@@ -1,0 +1,20 @@
+[package]
+name = "phux-server"
+description = "phux daemon: owns PTYs, terminal grids, and client IPC."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+phux-protocol.workspace = true
+phux-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# libghostty-vt is added when we begin the terminal-state implementation.
+# See ADR-0004.

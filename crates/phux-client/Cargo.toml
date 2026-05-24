@@ -1,0 +1,18 @@
+[package]
+name = "phux-client"
+description = "phux TUI client: composes panes + chrome, emits VT to the outer terminal."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+phux-protocol.workspace = true
+phux-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

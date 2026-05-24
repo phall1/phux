@@ -1,0 +1,25 @@
+[package]
+name = "phux"
+description = "phux — a terminal multiplexer built on libghostty-vt."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "phux"
+path = "src/main.rs"
+
+[dependencies]
+phux-protocol.workspace = true
+phux-core.workspace = true
+phux-server.workspace = true
+phux-client.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

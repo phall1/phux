@@ -1,0 +1,6 @@
+[alias]
+ci = ["build", "--workspace", "--all-targets", "--locked"]
+xtest = ["nextest", "run", "--workspace"]
+
+[net]
+git-fetch-with-cli = true

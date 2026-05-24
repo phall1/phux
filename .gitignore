@@ -1,0 +1,9 @@
+target/
+result
+result-*
+.direnv/
+.envrc.local
+*.swp
+.DS_Store
+perf.data*
+flamegraph.svg
