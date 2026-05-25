@@ -95,6 +95,7 @@ pub(crate) const ATTACH_TARGET_CREATE_IF_MISSING: u8 = 3;
 ///
 /// Tagged union; each variant maps to one of SPEC's four selection modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AttachTarget {
     /// Most-recently-attached session known to the server. Implementations
     /// without prior-attach memory MAY return `SESSION_NOT_FOUND`.

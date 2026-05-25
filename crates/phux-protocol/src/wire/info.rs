@@ -43,6 +43,7 @@ pub(crate) const SPLIT_DIR_VERTICAL: u8 = 1;
 /// deliberate — see module docs for the core/protocol independence rationale.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SplitDir {
     /// Split side-by-side (a vertical bar between left and right).
     Horizontal = SPLIT_DIR_HORIZONTAL,
@@ -59,6 +60,7 @@ pub enum SplitDir {
 /// The server-side bridge (parallel to the `IdBridge` pattern) converts
 /// between this type and `phux_core::window::LayoutNode`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum LayoutNode {
     /// A single pane — recursion base.
     Leaf(PaneId),

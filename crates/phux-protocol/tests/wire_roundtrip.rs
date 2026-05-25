@@ -818,7 +818,7 @@ fn layout_ratio_zero_is_accepted() {
         let win = &snapshot.windows[0];
         match win.layout.as_ref().unwrap() {
             LayoutNode::Split { ratio, .. } => assert_eq!(*ratio, 0.0),
-            LayoutNode::Leaf(_) => panic!("expected Split"),
+            other => panic!("expected Split, got {other:?}"),
         }
     } else {
         panic!("expected Attached frame");
@@ -834,7 +834,7 @@ fn layout_ratio_one_is_accepted() {
         let win = &snapshot.windows[0];
         match win.layout.as_ref().unwrap() {
             LayoutNode::Split { ratio, .. } => assert_eq!(*ratio, 1.0),
-            LayoutNode::Leaf(_) => panic!("expected Split"),
+            other => panic!("expected Split, got {other:?}"),
         }
     } else {
         panic!("expected Attached frame");
