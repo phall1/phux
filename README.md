@@ -44,12 +44,28 @@ design; the things we say no to are listed in
 
 ## Status
 
-**Pre-alpha. Spec first, code second.** Today this repo contains:
+**Pre-alpha. Spec first, code second.** No end-to-end attach yet.
+
+What is wired up today:
 
 - [`SPEC.md`](./SPEC.md) — normative wire protocol.
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — internal design.
-- [`ADR/`](./ADR/) — recorded design decisions.
-- Empty crate skeletons.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DESIGN.md`](./DESIGN.md), and
+  [`ADR/`](./ADR/) — recorded decisions.
+- `phux-protocol` — frame codec (length-prefixed TLV, `SPEC.md` Appendix A),
+  cell diff codec, structured input types (key / mouse / focus / paste).
+- `phux-core` — `SessionId`/`WindowId`/`PaneId` registries (slotmaps) and
+  the binary split-tree window layout.
+- `phux-server` — tokio current-thread runtime, UDS listener with PING/PONG,
+  server-side state scaffold (attach/detach, pane-subscriber routing,
+  per-pane input log), and a `IdBridge` between core slotmap keys and
+  wire `u32` IDs.
+- `phux-client` — diff mirror: applies `DiffOp`s to a local `Grid`.
+- `phux-config` — TOML schema + loader with `line:col` errors, keybind
+  parser/trie resolver, status `Widget` trait + time/session-name widgets.
+
+What is not wired up yet: full ATTACH/DETACH lifecycle on the server,
+PTY supervision inside the multiplexer state machine, the renderer, and
+the binary's subcommand dispatch.
 
 ## Quickstart
 
@@ -67,10 +83,16 @@ plus `nextest`, `deny`, `watch`, `insta`, `mutants`, and `just`.
 | Crate              | Purpose                                                        |
 |--------------------|----------------------------------------------------------------|
 | `phux`             | Single binary; subcommands for server, attach, new, ls, kill   |
-| `phux-protocol`    | Wire types, codec, version negotiation                         |
+| `phux-protocol`    | Wire types, codec, version negotiation; publish-ready          |
 | `phux-core`        | Domain types: Session, Window, Pane, Layout                    |
 | `phux-server`      | Daemon: PTYs, terminal grids, IPC, diff emission               |
 | `phux-client`      | TUI client: composes pane grids + chrome, emits VT             |
+| `phux-config`      | TOML config schema + status widget contract                    |
+
+`phux-protocol` is the only crate intended for publication; the rest are
+`publish = false`. ADR-0008 records why `phux-protocol` depends on
+`libghostty-vt` directly (gated behind the `server` feature so docs.rs +
+crates.io see a git-dep-free shell).
 
 A future `phux-client-gui` (libghostty-surface-based) plugs into the same
 protocol.

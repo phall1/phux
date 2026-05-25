@@ -53,18 +53,56 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
+The dev shell is Nix-pinned (`flake.nix`): Rust 1.90, `zig_0_15` for
+libghostty-vt's build, plus `nextest`, `deny`, `watch`, `insta`,
+`mutants`, `just`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+nix develop      # or direnv allow once
+just ci          # everything CI must pass: fmt-check + lint + test + deny
+just check       # quick type-check
+just test        # cargo nextest run --workspace --all-features
 ```
+
+`just ci` is the bar in CONTRIBUTING.md. Do not push without it green.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+phux is a terminal multiplexer built on `libghostty-vt`. The wire
+protocol carries **cell-level diffs** and **structured input events**,
+not VT bytes (ADR-0002, ADR-0006, ADR-0008). One server per user
+(ADR-0003); one tokio current-thread runtime; UDS transport with a
+QUIC future (ADR-0007).
+
+Authoritative docs, in order of priority:
+
+- [`SPEC.md`](./SPEC.md) — normative wire protocol. Code conforms to
+  it, not vice versa.
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — internal structure (process
+  model, crate graph, data model, modules).
+- [`DESIGN.md`](./DESIGN.md) — user-facing surface (CLI, config,
+  keybindings, status bar, hooks).
+- [`ADR/`](./ADR/) — decisions, with rationale and tradeoffs.
+
+Crates: `phux-protocol` (wire), `phux-core` (domain), `phux-server`
+(daemon), `phux-client` (renderer + diff mirror), `phux-config` (TOML
++ widgets), `phux` (binary). `phux-protocol` is publishable; the rest
+are `publish = false`.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- **No emojis in committed files.** Plain prose only.
+- **Conventional commits.** `feat(scope): ...`, `fix(scope): ...`,
+  `docs(scope): ...`, `chore(scope): ...`.
+- **SPEC.md is normative.** Wire changes update SPEC + bump version
+  (see CONTRIBUTING.md). Wire bytes are owned by `phux-protocol`;
+  `phux-server` and `phux-client` consume them.
+- **ADR for any decision that closes off a design space.** Bug fixes
+  don't need one; "should this be in `core` or `server`?" does.
+- **`unsafe` requires a `// SAFETY:` comment.** Library crates default
+  to `forbid(unsafe_code)`.
+- **No new deps without a paragraph of justification in the PR.**
+- **Linear history on `main`.** Rebase, ff-only merges; no `--no-ff`.
+- **Multi-agent fan-out uses self-managed worktrees** — see
+  CONTRIBUTING.md §"Multi-agent fan-out" for the wave-1 race that
+  motivated this.

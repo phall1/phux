@@ -1,7 +1,7 @@
 # phux
 
 A terminal multiplexer built on
-[libghostty-vt](https://github.com/ghostty-org/libghostty-vt-rs).
+[libghostty-vt](https://github.com/Uzaaft/libghostty-rs).
 
 phux is in the shape of tmux — a long-lived server, attaching clients, sessions
 of windows of panes — but the wire protocol carries **structured cell-level

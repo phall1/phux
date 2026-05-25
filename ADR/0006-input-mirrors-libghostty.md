@@ -1,6 +1,12 @@
 # 0006 — Input event types mirror libghostty's API
 
-Status: Accepted
+Status: Accepted. **Superseded in part by ADR-0008** — the "wire is
+canonical, libghostty is a backend" framing of the divergence amendment
+below is replaced by "phux re-exports libghostty's atoms directly." The
+*intent* of this ADR (input event shape mirrors libghostty's `key::Event`
+/ `mouse::Event` / `focus::Event` / `paste`) is unchanged. Read ADR-0008
+first if you are landing here for the first time.
+
 Date: 2026-05-24
 
 ## Context
@@ -116,7 +122,9 @@ intent (field-for-field, infallible) is unchanged.
 
 ## Implementation note
 
-The Rust types in `crates/phux-protocol/src/input.rs` (forthcoming)
-will use `From<phux_protocol::KeyEvent> for libghostty_vt::key::Event`
-and the reverse, so the server-side encode loop is one line of code
-plus an unwrap into the existing libghostty machinery.
+Superseded by ADR-0008: `PhysicalKey`, `KeyAction`, `ModSet`,
+`MouseAction`, `MouseButton`, and `FocusEvent` are now re-exports of
+the libghostty types (no separate enum, no `From` impl). The wire-side
+outer structs (`KeyEvent`, `MouseEvent`) compose those atoms; the
+server bridge in `crates/phux-server/src/input/` constructs
+libghostty's allocator-bound `Event` values from those fields.
