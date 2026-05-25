@@ -57,9 +57,9 @@ Asking saves us both time:
   If you want logic, write a script and shell out.
 - **A plugin system on day one.** Hooks are typed events. We may design a
   proper plugin contract later, after we know what is actually pluggable.
-- **A reimplementation of copy mode.** We expose grid state. Modern
-  terminals (Ghostty, kitty, wezterm) handle selection well; we do not
-  compete.
+- **A homegrown selection engine.** When we add copy-mode (see issue
+  `phux-abi`), we bridge to libghostty-vt's selection APIs (Ghostty PR
+  \#12794) rather than reimplement word/line/output boundaries.
 - **Homegrown crypto.** SSH and Unix socket perms are the model.
 - **"Just supporting tmux's behavior here for compatibility."** We are
   not tmux. We will be better in places and different in others, and we
@@ -68,6 +68,52 @@ Asking saves us both time:
 If your change conflicts with these, open a [Discussion] before a PR.
 
 [Discussion]: https://github.com/phall1/phux/discussions
+
+## Git workflow
+
+- **Linear history is the default.** Prefer fast-forward merges or
+  rebases. Do NOT create merge commits with `--no-ff` on `main` — the
+  log must stay linear and bisect-friendly. For a multi-branch
+  integration, the canonical sequence is:
+  ```bash
+  for branch in <ordered list>; do
+      git rebase main "$branch"      # replay onto current main
+      git checkout main
+      git merge --ff-only "$branch"
+  done
+  ```
+- **One commit per task.** Squash WIP commits before merge. The
+  commit message tells the story of the change, not the keystrokes
+  that produced it.
+- **Never `--no-verify`.** Pre-commit hooks are load-bearing. If a
+  hook fails, fix the root cause.
+
+## Multi-agent fan-out
+
+When fanning out parallel agent work (e.g. four agents in wave 1 of
+the protocol epic):
+
+1. **Pre-create explicit worktrees** before launching agents:
+   ```bash
+   git worktree add /tmp/phux-<wave>-<task> -b <branch-name> main
+   ```
+   Do NOT rely on the Claude Code Agent tool's `isolation: worktree`
+   flag for parallel launches — in wave 1 only 2 of 4 agents got real
+   worktrees (race condition); the other 2 shared the main checkout.
+   Self-managed worktrees are race-free.
+2. **Pre-scaffold shared files** (e.g. `mod.rs`, `lib.rs`) so each
+   agent owns disjoint files. This is how wave 1 avoided merge
+   conflicts on `crates/phux-protocol/src/input/mod.rs`.
+3. **Each agent's prompt MUST start with** a `cd /tmp/phux-...; pwd`
+   to verify they're in their worktree, and an instruction to produce
+   **one squashed commit** on their branch.
+4. **Integration uses rebase + ff-only merge** per the Git workflow
+   section above.
+5. **Clean up after merge**:
+   ```bash
+   git worktree remove /tmp/phux-<wave>-<task>
+   git branch -d <branch-name>
+   ```
 
 ## Reviewing your own work before opening a PR
 
