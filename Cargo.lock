@@ -654,6 +654,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "phux-config"
+version = "0.0.0"
+
+[[package]]
 name = "phux-core"
 version = "0.0.0"
 dependencies = [

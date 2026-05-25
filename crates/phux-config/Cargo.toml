@@ -1,0 +1,15 @@
+[package]
+name = "phux-config"
+description = "Config (TOML) loader + status-bar widget contract for phux."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
