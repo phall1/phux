@@ -34,9 +34,43 @@ Wire input event types mirror libghostty-vt's `key::Event`,
 - `INPUT_PASTE` carries raw bytes plus a `trust` field; the server uses
   `libghostty_vt::paste::is_safe` and `paste::encode` per policy.
 
-The numeric values of `PhysicalKey`, `MouseButton`, `MouseAction`,
-`KeyAction` match libghostty's enums verbatim so the wire <→ libghostty
-mapping is a field-for-field copy.
+The numeric values of `PhysicalKey`, `MouseButton`, and `MouseAction`
+match libghostty's enums verbatim so the wire ↔ libghostty mapping for
+those is a field-for-field copy.
+
+### Amendment (phux-6yl.2 finding, 2026-05-25)
+
+The original draft of this ADR overgeneralized: it claimed *all* the
+mirrored enums (including `KeyAction` and `ModSet`/`Mods`) share
+discriminants with libghostty. The phux-6yl.2 implementation pass
+discovered this is not true at the live pinned libghostty rev
+(`31d1f70`):
+
+| Type        | phux wire             | libghostty `key::*`   |
+|-------------|-----------------------|-----------------------|
+| `KeyAction` | `Press=0, Release=1`  | `Release=0, Press=1`  |
+| `Mods`      | `CTRL=2, ALT=4`       | `ALT=2, CTRL=4`       |
+
+We **deliberately keep the phux wire discriminants stable** and do a
+semantic remap inside the server-side `*_to_libghostty` conversion
+functions. The wire format is canonical; libghostty is a backend whose
+ABI may shift. The discriminant-pin tests in `phux-server/src/input/`
+assert the *semantic* mapping (`KeyAction::Press` maps to libghostty's
+press value) rather than numeric equality.
+
+`PhysicalKey`, `MouseButton`, and `MouseAction` discriminants *do*
+match libghostty's verbatim — those conversions remain mechanical
+casts. The contract is: phux-protocol pins the wire bytes; phux-server
+owns the libghostty-bridge layer and absorbs any future upstream ABI
+churn there.
+
+### Amendment (Rust orphan rules)
+
+The original draft wrote `impl From<&phux_protocol::input::KeyEvent>
+for libghostty_vt::key::Event`. Rust's orphan rules forbid this: both
+types are foreign to `phux-server`. The actual surface is free
+functions in `phux_server::input::*` named `*_to_libghostty`. The
+intent (field-for-field, infallible) is unchanged.
 
 ## Rationale
 
