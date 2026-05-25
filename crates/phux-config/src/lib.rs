@@ -21,7 +21,11 @@ pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Wi
 
 pub use error::{ConfigError, byte_offset_to_line_col};
 pub use schema::{
-    Action, Config, DefaultsCfg, HookEntry, KeybindingsCfg, StatusCfg, ThemeCfg, Widget,
+    Action, Config, DefaultsCfg, HookEntry, KeybindingsCfg, StatusCfg, ThemeCfg, Widget, WidgetSpec,
+};
+pub use widget::{
+    SessionNameWidget, StatusWidget, TimeWidget, WidgetCells, WidgetContext, WidgetError,
+    WidgetFactory, WidgetRegistry,
 };
 
 use std::path::Path;
