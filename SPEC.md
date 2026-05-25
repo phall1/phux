@@ -960,9 +960,25 @@ WINDOW_CLOSED  { window_id: WindowId }
 WINDOW_RENAMED { window_id: WindowId, name: str }
 ```
 
-`SessionId` and `WindowId` are opaque `u32` values, stable for the life
-of the server. They are not reused after a session/window closes (the
+`SessionId` is a tagged union; `WindowId` is an opaque `u32`. Both are
+stable for the life of the server and are not reused after close (the
 counter is monotonic for the server's lifetime).
+
+```
+SessionId = tagged_union {
+    LOCAL     { id: u32 },              // tag = 0
+    SATELLITE { host: str, id: u32 },   // tag = 1; reserved for v0.2+ (ADR-0007)
+}
+```
+
+v0.1 servers only ever construct `LOCAL`. v0.1 decoders MUST accept the
+`SATELLITE` tag and, if not configured as a federation hub, respond with
+an `ERROR { code: UnsupportedSatelliteRoute }` (SPEC §14) rather than
+failing the frame. This forward-compat reservation costs one tag byte per
+session reference and avoids a wire-format break when satellites land.
+
+`WindowId` remains an opaque `u32` — windows are always scoped to a
+known session, so their addressability is inherited from the session URI.
 
 ### 10.2 Panes
 

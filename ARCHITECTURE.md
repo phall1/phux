@@ -139,6 +139,35 @@ Hot paths that *can* go multi-threaded later if needed:
 
 We do not parallelize on day one. Premature.
 
+## Transport abstraction
+
+The wire codec sits behind an `async Transport` trait on both server and
+client. v0.1 ships exactly one implementation — `UnixSocketTransport` —
+but no domain module in `phux-server` or `phux-client` names a concrete
+transport type. All I/O goes through the trait.
+
+This is a load-bearing invariant for ADR-0007 (Mosh-class transport and
+satellite forward-compat). It exists to keep two v0.2+ features purely
+additive:
+
+- **QUIC transport** (via `quinn`) — provides connection migration,
+  0-RTT resumption, and TLS, giving us the UX properties of Mosh
+  without reimplementing SSP.
+- **SSH-stdio transport** — frames the wire codec over a child SSH
+  process's stdin/stdout, used by hub servers to reach satellites over
+  existing SSH paths.
+
+Predictive local echo (the Mosh property users actually feel) is
+implemented in `phux-client` against the diff mirror, not in the
+transport. It reconciles on `FRAME_ACK` (SPEC §6) and works over any
+transport — including the Unix socket. Treating it as a client feature
+rather than a transport feature is deliberate: shipping it in v0.1
+unlocks the most visible Mosh-class UX without waiting for QUIC.
+
+See ADR-0007 for the full forward-compat invariants (URI-shaped
+session IDs, hub-and-spoke satellite topology, per-pane encoder
+isolation).
+
 ## Error model
 
 Each library crate defines its own error type with `thiserror`. The binary
