@@ -9,15 +9,7 @@
 //! copies. The `mouse_button_discriminants_match_libghostty` test pins this
 //! contract.
 
-// TODO(phux-6yl.1): replace with `use super::key::ModSet;` once the sibling
-// branch lands. Until then we carry a minimal local stub so this crate
-// compiles standalone on the phux-6yl.6 worktree.
-/// Temporary local stub for `ModSet`. The real type is owned by phux-6yl.1
-/// (`crates/phux-protocol/src/input/key.rs`); the integration pass swaps
-/// this stub for `use super::key::ModSet;`.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ModSet(u32);
+use super::key::ModSet;
 
 /// A normalized mouse input event flowing from client to server.
 ///

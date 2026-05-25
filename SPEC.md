@@ -848,8 +848,11 @@ MouseButton = enum (u32) {
 
 MousePosition {
     // Pane-local surface-space pixels. Always present.
-    pixel_x: u32,
-    pixel_y: u32,
+    // f64 (not u32) to mirror libghostty's `mouse::Position` exactly —
+    // sub-pixel input is real on macOS trackpads and Wayland HiDPI surfaces;
+    // cell-quantizing clients pass integer-valued f64s (`12.0`).
+    pixel_x: f64,
+    pixel_y: f64,
 }
 ```
 
