@@ -442,6 +442,7 @@ dependencies = [
 name = "phux-server"
 version = "0.0.0"
 dependencies = [
+ "insta",
  "libghostty-vt",
  "phux-core",
  "phux-protocol",

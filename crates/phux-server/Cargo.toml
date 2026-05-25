@@ -21,6 +21,9 @@ tracing.workspace = true
 # requires zig 0.15.x on PATH; the nix dev shell provides it.
 libghostty-vt.workspace = true
 
+[dev-dependencies]
+insta.workspace = true
+
 [[example]]
 name = "diff_spike"
 path = "examples/diff_spike.rs"
