@@ -1,6 +1,7 @@
 [package]
 name = "phux-server"
 description = "phux daemon: owns PTYs, terminal grids, and client IPC."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

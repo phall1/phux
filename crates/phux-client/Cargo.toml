@@ -1,6 +1,7 @@
 [package]
 name = "phux-client"
 description = "phux TUI client: composes panes + chrome, emits VT to the outer terminal."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

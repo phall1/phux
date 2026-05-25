@@ -1,0 +1,90 @@
+# phux CI — fmt + clippy + nextest + cargo-deny + doc.
+#
+# All cargo invocations run inside `nix develop -c` so CI uses the exact
+# toolchain pinned by `rust-toolchain.toml` and the devshell from `flake.nix`
+# (which provides cargo-nextest and cargo-deny).
+#
+# Runners: ubuntu-latest only for now. macOS can be added to a matrix later
+# when a contributor needs it (the devshell already supports darwin systems
+# via flake-utils.lib.eachDefaultSystem).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to keep queue times sane.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: cargo fmt --check
+        run: nix develop -c cargo fmt --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: cargo clippy
+        run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: cargo nextest run
+        run: nix develop -c cargo nextest run --workspace
+
+  deny:
+    name: deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: cargo deny check
+        run: nix develop -c cargo deny check
+
+  doc:
+    name: doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: cargo doc
+        run: nix develop -c env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace

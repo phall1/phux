@@ -1,6 +1,7 @@
 [package]
 name = "phux-core"
 description = "Core domain types for phux: sessions, windows, panes, layout."
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

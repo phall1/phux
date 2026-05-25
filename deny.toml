@@ -26,10 +26,17 @@ confidence-threshold = 0.93
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal crates pin each other with version = "0.0.0", which
+# cargo-deny otherwise reports as a wildcard. Per cargo-deny docs this is
+# the canonical opt-out for intra-workspace path deps.
+allow-wildcard-paths = true
 deny = []
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-allow-git = []
+# libghostty-vt / libghostty-vt-sys are intentionally consumed from git
+# per ADR-0008 (use libghostty types directly). Track upstream until
+# crates.io releases catch up.
+allow-git = ["https://github.com/Uzaaft/libghostty-rs"]
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
