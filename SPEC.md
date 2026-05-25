@@ -210,6 +210,9 @@ ServerCapabilities {
     //   PANE_RECORDING     — server can record pane I/O to disk
     //   AGENT_HOOKS        — server supports typed agent-style hooks
     //   IMAGE_PASSTHROUGH  — server forwards image protocols transparently
+    //   CC_FRONTEND        — server can speak tmux control mode in
+    //                        addition to native cell-diff (reserved;
+    //                        unset in v0.1; see ADR-0010)
     max_message_size: u32,
 }
 ```

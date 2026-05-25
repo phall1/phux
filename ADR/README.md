@@ -16,6 +16,10 @@ Nygard's template][nygard].
 | [0004](./0004-libghostty-vt-as-grid.md) | libghostty-vt is the canonical grid | Accepted |
 | [0005](./0005-relationship-to-zmx-and-zmosh.md) | Greenfield relative to zmx / zmosh | Accepted |
 | [0006](./0006-input-mirrors-libghostty.md) | Input event types mirror libghostty's API | Accepted |
+| [0007](./0007-mosh-class-transport-and-satellites.md) | Mosh-class transport semantics and satellite forward-compat | Accepted (forward-compat); impl deferred to v0.2+ |
+| [0008](./0008-use-libghostty-types-directly.md) | Re-export libghostty-vt's input/style types directly | Accepted |
+| [0009](./0009-phux-vs-mux-positioning.md) | phux is a protocol substrate; Mux is a product (no overlap) | Accepted |
+| [0010](./0010-frontend-agnostic-tmux-cc-reserved.md) | Frontend-agnostic server; tmux control mode reserved as compat | Accepted (forward-compat); CC adapter not on the roadmap |
 
 ## When to write an ADR
 

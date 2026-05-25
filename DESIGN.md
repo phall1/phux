@@ -577,3 +577,10 @@ require breaking changes:
   the `TABBED` layout node.
 - **Image protocols** (sixel, kitty graphics). `SPEC.md` §8.3 reserves
   `IMAGE` diff ops.
+- **tmux control mode (CC) frontend.** Optional adapter that would let
+  a CC-aware terminal (iTerm2 today; Ghostty when 1.4+ binds its
+  parser to the GUI) render phux panes as native splits of that
+  terminal. Native cell-diff protocol stays primary and strictly more
+  capable; CC is reserved as a compatibility option, not a roadmap
+  commitment. See ADR-0010 and the `CC_FRONTEND` capability bit in
+  `SPEC.md` §6.2.
