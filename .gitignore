@@ -7,3 +7,8 @@ result-*
 .DS_Store
 perf.data*
 flamegraph.svg
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
