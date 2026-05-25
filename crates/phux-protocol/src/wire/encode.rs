@@ -56,6 +56,15 @@ impl<'a> Encoder<'a> {
         self.buf.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Write an IEEE-754 `f64` in network (big-endian) byte order.
+    ///
+    /// Bit-for-bit encoding via [`f64::to_be_bytes`] — preserves NaNs and
+    /// signed zeros. Used by mouse events whose pane-local positions are
+    /// pixel-precise per SPEC.md §9.2.1.
+    pub fn write_f64_be(&mut self, value: f64) {
+        self.buf.extend_from_slice(&value.to_be_bytes());
+    }
+
     /// Write a length-prefixed UTF-8 string.
     ///
     /// The length prefix is a `u32` big-endian count of UTF-8 bytes (not

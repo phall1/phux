@@ -6,7 +6,12 @@
 
 use super::diff::decode_diff_ops;
 use super::error::DecodeError;
-use super::frame::{FrameKind, MAX_FRAME_LEN, TYPE_HELLO, TYPE_PANE_DIFF, TYPE_PING};
+use super::frame::{
+    FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH, TYPE_DETACHED,
+    TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE,
+    TYPE_PANE_DIFF, TYPE_PING, decode_attach_role, decode_focus_event, decode_key_event,
+    decode_mouse_event, decode_pane_snapshot, decode_paste_event,
+};
 
 /// Cursor-style decoder over an immutable byte slice.
 ///
@@ -75,6 +80,16 @@ impl<'a> Decoder<'a> {
         Ok(u64::from_be_bytes(arr))
     }
 
+    /// Read an IEEE-754 `f64` in network (big-endian) byte order.
+    ///
+    /// Bit-for-bit decoding via [`f64::from_be_bytes`] — preserves NaNs and
+    /// signed zeros. Pairs with [`super::encode::Encoder::write_f64_be`].
+    pub fn read_f64_be(&mut self) -> Result<f64, DecodeError> {
+        let slice = self.take(8)?;
+        let arr: [u8; 8] = slice.try_into().map_err(|_| DecodeError::UnexpectedEof)?;
+        Ok(f64::from_be_bytes(arr))
+    }
+
     /// Read a length-prefixed byte slice.
     ///
     /// The length prefix is a big-endian `u32`. Returns `LengthOverflow` if
@@ -141,10 +156,55 @@ impl<'a> Decoder<'a> {
                     ops,
                 }
             }
-            // `HELLO_OK` / `PONG` are recognised by the catalog but not yet
-            // populated as `FrameKind` variants; sibling tasks lift them
-            // into real variants during the integration pass. Treat them as
-            // unknown for now alongside any genuinely unknown tag.
+            TYPE_ATTACH => {
+                let session_name = self.read_str()?.to_owned();
+                let role = decode_attach_role(self.read_u8()?)?;
+                FrameKind::Attach { session_name, role }
+            }
+            TYPE_DETACH => FrameKind::Detach,
+            TYPE_INPUT_KEY => {
+                let pane_id = self.read_u32_be()?;
+                let event = decode_key_event(self)?;
+                FrameKind::InputKey { pane_id, event }
+            }
+            TYPE_INPUT_MOUSE => {
+                let pane_id = self.read_u32_be()?;
+                let event = decode_mouse_event(self)?;
+                FrameKind::InputMouse { pane_id, event }
+            }
+            TYPE_INPUT_FOCUS => {
+                let pane_id = self.read_u32_be()?;
+                let event = decode_focus_event(self.read_u8()?)?;
+                FrameKind::InputFocus { pane_id, event }
+            }
+            TYPE_INPUT_PASTE => {
+                let pane_id = self.read_u32_be()?;
+                let event = decode_paste_event(self)?;
+                FrameKind::InputPaste { pane_id, event }
+            }
+            TYPE_ATTACHED => {
+                let session_id = self.read_u32_be()?;
+                let window_id = self.read_u32_be()?;
+                let pane_id = self.read_u32_be()?;
+                let snapshot = decode_pane_snapshot(self)?;
+                FrameKind::Attached {
+                    session_id,
+                    window_id,
+                    pane_id,
+                    snapshot,
+                }
+            }
+            TYPE_DETACHED => FrameKind::Detached,
+            TYPE_BELL => {
+                let pane_id = self.read_u32_be()?;
+                FrameKind::Bell { pane_id }
+            }
+            // `HELLO_OK` / `PONG` and the deferred message-catalog variants
+            // (`OscEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.) are
+            // recognised by the SPEC §7 catalog but not yet populated as
+            // `FrameKind` variants. Sibling tasks lift them in during the
+            // integration pass. Treat them as unknown alongside genuinely
+            // unallocated tags.
             other => {
                 return Err(DecodeError::UnknownFrameKind {
                     tag: u16::from(other),

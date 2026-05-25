@@ -46,6 +46,73 @@ pub const INPUT_KEY_ACTION: u32 = 4;
 pub const INPUT_KEY_TEXT: u32 = 5;
 
 // -----------------------------------------------------------------------------
+// `INPUT_MOUSE` — §9.2
+// -----------------------------------------------------------------------------
+
+/// `INPUT_MOUSE`: target `PaneId`.
+pub const INPUT_MOUSE_PANE: u32 = 1;
+/// `INPUT_MOUSE`: action (press/release/motion) — libghostty `mouse::Action`.
+pub const INPUT_MOUSE_ACTION: u32 = 2;
+/// `INPUT_MOUSE`: button identity — libghostty `mouse::Button`.
+pub const INPUT_MOUSE_BUTTON: u32 = 3;
+/// `INPUT_MOUSE`: modifier bitset at event time.
+pub const INPUT_MOUSE_MODS: u32 = 4;
+/// `INPUT_MOUSE`: pane-local pixel `x` (f64, SPEC §9.2.1).
+pub const INPUT_MOUSE_X: u32 = 5;
+/// `INPUT_MOUSE`: pane-local pixel `y` (f64, SPEC §9.2.1).
+pub const INPUT_MOUSE_Y: u32 = 6;
+
+// -----------------------------------------------------------------------------
+// `INPUT_FOCUS` — §9.3
+// -----------------------------------------------------------------------------
+
+/// `INPUT_FOCUS`: target `PaneId`.
+pub const INPUT_FOCUS_PANE: u32 = 1;
+/// `INPUT_FOCUS`: focus kind (gained=0, lost=1).
+pub const INPUT_FOCUS_KIND: u32 = 2;
+
+// -----------------------------------------------------------------------------
+// `INPUT_PASTE` — §9.4
+// -----------------------------------------------------------------------------
+
+/// `INPUT_PASTE`: target `PaneId`.
+pub const INPUT_PASTE_PANE: u32 = 1;
+/// `INPUT_PASTE`: trust classification (0=untrusted, 1=trusted).
+pub const INPUT_PASTE_TRUST: u32 = 2;
+/// `INPUT_PASTE`: raw payload bytes.
+pub const INPUT_PASTE_DATA: u32 = 3;
+
+// -----------------------------------------------------------------------------
+// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` — §7.1-§7.3, §13
+// -----------------------------------------------------------------------------
+
+/// `ATTACH`: target session name (UTF-8). Phux-4az scaffold; v0.2 may add
+/// `AttachTarget` tagged union per SPEC §13.
+pub const ATTACH_SESSION_NAME: u32 = 1;
+/// `ATTACH`: client `AttachRole` (primary=0, viewer=1). Phux-defined and NOT
+/// yet codified in SPEC §13 — see commit message for phux-4az.
+pub const ATTACH_ROLE: u32 = 2;
+
+/// `ATTACHED`: server-assigned `SessionId`.
+pub const ATTACHED_SESSION_ID: u32 = 1;
+/// `ATTACHED`: focused `WindowId` at attach time.
+pub const ATTACHED_WINDOW_ID: u32 = 2;
+/// `ATTACHED`: focused `PaneId` at attach time.
+pub const ATTACHED_PANE_ID: u32 = 3;
+/// `ATTACHED`: initial `PaneSnapshot` for the focused pane.
+pub const ATTACHED_SNAPSHOT: u32 = 4;
+
+// `DETACH` and `DETACHED` are unit messages in the phux-4az scaffold;
+// `DETACHED { reason, message }` from SPEC §7.3 lands in a follow-up.
+
+// -----------------------------------------------------------------------------
+// `BELL` — §7.6
+// -----------------------------------------------------------------------------
+
+/// `BELL`: pane that received the bell character.
+pub const BELL_PANE: u32 = 1;
+
+// -----------------------------------------------------------------------------
 // `PANE_DIFF` / `PANE_SNAPSHOT` — §8
 // -----------------------------------------------------------------------------
 

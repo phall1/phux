@@ -38,4 +38,18 @@ pub enum DecodeError {
     /// decoders accept only `LOCAL`; satellite routing arrives in v0.2+.
     #[error("satellite-routed session ids are not supported in this protocol version")]
     UnsupportedSatelliteRoute,
+
+    /// An enumerated field on the wire carried a value the decoder does not
+    /// recognise. Used for libghostty atoms (`Key`, `KeyAction`, `MouseAction`,
+    /// `MouseButton`) where minor protocol versions MAY add values; v0.1
+    /// rejects unknown discriminants so that misinterpretation can't silently
+    /// corrupt downstream encoding.
+    #[error("unknown enum discriminant in field '{field}': {value}")]
+    UnknownEnumValue {
+        /// Logical name of the field that carried the bad value, for diagnostics.
+        field: &'static str,
+        /// The unrecognised discriminant, widened to `u32` to cover every
+        /// enumerated type the codec emits.
+        value: u32,
+    },
 }
