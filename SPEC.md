@@ -246,6 +246,7 @@ Within each half:
 | 0x11  | `INPUT_PASTE`     | §9.4      |
 | 0x12  | `INPUT_MOUSE`     | §9.2      |
 | 0x13  | `INPUT_RAW`       | §9.5      |
+| 0x14  | `INPUT_FOCUS`     | §9.3      |
 | 0x20  | `VIEWPORT_RESIZE` | §10.5     |
 | 0x21  | `FRAME_ACK`       | §12       |
 | 0x30  | `COMMAND`         | §11       |
@@ -333,8 +334,8 @@ into VT output; clients decide policy.
 
 ### 7.7 OSC_EVENT
 
-A general-purpose channel for terminal-originated events that don't
-deserve a dedicated message type:
+A channel for terminal-originated events the server has parsed (via
+libghostty-vt's OSC parser) and chooses to surface to clients.
 
 ```
 OSC_EVENT {
@@ -343,16 +344,49 @@ OSC_EVENT {
 }
 
 OscEvent = tagged_union {
-    TITLE         { title: str },                 // OSC 0/1/2
-    CURRENT_DIR   { uri: str },                   // OSC 7
-    HYPERLINK     { id: u32, uri: str, params: str },  // OSC 8
-    USER_NOTIFICATION { body: str },              // OSC 9 / iTerm2 / OSC 777
-    PROMPT_MARK   { kind: PromptMarkKind, info: str },  // OSC 133
-    CLIPBOARD     { selection: ClipboardSelection, data: bytes },  // OSC 52
-    EXIT_CODE     { code: i32 },                  // synthesized when PTY exits
-    CUSTOM        { id: u32, payload: bytes },    // pass-through, for future extensions
+    TITLE             { title: str },                              // OSC 0/1/2
+    CHANGE_WINDOW_ICON,                                            // OSC 1 (icon-only)
+    CURRENT_DIR       { uri: str },                                // OSC 7
+    HYPERLINK_START   { id: u32, uri: str, params: str },          // OSC 8 begin
+    HYPERLINK_END     { id: u32 },                                 // OSC 8 end
+    USER_NOTIFICATION { body: str, tag: optional<str> },           // OSC 9 / iTerm2 / OSC 777
+    SEMANTIC_PROMPT   { kind: PromptMarkKind, info: optional<str> }, // OSC 133
+    CLIPBOARD         { selection: ClipboardSelection, data: bytes }, // OSC 52
+    MOUSE_SHAPE       { shape: str },                              // OSC 22
+    PROGRESS_REPORT   { state: ProgressState, value: optional<u8> }, // ConEmu OSC 9;4
+    EXIT_CODE         { code: i32 },                               // synthesized at PTY exit
+    CUSTOM            { kind: u32, payload: bytes },               // pass-through escape hatch
+}
+
+PromptMarkKind = enum {
+    PROMPT_START   = 1,  // OSC 133;A
+    COMMAND_START  = 2,  // OSC 133;B
+    COMMAND_END    = 3,  // OSC 133;C
+    PROMPT_END     = 4,  // OSC 133;D (optional exit code in `info`)
+}
+
+ProgressState = enum {
+    REMOVE      = 0,
+    DEFAULT     = 1,
+    ERROR       = 2,
+    INDETERMINATE = 3,
+    WARNING     = 4,
+    PAUSED      = 5,
+}
+
+ClipboardSelection = enum {
+    SYSTEM     = 0,
+    PRIMARY    = 1,
+    SECONDARY  = 2,
 }
 ```
+
+The server does NOT forward every OSC type libghostty recognises. Color
+operations, kitty color protocol commands, and kitty text-sizing are
+purely terminal-state concerns; they are applied to the pane's
+`libghostty_vt::Terminal` and clients see their effect through normal
+cell diffs. The variants listed above are those that affect *client* UX
+(chrome, notifications, clipboard, status bar widgets).
 
 ### 7.8 ALERT
 
@@ -566,91 +600,221 @@ active before forwarding pointer events.
 
 ## 9. Input events
 
-This section is the second-most-important part of the protocol. Getting
-input encoding right is what allows phux to faithfully carry modifier-
-rich key events through to inner programs, even when traditional
-multiplexers cannot.
+This section is the second-most-important part of the protocol. Carrying
+input events as structured data — not raw VT bytes — is what allows
+phux to faithfully transport the kitty keyboard protocol, IME
+composition, modifier-rich chords, and pixel-precise mouse events
+end-to-end through the multiplexer. It is also what lets the protocol
+serve a future GUI client and a TUI client from the same wire format.
+
+The shapes in this section **mirror libghostty-vt's input event types**
+(`key::Event`, `mouse::Event`, `focus::Event`, paste utilities) by
+design. The server constructs libghostty events directly from wire
+events, hands them to libghostty's encoders (which know per-terminal
+state: KIP flags, cursor-key mode, mouse protocol, etc.), and writes
+the resulting bytes to the PTY. Encoder configuration never traverses
+the wire — the server is the one with the `Terminal` and the encoder.
+See [ADR-0006](./ADR/0006-input-mirrors-libghostty.md).
 
 ### 9.1 INPUT_KEY
 
 ```
 INPUT_KEY {
     pane_id: PaneId,
-    key: KeyEvent,
+    event: KeyEvent,
 }
 
 KeyEvent {
-    key: Key,
+    action: KeyAction,
+    key: PhysicalKey,
     mods: ModSet,
-    event: KeyEventKind,
+    consumed_mods: ModSet,
+    composing: bool,
     text: optional<str>,
-    associated: optional<Key>,
+    unshifted_codepoint: optional<u32>,
 }
 
-Key = tagged_union {
-    CHAR(u32),               // Unicode codepoint of the layout-resolved key
-    NAMED(NamedKey),         // a non-character key
-}
-
-NamedKey = enum {
-    ESCAPE = 1, ENTER = 2, TAB = 3, BACKSPACE = 4, DELETE = 5, INSERT = 6,
-    HOME = 7, END = 8, PAGE_UP = 9, PAGE_DOWN = 10,
-    ARROW_UP = 11, ARROW_DOWN = 12, ARROW_LEFT = 13, ARROW_RIGHT = 14,
-    F1 = 20, F2 = 21, /* ... */ F35 = 54,
-    KEYPAD_0 = 60, /* ... */ KEYPAD_9 = 69,
-    KEYPAD_DECIMAL = 70, KEYPAD_DIVIDE = 71, KEYPAD_MULTIPLY = 72,
-    KEYPAD_SUBTRACT = 73, KEYPAD_ADD = 74, KEYPAD_ENTER = 75, KEYPAD_EQUAL = 76,
-    KEYPAD_SEPARATOR = 77, KEYPAD_LEFT = 78, KEYPAD_RIGHT = 79,
-    KEYPAD_UP = 80, KEYPAD_DOWN = 81, KEYPAD_PAGE_UP = 82, KEYPAD_PAGE_DOWN = 83,
-    KEYPAD_HOME = 84, KEYPAD_END = 85, KEYPAD_INSERT = 86, KEYPAD_DELETE = 87,
-    KEYPAD_BEGIN = 88,
-    CAPS_LOCK = 100, SCROLL_LOCK = 101, NUM_LOCK = 102,
-    PRINT_SCREEN = 103, PAUSE = 104, MENU = 105,
-    LEFT_SHIFT = 110, RIGHT_SHIFT = 111,
-    LEFT_CONTROL = 112, RIGHT_CONTROL = 113,
-    LEFT_ALT = 114, RIGHT_ALT = 115,
-    LEFT_SUPER = 116, RIGHT_SUPER = 117,
-    LEFT_HYPER = 118, RIGHT_HYPER = 119,
-    LEFT_META = 120, RIGHT_META = 121,
-    ISO_LEVEL3_SHIFT = 130, ISO_LEVEL5_SHIFT = 131,
-    MEDIA_PLAY = 200, MEDIA_PAUSE = 201, MEDIA_PLAY_PAUSE = 202,
-    MEDIA_STOP = 203, MEDIA_NEXT = 204, MEDIA_PREVIOUS = 205,
-    VOLUME_UP = 210, VOLUME_DOWN = 211, MUTE = 212,
-    // 1..=255 reserved for protocol use.
-}
-
-ModSet = bitset {
-    SHIFT     = 0x01,
-    CTRL      = 0x02,
-    ALT       = 0x04,
-    SUPER     = 0x08,
-    HYPER     = 0x10,
-    META      = 0x20,
-    CAPS_LOCK = 0x40,
-    NUM_LOCK  = 0x80,
-}
-
-KeyEventKind = enum {
-    PRESS = 0,
+KeyAction = enum {
+    PRESS   = 0,
     RELEASE = 1,
-    REPEAT = 2,
+    REPEAT  = 2,
 }
 ```
 
-Notes:
+#### 9.1.1 `key` — `PhysicalKey`
 
-- `key` is the **layout-resolved** key. A US-QWERTY user pressing the
-  `a` key produces `CHAR(0x61)`. An AZERTY user pressing the same
-  physical key but with their layout produces `CHAR(0x71)` (`q`).
-- `mods` reports which modifiers were held at the time of the event.
-  CAPS_LOCK and NUM_LOCK are reported as state, not as key events of
-  their own (those keys also produce a NAMED event when pressed).
-- `text` is the IME-resolved text produced by the event, if any.
-  Encoders SHOULD include it when it differs from the simple result of
-  applying `mods` to `key`.
-- `associated` carries the alternate-layout representation for
-  applications that opt into kitty keyboard protocol features. Encoders
-  MAY include it; decoders MAY ignore it.
+`PhysicalKey` is a physical key code, **independent of keyboard layout
+or modifiers**. It is the W3C UI Events `code`-style enum that
+libghostty's `key::Key` carries. A US-QWERTY user pressing the leftmost
+home-row key produces `KeyA`; an AZERTY user pressing the *same physical
+key* also produces `KeyA`. The layout-resolved text appears in `text`
+and `unshifted_codepoint`.
+
+Values are stable; numeric assignments match libghostty's `key::Key`:
+
+```
+PhysicalKey = enum (u32) {
+    UNIDENTIFIED   = 0,
+
+    // Writing-system keys (US-QWERTY positions)
+    BACKQUOTE      = 1,   BACKSLASH        = 2,   BRACKET_LEFT     = 3,
+    BRACKET_RIGHT  = 4,   COMMA            = 5,
+    DIGIT_0        = 6 ..= DIGIT_9          = 15,
+    EQUAL          = 16,  INTL_BACKSLASH   = 17,  INTL_RO          = 18,
+    INTL_YEN       = 19,
+    KEY_A          = 20 ..= KEY_Z           = 45,
+    MINUS          = 46,  PERIOD           = 47,  QUOTE            = 48,
+    SEMICOLON      = 49,  SLASH            = 50,
+
+    // Functional keys
+    ALT_LEFT       = 51,  ALT_RIGHT        = 52,  BACKSPACE        = 53,
+    CAPS_LOCK      = 54,  CONTEXT_MENU     = 55,  CONTROL_LEFT     = 56,
+    CONTROL_RIGHT  = 57,  ENTER            = 58,  META_LEFT        = 59,
+    META_RIGHT     = 60,  SHIFT_LEFT       = 61,  SHIFT_RIGHT      = 62,
+    SPACE          = 63,  TAB              = 64,
+    CONVERT        = 65,  KANA_MODE        = 66,  NON_CONVERT      = 67,
+
+    // Control pad
+    DELETE = 68,  END = 69, HELP = 70, HOME = 71, INSERT = 72,
+    PAGE_DOWN = 73, PAGE_UP = 74,
+
+    // Arrow keys
+    ARROW_DOWN = 75, ARROW_LEFT = 76, ARROW_RIGHT = 77, ARROW_UP = 78,
+
+    // Numpad
+    NUM_LOCK = 79,
+    NUMPAD_0 = 80 ..= NUMPAD_9 = 89,
+    NUMPAD_ADD = 90, NUMPAD_BACKSPACE = 91, NUMPAD_CLEAR = 92,
+    NUMPAD_CLEAR_ENTRY = 93, NUMPAD_COMMA = 94, NUMPAD_DECIMAL = 95,
+    NUMPAD_DIVIDE = 96, NUMPAD_ENTER = 97, NUMPAD_EQUAL = 98,
+    NUMPAD_MEMORY_ADD = 99, NUMPAD_MEMORY_CLEAR = 100,
+    NUMPAD_MEMORY_RECALL = 101, NUMPAD_MEMORY_STORE = 102,
+    NUMPAD_MEMORY_SUBTRACT = 103, NUMPAD_MULTIPLY = 104,
+    NUMPAD_PAREN_LEFT = 105, NUMPAD_PAREN_RIGHT = 106,
+    NUMPAD_SUBTRACT = 107, NUMPAD_SEPARATOR = 108,
+    NUMPAD_UP = 109, NUMPAD_DOWN = 110, NUMPAD_RIGHT = 111,
+    NUMPAD_LEFT = 112, NUMPAD_BEGIN = 113, NUMPAD_HOME = 114,
+    NUMPAD_END = 115, NUMPAD_INSERT = 116, NUMPAD_DELETE = 117,
+    NUMPAD_PAGE_UP = 118, NUMPAD_PAGE_DOWN = 119,
+
+    // Function keys
+    ESCAPE = 120,
+    F1 = 121 ..= F25 = 145,
+    FN = 146, FN_LOCK = 147,
+    PRINT_SCREEN = 148, SCROLL_LOCK = 149, PAUSE = 150,
+
+    // Browser / app
+    BROWSER_BACK = 151, BROWSER_FAVORITES = 152, BROWSER_FORWARD = 153,
+    BROWSER_HOME = 154, BROWSER_REFRESH = 155, BROWSER_SEARCH = 156,
+    BROWSER_STOP = 157,
+    EJECT = 158, LAUNCH_APP_1 = 159, LAUNCH_APP_2 = 160, LAUNCH_MAIL = 161,
+
+    // Media / system
+    MEDIA_PLAY_PAUSE = 162, MEDIA_SELECT = 163, MEDIA_STOP = 164,
+    MEDIA_TRACK_NEXT = 165, MEDIA_TRACK_PREVIOUS = 166,
+    POWER = 167, SLEEP = 168,
+    AUDIO_VOLUME_DOWN = 169, AUDIO_VOLUME_MUTE = 170, AUDIO_VOLUME_UP = 171,
+    WAKE_UP = 172, COPY = 173, CUT = 174, PASTE = 175,
+}
+```
+
+This enum is **non-exhaustive** in spirit: minor protocol versions may
+add new values. Decoders MUST treat unknown values as `UNIDENTIFIED`.
+
+#### 9.1.2 `mods` — `ModSet`
+
+```
+ModSet = bitset (u16) {
+    SHIFT        = 0x0001,
+    ALT          = 0x0002,
+    CTRL         = 0x0004,
+    SUPER        = 0x0008,    // also macOS Command, Windows key
+    CAPS_LOCK    = 0x0010,
+    NUM_LOCK     = 0x0020,
+
+    // Left-vs-right discrimination. Each *_SIDE bit is only meaningful
+    // when the corresponding modifier bit is set: 0 = left key,
+    // 1 = right key. Platforms that cannot distinguish sides MUST
+    // leave these bits zero.
+    SHIFT_SIDE   = 0x0040,
+    ALT_SIDE     = 0x0080,
+    CTRL_SIDE    = 0x0100,
+    SUPER_SIDE   = 0x0200,
+}
+```
+
+Note the deliberate absence of `HYPER` and `META` as separate flags.
+libghostty's `Mods` does not distinguish them from `SUPER`; on
+platforms where they exist (X11 with custom XKB), they map to `SUPER`
+with appropriate XKB configuration. Modeling them separately at the
+protocol level would introduce a degree of freedom no downstream
+encoder can honor.
+
+#### 9.1.3 `consumed_mods`
+
+The subset of `mods` that the operating system *consumed* to produce
+`text`. For example, on a US layout pressing Shift+2 produces the text
+`@` with `SHIFT` in `consumed_mods`; the KIP encoder uses this to avoid
+double-applying the shift modifier in its escape sequence.
+
+Clients that do not have this information from their platform SHOULD
+emit `ModSet::empty()` — the encoder degrades gracefully.
+
+#### 9.1.4 `composing`
+
+`true` if this key event is part of an active IME composition sequence.
+The encoder uses this to suppress text production where appropriate.
+
+#### 9.1.5 `text` and `unshifted_codepoint`
+
+- `text`: the UTF-8 text the keypress produced under the current
+  layout, *before* any Ctrl/Meta transformation. MUST NOT contain C0
+  control characters (`U+0000–U+001F`, `U+007F`) — for those, pass
+  `None` and let the encoder derive bytes from `key + mods`. MUST NOT
+  contain platform PUA function-key codes (`U+F700–U+F8FF`).
+- `unshifted_codepoint`: the layout-resolved codepoint that would have
+  been produced if no modifiers were held. Used by KIP's
+  `REPORT_ALTERNATES` mode to report the "base" key alongside the
+  modified one.
+
+Both fields are optional. KIP-aware clients SHOULD supply both for
+maximum fidelity; legacy clients MAY omit them.
+
+#### 9.1.6 Server-side encoding pipeline
+
+The server's per-pane state includes:
+
+- A `libghostty_vt::Terminal` (canonical pane state, ADR-0004).
+- A `libghostty_vt::key::Encoder` (key-to-bytes converter).
+
+When the server receives an `INPUT_KEY`:
+
+1. Translate the wire `KeyEvent` into a `libghostty::key::Event` —
+   every field maps one-to-one.
+2. Refresh the encoder's options against the current terminal state via
+   `Encoder::set_options_from_terminal(&terminal)`. This pulls cursor-
+   key application mode, keypad mode, alt-esc-prefix, modifyOtherKeys,
+   and KIP progressive-enhancement flags from the terminal's current
+   modes.
+3. Call `Encoder::encode_to_vec(&event, &mut buf)`.
+4. Write `buf` to the pane's PTY.
+
+The client never sees encoder options. The client never produces VT
+bytes. The protocol is the seam.
+
+This pipeline supports, end-to-end:
+
+- **The kitty keyboard protocol (KIP)** in its progressive-enhancement
+  entirety — disambiguation, report-events, report-alternates,
+  report-all, report-associated.
+- Unambiguous distinction between Ctrl+I and Tab, between Esc and
+  Alt-letter, between Ctrl+Enter and a literal `J`.
+- IME composition and dead keys.
+- Modifier-rich combinations (Super, side-discriminated) for tiling-WM-
+  style bindings, with correct passthrough.
+
+These are the things tmux structurally cannot do because it speaks raw
+VT between client and server.
 
 ### 9.2 INPUT_MOUSE
 
@@ -661,55 +825,76 @@ INPUT_MOUSE {
 }
 
 MouseEvent {
-    kind: MouseEventKind,
-    button: MouseButton,
-    col: u16,           // 0-based pane-local cell column
-    row: u16,           // 0-based pane-local cell row
-    pixel_x: optional<u16>,  // for sub-cell precision; pane-local
-    pixel_y: optional<u16>,
+    action: MouseAction,
+    button: optional<MouseButton>,
     mods: ModSet,
+    position: MousePosition,
 }
 
-MouseEventKind = enum {
-    PRESS = 0, RELEASE = 1, DRAG = 2, MOVE = 3, SCROLL = 4,
+MouseAction = enum {
+    PRESS   = 0,
+    RELEASE = 1,
+    MOTION  = 2,
 }
 
-MouseButton = enum {
-    NONE = 0,
-    LEFT = 1, MIDDLE = 2, RIGHT = 3,
-    SCROLL_UP = 4, SCROLL_DOWN = 5, SCROLL_LEFT = 6, SCROLL_RIGHT = 7,
-    EXTRA_1 = 8, EXTRA_2 = 9, EXTRA_3 = 10, EXTRA_4 = 11,
+MouseButton = enum (u32) {
+    UNKNOWN = 0,
+    LEFT    = 1,
+    RIGHT   = 2,
+    MIDDLE  = 3,
+    FOUR    = 4,    FIVE    = 5,    SIX    = 6,    SEVEN  = 7,
+    EIGHT   = 8,    NINE    = 9,    TEN    = 10,   ELEVEN = 11,
+}
+
+MousePosition {
+    // Pane-local surface-space pixels. Always present.
+    pixel_x: u32,
+    pixel_y: u32,
 }
 ```
 
-The server is responsible for re-encoding the event for whatever mouse
-protocol the inner program asked for (legacy X10, SGR-1006, etc.).
+Values map one-to-one to libghostty's `mouse::Action`, `mouse::Button`,
+and `mouse::Position`. Buttons 4..=11 carry their libghostty meaning;
+scroll-wheel events arrive as `PRESS` of buttons 4 (up) / 5 (down) /
+6 (left) / 7 (right) following xterm convention.
 
-### 9.3 Server-side encoding of input
+#### 9.2.1 Pixel positions and the cell-geometry contract
 
-When the server receives an `INPUT_KEY` or `INPUT_MOUSE` for a pane,
-it queries the pane's negotiated terminal-side keyboard / mouse
-protocol (from libghostty-vt's mode state) and renders the event to the
-bytes that protocol expects, writing them to the PTY. Clients never
-emit raw key bytes.
+Mouse positions on the wire are **pixels in pane-local surface space**.
+The server reconstructs `mouse::EncoderSize` (cell width/height,
+padding, full screen geometry) from the most recent `VIEWPORT_RESIZE`
+(§10.5) and per-pane layout. Cell-quantized clients (TUIs without true
+pixel-precision input) emit positions at `cell_index × cell_size`; the
+server's encoder produces correct output in both cell-format (SGR,
+URXVT) and pixel-format (SGR-Pixels) mouse protocols.
 
-This design point is what allows phux to support, end-to-end through
-the multiplexer:
+#### 9.2.2 Server-side encoding pipeline
 
-- **The kitty keyboard protocol (KIP)** in its progressive-enhancement
-  entirety: modifier-only events, release events, alternate-key
-  reporting, associated text. Carrying KIP cleanly is the **principal
-  reason this protocol exists in this shape**; structured key events
-  are the only way to get it right.
-- Unambiguous distinction between Ctrl+I and Tab, between Esc and
-  Alt-letter, between Ctrl+Enter and a literal `J`.
-- IME composition and dead keys.
-- Modifier-rich combinations (Hyper, Super) for tiling-WM-style
-  bindings, with correct passthrough to inner applications.
+Identical in spirit to §9.1.6: each pane has a
+`libghostty_vt::mouse::Encoder`. On `INPUT_MOUSE`, the server refreshes
+the encoder via `set_options_from_terminal`, sets the encoder's
+`EncoderSize` from current pane/cell geometry, builds a
+`libghostty::mouse::Event`, encodes, and writes to PTY.
 
-Multiplexers that speak raw VT between client and server cannot
-faithfully transport these events, and lossy translation has been a
-durable source of papercuts in tmux. phux solves this categorically.
+### 9.3 INPUT_FOCUS
+
+```
+INPUT_FOCUS {
+    pane_id: PaneId,
+    event: FocusKind,
+}
+
+FocusKind = enum { GAINED = 0, LOST = 1 }
+```
+
+The client emits `INPUT_FOCUS` when its window gains or loses focus on
+the host OS. If the pane has DEC mode 1004 (focus reporting) active,
+the server encodes a `CSI I` / `CSI O` via `libghostty_vt::focus`
+and writes to the PTY; otherwise the event is dropped server-side.
+
+This is separate from `FOCUS_CHANGED` (§10.4), which is server-to-
+client and concerns *which pane the client is interacting with* — not
+whether the client itself is in the foreground.
 
 ### 9.4 INPUT_PASTE
 
@@ -718,13 +903,26 @@ INPUT_PASTE {
     pane_id: PaneId,
     data: bytes,
     bracketed: bool,
+    trust: PasteTrust,
+}
+
+PasteTrust = enum {
+    UNTRUSTED = 0,   // server SHOULD apply paste::is_safe; reject or sanitize
+                     //   per server config
+    TRUSTED   = 1,   // server forwards verbatim; caller asserted safety
 }
 ```
 
-A paste is a bulk text insertion. If `bracketed` is true and the pane
-has `BRACKETED_PASTE` active, the server emits the appropriate
-bracketed-paste sequence around the data. If false, the data is sent
-as-is.
+Server uses `libghostty_vt::paste` utilities: `paste::is_safe(data)` to
+classify content, `paste::encode(data, bracketed, buf)` to produce
+final bytes (handles bracketed-paste sequences and unsafe-control-byte
+stripping).
+
+When `trust = UNTRUSTED`, the server's per-pane policy applies:
+`reject` (default — return an `ERROR { code: UNSAFE_PASTE }`),
+`sanitize` (use `paste::encode` to strip), or `allow` (forward anyway).
+When `trust = TRUSTED`, the server invokes `paste::encode` for
+bracketing but skips safety classification.
 
 ### 9.5 INPUT_RAW
 
@@ -735,12 +933,11 @@ INPUT_RAW {
 }
 ```
 
-A deliberate escape hatch. Bytes in `data` are written verbatim to the
-pane's PTY. Reserved for the small set of cases not modelled by
-`INPUT_KEY` / `INPUT_PASTE` / `INPUT_MOUSE` (chiefly: direct PTY testing
-and command interpolation from configs). Servers MUST NOT silently
-re-interpret `INPUT_RAW`; clients SHOULD avoid using it in normal
-operation.
+Escape hatch. Bytes in `data` are written verbatim to the pane's PTY.
+Reserved for cases not modelled by `INPUT_KEY` / `INPUT_PASTE` /
+`INPUT_MOUSE` / `INPUT_FOCUS` (chiefly: direct PTY testing and command
+interpolation from configs). Servers MUST NOT silently re-interpret
+`INPUT_RAW`; clients SHOULD avoid using it in normal operation.
 
 ---
 
@@ -824,16 +1021,30 @@ all attached clients whenever any one of them changes focus.
 
 ### 10.5 Viewport resize
 
-The client's outer terminal size is signalled with `VIEWPORT_RESIZE`:
+The client's outer terminal size and cell geometry are signalled with
+`VIEWPORT_RESIZE`:
 
 ```
 VIEWPORT_RESIZE {
-    cols: u16,
-    rows: u16,
-    pixel_w: optional<u16>,
-    pixel_h: optional<u16>,
+    cols: u16,                          // outer terminal width in cells
+    rows: u16,                          // outer terminal height in cells
+    pixel_w: optional<u16>,             // outer terminal width in pixels
+    pixel_h: optional<u16>,             // outer terminal height in pixels
+    cell_w: optional<u16>,              // single-cell width in pixels
+    cell_h: optional<u16>,              // single-cell height in pixels
+    padding_top: optional<u16>,         // chrome padding around the cell grid
+    padding_bottom: optional<u16>,
+    padding_left: optional<u16>,
+    padding_right: optional<u16>,
 }
 ```
+
+`cell_w` / `cell_h` / `padding_*` are required for accurate mouse
+encoding in pixel-format mouse protocols (`SgrPixels`). Cell-quantized
+clients (TUIs without real pixel metrics) MAY pass `cell_w = 1,
+cell_h = 1, padding_* = 0` — the server's encoder produces correct
+output in cell-format protocols regardless. Pixel-precise clients
+(GUIs) SHOULD provide real metrics.
 
 The server recomputes layout against the new viewport. Per-pane resize
 events are then emitted as `PANE_RESIZED`:
@@ -1150,3 +1361,4 @@ against this document.
 | Version | Date       | Notes                                        |
 |---------|------------|----------------------------------------------|
 | 0.1.0-draft | 2026-05-24 | Initial draft. Subject to change.            |
+| 0.1.0-draft.2 | 2026-05-24 | §7.7, §9, §10.5 revised to mirror libghostty input/OSC APIs. ADR-0006. |

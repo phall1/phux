@@ -123,13 +123,19 @@ mod tests {
 
     #[test]
     fn cell_with_text_is_not_blank() {
-        let c = Cell { text: vec!['a'], ..Cell::blank() };
+        let c = Cell {
+            text: vec!['a'],
+            ..Cell::blank()
+        };
         assert!(!c.is_blank());
     }
 
     #[test]
     fn cell_with_color_is_not_blank() {
-        let c = Cell { fg: Color::Rgb(1, 2, 3), ..Cell::blank() };
+        let c = Cell {
+            fg: Color::Rgb(1, 2, 3),
+            ..Cell::blank()
+        };
         assert!(!c.is_blank());
     }
 }

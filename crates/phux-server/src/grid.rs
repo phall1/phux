@@ -25,7 +25,7 @@ pub enum CaptureError {
 /// each call. Per-pane hot loops should hold these structs across frames;
 /// this helper is for one-shot captures (testing, the diff spike, the
 /// `phux capture` command).
-pub fn capture(terminal: &mut Terminal<'_, '_>) -> Result<Grid, CaptureError> {
+pub fn capture(terminal: &Terminal<'_, '_>) -> Result<Grid, CaptureError> {
     let mut render_state = RenderState::new()?;
     let mut rows = RowIterator::new()?;
     let mut cells = CellIterator::new()?;
@@ -34,8 +34,9 @@ pub fn capture(terminal: &mut Terminal<'_, '_>) -> Result<Grid, CaptureError> {
     let cols = snapshot.cols()?;
     let rows_n = snapshot.rows()?;
 
-    let mut grid_cells: Vec<Vec<Cell>> =
-        (0..rows_n).map(|_| (0..cols).map(|_| Cell::blank()).collect()).collect();
+    let mut grid_cells: Vec<Vec<Cell>> = (0..rows_n)
+        .map(|_| (0..cols).map(|_| Cell::blank()).collect())
+        .collect();
 
     let mut row_iter = rows.update(&snapshot)?;
     let mut row_index: u16 = 0;
@@ -57,7 +58,12 @@ pub fn capture(terminal: &mut Terminal<'_, '_>) -> Result<Grid, CaptureError> {
 
     let cursor = cursor_from_snapshot(&snapshot)?;
 
-    Ok(Grid { cols, rows: rows_n, cells: grid_cells, cursor })
+    Ok(Grid {
+        cols,
+        rows: rows_n,
+        cells: grid_cells,
+        cursor,
+    })
 }
 
 fn cell_from_iter(
@@ -65,14 +71,12 @@ fn cell_from_iter(
 ) -> Result<Cell, CaptureError> {
     let text = cell.graphemes()?;
 
-    let fg = match cell.fg_color()? {
-        Some(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-        None => Color::Default,
-    };
-    let bg = match cell.bg_color()? {
-        Some(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-        None => Color::Default,
-    };
+    let fg = cell
+        .fg_color()?
+        .map_or(Color::Default, |rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
+    let bg = cell
+        .bg_color()?
+        .map_or(Color::Default, |rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
 
     let style = cell.style()?;
     let underline = map_underline(style.underline);
@@ -104,35 +108,32 @@ fn cell_from_iter(
         flags |= CellFlags::OVERLINED;
     }
 
-    Ok(Cell { text, fg, bg, underline, underline_color, flags })
+    Ok(Cell {
+        text,
+        fg,
+        bg,
+        underline,
+        underline_color,
+        flags,
+    })
 }
 
-fn map_style_color(c: StyleColor) -> Color {
+const fn map_style_color(c: StyleColor) -> Color {
     match c {
         StyleColor::None => Color::Default,
-        StyleColor::Palette(idx) => Color::Indexed(palette_to_u8(idx.0)),
+        StyleColor::Palette(idx) => Color::Indexed(idx.0),
         StyleColor::Rgb(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
     }
 }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "ColorPaletteIndex is 0..=255 by construction; bindgen types may widen"
-)]
-fn palette_to_u8(idx: libghostty_vt::ffi::ColorPaletteIndex) -> u8 {
-    idx as u8
-}
-
-fn map_underline(u: LgUnderline) -> Underline {
+const fn map_underline(u: LgUnderline) -> Underline {
+    // Upstream `LgUnderline` is non-exhaustive — future kinds fall through to None.
     match u {
-        LgUnderline::None => Underline::None,
         LgUnderline::Single => Underline::Single,
         LgUnderline::Double => Underline::Double,
         LgUnderline::Curly => Underline::Curly,
         LgUnderline::Dotted => Underline::Dotted,
         LgUnderline::Dashed => Underline::Dashed,
-        // Non-exhaustive upstream: future kinds map to None until we model them.
         _ => Underline::None,
     }
 }
@@ -143,17 +144,21 @@ fn cursor_from_snapshot(
     let visible = snapshot.cursor_visible()?;
     let blink = snapshot.cursor_blinking()?;
     let shape = match snapshot.cursor_visual_style()? {
-        CursorVisualStyle::Block => CursorShape::Block,
+        // Block and any future kind fall through to the Block default below.
         CursorVisualStyle::Bar => CursorShape::Bar,
         CursorVisualStyle::Underline => CursorShape::Underline,
         CursorVisualStyle::BlockHollow => CursorShape::BlockHollow,
-        // Non-exhaustive upstream: fall back to Block.
         _ => CursorShape::Block,
     };
-    let (row, col) = match snapshot.cursor_viewport()? {
-        Some(cv) => (cv.y, cv.x),
-        None => (0, 0),
-    };
+    let (row, col) = snapshot
+        .cursor_viewport()?
+        .map_or((0, 0), |cv| (cv.y, cv.x));
 
-    Ok(CursorState { row, col, visible, shape, blink })
+    Ok(CursorState {
+        row,
+        col,
+        visible,
+        shape,
+        blink,
+    })
 }

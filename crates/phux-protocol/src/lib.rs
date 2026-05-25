@@ -24,7 +24,11 @@ pub use diff::{
 pub use ids::{ClientId, FrameId, PaneId, SessionId, WindowId};
 
 /// Protocol version this crate implements.
-pub const PROTOCOL_VERSION: Version = Version { major: 0, minor: 1, patch: 0 };
+pub const PROTOCOL_VERSION: Version = Version {
+    major: 0,
+    minor: 1,
+    patch: 0,
+};
 
 /// A semantic protocol version: `major.minor.patch`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

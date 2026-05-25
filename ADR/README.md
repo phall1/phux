@@ -15,6 +15,7 @@ Nygard's template][nygard].
 | [0003](./0003-server-process-model.md) | Single server, many sessions | Accepted |
 | [0004](./0004-libghostty-vt-as-grid.md) | libghostty-vt is the canonical grid | Accepted |
 | [0005](./0005-relationship-to-zmx-and-zmosh.md) | Greenfield relative to zmx / zmosh | Accepted |
+| [0006](./0006-input-mirrors-libghostty.md) | Input event types mirror libghostty's API | Accepted |
 
 ## When to write an ADR
 

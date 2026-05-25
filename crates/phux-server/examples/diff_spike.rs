@@ -1,4 +1,4 @@
-//! diff_spike — feed bytes into libghostty-vt, capture grids, compute diffs.
+//! `diff_spike` — feed bytes into libghostty-vt, capture grids, compute diffs.
 //!
 //! Validates the architectural bet behind ADR-0002 and ADR-0004 with running
 //! code, end-to-end:
@@ -27,16 +27,20 @@ use phux_protocol::{DiffOp, compute_diff};
 use phux_server::grid;
 
 fn main() {
-    let mut terminal = Terminal::new(TerminalOptions { cols: 40, rows: 6, max_scrollback: 10_000 })
-        .expect("Terminal::new");
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols: 40,
+        rows: 6,
+        max_scrollback: 10_000,
+    })
+    .expect("Terminal::new");
 
-    let snap0 = grid::capture(&mut terminal).expect("capture 0");
+    let snap0 = grid::capture(&terminal).expect("capture 0");
     println!("=== snapshot 0 (empty) ===");
     print_grid(&snap0);
 
     println!("\n>> feeding: \"hello, \\x1b[1;32mworld\\x1b[0m!\\r\\n\"");
     terminal.vt_write(b"hello, \x1b[1;32mworld\x1b[0m!\r\n");
-    let snap1 = grid::capture(&mut terminal).expect("capture 1");
+    let snap1 = grid::capture(&terminal).expect("capture 1");
     println!("\n=== snapshot 1 (after hello) ===");
     print_grid(&snap1);
 
@@ -46,7 +50,7 @@ fn main() {
 
     println!("\n>> feeding: \"\\x1b[31msecond line\\x1b[0m\\r\\n\"");
     terminal.vt_write(b"\x1b[31msecond line\x1b[0m\r\n");
-    let snap2 = grid::capture(&mut terminal).expect("capture 2");
+    let snap2 = grid::capture(&terminal).expect("capture 2");
     println!("\n=== snapshot 2 (after second line) ===");
     print_grid(&snap2);
 
@@ -56,7 +60,7 @@ fn main() {
 
     println!("\n>> feeding: clear screen + reposition");
     terminal.vt_write(b"\x1b[H\x1b[2J");
-    let snap3 = grid::capture(&mut terminal).expect("capture 3");
+    let snap3 = grid::capture(&terminal).expect("capture 3");
     println!("\n=== snapshot 3 (cleared) ===");
     print_grid(&snap3);
 
@@ -70,7 +74,7 @@ fn main() {
     println!("2→3: {} ops", diff_2_3.len());
 
     // Sanity: applying 0→1 to snap0 should produce snap1 (cell-equivalence).
-    let mut replay = snap0.clone();
+    let mut replay = snap0;
     apply_diff(&mut replay, &diff_0_1);
     assert_eq!(
         replay.cells, snap1.cells,
@@ -80,7 +84,10 @@ fn main() {
 }
 
 fn print_grid(g: &phux_protocol::Grid) {
-    println!("  dims: {}x{}  cursor: ({},{})", g.cols, g.rows, g.cursor.col, g.cursor.row);
+    println!(
+        "  dims: {}x{}  cursor: ({},{})",
+        g.cols, g.rows, g.cursor.col, g.cursor.row
+    );
     for (i, row) in g.cells.iter().enumerate() {
         let text: String = row
             .iter()
@@ -100,7 +107,10 @@ fn print_diff(ops: &[DiffOp]) {
     for op in ops {
         match op {
             DiffOp::CellRun { row, col, cells } => {
-                let text: String = cells.iter().map(|c| c.text.first().copied().unwrap_or(' ')).collect();
+                let text: String = cells
+                    .iter()
+                    .map(|c| c.text.first().copied().unwrap_or(' '))
+                    .collect();
                 println!("  CellRun  ({row:2},{col:2}) [{}] \"{text}\"", cells.len());
             }
             DiffOp::Clear { row, col, count } => {
@@ -109,7 +119,11 @@ fn print_diff(ops: &[DiffOp]) {
             DiffOp::CursorMove { row, col } => {
                 println!("  CursorMove -> ({row},{col})");
             }
-            DiffOp::CursorStyle { visible, shape, blink } => {
+            DiffOp::CursorStyle {
+                visible,
+                shape,
+                blink,
+            } => {
                 println!("  CursorStyle visible={visible} shape={shape:?} blink={blink}");
             }
         }
@@ -142,7 +156,11 @@ fn apply_diff(grid: &mut phux_protocol::Grid, ops: &[DiffOp]) {
                 grid.cursor.row = *row;
                 grid.cursor.col = *col;
             }
-            DiffOp::CursorStyle { visible, shape, blink } => {
+            DiffOp::CursorStyle {
+                visible,
+                shape,
+                blink,
+            } => {
                 grid.cursor.visible = *visible;
                 grid.cursor.shape = *shape;
                 grid.cursor.blink = *blink;

@@ -10,7 +10,11 @@
 //! Subcommands are unstable until v0.1.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stderr, reason = "binary entry point; stderr is the report")]
 
 fn main() {
-    eprintln!("phux {} (pre-alpha; see SPEC.md)", env!("CARGO_PKG_VERSION"));
+    eprintln!(
+        "phux {} (pre-alpha; see SPEC.md)",
+        env!("CARGO_PKG_VERSION")
+    );
 }

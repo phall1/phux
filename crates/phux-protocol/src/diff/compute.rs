@@ -30,10 +30,17 @@ pub fn compute_diff(prev: &Grid, next: &Grid) -> Vec<DiffOp> {
     // emit a `PANE_SNAPSHOT` instead; this function returns a faithful
     // diff regardless.
     if prev.rows != next.rows || prev.cols != next.cols {
-        ops.push(DiffOp::Clear { row: 0, col: 0, count: u16::MAX });
+        ops.push(DiffOp::Clear {
+            row: 0,
+            col: 0,
+            count: u16::MAX,
+        });
         push_full_repaint(&mut ops, next);
         if prev.cursor != next.cursor {
-            ops.push(DiffOp::CursorMove { row: next.cursor.row, col: next.cursor.col });
+            ops.push(DiffOp::CursorMove {
+                row: next.cursor.row,
+                col: next.cursor.col,
+            });
         }
         return ops;
     }
@@ -56,15 +63,26 @@ pub fn compute_diff(prev: &Grid, next: &Grid) -> Vec<DiffOp> {
             // on the wire long-term, even though both are correct).
             if run.iter().all(Cell::is_blank) {
                 let count = u16::try_from(run.len()).unwrap_or(u16::MAX);
-                ops.push(DiffOp::Clear { row: row_u16, col: start_u16, count });
+                ops.push(DiffOp::Clear {
+                    row: row_u16,
+                    col: start_u16,
+                    count,
+                });
             } else {
-                ops.push(DiffOp::CellRun { row: row_u16, col: start_u16, cells: run });
+                ops.push(DiffOp::CellRun {
+                    row: row_u16,
+                    col: start_u16,
+                    cells: run,
+                });
             }
         }
     }
 
     if prev.cursor != next.cursor {
-        ops.push(DiffOp::CursorMove { row: next.cursor.row, col: next.cursor.col });
+        ops.push(DiffOp::CursorMove {
+            row: next.cursor.row,
+            col: next.cursor.col,
+        });
     }
 
     ops
@@ -84,7 +102,11 @@ fn push_full_repaint(ops: &mut Vec<DiffOp>, grid: &Grid) {
         if row.iter().all(Cell::is_blank) {
             continue;
         }
-        ops.push(DiffOp::CellRun { row: row_u16, col: 0, cells: row.clone() });
+        ops.push(DiffOp::CellRun {
+            row: row_u16,
+            col: 0,
+            cells: row.clone(),
+        });
     }
 }
 
@@ -94,7 +116,10 @@ mod tests {
     use crate::diff::cell::Color;
 
     fn cell_with_text(s: &str) -> Cell {
-        Cell { text: s.chars().collect(), ..Cell::blank() }
+        Cell {
+            text: s.chars().collect(),
+            ..Cell::blank()
+        }
     }
 
     #[test]
@@ -169,7 +194,10 @@ mod tests {
     fn color_change_is_a_diff() {
         let prev = Grid::blank(1, 1);
         let mut next = prev.clone();
-        next.cells[0][0] = Cell { fg: Color::Rgb(255, 0, 0), ..Cell::blank() };
+        next.cells[0][0] = Cell {
+            fg: Color::Rgb(255, 0, 0),
+            ..Cell::blank()
+        };
         let ops = compute_diff(&prev, &next);
         assert_eq!(ops.len(), 1);
         // It's a CellRun because the cell isn't "blank" — fg is non-default.

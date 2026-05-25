@@ -29,7 +29,12 @@ impl Grid {
         let cells = (0..rows)
             .map(|_| (0..cols).map(|_| Cell::blank()).collect())
             .collect();
-        Self { cols, rows, cells, cursor: CursorState::default() }
+        Self {
+            cols,
+            rows,
+            cells,
+            cursor: CursorState::default(),
+        }
     }
 
     /// Total cell count, for sanity checks.
@@ -40,7 +45,7 @@ impl Grid {
 
     /// True if `rows == 0` or `cols == 0`.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.rows == 0 || self.cols == 0
     }
 
