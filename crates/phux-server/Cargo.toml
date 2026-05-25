@@ -26,10 +26,16 @@ libghostty-vt.workspace = true
 insta.workspace = true
 criterion.workspace = true
 dhat.workspace = true
+portable-pty.workspace = true
+tokio.workspace = true
 
 [[example]]
 name = "diff_spike"
 path = "examples/diff_spike.rs"
+
+[[example]]
+name = "one_pane"
+path = "examples/one_pane.rs"
 
 [[bench]]
 name = "capture"
