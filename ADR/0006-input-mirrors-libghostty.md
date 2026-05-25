@@ -1,130 +1,191 @@
-# 0006 — Input event types mirror libghostty's API
+# 0006 — Input event types re-export libghostty-vt's atoms
 
-Status: Accepted. **Superseded in part by ADR-0008** — the "wire is
-canonical, libghostty is a backend" framing of the divergence amendment
-below is replaced by "phux re-exports libghostty's atoms directly." The
-*intent* of this ADR (input event shape mirrors libghostty's `key::Event`
-/ `mouse::Event` / `focus::Event` / `paste`) is unchanged. Read ADR-0008
-first if you are landing here for the first time.
+Status: Accepted. Substantially rewritten on 2026-05-25 to consolidate
+the supersession by ADR-0008; see git history for the original draft and
+its two amendments. The decision recorded below is the current decision —
+ADR-0008 is the *why*, this ADR is the *what* for the input wire.
 
-Date: 2026-05-24
+Date: 2026-05-24 (original) / 2026-05-25 (rewrite)
 
 ## Context
 
-Server-side, phux feeds input events to libghostty's encoders
+Server-side, phux feeds input events to libghostty-vt's encoders
 (`key::Encoder`, `mouse::Encoder`, `focus::Event::encode`,
 `paste::encode`). The encoders take typed event structures and produce
 the exact PTY bytes for whatever protocol the inner program currently
-expects — KIP at any progressive-enhancement level, legacy fixterms,
-SGR / SGR-Pixels mouse, etc.
+expects — KIP at any progressive-enhancement level, legacy fixterms, SGR
+/ SGR-Pixels mouse, etc. Round-trip fidelity from the wire into those
+encoders is the design constraint SPEC §9 has to satisfy.
 
-Our first draft of `SPEC.md` §9 modeled inputs from the *application*
-side: `Key = CHAR(u32) | NAMED(NamedKey)`, with the codepoint being the
-layout-resolved character. This is the model an application receives
-*after* the terminal has done its work. The diff spike caught the
-mismatch: feeding this shape into libghostty's encoder requires lossy
-translation, and KIP features (alternate-keys, modifier-only events,
-side-discriminated modifiers) cannot round-trip correctly.
+The early draft of SPEC §9 modeled inputs from the *application* side
+(`Key = CHAR(u32) | NAMED(NamedKey)`, codepoint already layout-resolved).
+The first diff spike caught the mismatch: that shape is what an
+application receives *after* the terminal has done its work, and feeding
+it into a KIP-capable encoder requires lossy translation — alternate
+keys, modifier-only events, and side-discriminated modifiers cannot
+round-trip.
+
+The shape on the wire therefore has to be libghostty-vt-shaped. The
+remaining question is *how* to express that: mirror the upstream enums
+into phux-protocol (the original 0006 decision), or re-export them
+directly (ADR-0008). This ADR records the latter.
 
 ## Decision
 
-Wire input event types mirror libghostty-vt's `key::Event`,
-`mouse::Event`, `focus::Event`, and paste utilities one-to-one.
+phux-protocol re-exports libghostty-vt's input atoms directly. Outer
+wire-side event structs wrap those atoms with pane addressing and any
+phux-specific framing. The server-side conversion to libghostty-vt's
+allocator-bound `Event` types is a free function in phux-server.
 
-- `KeyEvent` carries `action`, `key: PhysicalKey` (W3C `code`-style),
-  `mods` (with `*_SIDE` bits), `consumed_mods`, `composing`, `text`,
+### Re-exported atoms
+
+The following atoms are `pub use`d from libghostty-vt unchanged. There
+is no parallel type:
+
+| phux-protocol name | Source                            |
+|--------------------|-----------------------------------|
+| `PhysicalKey`      | `libghostty_vt::key::Key`         |
+| `KeyAction`        | `libghostty_vt::key::Action`      |
+| `ModSet`           | `libghostty_vt::key::Mods`        |
+| `MouseAction`      | `libghostty_vt::mouse::Action`    |
+| `MouseButton`      | `libghostty_vt::mouse::Button`    |
+| `FocusEvent`       | `libghostty_vt::focus::Event`     |
+
+### phux-owned wire-side wrappers
+
+The outer event structs that cross the wire are phux-defined. They
+compose the re-exported atoms and add pane addressing plus any framing
+the multiplexer needs:
+
+- `phux_protocol::input::KeyEvent` — `pane_id`, plus libghostty-shaped
+  `action`, `key`, `mods`, `consumed_mods`, `composing`, `text`,
   `unshifted_codepoint`.
-- `MouseEvent` carries `action`, `button`, `mods`, and `position` in
-  pane-local surface pixels.
-- `INPUT_FOCUS` is `{Gained,Lost}` per pane.
-- `INPUT_PASTE` carries raw bytes plus a `trust` field; the server uses
-  `libghostty_vt::paste::is_safe` and `paste::encode` per policy.
+- `phux_protocol::input::MouseEvent` — `pane_id`, plus `action`,
+  `button`, `mods`, and a pane-local pixel `position`.
+- Focus is the re-exported `libghostty_vt::focus::Event` plus a
+  `pane_id` at the frame layer.
+- `phux_protocol::input::PasteEvent` — `pane_id`, raw bytes, and a
+  `PasteTrust` policy field. libghostty-vt's `paste` module is free
+  functions only (`is_safe`, `encode`); there is no upstream paste-event
+  type to re-export. `PasteTrust` is phux-defined per-pane policy.
 
-The numeric values of `PhysicalKey`, `MouseButton`, and `MouseAction`
-match libghostty's enums verbatim so the wire ↔ libghostty mapping for
-those is a field-for-field copy.
+The outer structs exist because libghostty-vt's `key::Event<'alloc>` and
+`mouse::Event<'alloc>` are allocator-bound FFI handles — not safe to
+`Vec`-store or send across an async boundary. Wrapping them with plain
+fields composing the atoms gives us a wire-friendly representation that
+still composes back into the FFI types server-side.
 
-### Amendment (phux-6yl.2 finding, 2026-05-25)
+### Server-side bridge
 
-The original draft of this ADR overgeneralized: it claimed *all* the
-mirrored enums (including `KeyAction` and `ModSet`/`Mods`) share
-discriminants with libghostty. The phux-6yl.2 implementation pass
-discovered this is not true at the live pinned libghostty rev
-(`31d1f70`):
-
-| Type        | phux wire             | libghostty `key::*`   |
-|-------------|-----------------------|-----------------------|
-| `KeyAction` | `Press=0, Release=1`  | `Release=0, Press=1`  |
-| `Mods`      | `CTRL=2, ALT=4`       | `ALT=2, CTRL=4`       |
-
-We **deliberately keep the phux wire discriminants stable** and do a
-semantic remap inside the server-side `*_to_libghostty` conversion
-functions. The wire format is canonical; libghostty is a backend whose
-ABI may shift. The discriminant-pin tests in `phux-server/src/input/`
-assert the *semantic* mapping (`KeyAction::Press` maps to libghostty's
-press value) rather than numeric equality.
-
-`PhysicalKey`, `MouseButton`, and `MouseAction` discriminants *do*
-match libghostty's verbatim — those conversions remain mechanical
-casts. The contract is: phux-protocol pins the wire bytes; phux-server
-owns the libghostty-bridge layer and absorbs any future upstream ABI
-churn there.
-
-### Amendment (Rust orphan rules)
-
-The original draft wrote `impl From<&phux_protocol::input::KeyEvent>
-for libghostty_vt::key::Event`. Rust's orphan rules forbid this: both
-types are foreign to `phux-server`. The actual surface is free
-functions in `phux_server::input::*` named `*_to_libghostty`. The
-intent (field-for-field, infallible) is unchanged.
+`phux-server` constructs the libghostty-vt allocator-bound events from
+the wire-side fields via free functions in
+`crates/phux-server/src/input/` — currently `key_event_to_libghostty`
+and `mouse_event_to_libghostty`. These are *not* `From` impls: both
+`phux_protocol::input::KeyEvent` and `libghostty_vt::key::Event` are
+foreign to phux-server, and Rust's orphan rules forbid the cross-crate
+`From`. A free function is the only legal expression of the conversion,
+and it is plenty — the call sites are exactly the per-pane encoders.
 
 ## Rationale
 
-- **Round-trip fidelity.** Wire events translate to libghostty events
-  with no semantic loss. Whatever the encoder can produce, phux can
-  carry.
+The original 0006 decision was parallel mirror types in phux-protocol
+with discriminant-pin tests and a `*_to_libghostty` remap layer. The
+stated motivation was a "clean wire format with no leaky libghostty
+deps." ADR-0008 reversed that call. The reasons, restated here for a
+reader who lands on this ADR first:
+
+- **The leak is illusory.** phux-protocol depends on `libghostty-vt`
+  under the `server` feature already; the protocol crate's real
+  consumers (phux-server, phux-client) both pull libghostty-vt-sys's
+  build chain anyway. Mirroring atoms doesn't avoid the dependency, it
+  just adds parallel types alongside it.
+- **Mirror types drift.** The wave-2 implementation discovered
+  `KeyAction` and `Mods` discriminants had silently diverged from
+  upstream at the pinned libghostty rev. Catching that required a
+  177-line discriminant-pin table. Re-exporting deletes the table and
+  the drift class entirely.
+- **Orphan rules kill the clean-conversion benefit.** Even with mirror
+  types, the conversion can't be a cross-crate `From` impl — it has to
+  be a free function in phux-server. The "infrastructure" the mirror
+  was protecting (`impl From<&Wire> for Lg`) doesn't exist in any
+  universe; the conversion is a free function either way.
+- **Upstream evolution rides along.** When Ghostty merges a new key, a
+  new mouse button, or a new KIP refinement, `cargo update` lands it on
+  phux's wire. Variant additions are non-breaking because libghostty's
+  enums are `#[non_exhaustive]` (with the documented exception of
+  `key::Key`).
+
+The original draft's deeper motivation — round-trip fidelity into the
+KIP encoder, encoder options staying server-local, native libghostty-
+surface clients producing wire events with no flattening — survives
+intact. The implementation just got simpler.
+
+## Consequences
+
+- **Less code; no drift.** No mirror enums, no discriminant-pin tests,
+  no per-variant conversion arms. Server-side bridge functions
+  construct libghostty events from wire-side fields and that's the
+  entirety of the input adapter layer.
+- **Upstream tracking is atomic.** A libghostty-vt point release is a
+  `cargo update`, not a porting exercise.
+- **phux-protocol's public API is partially shaped by libghostty-vt's.**
+  A libghostty-vt major version bump forces phux-protocol to bump in
+  lockstep. Mitigated by the wire-side wrappers (`KeyEvent`,
+  `MouseEvent`, `PasteEvent`) staying phux-owned: the atoms inside them
+  are libghostty's, but the framing — pane addressing, paste trust,
+  any future phux-specific fields — is ours and stable across upstream
+  churn.
 - **Encoder options stay server-local.** Cursor-key application mode,
   keypad mode, modifyOtherKeys, KIP flags, alt-esc-prefix, backarrow,
   macos-option-as-alt — none of this traverses the wire. The server
-  has the `Terminal` and calls
+  holds the `Terminal` and calls
   `Encoder::set_options_from_terminal(&terminal)` before each encode.
   Per-pane encoder state is private to the server.
-- **Future-aligned.** If libghostty adds a new physical key, a new
-  encoder flag, or refines KIP support, we adopt it server-side without
-  protocol changes. The wire format is upstream-shaped, so upstream
-  evolution lands without versioning friction.
-- **GUI clients are first-class.** A native libghostty-surface client
-  produces `key::Event` values natively from the OS; they map to wire
-  `KeyEvent` field-for-field with no flattening.
-
-## Tradeoffs
-
-- **Larger spec surface than the original draft.** `PhysicalKey` has
-  ~175 enum values; the original draft had ~70. We accept this — the
-  values are stable W3C names and they are what makes faithful key
-  encoding possible.
-- **`HYPER` and `META` are not separate modifier bits.** This matches
-  libghostty (and the underlying reality on most platforms: they're
-  XKB-configurable mappings to SUPER, not independent kernel-level
-  flags). Users wanting tiling-WM-style "modifier-only" bindings get
-  them via KIP's report-events flag plus configuration, not via wire-
-  level Hyper/Meta bits.
+- **Per-pane encoder isolation is preserved.** Mouse, key, focus, paste
+  encoders are per-pane. No shared global encoder state. This is the
+  invariant ADR-0007 inherits when satellites land.
+- **`HYPER` and `META` are not separate modifier bits.** Inherited from
+  libghostty (and the underlying reality on most platforms: they are
+  XKB-configurable mappings to `SUPER`, not independent kernel-level
+  flags). Users wanting tiling-WM-style modifier-only bindings get them
+  via KIP's report-events flag plus configuration, not via wire-level
+  Hyper/Meta bits.
 
 ## Alternatives considered
 
-- **Application-shaped input** (the original draft): clean for
-  in-process consumers but lossy at the libghostty seam.
-- **Opaque pre-encoded VT bytes** (`INPUT_RAW` everywhere): trivially
+- **Parallel mirror types in phux-protocol** (the original 0006
+  decision). Rejected per the rationale above: dep-graph leak was
+  illusory, mirror drift was real, orphan rules nullified the
+  clean-conversion benefit, and the maintenance treadmill bought
+  nothing concrete.
+- **Opaque pre-encoded VT bytes** (`INPUT_RAW` everywhere). Trivially
   faithful at the byte level but discards the structured information
-  KIP needs to be encoded correctly per-pane. Also forces every client
-  to know every encoding the inner program might want — exactly the
-  thing the multiplexer should hide.
+  KIP needs to be encoded correctly per-pane. Forces every client to
+  know every encoding the inner program might want — exactly the thing
+  the multiplexer should hide. Defeats the structured-input goal of
+  SPEC §9.
+- **Re-export atoms but flatten wrappers into bare libghostty events
+  on the wire.** Rejected: libghostty's `key::Event<'alloc>` and
+  `mouse::Event<'alloc>` are allocator-bound. They are not
+  serializable across the wire or storable in a `Vec` without owning
+  copies of their fields. The plain wrapper structs are doing real
+  work, not redundant framing.
 
-## Implementation note
+## References
 
-Superseded by ADR-0008: `PhysicalKey`, `KeyAction`, `ModSet`,
-`MouseAction`, `MouseButton`, and `FocusEvent` are now re-exports of
-the libghostty types (no separate enum, no `From` impl). The wire-side
-outer structs (`KeyEvent`, `MouseEvent`) compose those atoms; the
-server bridge in `crates/phux-server/src/input/` constructs
-libghostty's allocator-bound `Event` values from those fields.
+- ADR-0008 — use libghostty-vt's types directly. The *why* behind this
+  ADR's *what*. Read 0008 if you want the dep-graph and forward-compat
+  argument in full.
+- ADR-0002 — diff-based protocol. Partial supersede by 0008 for input
+  and style atoms; the diff protocol shape remains
+  emulator-independent.
+- ADR-0004 — libghostty-vt as grid source. Same load-bearing dep on
+  the server side.
+- ADR-0007 — Mosh-class transport and satellites. Inherits the
+  per-pane encoder isolation invariant.
+- `crates/phux-protocol/src/input/` — wire-side event structs and
+  re-exports.
+- `crates/phux-server/src/input/` — the conversion bridge
+  (`key_event_to_libghostty`, `mouse_event_to_libghostty`) and the
+  per-pane encoders that consume it.
+- SPEC §9 — input frame format.
