@@ -83,27 +83,40 @@ pub const INPUT_PASTE_TRUST: u32 = 2;
 pub const INPUT_PASTE_DATA: u32 = 3;
 
 // -----------------------------------------------------------------------------
-// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` — §7.1-§7.3, §13
+// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` / `PANE_SNAPSHOT` —
+//   §7.1-§7.3, §8.4, §13. Field IDs are positional-codec-anticipatory
+//   (unused today); TLV migration is tracked in phux-i58.
 // -----------------------------------------------------------------------------
 
-/// `ATTACH`: target session name (UTF-8). Phux-4az scaffold; v0.2 may add
-/// `AttachTarget` tagged union per SPEC §13.
-pub const ATTACH_SESSION_NAME: u32 = 1;
-/// `ATTACH`: client `AttachRole` (primary=0, viewer=1). Phux-defined and NOT
-/// yet codified in SPEC §13 — see commit message for phux-4az.
-pub const ATTACH_ROLE: u32 = 2;
+/// `ATTACH`: `AttachTarget` tagged union (SPEC §13).
+pub const ATTACH_TARGET: u32 = 1;
+/// `ATTACH`: `ViewportInfo { cols, rows, pixel_w?, pixel_h? }` (SPEC §13).
+pub const ATTACH_VIEWPORT: u32 = 2;
+/// `ATTACH`: `request_scrollback: bool` (SPEC §13).
+pub const ATTACH_REQUEST_SCROLLBACK: u32 = 3;
+/// `ATTACH`: `scrollback_limit_lines: u32` (SPEC §13).
+pub const ATTACH_SCROLLBACK_LIMIT_LINES: u32 = 4;
 
-/// `ATTACHED`: server-assigned `SessionId`.
-pub const ATTACHED_SESSION_ID: u32 = 1;
-/// `ATTACHED`: focused `WindowId` at attach time.
-pub const ATTACHED_WINDOW_ID: u32 = 2;
-/// `ATTACHED`: focused `PaneId` at attach time.
-pub const ATTACHED_PANE_ID: u32 = 3;
-/// `ATTACHED`: initial `PaneSnapshot` for the focused pane.
-pub const ATTACHED_SNAPSHOT: u32 = 4;
+/// `ATTACHED`: full `SessionSnapshot` (SPEC §13).
+pub const ATTACHED_SNAPSHOT: u32 = 1;
+/// `ATTACHED`: server-allocated `ClientId` for this attachment (SPEC §13).
+pub const ATTACHED_INITIAL_CLIENT_ID: u32 = 2;
 
 // `DETACH` and `DETACHED` are unit messages in the phux-4az scaffold;
 // `DETACHED { reason, message }` from SPEC §7.3 lands in a follow-up.
+
+// -----------------------------------------------------------------------------
+// `PANE_SNAPSHOT` body — §8.4 (separate frame per SPEC §13's attach sequence).
+// -----------------------------------------------------------------------------
+
+/// `PANE_SNAPSHOT`: target `PaneId`.
+pub const PANE_SNAPSHOT_PANE: u32 = 1;
+/// `PANE_SNAPSHOT`: grid columns.
+pub const PANE_SNAPSHOT_COLS: u32 = 2;
+/// `PANE_SNAPSHOT`: grid rows.
+pub const PANE_SNAPSHOT_ROWS: u32 = 3;
+/// `PANE_SNAPSHOT`: opening sequence of `DiffOp` against a blank grid.
+pub const PANE_SNAPSHOT_OPS: u32 = 4;
 
 // -----------------------------------------------------------------------------
 // `BELL` — §7.6

@@ -1,0 +1,524 @@
+//! Snapshot-graph types delivered with `ATTACHED` per `SPEC.md` §13.
+//!
+//! SPEC §13 references `SessionInfo`, `WindowInfo`, `PaneInfo`, and
+//! `SessionSnapshot` but does not define their fields. This module fills that
+//! gap with wire-portable shapes that mirror `phux_core::{Session, Window,
+//! Pane, LayoutNode, SplitDir}` semantics WITHOUT crossing the
+//! core/protocol independence boundary (`phux-protocol` cannot depend on
+//! `phux-core`).
+//!
+//! The snapshot is the minimum a reconnecting client needs to render
+//! UI chrome, status bars, and pane layout — the grid contents themselves
+//! flow as separate `PANE_SNAPSHOT` frames per SPEC §13's attach sequence
+//! (`ATTACHED` → N×`PANE_SNAPSHOT` → diffs).
+
+use crate::ids::{ClientId, PaneId, SessionId, WindowId};
+
+use super::decode::Decoder;
+use super::encode::Encoder;
+use super::error::DecodeError;
+
+// -----------------------------------------------------------------------------
+// Tagged-union tags. `pub(crate)` so the codec and tests can spell them
+// without re-deriving the byte assignments.
+// -----------------------------------------------------------------------------
+
+/// Tag byte for [`LayoutNode::Leaf`] on the wire.
+pub(crate) const LAYOUT_TAG_LEAF: u8 = 0;
+/// Tag byte for [`LayoutNode::Split`] on the wire.
+pub(crate) const LAYOUT_TAG_SPLIT: u8 = 1;
+
+/// Tag byte for [`SplitDir::Horizontal`] on the wire.
+pub(crate) const SPLIT_DIR_HORIZONTAL: u8 = 0;
+/// Tag byte for [`SplitDir::Vertical`] on the wire.
+pub(crate) const SPLIT_DIR_VERTICAL: u8 = 1;
+
+// -----------------------------------------------------------------------------
+// SplitDir / LayoutNode
+// -----------------------------------------------------------------------------
+
+/// Axis along which a [`LayoutNode::Split`] divides its rectangle.
+///
+/// Wire-side mirror of `phux_core::window::SplitDir`. Duplication is
+/// deliberate — see module docs for the core/protocol independence rationale.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDir {
+    /// Split side-by-side (a vertical bar between left and right).
+    Horizontal = SPLIT_DIR_HORIZONTAL,
+    /// Split stacked (a horizontal bar between top and bottom).
+    Vertical = SPLIT_DIR_VERTICAL,
+}
+
+/// Wire-side mirror of `phux_core::window::LayoutNode`.
+///
+/// `Leaf` carries a single [`PaneId`]; `Split` divides its rectangle between
+/// two children along [`SplitDir`] at `ratio` (the left/top child gets
+/// `ratio` of the parent dimension along the split axis).
+///
+/// The server-side bridge (parallel to the `IdBridge` pattern) converts
+/// between this type and `phux_core::window::LayoutNode`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutNode {
+    /// A single pane — recursion base.
+    Leaf(PaneId),
+    /// An interior node that splits its rectangle in two.
+    Split {
+        /// The axis the split is taken along.
+        dir: SplitDir,
+        /// Fraction of the parent dim given to `left` (range `0.0..=1.0`).
+        ///
+        /// Decoders reject NaN, infinite, or out-of-range values as
+        /// [`DecodeError::MalformedLayoutRatio`].
+        ratio: f32,
+        /// Left (for [`SplitDir::Horizontal`]) or top (for [`SplitDir::Vertical`]) child.
+        left: Box<LayoutNode>,
+        /// Right (for [`SplitDir::Horizontal`]) or bottom (for [`SplitDir::Vertical`]) child.
+        right: Box<LayoutNode>,
+    },
+}
+
+// -----------------------------------------------------------------------------
+// SessionInfo / WindowInfo / PaneInfo / SessionSnapshot
+// -----------------------------------------------------------------------------
+
+/// Description of a single session, sufficient for UI chrome and `phux ls`.
+///
+/// Excludes the windows themselves — those are flattened into
+/// [`SessionSnapshot::windows`] and joined via `WindowInfo::session_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionInfo {
+    /// Stable session identifier.
+    pub id: SessionId,
+    /// Human-readable name; `AttachTarget::ByName` matches against this.
+    pub name: String,
+    /// Session's remembered focused window. Distinct from
+    /// [`SessionSnapshot::focused_window`] — that one tracks the attaching
+    /// client's current focus; this one tracks the session's "last known"
+    /// focus, restored when a client attaches with no fresher signal.
+    pub active_window: Option<WindowId>,
+    /// Wall-clock creation time as seconds since the Unix epoch.
+    ///
+    /// `i64` (not `u64`) is the cross-language standard for Unix time and
+    /// costs nothing in bytes; signedness leaves room for sub-1970 cases
+    /// future implementations might dream up (none today).
+    pub created_at_unix_secs: i64,
+    /// Number of windows in this session.
+    ///
+    /// Denormalized at snapshot time so `phux ls` and status widgets can
+    /// render without walking the windows list. Not stored long-term in
+    /// core; computed on snapshot construction.
+    pub window_count: u16,
+    /// Number of clients currently attached to this session.
+    ///
+    /// Drives multi-attach UX (status-bar indicators, etc.). Like
+    /// `window_count`, denormalized at snapshot time.
+    pub attached_client_count: u16,
+}
+
+/// Description of a single window, sufficient for tab/pane chrome.
+///
+/// Excludes the panes themselves — those are flattened into
+/// [`SessionSnapshot::panes`] and joined via `PaneInfo::window_id`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowInfo {
+    /// Stable window identifier.
+    pub id: WindowId,
+    /// Foreign key into [`SessionSnapshot::sessions`].
+    pub session_id: SessionId,
+    /// Position within the session's windows list.
+    ///
+    /// Not stored in `phux_core::Window` today; computed at snapshot time
+    /// as the position of this window's id in `session.windows`. Tmux-style
+    /// numeric indices (`Ctrl-b 2`) bind against this.
+    pub index: u16,
+    /// Human-readable window name.
+    pub name: String,
+    /// Window's remembered focused pane.
+    pub active_pane: Option<PaneId>,
+    /// Pane layout as a binary split tree.
+    ///
+    /// `None` iff this window has no panes — `SessionSnapshot::panes`
+    /// filtered by `window_id` will be empty.
+    pub layout: Option<LayoutNode>,
+}
+
+/// Description of a single pane, sufficient for layout chrome.
+///
+/// Excludes grid contents, cursor state, scrollback, and process info.
+/// Grid contents and (optionally) scrollback flow as separate
+/// `PANE_SNAPSHOT` frames per SPEC §13. Process info (PID, command, exit
+/// status) is not yet modeled in `phux_core::Pane`; adding wire fields the
+/// server can only send `None` for is premature. Revisit when core grows
+/// process tracking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneInfo {
+    /// Stable pane identifier.
+    pub id: PaneId,
+    /// Foreign key into [`SessionSnapshot::windows`].
+    pub window_id: WindowId,
+    /// Current grid width in cells (from `core::Pane::dims.0`).
+    pub cols: u16,
+    /// Current grid height in cells (from `core::Pane::dims.1`).
+    pub rows: u16,
+    /// User-set title, distinct from any title the shell may set.
+    pub title: Option<String>,
+    /// Working directory as a UTF-8 string.
+    ///
+    /// `phux_core::Pane::cwd` is `PathBuf`; conversion uses
+    /// `to_string_lossy().into_owned()`. Lossy on non-UTF-8 cwds (rare on
+    /// modern systems) and acceptable for a display field.
+    pub cwd: Option<String>,
+}
+
+/// Flat graph of sessions/windows/panes delivered with `ATTACHED`.
+///
+/// All three lists are joined by id. The triple of `focused_*` fields
+/// records the **attaching client's** current focus — distinct from the
+/// per-container `SessionInfo::active_window` / `WindowInfo::active_pane`,
+/// which record the container's remembered focus from when no client was
+/// attached (tmux behavior: detach → attach later restores last focus).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SessionSnapshot {
+    /// Every session the attaching client can see.
+    pub sessions: Vec<SessionInfo>,
+    /// Every window across every visible session.
+    pub windows: Vec<WindowInfo>,
+    /// Every pane across every visible window.
+    pub panes: Vec<PaneInfo>,
+    /// The attaching client's initial focused session.
+    pub focused_session: SessionId,
+    /// The attaching client's initial focused window.
+    pub focused_window: WindowId,
+    /// The attaching client's initial focused pane.
+    pub focused_pane: PaneId,
+}
+
+// -----------------------------------------------------------------------------
+// Encoding helpers. Positional; same conventions as `wire::frame`.
+// SPEC.md Appendix A mandates TLV — tracked in phux-i58.
+// -----------------------------------------------------------------------------
+
+pub(super) const fn encode_split_dir(dir: SplitDir) -> u8 {
+    match dir {
+        SplitDir::Horizontal => SPLIT_DIR_HORIZONTAL,
+        SplitDir::Vertical => SPLIT_DIR_VERTICAL,
+    }
+}
+
+pub(super) fn decode_split_dir(tag: u8) -> Result<SplitDir, DecodeError> {
+    match tag {
+        SPLIT_DIR_HORIZONTAL => Ok(SplitDir::Horizontal),
+        SPLIT_DIR_VERTICAL => Ok(SplitDir::Vertical),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "SplitDir",
+            value: u32::from(other),
+        }),
+    }
+}
+
+/// Encode a layout subtree. Tag byte selects `Leaf` (0) vs `Split` (1);
+/// `Split` recurses into both children.
+pub(super) fn encode_layout_node(node: &LayoutNode, enc: &mut Encoder<'_>) {
+    match node {
+        LayoutNode::Leaf(pane) => {
+            enc.write_u8(LAYOUT_TAG_LEAF);
+            enc.write_u32_be(pane.get());
+        }
+        LayoutNode::Split {
+            dir,
+            ratio,
+            left,
+            right,
+        } => {
+            enc.write_u8(LAYOUT_TAG_SPLIT);
+            enc.write_u8(encode_split_dir(*dir));
+            enc.write_f32_be(*ratio);
+            encode_layout_node(left, enc);
+            encode_layout_node(right, enc);
+        }
+    }
+}
+
+/// Decode a layout subtree. Validates `Split.ratio` to reject NaN, infinite,
+/// or out-of-range values that would otherwise round-trip but be useless.
+pub(super) fn decode_layout_node(dec: &mut Decoder<'_>) -> Result<LayoutNode, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        LAYOUT_TAG_LEAF => {
+            let pane = PaneId::new(dec.read_u32_be()?);
+            Ok(LayoutNode::Leaf(pane))
+        }
+        LAYOUT_TAG_SPLIT => {
+            let dir = decode_split_dir(dec.read_u8()?)?;
+            let ratio = dec.read_f32_be()?;
+            if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+                return Err(DecodeError::MalformedLayoutRatio { ratio });
+            }
+            let left = Box::new(decode_layout_node(dec)?);
+            let right = Box::new(decode_layout_node(dec)?);
+            Ok(LayoutNode::Split {
+                dir,
+                ratio,
+                left,
+                right,
+            })
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "LayoutNode",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_option_layout_node(node: Option<&LayoutNode>, enc: &mut Encoder<'_>) {
+    match node {
+        None => enc.write_u8(0),
+        Some(n) => {
+            enc.write_u8(1);
+            encode_layout_node(n, enc);
+        }
+    }
+}
+
+pub(super) fn decode_option_layout_node(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<LayoutNode>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(decode_layout_node(dec)?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<LayoutNode> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_session_info(info: &SessionInfo, enc: &mut Encoder<'_>) {
+    enc.write_u32_be(info.id.get());
+    enc.write_str(&info.name);
+    encode_option_window_id(info.active_window, enc);
+    enc.write_i64_be(info.created_at_unix_secs);
+    enc.write_u16_be(info.window_count);
+    enc.write_u16_be(info.attached_client_count);
+}
+
+pub(super) fn decode_session_info(dec: &mut Decoder<'_>) -> Result<SessionInfo, DecodeError> {
+    let id = SessionId::new(dec.read_u32_be()?);
+    let name = dec.read_str()?.to_owned();
+    let active_window = decode_option_window_id(dec)?;
+    let created_at_unix_secs = dec.read_i64_be()?;
+    let window_count = dec.read_u16_be()?;
+    let attached_client_count = dec.read_u16_be()?;
+    Ok(SessionInfo {
+        id,
+        name,
+        active_window,
+        created_at_unix_secs,
+        window_count,
+        attached_client_count,
+    })
+}
+
+pub(super) fn encode_window_info(info: &WindowInfo, enc: &mut Encoder<'_>) {
+    enc.write_u32_be(info.id.get());
+    enc.write_u32_be(info.session_id.get());
+    enc.write_u16_be(info.index);
+    enc.write_str(&info.name);
+    encode_option_pane_id(info.active_pane, enc);
+    encode_option_layout_node(info.layout.as_ref(), enc);
+}
+
+pub(super) fn decode_window_info(dec: &mut Decoder<'_>) -> Result<WindowInfo, DecodeError> {
+    let id = WindowId::new(dec.read_u32_be()?);
+    let session_id = SessionId::new(dec.read_u32_be()?);
+    let index = dec.read_u16_be()?;
+    let name = dec.read_str()?.to_owned();
+    let active_pane = decode_option_pane_id(dec)?;
+    let layout = decode_option_layout_node(dec)?;
+    Ok(WindowInfo {
+        id,
+        session_id,
+        index,
+        name,
+        active_pane,
+        layout,
+    })
+}
+
+pub(super) fn encode_pane_info(info: &PaneInfo, enc: &mut Encoder<'_>) {
+    enc.write_u32_be(info.id.get());
+    enc.write_u32_be(info.window_id.get());
+    enc.write_u16_be(info.cols);
+    enc.write_u16_be(info.rows);
+    encode_option_str(info.title.as_deref(), enc);
+    encode_option_str(info.cwd.as_deref(), enc);
+}
+
+pub(super) fn decode_pane_info(dec: &mut Decoder<'_>) -> Result<PaneInfo, DecodeError> {
+    let id = PaneId::new(dec.read_u32_be()?);
+    let window_id = WindowId::new(dec.read_u32_be()?);
+    let cols = dec.read_u16_be()?;
+    let rows = dec.read_u16_be()?;
+    let title = decode_option_str(dec)?.map(str::to_owned);
+    let cwd = decode_option_str(dec)?.map(str::to_owned);
+    Ok(PaneInfo {
+        id,
+        window_id,
+        cols,
+        rows,
+        title,
+        cwd,
+    })
+}
+
+pub(super) fn encode_session_snapshot(snap: &SessionSnapshot, enc: &mut Encoder<'_>) {
+    encode_list_len(snap.sessions.len(), enc);
+    for s in &snap.sessions {
+        encode_session_info(s, enc);
+    }
+    encode_list_len(snap.windows.len(), enc);
+    for w in &snap.windows {
+        encode_window_info(w, enc);
+    }
+    encode_list_len(snap.panes.len(), enc);
+    for p in &snap.panes {
+        encode_pane_info(p, enc);
+    }
+    enc.write_u32_be(snap.focused_session.get());
+    enc.write_u32_be(snap.focused_window.get());
+    enc.write_u32_be(snap.focused_pane.get());
+}
+
+pub(super) fn decode_session_snapshot(
+    dec: &mut Decoder<'_>,
+) -> Result<SessionSnapshot, DecodeError> {
+    let sessions_len = decode_list_len(dec)?;
+    let mut sessions = Vec::with_capacity(sessions_len);
+    for _ in 0..sessions_len {
+        sessions.push(decode_session_info(dec)?);
+    }
+    let windows_len = decode_list_len(dec)?;
+    let mut windows = Vec::with_capacity(windows_len);
+    for _ in 0..windows_len {
+        windows.push(decode_window_info(dec)?);
+    }
+    let panes_len = decode_list_len(dec)?;
+    let mut panes = Vec::with_capacity(panes_len);
+    for _ in 0..panes_len {
+        panes.push(decode_pane_info(dec)?);
+    }
+    let focused_session = SessionId::new(dec.read_u32_be()?);
+    let focused_window = WindowId::new(dec.read_u32_be()?);
+    let focused_pane = PaneId::new(dec.read_u32_be()?);
+    Ok(SessionSnapshot {
+        sessions,
+        windows,
+        panes,
+        focused_session,
+        focused_window,
+        focused_pane,
+    })
+}
+
+// -----------------------------------------------------------------------------
+// Small option-of-id and list-length helpers. Mirror the conventions used in
+// `wire::frame` (presence byte + body, u32 length-prefixed lists).
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_option_window_id(value: Option<WindowId>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(id) => {
+            enc.write_u8(1);
+            enc.write_u32_be(id.get());
+        }
+    }
+}
+
+pub(super) fn decode_option_window_id(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<WindowId>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(WindowId::new(dec.read_u32_be()?))),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<WindowId> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_option_pane_id(value: Option<PaneId>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(id) => {
+            enc.write_u8(1);
+            enc.write_u32_be(id.get());
+        }
+    }
+}
+
+pub(super) fn decode_option_pane_id(dec: &mut Decoder<'_>) -> Result<Option<PaneId>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(PaneId::new(dec.read_u32_be()?))),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<PaneId> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_option_str(value: Option<&str>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(s) => {
+            enc.write_u8(1);
+            enc.write_str(s);
+        }
+    }
+}
+
+pub(super) fn decode_option_str<'a>(dec: &mut Decoder<'a>) -> Result<Option<&'a str>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(dec.read_str()?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<str> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_list_len(len: usize, enc: &mut Encoder<'_>) {
+    debug_assert!(
+        u32::try_from(len).is_ok(),
+        "list length exceeds u32 (positional encoding cap)",
+    );
+    let len_u32 = u32::try_from(len).unwrap_or(u32::MAX);
+    enc.write_u32_be(len_u32);
+}
+
+pub(super) fn decode_list_len(dec: &mut Decoder<'_>) -> Result<usize, DecodeError> {
+    let len = dec.read_u32_be()?;
+    usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)
+}
+
+// -----------------------------------------------------------------------------
+// ClientId option encoding — used in ATTACHED for `initial_client_id` once
+// the server starts allocating, but the field itself is required, not optional,
+// per SPEC §13. Kept here as a single source of truth for ClientId on the wire.
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_client_id(id: ClientId, enc: &mut Encoder<'_>) {
+    enc.write_u32_be(id.get());
+}
+
+pub(super) fn decode_client_id(dec: &mut Decoder<'_>) -> Result<ClientId, DecodeError> {
+    Ok(ClientId::new(dec.read_u32_be()?))
+}

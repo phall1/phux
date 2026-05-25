@@ -1,20 +1,24 @@
-//! Snapshot tests for the phux-4az message-catalog wire frames.
+//! Snapshot tests for the SPEC §13-conformant wire frames.
 //!
 //! Each test encodes a representative fixture of an `ATTACH` / `ATTACHED` /
-//! `DETACH` / `DETACHED` / `INPUT_*` / `BELL` frame, hex-dumps the bytes,
-//! and compares against a committed `.snap` file under `tests/snapshots/`.
-//! The wire format is a cross-implementation contract — any change MUST
-//! surface as a visible diff in pull-request review.
+//! `PANE_SNAPSHOT` / `DETACH` / `DETACHED` / `INPUT_*` / `BELL` frame,
+//! hex-dumps the bytes, and compares against a committed `.snap` file under
+//! `tests/snapshots/`. The wire format is a cross-implementation contract —
+//! any change MUST surface as a visible diff in pull-request review.
 
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
 use phux_protocol::diff::{Cell, Color, DiffOp, PaletteIndex};
+use phux_protocol::ids::{ClientId, PaneId, SessionId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachRole, FrameKind, PaneSnapshot};
+use phux_protocol::wire::frame::{AttachTarget, FrameKind, PaneSnapshotPayload, ViewportInfo};
+use phux_protocol::wire::info::{
+    LayoutNode, PaneInfo, SessionInfo, SessionSnapshot, SplitDir, WindowInfo,
+};
 
 /// Render `bytes` as an `xxd`-style hex dump: 16 cols per row,
 /// `OFFSET | HEX HEX HEX ... | ASCII`.
@@ -62,28 +66,120 @@ fn dump_frame(frame: &FrameKind) -> String {
     hex_dump(&buf)
 }
 
+// -----------------------------------------------------------------------------
+// ATTACH — SPEC §13. The four AttachTarget variants plus viewport pixel-dim
+// presence both ways.
+// -----------------------------------------------------------------------------
+
+const fn vp_no_pixels() -> ViewportInfo {
+    ViewportInfo {
+        cols: 80,
+        rows: 24,
+        pixel_w: None,
+        pixel_h: None,
+    }
+}
+
+const fn vp_with_pixels() -> ViewportInfo {
+    ViewportInfo {
+        cols: 80,
+        rows: 24,
+        pixel_w: Some(1280),
+        pixel_h: Some(720),
+    }
+}
+
 #[test]
-fn snap_attach_primary() {
+fn snap_attach_target_last() {
     let frame = FrameKind::Attach {
-        session_name: "default".to_owned(),
-        role: AttachRole::Primary,
+        target: AttachTarget::Last,
+        viewport: vp_no_pixels(),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
 
 #[test]
-fn snap_attach_viewer_empty_name() {
+fn snap_attach_target_by_name() {
     let frame = FrameKind::Attach {
-        session_name: String::new(),
-        role: AttachRole::Viewer,
+        target: AttachTarget::ByName("default".to_owned()),
+        viewport: vp_no_pixels(),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
+
+#[test]
+fn snap_attach_target_by_id() {
+    let frame = FrameKind::Attach {
+        target: AttachTarget::ById(SessionId::new(7)),
+        viewport: vp_no_pixels(),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_attach_target_create_if_missing_minimal() {
+    let frame = FrameKind::Attach {
+        target: AttachTarget::CreateIfMissing {
+            name: "dev".to_owned(),
+            command: None,
+            cwd: None,
+        },
+        viewport: vp_no_pixels(),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_attach_target_create_if_missing_full() {
+    let frame = FrameKind::Attach {
+        target: AttachTarget::CreateIfMissing {
+            name: "dev".to_owned(),
+            command: Some(vec!["zsh".to_owned()]),
+            cwd: Some("/tmp".to_owned()),
+        },
+        viewport: vp_no_pixels(),
+        request_scrollback: true,
+        scrollback_limit_lines: 10_000,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_attach_viewport_with_pixels() {
+    let frame = FrameKind::Attach {
+        target: AttachTarget::ByName("default".to_owned()),
+        viewport: vp_with_pixels(),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// DETACH / DETACHED — unit messages; unchanged from phux-4az.
+// -----------------------------------------------------------------------------
 
 #[test]
 fn snap_detach() {
     insta::assert_snapshot!(dump_frame(&FrameKind::Detach));
 }
+
+#[test]
+fn snap_detached() {
+    insta::assert_snapshot!(dump_frame(&FrameKind::Detached));
+}
+
+// -----------------------------------------------------------------------------
+// INPUT_* — unchanged from phux-4az.
+// -----------------------------------------------------------------------------
 
 #[test]
 fn snap_input_key_letter_a_press() {
@@ -164,13 +260,148 @@ fn snap_input_paste_trusted_ascii() {
     insta::assert_snapshot!(dump_frame(&frame));
 }
 
+// -----------------------------------------------------------------------------
+// ATTACHED — SPEC §13 full SessionSnapshot, with a non-trivial layout tree.
+// -----------------------------------------------------------------------------
+
 #[test]
-fn snap_attached_empty_snapshot() {
+fn snap_attached_empty_graph() {
+    // Single session, no windows or panes — the smallest legal ATTACHED.
+    let snapshot = SessionSnapshot {
+        sessions: vec![SessionInfo {
+            id: SessionId::new(1),
+            name: "default".to_owned(),
+            active_window: None,
+            created_at_unix_secs: 1_700_000_000,
+            window_count: 0,
+            attached_client_count: 1,
+        }],
+        windows: Vec::new(),
+        panes: Vec::new(),
+        focused_session: SessionId::new(1),
+        focused_window: WindowId::new(0),
+        focused_pane: PaneId::new(0),
+    };
     let frame = FrameKind::Attached {
-        session_id: 0x0000_0011,
-        window_id: 0x0000_0022,
-        pane_id: 0x0000_0033,
-        snapshot: PaneSnapshot {
+        snapshot,
+        initial_client_id: ClientId::new(42),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_attached_realistic_graph() {
+    // 2 sessions, 3 windows, 4 panes, non-trivial layout including a Split.
+    let sessions = vec![
+        SessionInfo {
+            id: SessionId::new(1),
+            name: "work".to_owned(),
+            active_window: Some(WindowId::new(10)),
+            created_at_unix_secs: 1_700_000_000,
+            window_count: 2,
+            attached_client_count: 1,
+        },
+        SessionInfo {
+            id: SessionId::new(2),
+            name: "personal".to_owned(),
+            active_window: Some(WindowId::new(30)),
+            created_at_unix_secs: 1_700_000_500,
+            window_count: 1,
+            attached_client_count: 0,
+        },
+    ];
+
+    let windows = vec![
+        WindowInfo {
+            id: WindowId::new(10),
+            session_id: SessionId::new(1),
+            index: 0,
+            name: "code".to_owned(),
+            active_pane: Some(PaneId::new(100)),
+            layout: Some(LayoutNode::Split {
+                dir: SplitDir::Horizontal,
+                ratio: 0.5,
+                left: Box::new(LayoutNode::Leaf(PaneId::new(100))),
+                right: Box::new(LayoutNode::Leaf(PaneId::new(101))),
+            }),
+        },
+        WindowInfo {
+            id: WindowId::new(20),
+            session_id: SessionId::new(1),
+            index: 1,
+            name: "logs".to_owned(),
+            active_pane: Some(PaneId::new(102)),
+            layout: Some(LayoutNode::Leaf(PaneId::new(102))),
+        },
+        WindowInfo {
+            id: WindowId::new(30),
+            session_id: SessionId::new(2),
+            index: 0,
+            name: "scratch".to_owned(),
+            active_pane: Some(PaneId::new(103)),
+            layout: Some(LayoutNode::Leaf(PaneId::new(103))),
+        },
+    ];
+
+    let panes = vec![
+        PaneInfo {
+            id: PaneId::new(100),
+            window_id: WindowId::new(10),
+            cols: 80,
+            rows: 24,
+            title: Some("editor".to_owned()),
+            cwd: Some("/home/u/src".to_owned()),
+        },
+        PaneInfo {
+            id: PaneId::new(101),
+            window_id: WindowId::new(10),
+            cols: 80,
+            rows: 24,
+            title: None,
+            cwd: Some("/home/u/src".to_owned()),
+        },
+        PaneInfo {
+            id: PaneId::new(102),
+            window_id: WindowId::new(20),
+            cols: 160,
+            rows: 48,
+            title: None,
+            cwd: None,
+        },
+        PaneInfo {
+            id: PaneId::new(103),
+            window_id: WindowId::new(30),
+            cols: 80,
+            rows: 24,
+            title: None,
+            cwd: Some("/home/u".to_owned()),
+        },
+    ];
+
+    let snapshot = SessionSnapshot {
+        sessions,
+        windows,
+        panes,
+        focused_session: SessionId::new(1),
+        focused_window: WindowId::new(10),
+        focused_pane: PaneId::new(100),
+    };
+    let frame = FrameKind::Attached {
+        snapshot,
+        initial_client_id: ClientId::new(1),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// PANE_SNAPSHOT — separate frame per SPEC §13 attach sequence + §16.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_pane_snapshot_empty() {
+    let frame = FrameKind::PaneSnapshot {
+        pane_id: PaneId::new(100),
+        snapshot: PaneSnapshotPayload {
             cols: 80,
             rows: 24,
             ops: Vec::new(),
@@ -180,12 +411,10 @@ fn snap_attached_empty_snapshot() {
 }
 
 #[test]
-fn snap_attached_with_initial_diff() {
-    let frame = FrameKind::Attached {
-        session_id: 1,
-        window_id: 1,
-        pane_id: 1,
-        snapshot: PaneSnapshot {
+fn snap_pane_snapshot_with_initial_diff() {
+    let frame = FrameKind::PaneSnapshot {
+        pane_id: PaneId::new(100),
+        snapshot: PaneSnapshotPayload {
             cols: 4,
             rows: 1,
             ops: vec![DiffOp::CellRun {
@@ -200,11 +429,6 @@ fn snap_attached_with_initial_diff() {
         },
     };
     insta::assert_snapshot!(dump_frame(&frame));
-}
-
-#[test]
-fn snap_detached() {
-    insta::assert_snapshot!(dump_frame(&FrameKind::Detached));
 }
 
 #[test]

@@ -4,14 +4,18 @@
 //! (primitives). Every decode method returns `Result` and refuses to read
 //! past the end of the borrowed slice.
 
+use crate::ids::PaneId;
+
 use super::diff::decode_diff_ops;
 use super::error::DecodeError;
 use super::frame::{
     FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH, TYPE_DETACHED,
     TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE,
-    TYPE_PANE_DIFF, TYPE_PING, decode_attach_role, decode_focus_event, decode_key_event,
-    decode_mouse_event, decode_pane_snapshot, decode_paste_event,
+    TYPE_PANE_DIFF, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target, decode_focus_event,
+    decode_key_event, decode_mouse_event, decode_pane_snapshot_payload, decode_paste_event,
+    decode_viewport_info,
 };
+use super::info::{decode_client_id, decode_session_snapshot};
 
 /// Cursor-style decoder over an immutable byte slice.
 ///
@@ -80,6 +84,27 @@ impl<'a> Decoder<'a> {
         Ok(u64::from_be_bytes(arr))
     }
 
+    /// Read an `i64` in network (big-endian) byte order.
+    ///
+    /// Two's-complement decoding; pairs with
+    /// [`super::encode::Encoder::write_i64_be`]. Used by
+    /// `SessionInfo::created_at_unix_secs`.
+    pub fn read_i64_be(&mut self) -> Result<i64, DecodeError> {
+        let slice = self.take(8)?;
+        let arr: [u8; 8] = slice.try_into().map_err(|_| DecodeError::UnexpectedEof)?;
+        Ok(i64::from_be_bytes(arr))
+    }
+
+    /// Read an IEEE-754 `f32` in network (big-endian) byte order.
+    ///
+    /// Bit-for-bit decoding via [`f32::from_be_bytes`] — preserves NaNs and
+    /// signed zeros. Pairs with [`super::encode::Encoder::write_f32_be`].
+    pub fn read_f32_be(&mut self) -> Result<f32, DecodeError> {
+        let slice = self.take(4)?;
+        let arr: [u8; 4] = slice.try_into().map_err(|_| DecodeError::UnexpectedEof)?;
+        Ok(f32::from_be_bytes(arr))
+    }
+
     /// Read an IEEE-754 `f64` in network (big-endian) byte order.
     ///
     /// Bit-for-bit decoding via [`f64::from_be_bytes`] — preserves NaNs and
@@ -111,6 +136,10 @@ impl<'a> Decoder<'a> {
 
     /// Read a complete wire frame from the current position. Returns the
     /// decoded frame and the unconsumed tail of the underlying input.
+    ///
+    /// The body is one big `match` over the SPEC §7 catalog, intentionally —
+    /// keeping the dispatch table in one place trades length for locality.
+    #[allow(clippy::too_many_lines)]
     pub fn read_frame(&mut self) -> Result<(FrameKind, &'a [u8]), DecodeError> {
         // Length header: u32 big-endian, excludes itself, includes type byte.
         let length = self.read_u32_be()?;
@@ -157,9 +186,16 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_ATTACH => {
-                let session_name = self.read_str()?.to_owned();
-                let role = decode_attach_role(self.read_u8()?)?;
-                FrameKind::Attach { session_name, role }
+                let target = decode_attach_target(self)?;
+                let viewport = decode_viewport_info(self)?;
+                let request_scrollback = self.read_u8()? != 0;
+                let scrollback_limit_lines = self.read_u32_be()?;
+                FrameKind::Attach {
+                    target,
+                    viewport,
+                    request_scrollback,
+                    scrollback_limit_lines,
+                }
             }
             TYPE_DETACH => FrameKind::Detach,
             TYPE_INPUT_KEY => {
@@ -183,16 +219,17 @@ impl<'a> Decoder<'a> {
                 FrameKind::InputPaste { pane_id, event }
             }
             TYPE_ATTACHED => {
-                let session_id = self.read_u32_be()?;
-                let window_id = self.read_u32_be()?;
-                let pane_id = self.read_u32_be()?;
-                let snapshot = decode_pane_snapshot(self)?;
+                let snapshot = decode_session_snapshot(self)?;
+                let initial_client_id = decode_client_id(self)?;
                 FrameKind::Attached {
-                    session_id,
-                    window_id,
-                    pane_id,
                     snapshot,
+                    initial_client_id,
                 }
+            }
+            TYPE_PANE_SNAPSHOT => {
+                let pane_id = PaneId::new(self.read_u32_be()?);
+                let snapshot = decode_pane_snapshot_payload(self)?;
+                FrameKind::PaneSnapshot { pane_id, snapshot }
             }
             TYPE_DETACHED => FrameKind::Detached,
             TYPE_BELL => {

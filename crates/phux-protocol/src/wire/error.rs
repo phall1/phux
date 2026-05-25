@@ -9,7 +9,12 @@ use thiserror::Error;
 /// Every variant corresponds to a malformed-input condition that the decoder
 /// MUST surface without panicking. See `SPEC.md` §5 (framing) and Appendix A
 /// (encoding primitives).
-#[derive(Debug, Error, PartialEq, Eq)]
+/// `PartialEq` is implemented but **not** `Eq` because
+/// [`Self::MalformedLayoutRatio`] carries an `f32`. Two `MalformedLayoutRatio`
+/// errors compare equal iff their ratios are bitwise-`PartialEq` (NaN errors
+/// never compare equal to each other — desired: tests assert exact-decoding
+/// behavior on finite/out-of-range ratios separately from NaN).
+#[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum DecodeError {
     /// The input buffer was exhausted before the decoder finished reading the
@@ -51,5 +56,18 @@ pub enum DecodeError {
         /// The unrecognised discriminant, widened to `u32` to cover every
         /// enumerated type the codec emits.
         value: u32,
+    },
+
+    /// A [`crate::wire::info::LayoutNode::Split`] carried a `ratio` outside
+    /// the closed interval `[0.0, 1.0]` or one that was NaN / infinite.
+    ///
+    /// SPEC §13 leaves layout-tree ratios implicit; phux validates on decode
+    /// to reject values that would round-trip but produce nonsense layouts.
+    /// See `phux_core::window::Window::split`, which applies the same
+    /// validation on the core side.
+    #[error("malformed layout ratio: {ratio}")]
+    MalformedLayoutRatio {
+        /// The offending ratio value (NaN, infinite, or out of `[0.0, 1.0]`).
+        ratio: f32,
     },
 }

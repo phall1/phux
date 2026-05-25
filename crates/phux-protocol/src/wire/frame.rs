@@ -19,6 +19,7 @@
 use bytes::BytesMut;
 
 use crate::diff::DiffOp;
+use crate::ids::{ClientId, PaneId, SessionId};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
@@ -28,6 +29,7 @@ use super::decode::Decoder;
 use super::diff::encode_diff_ops;
 use super::encode::Encoder;
 use super::error::DecodeError;
+use super::info::{SessionSnapshot, encode_client_id, encode_session_snapshot};
 
 /// Maximum permitted value of the wire-frame `length` field, per `SPEC.md` §5
 /// ("at most `16_777_216` (16 MiB)").
@@ -70,49 +72,93 @@ pub const TYPE_PONG: u8 = 0xFF;
 /// Picked from the §7 free range. v0.2+ may renumber when the `SessionId`
 /// tagged-union routing lands; the discriminant is local to phux-6yl.5.
 pub const TYPE_PANE_DIFF: u8 = 0x40;
-
-// -----------------------------------------------------------------------------
-// Auxiliary types used in `ATTACH` / `ATTACHED` bodies.
-// -----------------------------------------------------------------------------
-
-/// Client role at attach time.
+/// Discriminant for `PANE_SNAPSHOT` (server to client, `SPEC.md` §7.2 / §8.4).
 ///
-/// **Phux-defined**, NOT yet codified in `SPEC.md` §13. Added in phux-4az to
-/// give byc.6's deferred wire-integration tests something expressible. The
-/// minimum useful split is `Primary` (the canonical input source — what
-/// today's tmux-style attach implies) vs `Viewer` (read-only / mirror).
-/// Future protocol versions may expand this to cover follower-with-cursor,
-/// collaboration modes, etc. — when SPEC §13 grows a real role enum, this
-/// type tracks it.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttachRole {
-    /// Canonical input/output participant. Forwards input, receives diffs.
-    Primary = 0,
-    /// Read-only mirror. Receives diffs; server discards any input frames.
-    Viewer = 1,
+/// Required per SPEC §16 conformance. Separated from `ATTACHED` per SPEC §13's
+/// attach sequence: `ATTACHED` → N×`PANE_SNAPSHOT` → `PANE_DIFF` stream.
+pub const TYPE_PANE_SNAPSHOT: u8 = 0x91;
+
+// -----------------------------------------------------------------------------
+// AttachTarget tagged union — SPEC §13.
+// -----------------------------------------------------------------------------
+
+/// Wire tag for [`AttachTarget::Last`].
+pub(crate) const ATTACH_TARGET_LAST: u8 = 0;
+/// Wire tag for [`AttachTarget::ByName`].
+pub(crate) const ATTACH_TARGET_BY_NAME: u8 = 1;
+/// Wire tag for [`AttachTarget::ById`].
+pub(crate) const ATTACH_TARGET_BY_ID: u8 = 2;
+/// Wire tag for [`AttachTarget::CreateIfMissing`].
+pub(crate) const ATTACH_TARGET_CREATE_IF_MISSING: u8 = 3;
+
+/// Session the client wishes to attach to, per SPEC §13.
+///
+/// Tagged union; each variant maps to one of SPEC's four selection modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachTarget {
+    /// Most-recently-attached session known to the server. Implementations
+    /// without prior-attach memory MAY return `SESSION_NOT_FOUND`.
+    Last,
+    /// Look up a session by its human-readable name.
+    ByName(String),
+    /// Look up a session by its server-assigned [`SessionId`].
+    ById(SessionId),
+    /// Look up a session by name; create one if no such session exists.
+    CreateIfMissing {
+        /// Name for the new session (also used to match an existing one).
+        name: String,
+        /// Initial command to run in the seed pane, if creation occurs.
+        command: Option<Vec<String>>,
+        /// Working directory for the seed pane, if creation occurs.
+        cwd: Option<String>,
+    },
 }
 
-/// On-wire tag for [`AttachRole::Primary`].
-pub(crate) const ATTACH_ROLE_PRIMARY: u8 = 0;
-/// On-wire tag for [`AttachRole::Viewer`].
-pub(crate) const ATTACH_ROLE_VIEWER: u8 = 1;
+/// Viewport metrics the client advertises at attach time.
+///
+/// SPEC §13: `{ cols, rows, pixel_w: optional<u16>, pixel_h: optional<u16> }`.
+/// Pixel dimensions support sub-cell rendering and image protocols; cells are
+/// the load-bearing axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewportInfo {
+    /// Viewport width in cells.
+    pub cols: u16,
+    /// Viewport height in cells.
+    pub rows: u16,
+    /// Optional viewport width in pixels.
+    pub pixel_w: Option<u16>,
+    /// Optional viewport height in pixels.
+    pub pixel_h: Option<u16>,
+}
 
-/// Initial pane state delivered alongside `ATTACHED`.
+// -----------------------------------------------------------------------------
+// PaneSnapshotPayload — body of the PANE_SNAPSHOT frame.
+// -----------------------------------------------------------------------------
+
+/// Initial state of a single pane, delivered as a `PANE_SNAPSHOT` frame.
 ///
-/// **Phux-4az minimum:** grid dimensions plus an opening sequence of
-/// [`DiffOp`]. `SPEC.md` §8.4 specifies more (cursor state, pane modes,
-/// optional scrollback); those fields land in a follow-up when the
-/// server-side replay path needs them. The encoding here treats `ops` as the
-/// payload that, when applied to a freshly-initialised `cols×rows` grid,
-/// reproduces the pane.
+/// **Phux-4az → phux-i58 minimum:** grid dimensions plus an opening sequence
+/// of [`DiffOp`] that, applied to a blank `cols × rows` grid, reproduces the
+/// pane. SPEC §8.4 also specifies cursor state, pane modes, and optional
+/// scrollback; those fields land when the server-side replay path needs them
+/// (see TODO below).
 ///
-/// TODO(phux-byc.7+): extend with `cursor: CursorState`, `modes: PaneModes`,
-/// and `scrollback: Option<Scrollback>` once the server-side bridge needs
-/// them. Adding fields is additive on the wire (positional encoding is the
-/// reason this remains a struct, not a tagged union).
+/// Renamed from `PaneSnapshot` (the type) → `PaneSnapshotPayload` in the
+/// phux-i58 SPEC §13 conformance pass so the name `FrameKind::PaneSnapshot`
+/// (the frame variant) is available.
+///
+/// Extending this struct is a breaking wire change with the current
+/// positional encoder. SPEC.md Appendix A mandates TLV
+/// (`{field_id: varint, wire_type: u8, value}`), under which extension
+/// becomes additive; migration is tracked separately — see
+/// `bd show phux-i58`.
+///
+/// TODO(post-phux-i58): extend with `cursor: CursorState`, `modes: PaneModes`,
+/// and `scrollback: Option<Scrollback>` per SPEC §8.4 once the server-side
+/// bridge needs them. The cursor/modes types are not yet modeled in
+/// `phux_core`; do not invent them here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneSnapshot {
+pub struct PaneSnapshotPayload {
     /// Grid width in cells.
     pub cols: u16,
     /// Grid height in cells.
@@ -125,11 +171,11 @@ pub struct PaneSnapshot {
 /// Decoded wire frame.
 ///
 /// The phux-6yl.4 scaffold populated `Hello`, `Ping`, and `PaneDiff`. The
-/// phux-4az pass adds the message-catalog variants needed for the attach
-/// lifecycle: `Attach`/`Attached`/`Detach`/`Detached`, the four structured
-/// input events from `SPEC.md` §9.1-§9.4, and `Bell` from §7.6. The
-/// remaining SPEC §7 catalog (`Hello_Ok`, `Pong`, `OscEvent`, `Alert`,
-/// resize/ack/command/error/etc.) lands in sibling tasks.
+/// phux-4az pass added the message-catalog variants needed for the attach
+/// lifecycle. The phux-i58 SPEC §13 conformance pass conforms ATTACH/ATTACHED
+/// to spec and splits out `PANE_SNAPSHOT` per SPEC §16. The remaining SPEC §7
+/// catalog (`Hello_Ok`, `Pong`, `OscEvent`, `Alert`, resize/ack/command/etc.)
+/// lands in sibling tasks.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FrameKind {
@@ -173,19 +219,22 @@ pub enum FrameKind {
         ops: Vec<DiffOp>,
     },
 
-    /// `ATTACH` — client requests to attach to a session (`SPEC.md` §7.1, §13).
+    /// `ATTACH` — client requests to attach to a session (`SPEC.md` §13).
     ///
-    /// The phux-4az scaffold carries the session **name** plus a phux-defined
-    /// [`AttachRole`]. SPEC §13 actually models the target as an
-    /// `AttachTarget` tagged union (`LAST`, `BY_NAME`, `BY_ID`,
-    /// `CREATE_IF_MISSING`); the union lands in a follow-up. `role` is NOT
-    /// in SPEC §13 today — see [`AttachRole`] for rationale.
+    /// Conforms to SPEC §13 as of phux-i58: `target` tagged union plus
+    /// viewport metrics plus scrollback negotiation.
     Attach {
-        /// Session name to attach to (UTF-8). Maps to `AttachTarget::BY_NAME`
-        /// in SPEC §13's vocabulary.
-        session_name: String,
-        /// Client role for this attachment.
-        role: AttachRole,
+        /// Which session to attach to. Tagged union with four variants.
+        target: AttachTarget,
+        /// Client viewport dimensions at attach time.
+        viewport: ViewportInfo,
+        /// Whether the client wants the server to send scrollback as part of
+        /// the attach sequence.
+        request_scrollback: bool,
+        /// Upper bound on scrollback lines the client will accept.
+        ///
+        /// The server caps its own retention at `min(server_cap, this)`.
+        scrollback_limit_lines: u32,
     },
 
     /// `DETACH` — client signals clean departure (`SPEC.md` §7.3).
@@ -230,21 +279,18 @@ pub enum FrameKind {
     },
 
     /// `ATTACHED` — server acknowledges attach with initial state
-    /// (`SPEC.md` §7.2, §13).
+    /// (`SPEC.md` §13).
     ///
-    /// Phux-4az minimum: server-assigned `session_id`, focused
-    /// `window_id`/`pane_id`, plus a [`PaneSnapshot`] of the focused pane.
-    /// SPEC §13's full `SessionSnapshot` (lists of sessions/windows/panes)
-    /// lands in a follow-up.
+    /// Conforms to SPEC §13 as of phux-i58: full `SessionSnapshot` plus the
+    /// server-allocated `ClientId` identifying this attachment. The per-pane
+    /// initial state arrives separately via `PANE_SNAPSHOT` frames per the
+    /// SPEC §13 attach sequence.
     Attached {
-        /// Server-assigned session identifier.
-        session_id: u32,
-        /// Focused window at attach time.
-        window_id: u32,
-        /// Focused pane at attach time.
-        pane_id: u32,
-        /// Initial state of the focused pane.
-        snapshot: PaneSnapshot,
+        /// Full graph of sessions/windows/panes plus the attaching client's
+        /// initial focus triple.
+        snapshot: SessionSnapshot,
+        /// Server-allocated client identifier for this attachment.
+        initial_client_id: ClientId,
     },
 
     /// `DETACHED` — server confirms detach and closes the transport
@@ -254,6 +300,19 @@ pub enum FrameKind {
     /// `{ reason: DetachReason, message: str }`; those land in a follow-up
     /// once the server actually distinguishes shutdown causes.
     Detached,
+
+    /// `PANE_SNAPSHOT` — initial state of a single pane (`SPEC.md` §8.4).
+    ///
+    /// REQUIRED per SPEC §16 conformance. Sent after `ATTACHED` for each pane
+    /// the client needs initialised; subsequent updates flow as `PANE_DIFF`.
+    /// The server MAY also emit `PANE_SNAPSHOT` mid-stream as a flow-control
+    /// catch-up (SPEC §12.2).
+    PaneSnapshot {
+        /// Target pane.
+        pane_id: PaneId,
+        /// Initial grid state and (eventually) cursor/modes/scrollback.
+        snapshot: PaneSnapshotPayload,
+    },
 
     /// `BELL` — pane received a bell character (`SPEC.md` §7.6).
     Bell {
@@ -278,6 +337,7 @@ impl FrameKind {
             Self::InputPaste { .. } => TYPE_INPUT_PASTE,
             Self::Attached { .. } => TYPE_ATTACHED,
             Self::Detached => TYPE_DETACHED,
+            Self::PaneSnapshot { .. } => TYPE_PANE_SNAPSHOT,
             Self::Bell { .. } => TYPE_BELL,
         }
     }
@@ -320,9 +380,16 @@ impl FrameKind {
                 enc.write_u64_be(*frame_id);
                 encode_diff_ops(ops, &mut enc);
             }
-            Self::Attach { session_name, role } => {
-                enc.write_str(session_name);
-                enc.write_u8(encode_attach_role(*role));
+            Self::Attach {
+                target,
+                viewport,
+                request_scrollback,
+                scrollback_limit_lines,
+            } => {
+                encode_attach_target(target, &mut enc);
+                encode_viewport_info(viewport, &mut enc);
+                enc.write_u8(u8::from(*request_scrollback));
+                enc.write_u32_be(*scrollback_limit_lines);
             }
             // `Detach` and `Detached` are unit variants: just the type byte,
             // no payload. Merged to satisfy `clippy::match_same_arms`.
@@ -344,15 +411,15 @@ impl FrameKind {
                 encode_paste_event(event, &mut enc);
             }
             Self::Attached {
-                session_id,
-                window_id,
-                pane_id,
                 snapshot,
+                initial_client_id,
             } => {
-                enc.write_u32_be(*session_id);
-                enc.write_u32_be(*window_id);
-                enc.write_u32_be(*pane_id);
-                encode_pane_snapshot(snapshot, &mut enc);
+                encode_session_snapshot(snapshot, &mut enc);
+                encode_client_id(*initial_client_id, &mut enc);
+            }
+            Self::PaneSnapshot { pane_id, snapshot } => {
+                enc.write_u32_be(pane_id.get());
+                encode_pane_snapshot_payload(snapshot, &mut enc);
             }
             Self::Bell { pane_id } => {
                 enc.write_u32_be(*pane_id);
@@ -379,26 +446,69 @@ impl FrameKind {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers for the phux-4az catalog variants. Kept in this file so encoder and
+// Helpers for the message-catalog variants. Kept in this file so encoder and
 // decoder share one source of truth for sub-record layout.
 // -----------------------------------------------------------------------------
 
-pub(super) const fn encode_attach_role(role: AttachRole) -> u8 {
-    match role {
-        AttachRole::Primary => ATTACH_ROLE_PRIMARY,
-        AttachRole::Viewer => ATTACH_ROLE_VIEWER,
+pub(super) fn encode_attach_target(target: &AttachTarget, enc: &mut Encoder<'_>) {
+    match target {
+        AttachTarget::Last => {
+            enc.write_u8(ATTACH_TARGET_LAST);
+        }
+        AttachTarget::ByName(name) => {
+            enc.write_u8(ATTACH_TARGET_BY_NAME);
+            enc.write_str(name);
+        }
+        AttachTarget::ById(id) => {
+            enc.write_u8(ATTACH_TARGET_BY_ID);
+            enc.write_u32_be(id.get());
+        }
+        AttachTarget::CreateIfMissing { name, command, cwd } => {
+            enc.write_u8(ATTACH_TARGET_CREATE_IF_MISSING);
+            enc.write_str(name);
+            encode_optional_string_list(command.as_deref(), enc);
+            encode_optional_str(cwd.as_deref(), enc);
+        }
     }
 }
 
-pub(super) fn decode_attach_role(tag: u8) -> Result<AttachRole, DecodeError> {
+pub(super) fn decode_attach_target(dec: &mut Decoder<'_>) -> Result<AttachTarget, DecodeError> {
+    let tag = dec.read_u8()?;
     match tag {
-        ATTACH_ROLE_PRIMARY => Ok(AttachRole::Primary),
-        ATTACH_ROLE_VIEWER => Ok(AttachRole::Viewer),
+        ATTACH_TARGET_LAST => Ok(AttachTarget::Last),
+        ATTACH_TARGET_BY_NAME => Ok(AttachTarget::ByName(dec.read_str()?.to_owned())),
+        ATTACH_TARGET_BY_ID => Ok(AttachTarget::ById(SessionId::new(dec.read_u32_be()?))),
+        ATTACH_TARGET_CREATE_IF_MISSING => {
+            let name = dec.read_str()?.to_owned();
+            let command = decode_optional_string_list(dec)?;
+            let cwd = decode_optional_str(dec)?.map(str::to_owned);
+            Ok(AttachTarget::CreateIfMissing { name, command, cwd })
+        }
         other => Err(DecodeError::UnknownEnumValue {
-            field: "AttachRole",
+            field: "AttachTarget",
             value: u32::from(other),
         }),
     }
+}
+
+pub(super) fn encode_viewport_info(v: &ViewportInfo, enc: &mut Encoder<'_>) {
+    enc.write_u16_be(v.cols);
+    enc.write_u16_be(v.rows);
+    encode_optional_u16(v.pixel_w, enc);
+    encode_optional_u16(v.pixel_h, enc);
+}
+
+pub(super) fn decode_viewport_info(dec: &mut Decoder<'_>) -> Result<ViewportInfo, DecodeError> {
+    let cols = dec.read_u16_be()?;
+    let rows = dec.read_u16_be()?;
+    let pixel_w = decode_optional_u16(dec)?;
+    let pixel_h = decode_optional_u16(dec)?;
+    Ok(ViewportInfo {
+        cols,
+        rows,
+        pixel_w,
+        pixel_h,
+    })
 }
 
 pub(super) const fn encode_focus_event(event: FocusEvent) -> u8 {
@@ -517,19 +627,26 @@ pub(super) fn decode_paste_event(dec: &mut Decoder<'_>) -> Result<PasteEvent, De
     Ok(PasteEvent { trust, data })
 }
 
-pub(super) fn encode_pane_snapshot(snap: &PaneSnapshot, enc: &mut Encoder<'_>) {
+pub(super) fn encode_pane_snapshot_payload(snap: &PaneSnapshotPayload, enc: &mut Encoder<'_>) {
     enc.write_u16_be(snap.cols);
     enc.write_u16_be(snap.rows);
     encode_diff_ops(&snap.ops, enc);
 }
 
-pub(super) fn decode_pane_snapshot(dec: &mut Decoder<'_>) -> Result<PaneSnapshot, DecodeError> {
+pub(super) fn decode_pane_snapshot_payload(
+    dec: &mut Decoder<'_>,
+) -> Result<PaneSnapshotPayload, DecodeError> {
     use super::diff::decode_diff_ops;
     let cols = dec.read_u16_be()?;
     let rows = dec.read_u16_be()?;
     let ops = decode_diff_ops(dec)?;
-    Ok(PaneSnapshot { cols, rows, ops })
+    Ok(PaneSnapshotPayload { cols, rows, ops })
 }
+
+// -----------------------------------------------------------------------------
+// Small option-of-primitive helpers. Local to this module — `info.rs` has its
+// own parallel set tuned to its types (id newtypes, layout nodes).
+// -----------------------------------------------------------------------------
 
 fn encode_optional_str(value: Option<&str>, enc: &mut Encoder<'_>) {
     match value {
@@ -553,6 +670,28 @@ fn decode_optional_str<'a>(dec: &mut Decoder<'a>) -> Result<Option<&'a str>, Dec
     }
 }
 
+fn encode_optional_u16(value: Option<u16>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(n) => {
+            enc.write_u8(1);
+            enc.write_u16_be(n);
+        }
+    }
+}
+
+fn decode_optional_u16(dec: &mut Decoder<'_>) -> Result<Option<u16>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(dec.read_u16_be()?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<u16> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
 fn encode_optional_u32(value: Option<u32>, enc: &mut Encoder<'_>) {
     match value {
         None => enc.write_u8(0),
@@ -570,6 +709,44 @@ fn decode_optional_u32(dec: &mut Decoder<'_>) -> Result<Option<u32>, DecodeError
         1 => Ok(Some(dec.read_u32_be()?)),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Option<u32> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+fn encode_optional_string_list(value: Option<&[String]>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(list) => {
+            enc.write_u8(1);
+            debug_assert!(
+                u32::try_from(list.len()).is_ok(),
+                "string list length exceeds u32",
+            );
+            let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+            enc.write_u32_be(len);
+            for s in list {
+                enc.write_str(s);
+            }
+        }
+    }
+}
+
+fn decode_optional_string_list(dec: &mut Decoder<'_>) -> Result<Option<Vec<String>>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => {
+            let len = dec.read_u32_be()?;
+            let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
+            let mut out = Vec::with_capacity(len_usize);
+            for _ in 0..len_usize {
+                out.push(dec.read_str()?.to_owned());
+            }
+            Ok(Some(out))
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<list<str>> tag",
             value: u32::from(other),
         }),
     }

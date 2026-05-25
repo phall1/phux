@@ -1,4 +1,4 @@
-//! Wire-codec round-trip and malformed-input tests for phux-6yl.4.
+//! Wire-codec round-trip and malformed-input tests for phux-6yl.4 + phux-i58.
 //!
 //! Proptest exercises the encoder and decoder on arbitrary `FrameKind`
 //! values. Hand-rolled cases cover known-bad inputs and confirm the decoder
@@ -7,20 +7,173 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
+use phux_protocol::ids::{ClientId, PaneId, SessionId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachRole, PaneSnapshot};
+use phux_protocol::wire::frame::{AttachTarget, PaneSnapshotPayload, ViewportInfo};
+use phux_protocol::wire::info::{
+    LayoutNode, PaneInfo, SessionInfo, SessionSnapshot, SplitDir, WindowInfo,
+};
 use phux_protocol::wire::{DecodeError, decode::Decoder, frame::FrameKind};
 use proptest::prelude::*;
 
-/// Strategy producing one of the implemented `FrameKind` variants. Bounds on
-/// string and payload length keep the search space tractable while still
-/// exercising edge cases (empty strings, non-ASCII, etc.). The `PaneDiff`,
-/// `Attached`, `InputKey`, etc. variants have their own dedicated round-trip
-/// tests below; this strategy focuses on the catalog-level dispatch and the
-/// simple-payload variants.
+// -----------------------------------------------------------------------------
+// Strategies
+// -----------------------------------------------------------------------------
+
+fn arb_attach_target() -> impl Strategy<Value = AttachTarget> {
+    prop_oneof![
+        Just(AttachTarget::Last),
+        ".{0,64}".prop_map(AttachTarget::ByName),
+        any::<u32>().prop_map(|id| AttachTarget::ById(SessionId::new(id))),
+        (
+            ".{0,32}",
+            proptest::option::of(proptest::collection::vec(".{0,16}", 0..4)),
+            proptest::option::of(".{0,32}"),
+        )
+            .prop_map(|(name, command, cwd)| AttachTarget::CreateIfMissing {
+                name,
+                command,
+                cwd,
+            }),
+    ]
+}
+
+fn arb_viewport_info() -> impl Strategy<Value = ViewportInfo> {
+    (
+        any::<u16>(),
+        any::<u16>(),
+        proptest::option::of(any::<u16>()),
+        proptest::option::of(any::<u16>()),
+    )
+        .prop_map(|(cols, rows, pixel_w, pixel_h)| ViewportInfo {
+            cols,
+            rows,
+            pixel_w,
+            pixel_h,
+        })
+}
+
+fn arb_split_dir() -> impl Strategy<Value = SplitDir> {
+    prop_oneof![Just(SplitDir::Horizontal), Just(SplitDir::Vertical)]
+}
+
+/// Bounded recursion: at most depth 4 keeps prop-test work tractable while
+/// still exercising recursive split-tree encoding/decoding.
+fn arb_layout_node() -> impl Strategy<Value = LayoutNode> {
+    let leaf = any::<u32>().prop_map(|id| LayoutNode::Leaf(PaneId::new(id)));
+    leaf.prop_recursive(4, 32, 2, |inner| {
+        (
+            arb_split_dir(),
+            // Constrain ratio to the open interval so the decoder accepts it;
+            // boundary and out-of-range cases are exercised by hand below.
+            0.0001f32..0.9999f32,
+            inner.clone(),
+            inner,
+        )
+            .prop_map(|(dir, ratio, left, right)| LayoutNode::Split {
+                dir,
+                ratio,
+                left: Box::new(left),
+                right: Box::new(right),
+            })
+    })
+}
+
+fn arb_session_info() -> impl Strategy<Value = SessionInfo> {
+    (
+        any::<u32>(),
+        ".{0,32}",
+        proptest::option::of(any::<u32>()),
+        any::<i64>(),
+        any::<u16>(),
+        any::<u16>(),
+    )
+        .prop_map(
+            |(
+                id,
+                name,
+                active_window,
+                created_at_unix_secs,
+                window_count,
+                attached_client_count,
+            )| {
+                SessionInfo {
+                    id: SessionId::new(id),
+                    name,
+                    active_window: active_window.map(WindowId::new),
+                    created_at_unix_secs,
+                    window_count,
+                    attached_client_count,
+                }
+            },
+        )
+}
+
+fn arb_window_info() -> impl Strategy<Value = WindowInfo> {
+    (
+        any::<u32>(),
+        any::<u32>(),
+        any::<u16>(),
+        ".{0,32}",
+        proptest::option::of(any::<u32>()),
+        proptest::option::of(arb_layout_node()),
+    )
+        .prop_map(
+            |(id, session_id, index, name, active_pane, layout)| WindowInfo {
+                id: WindowId::new(id),
+                session_id: SessionId::new(session_id),
+                index,
+                name,
+                active_pane: active_pane.map(PaneId::new),
+                layout,
+            },
+        )
+}
+
+fn arb_pane_info() -> impl Strategy<Value = PaneInfo> {
+    (
+        any::<u32>(),
+        any::<u32>(),
+        any::<u16>(),
+        any::<u16>(),
+        proptest::option::of(".{0,32}"),
+        proptest::option::of(".{0,32}"),
+    )
+        .prop_map(|(id, window_id, cols, rows, title, cwd)| PaneInfo {
+            id: PaneId::new(id),
+            window_id: WindowId::new(window_id),
+            cols,
+            rows,
+            title,
+            cwd,
+        })
+}
+
+fn arb_session_snapshot() -> impl Strategy<Value = SessionSnapshot> {
+    (
+        proptest::collection::vec(arb_session_info(), 0..3),
+        proptest::collection::vec(arb_window_info(), 0..4),
+        proptest::collection::vec(arb_pane_info(), 0..5),
+        any::<u32>(),
+        any::<u32>(),
+        any::<u32>(),
+    )
+        .prop_map(|(sessions, windows, panes, fs, fw, fp)| SessionSnapshot {
+            sessions,
+            windows,
+            panes,
+            focused_session: SessionId::new(fs),
+            focused_window: WindowId::new(fw),
+            focused_pane: PaneId::new(fp),
+        })
+}
+
+/// Strategy producing one of the simple-payload `FrameKind` variants. The
+/// recursive/structured variants (`ATTACH`, `ATTACHED`, `PANE_SNAPSHOT`) have
+/// their own dedicated round-trip proptests below.
 fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
     prop_oneof![
         (
@@ -37,16 +190,10 @@ fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
                 protocol_patch: patch,
             },),
         any::<u64>().prop_map(|nonce| FrameKind::Ping { nonce }),
-        (".{0,64}", arb_attach_role())
-            .prop_map(|(session_name, role)| FrameKind::Attach { session_name, role }),
         Just(FrameKind::Detach),
         Just(FrameKind::Detached),
         any::<u32>().prop_map(|pane_id| FrameKind::Bell { pane_id }),
     ]
-}
-
-fn arb_attach_role() -> impl Strategy<Value = AttachRole> {
-    prop_oneof![Just(AttachRole::Primary), Just(AttachRole::Viewer)]
 }
 
 fn arb_focus_event() -> impl Strategy<Value = FocusEvent> {
@@ -289,16 +436,41 @@ fn tail_is_returned_after_single_frame() {
 }
 
 // -----------------------------------------------------------------------------
-// phux-4az: message-catalog round-trip tests
+// phux-i58 SPEC §13 conformance: ATTACH / ATTACHED / PANE_SNAPSHOT and the
+// SessionSnapshot/{SessionInfo,WindowInfo,PaneInfo,LayoutNode} types.
 // -----------------------------------------------------------------------------
 
 proptest! {
     #[test]
-    fn roundtrip_attach(
-        session_name in ".{0,64}",
-        role in arb_attach_role(),
+    fn roundtrip_attach_target(target in arb_attach_target()) {
+        // AttachTarget on its own has no top-level FrameKind variant; wrap it
+        // in a minimal ATTACH so the codec layer is exercised end-to-end.
+        let frame = FrameKind::Attach {
+            target,
+            viewport: ViewportInfo { cols: 80, rows: 24, pixel_w: None, pixel_h: None },
+            request_scrollback: false,
+            scrollback_limit_lines: 0,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_attach_full(
+        target in arb_attach_target(),
+        viewport in arb_viewport_info(),
+        request_scrollback in any::<bool>(),
+        scrollback_limit_lines in any::<u32>(),
     ) {
-        let frame = FrameKind::Attach { session_name, role };
+        let frame = FrameKind::Attach {
+            target,
+            viewport,
+            request_scrollback,
+            scrollback_limit_lines,
+        };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -346,18 +518,118 @@ proptest! {
         prop_assert!(tail.is_empty());
     }
 
+    /// `SessionInfo` round-trips through the snapshot codec — wrap it in a
+    /// one-session SessionSnapshot to exercise the public entry points.
+    #[test]
+    fn roundtrip_session_info(info in arb_session_info()) {
+        let snap = SessionSnapshot {
+            sessions: vec![info.clone()],
+            windows: Vec::new(),
+            panes: Vec::new(),
+            focused_session: info.id,
+            focused_window: WindowId::new(0),
+            focused_pane: PaneId::new(0),
+        };
+        let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_window_info(info in arb_window_info()) {
+        let snap = SessionSnapshot {
+            sessions: Vec::new(),
+            windows: vec![info.clone()],
+            panes: Vec::new(),
+            focused_session: info.session_id,
+            focused_window: info.id,
+            focused_pane: PaneId::new(0),
+        };
+        let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_pane_info(info in arb_pane_info()) {
+        let snap = SessionSnapshot {
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            panes: vec![info.clone()],
+            focused_session: SessionId::new(0),
+            focused_window: info.window_id,
+            focused_pane: info.id,
+        };
+        let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    /// `LayoutNode` recursion is exercised via the WindowInfo it lives inside.
+    /// Depth bounded by `arb_layout_node` to keep prop-test work tractable.
+    #[test]
+    fn roundtrip_layout_node(layout in arb_layout_node()) {
+        let win = WindowInfo {
+            id: WindowId::new(1),
+            session_id: SessionId::new(1),
+            index: 0,
+            name: "w".to_owned(),
+            active_pane: None,
+            layout: Some(layout),
+        };
+        let snap = SessionSnapshot {
+            sessions: Vec::new(),
+            windows: vec![win],
+            panes: Vec::new(),
+            focused_session: SessionId::new(1),
+            focused_window: WindowId::new(1),
+            focused_pane: PaneId::new(0),
+        };
+        let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
     #[test]
     fn roundtrip_attached(
-        session_id in any::<u32>(),
-        window_id in any::<u32>(),
+        snapshot in arb_session_snapshot(),
+        client_id in any::<u32>(),
+    ) {
+        let frame = FrameKind::Attached {
+            snapshot,
+            initial_client_id: ClientId::new(client_id),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_pane_snapshot_frame(
         pane_id in any::<u32>(),
         cols in any::<u16>(),
         rows in any::<u16>(),
     ) {
-        // `ops` left empty here; `wire::diff::tests` already exercises the
-        // `Vec<DiffOp>` encoding. This test focuses on the outer envelope.
-        let snapshot = PaneSnapshot { cols, rows, ops: Vec::new() };
-        let frame = FrameKind::Attached { session_id, window_id, pane_id, snapshot };
+        // `ops` covered by `wire::diff::tests`; this test focuses on the
+        // outer PANE_SNAPSHOT envelope.
+        let frame = FrameKind::PaneSnapshot {
+            pane_id: PaneId::new(pane_id),
+            snapshot: PaneSnapshotPayload { cols, rows, ops: Vec::new() },
+        };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -397,13 +669,10 @@ fn detached_round_trip() {
 }
 
 #[test]
-fn attach_unknown_role_is_rejected() {
-    // Hand-build an ATTACH frame whose role byte is 0xFF (unallocated).
+fn attach_unknown_target_tag_is_rejected() {
+    // Hand-build an ATTACH frame whose AttachTarget tag is 0xFF (unallocated).
     let mut body = vec![0x02u8]; // ATTACH type
-    let name = b"default";
-    body.extend_from_slice(&u32::try_from(name.len()).unwrap().to_be_bytes());
-    body.extend_from_slice(name);
-    body.push(0xFF);
+    body.push(0xFF); // bogus AttachTarget tag
 
     let mut bytes = vec![];
     bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
@@ -413,7 +682,7 @@ fn attach_unknown_role_is_rejected() {
     assert_eq!(
         err,
         DecodeError::UnknownEnumValue {
-            field: "AttachRole",
+            field: "AttachTarget",
             value: 0xFF,
         }
     );
@@ -450,3 +719,129 @@ fn bell_round_trip() {
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
 }
+
+// -----------------------------------------------------------------------------
+// Layout ratio validation — SPEC §13 leaves bounds implicit; phux rejects
+// NaN, infinite, and out-of-range values on decode.
+// -----------------------------------------------------------------------------
+
+/// Encode a single-split layout with an arbitrary `ratio` so we can exercise
+/// the decoder's validation path independently of the encoder's good-citizen
+/// behaviour (the encoder happily writes any f32; the decoder is the gate).
+fn encode_split_with_ratio(ratio: f32) -> Vec<u8> {
+    // We wrap the LayoutNode in a one-window snapshot, then an ATTACHED frame.
+    // Hand-construct the LayoutNode bytes so the ratio is exactly what we want.
+    let mut body = vec![0x81u8]; // ATTACHED type byte
+
+    // SessionSnapshot { sessions: [], windows: [WindowInfo{...}], panes: [],
+    //                   focused_*: 0 }
+    body.extend_from_slice(&0u32.to_be_bytes()); // sessions len = 0
+    body.extend_from_slice(&1u32.to_be_bytes()); // windows len = 1
+
+    // WindowInfo {
+    //   id: 1, session_id: 1, index: 0, name: "w",
+    //   active_pane: None,
+    //   layout: Some(Split { dir: H, ratio: <ratio>, left: Leaf(1), right: Leaf(2) })
+    // }
+    body.extend_from_slice(&1u32.to_be_bytes()); // window id
+    body.extend_from_slice(&1u32.to_be_bytes()); // session id
+    body.extend_from_slice(&0u16.to_be_bytes()); // index
+    body.extend_from_slice(&1u32.to_be_bytes()); // name len = 1
+    body.push(b'w');
+    body.push(0); // active_pane: None
+    body.push(1); // layout: Some(_)
+    body.push(1); // LayoutNode::Split tag
+    body.push(0); // SplitDir::Horizontal
+    body.extend_from_slice(&ratio.to_be_bytes()); // ratio
+    body.push(0); // left: Leaf tag
+    body.extend_from_slice(&1u32.to_be_bytes()); // pane id 1
+    body.push(0); // right: Leaf tag
+    body.extend_from_slice(&2u32.to_be_bytes()); // pane id 2
+
+    body.extend_from_slice(&0u32.to_be_bytes()); // panes len = 0
+    body.extend_from_slice(&0u32.to_be_bytes()); // focused_session
+    body.extend_from_slice(&1u32.to_be_bytes()); // focused_window
+    body.extend_from_slice(&0u32.to_be_bytes()); // focused_pane
+
+    body.extend_from_slice(&0u32.to_be_bytes()); // initial_client_id
+
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+    bytes
+}
+
+#[test]
+fn layout_ratio_nan_is_rejected() {
+    let bytes = encode_split_with_ratio(f32::NAN);
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    // PartialEq on the NaN-bearing variant is false; assert by pattern.
+    match err {
+        DecodeError::MalformedLayoutRatio { ratio } => assert!(ratio.is_nan()),
+        other => panic!("expected MalformedLayoutRatio, got {other:?}"),
+    }
+}
+
+#[test]
+fn layout_ratio_above_one_is_rejected() {
+    let bytes = encode_split_with_ratio(1.5);
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(err, DecodeError::MalformedLayoutRatio { ratio: 1.5 });
+}
+
+#[test]
+fn layout_ratio_negative_is_rejected() {
+    let bytes = encode_split_with_ratio(-0.1);
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(err, DecodeError::MalformedLayoutRatio { ratio: -0.1 });
+}
+
+#[test]
+fn layout_ratio_infinite_is_rejected() {
+    let bytes = encode_split_with_ratio(f32::INFINITY);
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::MalformedLayoutRatio {
+            ratio: f32::INFINITY
+        }
+    );
+}
+
+#[test]
+#[allow(clippy::float_cmp)] // exact bit-pattern is the assertion here
+fn layout_ratio_zero_is_accepted() {
+    // 0.0 is in [0.0, 1.0] inclusive — accepted.
+    let bytes = encode_split_with_ratio(0.0);
+    let (decoded, _tail) = FrameKind::decode(&bytes).unwrap();
+    if let FrameKind::Attached { snapshot, .. } = decoded {
+        let win = &snapshot.windows[0];
+        match win.layout.as_ref().unwrap() {
+            LayoutNode::Split { ratio, .. } => assert_eq!(*ratio, 0.0),
+            LayoutNode::Leaf(_) => panic!("expected Split"),
+        }
+    } else {
+        panic!("expected Attached frame");
+    }
+}
+
+#[test]
+#[allow(clippy::float_cmp)] // exact bit-pattern is the assertion here
+fn layout_ratio_one_is_accepted() {
+    let bytes = encode_split_with_ratio(1.0);
+    let (decoded, _tail) = FrameKind::decode(&bytes).unwrap();
+    if let FrameKind::Attached { snapshot, .. } = decoded {
+        let win = &snapshot.windows[0];
+        match win.layout.as_ref().unwrap() {
+            LayoutNode::Split { ratio, .. } => assert_eq!(*ratio, 1.0),
+            LayoutNode::Leaf(_) => panic!("expected Split"),
+        }
+    } else {
+        panic!("expected Attached frame");
+    }
+}
+
+// Suppress unused warning on SplitDir — the import is needed for the
+// `arb_layout_node` strategy's `Just` paths.
+#[allow(dead_code)]
+const _SPLIT_DIR_TYPE_CHECK: fn() -> SplitDir = || SplitDir::Horizontal;

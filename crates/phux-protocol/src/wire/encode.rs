@@ -56,6 +56,23 @@ impl<'a> Encoder<'a> {
         self.buf.extend_from_slice(&value.to_be_bytes());
     }
 
+    /// Write an `i64` in network (big-endian) byte order.
+    ///
+    /// Two's-complement encoding (bit-identical to `u64` after reinterpret).
+    /// Used by `SessionInfo::created_at_unix_secs` per SPEC §13 wire-portable
+    /// timestamp convention.
+    pub fn write_i64_be(&mut self, value: i64) {
+        self.buf.extend_from_slice(&value.to_be_bytes());
+    }
+
+    /// Write an IEEE-754 `f32` in network (big-endian) byte order.
+    ///
+    /// Bit-for-bit encoding via [`f32::to_be_bytes`] — preserves NaNs and
+    /// signed zeros. Used by `LayoutNode::Split::ratio` per SPEC §13.
+    pub fn write_f32_be(&mut self, value: f32) {
+        self.buf.extend_from_slice(&value.to_be_bytes());
+    }
+
     /// Write an IEEE-754 `f64` in network (big-endian) byte order.
     ///
     /// Bit-for-bit encoding via [`f64::to_be_bytes`] — preserves NaNs and
