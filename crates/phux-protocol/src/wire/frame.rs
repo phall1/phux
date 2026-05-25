@@ -18,7 +18,10 @@
 
 use bytes::BytesMut;
 
+use crate::diff::DiffOp;
+
 use super::decode::Decoder;
+use super::diff::encode_diff_ops;
 use super::encode::Encoder;
 use super::error::DecodeError;
 
@@ -40,6 +43,11 @@ pub const TYPE_PING: u8 = 0x7F;
 pub const TYPE_HELLO_OK: u8 = 0x80;
 /// Discriminant for `PONG` (server to client, `SPEC.md` §7.5). Reserved.
 pub const TYPE_PONG: u8 = 0xFF;
+/// Discriminant for `PANE_DIFF` (server to client, `SPEC.md` §7).
+///
+/// Picked from the §7 free range. v0.2+ may renumber when the `SessionId`
+/// tagged-union routing lands; the discriminant is local to phux-6yl.5.
+pub const TYPE_PANE_DIFF: u8 = 0x40;
 
 /// Decoded wire frame.
 ///
@@ -72,6 +80,21 @@ pub enum FrameKind {
         /// Opaque nonce echoed by the peer in `PONG`.
         nonce: u64,
     },
+
+    /// `PANE_DIFF` — server-to-client incremental pane update (`SPEC.md` §8.3).
+    ///
+    /// The body carries a `u32` pane id, a `u64` frame id, then a `u32`-prefixed
+    /// list of [`DiffOp`]. The `pane_id` is a plain `u32` for now; the
+    /// `SessionId` tagged-union from ADR-0007 §3 will replace it once
+    /// satellite routing lands.
+    PaneDiff {
+        /// Target pane.
+        pane_id: u32,
+        /// Monotonic frame counter for this pane.
+        frame_id: u64,
+        /// Diff operations to apply, in order.
+        ops: Vec<DiffOp>,
+    },
 }
 
 impl FrameKind {
@@ -81,6 +104,7 @@ impl FrameKind {
         match self {
             Self::Hello { .. } => TYPE_HELLO,
             Self::Ping { .. } => TYPE_PING,
+            Self::PaneDiff { .. } => TYPE_PANE_DIFF,
         }
     }
 
@@ -112,6 +136,15 @@ impl FrameKind {
             }
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);
+            }
+            Self::PaneDiff {
+                pane_id,
+                frame_id,
+                ops,
+            } => {
+                enc.write_u32_be(*pane_id);
+                enc.write_u64_be(*frame_id);
+                encode_diff_ops(ops, &mut enc);
             }
         }
 

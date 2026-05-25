@@ -4,8 +4,9 @@
 //! (primitives). Every decode method returns `Result` and refuses to read
 //! past the end of the borrowed slice.
 
+use super::diff::decode_diff_ops;
 use super::error::DecodeError;
-use super::frame::{FrameKind, MAX_FRAME_LEN, TYPE_HELLO, TYPE_PING};
+use super::frame::{FrameKind, MAX_FRAME_LEN, TYPE_HELLO, TYPE_PANE_DIFF, TYPE_PING};
 
 /// Cursor-style decoder over an immutable byte slice.
 ///
@@ -129,6 +130,16 @@ impl<'a> Decoder<'a> {
             TYPE_PING => {
                 let nonce = self.read_u64_be()?;
                 FrameKind::Ping { nonce }
+            }
+            TYPE_PANE_DIFF => {
+                let pane_id = self.read_u32_be()?;
+                let frame_id = self.read_u64_be()?;
+                let ops = decode_diff_ops(self)?;
+                FrameKind::PaneDiff {
+                    pane_id,
+                    frame_id,
+                    ops,
+                }
             }
             // `HELLO_OK` / `PONG` are recognised by the catalog but not yet
             // populated as `FrameKind` variants; sibling tasks lift them

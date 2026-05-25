@@ -4,6 +4,7 @@
 //! Field IDs and message types match SPEC §7's catalog.
 
 pub mod decode;
+pub mod diff;
 pub mod encode;
 pub mod error;
 pub mod field;
