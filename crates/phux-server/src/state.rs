@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use phux_core::ids::{PaneId, SessionId};
 use phux_core::registry::Registry;
 use phux_core::session::Session;
+
+use crate::id_bridge::IdBridge;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
@@ -141,13 +143,11 @@ pub struct ServerState {
     /// accumulates and tests inspect it via
     /// [`Self::pane_input_log_for`].
     pane_inputs: HashMap<PaneId, Vec<PaneInput>>,
-    /// Name → [`SessionId`] ledger maintained as the server creates sessions.
-    ///
-    /// `phux-core::Registry` doesn't expose iteration of sessions over its
-    /// `SlotMap`, and a future `Registry::sessions()` upstream method would
-    /// let us drop this. Until then this ledger is the only way to resolve
-    /// attach-by-name without changing `phux-core`.
-    seeded_sessions: Vec<(String, SessionId)>,
+    /// Bridge between core slotmap [`SessionId`]s and wire-level
+    /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
+    /// this crate) because `phux-core` and `phux-protocol` must not depend
+    /// on each other — see [`crate::id_bridge`] module docs.
+    pub session_id_bridge: IdBridge,
     next_client_id: u64,
 }
 
@@ -166,7 +166,7 @@ impl ServerState {
             attached: HashMap::new(),
             pane_subscribers: HashMap::new(),
             pane_inputs: HashMap::new(),
-            seeded_sessions: Vec::new(),
+            session_id_bridge: IdBridge::new(),
             next_client_id: 1,
         }
     }
@@ -266,23 +266,17 @@ impl ServerState {
         self.registry.session(id)
     }
 
-    /// Look up the [`SessionId`] for a name, scanning the seeded-sessions
-    /// ledger.
+    /// Look up the [`SessionId`] for a name by scanning the registry.
     ///
-    /// `phux-core::Registry` doesn't expose iteration over its `SlotMap`,
-    /// so the server maintains its own ledger (`seeded_sessions`). When the
-    /// registry grows a public iterator over sessions, this method collapses
-    /// to one line and the ledger goes away.
+    /// Uses [`Registry::sessions`] directly — no side ledger required.
     fn find_session_by_name(&self, name: &str) -> Option<SessionId> {
-        self.seeded_sessions
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, sid)| *sid)
-            .filter(|sid| self.registry.session(*sid).is_some())
+        self.registry
+            .sessions()
+            .find(|(_, s)| s.name == name)
+            .map(|(id, _)| id)
     }
 
-    /// Seed a session+window+pane and remember the session by name so
-    /// [`Self::attach`] can find it. Returns the new
+    /// Seed a session+window+pane. Returns the new
     /// `(SessionId, WindowId, PaneId)`.
     ///
     /// This is the entry point `ServerConfig::pre_seeded_session` uses to
@@ -299,7 +293,6 @@ impl ServerState {
         let sid = self.registry.new_session(name.to_owned());
         let wid = self.registry.new_window(sid).expect("session just created");
         let pid = self.registry.new_pane(wid).expect("window just created");
-        self.seeded_sessions.push((name.to_owned(), sid));
         (sid, wid, pid)
     }
 

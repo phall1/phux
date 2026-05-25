@@ -8,10 +8,12 @@
 #![warn(missing_docs)]
 
 pub mod grid;
+pub mod id_bridge;
 pub mod input;
 pub mod runtime;
 pub mod state;
 
+pub use id_bridge::IdBridge;
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
 pub use state::{
     AttachError, AttachedClient, ClientId, OutboundFrame, PaneInput, ServerState, SharedState,

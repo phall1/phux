@@ -284,3 +284,68 @@ proptest! {
         }
     }
 }
+
+// ---- Registry::sessions() iterator ----------------------------------------
+
+#[test]
+fn sessions_iter_is_empty_on_fresh_registry() {
+    let reg = Registry::new();
+    assert_eq!(reg.sessions().count(), 0);
+}
+
+#[test]
+fn sessions_iter_yields_every_inserted_session() {
+    let mut reg = Registry::new();
+    let a = reg.new_session("alpha".to_string());
+    let b = reg.new_session("bravo".to_string());
+    let c = reg.new_session("charlie".to_string());
+
+    let collected: Vec<(SessionId, String)> =
+        reg.sessions().map(|(id, s)| (id, s.name.clone())).collect();
+    assert_eq!(collected.len(), 3);
+    let names: std::collections::HashSet<&str> =
+        collected.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(names.contains("alpha"));
+    assert!(names.contains("bravo"));
+    assert!(names.contains("charlie"));
+
+    // Every yielded id must round-trip through `session()`.
+    for (id, _name) in &collected {
+        assert!(reg.session(*id).is_some());
+    }
+
+    // The three inserted ids must be the ones yielded (set equality).
+    let yielded_ids: std::collections::HashSet<SessionId> =
+        collected.iter().map(|(id, _)| *id).collect();
+    let expected_ids: std::collections::HashSet<SessionId> = [a, b, c].into_iter().collect();
+    assert_eq!(yielded_ids, expected_ids);
+}
+
+#[test]
+fn sessions_iter_drops_removed_sessions() {
+    let mut reg = Registry::new();
+    let a = reg.new_session("alpha".to_string());
+    let b = reg.new_session("bravo".to_string());
+    let _ = reg.remove_session(a).expect("alpha was just inserted");
+
+    let collected: Vec<SessionId> = reg.sessions().map(|(id, _)| id).collect();
+    assert_eq!(collected, vec![b]);
+}
+
+#[test]
+fn sessions_iter_supports_find_by_name() {
+    // The canonical use case the server crate has been working around.
+    let mut reg = Registry::new();
+    let _ = reg.new_session("alpha".to_string());
+    let target = reg.new_session("bravo".to_string());
+    let _ = reg.new_session("charlie".to_string());
+
+    let found = reg
+        .sessions()
+        .find(|(_, s)| s.name == "bravo")
+        .map(|(id, _)| id);
+    assert_eq!(found, Some(target));
+
+    let missing = reg.sessions().find(|(_, s)| s.name == "ghost");
+    assert!(missing.is_none());
+}

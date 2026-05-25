@@ -208,6 +208,21 @@ impl Registry {
         self.sessions.get(id)
     }
 
+    /// Iterate over every live `(SessionId, &Session)` pair in the registry.
+    ///
+    /// Order matches [`slotmap::SlotMap::iter`] — i.e. insertion-stable for
+    /// the slots currently occupied, but **not** strictly insertion order
+    /// across remove+reinsert cycles (a removed slot may be re-occupied by a
+    /// later `new_session` and appear earlier in iteration than newer slots).
+    /// Callers that need a stable ordering should sort on a session field
+    /// they own (e.g. `created_at` or `name`).
+    ///
+    /// This is the canonical lookup-by-name primitive: the server crate uses
+    /// it to resolve `ATTACH` requests without maintaining a side ledger.
+    pub fn sessions(&self) -> impl Iterator<Item = (SessionId, &Session)> + '_ {
+        self.sessions.iter()
+    }
+
     /// Mutably borrow a session by ID, or `None` if the ID is unknown.
     #[must_use]
     pub fn session_mut(&mut self, id: SessionId) -> Option<&mut Session> {
