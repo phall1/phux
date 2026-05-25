@@ -8,6 +8,14 @@
 //! libghostty-vt's types, so there is no conversion layer for them — the
 //! values flow through unchanged. Only `CursorVisualStyle` and the per-bool
 //! `Style` fields require translation.
+//!
+//! ## Iterator lifetime
+//!
+//! Per-pane render loops should hold a [`PaneCapture`] across frames; the
+//! [`RenderState`], [`RowIterator`], and [`CellIterator`] inside are
+//! designed to be reused (see SPEC §8 hot path / frame model). The free
+//! [`capture`] function is a thin one-shot wrapper for tests, the
+//! `diff_spike` example, and any future `phux capture` CLI.
 
 use libghostty_vt::{
     RenderState, Terminal,
@@ -24,51 +32,81 @@ pub enum CaptureError {
     Ghostty(#[from] libghostty_vt::Error),
 }
 
-/// Snapshot the current state of `terminal` into a [`Grid`].
+/// Pooled per-pane capture state.
 ///
-/// Allocates fresh [`RenderState`], [`RowIterator`], and [`CellIterator`]
-/// each call. Per-pane hot loops should hold these structs across frames;
-/// this helper is for one-shot captures (testing, the diff spike, the
-/// `phux capture` command).
-pub fn capture(terminal: &Terminal<'_, '_>) -> Result<Grid, CaptureError> {
-    let mut render_state = RenderState::new()?;
-    let mut rows = RowIterator::new()?;
-    let mut cells = CellIterator::new()?;
+/// Owns the libghostty render scaffolding ([`RenderState`], [`RowIterator`],
+/// [`CellIterator`]) so the hot loop reuses them across frames instead of
+/// reallocating each tick. Per ADR-0008 these are libghostty's own types,
+/// re-exported and used directly.
+#[derive(Debug)]
+pub struct PaneCapture<'alloc> {
+    render_state: RenderState<'alloc>,
+    rows: RowIterator<'alloc>,
+    cells: CellIterator<'alloc>,
+}
 
-    let snapshot = render_state.update(terminal)?;
-    let cols = snapshot.cols()?;
-    let rows_n = snapshot.rows()?;
-
-    let mut grid_cells: Vec<Vec<Cell>> = (0..rows_n)
-        .map(|_| (0..cols).map(|_| Cell::blank()).collect())
-        .collect();
-
-    let mut row_iter = rows.update(&snapshot)?;
-    let mut row_index: u16 = 0;
-    while let Some(row) = row_iter.next() {
-        if row_index >= rows_n {
-            break;
-        }
-        let mut cell_iter = cells.update(row)?;
-        let mut col_index: u16 = 0;
-        while let Some(cell) = cell_iter.next() {
-            if col_index >= cols {
-                break;
-            }
-            grid_cells[usize::from(row_index)][usize::from(col_index)] = cell_from_iter(cell)?;
-            col_index += 1;
-        }
-        row_index += 1;
+impl<'alloc> PaneCapture<'alloc> {
+    /// Allocate a fresh pool of render iterators. Do this once per pane.
+    pub fn new() -> Result<Self, CaptureError> {
+        Ok(Self {
+            render_state: RenderState::new()?,
+            rows: RowIterator::new()?,
+            cells: CellIterator::new()?,
+        })
     }
 
-    let cursor = cursor_from_snapshot(&snapshot)?;
+    /// Snapshot the current state of `terminal` into a [`Grid`], reusing
+    /// the pooled iterators.
+    ///
+    /// Steady-state allocations come from the returned [`Grid`] itself
+    /// (the `Vec<Vec<Cell>>` and the per-cell `Vec<char>` graphemes) —
+    /// the render iterators themselves do not reallocate.
+    pub fn capture(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<Grid, CaptureError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let cols = snapshot.cols()?;
+        let rows_n = snapshot.rows()?;
 
-    Ok(Grid {
-        cols,
-        rows: rows_n,
-        cells: grid_cells,
-        cursor,
-    })
+        let mut grid_cells: Vec<Vec<Cell>> = (0..rows_n)
+            .map(|_| (0..cols).map(|_| Cell::blank()).collect())
+            .collect();
+
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_n {
+                break;
+            }
+            let mut cell_iter = self.cells.update(row)?;
+            let mut col_index: u16 = 0;
+            while let Some(cell) = cell_iter.next() {
+                if col_index >= cols {
+                    break;
+                }
+                grid_cells[usize::from(row_index)][usize::from(col_index)] = cell_from_iter(cell)?;
+                col_index += 1;
+            }
+            row_index += 1;
+        }
+
+        let cursor = cursor_from_snapshot(&snapshot)?;
+
+        Ok(Grid {
+            cols,
+            rows: rows_n,
+            cells: grid_cells,
+            cursor,
+        })
+    }
+}
+
+/// Snapshot the current state of `terminal` into a [`Grid`].
+///
+/// Convenience wrapper that allocates a fresh [`PaneCapture`] on every
+/// call. Use this for one-shot captures (tests, the diff spike, the
+/// future `phux capture` CLI). Per-pane hot loops should construct a
+/// [`PaneCapture`] once and reuse it across frames.
+pub fn capture(terminal: &Terminal<'_, '_>) -> Result<Grid, CaptureError> {
+    PaneCapture::new()?.capture(terminal)
 }
 
 fn cell_from_iter(

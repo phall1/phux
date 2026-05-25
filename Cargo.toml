@@ -48,6 +48,8 @@ bytes = "1"
 slotmap = "1"
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+dhat = "0.3"
 # libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.

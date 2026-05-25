@@ -23,7 +23,13 @@ libghostty-vt.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+criterion.workspace = true
+dhat.workspace = true
 
 [[example]]
 name = "diff_spike"
 path = "examples/diff_spike.rs"
+
+[[bench]]
+name = "capture"
+harness = false
