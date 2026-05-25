@@ -15,6 +15,7 @@ workspace = true
 thiserror.workspace = true
 bytes.workspace = true
 bitflags = "2"
+libghostty-vt.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

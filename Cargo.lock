@@ -433,6 +433,7 @@ dependencies = [
  "bitflags",
  "bytes",
  "insta",
+ "libghostty-vt",
  "proptest",
  "thiserror",
 ]

@@ -1,14 +1,30 @@
 //! The cell — protocol's atomic unit of pane state.
 //!
-//! A cell is one screen position: a grapheme cluster plus fully-resolved
-//! rendering attributes (`SPEC.md` §8.2). Server-side resolution means
-//! `Color::Default` is the only "follow the terminal default" value; all
-//! palette indices and truecolor values arrive on the wire as themselves.
+//! Per ADR-0008, `Color` and `Underline` are direct re-exports of
+//! libghostty-vt's `style::StyleColor` and `style::Underline`. `Cell` and
+//! `CellFlags` remain phux-defined: the wire shape (cell-as-snapshot-with-
+//! grapheme-text) is multiplexer-specific, and `CellFlags` is a compact
+//! bitfield over libghostty's per-bool `Style` fields.
 
 use bitflags::bitflags;
 
+pub use libghostty_vt::style::StyleColor as Color;
+pub use libghostty_vt::style::Underline;
+
+/// Re-export of libghostty-vt's RGB color value, exposed alongside [`Color`]
+/// because `Color::Rgb` wraps it.
+pub use libghostty_vt::style::RgbColor;
+
+/// Re-export of libghostty-vt's palette-index type, wrapping `u8`.
+pub use libghostty_vt::style::PaletteIndex;
+
 /// One screen cell.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+///
+/// Composes libghostty's color/underline atoms with a grapheme-cluster text
+/// field and a compact rendering-flags bitset. `Default` is implemented
+/// manually because libghostty's `StyleColor` and `Underline` don't derive
+/// `Default` upstream — we pick the obvious zero values (`None`/`None`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cell {
     /// Grapheme cluster occupying this cell. May be empty for a blank cell.
     /// First element is the base codepoint; remaining elements are combining
@@ -27,9 +43,21 @@ pub struct Cell {
     pub flags: CellFlags,
 }
 
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            text: Vec::new(),
+            fg: Color::None,
+            bg: Color::None,
+            underline: Underline::None,
+            underline_color: Color::None,
+            flags: CellFlags::empty(),
+        }
+    }
+}
+
 impl Cell {
     /// A completely blank cell: empty text, default colors, no flags.
-    /// Identical to `Cell::default()`; named for clarity at call sites.
     #[must_use]
     pub fn blank() -> Self {
         Self::default()
@@ -37,52 +65,22 @@ impl Cell {
 
     /// True if this is a blank cell.
     #[must_use]
-    pub fn is_blank(&self) -> bool {
+    pub const fn is_blank(&self) -> bool {
         self.text.is_empty()
-            && self.fg == Color::Default
-            && self.bg == Color::Default
-            && self.underline == Underline::None
+            && matches!(self.fg, Color::None)
+            && matches!(self.bg, Color::None)
+            && matches!(self.underline, Underline::None)
             && self.flags.is_empty()
     }
 }
 
-/// A fully-resolved cell color.
-///
-/// `SPEC.md` §8.2 says: servers MUST NOT emit `Rgb` to clients without
-/// `TrueColor` capability. Downsampling happens server-side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Color {
-    /// The terminal's foreground/background default — resolved by the client
-    /// against its theme. The only "indirection" allowed on the wire.
-    #[default]
-    Default,
-    /// Palette index in the 0..=255 ANSI palette.
-    Indexed(u8),
-    /// 24-bit truecolor.
-    Rgb(u8, u8, u8),
-}
-
-/// Underline kind. Mirrors `SPEC.md` §8.2.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Underline {
-    /// No underline.
-    #[default]
-    None = 0,
-    /// `CSI 4 m`.
-    Single = 1,
-    /// `CSI 21 m`.
-    Double = 2,
-    /// Curly / squiggly underline.
-    Curly = 3,
-    /// Dotted underline.
-    Dotted = 4,
-    /// Dashed underline.
-    Dashed = 5,
-}
-
 bitflags! {
-    /// Cell-rendering flags. Wire layout matches `SPEC.md` §8.2.
+    /// Cell-rendering flags. Compact bitfield over libghostty's per-bool
+    /// `Style` fields (bold, italic, faint, blink, inverse, invisible,
+    /// strikethrough, overline) plus phux-specific render hints
+    /// (`WIDE_LEFT`, `WIDE_RIGHT`, `PROTECTED`, `BLINK_FAST`).
+    ///
+    /// Wire layout matches SPEC.md §8.2.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct CellFlags: u16 {
         /// Bold.
@@ -133,7 +131,7 @@ mod tests {
     #[test]
     fn cell_with_color_is_not_blank() {
         let c = Cell {
-            fg: Color::Rgb(1, 2, 3),
+            fg: Color::Rgb(RgbColor { r: 1, g: 2, b: 3 }),
             ..Cell::blank()
         };
         assert!(!c.is_blank());

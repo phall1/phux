@@ -1,73 +1,44 @@
-//! Mouse event translation: wire → libghostty-vt.
+//! Wire `MouseEvent` → libghostty allocator-bound `mouse::Event` + per-pane encoder.
 //!
-//! Mirrors libghostty-vt's `mouse::Event` field-for-field per ADR-0006. The
-//! wire form carries [`MouseButton::Unknown`] in place of libghostty's
-//! "no button" / `None` button — this conversion remaps the sentinel.
+//! Per ADR-0008, `MouseAction` and `MouseButton` are re-exports of
+//! libghostty's `mouse::{Action, Button}`. Composition is the only work
+//! here; no enum conversions.
+//!
+//! The wire form treats [`MouseButton::Unknown`] as the "no button"
+//! sentinel for naked motion. libghostty's encoder takes `Option<Button>`,
+//! so this module wraps each call site with `option_for_encoder`.
 
 use libghostty_vt::{
     Error, Terminal,
-    mouse::{
-        Action as LgMouseAction, Button as LgMouseButton, Encoder as LgMouseEncoder,
-        Event as LgMouseEvent, Position as LgMousePosition,
-    },
+    mouse::{Encoder as LgMouseEncoder, Event as LgMouseEvent, Position as LgMousePosition},
 };
-use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
+use phux_protocol::input::mouse::{MouseButton, MouseEvent};
 
-use super::key::modset_to_libghostty;
-
-/// Map wire [`MouseAction`] to libghostty's [`LgMouseAction`].
-/// Discriminants match (ADR-0006).
+/// Treat [`MouseButton::Unknown`] as the wire sentinel for "no button" and
+/// hand libghostty `None` for it. Every other variant flows through
+/// verbatim (they're the same type).
 #[must_use]
-pub const fn mouse_action_to_libghostty(action: MouseAction) -> LgMouseAction {
-    match action {
-        MouseAction::Press => LgMouseAction::Press,
-        MouseAction::Release => LgMouseAction::Release,
-        MouseAction::Motion => LgMouseAction::Motion,
-    }
-}
-
-/// Map wire [`MouseButton`] to libghostty's `Option<Button>`.
-///
-/// [`MouseButton::Unknown`] is the wire's "no button" sentinel (used for
-/// naked motion) and maps to `None`. Every other variant maps verbatim;
-/// discriminants are pinned by the
-/// [`mouse_button_discriminants_match_libghostty`](self::tests::mouse_button_discriminants_match_libghostty)
-/// test.
-#[must_use]
-pub const fn mouse_button_to_libghostty(button: MouseButton) -> Option<LgMouseButton> {
+pub const fn option_for_encoder(button: MouseButton) -> Option<MouseButton> {
     match button {
         MouseButton::Unknown => None,
-        MouseButton::Left => Some(LgMouseButton::Left),
-        MouseButton::Right => Some(LgMouseButton::Right),
-        MouseButton::Middle => Some(LgMouseButton::Middle),
-        MouseButton::Four => Some(LgMouseButton::Four),
-        MouseButton::Five => Some(LgMouseButton::Five),
-        MouseButton::Six => Some(LgMouseButton::Six),
-        MouseButton::Seven => Some(LgMouseButton::Seven),
-        MouseButton::Eight => Some(LgMouseButton::Eight),
-        MouseButton::Nine => Some(LgMouseButton::Nine),
-        MouseButton::Ten => Some(LgMouseButton::Ten),
-        MouseButton::Eleven => Some(LgMouseButton::Eleven),
+        other => Some(other),
     }
 }
 
-/// Fallible conversion: wire [`MouseEvent`] → libghostty [`LgMouseEvent`].
+/// Build a libghostty `mouse::Event` from our wire `MouseEvent`.
 ///
-/// Orphan-rules prevent a trait impl (both types are foreign). Fallibility
-/// comes only from the FFI allocator; the field copy itself is total. Note
-/// that wire positions are `f64` per `SPEC.md` §9.2; libghostty's
-/// `MousePosition` is `f32` — values are downcast here. (This is the
-/// behavior libghostty's encoders expect; surface-space pixel precision
-/// at `f32` is ample for terminal cell geometry.)
+/// Fallibility comes only from libghostty's FFI allocator. Wire positions
+/// are `f64`; libghostty's `MousePosition` is `f32` — downcast here. (That
+/// surface-pixel precision is ample for terminal cell geometry.)
 #[allow(
     clippy::cast_possible_truncation,
     reason = "f64 → f32 downcast is by design — libghostty's surface coords are f32"
 )]
 pub fn mouse_event_to_libghostty(ev: &MouseEvent) -> Result<LgMouseEvent<'static>, Error> {
     let mut out = LgMouseEvent::new()?;
-    out.set_action(mouse_action_to_libghostty(ev.action))
-        .set_button(mouse_button_to_libghostty(ev.button))
-        .set_mods(modset_to_libghostty(ev.mods))
+    out.set_action(ev.action)
+        .set_button(option_for_encoder(ev.button))
+        .set_mods(ev.mods)
         .set_position(LgMousePosition {
             x: ev.x as f32,
             y: ev.y as f32,
@@ -97,13 +68,12 @@ impl PerPaneMouseEncoder {
 
     /// Encode a wire mouse event into PTY bytes.
     ///
-    /// Refreshes tracking-mode and format from `terminal` before each call so
-    /// the encoded sequence matches whatever the inner program currently has
-    /// enabled (SGR, SGR-Pixels, urxvt, X10, UTF-8, or off).
+    /// Refreshes tracking-mode and format from `terminal` before each call
+    /// so the encoded sequence matches whatever the inner program currently
+    /// has enabled.
     ///
     /// Note: callers MUST separately configure `EncoderSize` (cell geometry)
-    /// via the encoder's `set_size` if the inner program may use SGR-Pixels —
-    /// that data is not in `Terminal` state. See `SPEC.md` §9.2.2.
+    /// via the encoder's `set_size` if the inner program may use SGR-Pixels.
     pub fn encode(
         &mut self,
         event: &MouseEvent,
@@ -127,6 +97,7 @@ impl PerPaneMouseEncoder {
 mod tests {
     use super::*;
     use phux_protocol::input::key::ModSet;
+    use phux_protocol::input::mouse::MouseAction;
 
     #[test]
     fn mouse_event_to_libghostty_round_trips_fields() {
@@ -138,9 +109,9 @@ mod tests {
             y: 34.25,
         };
         let lg = mouse_event_to_libghostty(&ev).expect("convert");
-        assert_eq!(lg.action(), LgMouseAction::Press);
-        assert_eq!(lg.button(), Some(LgMouseButton::Left));
-        assert_eq!(lg.mods(), libghostty_vt::key::Mods::SHIFT);
+        assert_eq!(lg.action(), MouseAction::Press);
+        assert_eq!(lg.button(), Some(MouseButton::Left));
+        assert_eq!(lg.mods(), ModSet::SHIFT);
         let pos = lg.position();
         assert!((pos.x - 12.5_f32).abs() < f32::EPSILON);
         assert!((pos.y - 34.25_f32).abs() < f32::EPSILON);
@@ -157,44 +128,5 @@ mod tests {
         };
         let lg = mouse_event_to_libghostty(&ev).expect("convert");
         assert_eq!(lg.button(), None);
-    }
-
-    #[test]
-    fn mouse_button_discriminants_match_libghostty() {
-        const PAIRS: &[(MouseButton, LgMouseButton)] = &[
-            (MouseButton::Unknown, LgMouseButton::Unknown),
-            (MouseButton::Left, LgMouseButton::Left),
-            (MouseButton::Right, LgMouseButton::Right),
-            (MouseButton::Middle, LgMouseButton::Middle),
-            (MouseButton::Four, LgMouseButton::Four),
-            (MouseButton::Five, LgMouseButton::Five),
-            (MouseButton::Six, LgMouseButton::Six),
-            (MouseButton::Seven, LgMouseButton::Seven),
-            (MouseButton::Eight, LgMouseButton::Eight),
-            (MouseButton::Nine, LgMouseButton::Nine),
-            (MouseButton::Ten, LgMouseButton::Ten),
-            (MouseButton::Eleven, LgMouseButton::Eleven),
-        ];
-        for &(wire, lg) in PAIRS {
-            assert_eq!(
-                wire as u32, lg as u32,
-                "MouseButton::{wire:?} discriminant drifts vs libghostty {lg:?}",
-            );
-        }
-    }
-
-    #[test]
-    fn mouse_action_discriminants_match_libghostty() {
-        const PAIRS: &[(MouseAction, LgMouseAction)] = &[
-            (MouseAction::Press, LgMouseAction::Press),
-            (MouseAction::Release, LgMouseAction::Release),
-            (MouseAction::Motion, LgMouseAction::Motion),
-        ];
-        for &(wire, lg) in PAIRS {
-            assert_eq!(
-                wire as u32, lg as u32,
-                "MouseAction::{wire:?} discriminant drifts vs libghostty {lg:?}",
-            );
-        }
     }
 }

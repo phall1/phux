@@ -17,7 +17,7 @@ mod compute;
 mod grid;
 mod op;
 
-pub use cell::{Cell, CellFlags, Color, Underline};
+pub use cell::{Cell, CellFlags, Color, PaletteIndex, RgbColor, Underline};
 pub use compute::compute_diff;
 pub use grid::Grid;
 pub use op::{CursorShape, CursorState, DiffOp};

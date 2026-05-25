@@ -17,10 +17,9 @@ phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# Pinned to upstream master at 2026-05-22 — latest with link-static, png,
-# log, and kitty-graphics features. Build requires zig 0.15.x on PATH;
-# the nix dev shell provides it.
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "31d1f70004ff80727e36437cd540984f927333ce", default-features = false }
+# libghostty-vt is workspace-pinned (see workspace Cargo.toml). Build
+# requires zig 0.15.x on PATH; the nix dev shell provides it.
+libghostty-vt.workspace = true
 
 [[example]]
 name = "diff_spike"

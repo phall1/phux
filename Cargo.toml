@@ -48,6 +48,10 @@ bytes = "1"
 slotmap = "1"
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
+# libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
+# and phux-server depend on it — phux-protocol re-exports types, phux-server
+# drives the emulator.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "31d1f70004ff80727e36437cd540984f927333ce", default-features = false }
 
 [profile.release]
 lto = "fat"

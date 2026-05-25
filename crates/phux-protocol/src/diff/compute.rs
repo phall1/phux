@@ -113,7 +113,7 @@ fn push_full_repaint(ops: &mut Vec<DiffOp>, grid: &Grid) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diff::cell::Color;
+    use crate::diff::cell::{Color, RgbColor};
 
     fn cell_with_text(s: &str) -> Cell {
         Cell {
@@ -195,7 +195,7 @@ mod tests {
         let prev = Grid::blank(1, 1);
         let mut next = prev.clone();
         next.cells[0][0] = Cell {
-            fg: Color::Rgb(255, 0, 0),
+            fg: Color::Rgb(RgbColor { r: 255, g: 0, b: 0 }),
             ..Cell::blank()
         };
         let ops = compute_diff(&prev, &next);

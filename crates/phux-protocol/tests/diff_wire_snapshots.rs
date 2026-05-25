@@ -8,7 +8,9 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::diff::{Cell, CellFlags, Color, CursorShape, DiffOp, Underline};
+use phux_protocol::diff::{
+    Cell, CellFlags, Color, CursorShape, DiffOp, PaletteIndex, RgbColor, Underline,
+};
 use phux_protocol::wire::diff::encode_diff_ops;
 use phux_protocol::wire::encode::Encoder;
 use phux_protocol::wire::frame::FrameKind;
@@ -95,11 +97,27 @@ fn snap_mixed_color_cells() {
         row: 3,
         col: 7,
         cells: vec![
-            mk(Color::Default, Color::Default, 'a'),
-            mk(Color::Indexed(7), Color::Default, 'b'),
-            mk(Color::Default, Color::Indexed(4), 'c'),
-            mk(Color::Rgb(0xff, 0x80, 0x00), Color::Default, 'd'),
-            mk(Color::Rgb(0x12, 0x34, 0x56), Color::Indexed(2), 'e'),
+            mk(Color::None, Color::None, 'a'),
+            mk(Color::Palette(PaletteIndex(7)), Color::None, 'b'),
+            mk(Color::None, Color::Palette(PaletteIndex(4)), 'c'),
+            mk(
+                Color::Rgb(RgbColor {
+                    r: 0xff,
+                    g: 0x80,
+                    b: 0x00,
+                }),
+                Color::None,
+                'd',
+            ),
+            mk(
+                Color::Rgb(RgbColor {
+                    r: 0x12,
+                    g: 0x34,
+                    b: 0x56,
+                }),
+                Color::Palette(PaletteIndex(2)),
+                'e',
+            ),
         ],
     }];
     insta::assert_snapshot!(dump_ops(&ops));
@@ -127,7 +145,11 @@ fn snap_curly_rgb_underline() {
         cells: vec![Cell {
             text: vec!['u'],
             underline: Underline::Curly,
-            underline_color: Color::Rgb(0xaa, 0xbb, 0xcc),
+            underline_color: Color::Rgb(RgbColor {
+                r: 0xaa,
+                g: 0xbb,
+                b: 0xcc,
+            }),
             ..Cell::blank()
         }],
     }];
@@ -198,7 +220,7 @@ fn snap_full_pane_diff_frame() {
                 col: 0,
                 cells: vec![Cell {
                     text: vec!['O', 'K'].into_iter().take(1).collect(),
-                    fg: Color::Indexed(2),
+                    fg: Color::Palette(PaletteIndex(2)),
                     ..Cell::blank()
                 }],
             },

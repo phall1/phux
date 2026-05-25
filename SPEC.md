@@ -607,14 +607,22 @@ composition, modifier-rich chords, and pixel-precise mouse events
 end-to-end through the multiplexer. It is also what lets the protocol
 serve a future GUI client and a TUI client from the same wire format.
 
-The shapes in this section **mirror libghostty-vt's input event types**
-(`key::Event`, `mouse::Event`, `focus::Event`, paste utilities) by
-design. The server constructs libghostty events directly from wire
-events, hands them to libghostty's encoders (which know per-terminal
-state: KIP flags, cursor-key mode, mouse protocol, etc.), and writes
-the resulting bytes to the PTY. Encoder configuration never traverses
-the wire — the server is the one with the `Terminal` and the encoder.
-See [ADR-0006](./ADR/0006-input-mirrors-libghostty.md).
+Per ADR-0008, the input *atom* types (`KeyAction`, `PhysicalKey`,
+`ModSet`, `MouseAction`, `MouseButton`, `FocusEvent`) **are** libghostty-
+vt's types — re-exported under phux-flavored names. The outer wrapper
+structs (`KeyEvent`, `MouseEvent`) are phux-defined because libghostty's
+event objects are allocator-lifetime-bound and not directly serializable;
+their fields are still libghostty's types.
+
+The server constructs libghostty events from wire events with a
+field-for-field copy (no enum conversion), hands them to libghostty's
+encoders (which know per-terminal state: KIP flags, cursor-key mode,
+mouse protocol, etc.), and writes the resulting bytes to the PTY.
+Encoder configuration never traverses the wire — the server is the one
+with the `Terminal` and the encoder. See [ADR-0006] and [ADR-0008].
+
+[ADR-0006]: ./ADR/0006-input-mirrors-libghostty.md
+[ADR-0008]: ./ADR/0008-use-libghostty-types-directly.md
 
 ### 9.1 INPUT_KEY
 

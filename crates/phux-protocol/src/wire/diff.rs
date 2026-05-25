@@ -17,13 +17,13 @@
 //!
 //! Cell          := Text | Color fg | Color bg | Underline | Color uline | CellFlags
 //! Text          := u8 grapheme_count | u32 codepoint{grapheme_count}
-//! Color         := u8 tag (0 Default | 1 Indexed u8 | 2 Rgb u8 u8 u8)
+//! Color         := u8 tag (0 None | 1 Palette u8 | 2 Rgb u8 u8 u8)
 //! Underline     := u8 discriminant
 //! CellFlags     := u16 bitset (matches bitflags repr)
 //! CursorShape   := u8 discriminant
 //! ```
 
-use crate::diff::{Cell, CellFlags, Color, CursorShape, DiffOp, Underline};
+use crate::diff::{Cell, CellFlags, Color, CursorShape, DiffOp, PaletteIndex, RgbColor, Underline};
 
 use super::decode::Decoder;
 use super::encode::Encoder;
@@ -36,9 +36,11 @@ pub(crate) const OP_CLEAR: u8 = 0x02;
 pub(crate) const OP_CURSOR_MOVE: u8 = 0x03;
 pub(crate) const OP_CURSOR_STYLE: u8 = 0x04;
 
-/// `Color` tag discriminants.
-pub(crate) const COLOR_DEFAULT: u8 = 0x00;
-pub(crate) const COLOR_INDEXED: u8 = 0x01;
+/// `Color` tag discriminants. Per ADR-0008, `Color` is libghostty-vt's
+/// `StyleColor`; the tag values are phux-stable bytes on the wire (not
+/// dependent on libghostty's repr).
+pub(crate) const COLOR_NONE: u8 = 0x00;
+pub(crate) const COLOR_PALETTE: u8 = 0x01;
 pub(crate) const COLOR_RGB: u8 = 0x02;
 
 /// Encode a slice of [`DiffOp`] with a leading `u32` big-endian count.
@@ -202,16 +204,16 @@ fn decode_text(dec: &mut Decoder<'_>) -> Result<Vec<char>, DecodeError> {
 
 fn encode_color(color: Color, enc: &mut Encoder<'_>) {
     match color {
-        Color::Default => enc.write_u8(COLOR_DEFAULT),
-        Color::Indexed(idx) => {
-            enc.write_u8(COLOR_INDEXED);
-            enc.write_u8(idx);
+        Color::None => enc.write_u8(COLOR_NONE),
+        Color::Palette(idx) => {
+            enc.write_u8(COLOR_PALETTE);
+            enc.write_u8(idx.0);
         }
-        Color::Rgb(r, g, b) => {
+        Color::Rgb(rgb) => {
             enc.write_u8(COLOR_RGB);
-            enc.write_u8(r);
-            enc.write_u8(g);
-            enc.write_u8(b);
+            enc.write_u8(rgb.r);
+            enc.write_u8(rgb.g);
+            enc.write_u8(rgb.b);
         }
     }
 }
@@ -219,13 +221,13 @@ fn encode_color(color: Color, enc: &mut Encoder<'_>) {
 fn decode_color(dec: &mut Decoder<'_>) -> Result<Color, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
-        COLOR_DEFAULT => Ok(Color::Default),
-        COLOR_INDEXED => Ok(Color::Indexed(dec.read_u8()?)),
+        COLOR_NONE => Ok(Color::None),
+        COLOR_PALETTE => Ok(Color::Palette(PaletteIndex(dec.read_u8()?))),
         COLOR_RGB => {
             let r = dec.read_u8()?;
             let g = dec.read_u8()?;
             let b = dec.read_u8()?;
-            Ok(Color::Rgb(r, g, b))
+            Ok(Color::Rgb(RgbColor { r, g, b }))
         }
         other => Err(DecodeError::UnknownFrameKind {
             tag: u16::from(other),
@@ -282,9 +284,13 @@ mod tests {
 
     fn arb_color() -> impl Strategy<Value = Color> {
         prop_oneof![
-            Just(Color::Default),
-            any::<u8>().prop_map(Color::Indexed),
-            (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(r, g, b)| Color::Rgb(r, g, b)),
+            Just(Color::None),
+            any::<u8>().prop_map(|n| Color::Palette(PaletteIndex(n))),
+            (any::<u8>(), any::<u8>(), any::<u8>()).prop_map(|(r, g, b)| Color::Rgb(RgbColor {
+                r,
+                g,
+                b
+            })),
         ]
     }
 

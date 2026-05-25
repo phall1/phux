@@ -3,13 +3,18 @@
 //! This is the seam between the terminal-emulator library (which holds the
 //! authoritative state) and the protocol (which speaks in [`Cell`]s and
 //! [`Grid`]s). Every server pane runs through here once per frame.
+//!
+//! Per ADR-0008, `Color` and `Underline` are direct re-exports of
+//! libghostty-vt's types, so there is no conversion layer for them — the
+//! values flow through unchanged. Only `CursorVisualStyle` and the per-bool
+//! `Style` fields require translation.
 
 use libghostty_vt::{
     RenderState, Terminal,
     render::{CellIterator, CursorVisualStyle, RowIterator},
-    style::{StyleColor, Underline as LgUnderline},
+    style::StyleColor,
 };
-use phux_protocol::{Cell, CellFlags, Color, CursorShape, CursorState, Grid, Underline};
+use phux_protocol::{Cell, CellFlags, Color, CursorShape, CursorState, Grid};
 
 /// Errors that can occur while capturing a grid from a terminal.
 #[derive(Debug, thiserror::Error)]
@@ -71,16 +76,18 @@ fn cell_from_iter(
 ) -> Result<Cell, CaptureError> {
     let text = cell.graphemes()?;
 
-    let fg = cell
-        .fg_color()?
-        .map_or(Color::Default, |rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
-    let bg = cell
-        .bg_color()?
-        .map_or(Color::Default, |rgb| Color::Rgb(rgb.r, rgb.g, rgb.b));
+    // `CellIteration::{fg,bg}_color` returns the *resolved* RGB color
+    // (after palette+theme lookup), not the raw `StyleColor`. We promote
+    // it to `StyleColor::Rgb` so the wire carries the final pixel value;
+    // `None` arrives when the cell's style is `StyleColor::None`.
+    let fg = cell.fg_color()?.map_or(Color::None, Color::Rgb);
+    let bg = cell.bg_color()?.map_or(Color::None, Color::Rgb);
 
     let style = cell.style()?;
-    let underline = map_underline(style.underline);
-    let underline_color = map_style_color(style.underline_color);
+    // `Underline` and `StyleColor` are themselves re-exports of libghostty's
+    // types (ADR-0008), so these are identity copies.
+    let underline = style.underline;
+    let underline_color: StyleColor = style.underline_color;
 
     let mut flags = CellFlags::empty();
     if style.bold {
@@ -116,26 +123,6 @@ fn cell_from_iter(
         underline_color,
         flags,
     })
-}
-
-const fn map_style_color(c: StyleColor) -> Color {
-    match c {
-        StyleColor::None => Color::Default,
-        StyleColor::Palette(idx) => Color::Indexed(idx.0),
-        StyleColor::Rgb(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
-    }
-}
-
-const fn map_underline(u: LgUnderline) -> Underline {
-    // Upstream `LgUnderline` is non-exhaustive — future kinds fall through to None.
-    match u {
-        LgUnderline::Single => Underline::Single,
-        LgUnderline::Double => Underline::Double,
-        LgUnderline::Curly => Underline::Curly,
-        LgUnderline::Dotted => Underline::Dotted,
-        LgUnderline::Dashed => Underline::Dashed,
-        _ => Underline::None,
-    }
 }
 
 fn cursor_from_snapshot(

@@ -1,38 +1,18 @@
-//! Focus event translation: wire → libghostty-vt with DEC 1004 gating.
+//! Focus event handling with DEC 1004 gating.
 //!
-//! Per `SPEC.md` §9.3 and ADR-0006: the wire form is a single boolean
-//! `gained`; this maps to libghostty's `focus::Event::{Gained, Lost}`. The
-//! server SHOULD only encode the report when the pane has DEC mode 1004
-//! (focus reporting) enabled — [`PerPaneFocusEncoder::encode`] enforces
-//! that.
+//! Per ADR-0008, `FocusEvent` is a direct re-export of libghostty's
+//! `focus::Event`. There is no conversion layer; this module exists to
+//! gate emission on the pane's DEC mode 1004 state and to own a reusable
+//! encode buffer for `Event::encode`.
 
-use libghostty_vt::{Error, Terminal, focus::Event as LgFocusEvent, terminal::Mode};
+use libghostty_vt::{Error, Terminal, terminal::Mode};
 use phux_protocol::input::focus::FocusEvent;
-
-/// Convert a wire [`FocusEvent`] to libghostty's [`LgFocusEvent`].
-///
-/// Orphan-rules prevent a trait impl (both types are foreign). The
-/// reference-taking signature mirrors the sibling `*_to_libghostty`
-/// functions for the larger event types.
-#[must_use]
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "API symmetry with the other From-style conversions in this module"
-)]
-pub const fn focus_event_to_libghostty(ev: &FocusEvent) -> LgFocusEvent {
-    if ev.gained {
-        LgFocusEvent::Gained
-    } else {
-        LgFocusEvent::Lost
-    }
-}
 
 /// Per-pane focus encoder.
 ///
 /// Holds a reusable byte buffer. Focus encoding itself is a stateless
-/// libghostty free function (`focus::Event::encode`); the type exists for
-/// API symmetry with the other per-pane encoders and to own the byte
-/// buffer.
+/// libghostty free function (`Event::encode`); the type exists for API
+/// symmetry with the other per-pane encoders and to own the byte buffer.
 #[derive(Debug, Default)]
 pub struct PerPaneFocusEncoder {
     buf: Vec<u8>,
@@ -51,25 +31,19 @@ impl PerPaneFocusEncoder {
     /// mode 1004 enabled.
     ///
     /// Returns `Ok(None)` if focus reporting is off (the event is silently
-    /// dropped per `SPEC.md` §9.3), `Ok(Some(&[u8]))` with the report
-    /// otherwise.
-    #[allow(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "API symmetry with KeyEvent/MouseEvent/PasteEvent encoders"
-    )]
+    /// dropped per SPEC §9.3), `Ok(Some(&[u8]))` with the report otherwise.
     pub fn encode(
         &mut self,
-        event: &FocusEvent,
+        event: FocusEvent,
         terminal: &Terminal<'_, '_>,
     ) -> Result<Option<&[u8]>, Error> {
         if !terminal.mode(Mode::FOCUS_EVENT)? {
             return Ok(None);
         }
-        let lg_event = focus_event_to_libghostty(event);
         // 8 bytes is plenty for CSI I / CSI O (3 bytes each).
         self.buf.resize(8, 0);
         let written = loop {
-            match lg_event.encode(&mut self.buf) {
+            match event.encode(&mut self.buf) {
                 Ok(n) => break n,
                 Err(Error::OutOfSpace { required }) => {
                     self.buf.resize(required, 0);
@@ -98,25 +72,10 @@ mod tests {
     }
 
     #[test]
-    fn focus_event_conversion_maps_both_variants() {
-        assert_eq!(
-            focus_event_to_libghostty(&FocusEvent { gained: true }),
-            LgFocusEvent::Gained
-        );
-        assert_eq!(
-            focus_event_to_libghostty(&FocusEvent { gained: false }),
-            LgFocusEvent::Lost
-        );
-    }
-
-    #[test]
     fn encode_drops_when_mode_1004_off() {
         let terminal = make_terminal();
-        // Default state: mode 1004 should be off.
         let mut enc = PerPaneFocusEncoder::new();
-        let out = enc
-            .encode(&FocusEvent { gained: true }, &terminal)
-            .expect("encode");
+        let out = enc.encode(FocusEvent::Gained, &terminal).expect("encode");
         assert!(out.is_none(), "expected drop, got {out:?}");
     }
 
@@ -128,7 +87,7 @@ mod tests {
             .expect("enable 1004");
         let mut enc = PerPaneFocusEncoder::new();
         let bytes = enc
-            .encode(&FocusEvent { gained: true }, &terminal)
+            .encode(FocusEvent::Gained, &terminal)
             .expect("encode")
             .expect("encoded payload");
         // CSI I = ESC [ I
@@ -146,7 +105,7 @@ mod tests {
             .expect("enable 1004");
         let mut enc = PerPaneFocusEncoder::new();
         let bytes = enc
-            .encode(&FocusEvent { gained: false }, &terminal)
+            .encode(FocusEvent::Lost, &terminal)
             .expect("encode")
             .expect("encoded payload");
         assert_eq!(bytes, b"\x1b[O", "unexpected focus-lost report: {bytes:?}");
