@@ -1,0 +1,35 @@
+# phux mdBook configuration.
+#
+# Approach (Option A): the canonical sources for the spec and ADRs live at
+# their existing repo paths — `SPEC.md` at the root and `ADR/*.md` under
+# `ADR/`. mdBook requires all content under a single `src/` directory with a
+# `SUMMARY.md`, so the docs workflow (`.github/workflows/docs.yml`) assembles
+# `docs-book/` at build time by copying those files into place. The
+# `docs-book/` tree is gitignored — no duplicated content lands in the repo.
+#
+# To preview locally:
+#
+#   mkdir -p docs-book/ADR
+#   cp SPEC.md docs-book/
+#   cp ADR/*.md docs-book/ADR/
+#   mdbook build  # or: mdbook serve
+#
+# (The tracked files under `docs-book/` are `SUMMARY.md` and `README.md` —
+# the navigation tree and the landing page. Everything else is copied in.)
+
+[book]
+title = "phux"
+description = "Wire protocol + architecture for phux."
+authors = ["Phil Hall <phallsignup@gmail.com>"]
+language = "en"
+src = "docs-book/"
+
+[output.html]
+git-repository-url = "https://github.com/phall1/phux"
+edit-url-template = "https://github.com/phall1/phux/edit/main/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+
+[output.html.fold]
+enable = true
+level = 1

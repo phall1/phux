@@ -1,0 +1,63 @@
+# phux docs — build the mdBook and deploy to GitHub Pages.
+#
+# Why push-to-main only: deploying to the gh-pages branch is destructive
+# (force-pushes the rendered tree). We do NOT want PRs to overwrite the live
+# site. CI on PRs is handled by ci.yml; this workflow is publish-only.
+#
+# Why assemble at build time: the canonical SPEC.md lives at the repo root
+# and ADRs live under ADR/. mdBook needs all content in a single `src/`
+# directory referenced by SUMMARY.md, so we copy (not move) the canonical
+# files into docs-book/ here, then build. See book.toml for the rationale.
+
+name: docs
+
+on:
+  push:
+    branches: [main]
+  # Manual trigger for re-deploys without a content change.
+  workflow_dispatch:
+
+# Only one deploy at a time — gh-pages force-pushes can race otherwise.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    name: build + deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Install mdBook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: latest
+
+      - name: Assemble docs-book/ from canonical sources
+        run: |
+          set -euxo pipefail
+          mkdir -p docs-book/ADR
+          cp SPEC.md docs-book/SPEC.md
+          cp ADR/*.md docs-book/ADR/
+          # Sanity check: we expect 8 numbered ADRs + ADR/README.md = 9 files.
+          ls -1 docs-book/ADR/
+          test "$(ls -1 docs-book/ADR/*.md | wc -l)" -ge 9
+
+      - name: mdbook build
+        run: mdbook build
+
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./book
+          publish_branch: gh-pages
+          # Replace the previous deploy rather than accreting history.
+          force_orphan: true
