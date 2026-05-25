@@ -34,7 +34,7 @@
 //! libghostty-vt-sys, not from Rust's heap — so their allocations are
 //! invisible to dhat. As a result, both paths report the **same**
 //! Rust-side block count: that count is dominated by the returned
-//! `Grid` (a `Vec<Vec<Cell>>` plus per-cell `Vec<char>` graphemes), which
+//! `Grid` (a `Vec<Vec<Cell>>` plus per-cell grapheme `SmallVec`s), which
 //! is constructed identically by both paths.
 //!
 //! What dhat **does** confirm is the invariant we care about: the pooled
@@ -200,7 +200,7 @@ fn dhat_probe() {
     );
     println!("  note: dhat sees only Rust's global allocator. Both paths");
     println!("        allocate the same Grid (Vec<Vec<Cell>> + per-cell");
-    println!("        Vec<char>), so Rust-side counts are equal. The");
+    println!("        grapheme SmallVecs), so Rust-side counts are equal. The");
     println!("        libghostty FFI scaffolding (RenderState/RowIterator/");
     println!("        CellIterator) is allocated by libghostty's Zig");
     println!("        allocator — invisible to dhat but a real wall-clock");

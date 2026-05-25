@@ -60,19 +60,19 @@ fn clear_blanks_a_run_of_populated_cells() {
         col: 0,
         cells,
     }]);
-    assert_eq!(mirror.grid.cells[0][2].text, vec!['c']);
+    assert_eq!(&mirror.grid.cells[0][2].text[..], &['c'][..]);
 
     mirror.apply(&[DiffOp::Clear {
         row: 0,
         col: 2,
         count: 3,
     }]);
-    assert!(mirror.grid.cells[0][0].text == vec!['a']);
-    assert!(mirror.grid.cells[0][1].text == vec!['b']);
+    assert_eq!(&mirror.grid.cells[0][0].text[..], &['a'][..]);
+    assert_eq!(&mirror.grid.cells[0][1].text[..], &['b'][..]);
     assert!(mirror.grid.cells[0][2].is_blank());
     assert!(mirror.grid.cells[0][3].is_blank());
     assert!(mirror.grid.cells[0][4].is_blank());
-    assert_eq!(mirror.grid.cells[0][5].text, vec!['f']);
+    assert_eq!(&mirror.grid.cells[0][5].text[..], &['f'][..]);
 }
 
 #[test]
@@ -228,7 +228,7 @@ fn replay_invariant_with_clear_op() {
 fn underline_and_flags_roundtrip_through_replay() {
     let mut g1 = Grid::blank(1, 4);
     g1.cells[0][0] = Cell {
-        text: vec!['u'],
+        text: smallvec::smallvec!['u'],
         fg: Color::None,
         bg: Color::Rgb(RgbColor { r: 9, g: 9, b: 9 }),
         underline: Underline::Curly,

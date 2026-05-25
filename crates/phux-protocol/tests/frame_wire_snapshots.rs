@@ -421,7 +421,7 @@ fn snap_pane_snapshot_with_initial_diff() {
                 row: 0,
                 col: 0,
                 cells: vec![Cell {
-                    text: vec!['H'],
+                    text: smallvec::smallvec!['H'],
                     fg: Color::Palette(PaletteIndex(2)),
                     ..Cell::blank()
                 }],

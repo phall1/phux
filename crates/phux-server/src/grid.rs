@@ -59,8 +59,9 @@ impl<'alloc> PaneCapture<'alloc> {
     /// the pooled iterators.
     ///
     /// Steady-state allocations come from the returned [`Grid`] itself
-    /// (the `Vec<Vec<Cell>>` and the per-cell `Vec<char>` graphemes) —
-    /// the render iterators themselves do not reallocate.
+    /// (the `Vec<Vec<Cell>>`; per-cell grapheme storage is `SmallVec`-
+    /// inline for the common case) — the render iterators themselves do
+    /// not reallocate.
     pub fn capture(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<Grid, CaptureError> {
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
@@ -112,7 +113,11 @@ pub fn capture(terminal: &Terminal<'_, '_>) -> Result<Grid, CaptureError> {
 fn cell_from_iter(
     cell: &libghostty_vt::render::CellIteration<'_, '_>,
 ) -> Result<Cell, CaptureError> {
-    let text = cell.graphemes()?;
+    // libghostty's `graphemes()` returns a `Vec<char>`; convert into the
+    // `SmallVec` storage used by `Cell::text`. For the common case
+    // (length <= 2) the destination stays inline; only true multi-combiner
+    // graphemes spill to the heap.
+    let text = cell.graphemes()?.into_iter().collect();
 
     // `CellIteration::{fg,bg}_color` returns the *resolved* RGB color
     // (after palette+theme lookup), not the raw `StyleColor`. We promote

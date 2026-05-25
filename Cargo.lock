@@ -827,6 +827,7 @@ dependencies = [
  "phux-protocol",
  "phux-server",
  "proptest",
+ "smallvec",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -840,6 +841,7 @@ dependencies = [
  "phux-protocol",
  "serde",
  "serde_json",
+ "smallvec",
  "tempfile",
  "thiserror 2.0.18",
  "toml",
@@ -864,6 +866,7 @@ dependencies = [
  "insta",
  "libghostty-vt",
  "proptest",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 

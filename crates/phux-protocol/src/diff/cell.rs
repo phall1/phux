@@ -7,6 +7,7 @@
 //! bitfield over libghostty's per-bool `Style` fields.
 
 use bitflags::bitflags;
+use smallvec::SmallVec;
 
 pub use libghostty_vt::style::StyleColor as Color;
 pub use libghostty_vt::style::Underline;
@@ -29,7 +30,12 @@ pub struct Cell {
     /// Grapheme cluster occupying this cell. May be empty for a blank cell.
     /// First element is the base codepoint; remaining elements are combining
     /// codepoints in source order.
-    pub text: Vec<char>,
+    ///
+    /// Backed by [`SmallVec`] with two inline slots so empty cells, ASCII
+    /// cells, and single-base+single-combining graphemes (the common case
+    /// for terminal content) require no heap allocation. Wire encoding is
+    /// unaffected — see `SPEC.md` §8 and `wire::diff` for the layout.
+    pub text: SmallVec<[char; 2]>,
     /// Foreground color.
     pub fg: Color,
     /// Background color.
@@ -46,7 +52,7 @@ pub struct Cell {
 impl Default for Cell {
     fn default() -> Self {
         Self {
-            text: Vec::new(),
+            text: SmallVec::new(),
             fg: Color::None,
             bg: Color::None,
             underline: Underline::None,
@@ -64,8 +70,12 @@ impl Cell {
     }
 
     /// True if this is a blank cell.
+    ///
+    /// Not `const fn`: `SmallVec::is_empty` is not const, so this method
+    /// can't be either. The compiler still inlines aggressively in
+    /// practice.
     #[must_use]
-    pub const fn is_blank(&self) -> bool {
+    pub fn is_blank(&self) -> bool {
         self.text.is_empty()
             && matches!(self.fg, Color::None)
             && matches!(self.bg, Color::None)
@@ -122,7 +132,7 @@ mod tests {
     #[test]
     fn cell_with_text_is_not_blank() {
         let c = Cell {
-            text: vec!['a'],
+            text: smallvec::smallvec!['a'],
             ..Cell::blank()
         };
         assert!(!c.is_blank());

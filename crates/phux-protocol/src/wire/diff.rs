@@ -24,6 +24,7 @@
 //! ```
 
 use crate::diff::{Cell, CellFlags, Color, CursorShape, DiffOp, PaletteIndex, RgbColor, Underline};
+use smallvec::SmallVec;
 
 use super::decode::Decoder;
 use super::encode::Encoder;
@@ -191,9 +192,12 @@ fn encode_text(text: &[char], enc: &mut Encoder<'_>) {
     }
 }
 
-fn decode_text(dec: &mut Decoder<'_>) -> Result<Vec<char>, DecodeError> {
+fn decode_text(dec: &mut Decoder<'_>) -> Result<SmallVec<[char; 2]>, DecodeError> {
     let n = dec.read_u8()?;
-    let mut out = Vec::with_capacity(usize::from(n));
+    // `SmallVec::with_capacity` stays inline when `n <= 2` (the common
+    // case) and otherwise spills to the heap exactly like `Vec`. The wire
+    // bytes the encoder produces are identical either way.
+    let mut out = SmallVec::with_capacity(usize::from(n));
     for _ in 0..n {
         let cp = dec.read_u32_be()?;
         let ch = char::from_u32(cp).ok_or(DecodeError::InvalidUtf8)?;
@@ -320,10 +324,13 @@ mod tests {
         any::<u16>().prop_map(|bits| CellFlags::from_bits_truncate(bits & CellFlags::all().bits()))
     }
 
-    fn arb_text() -> impl Strategy<Value = Vec<char>> {
+    fn arb_text() -> impl Strategy<Value = SmallVec<[char; 2]>> {
         // `char::arbitrary` covers the full Unicode scalar range, exercising
         // `char::from_u32` on the decode side. Bound length to keep tests fast.
+        // Range straddles the inline capacity (2) so both inline and spilled
+        // representations are exercised.
         proptest::collection::vec(any::<char>(), 0..4)
+            .prop_map(|v| v.into_iter().collect::<SmallVec<[char; 2]>>())
     }
 
     fn arb_cell() -> impl Strategy<Value = Cell> {

@@ -139,7 +139,7 @@ mod tests {
             DiffOp::CellRun { row, col, cells } => {
                 assert_eq!((*row, *col), (0, 2));
                 assert_eq!(cells.len(), 1);
-                assert_eq!(cells[0].text, vec!['x']);
+                assert_eq!(&cells[0].text[..], &['x'][..]);
             }
             other => panic!("expected CellRun, got {other:?}"),
         }

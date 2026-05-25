@@ -78,7 +78,7 @@ fn snap_single_ascii_cell() {
         row: 0,
         col: 0,
         cells: vec![Cell {
-            text: vec!['A'],
+            text: smallvec::smallvec!['A'],
             ..Cell::blank()
         }],
     }];
@@ -88,7 +88,7 @@ fn snap_single_ascii_cell() {
 #[test]
 fn snap_mixed_color_cells() {
     let mk = |fg, bg, ch: char| Cell {
-        text: vec![ch],
+        text: smallvec::smallvec![ch],
         fg,
         bg,
         ..Cell::blank()
@@ -129,7 +129,7 @@ fn snap_bold_italic_flags() {
         row: 0,
         col: 0,
         cells: vec![Cell {
-            text: vec!['X'],
+            text: smallvec::smallvec!['X'],
             flags: CellFlags::BOLD | CellFlags::ITALIC,
             ..Cell::blank()
         }],
@@ -143,7 +143,7 @@ fn snap_curly_rgb_underline() {
         row: 1,
         col: 2,
         cells: vec![Cell {
-            text: vec!['u'],
+            text: smallvec::smallvec!['u'],
             underline: Underline::Curly,
             underline_color: Color::Rgb(RgbColor {
                 r: 0xaa,
@@ -190,11 +190,11 @@ fn snap_mixed_op_sequence() {
             col: 0,
             cells: vec![
                 Cell {
-                    text: vec!['h'],
+                    text: smallvec::smallvec!['h'],
                     ..Cell::blank()
                 },
                 Cell {
-                    text: vec!['i'],
+                    text: smallvec::smallvec!['i'],
                     ..Cell::blank()
                 },
             ],

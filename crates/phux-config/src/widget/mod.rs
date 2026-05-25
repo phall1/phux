@@ -54,7 +54,7 @@ impl WidgetCells {
         let cells = s
             .chars()
             .map(|c| Cell {
-                text: vec![c],
+                text: smallvec::smallvec![c],
                 ..Cell::default()
             })
             .collect();

@@ -19,12 +19,19 @@ default = []
 # `server` activates the full type surface, including libghostty-vt
 # re-exports (ADR-0008) and the wire codec. Every in-workspace consumer
 # enables this; external consumers will too.
-server = ["dep:libghostty-vt"]
+server = ["dep:libghostty-vt", "dep:smallvec"]
 
 [dependencies]
 thiserror.workspace = true
 bytes.workspace = true
 bitflags = "2"
+# `smallvec` gives `Cell::text` inline storage for the common case
+# (empty / ASCII / one-base + one-combining grapheme), eliminating the
+# per-cell `Vec` header + heap allocation on 80x24+ grids. Wire format
+# is unchanged — the codec encodes length-prefix + chars regardless of
+# the in-memory collection type. Optional because it's only used by the
+# server-gated `diff` module.
+smallvec = { workspace = true, optional = true }
 libghostty-vt = { workspace = true, optional = true }
 
 [dev-dependencies]

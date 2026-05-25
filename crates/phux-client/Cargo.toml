@@ -23,3 +23,5 @@ phux-server.workspace = true
 libghostty-vt.workspace = true
 proptest.workspace = true
 insta.workspace = true
+# Used by `tests/mirror_replay.rs` to build `Cell::text` (a `SmallVec`).
+smallvec.workspace = true
