@@ -13,7 +13,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-phux-protocol.workspace = true
+phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

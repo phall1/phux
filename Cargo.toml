@@ -34,7 +34,7 @@ missing_errors_doc = "allow"
 
 [workspace.dependencies]
 # Internal.
-phux-protocol = { path = "crates/phux-protocol", version = "0.0.0" }
+phux-protocol = { path = "crates/phux-protocol", version = "0.0.1" }
 phux-core = { path = "crates/phux-core", version = "0.0.0" }
 phux-server = { path = "crates/phux-server", version = "0.0.0" }
 phux-client = { path = "crates/phux-client", version = "0.0.0" }
@@ -59,7 +59,7 @@ toml = "0.8"
 # libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "31d1f70004ff80727e36437cd540984f927333ce", default-features = false }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "31d1f70004ff80727e36437cd540984f927333ce", version = "0.1", default-features = false }
 
 [profile.release]
 lto = "fat"
