@@ -21,6 +21,7 @@ Nygard's template][nygard].
 | [0009](./0009-phux-vs-mux-positioning.md) | phux is a protocol substrate; Mux is a product (no overlap) | Accepted |
 | [0010](./0010-frontend-agnostic-tmux-cc-reserved.md) | Frontend-agnostic server; tmux control mode reserved as compat | Accepted (forward-compat); CC adapter not on the roadmap |
 | [0011](./0011-protocol-core-independence.md) | `phux-protocol` and `phux-core` are independent; `IdBridge` is their only meeting point | Accepted |
+| [0012](./0012-binary-split-tree-layout.md) | Window layout is a binary split tree, not n-ary | Accepted |
 
 ## When to write an ADR
 

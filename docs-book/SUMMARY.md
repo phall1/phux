@@ -18,3 +18,4 @@
 - [0009 phux vs Mux Positioning](./ADR/0009-phux-vs-mux-positioning.md)
 - [0010 Frontend-Agnostic Server + tmux CC Reserved](./ADR/0010-frontend-agnostic-tmux-cc-reserved.md)
 - [0011 Protocol/Core Independence + IdBridge](./ADR/0011-protocol-core-independence.md)
+- [0012 Binary Split-Tree Window Layout](./ADR/0012-binary-split-tree-layout.md)
