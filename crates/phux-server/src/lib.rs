@@ -10,5 +10,9 @@
 pub mod grid;
 pub mod input;
 pub mod runtime;
+pub mod state;
 
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
+pub use state::{
+    AttachError, AttachedClient, ClientId, OutboundFrame, PaneInput, ServerState, SharedState,
+};

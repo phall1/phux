@@ -32,6 +32,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
 use tracing::{debug, error, info, warn};
 
+use crate::state::SharedState;
+
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
 
@@ -44,14 +46,24 @@ const STALE_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
 pub struct ServerConfig {
     /// Filesystem path to bind the Unix domain socket at.
     pub socket_path: PathBuf,
+    /// Optional session name to pre-seed in the registry before clients
+    /// connect. When `Some(name)`, the server creates a session by that
+    /// name with one window and one pane during startup (`phux-byc.4`).
+    ///
+    /// Tests use this to launch a server whose registry already contains
+    /// a known session to attach to without first issuing a `COMMAND` (the
+    /// `COMMAND` message is not implemented yet).
+    pub pre_seeded_session: Option<String>,
 }
 
 impl ServerConfig {
-    /// Build a config with `socket_path` resolved via [`default_socket_path`].
+    /// Build a config with `socket_path` resolved via [`default_socket_path`]
+    /// and no pre-seeded session.
     #[must_use]
     pub fn with_default_socket() -> Self {
         Self {
             socket_path: default_socket_path(),
+            pre_seeded_session: None,
         }
     }
 }
@@ -150,10 +162,21 @@ impl ServerRuntime {
         prepare_socket_dir(&socket_path)?;
         handle_existing_socket(&socket_path).await?;
 
+        // Build and pre-seed shared state. The state is the merge point
+        // for multi-client input and the routing table for diffs (see
+        // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
+        let state = SharedState::new();
+        if let Some(name) = self.cfg.pre_seeded_session.as_deref() {
+            state.with_mut(|s| {
+                let (_sid, _wid, _pid) = s.seed_session(name);
+            });
+            debug!(session = name, "pre-seeded session in registry");
+        }
+
         let listener = UnixListener::bind(&socket_path).map_err(ServerError::Bind)?;
         info!(path = %socket_path.display(), "phux-server listening on UDS");
 
-        let result = accept_loop(&listener, shutdown).await;
+        let result = accept_loop(&listener, state, shutdown).await;
 
         // Always try to unlink the socket on the way out; ignore NotFound.
         if let Err(err) = std::fs::remove_file(&socket_path)
@@ -209,7 +232,11 @@ async fn handle_existing_socket(socket_path: &Path) -> Result<(), ServerError> {
 }
 
 /// Core accept loop. Pulled out to keep `run_async` flat.
-async fn accept_loop<F>(listener: &UnixListener, shutdown: F) -> Result<(), ServerError>
+async fn accept_loop<F>(
+    listener: &UnixListener,
+    state: SharedState,
+    shutdown: F,
+) -> Result<(), ServerError>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -224,10 +251,19 @@ where
                 match accept {
                     Ok((stream, _addr)) => {
                         debug!("client connected");
+                        // Allocate the per-client routing id up-front so the
+                        // task can detach itself cleanly on EOF.
+                        let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+                        let task_state = state.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = handle_client(stream).await {
+                            if let Err(err) = handle_client(stream, task_state.clone(), client_id).await {
                                 warn!(error = %err, "client task ended with error");
                             }
+                            // Implicit detach on EOF / error path — matches
+                            // the explicit `DETACH` semantics for the wire
+                            // path that will land alongside the protocol
+                            // variants.
+                            task_state.with_mut(|s| s.detach(client_id));
                         });
                     }
                     Err(err) => {
@@ -244,7 +280,19 @@ where
 
 /// Per-client task. Reads frames in a loop; for each `PING` echoes a `PONG`;
 /// logs and drops anything else for now.
-async fn handle_client(stream: UnixStream) -> io::Result<()> {
+///
+/// `client_id` and `state` are wired in `phux-byc.4`. The `ATTACH` /
+/// `DETACH` / `INPUT_*` routing branches will fill in once the wire
+/// variants land in `phux-protocol` — until then those discriminants
+/// arrive only as undecodable bytes (the protocol decoder rejects them)
+/// and the connection closes, which is the conservative behavior. See the
+/// `phux-byc.4` report for the protocol-crate scope ask.
+async fn handle_client(
+    stream: UnixStream,
+    _state: SharedState,
+    client_id: crate::state::ClientId,
+) -> io::Result<()> {
+    debug!(?client_id, "client task started");
     let (mut reader, mut writer) = stream.into_split();
     let mut header = [0u8; LENGTH_PREFIX];
     let mut payload = BytesMut::new();

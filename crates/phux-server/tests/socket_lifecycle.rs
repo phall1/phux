@@ -33,7 +33,10 @@ fn spawn_server(
     socket_path: PathBuf,
 ) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
     let (tx, rx) = oneshot::channel::<()>();
-    let cfg = ServerConfig { socket_path };
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: None,
+    };
     let handle = tokio::spawn(async move {
         let server = ServerRuntime::new(cfg);
         server
@@ -153,6 +156,7 @@ async fn lifecycle_busy_socket() {
     // Start server B at the same path; it should error with SocketBusy.
     let cfg_b = ServerConfig {
         socket_path: socket_path.clone(),
+        pre_seeded_session: None,
     };
     let server_b = ServerRuntime::new(cfg_b);
     let (_never_tx, never_rx) = oneshot::channel::<()>();
