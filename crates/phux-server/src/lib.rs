@@ -6,3 +6,5 @@
 //! emits diffs to attached clients.
 
 #![warn(missing_docs)]
+
+pub mod grid;

@@ -16,5 +16,12 @@ phux-protocol.workspace = true
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# libghostty-vt is added when we begin the terminal-state implementation.
-# See ADR-0004.
+
+# Pinned to upstream master at 2026-05-22 — latest with link-static, png,
+# log, and kitty-graphics features. Build requires zig 0.15.x on PATH;
+# the nix dev shell provides it.
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "31d1f70004ff80727e36437cd540984f927333ce", default-features = false }
+
+[[example]]
+name = "diff_spike"
+path = "examples/diff_spike.rs"

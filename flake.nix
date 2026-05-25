@@ -4,8 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    fenix = {
-      url = "github:nix-community/fenix";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -15,24 +15,24 @@
       self,
       nixpkgs,
       flake-utils,
-      fenix,
+      rust-overlay,
     }:
     flake-utils.lib.eachDefaultSystem (
       system:
       let
-        pkgs = import nixpkgs { inherit system; };
-        toolchain = fenix.packages.${system}.fromToolchainFile {
-          file = ./rust-toolchain.toml;
-          # First `nix develop` will print the expected hash. Paste it here.
-          sha256 = pkgs.lib.fakeSha256;
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
         };
+        # Read channel/components from rust-toolchain.toml. No hash needed —
+        # rust-overlay derives it from the rustup metadata.
+        toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
       in
       {
         devShells.default = pkgs.mkShell {
           packages = [
             toolchain
-            # libghostty-vt builds itself via Zig; the Rust sys crate fetches
-            # ghostty source and shells out to `zig build`.
+            # libghostty-vt-sys builds the C library via Zig at build time.
             pkgs.zig_0_15
             pkgs.pkg-config
             # Developer ergonomics.
@@ -46,9 +46,7 @@
             pkgs.lldb
           ];
 
-          env = {
-            RUST_BACKTRACE = "1";
-          };
+          env.RUST_BACKTRACE = "1";
 
           shellHook = ''
             echo "phux dev shell — $(rustc --version)"
