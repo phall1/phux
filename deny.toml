@@ -6,7 +6,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# RUSTSEC-2017-0008: `serial` crate is unmaintained. Pulled in transitively
+# by portable-pty (the canonical Rust PTY library; see phux-bc1.2). Not a
+# known vulnerability — just no upstream activity. Tracked; revisit if
+# portable-pty drops the dep or we move to a different PTY backend.
+ignore = ["RUSTSEC-2017-0008"]
 
 [licenses]
 allow = [
