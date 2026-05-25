@@ -20,6 +20,7 @@ Nygard's template][nygard].
 | [0008](./0008-use-libghostty-types-directly.md) | Re-export libghostty-vt's input/style types directly | Accepted |
 | [0009](./0009-phux-vs-mux-positioning.md) | phux is a protocol substrate; Mux is a product (no overlap) | Accepted |
 | [0010](./0010-frontend-agnostic-tmux-cc-reserved.md) | Frontend-agnostic server; tmux control mode reserved as compat | Accepted (forward-compat); CC adapter not on the roadmap |
+| [0011](./0011-protocol-core-independence.md) | `phux-protocol` and `phux-core` are independent; `IdBridge` is their only meeting point | Accepted |
 
 ## When to write an ADR
 

@@ -61,7 +61,7 @@ Two boundaries are load-bearing:
    IDs, length-prefixed TLV, libghostty-derived input/style atoms).
    The two ID spaces meet in `phux-server::id_bridge::IdBridge` and
    nowhere else; this isolates wire stability from in-process
-   refactors and vice versa.
+   refactors and vice versa. See ADR-0011 for the full rationale.
 2. **`phux-protocol` depends on `libghostty-vt` directly** (ADR-0008,
    gated by the `server` cargo feature). The protocol crate re-exports
    libghostty's input and style atoms instead of mirroring them. The
