@@ -273,23 +273,34 @@ Users with strong opinions override it in one line of config.
 
 ### 6.1 The tree
 
-A window's layout is a tree. Internal nodes are splits (horizontal or
-vertical) with weights. Leaves are panes.
+A window's layout is a **binary split tree**: each interior node is a
+split (horizontal or vertical) with a single `ratio` in `(0, 1)` and
+exactly two children; leaves are panes. Three-way and N-way splits
+are represented as nested binary splits. See ADR-0012 for the closed
+decision behind this shape and SPEC §10.3 for the wire form.
 
 ```
-window: split(vertical)
-        ├── pane #0   (weight 1)
-        └── split(horizontal)
-            ├── pane #1   (weight 1)
-            └── pane #2   (weight 2)
+window: split(vertical, ratio = 0.5)
+        ├── pane #0
+        └── split(horizontal, ratio = 0.33)
+            ├── pane #1
+            └── pane #2
 ```
+
+(The first ratio gives pane #0 the top half of the window; the second
+gives pane #1 the left third of the bottom half.)
 
 Tabbed layout nodes are reserved for `SPEC.md` v0.2.
 
 ### 6.2 Resize behavior
 
+> **Status:** Design intent. Not yet implemented as of 2026-05-25.
+> The layout tree, split, kill-pane, and directional focus shipped in
+> `phux-byc.2`; viewport-driven re-flow, minimum-size freezing, and
+> the `resize-pane` command have no tickets filed yet.
+
 When the client viewport (or server-aggregated viewport for multi-client
-sessions) resizes, weights are preserved and dimensions are
+sessions) resizes, split ratios are preserved and dimensions are
 redistributed proportionally. A leaf that hits its minimum size
 (`min_cols = 2`, `min_rows = 1` for the inner content; chrome is per
 client) freezes; remaining space redistributes among non-frozen leaves.
@@ -298,16 +309,27 @@ This is tmux's behavior. It's what users expect.
 
 ### 6.3 Resize commands
 
+> **Status:** Design intent. Not yet implemented as of 2026-05-25.
+> No `resize-pane` action wired into the dispatcher; no ticket filed.
+
 `resize-pane direction=right amount=5` moves the boundary between the
 focused pane and its right neighbor by 5 columns toward the right,
 giving the focused pane more width. Negative amounts shrink.
 
-Resize commands modify weights, not absolute sizes. After a window
-resize, the *ratio* is preserved.
+Resize commands modify the relevant interior node's `ratio` (not
+absolute sizes). After a subsequent window resize, the new ratio is
+preserved.
 
 ---
 
 ## 7. Mouse
+
+> **Status:** Partial. Input types and the per-pane wire encoder ship
+> in `phux-protocol::input::mouse` and `phux-server/src/input/mouse.rs`
+> (per ADR-0006 / ADR-0008). The routing described below — click-to-
+> focus, drag-on-border to resize, scroll-wheel fallthrough, per-pane
+> `set-pane mouse off` — is **not yet implemented** as of 2026-05-25.
+> No tickets filed.
 
 Mouse handling is enabled by default. The defaults:
 
@@ -426,6 +448,11 @@ Every widget kind accepts a `style` table with optional `fg`, `bg`,
 
 ## 9. Hooks
 
+> **Status:** Design intent. Config parsing for `[[hooks.<name>]]`
+> entries ships in `phux-config` (see `schema.rs`); the server-side
+> dispatcher that actually fires hooks on real events is **not yet
+> implemented** as of 2026-05-25. No tickets filed.
+
 Hooks fire at named events. Each hook in the config is an
 array-of-tables (TOML `[[hooks.<name>]]`) of `{ when, action }` pairs.
 
@@ -469,6 +496,10 @@ Hook points (initial):
 ---
 
 ## 10. Recording and playback
+
+> **Status:** Design intent. Not yet implemented as of 2026-05-25.
+> Neither `phux capture --record` nor `phux play` exists; no
+> asciinema writer or reader in the crates today. No tickets filed.
 
 `phux capture --record TARGET --out FILE.cast` records a pane's session
 to an [asciinema] v3-compatible file. v3 is a strict superset of v2 in
