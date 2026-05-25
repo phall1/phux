@@ -760,6 +760,7 @@ dependencies = [
 name = "phux-server"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "criterion",
  "dhat",
  "insta",
@@ -767,6 +768,7 @@ dependencies = [
  "phux-core",
  "phux-protocol",
  "portable-pty",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

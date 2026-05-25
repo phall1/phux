@@ -17,6 +17,8 @@ phux-protocol.workspace = true
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
+bytes.workspace = true
 
 # libghostty-vt is workspace-pinned (see workspace Cargo.toml). Build
 # requires zig 0.15.x on PATH; the nix dev shell provides it.
@@ -28,6 +30,7 @@ criterion.workspace = true
 dhat.workspace = true
 portable-pty.workspace = true
 tokio.workspace = true
+tempfile = "3"
 
 [[example]]
 name = "diff_spike"
