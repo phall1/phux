@@ -17,3 +17,9 @@ phux-protocol.workspace = true
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+phux-server.workspace = true
+libghostty-vt.workspace = true
+proptest.workspace = true
+insta.workspace = true
