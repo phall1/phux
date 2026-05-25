@@ -17,6 +17,8 @@
 
 pub mod diff;
 pub mod ids;
+pub mod input;
+pub mod wire;
 
 pub use diff::{
     Cell, CellFlags, Color, CursorShape, CursorState, DiffOp, Grid, Underline, compute_diff,
