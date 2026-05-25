@@ -14,6 +14,11 @@
 mod error;
 mod schema;
 
+// Wave 5 modules — each owned by its respective subtask:
+pub mod keybind; // phux-nz4.3
+pub mod loader; // phux-nz4.2
+pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Widget is the trait)
+
 pub use error::{ConfigError, byte_offset_to_line_col};
 pub use schema::{
     Action, Config, DefaultsCfg, HookEntry, KeybindingsCfg, StatusCfg, ThemeCfg, Widget,

@@ -728,6 +728,7 @@ name = "phux-config"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "phux-protocol",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
