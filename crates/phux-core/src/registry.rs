@@ -3,8 +3,8 @@
 //! All domain entities live in [`slotmap::SlotMap`]s keyed by the typed IDs
 //! from [`crate::ids`]. The registry preserves parent → child invariants:
 //!
-//! * Removing a [`Pane`] removes it from its parent [`Window`]'s `panes` list
-//!   and from the placeholder [`LayoutNode`].
+//! * Removing a [`Pane`] removes it from its parent [`Window`]'s `panes`
+//!   list and collapses it out of the layout tree.
 //! * Removing a [`Window`] cascades to all of its panes and unlinks the
 //!   window from its parent [`Session`].
 //! * Removing a [`Session`] cascades fully to every window and pane it owns.
@@ -21,7 +21,7 @@ use thiserror::Error;
 use crate::ids::{PaneId, SessionId, WindowId};
 use crate::pane::Pane;
 use crate::session::Session;
-use crate::window::{LayoutNode, Window};
+use crate::window::{SplitDir, Window};
 
 /// Errors returned by the [`Registry`] when a parent ID does not resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -86,7 +86,7 @@ impl Registry {
             id,
             session,
             panes: Vec::new(),
-            layout: LayoutNode::default(),
+            layout: None,
             active: None,
         });
         // Safe: existence checked above.
@@ -101,10 +101,13 @@ impl Registry {
 
     /// Insert a new pane under `window` and return its ID.
     ///
-    /// The pane is appended to the window's `panes` list and the placeholder
-    /// [`LayoutNode`]. If the window had no active pane, the new pane
-    /// becomes active. Default dims are `(80, 24)`; cwd defaults to the
-    /// empty path; title is `None`.
+    /// The pane is appended to the window's `panes` list and inserted into
+    /// the layout tree. If the window was empty the new pane becomes the
+    /// sole [`Leaf`](crate::window::LayoutNode::Leaf); otherwise it is added
+    /// by splitting the currently active pane horizontally at `0.5`
+    /// (tmux-default behavior). If the window had no active pane, the new
+    /// pane becomes active. Default dims are `(80, 24)`; cwd defaults to
+    /// the empty path; title is `None`.
     pub fn new_pane(&mut self, window: WindowId) -> Result<PaneId, RegistryError> {
         if !self.windows.contains_key(window) {
             return Err(RegistryError::UnknownWindow(window));
@@ -117,10 +120,24 @@ impl Registry {
             title: None,
         });
         if let Some(w) = self.windows.get_mut(window) {
+            let target = w.active;
             w.panes.push(pane_id);
-            w.layout.panes.push(pane_id);
-            if w.active.is_none() {
-                w.active = Some(pane_id);
+            match target {
+                None => {
+                    // Window was empty — seed the layout. This cannot fail
+                    // because the layout is None here.
+                    let _ = w.seed_layout(pane_id);
+                    w.active = Some(pane_id);
+                }
+                Some(t) => {
+                    // Split the active pane horizontally at the tmux default
+                    // ratio. If the active pane is somehow not in the tree
+                    // (shouldn't happen), fall back to seeding — but we
+                    // intentionally swallow the error here rather than
+                    // making `new_pane` fallible on layout grounds; the
+                    // proptest invariants would catch any drift.
+                    let _ = w.split(t, pane_id, SplitDir::Horizontal, 0.5);
+                }
             }
         }
         Ok(pane_id)
@@ -131,13 +148,17 @@ impl Registry {
     /// Remove a pane and unlink it from its parent window.
     ///
     /// Returns the removed [`Pane`] if it existed, otherwise `None`. The
-    /// parent window's `panes`, `layout.panes`, and `active` are all updated
-    /// to drop the removed key.
+    /// parent window's `panes`, layout tree, and `active` are all updated
+    /// to drop the removed key. When the removed pane was the only leaf the
+    /// window's `layout` is cleared (the window persists with no panes
+    /// until [`Self::remove_window`] is called).
     pub fn remove_pane(&mut self, id: PaneId) -> Option<Pane> {
         let pane = self.panes.remove(id)?;
         if let Some(w) = self.windows.get_mut(pane.window) {
             w.panes.retain(|p| *p != id);
-            w.layout.panes.retain(|p| *p != id);
+            // Collapse the layout. `LastPane` is fine — the layout becomes
+            // None and the window can be removed by a subsequent call.
+            let _ = w.kill_pane(id);
             if w.active == Some(id) {
                 w.active = w.panes.first().copied();
             }

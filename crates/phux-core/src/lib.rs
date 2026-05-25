@@ -17,4 +17,4 @@ pub use ids::{PaneId, SessionId, WindowId};
 pub use pane::Pane;
 pub use registry::{Registry, RegistryError};
 pub use session::Session;
-pub use window::{LayoutNode, Window};
+pub use window::{Direction, LayoutError, LayoutNode, Rect, SplitDir, Window};

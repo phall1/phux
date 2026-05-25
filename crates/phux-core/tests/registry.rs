@@ -1,6 +1,6 @@
 //! Integration tests for [`phux_core::Registry`].
 
-use phux_core::{PaneId, Registry, RegistryError, SessionId, WindowId};
+use phux_core::{LayoutNode, PaneId, Registry, RegistryError, SessionId, WindowId};
 
 #[test]
 fn new_session_window_pane_chain_yields_distinct_lookups() {
@@ -23,7 +23,8 @@ fn new_session_window_pane_chain_yields_distinct_lookups() {
     let window = reg.window(w).expect("window exists");
     assert_eq!(window.session, s);
     assert_eq!(window.panes, vec![p]);
-    assert_eq!(window.layout.panes, vec![p]);
+    // A single-pane window's layout is a Leaf for that pane.
+    assert_eq!(window.layout, Some(LayoutNode::Leaf(p)));
     assert_eq!(window.active, Some(p));
 }
 
@@ -61,8 +62,9 @@ fn remove_pane_invalidates_key_and_unlinks_from_window() {
 
     let window = reg.window(w).expect("window exists");
     assert!(!window.panes.contains(&p1));
-    assert!(!window.layout.panes.contains(&p1));
     assert_eq!(window.panes, vec![p2]);
+    // Layout collapsed the split — p2 is now the sole Leaf.
+    assert_eq!(window.layout, Some(LayoutNode::Leaf(p2)));
     // Active rolled forward to the remaining pane.
     assert_eq!(window.active, Some(p2));
 }
@@ -78,6 +80,8 @@ fn remove_pane_clears_active_when_last() {
     let window = reg.window(w).expect("window exists");
     assert_eq!(window.active, None);
     assert!(window.panes.is_empty());
+    // Layout is cleared when the last pane is removed.
+    assert!(window.layout.is_none());
 }
 
 #[test]
@@ -243,7 +247,16 @@ proptest! {
                 for wid in &session.windows {
                     let window = reg.window(*wid).expect("session points at live window");
                     prop_assert_eq!(window.session, sid);
-                    prop_assert_eq!(&window.panes, &window.layout.panes);
+                    // Layout leaves match the window's pane set.
+                    let leaves: Vec<phux_core::PaneId> = window
+                        .layout
+                        .as_ref()
+                        .map(LayoutNode::leaves)
+                        .unwrap_or_default();
+                    let pane_set: std::collections::HashSet<_> = window.panes.iter().copied().collect();
+                    let leaf_set: std::collections::HashSet<_> = leaves.iter().copied().collect();
+                    prop_assert_eq!(pane_set, leaf_set);
+                    prop_assert_eq!(leaves.len(), window.panes.len());
                     for pid in &window.panes {
                         let pane = reg.pane(*pid).expect("window points at live pane");
                         prop_assert_eq!(pane.window, *wid);
