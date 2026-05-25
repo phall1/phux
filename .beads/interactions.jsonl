@@ -10,3 +10,4 @@
 {"id":"int-f8d5b00c","kind":"field_change","created_at":"2026-05-25T18:13:18.513086Z","actor":"phall1","issue_id":"phux-6yl.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"wave 3 swarm"}}
 {"id":"int-7457eb74","kind":"field_change","created_at":"2026-05-25T18:13:18.801378Z","actor":"phall1","issue_id":"phux-bc1.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"wave 3 swarm"}}
 {"id":"int-7d351587","kind":"field_change","created_at":"2026-05-25T18:13:19.088472Z","actor":"phall1","issue_id":"phux-a38.2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"wave 3 swarm"}}
+{"id":"int-33dd9ba0","kind":"field_change","created_at":"2026-05-25T18:23:41.646218Z","actor":"phall1","issue_id":"phux-6yl","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"all 7 subtasks landed via waves 1-3"}}
