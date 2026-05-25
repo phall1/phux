@@ -93,7 +93,7 @@ phux kill =                   # kill last-focused (within whatever the command t
 
 Config is read in order, later files overriding earlier:
 
-1. `$XDG_CONFIG_HOME/phux/config.kdl` (or `~/.config/phux/config.kdl`)
+1. `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`)
 2. `$PHUX_CONFIG` if set, replacing the above (used by `phux --config`)
 
 Per-server-instance state lives at
@@ -111,46 +111,68 @@ Per-server-instance state lives at
 
 ### 4.2 Format
 
-Config is [KDL]. We picked KDL over TOML because phux's config is
-hierarchical with attribute-bearing nodes (keybindings carrying both an
-action and parameters; layouts carrying both structure and weights),
-and KDL handles that shape natively without `[[table.array]]` gymnastics.
+Config is **TOML**. We picked TOML over KDL because:
 
-[KDL]: https://kdl.dev/
+- TOML is ubiquitous in the Rust ecosystem and the broader tooling
+  world; every developer and every LLM-based assistant reads and writes
+  it fluently. KDL's syntactic niceties are real but don't outweigh
+  TOML's leverage in an environment where humans *and* agents are both
+  expected to edit configuration routinely.
+- Our config tree is shallow enough that TOML's idioms
+  (`[table]`, `[[array.of.tables]]`, inline tables for parameterized
+  values) cover it cleanly. We avoid the deep nesting that makes TOML
+  awkward.
 
 A minimal config:
 
-```kdl
-defaults {
-    shell "/bin/zsh"
-    history-limit 50000
-    refresh-rate 60
-}
+```toml
+[defaults]
+shell          = "/bin/zsh"
+history-limit  = 50000
+refresh-rate   = 60
 
-keybindings prefix="ctrl+space" {
-    "c" new-pane direction=horizontal
-    "v" new-pane direction=vertical
-    "x" kill-pane
-    "n" new-window
-    "tab" next-window
-    "h" focus-pane direction=left
-    "j" focus-pane direction=down
-    "k" focus-pane direction=up
-    "l" focus-pane direction=right
-    "d" detach
-    "shift+r" rename-window
-}
+[keybindings]
+prefix = "ctrl+space"
 
-status {
-    left "{session}"
-    center "{windows}"
-    right "{date %H:%M}"
-}
+# Bindings under the prefix.
+# An action is either a bare string (no parameters) or an inline
+# table whose `action` field names the action and remaining fields
+# pass parameters.
+[keybindings.prefix-table]
+"c"        = { action = "new-pane", direction = "horizontal" }
+"v"        = { action = "new-pane", direction = "vertical" }
+"x"        = "kill-pane"
+"n"        = "new-window"
+"tab"      = "next-window"
+"h"        = { action = "focus-pane", direction = "left" }
+"j"        = { action = "focus-pane", direction = "down" }
+"k"        = { action = "focus-pane", direction = "up" }
+"l"        = { action = "focus-pane", direction = "right" }
+"d"        = "detach"
+"shift+r"  = "rename-window"
 
-hook pane-exit {
-    on exit-code=0  noop
-    on exit-code=*  notify "pane {pane} exited with {exit-code}"
-}
+# Global table: bindings that fire without a prefix.
+# Empty by default; opt in to hyper/super combos if your outer
+# terminal forwards them.
+[keybindings.global]
+# "hyper+left" = { action = "focus-pane", direction = "left" }
+
+[status]
+left   = ["session"]
+center = ["windows"]
+right  = [{ kind = "clock", format = "%H:%M" }]
+
+[[hooks.pane-exit]]
+when   = { exit-code = 0 }
+action = "noop"
+
+[[hooks.pane-exit]]
+when   = { exit-code = "*" }
+action = { kind = "notify", text = "pane {pane} exited with {exit-code}" }
+
+[theme]
+fg = "#cdd6f4"
+bg = "#1e1e2e"
 ```
 
 ### 4.3 Reloading
@@ -168,22 +190,24 @@ keybindings are gone" papercuts.
 
 We support two binding tables, both always present:
 
-- **Prefix table.** Bindings under `keybindings prefix="..."` fire after
-  the prefix key has been pressed. This is tmux's familiar model.
-- **Global table.** Bindings under `keybindings global` fire any time.
-  Reserved for combinations unlikely to conflict with inner programs —
-  in practice, ones using `super`, `hyper`, or `meta` modifiers.
+- **Prefix table** (`[keybindings.prefix-table]`): bindings that fire
+  after the prefix key has been pressed. This is tmux's familiar model.
+- **Global table** (`[keybindings.global]`): bindings that fire any
+  time. Reserved for combinations unlikely to conflict with inner
+  programs — in practice, ones using `super`, `hyper`, or `meta`
+  modifiers.
 
-```kdl
-keybindings global {
-    "hyper+left"  focus-pane direction=left
-    "hyper+right" focus-pane direction=right
-}
+```toml
+[keybindings]
+prefix = "ctrl+space"
 
-keybindings prefix="ctrl+space" {
-    "c" new-pane direction=horizontal
-    // ...
-}
+[keybindings.global]
+"hyper+left"  = { action = "focus-pane", direction = "left" }
+"hyper+right" = { action = "focus-pane", direction = "right" }
+
+[keybindings.prefix-table]
+"c" = { action = "new-pane", direction = "horizontal" }
+# ...
 ```
 
 The global table is empty by default — no global bindings ship out of
@@ -199,11 +223,10 @@ named identifiers with typed parameters.
 
 To shell out, use the explicit `run` action:
 
-```kdl
-keybindings prefix="ctrl+space" {
-    "g" run "lazygit"                   // run in a new pane
-    "shift+g" run --in=. "git status"   // run in current pane
-}
+```toml
+[keybindings.prefix-table]
+"g"        = { action = "run", command = "lazygit" }          # in a new pane
+"shift+g"  = { action = "run", command = "git status", in = "." }  # in current pane
 ```
 
 ### 5.3 Defaults
@@ -307,66 +330,124 @@ We do not ship copy-mode mouse selection — see §11.
 
 ## 8. Status bar
 
-phux ships a minimal built-in status bar with three slots: `left`,
-`center`, `right`. Each slot accepts:
+### 8.1 Architecture: widget-first from day one
 
-- A static template string with `{variable}` interpolation.
-- An external program (`exec "..."`) re-run on a configurable interval.
-- The literal `none` to leave the slot blank.
+The status bar is **rendered entirely client-side**. A GUI client may
+ignore it and render its own chrome; the TUI client composes it from
+widgets and draws it on the bottom row of the outer terminal.
 
-```kdl
-status {
-    left   "{session}"
-    center "{windows}"
-    right  exec "~/.local/bin/phux-status-right" interval="5s"
-}
+Every slot's contents are a list of **widgets**. A widget is a typed
+thing that produces styled text. The default config looks short because
+a bare string is shorthand for a no-parameters widget:
+
+```toml
+[status]
+left   = ["session"]                                    # → [{ kind = "session" }]
+center = ["windows"]
+right  = [{ kind = "clock", format = "%H:%M" }]
 ```
 
-Built-in variables:
+There are three categories of widgets:
 
-| Variable                      | Value                                 |
-|-------------------------------|---------------------------------------|
-| `{session}`                   | current session name                  |
-| `{window}`                    | current window name                   |
-| `{windows}`                   | "0:edit* 1:build 2:logs" (active = *) |
-| `{pane}`                      | current pane id                       |
-| `{date FMT}`                  | strftime-formatted current time       |
-| `{host}`                      | `hostname()` result                   |
-| `{cwd}`                       | current pane's working directory      |
-| `{exit FMT}`                  | last command exit if known (OSC 133)  |
+1. **Server facts.** The server already publishes session names, window
+   lists, focused pane, cwd (via OSC 7), last command exit (via OSC
+   133). These are widget kinds (`session`, `windows`, `cwd`, `exit`,
+   etc.) backed by data the server pushes anyway.
+2. **Client-local widgets.** Things derivable on the client without
+   server help: `clock`, `mode`, `key-indicator` (last key chord).
+3. **`exec` widgets.** The client runs the named program on the
+   configured interval and renders its stdout (parsed for SGR if it
+   contains ANSI). These run per-client; a clipboard daemon, a battery
+   percentage, etc.
 
-The status bar is one row at the bottom. It is not configurable to be
-multi-row. If you need more, write a program that occupies a pane.
+```toml
+right = [
+    { kind = "exec", command = "~/.local/bin/battery", interval = "30s" },
+    { kind = "text", value = " | " },
+    { kind = "clock", format = "%H:%M" },
+]
+```
 
-This is a deliberate scoping decision: we ship a status bar that is
-useful out of the box and trivially overridable for everyone who has
-ever had Strong Opinions about status bars. We do not ship a status bar
-DSL. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+### 8.2 Why widget-first
+
+The scoping decision in `CONTRIBUTING.md` is that we will not ship a
+status bar *DSL* — no `if/else` mini-language, no format-template
+expression engine. The widget system gets us extensibility without
+becoming a template interpreter: arbitrary logic lives in `exec`
+widgets, which are real programs in real languages, supervised by the
+client. The widget contract itself is small and typed.
+
+This shape costs us almost nothing on day one (the default config is
+three names in three lists), and means we never have to do an
+architectural revision to grow a status bar plugin story.
+
+### 8.3 Built-in widget kinds
+
+| Kind            | Parameters                                                   |
+|-----------------|--------------------------------------------------------------|
+| `session`       | `format?` (default: `"{name}"`)                              |
+| `window`        | `format?` (default: `"{name}"`)                              |
+| `windows`       | `active-mark?`, `inactive-format?`, `active-format?`         |
+| `pane`          | `format?`                                                    |
+| `cwd`           | `format?`, `truncate?` (chars)                               |
+| `exit`          | `format?` (last command exit code, OSC 133)                  |
+| `clock`         | `format` (strftime)                                          |
+| `host`          | `format?`                                                    |
+| `mode`          | `format?` (current input mode)                               |
+| `key-indicator` | shows the last key/chord pressed; reserved for v0.2          |
+| `text`          | `value` (literal styled text)                                |
+| `spacer`        | flexible expanding space; no parameters                      |
+| `exec`          | `command`, `interval?` (default `5s`), `parse-ansi?` (true)  |
+
+Every widget kind accepts a `style` table with optional `fg`, `bg`,
+`bold`, `italic`, `underline` keys.
+
+### 8.4 Refresh and ordering
+
+- Server-fact widgets re-render on the relevant server event (window
+  rename, focus change, OSC 7/133).
+- Client-local widgets with no interval re-render only on event.
+  `clock` re-renders every minute by default; `interval` overrides.
+- `exec` widgets re-render every `interval`. The client batches
+  re-renders to once per frame (max ~60 Hz).
+- Slot contents render left-to-right with no implicit separator. Use
+  `text` widgets for separators.
+
+### 8.5 What the status bar is not
+
+- Not multi-row. One row, bottom of the outer terminal. If you need
+  more, dedicate a pane.
+- Not themable via a styling engine. Per-widget `style` tables only.
+- Not server-rendered. Every client owns its chrome. This is what
+  enables a future GUI client with native chrome to coexist with the
+  TUI client trivially.
 
 ---
 
 ## 9. Hooks
 
-Hooks fire at named events. Each hook in the config maps a hook name to
-an action.
+Hooks fire at named events. Each hook in the config is an
+array-of-tables (TOML `[[hooks.<name>]]`) of `{ when, action }` pairs.
 
-```kdl
-hook after-new-pane {
-    on cwd-startswith="/Users/phall/work"  message "in work tree"
-}
+```toml
+[[hooks.after-new-pane]]
+when   = { cwd-startswith = "/Users/phall/work" }
+action = { kind = "message", text = "in work tree" }
 
-hook pane-exit {
-    on exit-code=0  noop
-    on exit-code=*  run "say 'pane exited'"
-}
+[[hooks.pane-exit]]
+when   = { exit-code = 0 }
+action = "noop"
+
+[[hooks.pane-exit]]
+when   = { exit-code = "*" }
+action = { kind = "run", command = "say 'pane exited'" }
 ```
 
 The hook system is intentionally small:
 
-- **Match clauses** (`on key=value`) are exact-string or simple pattern
-  matches. No regex (yet); no expression language.
-- **First match wins.** Falls through to a `on default` clause if
-  present.
+- **Match clauses** (`when = { key = value }`) are exact-string or
+  simple glob matches (`"*"`). No regex; no expression language.
+- **First match wins** per hook event. Subsequent entries don't fire.
 - **Async by default.** Hook actions fire and the server moves on. Sync
   hooks (where the result blocks the trigger) are reserved for v0.2.
 
