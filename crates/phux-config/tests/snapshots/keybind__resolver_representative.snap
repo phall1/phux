@@ -1,0 +1,70 @@
+---
+source: crates/phux-config/tests/keybind.rs
+expression: r
+---
+Resolver {
+    root: TrieNode {
+        action: None,
+        children: {
+            KeyChord {
+                modifiers: Mods(
+                    CTRL,
+                ),
+                key: B,
+            }: TrieNode {
+                action: None,
+                children: {
+                    KeyChord {
+                        modifiers: Mods(
+                            0x0,
+                        ),
+                        key: C,
+                    }: TrieNode {
+                        action: Some(
+                            ResolvedAction {
+                                action: "new-window",
+                                args: {},
+                            },
+                        ),
+                        children: {},
+                    },
+                    KeyChord {
+                        modifiers: Mods(
+                            0x0,
+                        ),
+                        key: D,
+                    }: TrieNode {
+                        action: Some(
+                            ResolvedAction {
+                                action: "detach",
+                                args: {},
+                            },
+                        ),
+                        children: {},
+                    },
+                },
+            },
+            KeyChord {
+                modifiers: Mods(
+                    ALT,
+                ),
+                key: Q,
+            }: TrieNode {
+                action: Some(
+                    ResolvedAction {
+                        action: "quit",
+                        args: {},
+                    },
+                ),
+                children: {},
+            },
+        },
+    },
+    prefix: KeyChord {
+        modifiers: Mods(
+            CTRL,
+        ),
+        key: B,
+    },
+    cursor: None,
+}
