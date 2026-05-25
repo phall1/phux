@@ -1,0 +1,498 @@
+# Design
+
+This document describes phux's **product surface**: the things the user
+sees and configures. It is not normative — `SPEC.md` is. Where this
+document conflicts with `SPEC.md`, the spec wins; file an issue.
+
+The wire protocol is in [`SPEC.md`](./SPEC.md). The internal architecture
+is in [`ARCHITECTURE.md`](./ARCHITECTURE.md). This document covers
+everything between: how users invoke phux, configure it, bind keys to it,
+read its status output, and extend it.
+
+---
+
+## 1. CLI surface
+
+phux is a single binary with subcommands. The naked invocation —
+`phux` — is the common case: attach to the user's server, lazily
+spawning it if it isn't running.
+
+```
+phux                          # attach to default session, autostart server
+phux attach [session]         # attach explicitly; session optional
+phux new [-s NAME] [-c CWD] [--] [COMMAND...]
+                              # create a session
+phux ls                       # list sessions (alias: list-sessions)
+phux windows [-s SESSION]     # list windows
+phux panes [-w WINDOW]        # list panes
+phux kill TARGET              # kill session/window/pane by selector
+phux send TARGET KEYS...      # send keys to a pane (scripting)
+phux capture TARGET           # dump pane grid (for piping/scripting)
+phux server [--stdio] [-f]    # run server in foreground (for ssh/stdio)
+phux config [show|edit|path]  # config inspection
+phux messages                 # recent server-emitted messages for this user
+phux version                  # print version
+phux help [COMMAND]
+```
+
+All subcommands accept `--target` / `-t` consistently where applicable.
+Output is human-readable by default and JSON with `--json` where it
+makes sense (`ls`, `windows`, `panes`, `capture`, `config show`,
+`server status`).
+
+---
+
+## 2. The user model
+
+Three nouns. Same as tmux. Don't reinvent vocabulary that users already
+know.
+
+- **Session** — top-level container. Named. Persists across client
+  disconnects. Lives until explicitly killed or until the server exits.
+- **Window** — tab within a session. Numbered from 0 within its session;
+  optionally named.
+- **Pane** — leaf in a window's layout. One PTY, one terminal grid, one
+  shell or command.
+
+A **client** is an attached frontend (TUI or GUI). Clients are
+transient; they are not part of the session model. The protocol exposes
+`ClientId` only for the duration of a connection.
+
+---
+
+## 3. Selectors
+
+A selector identifies a session, window, or pane. Selectors appear in
+CLI arguments, keybinding actions, and hook arguments.
+
+| Selector              | Meaning                                          |
+|-----------------------|--------------------------------------------------|
+| `.`                   | current — the client's focused pane/window/session |
+| `name`                | session by name                                  |
+| `name:N`              | session `name`, window index `N`                 |
+| `name:N.M`            | session `name`, window `N`, pane index `M`       |
+| `name:tag`            | session `name`, window whose name is `tag`       |
+| `@N`                  | opaque ID (pane/window/session) — stable for the |
+|                       | server's lifetime                                |
+| `=`                   | last (most recently focused)                     |
+
+The CLI infers what kind of selector is expected from the command. When
+ambiguity matters, prefer the most specific form. Example:
+
+```sh
+phux kill work:edit.2         # second pane in window "edit" of session "work"
+phux send @42 "ls\n"          # by stable ID
+phux kill =                   # kill last-focused (within whatever the command targets)
+```
+
+---
+
+## 4. Configuration
+
+### 4.1 File location
+
+Config is read in order, later files overriding earlier:
+
+1. `$XDG_CONFIG_HOME/phux/config.kdl` (or `~/.config/phux/config.kdl`)
+2. `$PHUX_CONFIG` if set, replacing the above (used by `phux --config`)
+
+Per-server-instance state lives at
+`$XDG_STATE_HOME/phux/` (default `~/.local/state/phux/`):
+
+```
+~/.local/state/phux/
+├── socket             # SOCK_STREAM, perms 0600
+├── server.pid
+├── log/
+│   └── server.log     # tracing output, rotated daily
+└── journal/
+    └── <pane_id>.log  # per-pane PTY journal, capped ring (default 10 MiB)
+```
+
+### 4.2 Format
+
+Config is [KDL]. We picked KDL over TOML because phux's config is
+hierarchical with attribute-bearing nodes (keybindings carrying both an
+action and parameters; layouts carrying both structure and weights),
+and KDL handles that shape natively without `[[table.array]]` gymnastics.
+
+[KDL]: https://kdl.dev/
+
+A minimal config:
+
+```kdl
+defaults {
+    shell "/bin/zsh"
+    history-limit 50000
+    refresh-rate 60
+}
+
+keybindings prefix="ctrl+space" {
+    "c" new-pane direction=horizontal
+    "v" new-pane direction=vertical
+    "x" kill-pane
+    "n" new-window
+    "tab" next-window
+    "h" focus-pane direction=left
+    "j" focus-pane direction=down
+    "k" focus-pane direction=up
+    "l" focus-pane direction=right
+    "d" detach
+    "shift+r" rename-window
+}
+
+status {
+    left "{session}"
+    center "{windows}"
+    right "{date %H:%M}"
+}
+
+hook pane-exit {
+    on exit-code=0  noop
+    on exit-code=*  notify "pane {pane} exited with {exit-code}"
+}
+```
+
+### 4.3 Reloading
+
+Config reloads are explicit, not automatic. `phux config reload` re-reads
+the config file and applies it server-wide. We do not watch the file
+because watch-reload introduces a class of "saved-mid-edit, now my
+keybindings are gone" papercuts.
+
+---
+
+## 5. Keybindings
+
+### 5.1 The model
+
+We support two binding tables, both always present:
+
+- **Prefix table.** Bindings under `keybindings prefix="..."` fire after
+  the prefix key has been pressed. This is tmux's familiar model.
+- **Global table.** Bindings under `keybindings global` fire any time.
+  Reserved for combinations unlikely to conflict with inner programs —
+  in practice, ones using `super`, `hyper`, or `meta` modifiers.
+
+```kdl
+keybindings global {
+    "hyper+left"  focus-pane direction=left
+    "hyper+right" focus-pane direction=right
+}
+
+keybindings prefix="ctrl+space" {
+    "c" new-pane direction=horizontal
+    // ...
+}
+```
+
+The global table is empty by default — no global bindings ship out of
+the box because we cannot assume the user's outer terminal forwards
+hyper/super at all. Users on Ghostty can opt in.
+
+### 5.2 The dispatcher
+
+Bindings invoke **actions**. Actions are typed `Command`s from `SPEC.md`
+§11 plus a small set of client-side actions (detach, message-prompt,
+copy-selection-to-clipboard). They are *not* shell strings; they are
+named identifiers with typed parameters.
+
+To shell out, use the explicit `run` action:
+
+```kdl
+keybindings prefix="ctrl+space" {
+    "g" run "lazygit"                   // run in a new pane
+    "shift+g" run --in=. "git status"   // run in current pane
+}
+```
+
+### 5.3 Defaults
+
+The defaults ship with `prefix="ctrl+space"`. We chose `ctrl+space`
+because:
+
+- It does not conflict with readline (`C-a` begin-line, `C-b` back-char,
+  `C-e` end-line are all common).
+- It does not conflict with screen (`C-a`).
+- It does not conflict with vim (`C-w` is window, but `C-Space` is
+  free or used as completion which we tolerate).
+- It is two physical keys, no Greek-key chord.
+
+Users with strong opinions override it in one line of config.
+
+### 5.4 Action catalog (initial)
+
+| Action               | Parameters                            |
+|----------------------|---------------------------------------|
+| `new-session`        | `name`, `cwd`, `command`              |
+| `new-window`         | `cwd`, `command`                      |
+| `new-pane`           | `direction`, `target`, `cwd`, `command` |
+| `kill-pane`          | `target?`                             |
+| `kill-window`        | `target?`                             |
+| `kill-session`       | `target?`                             |
+| `rename-window`      | `target?`, `prompt?`                  |
+| `rename-session`     | `target?`, `prompt?`                  |
+| `focus-pane`         | `direction` or `target`               |
+| `focus-window`       | `direction` or `index` or `target`    |
+| `move-pane`          | `target`, `position`                  |
+| `resize-pane`        | `direction`, `amount`                 |
+| `next-window`        |                                       |
+| `previous-window`    |                                       |
+| `detach`             |                                       |
+| `run`                | `command`, `in?` (pane to run in)     |
+| `message`            | `text`                                |
+| `command-prompt`     | (interactive command entry)           |
+| `noop`               |                                       |
+
+---
+
+## 6. Layout
+
+### 6.1 The tree
+
+A window's layout is a tree. Internal nodes are splits (horizontal or
+vertical) with weights. Leaves are panes.
+
+```
+window: split(vertical)
+        ├── pane #0   (weight 1)
+        └── split(horizontal)
+            ├── pane #1   (weight 1)
+            └── pane #2   (weight 2)
+```
+
+Tabbed layout nodes are reserved for `SPEC.md` v0.2.
+
+### 6.2 Resize behavior
+
+When the client viewport (or server-aggregated viewport for multi-client
+sessions) resizes, weights are preserved and dimensions are
+redistributed proportionally. A leaf that hits its minimum size
+(`min_cols = 2`, `min_rows = 1` for the inner content; chrome is per
+client) freezes; remaining space redistributes among non-frozen leaves.
+
+This is tmux's behavior. It's what users expect.
+
+### 6.3 Resize commands
+
+`resize-pane direction=right amount=5` moves the boundary between the
+focused pane and its right neighbor by 5 columns toward the right,
+giving the focused pane more width. Negative amounts shrink.
+
+Resize commands modify weights, not absolute sizes. After a window
+resize, the *ratio* is preserved.
+
+---
+
+## 7. Mouse
+
+Mouse handling is enabled by default. The defaults:
+
+| Event                    | Action                                |
+|--------------------------|---------------------------------------|
+| Click in pane            | Focus the pane                        |
+| Click on pane border     | (no-op; reserved for future)          |
+| Drag on pane border      | Resize the boundary                   |
+| Scroll wheel in pane     | If the inner program has mouse mode,  |
+|                          | forward; else scroll pane scrollback  |
+| Right-click              | Pass through to inner program         |
+| Click on status bar slot | Slot-defined; default no-op           |
+
+Mouse handling is configurable per-pane: `set-pane mouse off` for a pane
+that wants raw bytes (e.g. a TUI that does its own mouse handling).
+
+We do not ship copy-mode mouse selection — see §11.
+
+---
+
+## 8. Status bar
+
+phux ships a minimal built-in status bar with three slots: `left`,
+`center`, `right`. Each slot accepts:
+
+- A static template string with `{variable}` interpolation.
+- An external program (`exec "..."`) re-run on a configurable interval.
+- The literal `none` to leave the slot blank.
+
+```kdl
+status {
+    left   "{session}"
+    center "{windows}"
+    right  exec "~/.local/bin/phux-status-right" interval="5s"
+}
+```
+
+Built-in variables:
+
+| Variable                      | Value                                 |
+|-------------------------------|---------------------------------------|
+| `{session}`                   | current session name                  |
+| `{window}`                    | current window name                   |
+| `{windows}`                   | "0:edit* 1:build 2:logs" (active = *) |
+| `{pane}`                      | current pane id                       |
+| `{date FMT}`                  | strftime-formatted current time       |
+| `{host}`                      | `hostname()` result                   |
+| `{cwd}`                       | current pane's working directory      |
+| `{exit FMT}`                  | last command exit if known (OSC 133)  |
+
+The status bar is one row at the bottom. It is not configurable to be
+multi-row. If you need more, write a program that occupies a pane.
+
+This is a deliberate scoping decision: we ship a status bar that is
+useful out of the box and trivially overridable for everyone who has
+ever had Strong Opinions about status bars. We do not ship a status bar
+DSL. See [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
+---
+
+## 9. Hooks
+
+Hooks fire at named events. Each hook in the config maps a hook name to
+an action.
+
+```kdl
+hook after-new-pane {
+    on cwd-startswith="/Users/phall/work"  message "in work tree"
+}
+
+hook pane-exit {
+    on exit-code=0  noop
+    on exit-code=*  run "say 'pane exited'"
+}
+```
+
+The hook system is intentionally small:
+
+- **Match clauses** (`on key=value`) are exact-string or simple pattern
+  matches. No regex (yet); no expression language.
+- **First match wins.** Falls through to a `on default` clause if
+  present.
+- **Async by default.** Hook actions fire and the server moves on. Sync
+  hooks (where the result blocks the trigger) are reserved for v0.2.
+
+Hook points (initial):
+
+| Hook                  | Fires after / on                         |
+|-----------------------|------------------------------------------|
+| `after-new-session`   | session creation                         |
+| `after-new-window`    | window creation                          |
+| `after-new-pane`      | pane creation, before exec               |
+| `after-kill-pane`     | pane removed from layout                 |
+| `pane-exit`           | inner process exit                       |
+| `client-attached`     | client attach completed                  |
+| `client-detached`     | client detach (any reason)               |
+| `focus-changed`       | any client changes focus                 |
+| `output-silenced`     | configurable silence threshold elapsed   |
+| `output-active`       | first byte after a silence               |
+
+---
+
+## 10. Recording and playback
+
+`phux capture --record TARGET --out FILE.cast` records a pane's session
+to an [asciinema] v3-compatible file. v3 is a strict superset of v2 in
+the features we need; players that only know v2 read v3 with reduced
+fidelity rather than failing.
+
+Replay is `phux play FILE.cast` — a thin wrapper that streams the cast
+into a new pane (via INPUT_RAW). We do not ship a full player; the
+ecosystem has plenty.
+
+We do not record per-keystroke timing client-side; recordings reflect
+output as the server emitted it. This matches what users expect and
+keeps the recording infrastructure server-local.
+
+[asciinema]: https://asciinema.org/
+
+---
+
+## 11. Things we explicitly do not ship
+
+Repeating from `CONTRIBUTING.md` because the design decisions here lean
+on these:
+
+- **No embedded scripting language.** No tmux-style `if-shell`, no
+  format-template DSL with conditionals. Templates are interpolation
+  only.
+- **No copy-mode reimplementation.** No vi/emacs cursor mode, no
+  search, no in-grid selection. We expose grid state and stay out of
+  the OS clipboard's way. Modern terminals (Ghostty, kitty, wezterm,
+  iTerm2) handle selection well; we delegate.
+- **No multi-row status bar, no widgets, no themes-as-config.** The
+  status bar is one row. Themes are color slots, not a styling engine.
+- **No plugin system on day one.** Hooks are typed events. Extensions
+  shell out.
+- **No homegrown crypto.** Transport is the right layer; SSH and Unix
+  socket perms cover it.
+
+---
+
+## 12. Defaults table
+
+The shipped defaults, in one place:
+
+| Setting                       | Default                                  |
+|-------------------------------|------------------------------------------|
+| Shell                         | `$SHELL`, fallback `/bin/sh`             |
+| History limit per pane        | 50 000 lines                             |
+| Pane refresh rate cap         | 60 Hz                                    |
+| Backpressure threshold        | 32 unacked frames                        |
+| Journal size cap (per pane)   | 10 MiB ring                              |
+| Prefix key                    | `ctrl+space`                             |
+| Pane on PTY exit              | close                                    |
+| Mouse                         | on                                       |
+| Status bar                    | `{session}` / `{windows}` / `{date %H:%M}` |
+| Activity / silence thresholds | activity off; silence 2 min when enabled |
+| Resize on attach              | aggregate min bounding box per session   |
+| Cursor blink                  | follow inner program request             |
+
+---
+
+## 13. First-time use
+
+A new user, fresh install, no config file:
+
+```sh
+$ phux
+# spawns server, creates session "default" with one window/one pane
+# running $SHELL in $PWD
+# attaches the client and renders
+# status bar shows "default | 0:shell | 21:14"
+# prefix is ctrl+space (advertised once in a startup message)
+$ ctrl+space c    # new pane horizontally
+$ ctrl+space d    # detach
+$ phux            # re-attach to "default"; full state replayed
+```
+
+Discoverability: at startup the first time, the client prints one
+non-intrusive message to the status bar:
+
+```
+phux 0.1 — prefix ctrl+space, ? for help, d to detach
+```
+
+That message disappears after 5 seconds or any keystroke, whichever
+first.
+
+Beyond that, `?` after the prefix opens a popup listing every binding.
+The popup is rendered server-side (a temporary overlay pane) so
+keyboard users and GUI clients both see the same list.
+
+---
+
+## 14. Out of scope, but on the radar
+
+These are not in v0.1 but the design accommodates them so they don't
+require breaking changes:
+
+- **Resilient remote transport** (zmosh-style UDP/SSP). Hooks into the
+  `Transport` abstraction in `SPEC.md` §4.
+- **Native GUI client** (libghostty surface). Talks the same protocol;
+  see ADR-0002.
+- **Multi-user shared sessions.** Today's protocol already supports
+  multiple clients per session; ACL and identity will be a future
+  authenticated transport addition.
+- **Tabbed layouts** (nested tab containers). `SPEC.md` §10.3 reserves
+  the `TABBED` layout node.
+- **Image protocols** (sixel, kitty graphics). `SPEC.md` §8.3 reserves
+  `IMAGE` diff ops.

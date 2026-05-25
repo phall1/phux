@@ -112,21 +112,196 @@ struct Client {
 
 ## Threading and I/O
 
-**One async runtime, single-threaded by default.** A terminal multiplexer
-is I/O-bound, not CPU-bound; the work is poll-many-fds-fanout-bytes.
-A single-threaded executor (or a hand-rolled `mio` loop) is simpler and
-plenty fast.
+**One `tokio` current-thread runtime.** A terminal multiplexer is I/O-bound,
+not CPU-bound; the work is poll-many-fds-fanout-bytes. A single-threaded
+executor is simpler and plenty fast. We pick tokio specifically over `mio`
+or `polling` because the ecosystem we need (tokio-uds for Unix sockets,
+signal-hook-tokio for signals, tokio-util frame codecs) is mature and not
+worth reinventing. We do not use the multi-threaded runtime: nothing in the
+server's hot path benefits from work-stealing.
 
-We will most likely use `tokio` with `current_thread` flavor. If profiling
-ever shows otherwise, we revisit.
+```rust
+fn main() -> std::io::Result<()> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()?
+        .block_on(phux_server::run())
+}
+```
 
-Hot paths that *can* go multi-threaded if needed:
+Hot paths that *can* go multi-threaded later if needed:
 
 - PTY-byte-to-terminal feed and diff computation per pane. Each pane is
-  independent; trivial to fan out.
+  independent; trivial to fan out via `spawn_blocking` or a dedicated
+  worker thread per pane.
 - Compression of large snapshots before transmission.
 
 We do not parallelize on day one. Premature.
+
+## Error model
+
+Each library crate defines its own error type with `thiserror`. The binary
+crate uses `anyhow` at the top level only — never inside library code.
+
+```rust
+// crates/phux-server/src/error.rs
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    #[error("protocol: {0}")]
+    Protocol(#[from] phux_protocol::ProtocolError),
+    #[error("pty: {0}")]
+    Pty(#[from] PtyError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    // ...
+}
+```
+
+Errors that cross the IPC boundary are translated to `ERROR` messages
+(`SPEC.md` §14) with a `code: ErrorCode` and a `message: str`. The mapping
+from internal Rust errors to wire `ErrorCode` is the responsibility of the
+server's IPC layer.
+
+## Logging and observability
+
+We use `tracing` for structured logging. Server logs go to
+`~/.local/state/phux/log/server.log`, rotated daily, with a `tracing-appender`
+file rolling writer. The filter is configured via:
+
+1. Config file (`log_filter = "phux=info,phux_server=debug"`).
+2. `PHUX_LOG` environment variable (overrides config).
+3. Default: `phux=info`.
+
+Spans we instrument by convention:
+
+- `attach` (client_id, session_id) — wraps an attachment for its lifetime.
+- `pane` (pane_id) — wraps PTY pump and diff emission per pane.
+- `command` (request_id, kind) — wraps a `COMMAND` dispatch.
+
+The server exposes a `phux server status --json` subcommand for runtime
+introspection: number of sessions/windows/panes/clients, per-pane refresh
+rate, per-client queue depth, total bytes since start. This becomes the
+basis for any future Prometheus/OpenTelemetry exporter; we do not ship one.
+
+## Module structure
+
+A high-level sketch of each crate's intended layout. Concrete module names
+will appear as code lands; the shape below should not surprise.
+
+### `phux-protocol`
+
+```
+src/
+  lib.rs              — re-exports, top-level docs, PROTOCOL_VERSION
+  version.rs          — Version, VersionRange, negotiation helpers
+  frame.rs            — frame header, length-prefix codec
+  wire/               — Appendix A encoding primitives
+    mod.rs
+    varint.rs
+    fields.rs         — field reader/writer, wire types
+  msg/                — one module per top-level message
+    mod.rs
+    hello.rs
+    attach.rs
+    diff.rs           — PANE_DIFF, PANE_SNAPSHOT, DiffOp, Cell, ...
+    input.rs          — INPUT_KEY, INPUT_PASTE, INPUT_MOUSE, INPUT_RAW
+    layout.rs         — LayoutTree, LayoutNode
+    command.rs        — Command, CommandResult
+    event.rs          — events: BELL, OSC_EVENT, ALERT, FOCUS_CHANGED, ...
+    error.rs          — wire ERROR message and ErrorCode enum
+  caps.rs             — ClientCapabilities, ServerCapabilities, bitsets
+  ids.rs              — SessionId, WindowId, PaneId, ClientId, FrameId
+```
+
+### `phux-core`
+
+```
+src/
+  lib.rs              — re-exports
+  session.rs          — Session, SessionId
+  window.rs           — Window, WindowId
+  pane.rs             — Pane (no PTY here; just metadata + state)
+  layout/             — layout tree, resize algorithm
+    mod.rs
+    tree.rs
+    resize.rs
+  selector.rs         — parse "session:window.pane" / "@id" / "."
+  config/             — typed config schema (deserialized in `phux` bin)
+    mod.rs
+    schema.rs
+    defaults.rs
+```
+
+### `phux-server`
+
+```
+src/
+  lib.rs              — `run()` entry point, runtime construction
+  server.rs           — top-level Server struct, slotmaps, dispatch
+  pty/                — PTY supervision
+    mod.rs
+    spawn.rs
+    pump.rs           — read/write loops feeding into terminal
+  terminal.rs         — wraps libghostty_vt::Terminal per pane
+  diff/               — diff computation + emission pacing
+    mod.rs
+    compute.rs        — RenderState → DiffOp[]
+    pacer.rs          — per-pane refresh-rate throttle
+  ipc/                — IPC over Unix sockets
+    mod.rs
+    listener.rs
+    connection.rs     — per-client connection state machine
+    codec.rs          — protocol-layer framing using tokio_util
+  client.rs           — Client struct (attached frontend)
+  journal/            — crash-recovery journals
+    mod.rs
+    writer.rs
+    replay.rs
+  command.rs          — server-side Command handlers
+  hooks.rs            — hook dispatch
+  error.rs
+```
+
+### `phux-client`
+
+```
+src/
+  lib.rs              — `run()` entry point for TUI client
+  attach.rs           — handshake + ATTACH + initial snapshot
+  state.rs            — client-side mirror of session/window/pane graph
+  renderer/           — composes pane grids + chrome into outer screen
+    mod.rs
+    chrome.rs         — pane borders, status bar
+    pane.rs           — per-pane rendering from diffs
+    vt_out.rs         — emits VT to the outer terminal
+  input/              — outer-terminal input → INPUT_KEY/MOUSE
+    mod.rs
+    kbd.rs            — parses KIP / fixterms / legacy
+    mouse.rs
+  status/             — status bar slot renderer
+  keymap.rs           — config-bound action dispatch
+  config.rs           — config consumed at startup
+  error.rs
+```
+
+### `phux` (binary)
+
+```
+src/
+  main.rs             — runtime construction, subcommand dispatch
+  cli.rs              — clap subcommand definitions
+  commands/
+    mod.rs
+    attach.rs
+    new.rs
+    list.rs
+    kill.rs
+    send.rs
+    capture.rs
+    server.rs
+    config.rs
+```
 
 ## State replay & crash recovery
 
