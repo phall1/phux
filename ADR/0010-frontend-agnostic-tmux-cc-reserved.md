@@ -189,6 +189,60 @@ Two things future contributors will propose. Both are rejected.
   (a wire-format break) is non-zero. ADR-0007 set the precedent for
   this asymmetry.
 
+## Validation status (as of 2026-05-25)
+
+The "Decision" above is a claim about what the wire protocol permits.
+It is not a claim about what has been demonstrated. Be honest about
+which one you're reading.
+
+What the wire protocol does: it carries cell-diffs (SPEC §8), input
+atoms (SPEC §9), and capability bits (SPEC §6.2) without any field
+that names "TUI" or assumes a terminal renderer. Nothing in SPEC.md
+precludes a non-TUI consumer.
+
+What the reference implementation does: it serves exactly one client
+shape, `phux-client`'s TUI renderer. No GUI client, no structured-
+output exporter, no replay viewer, no accessibility consumer has
+ever been built against this protocol. The "frontend-agnostic" claim
+is therefore **structural** — derivable from the wire format on
+paper — **not validated** — proven by a second consumer in the
+field.
+
+This distinction matters. Subtle TUI-coupling is exactly the kind
+of bug that survives until a non-TUI consumer surfaces it. Four
+things to watch:
+
+- **`RenderingMode::VtReplay` (SPEC §6.2).** The spec splits `Diff`
+  from `VtReplay` but the latter is sketched, not specified. A
+  non-VT renderer that receives a VtReplay frame today has no
+  defined behavior. That's a hole.
+- **`PaneDiff::ops` are 2D grid ops.** `PUT_CELL` / `RUN` /
+  `COPY_RECT` / `CLEAR_RECT` make sense to consumers that have a
+  grid. A structured-output or accessibility consumer would project
+  them onto a different model — fine, but we haven't proved the
+  projection is lossless because no one has tried.
+- **Input atoms (ADR-0006/0008) are re-exported from libghostty.**
+  They reflect terminal-input semantics: KEY/MOUSE/FOCUS/PASTE with
+  KIP-flavored modifiers. A GUI consumer would translate at the
+  boundary. Whether that translation is lossless is unproven.
+- **Status-bar widgets (DESIGN §6) emit ANSI.** Today widgets render
+  to ANSI for the client to paste into a terminal cell row. A GUI
+  consumer can't consume that — it would want a `StatusFrame` wire
+  type carrying structured cells or higher-level intent. Nothing in
+  this ADR says we ship one in v0.1, but the absence is a tell.
+
+Commitment: before tagging v0.1, **either** (a) ship a minimal
+non-TUI reference consumer — the cheapest credible candidate is a
+structured-output exporter or a recording/replay viewer, not a full
+GUI client — and fix whatever it surfaces, **or** (b) downgrade the
+Decision above from "frontend-agnostic" to "TUI-first with non-TUI
+not precluded." Both options are honest. The current text is honest
+only if we eventually do (a).
+
+The choice between (a) and (b) is deliberately deferred. This
+section exists so the deferral is visible rather than silent.
+Tracked in `bd show phux-3dj`.
+
 ## Related
 
 - ADR-0002 — diff-based protocol (the bet that makes native strictly
