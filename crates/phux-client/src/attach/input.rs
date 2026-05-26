@@ -58,8 +58,9 @@
 //! # Partial sequences across read boundaries
 //!
 //! A single CSI sequence can straddle two `read()` calls; the parser
-//! holds its in-progress state ([`State`] + a small parameter buffer) in
-//! the [`StdinParser`] struct and resumes on the next [`feed`].
+//! holds its in-progress state (a private `State` enum + a small
+//! parameter buffer) in the [`StdinParser`] struct and resumes on the
+//! next [`StdinParser::feed`] call.
 
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};

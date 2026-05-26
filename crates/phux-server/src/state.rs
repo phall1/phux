@@ -537,8 +537,8 @@ impl ServerState {
         wire
     }
 
-    /// Build a [`SessionSnapshot`] describing the entire registry plus
-    /// the attaching client's initial focus.
+    /// Build a [`phux_protocol::wire::info::SessionSnapshot`] describing
+    /// the entire registry plus the attaching client's initial focus.
     ///
     /// Used by the ATTACH handler in [`crate::runtime`] to populate the
     /// `ATTACHED` frame per SPEC §13. Allocates wire ids on demand so
