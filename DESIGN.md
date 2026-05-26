@@ -1,13 +1,41 @@
-# Design
+# Design — Reference TUI
 
-This document describes phux's **product surface**: the things the user
-sees and configures. It is not normative — `SPEC.md` is. Where this
-document conflicts with `SPEC.md`, the spec wins; file an issue.
+This document describes the **reference TUI consumer's product surface**:
+the things a tmux-shaped phux user sees and configures. It is not
+normative — `SPEC.md` is. Where this document conflicts with `SPEC.md`,
+the spec wins; file an issue.
 
-The wire protocol is in [`SPEC.md`](./SPEC.md). The internal architecture
-is in [`ARCHITECTURE.md`](./ARCHITECTURE.md). This document covers
-everything between: how users invoke phux, configure it, bind keys to it,
-read its status output, and extend it.
+The TUI is one consumer of the phux wire among several
+([ADR-0017](./ADR/0017-tui-not-protocol-privileged.md)). Other
+consumers — an agent SDK, a future native GUI — get their own design
+docs. The TUI's specialness is that it ships in tree as the
+human-facing reference; nothing on the wire exists for it alone.
+
+For the long arc, read [`VISION.md`](./VISION.md). For the wire
+protocol, see [`SPEC.md`](./SPEC.md). For internal structure,
+[`ARCHITECTURE.md`](./ARCHITECTURE.md). This document is everything
+between: how a user invokes the TUI, configures it, binds keys to it,
+reads its status output, and extends it.
+
+## How the TUI's user model maps to the substrate
+
+The user-facing vocabulary is tmux's because it's what people know.
+Under the hood, each TUI concept maps to one or more substrate
+concepts from [ADR-0015](./ADR/0015-protocol-layering.md):
+
+| TUI vocabulary | Substrate mapping |
+|---|---|
+| Session | L2 Collection (`CollectionId`, named lifecycle bundle of Terminals) |
+| Window | TUI convention. An entry in a layout-tree blob stored in L3 metadata, keyed by `phux.tui.layout/v1` under the Collection that contains the Session. |
+| Pane | L1 Terminal (`TerminalId`) referenced from a leaf of the TUI's layout tree. |
+| Layout (split tree) | TUI convention. The shape stored in the L3 metadata blob above. ADR-0012's "binary split, not n-ary" still governs *this tree*; it is no longer a wire concept. |
+| Active pane / window focus | TUI convention. Per-client, persisted in TUI metadata if the client wants it to come back on reattach. |
+| Status bar / hooks / keybindings | TUI-local. Not on the wire. |
+| Mouse routing (click-to-focus, drag-to-resize) | TUI-local. The wire carries `INPUT_MOUSE`; what to do with it is the TUI's call. |
+
+A consumer that doesn't want this vocabulary doesn't have to learn
+it. The substrate doesn't carry it. The TUI design that follows is
+*the TUI's* design.
 
 ---
 
