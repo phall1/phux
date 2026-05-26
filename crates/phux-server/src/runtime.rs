@@ -306,10 +306,16 @@ pub(crate) fn seed_session_with_actor(
     // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
     let pane_token = root_token.child_token();
     let bundle = PaneActor::build_with_token(80, 24, None, pane_token.clone())?;
-    let crate::pane_actor::PaneActorBundle { actor, handle, .. } = bundle;
+    let crate::pane_actor::PaneActorBundle {
+        actor,
+        handle,
+        exit_notify,
+        ..
+    } = bundle;
     state.with_mut(|s| {
         let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
     });
+    spawn_pane_exit_watcher(state.clone(), pane, exit_notify);
     Ok(pane)
 }
 
@@ -338,11 +344,109 @@ pub fn seed_session_with_pty(
     let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
     let pane_token = root_token.child_token();
     let bundle = PaneActor::build_with_token(80, 24, Some(cmd), pane_token.clone())?;
-    let crate::pane_actor::PaneActorBundle { actor, handle, .. } = bundle;
+    let crate::pane_actor::PaneActorBundle {
+        actor,
+        handle,
+        exit_notify,
+        ..
+    } = bundle;
     state.with_mut(|s| {
         let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
     });
+    spawn_pane_exit_watcher(state.clone(), pane, exit_notify);
     Ok(pane)
+}
+
+/// Spawn the per-pane EOF watcher task (phux-it8).
+///
+/// Awaits the `PaneActor`'s `exit_notify` oneshot. When the actor
+/// observes PTY EOF (the child process has exited — typically the
+/// shell typed `exit`), this watcher walks the attached-client table
+/// and sends `FrameKind::Detached` to every client whose attached
+/// session's currently-focused pane is the now-dead pane, then
+/// detaches them server-side via [`ServerState::detach`]. Without
+/// this signal the client sits in its `tokio::select!` waiting for
+/// frames that never come and the user is stranded in an alt-screen
+/// guard with no way out (the bug phux-it8 fixes).
+///
+/// The watcher is `spawn_local` because `SharedState` is `Send` but
+/// we want the task to live on the same `LocalSet` that owns the
+/// pane actor — co-locating the lifecycle keeps the cancellation
+/// story tidy (root-token cascade still applies via `JoinSet` drop
+/// when the runtime exits).
+///
+/// No-op when `exit_notify` is `None` (the bundle's receiver was
+/// already taken) or when the actor exits without ever firing EOF
+/// (cancellation via the root token, for example). Errors on the
+/// oneshot recv side are treated identically to "EOF observed":
+/// they only happen if the sender was dropped without firing, which
+/// in current code means the actor was dropped without going through
+/// the EOF branch — i.e. the pane is going away too. Detaching is
+/// still the right response.
+fn spawn_pane_exit_watcher(
+    state: SharedState,
+    pane: phux_core::ids::PaneId,
+    exit_notify: Option<oneshot::Receiver<()>>,
+) {
+    let Some(rx) = exit_notify else {
+        return;
+    };
+    tokio::task::spawn_local(async move {
+        // Recv error (sender dropped without firing) is treated the
+        // same as a fired EOF: in both cases the pane is dead and
+        // every attached client focused on it needs to be detached.
+        let _ = rx.await;
+        on_pane_exited(&state, pane).await;
+    });
+}
+
+/// Notify every client focused on `pane` that the session is closing,
+/// then detach them. Idempotent: safe to call once per pane EOF.
+///
+/// We gather the doomed clients (id, outbound sender) inside one
+/// `with_mut` critical section to avoid holding the state lock across
+/// `await` points. Each client is then handed a `FrameKind::Detached`
+/// asynchronously; on send failure (the writer task already exited)
+/// we silently drop — the client is already gone.
+///
+/// The final `state.with_mut(|s| s.detach(id))` removes the client
+/// from `attached` and clears its `pane_subscribers` entries, mirroring
+/// the existing explicit-detach path in `handle_client`'s
+/// `FrameKind::Detach` arm.
+async fn on_pane_exited(state: &SharedState, pane: phux_core::ids::PaneId) {
+    // Gather under-lock: which clients have this pane as their
+    // currently-focused pane? See SPEC §13 — focused pane is the only
+    // pane a single-pane session has, so this matches the practical
+    // 1:1 case today and TODO(phux-9gw) extends to multi-pane.
+    let doomed: Vec<(ClientId, tokio::sync::mpsc::Sender<Outbound>)> = state.with(|s| {
+        s.attached
+            .values()
+            .filter_map(|client| {
+                let active_pane = s.active_pane_of_session(client.session)?;
+                if active_pane == pane {
+                    Some((client.id, client.tx.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    });
+    if doomed.is_empty() {
+        debug!(?pane, "PaneActor EOF: no attached clients to detach");
+        return;
+    }
+    debug!(
+        ?pane,
+        count = doomed.len(),
+        "PaneActor EOF: broadcasting DETACHED to attached clients",
+    );
+    for (client_id, tx) in doomed {
+        // Best-effort: the writer task may already be gone if the
+        // socket died. The subsequent detach() call covers state
+        // cleanup either way.
+        let _ = tx.send(Outbound::Frame(FrameKind::Detached)).await;
+        state.with_mut(|s| s.detach(client_id));
+    }
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.

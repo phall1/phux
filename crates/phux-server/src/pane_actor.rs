@@ -144,6 +144,16 @@ pub struct PaneActor {
     /// reader/writer threads.
     pty: Option<PtyOwned>,
     output_tx: broadcast::Sender<Bytes>,
+    /// One-shot fired when the actor observes PTY EOF. Paired with the
+    /// matching receiver in [`PaneActorBundle::exit_notify`]; the
+    /// runtime uses it to drive client-detach on shell exit (phux-it8).
+    ///
+    /// `Option` so the actor can `.take()` it after firing — sending on
+    /// a `oneshot::Sender` is a by-value move. `None` after the first
+    /// fire or if the bundle's receiver was never created (the test
+    /// constructor [`PaneActor::new_with_seed`] leaves it `Some` too,
+    /// but no consumer subscribes; the `.ok()` swallow is benign).
+    exit_notify: Option<oneshot::Sender<()>>,
     /// Cancellation token watched by the actor's `select!`. Cancel to
     /// ask the actor to shut down cleanly (drains the PTY, reaps the
     /// child, and exits). A child token of the per-server root token
@@ -239,6 +249,18 @@ pub struct PaneActorBundle {
     /// down cleanly. Cloneable; shares cancellation state with the
     /// actor's internal copy.
     pub token: CancellationToken,
+    /// One-shot receiver that fires when the actor observes PTY EOF
+    /// (the child process exited, the pane is dying). The runtime
+    /// pairs this with the pane's [`phux_core::ids::PaneId`] and uses
+    /// it to drive client-detach on shell-`exit` (phux-it8).
+    ///
+    /// Used by the runtime's per-pane EOF watcher task; tests that
+    /// don't care about lifecycle simply drop it. Receiver-drop is
+    /// benign for the sender side — the actor uses `send().ok()`.
+    ///
+    /// `Option` so callers can `take()` it out of the bundle;
+    /// `None` after the first take.
+    pub exit_notify: Option<oneshot::Receiver<()>>,
 }
 
 impl std::fmt::Debug for PaneActor {
@@ -341,6 +363,7 @@ impl PaneActor {
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
+        let (exit_tx, exit_rx) = oneshot::channel::<()>();
         let bundle_token = token.clone();
 
         let (pty_rx, pty_tx, pty) = if let Some(cmd) = cmd {
@@ -364,6 +387,7 @@ impl PaneActor {
             pty_tx,
             pty,
             output_tx: output_tx.clone(),
+            exit_notify: Some(exit_tx),
             token,
             cols,
             rows,
@@ -380,6 +404,7 @@ impl PaneActor {
             actor,
             handle,
             token: bundle_token,
+            exit_notify: Some(exit_rx),
         })
     }
 
@@ -596,7 +621,7 @@ impl PaneActor {
                             let _ = self.output_tx.send(Bytes::from(chunk));
                         }
                         Some(PtyEvent::Eof) | None => {
-                            debug!("PTY EOF; keeping actor alive for snapshot/input drain");
+                            debug!("PTY EOF; firing exit_notify and keeping actor alive for late snapshot/input drain");
                             // Detach the PTY-read branch: drop the
                             // receiver so the select! arm parks
                             // forever. We deliberately do NOT exit —
@@ -604,11 +629,30 @@ impl PaneActor {
                             // late-arriving SnapshotRequests (e.g., a
                             // client attaching just after the child
                             // exited) and for an orderly shutdown via
-                            // the oneshot. We also reap the child
+                            // the cancellation token. Reap the child
                             // here so we don't leave a zombie waiting
                             // for the explicit shutdown signal.
+                            //
+                            // phux-it8: fire the `exit_notify` oneshot
+                            // so the runtime can broadcast `Detached`
+                            // to attached clients whose focused pane
+                            // just died (the bug being fixed: client
+                            // would freeze in alt-screen with no
+                            // signal that the shell had exited).
+                            //
+                            // TODO(phux-9gw): multi-pane lifecycle —
+                            // when a session has more than one pane,
+                            // a single EOF should switch focus to a
+                            // sibling rather than detach the whole
+                            // session. Today sessions are 1:1 with
+                            // panes in practice so the simpler
+                            // "EOF → detach attached" model is
+                            // correct.
                             self.pty_rx = None;
                             self.reap_child_if_any();
+                            if let Some(tx) = self.exit_notify.take() {
+                                let _ = tx.send(());
+                            }
                         }
                     }
                 }
