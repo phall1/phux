@@ -33,6 +33,8 @@
 // keep `pub`.
 #![allow(unreachable_pub, reason = "tests/common shared-helpers pattern")]
 
+pub mod screen;
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
