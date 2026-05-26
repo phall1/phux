@@ -3,6 +3,19 @@
 Status: Accepted.
 Date: 2026-05-25
 
+> **Update 2026-05-26:** [ADR-0015](./0015-protocol-layering.md)
+> demotes session/window/pane/layout vocabulary out of the normative
+> L1 wire and into L3 metadata conventions. The binary-split decision
+> below applies to the **reference TUI's layout schema** (stored under
+> a `phux.tui.layout/v1` metadata key on a Collection per ADR-0015 /
+> [ADR-0017](./0017-tui-not-protocol-privileged.md)), not to the wire
+> protocol itself. The `LayoutNode` type in `phux-core` and its wire
+> mirror in `phux-protocol::wire::info` remain the reference TUI's
+> layout shape; under ADR-0017 they are TUI-owned, not protocol-
+> privileged. [ADR-0016](./0016-terminal-id-as-wire-primary.md)
+> additionally renames `PaneId` (the leaf identity) to `TerminalId`;
+> the `Leaf(PaneId)` example below should be read as `Leaf(TerminalId)`.
+
 ## Context
 
 A multiplexer must commit to a layout model before it ships its first

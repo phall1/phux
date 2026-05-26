@@ -13,6 +13,19 @@
 Status: Accepted
 Date: 2026-05-24
 
+> **Update 2026-05-26:** [ADR-0013](./0013-libghostty-bytes-on-wire.md)
+> supersedes the diff-based wire; libghostty-vt is now the grid
+> representation on BOTH ends (server and client). The "diff" wording
+> in passages below and in the post-ADR-0013 note above refers to the
+> deleted architecture. [ADR-0016](./0016-terminal-id-as-wire-primary.md)
+> renamed `PaneId → TerminalId` and `PANE_* → TERMINAL_*` at the wire
+> level (commit `9f4bb2e`); references to `PANE_OUTPUT` /
+> `PANE_SNAPSHOT` below should be read as `TERMINAL_OUTPUT` /
+> `TERMINAL_SNAPSHOT`. The "every pane has a terminal screen state"
+> framing remains correct in spirit — under ADR-0015's L1/L2/L3
+> layering, "pane" is a TUI-consumer concept and the wire entity is a
+> Terminal.
+
 ## Context
 
 Every pane has a terminal screen state — the grid, plus scrollback,

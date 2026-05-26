@@ -35,6 +35,12 @@ amendment in ADR-0006.
 
 Date: 2026-05-25
 
+> **Update 2026-05-26:** [ADR-0016](./0016-terminal-id-as-wire-primary.md)
+> renamed `PaneId → TerminalId` at the wire level (commit `9f4bb2e`).
+> Any code examples or prose below that mention `pane_id` should be
+> read with that substitution; the "what stays phux-defined" reasoning
+> about envelope frames is unaffected — only the field name changed.
+
 ## Context
 
 Through wave 1 of the protocol epic, phux-protocol defined its own

@@ -20,6 +20,22 @@
 Status: Accepted (forward-compat invariants); implementation deferred to v0.2+.
 Date: 2026-05-25
 
+> **Update 2026-05-26:** [ADR-0015](./0015-protocol-layering.md)
+> §"Cross-cutting: Federation" generalizes the `{LOCAL, SATELLITE}`
+> tagged-union shape introduced here on `SessionId` to *every* protocol
+> identity uniformly — `TerminalId` ([ADR-0016](./0016-terminal-id-as-wire-primary.md)),
+> `CollectionId`, `SessionId`. v0.1 servers construct `LOCAL` only;
+> v0.1 decoders MUST accept `SATELLITE` and respond
+> `ERROR { code: UnsupportedSatelliteRoute }` when not configured as a
+> federation hub. The §"Sessions are URI-shaped" decision below is
+> preserved and broadened: it is now an *identity* invariant, not a
+> `SessionId`-specific one.
+>
+> Additionally, [ADR-0013](./0013-libghostty-bytes-on-wire.md) renamed
+> the per-pane content frame and snapshot frame to `TERMINAL_OUTPUT`
+> and `TERMINAL_SNAPSHOT`; the inline references to `PANE_OUTPUT` /
+> `PANE_SNAPSHOT` below should be read with that substitution.
+
 ## Context
 
 Two requests have arrived for what look like distinct features but
@@ -106,7 +122,10 @@ hops over existing SSH paths). Domain logic in `phux-server` and
 
 `SessionId` is a tagged union, not an opaque `u32`. v0.1 only ever
 constructs the `Local` variant, but the wire format reserves space for
-satellite-routed sessions from day one.
+satellite-routed sessions from day one. (Per the 2026-05-26 update at
+the top of this ADR, every protocol identity — `TerminalId`,
+`CollectionId`, `SessionId` — carries this tag uniformly under
+ADR-0015.)
 
 ```
 SessionUri = tagged_union {

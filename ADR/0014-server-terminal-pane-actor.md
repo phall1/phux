@@ -3,6 +3,17 @@
 Status: Accepted
 Date: 2026-05-25
 
+> **Update 2026-05-26:** `PaneActor` was renamed to `TerminalActor` in
+> commit `9f4bb2e` (Wave A of the L1 vocabulary cascade per
+> [ADR-0016](./0016-terminal-id-as-wire-primary.md)), along with
+> `PaneId → TerminalId` and the `PaneHandle`/`PaneInput`/`panes:
+> HashMap<PaneId, PaneHandle>` fields on `ServerState`. Code-shape
+> examples below referencing `PaneActor`, `PaneId`, `PaneHandle`, and
+> `PaneInput` should be read with that substitution. The decision —
+> per-terminal actor on a `LocalSet`, one borrower, no `RefCell` —
+> stands. The title heading "PaneActor" is preserved as historical
+> record; `bd` ticket `phux-byc.5` shipped as `TerminalActor::run`.
+
 ## Context
 
 ADR-0013 places a libghostty `Terminal` on the server: PTY bytes flow

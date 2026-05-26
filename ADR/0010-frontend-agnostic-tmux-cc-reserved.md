@@ -25,6 +25,34 @@ Status: Accepted (forward-compat invariants); CC adapter not on the
 roadmap.
 Date: 2026-05-25
 
+> **Update 2026-05-26:** [ADR-0017](./0017-tui-not-protocol-privileged.md)
+> ("The reference TUI is not protocol-privileged") re-anchors this
+> decision. The **frontend-agnostic principle still holds** —
+> phux-server, phux-protocol, and phux-client must not preclude a
+> second consumer of the protocol. The **"tmux CC reserved as compat
+> option" portion is REJECTED**: under ADR-0017, tmux CC is one
+> consumer among several with no protocol-level standing, and the
+> reference TUI itself has no protocol-level privileges either.
+> Concretely:
+>
+> - The `CC_FRONTEND` capability bit in `ServerFeature` (invariant 2
+>   below) is **reclaimed** — the bit slot is reserved as unassigned,
+>   not assigned to "CC adapter present." See SPEC.md after Wave C of
+>   the L1 cascade (epic `phux-vp0`).
+> - References to CC as "canonical alternative frontend," "peer
+>   frontend protocol," or "reserved as compat" should be read as
+>   overturned. If anyone ever builds a CC adapter, it consumes the
+>   same L1/L2/L3 conformance tiers as the reference TUI per
+>   ADR-0017; it does not get a dedicated capability bit.
+>
+> Additionally, [ADR-0015](./0015-protocol-layering.md) demotes
+> session/window/pane vocabulary out of the L1 substrate. The "native
+> wire" referenced below is now specifically the L1 substrate (bytes
+> + structured envelopes + libghostty `Terminal` on both ends, per
+> [ADR-0013](./0013-libghostty-bytes-on-wire.md)). [ADR-0016](./0016-terminal-id-as-wire-primary.md)
+> renamed `PaneId → TerminalId` and the corresponding `PANE_*` frames
+> to `TERMINAL_*`.
+
 ## Context
 
 Ghostty 1.3.0 ships partial tmux control mode (CC) parsing. The 1.3.0
@@ -140,6 +168,11 @@ These are bugs in v0.1 even though no CC adapter is shipping.
    Precedent: `AGENT_HOOKS` (SPEC §6.2) does the same thing — reserve
    the capability today, ship code later, never break wire format
    when we do.
+
+   *Overturned 2026-05-26 by ADR-0017:* the `CC_FRONTEND` bit is
+   reclaimed. The bit slot is reserved (unassigned), not held for a
+   CC adapter. A future CC consumer mounts L1/L2/L3 like any other
+   consumer; it does not get a dedicated capability bit.
 
 3. **Frame emission is not the only code path that touches pane
    state.** Today, the byte-forwarding path (ADR-0013) and the

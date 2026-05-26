@@ -15,6 +15,15 @@ ADR-0008 is the *why*, this ADR is the *what* for the input wire.
 
 Date: 2026-05-24 (original) / 2026-05-25 (rewrite)
 
+> **Update 2026-05-26:** [ADR-0008](./0008-use-libghostty-types-directly.md)
+> supersedes the discriminant-equality claim; phux re-exports
+> libghostty's input atoms directly. [ADR-0016](./0016-terminal-id-as-wire-primary.md)
+> renamed `PaneId → TerminalId` at the wire level (commit `9f4bb2e`).
+> The "pane" / `pane_id` wording in the tables and prose below refers
+> to what is now a "terminal" / `terminal_id` on the wire; under
+> [ADR-0015](./0015-protocol-layering.md) the L1 substrate knows only
+> terminals, and "pane" is a TUI-consumer convention.
+
 ## Context
 
 Server-side, phux feeds input events to libghostty-vt's encoders
