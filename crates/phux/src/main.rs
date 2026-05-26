@@ -32,7 +32,7 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use phux_client::attach::{self, DETACH_CHORD_DESCRIPTION};
+use phux_client::attach::{self, AttachError, DETACH_CHORD_DESCRIPTION};
 use phux_protocol::wire::frame::AttachTarget;
 use phux_server::runtime::default_socket_path;
 use phux_server::{ServerConfig, ServerRuntime};
@@ -138,13 +138,26 @@ fn main() -> ExitCode {
 /// connecting — see [`maybe_auto_spawn_server`].
 fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
+    // Resolve the session name to pass through to auto-spawn before we
+    // move `session` into the AttachTarget. Falling back to
+    // DEFAULT_SESSION_NAME matches what bare `phux` (no subcommand,
+    // no name) will eventually request.
+    let session_for_spawn = session
+        .as_deref()
+        .unwrap_or(DEFAULT_SESSION_NAME)
+        .to_owned();
     let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
 
     // Best-effort: if no socket exists, fork-exec ourselves into a
     // detached server. Failures here are non-fatal — the subsequent
     // `attach::run` call will surface the connect error.
+    //
+    // `phux-roz` (4): the spawned server is pre-seeded with the same
+    // session name the user is trying to attach to, so the subsequent
+    // `ATTACH` doesn't refuse with "session not found" against a
+    // surprise `default` session.
     if !socket_path.exists() {
-        match maybe_auto_spawn_server(&socket_path) {
+        match maybe_auto_spawn_server(&socket_path, &session_for_spawn) {
             Ok(()) => {}
             Err(err) => {
                 eprintln!(
@@ -169,8 +182,42 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("attach failed: {err}");
+            // `phux-roz` (5): produce actionable text per variant. The
+            // guard (if any) has already dropped, so this lands on the
+            // cooked terminal.
+            print_attach_error(&err, &socket_path, &session_for_spawn);
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print an `AttachError` as a one-line, actionable message on stderr.
+///
+/// `phux-roz` (5): the previous output was `attach failed: connection
+/// refused` — accurate but useless. The new shape names the socket and
+/// suggests the exact `phux server --session …` invocation, so the
+/// user can copy-paste their way out of the failure mode.
+fn print_attach_error(err: &AttachError, socket_path: &Path, session: &str) {
+    match err {
+        AttachError::Io(io_err)
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound,
+            ) =>
+        {
+            eprintln!(
+                "phux: no server at {}. Start one with: phux server --session {session}",
+                socket_path.display(),
+            );
+        }
+        AttachError::Refused(message) => {
+            eprintln!("phux: server refused attach: {message}");
+        }
+        AttachError::NotATty => {
+            eprintln!("phux: attach requires an interactive terminal (stdin is not a TTY).",);
+        }
+        other => {
+            eprintln!("phux: attach failed: {other}");
         }
     }
 }
@@ -242,11 +289,11 @@ fn run_server(session: &str, socket: Option<PathBuf>) -> ExitCode {
 /// `setsid` + log redirection) is a follow-up.
 ///
 /// Returns `Ok` if the socket showed up within the timeout.
-fn maybe_auto_spawn_server(socket_path: &Path) -> std::io::Result<()> {
+fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     eprintln!(
-        "phux: starting server at {} (auto-spawn)",
+        "phux: starting server at {} (auto-spawn, session={session})",
         socket_path.display()
     );
 
@@ -255,7 +302,7 @@ fn maybe_auto_spawn_server(socket_path: &Path) -> std::io::Result<()> {
         .arg("--socket")
         .arg(socket_path)
         .arg("--session")
-        .arg(DEFAULT_SESSION_NAME)
+        .arg(session)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -23,6 +23,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use libghostty_vt::{Terminal, TerminalOptions};
@@ -80,6 +81,13 @@ pub enum AttachError {
     /// A libghostty operation failed on the client's local Terminal.
     #[error("libghostty: {0}")]
     Ghostty(#[from] libghostty_vt::Error),
+
+    /// The server replied with a structured `ERROR` frame instead of
+    /// `ATTACHED`. The session may not exist, the protocol version may
+    /// have been rejected, or some other ATTACH-time server policy
+    /// refused the request. The CLI surfaces this as actionable text.
+    #[error("server refused attach: {0}")]
+    Refused(String),
 }
 
 impl From<io::Error> for AttachError {
@@ -107,22 +115,73 @@ impl From<super::render::RenderError> for AttachError {
 /// is intentionally `!Send` because libghostty's `Terminal` is `!Send`
 /// and lives on the attach task's stack across `await` points. The
 /// single-threaded runtime never moves the future between threads.
+///
+/// # Ordering (`phux-roz`)
+///
+/// The expensive pre-handshake work — UDS connect, `HELLO`, `ATTACH`,
+/// and the `ATTACHED` wait — runs on the *cooked* outer terminal.
+/// Failures there propagate as `Err(_)` without ever entering raw mode
+/// or the alt screen, so a missing server / bad session name / Ctrl-C
+/// during connect prints a one-line error on the normal screen and
+/// exits cleanly. Only after the server's `ATTACHED` frame arrives do
+/// we flip the terminal into raw + alt screen via [`RawModeGuard`].
 #[allow(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError> {
-    // Raw mode + alt screen first, before any other I/O — if the user
-    // sees us print something on the normal screen because UDS connect
-    // failed, that's surprising. Going to alt-screen first means the
-    // outer terminal is restored cleanly even on early-exit errors.
-    let _guard = RawModeGuard::install()?;
+    run_with_stdout(socket, target, &mut io::stdout()).await
+}
 
+/// Same as [`run`], but writes any terminal-control bytes (alt-screen
+/// enter, cursor hide, the renderer's per-row CUP/SGR, cleanup) to a
+/// caller-supplied `Write`.
+///
+/// Exposed so tests can capture the byte stream and assert on it — in
+/// particular, the regression guard for `phux-roz` asserts that the
+/// pre-handshake failure path NEVER emits `\x1b[?1049h`. Production
+/// callers should use [`run`] which targets real stdout; the stdin /
+/// signal / termios paths are unchanged.
+///
+/// The writer is only used for terminal-control bytes emitted *outside*
+/// the renderer in pre-handshake setup. The renderer itself still
+/// writes to `io::stdout()` because the libghostty render iterators
+/// are not generic over `Write`. The pre-handshake regression guard
+/// (no alt-screen on failure) does not need the renderer to participate
+/// because that path never reaches the renderer.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+pub async fn run_with_stdout<W: Write>(
+    socket: &Path,
+    target: AttachTarget,
+    out: &mut W,
+) -> Result<(), AttachError> {
+    // STAGE 1 — pre-handshake, on the cooked outer terminal.
+    //
+    // We deliberately do NOT install RawModeGuard here. If anything in
+    // this block fails (no server, refused, signal during connect) the
+    // user's terminal stays in its original state and `Err(_)` carries
+    // the actionable cause up to the CLI.
     let mut conn = Connection::connect(socket).await?;
     handshake(&mut conn).await?;
     send_attach(&mut conn, target).await?;
+    let attached = wait_for_attached(&mut conn).await?;
 
-    main_loop(&mut conn).await
+    // STAGE 2 — server accepted the attach. Now and only now do we flip
+    // the outer terminal into raw + alt screen. The guard's Drop runs
+    // on unwinding; the signal-handler path inside `main_loop` runs
+    // `write_terminal_reset` explicitly to cover SIGINT/SIGTERM/SIGHUP.
+    let _guard = RawModeGuard::install_with_stdout(out)?;
+
+    // Install a panic hook so an unexpected panic inside `main_loop`
+    // (renderer bug, libghostty FFI surprise, etc.) still restores the
+    // terminal before the default hook prints its backtrace. The hook
+    // is global, so we only register it once per process.
+    install_panic_hook_once();
+
+    main_loop(&mut conn, attached).await
 }
 
 /// Send `HELLO` and (when the server starts sending it) wait for
@@ -154,12 +213,48 @@ async fn send_attach(conn: &mut Connection, target: AttachTarget) -> Result<(), 
     .await
 }
 
+/// Read frames off `conn` until we get the expected `ATTACHED` reply,
+/// surfacing a structured `Error` frame as `AttachError::Refused` and
+/// any other unexpected frame as `AttachError::Protocol`.
+///
+/// Runs entirely on the cooked terminal (pre-`RawModeGuard`) per
+/// `phux-roz`. A server-side reject prints an actionable error on the
+/// normal screen and exits without flicker.
+async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachError> {
+    let frame = conn.recv().await?;
+    match frame {
+        FrameKind::Attached { .. } => Ok(frame),
+        FrameKind::Error {
+            code: _, message, ..
+        } => Err(AttachError::Refused(message)),
+        other => {
+            // Anything else this early is a protocol violation. The
+            // server is required to answer `ATTACH` with either
+            // `ATTACHED` or `ERROR`; reject otherwise rather than
+            // silently soldiering on into a half-attached state.
+            Err(AttachError::Protocol(format!(
+                "expected ATTACHED or ERROR after ATTACH, got {other:?}",
+            )))
+        }
+    }
+}
+
 /// Drive the `tokio::select!` loop until detach.
+///
+/// `initial_attached` is the `FrameKind::Attached` frame that
+/// [`wait_for_attached`] already pulled off the wire; we replay it
+/// through `handle_server_frame` so the focused-pane bookkeeping lives
+/// in one place. Subsequent `PANE_SNAPSHOT` / `PANE_OUTPUT` frames come
+/// off the wire as usual.
 #[allow(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
-async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "tokio::select! arms inflate function length; splitting would require carrying ~10 mutable locals through helpers"
+)]
+async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result<(), AttachError> {
     // Client-side Terminal + renderer for the focused pane. Dimensions
     // get replaced on the first PANE_SNAPSHOT; sizing to (80, 24) is the
     // safest no-content default for a Terminal that may receive
@@ -175,7 +270,26 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
     let mut sigwinch = signal(SignalKind::window_change()).map_err(AttachError::Io)?;
+    // `phux-roz`: SIGINT/SIGTERM/SIGHUP handlers run terminal cleanup
+    // before exiting non-zero. SIGKILL is uncatchable; deferring
+    // alt-screen entry until after handshake covers most real failure
+    // modes for that case.
+    let mut sigint = signal(SignalKind::interrupt()).map_err(AttachError::Io)?;
+    let mut sigterm = signal(SignalKind::terminate()).map_err(AttachError::Io)?;
+    let mut sighup = signal(SignalKind::hangup()).map_err(AttachError::Io)?;
     let mut detach_pending = false;
+
+    // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
+    // `handle_server_frame` runs exactly once, in one place.
+    let exit = handle_server_frame(
+        initial_attached,
+        &mut terminal,
+        &mut renderer,
+        &mut focused_pane,
+    )?;
+    if exit {
+        return Ok(());
+    }
 
     loop {
         // Arm the bare-ESC idle timer only when the parser has pending
@@ -264,6 +378,35 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
                 conn.send(&viewport_resize_frame(viewport)).await?;
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(&terminal, &mut stdout);
+            }
+
+            // SIGINT — restore the terminal explicitly (Drop wouldn't
+            // fire on `exit(130)`), then exit with the shell-conventional
+            // 130. `phux-roz`: this is the path that fires when the user
+            // hits Ctrl-C in the outer shell after `phux attach` has
+            // entered the alt screen.
+            _ = sigint.recv() => {
+                terminal_reset_on_signal();
+                #[allow(clippy::exit, reason = "signal-driven graceful exit; Drop won't run")]
+                std::process::exit(130);
+            }
+
+            // SIGTERM — `kill <pid>` from a sibling tool, supervisor, or
+            // the user's tmux/screen wrapping us. Same cleanup, exit 143.
+            _ = sigterm.recv() => {
+                terminal_reset_on_signal();
+                #[allow(clippy::exit, reason = "signal-driven graceful exit; Drop won't run")]
+                std::process::exit(143);
+            }
+
+            // SIGHUP — controlling terminal went away. Restore and exit
+            // 129. There is no live outer terminal to clean up, but the
+            // termios restore is harmless on a dead tty and keeps the
+            // cleanup path uniform.
+            _ = sighup.recv() => {
+                terminal_reset_on_signal();
+                #[allow(clippy::exit, reason = "signal-driven graceful exit; Drop won't run")]
+                std::process::exit(129);
             }
         }
     }
@@ -442,9 +585,19 @@ impl std::fmt::Debug for RawModeGuard {
 }
 
 impl RawModeGuard {
-    /// Install the guard. Errors if stdin is not a TTY or the termios
-    /// dance fails.
+    /// Install the guard, writing the alt-screen-enter + cursor-hide
+    /// sequence to real stdout. Convenience wrapper around
+    /// [`Self::install_with_stdout`] for the common path; tests use
+    /// the writer-injecting variant.
     pub fn install() -> Result<Self, AttachError> {
+        Self::install_with_stdout(&mut io::stdout())
+    }
+
+    /// Install the guard. Errors if stdin is not a TTY or the termios
+    /// dance fails. The alt-screen + cursor-hide bytes are written to
+    /// `out` so tests can capture them and assert on the regression
+    /// guard for `phux-roz`.
+    pub fn install_with_stdout<W: Write>(out: &mut W) -> Result<Self, AttachError> {
         let stdin = io::stdin();
         if !stdin.is_terminal() {
             return Err(AttachError::NotATty);
@@ -486,10 +639,13 @@ impl RawModeGuard {
 
         // Enter the alt screen + hide the cursor up front so the first
         // frame paint doesn't briefly show on the normal screen.
-        let mut out = io::stdout().lock();
-        out.write_all(b"\x1b[?1049h").map_err(AttachError::Io)?;
-        out.write_all(b"\x1b[?25l").map_err(AttachError::Io)?;
-        out.flush().map_err(AttachError::Io)?;
+        write_enter_alt_screen(out).map_err(AttachError::Io)?;
+
+        // Remember that we entered the alt screen so signal handlers
+        // know to emit the leave sequence. We deliberately set this
+        // AFTER the writes succeed so a half-completed entry doesn't
+        // confuse cleanup.
+        ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
 
         Ok(Self {
             original_termios: original,
@@ -506,10 +662,104 @@ impl Drop for RawModeGuard {
         let _ =
             rustix::termios::tcsetattr(stdin.as_fd(), OptionalActions::Now, &self.original_termios);
         let mut out = io::stdout().lock();
-        let _ = write_reset(&mut out);
-        let _ = out.write_all(b"\x1b[?1049l");
-        let _ = out.flush();
+        let _ = write_terminal_reset(&mut out);
+        ALT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
     }
+}
+
+/// Whether the alt-screen / cursor-hide sequence is currently active.
+///
+/// Set inside [`RawModeGuard::install_with_stdout`] after the entry
+/// sequence has been emitted, cleared by [`RawModeGuard::drop`] and the
+/// signal-handler cleanup. The signal path consults this so SIGINT
+/// during the pre-handshake stage (no alt-screen, no raw mode) does NOT
+/// emit a spurious leave sequence that the cooked terminal would print
+/// as garbage.
+static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`install_panic_hook_once`] has already run. The panic hook
+/// is global to the process; we don't want a re-entrant install to
+/// chain hooks indefinitely.
+static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Write the alt-screen-enter + cursor-hide sequence. Factored out so
+/// the install path and any future re-entry path share one byte
+/// definition.
+fn write_enter_alt_screen<W: Write>(out: &mut W) -> io::Result<()> {
+    out.write_all(b"\x1b[?1049h")?;
+    out.write_all(b"\x1b[?25l")?;
+    out.flush()
+}
+
+/// Restore the outer terminal to a sane post-attach state: drop SGR,
+/// show the cursor, and (if we ever entered the alt screen) leave it.
+///
+/// Used by both [`RawModeGuard::drop`] and the signal-handler arms in
+/// [`main_loop`]. Safe to call multiple times — the second call sees
+/// `ALT_SCREEN_ACTIVE == false` and skips the leave sequence.
+pub fn write_terminal_reset<W: Write>(out: &mut W) -> io::Result<()> {
+    write_reset(out)?;
+    if ALT_SCREEN_ACTIVE.swap(false, Ordering::SeqCst) {
+        out.write_all(b"\x1b[?1049l")?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
+/// Best-effort terminal reset from inside a signal handler arm. This
+/// is the SIGINT/SIGTERM/SIGHUP path: termios goes back to the saved
+/// state (recovered from the live stdin tty), and the alt-screen
+/// sequence is left if we entered one. Errors are swallowed — the
+/// process is on its way out.
+fn terminal_reset_on_signal() {
+    // Restore termios. We can't reach the `RawModeGuard`'s captured
+    // `original_termios` from here without a global; instead we ask
+    // the kernel to re-cook the tty by setting ICANON|ECHO|ISIG back.
+    // That's not a perfect restore (it ignores user-customised flags
+    // like IUTF8 / IUCLC / VEOF), but it's close enough that the user
+    // can type `reset` if they want a precise restore. The important
+    // bit is that the alt-screen + cursor-hide is undone.
+    if let Ok(mut termios) = rustix::termios::tcgetattr(io::stdin().as_fd()) {
+        termios.local_modes.insert(
+            LocalModes::ECHO
+                | LocalModes::ECHONL
+                | LocalModes::ICANON
+                | LocalModes::ISIG
+                | LocalModes::IEXTEN,
+        );
+        termios.input_modes.insert(
+            rustix::termios::InputModes::BRKINT
+                | rustix::termios::InputModes::ICRNL
+                | rustix::termios::InputModes::IXON,
+        );
+        termios
+            .output_modes
+            .insert(rustix::termios::OutputModes::OPOST);
+        let _ = rustix::termios::tcsetattr(io::stdin().as_fd(), OptionalActions::Now, &termios);
+    }
+    let mut out = io::stdout().lock();
+    let _ = write_terminal_reset(&mut out);
+}
+
+/// Install a global panic hook that runs [`write_terminal_reset`]
+/// before the previous (default) hook prints the panic. Idempotent —
+/// repeated calls after the first are no-ops.
+///
+/// Without this, a panic deep inside the renderer or libghostty would
+/// unwind through `main_loop`, but the default hook would print the
+/// backtrace into the alt screen — the user sees nothing because we're
+/// about to leave the alt screen, and then on cooked-terminal restore
+/// the panic message is already gone. The hook flips the cleanup
+/// BEFORE the panic message lands.
+fn install_panic_hook_once() {
+    if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        terminal_reset_on_signal();
+        previous(info);
+    }));
 }
 
 #[cfg(test)]
