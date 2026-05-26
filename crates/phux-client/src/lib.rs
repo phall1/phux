@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod attach;
 pub mod mirror;
 
 pub use mirror::DiffMirror;

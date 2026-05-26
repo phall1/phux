@@ -17,6 +17,21 @@ phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Async I/O + UDS transport for the attach loop (phux-9gw.3). The workspace
+# tokio dep enables `net`, `io-util`, `signal`, `macros`, `rt`. The attach
+# loop also needs `io-std` for `tokio::io::stdin()`; layer it on locally so
+# other consumers don't pay for the extra `BlockingStdin` helper thread.
+tokio = { workspace = true, features = ["io-std"] }
+# Frame encode/decode produces and consumes `BytesMut`; the attach loop owns
+# these buffers across its read and write halves.
+bytes.workspace = true
+# Raw-mode + alt-screen toggling on the outer terminal needs safe `termios(3)`
+# access. `rustix` is a pure-Rust wrapper that keeps phux-client's
+# `#![forbid(unsafe_code)]` intact — preferred over a direct `libc` dep
+# (which would require relaxing the unsafe lint) and over `crossterm` (which
+# pulls its own event loop we don't use). Only the `termios` feature group
+# is enabled; rustix's default crate-feature set is opt-in beyond that.
+rustix = { version = "0.38", default-features = false, features = ["std", "termios"] }
 
 [dev-dependencies]
 phux-server.workspace = true
