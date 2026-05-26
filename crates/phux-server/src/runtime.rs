@@ -40,7 +40,7 @@ use tokio::runtime::Builder;
 use tokio::sync::oneshot;
 use tokio::task::{JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::pane_actor::{PaneActor, SnapshotRequest};
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState};
@@ -554,7 +554,9 @@ async fn handle_client(
                 debug!(nonce, "PING -> PONG");
                 let mut buf = BytesMut::new();
                 encode_pong(nonce, &mut buf);
-                let _ = out_tx.send(Outbound::Raw(buf)).await;
+                if out_tx.send(Outbound::Raw(buf)).await.is_err() {
+                    trace!(?client_id, nonce, "PONG send dropped: writer gone");
+                }
             }
             FrameKind::Attach {
                 target,
@@ -580,6 +582,10 @@ async fn handle_client(
                 // continue — actual transport close lands when the
                 // client drops, which is the path the existing
                 // socket-lifecycle tests exercise.
+                // Intentionally silent on send failure: we are about
+                // to `detach()` this client on the next line, so the
+                // writer being gone is the next thing to happen
+                // anyway. Logging here would be pure noise.
                 let _ = out_tx.send(Outbound::Frame(FrameKind::Detached)).await;
                 state.with_mut(|s| s.detach(client_id));
             }
@@ -1005,18 +1011,18 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
 }
 
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
-async fn send_error(
-    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-    code: ErrorCode,
-    message: &str,
-) {
-    let _ = out_tx
+async fn send_error(out_tx: &tokio::sync::mpsc::Sender<Outbound>, code: ErrorCode, message: &str) {
+    if out_tx
         .send(Outbound::Frame(FrameKind::Error {
             request_id: None,
             code,
             message: message.to_owned(),
         }))
-        .await;
+        .await
+        .is_err()
+    {
+        trace!(?code, "ERROR send dropped: writer gone");
+    }
 }
 
 /// Encode a `PONG { nonce }` frame directly, since `phux-protocol`'s
