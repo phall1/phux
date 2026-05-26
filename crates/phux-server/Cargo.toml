@@ -12,11 +12,20 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compile-in the tokio-console async-runtime debugger. Off by default
+# (pulls a TCP server + extra task instrumentation). Requires Tokio
+# built with `--cfg tokio_unstable`, so build with:
+#   RUSTFLAGS='--cfg tokio_unstable' cargo build --features tokio-console
+# Then `cargo install tokio-console` and `tokio-console` to attach.
+tokio-console = ["dep:console-subscriber"]
+
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 tokio.workspace = true
 # tokio-util gives us `CancellationToken` (hierarchical cancellation,
 # replacing the per-actor / per-loop `oneshot::Sender<()>` shutdown
@@ -30,6 +39,9 @@ bytes.workspace = true
 # dep graph transitively via tokio; declared here for direct use. `std` (the
 # default feature set we want) is implied by leaving `default-features` on.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Optional: opt-in via the `tokio-console` feature. See the feature
+# comment above for the build incantation.
+console-subscriber = { version = "0.4", optional = true }
 # portable-pty is the PTY backend PaneActor drives (phux-byc.5). It is a
 # regular dependency because the actor owns the master fd; its blocking
 # read/write halves bridge to async via spawn_blocking + mpsc channels.

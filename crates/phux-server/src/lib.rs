@@ -15,6 +15,7 @@ pub mod input;
 pub mod pane_actor;
 pub mod runtime;
 pub mod state;
+pub mod telemetry;
 
 pub use id_bridge::IdBridge;
 pub use pane_actor::{PaneActor, PaneActorBundle, PaneActorError, PaneHandle, SnapshotRequest};

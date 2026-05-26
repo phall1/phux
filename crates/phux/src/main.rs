@@ -91,6 +91,16 @@ fn main() -> ExitCode {
         "phux {} (pre-alpha; see SPEC.md)",
         env!("CARGO_PKG_VERSION")
     );
+
+    // Install the process-global tracing subscriber once, before any
+    // runtime spins up. Without this, every `tracing::{info,debug,...}`
+    // call site is a no-op. An init failure is non-fatal: we want the
+    // binary to keep working even if a future test harness or library
+    // has already installed its own subscriber.
+    if let Err(err) = phux_server::telemetry::init() {
+        eprintln!("phux: tracing init failed (continuing): {err}");
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Attach { session, socket }) => run_attach(session, socket),

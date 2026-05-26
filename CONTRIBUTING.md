@@ -115,6 +115,21 @@ the protocol epic):
    git branch -d <branch-name>
    ```
 
+## Observability: tokio-console
+
+`phux-server` has an opt-in `tokio-console` cargo feature that attaches
+the [tokio-console](https://github.com/tokio-rs/console) debugger to a
+running server — handy for inspecting broadcast lag, task stalls, and
+poll counts in the actor system. Requires Tokio built with
+`--cfg tokio_unstable`:
+
+```sh
+RUSTFLAGS='--cfg tokio_unstable' cargo run --features phux-server/tokio-console -- server
+# in another shell:
+cargo install --locked tokio-console
+tokio-console   # connects to 127.0.0.1:6669 by default
+```
+
 ## Reviewing your own work before opening a PR
 
 - Did the public API change? Rustdoc updated?
