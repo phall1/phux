@@ -71,6 +71,7 @@ pub fn spawn_server(
     let cfg = ServerConfig {
         socket_path,
         pre_seeded_session: pre_seeded.map(str::to_owned),
+        seed_with_pty: false,
     };
     let handle = tokio::task::spawn_local(async move {
         let server = ServerRuntime::new(cfg);

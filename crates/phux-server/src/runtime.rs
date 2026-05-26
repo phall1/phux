@@ -62,6 +62,18 @@ pub struct ServerConfig {
     /// a known session to attach to without first issuing a `COMMAND` (the
     /// `COMMAND` message is not implemented yet).
     pub pre_seeded_session: Option<String>,
+    /// When `true`, the pre-seeded session's initial pane spawns the user's
+    /// default shell (`$SHELL`, falling back to `/bin/sh`) inside a real
+    /// PTY (see [`seed_session_with_pty`] / [`crate::pane_actor::PaneActor::new_with_default_shell`]).
+    /// When `false`, the pre-seeded session's pane has a no-PTY actor —
+    /// the actor exists for snapshot/input plumbing but no child process
+    /// runs and no bytes flow.
+    ///
+    /// The PTY path is what the `phux server` binary subcommand needs to
+    /// actually be useful to a human attacher; tests and example code
+    /// keep the default (no-PTY) so they can exercise the registry/wire
+    /// surface without forking shells.
+    pub seed_with_pty: bool,
 }
 
 impl ServerConfig {
@@ -72,6 +84,7 @@ impl ServerConfig {
         Self {
             socket_path: default_socket_path(),
             pre_seeded_session: None,
+            seed_with_pty: false,
         }
     }
 }
@@ -193,6 +206,7 @@ impl ServerRuntime {
         // future's completion; tasks spawned via `spawn_local` from
         // inside the future are polled on the same thread.
         let pre_seeded = self.cfg.pre_seeded_session.clone();
+        let seed_with_pty = self.cfg.seed_with_pty;
         let local = LocalSet::new();
         let result = local
             .run_until(async move {
@@ -201,14 +215,23 @@ impl ServerRuntime {
                 // would have to call `tokio::spawn`, which requires
                 // `Send` futures — exactly what `PaneActor` is not.
                 if let Some(name) = pre_seeded.as_deref() {
-                    if let Err(err) = seed_session_with_actor(&state, name) {
+                    let seeded = if seed_with_pty {
+                        seed_session_with_default_shell(&state, name)
+                    } else {
+                        seed_session_with_actor(&state, name)
+                    };
+                    if let Err(err) = seeded {
                         warn!(
                             session = name,
                             error = %err,
                             "failed to spawn pane actor for pre-seeded session",
                         );
                     } else {
-                        debug!(session = name, "pre-seeded session in registry");
+                        debug!(
+                            session = name,
+                            pty = seed_with_pty,
+                            "pre-seeded session in registry"
+                        );
                     }
                 }
                 accept_loop(&listener, state, shutdown).await
@@ -260,14 +283,14 @@ pub(crate) fn seed_session_with_actor(
 /// `PaneActor` running `cmd`. Sibling of [`seed_session_with_actor`]
 /// for the real server path (`phux-byc.5`).
 ///
-/// Eventual call site: the binary entry point that takes a user
-/// session's `$SHELL` (or a configured command) and creates the
-/// initial pane. Today the binary doesn't exist; this helper exists
-/// so the eventual wire-up is a single function call.
-#[allow(
-    dead_code,
-    reason = "phux-byc.5 lands the actor side; the call site lands with the binary"
-)]
+/// Call sites:
+///
+/// * The `phux server` binary entry point, via the thin
+///   [`seed_session_with_default_shell`] wrapper that uses
+///   [`crate::pane_actor::default_shell_command`] for the user's
+///   `$SHELL` (falling back to `/bin/sh` per the byc.5 convention).
+/// * Anything embedding `phux-server` and wanting a specific command
+///   (e.g. an integration test driving a known fixture).
 pub(crate) fn seed_session_with_pty(
     state: &SharedState,
     name: &str,
@@ -286,6 +309,19 @@ pub(crate) fn seed_session_with_pty(
         let _ = s.register_pane_handle(pane, handle, shutdown);
     });
     Ok(pane)
+}
+
+/// Seed `(session, window, pane)` and spawn a PTY-backed `PaneActor`
+/// running the user's default shell (`$SHELL`, or `/bin/sh` if unset).
+///
+/// Thin wrapper over [`seed_session_with_pty`] used by the `phux
+/// server` binary entry point when `ServerConfig::seed_with_pty` is
+/// `true`.
+pub(crate) fn seed_session_with_default_shell(
+    state: &SharedState,
+    name: &str,
+) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
+    seed_session_with_pty(state, name, crate::pane_actor::default_shell_command())
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.

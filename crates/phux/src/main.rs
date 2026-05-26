@@ -17,13 +17,32 @@
     reason = "binary entry point; stderr is the report"
 )]
 
-use std::path::PathBuf;
-use std::process::ExitCode;
+use std::path::{Path, PathBuf};
+use std::process::{ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use phux_client::attach::{self, DETACH_CHORD_DESCRIPTION};
 use phux_protocol::wire::frame::AttachTarget;
 use phux_server::runtime::default_socket_path;
+use phux_server::{ServerConfig, ServerRuntime};
+
+/// Default name the `phux server` subcommand pre-seeds, and the name
+/// the `phux attach` auto-spawn path requests when the user doesn't
+/// provide one. Keeping both halves on a single constant means
+/// "`phux` with no arguments after a fresh boot" Just Works.
+const DEFAULT_SESSION_NAME: &str = "default";
+
+/// How long the auto-spawn path waits for the freshly-launched server
+/// to bind its socket before giving up. The server's bind is sub-ms on
+/// a healthy system; 2s tolerates a slow-CI host without making a
+/// failed spawn feel like a hang.
+const AUTO_SPAWN_SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Poll cadence while waiting for the auto-spawned server's socket to
+/// appear. 25ms is well under user-perceptible delay and small enough
+/// that the typical happy path resolves in a single poll.
+const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// phux — terminal multiplexer built on libghostty-vt.
 #[derive(Debug, Parser)]
@@ -48,6 +67,23 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Run a phux server in the foreground.
+    ///
+    /// Binds a Unix domain socket, pre-seeds a session whose initial
+    /// pane spawns the user's `$SHELL` inside a real PTY, and serves
+    /// `ATTACH` requests until Ctrl-C.
+    Server {
+        /// Name of the pre-seeded session. Matches what
+        /// `phux attach <name>` will request.
+        #[arg(long, default_value = DEFAULT_SESSION_NAME)]
+        session: String,
+
+        /// Override the UDS path. Defaults to `$XDG_RUNTIME_DIR/phux/phux.sock`
+        /// (or `/tmp/phux-$USER/phux.sock` if `XDG_RUNTIME_DIR` isn't set).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -58,6 +94,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Attach { session, socket }) => run_attach(session, socket),
+        Some(Command::Server { session, socket }) => run_server(&session, socket),
         None => {
             eprintln!(
                 "no subcommand provided. Try `phux attach <session>` (detach with {DETACH_CHORD_DESCRIPTION})."
@@ -69,9 +106,27 @@ fn main() -> ExitCode {
 
 /// Block on the tokio current-thread runtime, drive the attach loop,
 /// translate the result into a process exit code.
+///
+/// If the socket isn't there (or refuses connections), this also
+/// attempts a best-effort auto-spawn of `phux server` before
+/// connecting — see [`maybe_auto_spawn_server`].
 fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
+
+    // Best-effort: if no socket exists, fork-exec ourselves into a
+    // detached server. Failures here are non-fatal — the subsequent
+    // `attach::run` call will surface the connect error.
+    if !socket_path.exists() {
+        match maybe_auto_spawn_server(&socket_path) {
+            Ok(()) => {}
+            Err(err) => {
+                eprintln!(
+                    "phux: auto-spawn skipped ({err}). Start a server manually with `phux server`."
+                );
+            }
+        }
+    }
 
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -91,5 +146,115 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
             eprintln!("attach failed: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Build a current-thread tokio runtime and drive `ServerRuntime`
+/// until Ctrl-C.
+///
+/// The runtime pre-seeds a session named `session` whose initial pane
+/// is backed by a real PTY running the user's `$SHELL` (falling back
+/// to `/bin/sh`). On Ctrl-C, `run_async` returns `Ok(())` and the
+/// process exits 0.
+fn run_server(session: &str, socket: Option<PathBuf>) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+
+    let cfg = ServerConfig {
+        socket_path: socket_path.clone(),
+        pre_seeded_session: Some(session.to_owned()),
+        seed_with_pty: true,
+    };
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to build runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    eprintln!(
+        "phux server listening on {} (session={session}; Ctrl-C to stop)",
+        socket_path.display()
+    );
+
+    let server = ServerRuntime::new(cfg);
+    let result = rt.block_on(async move {
+        server
+            .run_async(async {
+                // tokio::signal::ctrl_c() resolves on SIGINT *or*
+                // closure of the process's stdin equivalent on some
+                // platforms; either way, treat it as "user wants out".
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
+    });
+
+    match result {
+        Ok(()) => {
+            eprintln!("phux server: shutting down cleanly");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux server failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Fork-exec the current binary as `phux server` (with the same
+/// `--socket` override), then poll for the socket to appear.
+///
+/// Detachment strategy: stdio is fully nulled and the child runs on
+/// the same process group; the parent exiting after a successful
+/// attach is fine because the child holds the listener fd. This is
+/// "good enough for demo" — proper daemonization (double-fork +
+/// `setsid` + log redirection) is a follow-up.
+///
+/// Returns `Ok` if the socket showed up within the timeout.
+fn maybe_auto_spawn_server(socket_path: &Path) -> std::io::Result<()> {
+    let current_exe = std::env::current_exe()?;
+
+    eprintln!(
+        "phux: starting server at {} (auto-spawn)",
+        socket_path.display()
+    );
+
+    let mut cmd = std::process::Command::new(current_exe);
+    cmd.arg("server")
+        .arg("--socket")
+        .arg(socket_path)
+        .arg("--session")
+        .arg(DEFAULT_SESSION_NAME)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // Spawn — we deliberately don't keep the `Child` around; the
+    // server is its own lifecycle now. The OS reaps it when it exits.
+    let _child = cmd.spawn()?;
+
+    // Poll for the socket. The server's bind is fast (sub-ms on a
+    // healthy system); the timeout exists to avoid hanging if the
+    // child crashed at startup.
+    let deadline = Instant::now() + AUTO_SPAWN_SOCKET_TIMEOUT;
+    loop {
+        if socket_path.exists() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "auto-spawned server did not bind {} within {:?}",
+                    socket_path.display(),
+                    AUTO_SPAWN_SOCKET_TIMEOUT
+                ),
+            ));
+        }
+        std::thread::sleep(AUTO_SPAWN_POLL_INTERVAL);
     }
 }

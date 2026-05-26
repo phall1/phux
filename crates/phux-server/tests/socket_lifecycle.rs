@@ -42,6 +42,7 @@ fn spawn_server(
     let cfg = ServerConfig {
         socket_path,
         pre_seeded_session: None,
+        seed_with_pty: false,
     };
     let handle = tokio::task::spawn_local(async move {
         let server = ServerRuntime::new(cfg);
@@ -183,6 +184,7 @@ fn lifecycle_busy_socket() {
         let cfg_b = ServerConfig {
             socket_path: socket_path.clone(),
             pre_seeded_session: None,
+            seed_with_pty: false,
         };
         let server_b = ServerRuntime::new(cfg_b);
         let (_never_tx, never_rx) = oneshot::channel::<()>();
