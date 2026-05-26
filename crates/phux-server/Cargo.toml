@@ -56,7 +56,7 @@ insta.workspace = true
 criterion.workspace = true
 dhat.workspace = true
 tokio.workspace = true
-tempfile = "3"
+tempfile.workspace = true
 
 [[example]]
 name = "one_pane"

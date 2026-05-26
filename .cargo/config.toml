@@ -1,6 +1,4 @@
-[alias]
-ci = ["build", "--workspace", "--all-targets", "--locked"]
-xtest = ["nextest", "run", "--workspace"]
-
+# Use the system `git` for crate-graph fetches. More reliable than libgit2
+# under corp proxies / SSH agents; matches the nix dev shell's git.
 [net]
 git-fetch-with-cli = true
