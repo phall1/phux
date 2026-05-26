@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::BytesMut;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use phux_protocol::wire::frame::{
     AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_PONG, ViewportInfo,
 };
@@ -833,6 +835,13 @@ async fn handle_attach(
         return;
     }
 
+    // Fan out all `SnapshotRequest`s concurrently. The mpsc sends below
+    // are fast (they just push into each actor's mailbox); the slow part
+    // is awaiting the oneshot reply once the actor synthesizes. Doing
+    // this sequentially made attach latency scale with the SUM of pane
+    // reply times. With `FuturesUnordered` it scales with the MAX —
+    // one slow pane no longer stalls the rest.
+    let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
     for (pane_id, handle, wire_pane_id) in panes_to_snapshot {
         // Subscribe to live PTY output BEFORE requesting the snapshot.
         // Subscribing first means anything the PaneActor broadcasts
@@ -884,7 +893,13 @@ async fn handle_attach(
             warn!(?pane_id, "pane actor dropped; skipping snapshot");
             continue;
         }
-        let Ok(snap) = reply_rx.await else {
+        // Tag each in-flight receiver with its identifiers so the drain
+        // loop can warn / build a frame without re-deriving them.
+        pending.push(async move { (pane_id, wire_pane_id, reply_rx.await) });
+    }
+
+    while let Some((pane_id, wire_pane_id, reply)) = pending.next().await {
+        let Ok(snap) = reply else {
             warn!(?pane_id, "pane actor failed to reply with snapshot");
             continue;
         };
@@ -1140,6 +1155,159 @@ mod tests {
             resize_rx.try_recv().is_err(),
             "exactly one resize tuple should be queued — got more",
         );
+    }
+
+    /// Concurrency proof for the ATTACH per-pane snapshot fan-out.
+    ///
+    /// Builds N hand-crafted `PaneHandle`s (no real `PaneActor`) whose
+    /// `snapshot_rx` ends the test holds. Registers them against a
+    /// session, then drives `handle_attach`. With the sequential loop
+    /// the test would deadlock: the handler would `await` pane 0's
+    /// reply, but the test only replies after observing all N requests
+    /// land on their receivers. The `FuturesUnordered` fan-out unsticks
+    /// it by sending all N requests up front, then awaiting replies as
+    /// they arrive in any order.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear setup-then-act-then-assert test body; splitting would obscure the concurrency proof"
+    )]
+    async fn handle_attach_fans_out_snapshot_requests_concurrently() {
+        use std::time::Duration;
+
+        use bytes::Bytes;
+        use phux_core::ids::PaneId as CorePaneId;
+        use tokio::sync::{broadcast, mpsc, oneshot};
+        use tokio::task::LocalSet;
+
+        use crate::grid::SnapshotBytes;
+        use crate::pane_actor::{PaneHandle, SnapshotRequest};
+
+        const N: usize = 4;
+
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                // Seed one session with one window and N panes.
+                let (sid, wid, _first_pane) = state.with_mut(|s| s.seed_session("multi"));
+                // `seed_session` made one pane already; we want N total.
+                let mut pane_ids: Vec<CorePaneId> = Vec::with_capacity(N);
+                state.with_mut(|s| {
+                    let session = s.registry.session(sid).cloned().expect("session");
+                    let window = s
+                        .registry
+                        .window(session.windows[0])
+                        .cloned()
+                        .expect("window");
+                    pane_ids.push(window.panes[0]);
+                    for _ in 1..N {
+                        let pid = s.registry.new_pane(wid).expect("new_pane");
+                        pane_ids.push(pid);
+                    }
+                });
+
+                // Build N PaneHandles; keep the snapshot receivers in the test.
+                let mut snapshot_rxs: Vec<mpsc::Receiver<SnapshotRequest>> = Vec::with_capacity(N);
+                for &pid in &pane_ids {
+                    let (input_tx, _input_rx) = mpsc::channel(8);
+                    let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
+                    let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+                    let (resize_tx, _resize_rx) = mpsc::channel::<(u16, u16)>(8);
+                    let handle = PaneHandle {
+                        input: input_tx,
+                        snapshot: snapshot_tx,
+                        output: output_tx,
+                        resize: resize_tx,
+                        cols: 80,
+                        rows: 24,
+                    };
+                    state.with_mut(|s| {
+                        let (sd_tx, _sd_rx) = oneshot::channel::<()>();
+                        let _ = s.register_pane_handle(pid, handle, sd_tx);
+                    });
+                    snapshot_rxs.push(snapshot_rx);
+                }
+
+                // Outbound channel for the would-be writer task; we read
+                // PANE_SNAPSHOT frames out of `out_rx` to verify all N
+                // shipped.
+                let (out_tx, mut out_rx) =
+                    mpsc::channel::<OutboundFrame>(crate::state::DEFAULT_CLIENT_MAILBOX);
+                let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+
+                // Spawn `handle_attach` on the LocalSet so the test
+                // body can interleave with it.
+                let state_for_task = state.clone();
+                let attach_task = tokio::task::spawn_local(async move {
+                    handle_attach(
+                        &state_for_task,
+                        client_id,
+                        AttachTarget::ByName("multi".to_owned()),
+                        ViewportInfo::new(80, 24),
+                        false,
+                        0,
+                        &out_tx,
+                    )
+                    .await;
+                });
+
+                // First the writer should see ATTACHED.
+                let attached = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+                    .await
+                    .expect("attached frame did not arrive")
+                    .expect("out_rx closed before attached");
+                match attached {
+                    FrameKind::Attached { .. } => {}
+                    other => panic!("expected Attached, got {other:?}"),
+                }
+
+                // Now collect all N SnapshotRequests BEFORE replying to
+                // any of them. Under the old sequential loop the
+                // handler would block on pane 0's reply forever (we
+                // haven't replied yet), so only the first request
+                // would land. With the concurrent fan-out all N land
+                // up front.
+                let mut replies: Vec<oneshot::Sender<SnapshotBytes>> = Vec::with_capacity(N);
+                for (i, rx) in snapshot_rxs.iter_mut().enumerate() {
+                    let req = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("snapshot request {i} never arrived — sequential loop?",)
+                        })
+                        .expect("snapshot channel closed");
+                    replies.push(req.reply);
+                }
+
+                // Reply on all N oneshots. Order should not matter to the
+                // fan-out; deliberately reply in reverse to underscore that.
+                for (i, reply) in replies.into_iter().enumerate().rev() {
+                    let payload = SnapshotBytes {
+                        cols: 80,
+                        rows: 24,
+                        bytes: format!("snap-{i}").into_bytes(),
+                    };
+                    let _ = reply.send(payload);
+                }
+
+                // Drain N PANE_SNAPSHOT frames out of the writer channel.
+                let mut snaps_seen = 0usize;
+                for _ in 0..N {
+                    let frame = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+                        .await
+                        .expect("pane snapshot frame did not arrive")
+                        .expect("out_rx closed before snapshot");
+                    if matches!(frame, FrameKind::PaneSnapshot { .. }) {
+                        snaps_seen += 1;
+                    } else {
+                        panic!("expected PaneSnapshot, got {frame:?}");
+                    }
+                }
+                assert_eq!(snaps_seen, N, "expected one PANE_SNAPSHOT per pane");
+
+                attach_task.await.expect("attach task panicked");
+            })
+            .await;
     }
 
     /// A `VIEWPORT_RESIZE` from a non-attached client is a benign no-op —

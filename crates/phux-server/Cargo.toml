@@ -24,6 +24,12 @@ tokio.workspace = true
 # in current tokio-util releases.
 tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 bytes.workspace = true
+# `futures-util` brings `FuturesUnordered` + `StreamExt`, which `handle_attach`
+# uses to fan out per-pane `SnapshotRequest`s concurrently so attach latency
+# scales with the slowest pane's reply time, not their sum. Already in the
+# dep graph transitively via tokio; declared here for direct use. `std` (the
+# default feature set we want) is implied by leaving `default-features` on.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # portable-pty is the PTY backend PaneActor drives (phux-byc.5). It is a
 # regular dependency because the actor owns the master fd; its blocking
 # read/write halves bridge to async via spawn_blocking + mpsc channels.
