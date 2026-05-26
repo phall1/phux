@@ -15,14 +15,3 @@ flamegraph.svg
 
 # bv (beads viewer) local config and caches
 .bv/
-
-# mdBook build output and assembled-at-build-time source tree.
-# Canonical sources live at VISION.md, SPEC.md, and ADR/*.md;
-# .github/workflows/docs.yml copies them into docs-book/ at build time.
-# Only docs-book/SUMMARY.md and docs-book/README.md (the nav tree + landing
-# page) are tracked — everything else under docs-book/ is a build-time copy
-# and must stay out of git.
-book/
-docs-book/VISION.md
-docs-book/SPEC.md
-docs-book/ADR/
