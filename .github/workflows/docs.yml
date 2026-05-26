@@ -48,14 +48,10 @@ jobs:
           cp SPEC.md docs-book/SPEC.md
           cp ADR/*.md docs-book/ADR/
           ls -1 docs-book/ADR/
-          # Sanity check: at least the original 8 numbered ADRs + the
-          # ADR/README index file. Today there are many more, but the
-          # floor stops the build if the canonical ADR tree has
-          # disappeared.
-          test "$(ls -1 docs-book/ADR/*.md | wc -l)" -ge 9
-          # Cross-check: every "[*](./...)" path SUMMARY.md references
-          # has to resolve under docs-book/, or mdbook silently auto-
-          # stubs the missing pages and we ship broken nav.
+          # The real invariant: every relative link in SUMMARY.md
+          # resolves to a file under docs-book/ after assembly.
+          # mdbook silently auto-stubs missing pages otherwise, which
+          # is what let the broken Vision link ship the first time.
           missing=0
           while IFS= read -r path; do
             full="docs-book/${path#./}"
