@@ -20,5 +20,5 @@ pub use id_bridge::IdBridge;
 pub use pane_actor::{PaneActor, PaneActorBundle, PaneActorError, PaneHandle, SnapshotRequest};
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
 pub use state::{
-    AttachError, AttachedClient, ClientId, OutboundFrame, PaneInput, ServerState, SharedState,
+    AttachError, AttachedClient, ClientId, Outbound, PaneInput, ServerState, SharedState,
 };

@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::pane_actor::{PaneActor, SnapshotRequest};
-use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, OutboundFrame, SharedState};
+use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState};
 
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -450,11 +450,13 @@ async fn accept_loop(
 
 /// Per-client task. Reads frames in a loop and dispatches each one.
 ///
-/// Outbound frames are routed through a per-client `mpsc` channel
+/// Outbound messages are routed through a per-client `mpsc` channel
 /// drained by a sibling writer task (also `spawn_local`'d). This gives
 /// us one place to back-pressure on slow clients without entangling
-/// the read side, and matches the `tx: mpsc::Sender<OutboundFrame>`
-/// shape `ServerState::attach` already wants.
+/// the read side, and matches the `tx: mpsc::Sender<Outbound>` shape
+/// `ServerState::attach` already wants. The channel carries
+/// [`Outbound`] so structured [`FrameKind`] sends and pre-encoded raw
+/// byte blobs (today: PONG) share a single ordering domain.
 ///
 /// `phux-byc.8`: implements the ATTACH path. Resolves the target,
 /// builds a [`SessionSnapshot`](phux_protocol::wire::info::SessionSnapshot)
@@ -472,19 +474,19 @@ async fn handle_client(
     let (mut reader, writer) = stream.into_split();
 
     // Allocate the per-client outbound mailbox + spawn the writer task.
-    // Structured frames flow through `out_tx`; pre-encoded raw byte
-    // blobs (currently only PONG — see `encode_pong` and the wire-
-    // protocol comment on `TYPE_PONG`) flow through `raw_tx`. Both
-    // channels feed the same writer task; the writer drains them
-    // fairly via `select!`.
-    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<OutboundFrame>(DEFAULT_CLIENT_MAILBOX);
-    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<BytesMut>(DEFAULT_CLIENT_MAILBOX);
+    // Both structured frames and pre-encoded raw byte blobs (currently
+    // only PONG — see `encode_pong` and the wire-protocol comment on
+    // `TYPE_PONG`) ride the same channel, tagged by the `Outbound`
+    // variant. The writer task drains it with a single `recv()` loop;
+    // closure of this one channel is the unambiguous signal for the
+    // writer to exit.
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
     // Per-client `JoinSet` for sibling tasks (today: just the writer).
     // Held in this scope so it drops with `handle_client` and the
     // writer aborts if it hasn't already exited via its own
     // close-on-EOF path. Keeps lifecycle plumbing local.
     let mut sibling_tasks: JoinSet<()> = JoinSet::new();
-    sibling_tasks.spawn_local(writer_task(writer, out_rx, raw_rx, client_id));
+    sibling_tasks.spawn_local(writer_task(writer, out_rx, client_id));
 
     let mut header = [0u8; LENGTH_PREFIX];
     let mut payload = BytesMut::new();
@@ -545,13 +547,14 @@ async fn handle_client(
             FrameKind::Ping { nonce } => {
                 // PONG isn't a `FrameKind` variant yet (the type byte
                 // `0xFF` is reserved). Ship the pre-encoded bytes
-                // through the writer's `raw_tx` side channel. Once
-                // the protocol crate lifts `Pong` into the enum, this
-                // collapses to a structured send through `out_tx`.
+                // through the unified outbound channel as
+                // `Outbound::Raw`. Once the protocol crate lifts
+                // `Pong` into the enum, this collapses to a structured
+                // `Outbound::Frame` send.
                 debug!(nonce, "PING -> PONG");
                 let mut buf = BytesMut::new();
                 encode_pong(nonce, &mut buf);
-                let _ = raw_tx.send(buf).await;
+                let _ = out_tx.send(Outbound::Raw(buf)).await;
             }
             FrameKind::Attach {
                 target,
@@ -577,7 +580,7 @@ async fn handle_client(
                 // continue — actual transport close lands when the
                 // client drops, which is the path the existing
                 // socket-lifecycle tests exercise.
-                let _ = out_tx.send(FrameKind::Detached).await;
+                let _ = out_tx.send(Outbound::Frame(FrameKind::Detached)).await;
                 state.with_mut(|s| s.detach(client_id));
             }
             FrameKind::ViewportResize { viewport } => {
@@ -596,50 +599,40 @@ async fn handle_client(
     }
 }
 
-/// Writer task: drain the per-client outbound channels and write each
-/// frame to the socket. Encodes [`FrameKind`] frames via
-/// `FrameKind::encode`; pre-encoded raw byte blobs (PONG today) go
-/// straight to the wire.
+/// Writer task: drain the per-client outbound channel and write each
+/// message to the socket. Encodes [`Outbound::Frame`] via
+/// `FrameKind::encode`; [`Outbound::Raw`] pre-encoded byte blobs (PONG
+/// today) go straight to the wire.
 ///
-/// Exits when **both** channels close — i.e. the client task drops its
-/// senders. Either channel closing alone is not a shutdown signal:
-/// `select!` with `.recv()` returns `None` on closure, and we ignore
-/// `None` from one branch as long as the other stays open.
+/// Exits when the channel closes — i.e. the client task drops its
+/// sender. The unified `Outbound` enum collapses what used to be two
+/// channels (one for structured frames, one for raw blobs) into a
+/// single ordering domain, so a single `recv()` loop suffices.
 async fn writer_task(
     mut writer: tokio::net::unix::OwnedWriteHalf,
-    mut frame_rx: tokio::sync::mpsc::Receiver<OutboundFrame>,
-    mut raw_rx: tokio::sync::mpsc::Receiver<BytesMut>,
+    mut rx: tokio::sync::mpsc::Receiver<Outbound>,
     client_id: ClientId,
 ) {
     let mut buf = BytesMut::with_capacity(1024);
-    let mut frame_open = true;
-    let mut raw_open = true;
-    while frame_open || raw_open {
-        tokio::select! {
-            biased;
-            maybe_frame = frame_rx.recv(), if frame_open => match maybe_frame {
-                Some(frame) => {
-                    buf.clear();
-                    frame.encode(&mut buf);
-                    if let Err(err) = writer.write_all(&buf).await {
-                        debug!(?client_id, error = %err, "writer error on frame; client task ending");
-                        return;
-                    }
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Outbound::Frame(frame) => {
+                buf.clear();
+                frame.encode(&mut buf);
+                if let Err(err) = writer.write_all(&buf).await {
+                    debug!(?client_id, error = %err, "writer error on frame; client task ending");
+                    return;
                 }
-                None => frame_open = false,
-            },
-            maybe_raw = raw_rx.recv(), if raw_open => match maybe_raw {
-                Some(bytes) => {
-                    if let Err(err) = writer.write_all(&bytes).await {
-                        debug!(?client_id, error = %err, "writer error on raw; client task ending");
-                        return;
-                    }
+            }
+            Outbound::Raw(bytes) => {
+                if let Err(err) = writer.write_all(&bytes).await {
+                    debug!(?client_id, error = %err, "writer error on raw; client task ending");
+                    return;
                 }
-                None => raw_open = false,
-            },
+            }
         }
     }
-    debug!(?client_id, "writer task exiting (both channels closed)");
+    debug!(?client_id, "writer task exiting (channel closed)");
 }
 
 /// Tuple bundling everything `handle_attach` needs after it's done
@@ -661,7 +654,7 @@ type AttachPrepared = (
 async fn resolve_attach_target(
     state: &SharedState,
     target: AttachTarget,
-    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) -> Option<String> {
     match target {
         AttachTarget::ByName(name) => Some(name),
@@ -741,7 +734,7 @@ fn prepare_attach(
     state: &SharedState,
     client_id: ClientId,
     session_name: &str,
-    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) -> Result<AttachPrepared, crate::state::AttachError> {
     state.with_mut(|s| {
         let sid = s.attach(client_id, session_name, out_tx.clone())?;
@@ -795,7 +788,7 @@ async fn handle_attach(
     _viewport: phux_protocol::wire::frame::ViewportInfo,
     _request_scrollback: bool,
     _scrollback_limit_lines: u32,
-    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
     let Some(session_name) = resolve_attach_target(state, target, out_tx).await else {
         return;
@@ -825,10 +818,10 @@ async fn handle_attach(
         };
 
     if out_tx
-        .send(FrameKind::Attached {
+        .send(Outbound::Frame(FrameKind::Attached {
             snapshot,
             initial_client_id,
-        })
+        }))
         .await
         .is_err()
     {
@@ -859,11 +852,11 @@ async fn handle_attach(
                     Ok(bytes) => {
                         seq = seq.wrapping_add(1);
                         if pump_out_tx
-                            .send(FrameKind::PaneOutput {
+                            .send(Outbound::Frame(FrameKind::PaneOutput {
                                 pane_id: pump_wire_pane_id,
                                 seq,
                                 bytes: bytes.to_vec(),
-                            })
+                            }))
                             .await
                             .is_err()
                         {
@@ -904,7 +897,7 @@ async fn handle_attach(
             continue;
         };
         if out_tx
-            .send(FrameKind::PaneSnapshot {
+            .send(Outbound::Frame(FrameKind::PaneSnapshot {
                 pane_id: wire_pane_id,
                 cols: snap.cols,
                 rows: snap.rows,
@@ -912,7 +905,7 @@ async fn handle_attach(
                 // Scrollback negotiation per ATTACH viewport metrics
                 // lands with the PTY pump; byc.8 always sends None.
                 scrollback_bytes: None,
-            })
+            }))
             .await
             .is_err()
         {
@@ -1013,16 +1006,16 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
 
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
 async fn send_error(
-    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     code: ErrorCode,
     message: &str,
 ) {
     let _ = out_tx
-        .send(FrameKind::Error {
+        .send(Outbound::Frame(FrameKind::Error {
             request_id: None,
             code,
             message: message.to_owned(),
-        })
+        }))
         .await;
 }
 
@@ -1223,8 +1216,7 @@ mod tests {
                         rows: 24,
                     };
                     state.with_mut(|s| {
-                        let (sd_tx, _sd_rx) = oneshot::channel::<()>();
-                        let _ = s.register_pane_handle(pid, handle, sd_tx);
+                        let _ = s.register_pane_handle(pid, handle, CancellationToken::new());
                     });
                     snapshot_rxs.push(snapshot_rx);
                 }
@@ -1233,7 +1225,7 @@ mod tests {
                 // PANE_SNAPSHOT frames out of `out_rx` to verify all N
                 // shipped.
                 let (out_tx, mut out_rx) =
-                    mpsc::channel::<OutboundFrame>(crate::state::DEFAULT_CLIENT_MAILBOX);
+                    mpsc::channel::<Outbound>(crate::state::DEFAULT_CLIENT_MAILBOX);
                 let client_id = state.with_mut(crate::state::ServerState::new_client_id);
 
                 // Spawn `handle_attach` on the LocalSet so the test
@@ -1258,7 +1250,7 @@ mod tests {
                     .expect("attached frame did not arrive")
                     .expect("out_rx closed before attached");
                 match attached {
-                    FrameKind::Attached { .. } => {}
+                    Outbound::Frame(FrameKind::Attached { .. }) => {}
                     other => panic!("expected Attached, got {other:?}"),
                 }
 
@@ -1297,7 +1289,7 @@ mod tests {
                         .await
                         .expect("pane snapshot frame did not arrive")
                         .expect("out_rx closed before snapshot");
-                    if matches!(frame, FrameKind::PaneSnapshot { .. }) {
+                    if matches!(frame, Outbound::Frame(FrameKind::PaneSnapshot { .. })) {
                         snaps_seen += 1;
                     } else {
                         panic!("expected PaneSnapshot, got {frame:?}");

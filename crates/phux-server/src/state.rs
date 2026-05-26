@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use bytes::BytesMut;
 use phux_core::ids::{PaneId, SessionId, WindowId};
 use phux_core::registry::Registry;
 use phux_core::session::Session;
@@ -89,17 +90,28 @@ pub enum PaneInput {
     Paste(PasteEvent),
 }
 
-/// A frame queued on a client's outbound mailbox.
+/// A message queued on a client's outbound mailbox.
 ///
-/// Aliased to `phux_protocol::wire::frame::FrameKind` so consumers can route
-/// any variant — `Hello`, `PaneOutput`, `PaneSnapshot`, lifecycle frames —
-/// without a parallel server-side enum. Per ADR-0008 / ADR-0013, the
-/// protocol crate owns the wire types and the server defers to them.
+/// The writer task drains a single channel of [`Outbound`] and routes each
+/// item to one of two write paths:
 ///
-/// PONG (reserved type byte `0xFF`) is not yet a `FrameKind` variant.
-/// The writer task supports a side-channel for pre-encoded bytes via
-/// [`OutboundMessage`] — see the runtime module.
-pub type OutboundFrame = phux_protocol::wire::frame::FrameKind;
+/// * [`Outbound::Frame`] carries a [`phux_protocol::wire::frame::FrameKind`]
+///   and is encoded via `FrameKind::encode` before being written. Per
+///   ADR-0008 / ADR-0013 the protocol crate owns the wire types and the
+///   server defers to them for any variant — `Hello`, `PaneOutput`,
+///   `PaneSnapshot`, lifecycle frames, and so on.
+/// * [`Outbound::Raw`] carries pre-encoded bytes that bypass the encoder.
+///   This is currently used only by the PONG path, because PONG (reserved
+///   type byte `0xFF`) is not yet a `FrameKind` variant. Once the protocol
+///   crate lifts `Pong` into the enum, this variant can go away and PONG
+///   collapses to a structured send through `Outbound::Frame`.
+#[derive(Debug)]
+pub enum Outbound {
+    /// A structured frame; the writer encodes it before writing.
+    Frame(phux_protocol::wire::frame::FrameKind),
+    /// A pre-encoded byte blob; the writer writes it as-is.
+    Raw(BytesMut),
+}
 
 /// An attached client: routing identity plus outbound mailbox.
 #[derive(Debug)]
@@ -110,7 +122,7 @@ pub struct AttachedClient {
     pub session: SessionId,
     /// Outbound mailbox; the per-client write task drains this and writes to
     /// the socket.
-    pub tx: mpsc::Sender<OutboundFrame>,
+    pub tx: mpsc::Sender<Outbound>,
     /// The client's advertised color tier (SPEC §6.2). The server MUST
     /// downsample outbound color values to this tier before fanout —
     /// see [`crate::downsample`] for the helper byc.5's fanout layer
@@ -297,7 +309,7 @@ impl ServerState {
         &mut self,
         client_id: ClientId,
         session_name: &str,
-        tx: mpsc::Sender<OutboundFrame>,
+        tx: mpsc::Sender<Outbound>,
     ) -> Result<SessionId, AttachError> {
         if self.attached.contains_key(&client_id) {
             return Err(AttachError::AlreadyAttached(client_id));
@@ -691,8 +703,8 @@ impl SharedState {
 mod tests {
     use super::*;
 
-    fn mk_tx() -> mpsc::Sender<OutboundFrame> {
-        let (tx, _rx) = mpsc::channel::<OutboundFrame>(DEFAULT_CLIENT_MAILBOX);
+    fn mk_tx() -> mpsc::Sender<Outbound> {
+        let (tx, _rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
         tx
     }
 
