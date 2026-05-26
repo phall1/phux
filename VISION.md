@@ -130,6 +130,18 @@ accessible from one place, observable in real time, persistent across
 disconnect. tmux cannot become this without throwing its wire away.
 phux's wire is already pointed at it.
 
+The long-arc wire semantics that make this scale across lossy and
+high-latency links is **lazy state synchronization** of libghostty
+Terminal state — Mosh's State Synchronization Protocol composed with
+libghostty as the state model
+([ADR-0018](./ADR/0018-lazy-state-synchronization.md)). Today's
+pass-through bytes (ADR-0013) is the degenerate case of that scheme;
+the destination shape is structurally identical on the wire, with the
+server synthesizing minimum-VT transitions per consumer per tick once
+the libghostty state-snapshot primitive lands. See
+[`research/2026-05-26-state-sync-algorithm.md`](./research/2026-05-26-state-sync-algorithm.md)
+for the algorithm composition.
+
 ---
 
 ## Two consumer surfaces

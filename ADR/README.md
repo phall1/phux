@@ -27,6 +27,7 @@ Nygard's template][nygard].
 | [0015](./0015-protocol-layering.md) | Protocol layering: L1 substrate / L2 collections / L3 metadata; federation + automation as cross-cuts | Accepted |
 | [0016](./0016-terminal-id-as-wire-primary.md) | `TerminalId` is the wire identity for a managed terminal; `PaneId` is removed | Accepted |
 | [0017](./0017-tui-not-protocol-privileged.md) | The reference TUI is one consumer among several, with no protocol-level privileges | Accepted (refines [0010](./0010-frontend-agnostic-tmux-cc-reserved.md)) |
+| [0018](./0018-lazy-state-synchronization.md) | The wire is lazy state synchronization of libghostty Terminal state; ADR-0013's pass-through bytes is the degenerate case | Accepted (builds on [0013](./0013-libghostty-bytes-on-wire.md)) |
 
 ## When to write an ADR
 

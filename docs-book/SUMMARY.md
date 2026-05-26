@@ -27,3 +27,4 @@
 - [0015 Protocol Layering: L1/L2/L3 + Cross-Cuts](./ADR/0015-protocol-layering.md)
 - [0016 TerminalId as Wire Primary](./ADR/0016-terminal-id-as-wire-primary.md)
 - [0017 Reference TUI Not Protocol-Privileged](./ADR/0017-tui-not-protocol-privileged.md)
+- [0018 Lazy State Synchronization](./ADR/0018-lazy-state-synchronization.md)
