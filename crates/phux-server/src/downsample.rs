@@ -50,7 +50,9 @@ pub fn downsample_op(op: &DiffOp, support: ColorSupport) -> DiffOp {
             cells: cells.iter().map(|c| downsample_cell(c, support)).collect(),
         },
         // Variants without embedded Color values are tier-agnostic.
-        DiffOp::Clear { .. } | DiffOp::CursorMove { .. } | DiffOp::CursorStyle { .. } => op.clone(),
+        // `DiffOp` is `#[non_exhaustive]`; the catch-all covers `Clear` plus
+        // any future additive variants that have no `Color` payload.
+        _ => op.clone(),
     }
 }
 
@@ -75,7 +77,7 @@ pub fn downsample_cell(cell: &Cell, support: ColorSupport) -> Cell {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phux_protocol::diff::{CellFlags, Color, CursorShape, PaletteIndex, RgbColor, Underline};
+    use phux_protocol::diff::{CellFlags, Color, PaletteIndex, RgbColor, Underline};
 
     fn rgb(r: u8, g: u8, b: u8) -> Color {
         Color::Rgb(RgbColor { r, g, b })
@@ -175,27 +177,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn downsample_op_cursor_variants_pass_through() {
-        // Cursor ops carry no Color today. (The byc.5-adjacent #2 agent
-        // is reshaping these into PaneDiff fields; this test only
-        // asserts the current DiffOp::CursorMove / CursorStyle shape
-        // is tier-agnostic. When cursor-as-field lands, the cursor
-        // variants in DiffOp will be deleted entirely and this test
-        // will be deleted with them — that's a pure subtraction.)
-        let mv = DiffOp::CursorMove { row: 4, col: 9 };
-        let style = DiffOp::CursorStyle {
-            visible: true,
-            shape: CursorShape::Bar,
-            blink: false,
-        };
-        for support in [
-            ColorSupport::TrueColor,
-            ColorSupport::Indexed256,
-            ColorSupport::Indexed16,
-        ] {
-            assert_eq!(downsample_op(&mv, support), mv);
-            assert_eq!(downsample_op(&style, support), style);
-        }
-    }
+    // Note: phux-429 removed the `DiffOp::CursorMove` / `CursorStyle`
+    // variants — cursor state is now a `PANE_DIFF` struct field per
+    // SPEC §8.1/§8.5 rather than a diff op. The dedicated cursor-variant
+    // passthrough test that lived here was a pure subtraction, as the
+    // anticipating comment in the prior revision noted.
 }

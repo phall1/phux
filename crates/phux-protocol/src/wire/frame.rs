@@ -18,7 +18,7 @@
 
 use bytes::BytesMut;
 
-use crate::diff::DiffOp;
+use crate::diff::{CursorState, DiffOp, PaneModes};
 use crate::ids::{ClientId, PaneId, SessionId};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
@@ -26,7 +26,7 @@ use crate::input::mouse::MouseEvent;
 use crate::input::paste::PasteEvent;
 
 use super::decode::Decoder;
-use super::diff::encode_diff_ops;
+use super::diff::{encode_cursor_state, encode_diff_ops, encode_pane_modes};
 use super::encode::Encoder;
 use super::error::DecodeError;
 use super::info::{SessionSnapshot, encode_client_id, encode_session_snapshot};
@@ -205,19 +205,35 @@ pub enum FrameKind {
         nonce: u64,
     },
 
-    /// `PANE_DIFF` — server-to-client incremental pane update (`SPEC.md` §8.3).
+    /// `PANE_DIFF` — server-to-client incremental pane update (`SPEC.md` §8.1).
     ///
-    /// The body carries a `u32` pane id, a `u64` frame id, then a `u32`-prefixed
-    /// list of [`DiffOp`]. The `pane_id` is a plain `u32` for now; the
-    /// `SessionId` tagged-union from ADR-0007 §3 will replace it once
-    /// satellite routing lands.
+    /// The body shape conforms to SPEC §8.1's `PANE_DIFF { pane_id, frame_id,
+    /// base_frame_id, ops, cursor, modes, revision }`. Per SPEC §8.5 the
+    /// `cursor` and `modes` fields ride along with every diff rather than as
+    /// separate frames — pulling them into the op stream would increase
+    /// wire chatter without benefit.
+    ///
+    /// `revision` is `0` today; SPEC §8.1 reserves it for future
+    /// compression schemes (e.g. per-frame LZ4). The `pane_id` is a plain
+    /// `u32` for now; the `SessionId` tagged-union from ADR-0007 §3 will
+    /// replace it once satellite routing lands.
     PaneDiff {
         /// Target pane.
         pane_id: u32,
-        /// Monotonic frame counter for this pane.
+        /// Monotonic frame counter for this pane — the frame this produces.
         frame_id: u64,
+        /// Frame counter this diff applies on top of. `0` means "the empty
+        /// grid at pane creation"; see SPEC §8.1.
+        base_frame_id: u64,
         /// Diff operations to apply, in order.
         ops: Vec<DiffOp>,
+        /// Cursor state at the end of this frame (SPEC §8.5).
+        cursor: CursorState,
+        /// Pane-wide modes at the end of this frame (SPEC §8.5).
+        modes: PaneModes,
+        /// Revision tag; `0` today, reserved for SPEC §8.1 compression
+        /// schemes.
+        revision: u8,
     },
 
     /// `ATTACH` — client requests to attach to a session (`SPEC.md` §13).
@@ -375,11 +391,19 @@ impl FrameKind {
             Self::PaneDiff {
                 pane_id,
                 frame_id,
+                base_frame_id,
                 ops,
+                cursor,
+                modes,
+                revision,
             } => {
                 enc.write_u32_be(*pane_id);
                 enc.write_u64_be(*frame_id);
+                enc.write_u64_be(*base_frame_id);
                 encode_diff_ops(ops, &mut enc);
+                encode_cursor_state(*cursor, &mut enc);
+                encode_pane_modes(*modes, &mut enc);
+                enc.write_u8(*revision);
             }
             Self::Attach {
                 target,

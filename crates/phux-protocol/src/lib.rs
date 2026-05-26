@@ -44,7 +44,7 @@ pub mod ids;
 #[cfg_attr(docsrs, doc(cfg(feature = "server")))]
 pub use diff::{
     Cell, CellFlags, Color, ColorDownsample, ColorSupport, CursorShape, CursorState, DiffOp, Grid,
-    Underline, compute_diff, downsample_color,
+    PaneDiffResult, PaneModes, Underline, compute_diff, downsample_color,
 };
 pub use ids::{ClientId, FrameId, PaneId, SessionId, WindowId};
 

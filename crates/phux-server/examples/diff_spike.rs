@@ -46,7 +46,13 @@ fn main() {
 
     println!("\n=== diff 0 -> 1 ===");
     let diff_0_1 = compute_diff(&snap0, &snap1);
-    print_diff(&diff_0_1);
+    print_diff(&diff_0_1.ops);
+    println!(
+        "  cursor: ({},{}) modes: {:#06x}",
+        diff_0_1.cursor.row,
+        diff_0_1.cursor.col,
+        diff_0_1.modes.bits()
+    );
 
     println!("\n>> feeding: \"\\x1b[31msecond line\\x1b[0m\\r\\n\"");
     terminal.vt_write(b"\x1b[31msecond line\x1b[0m\r\n");
@@ -56,7 +62,13 @@ fn main() {
 
     println!("\n=== diff 1 -> 2 ===");
     let diff_1_2 = compute_diff(&snap1, &snap2);
-    print_diff(&diff_1_2);
+    print_diff(&diff_1_2.ops);
+    println!(
+        "  cursor: ({},{}) modes: {:#06x}",
+        diff_1_2.cursor.row,
+        diff_1_2.cursor.col,
+        diff_1_2.modes.bits()
+    );
 
     println!("\n>> feeding: clear screen + reposition");
     terminal.vt_write(b"\x1b[H\x1b[2J");
@@ -66,16 +78,23 @@ fn main() {
 
     println!("\n=== diff 2 -> 3 ===");
     let diff_2_3 = compute_diff(&snap2, &snap3);
-    print_diff(&diff_2_3);
+    print_diff(&diff_2_3.ops);
+    println!(
+        "  cursor: ({},{}) modes: {:#06x}",
+        diff_2_3.cursor.row,
+        diff_2_3.cursor.col,
+        diff_2_3.modes.bits()
+    );
 
     println!("\n=== summary ===");
-    println!("0→1: {} ops", diff_0_1.len());
-    println!("1→2: {} ops", diff_1_2.len());
-    println!("2→3: {} ops", diff_2_3.len());
+    println!("0→1: {} ops", diff_0_1.ops.len());
+    println!("1→2: {} ops", diff_1_2.ops.len());
+    println!("2→3: {} ops", diff_2_3.ops.len());
 
     // Sanity: applying 0→1 to snap0 should produce snap1 (cell-equivalence).
     let mut replay = snap0;
-    apply_diff(&mut replay, &diff_0_1);
+    apply_diff(&mut replay, &diff_0_1.ops);
+    replay.cursor = diff_0_1.cursor;
     assert_eq!(
         replay.cells, snap1.cells,
         "diff 0→1 did not reproduce snapshot 1; protocol invariant violated",
@@ -116,21 +135,17 @@ fn print_diff(ops: &[DiffOp]) {
             DiffOp::Clear { row, col, count } => {
                 println!("  Clear    ({row:2},{col:2}) count={count}");
             }
-            DiffOp::CursorMove { row, col } => {
-                println!("  CursorMove -> ({row},{col})");
-            }
-            DiffOp::CursorStyle {
-                visible,
-                shape,
-                blink,
-            } => {
-                println!("  CursorStyle visible={visible} shape={shape:?} blink={blink}");
-            }
+            // `DiffOp` is `#[non_exhaustive]` for forward compatibility; the
+            // catch-all is required even though `CellRun` / `Clear` are the
+            // only variants today.
+            _ => println!("  <unknown op>"),
         }
     }
 }
 
 /// Apply a diff in-place. Used to validate the round-trip invariant.
+/// Cursor + modes are NOT in the op stream — SPEC §8.1 carries them on the
+/// `PANE_DIFF` frame; callers update them separately.
 fn apply_diff(grid: &mut phux_protocol::Grid, ops: &[DiffOp]) {
     for op in ops {
         match op {
@@ -152,19 +167,9 @@ fn apply_diff(grid: &mut phux_protocol::Grid, ops: &[DiffOp]) {
                     }
                 }
             }
-            DiffOp::CursorMove { row, col } => {
-                grid.cursor.row = *row;
-                grid.cursor.col = *col;
-            }
-            DiffOp::CursorStyle {
-                visible,
-                shape,
-                blink,
-            } => {
-                grid.cursor.visible = *visible;
-                grid.cursor.shape = *shape;
-                grid.cursor.blink = *blink;
-            }
+            // `DiffOp` is `#[non_exhaustive]`; ignore unknown variants in this
+            // spike (real apply code would log + snapshot-resync per SPEC §8.4).
+            _ => {}
         }
     }
 }

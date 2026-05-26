@@ -1,15 +1,24 @@
-//! Diff operations (`SPEC.md` §8.3) and cursor state (`SPEC.md` §8.5).
+//! Diff operations (`SPEC.md` §8.3).
+//!
+//! Per SPEC §8.1, cursor state and pane modes are **struct fields** of
+//! `PANE_DIFF`, not entries in this op stream. The cursor / modes types live
+//! in [`super::cursor`].
 
 use super::cell::Cell;
 
 /// A single diff operation. Applied in order to evolve a pane's grid from one
 /// frame to the next.
 ///
+/// Cursor state and pane modes are intentionally **not** members of this enum;
+/// SPEC §8.1/§8.5 carry them on `PANE_DIFF` as dedicated struct fields. See
+/// [`super::cursor::CursorState`] and [`super::cursor::PaneModes`].
+///
 /// The set defined here is the minimum needed to round-trip the spike; the
 /// remaining variants from `SPEC.md` §8.3 (`Repeat`, `EraseLine`, `ScrollUp`,
 /// `ScrollDown`, `Hyperlink`, `Image`) will be added as the implementation
 /// requires them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DiffOp {
     /// Set a contiguous horizontal run of cells.
     ///
@@ -34,62 +43,4 @@ pub enum DiffOp {
         /// Number of cells to clear.
         count: u16,
     },
-    /// Move the cursor to `(row, col)`.
-    CursorMove {
-        /// Zero-based row index.
-        row: u16,
-        /// Zero-based column index.
-        col: u16,
-    },
-    /// Update cursor visibility and visual style.
-    CursorStyle {
-        /// Whether the cursor is currently visible.
-        visible: bool,
-        /// Cursor shape.
-        shape: CursorShape,
-        /// Whether the cursor is blinking.
-        blink: bool,
-    },
-}
-
-/// Cursor state, carried with every frame (`SPEC.md` §8.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CursorState {
-    /// Zero-based row index.
-    pub row: u16,
-    /// Zero-based column index.
-    pub col: u16,
-    /// Whether the cursor is visible.
-    pub visible: bool,
-    /// Cursor shape.
-    pub shape: CursorShape,
-    /// Whether the cursor is blinking.
-    pub blink: bool,
-}
-
-impl Default for CursorState {
-    fn default() -> Self {
-        Self {
-            row: 0,
-            col: 0,
-            visible: true,
-            shape: CursorShape::Block,
-            blink: true,
-        }
-    }
-}
-
-/// Cursor shape.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum CursorShape {
-    /// `DECSCUSR 1, 2` — block.
-    #[default]
-    Block = 0,
-    /// `DECSCUSR 5, 6` — bar.
-    Bar = 1,
-    /// `DECSCUSR 3, 4` — underline.
-    Underline = 2,
-    /// Hollow block.
-    BlockHollow = 3,
 }

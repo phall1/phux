@@ -76,14 +76,16 @@ proptest! {
         let g1 = grid::capture(&terminal).expect("capture g1");
 
         // Compute the canonical diff and replay on the client mirror.
-        let ops = compute_diff(&g0, &g1);
+        let diff = compute_diff(&g0, &g1);
 
         let mut mirror = DiffMirror::new(rows, cols);
         // Seed the mirror with G0 via the snapshot path — same as a real
         // client attaching after the server has already drawn into the
         // pane.
         mirror.ingest_snapshot(&g0, 0);
-        mirror.apply(&ops);
+        // Apply ops + cursor + modes together via the frame-level entry
+        // point per SPEC §8.1/§8.5.
+        mirror.apply_frame(&diff.ops, diff.cursor, diff.modes, 1);
 
         prop_assert_eq!(
             &mirror.grid, &g1,

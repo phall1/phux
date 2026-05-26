@@ -6,7 +6,7 @@
 
 use crate::ids::PaneId;
 
-use super::diff::decode_diff_ops;
+use super::diff::{decode_cursor_state, decode_diff_ops, decode_pane_modes};
 use super::error::DecodeError;
 use super::frame::{
     FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH, TYPE_DETACHED,
@@ -178,11 +178,19 @@ impl<'a> Decoder<'a> {
             TYPE_PANE_DIFF => {
                 let pane_id = self.read_u32_be()?;
                 let frame_id = self.read_u64_be()?;
+                let base_frame_id = self.read_u64_be()?;
                 let ops = decode_diff_ops(self)?;
+                let cursor = decode_cursor_state(self)?;
+                let modes = decode_pane_modes(self)?;
+                let revision = self.read_u8()?;
                 FrameKind::PaneDiff {
                     pane_id,
                     frame_id,
+                    base_frame_id,
                     ops,
+                    cursor,
+                    modes,
+                    revision,
                 }
             }
             TYPE_ATTACH => {

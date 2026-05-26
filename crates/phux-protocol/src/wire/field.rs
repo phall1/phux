@@ -135,6 +135,14 @@ pub const PANE_DIFF_PANE: u32 = 1;
 pub const PANE_DIFF_FRAME_ID: u32 = 2;
 /// Encoded `DiffOp` sequence.
 pub const PANE_DIFF_OPS: u32 = 3;
+/// Base frame id this diff applies on top of (`SPEC.md` §8.1).
+pub const PANE_DIFF_BASE_FRAME_ID: u32 = 4;
+/// `CursorState` carried with every diff (`SPEC.md` §8.5).
+pub const PANE_DIFF_CURSOR: u32 = 5;
+/// `PaneModes` bitset carried with every diff (`SPEC.md` §8.5).
+pub const PANE_DIFF_MODES: u32 = 6;
+/// Revision tag, reserved for SPEC §8.1 compression schemes (`0` today).
+pub const PANE_DIFF_REVISION: u32 = 7;
 
 // -----------------------------------------------------------------------------
 // `VIEWPORT_RESIZE` / `PANE_RESIZED` — §10.5

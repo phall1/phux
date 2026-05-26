@@ -845,3 +845,191 @@ fn layout_ratio_one_is_accepted() {
 // `arb_layout_node` strategy's `Just` paths.
 #[allow(dead_code)]
 const _SPLIT_DIR_TYPE_CHECK: fn() -> SplitDir = || SplitDir::Horizontal;
+
+// -----------------------------------------------------------------------------
+// phux-429: PANE_DIFF carries cursor + modes + base_frame_id + revision as
+// struct fields per SPEC §8.1/§8.5 (not as DiffOps). The tests below exercise
+// the new field layout end-to-end through encode/decode. These are appended at
+// the END of the file so parallel agents can append their own sections without
+// interleaving.
+// -----------------------------------------------------------------------------
+
+use phux_protocol::diff::{CursorShape, CursorState, DiffOp, PaneModes};
+
+fn cursor_field_arb_cursor_shape() -> impl Strategy<Value = CursorShape> {
+    prop_oneof![
+        Just(CursorShape::Block),
+        Just(CursorShape::Bar),
+        Just(CursorShape::Underline),
+        Just(CursorShape::BlockHollow),
+    ]
+}
+
+fn cursor_field_arb_cursor_state() -> impl Strategy<Value = CursorState> {
+    (
+        any::<u16>(),
+        any::<u16>(),
+        any::<bool>(),
+        cursor_field_arb_cursor_shape(),
+        any::<bool>(),
+    )
+        .prop_map(|(row, col, visible, shape, blink)| CursorState {
+            row,
+            col,
+            visible,
+            shape,
+            blink,
+        })
+}
+
+fn cursor_field_arb_pane_modes() -> impl Strategy<Value = PaneModes> {
+    any::<u16>().prop_map(PaneModes::from_bits)
+}
+
+proptest! {
+    #[test]
+    fn cursor_field_roundtrip_pane_diff(
+        pane_id in any::<u32>(),
+        frame_id in any::<u64>(),
+        base_frame_id in any::<u64>(),
+        cursor in cursor_field_arb_cursor_state(),
+        modes in cursor_field_arb_pane_modes(),
+        revision in any::<u8>(),
+    ) {
+        let frame = FrameKind::PaneDiff {
+            pane_id,
+            frame_id,
+            base_frame_id,
+            ops: Vec::new(),
+            cursor,
+            modes,
+            revision,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn cursor_field_roundtrip_pane_diff_with_ops(
+        pane_id in any::<u32>(),
+        frame_id in any::<u64>(),
+        base_frame_id in any::<u64>(),
+        cursor in cursor_field_arb_cursor_state(),
+        modes in cursor_field_arb_pane_modes(),
+        revision in any::<u8>(),
+        // A single Clear op is enough to confirm the ops field still travels
+        // alongside the new fields. Op-stream details are exercised in
+        // wire::diff::tests.
+        clear_row in any::<u16>(),
+        clear_col in any::<u16>(),
+        clear_count in any::<u16>(),
+    ) {
+        let frame = FrameKind::PaneDiff {
+            pane_id,
+            frame_id,
+            base_frame_id,
+            ops: vec![DiffOp::Clear {
+                row: clear_row,
+                col: clear_col,
+                count: clear_count,
+            }],
+            cursor,
+            modes,
+            revision,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn cursor_field_pane_diff_invalid_cursor_shape_rejected() {
+    // Hand-build a PANE_DIFF body whose embedded CursorShape tag is 0xFF.
+    // Body layout: type | pane_id u32 | frame_id u64 | base_frame_id u64 |
+    //              ops_count u32 (0) | cursor (row u16 | col u16 | visible u8
+    //              | shape u8 | blink u8) | modes u16 | revision u8.
+    let mut body = vec![0x40u8]; // TYPE_PANE_DIFF
+    body.extend_from_slice(&0u32.to_be_bytes()); // pane_id
+    body.extend_from_slice(&0u64.to_be_bytes()); // frame_id
+    body.extend_from_slice(&0u64.to_be_bytes()); // base_frame_id
+    body.extend_from_slice(&0u32.to_be_bytes()); // ops count = 0
+    body.extend_from_slice(&0u16.to_be_bytes()); // cursor.row
+    body.extend_from_slice(&0u16.to_be_bytes()); // cursor.col
+    body.push(1); // cursor.visible
+    body.push(0xFF); // cursor.shape — INVALID
+    body.push(1); // cursor.blink
+    body.extend_from_slice(&0u16.to_be_bytes()); // modes
+    body.push(0); // revision
+
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::UnknownEnumValue {
+            field: "CursorShape",
+            value: 0xFF,
+        }
+    );
+}
+
+#[test]
+fn cursor_field_pane_diff_reserved_mode_bits_round_trip() {
+    // Per SPEC §16 ("tolerate unknown trailing fields"), reserved mode bits
+    // travel through encode/decode unchanged so additive minor-version
+    // protocol changes remain backward compatible.
+    let frame = FrameKind::PaneDiff {
+        pane_id: 1,
+        frame_id: 2,
+        base_frame_id: 1,
+        ops: Vec::new(),
+        cursor: CursorState::default(),
+        modes: PaneModes::from_bits(0x4000), // currently unallocated bit
+        revision: 0,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, _) = FrameKind::decode(&buf).unwrap();
+    if let FrameKind::PaneDiff { modes, .. } = decoded {
+        assert_eq!(modes.bits(), 0x4000);
+    } else {
+        panic!("expected PaneDiff");
+    }
+}
+
+#[test]
+fn cursor_field_pane_diff_mouse_protocol_encoding_packed_fields() {
+    // The 4-bit mouse_protocol (0x00F0) and 4-bit mouse_encoding (0x0F00)
+    // packed nibbles survive a round-trip.
+    let modes = PaneModes::EMPTY
+        .with_mouse_protocol(0xA)
+        .with_mouse_encoding(0x3)
+        .insert(PaneModes::FOCUS_REPORTING);
+    let frame = FrameKind::PaneDiff {
+        pane_id: 0,
+        frame_id: 0,
+        base_frame_id: 0,
+        ops: Vec::new(),
+        cursor: CursorState::default(),
+        modes,
+        revision: 0,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, _) = FrameKind::decode(&buf).unwrap();
+    if let FrameKind::PaneDiff { modes, .. } = decoded {
+        assert_eq!(modes.mouse_protocol(), 0xA);
+        assert_eq!(modes.mouse_encoding(), 0x3);
+        assert!(modes.contains(PaneModes::FOCUS_REPORTING));
+    } else {
+        panic!("expected PaneDiff");
+    }
+}

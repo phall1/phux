@@ -1,5 +1,0 @@
----
-source: crates/phux-protocol/tests/diff_wire_snapshots.rs
-expression: dump_ops(&ops)
----
-00000000 | 00 00 00 01 03 00 09 00  29                      |........)

@@ -12,18 +12,24 @@
 //! DiffOp        := u8 tag | body
 //!     0x01 CellRun     := u16 row | u16 col | u32 cell_count | Cell{cell_count}
 //!     0x02 Clear       := u16 row | u16 col | u16 count
-//!     0x03 CursorMove  := u16 row | u16 col
-//!     0x04 CursorStyle := u8 visible | u8 shape | u8 blink
 //!
 //! Cell          := Text | Color fg | Color bg | Underline | Color uline | CellFlags
 //! Text          := u8 grapheme_count | u32 codepoint{grapheme_count}
 //! Color         := u8 tag (0 None | 1 Palette u8 | 2 Rgb u8 u8 u8)
 //! Underline     := u8 discriminant
 //! CellFlags     := u16 bitset (matches bitflags repr)
-//! CursorShape   := u8 discriminant
+//! CursorShape   := u8 discriminant (only on PANE_DIFF cursor field, not in ops)
 //! ```
+//!
+//! Tags `0x03` (`CursorMove`) and `0x04` (`CursorStyle`) used to live here.
+//! They were removed when the protocol was conformed to SPEC §8.1/§8.5:
+//! cursor state and pane modes are now struct fields on `PANE_DIFF`, not
+//! ops. See `bd show phux-429` for the rationale.
 
-use crate::diff::{Cell, CellFlags, Color, CursorShape, DiffOp, PaletteIndex, RgbColor, Underline};
+use crate::diff::{
+    Cell, CellFlags, Color, CursorShape, CursorState, DiffOp, PaletteIndex, PaneModes, RgbColor,
+    Underline,
+};
 use smallvec::SmallVec;
 
 use super::decode::Decoder;
@@ -31,11 +37,12 @@ use super::encode::Encoder;
 use super::error::DecodeError;
 
 /// `DiffOp` discriminants, occupying their own 1-byte tag space (independent
-/// of the frame-type space in `SPEC.md` §7).
+/// of the frame-type space in `SPEC.md` §7). `0x03` and `0x04` were retired
+/// in phux-429 when cursor state moved to `PANE_DIFF` struct fields per
+/// SPEC §8.1/§8.5; they are reserved (decoder rejects them) until the
+/// `DiffOp` enum expands per SPEC §8.3 (`Repeat`, `EraseLine`, etc.).
 pub(crate) const OP_CELL_RUN: u8 = 0x01;
 pub(crate) const OP_CLEAR: u8 = 0x02;
-pub(crate) const OP_CURSOR_MOVE: u8 = 0x03;
-pub(crate) const OP_CURSOR_STYLE: u8 = 0x04;
 
 /// `Color` tag discriminants. Per ADR-0008, `Color` is libghostty-vt's
 /// `StyleColor`; the tag values are phux-stable bytes on the wire (not
@@ -94,21 +101,6 @@ fn encode_diff_op(op: &DiffOp, enc: &mut Encoder<'_>) {
             enc.write_u16_be(*col);
             enc.write_u16_be(*count);
         }
-        DiffOp::CursorMove { row, col } => {
-            enc.write_u8(OP_CURSOR_MOVE);
-            enc.write_u16_be(*row);
-            enc.write_u16_be(*col);
-        }
-        DiffOp::CursorStyle {
-            visible,
-            shape,
-            blink,
-        } => {
-            enc.write_u8(OP_CURSOR_STYLE);
-            enc.write_u8(u8::from(*visible));
-            encode_cursor_shape(*shape, enc);
-            enc.write_u8(u8::from(*blink));
-        }
     }
 }
 
@@ -131,21 +123,6 @@ fn decode_diff_op(dec: &mut Decoder<'_>) -> Result<DiffOp, DecodeError> {
             let col = dec.read_u16_be()?;
             let count = dec.read_u16_be()?;
             Ok(DiffOp::Clear { row, col, count })
-        }
-        OP_CURSOR_MOVE => {
-            let row = dec.read_u16_be()?;
-            let col = dec.read_u16_be()?;
-            Ok(DiffOp::CursorMove { row, col })
-        }
-        OP_CURSOR_STYLE => {
-            let visible = decode_bool(dec)?;
-            let shape = decode_cursor_shape(dec)?;
-            let blink = decode_bool(dec)?;
-            Ok(DiffOp::CursorStyle {
-                visible,
-                shape,
-                blink,
-            })
         }
         other => Err(DecodeError::UnknownFrameKind {
             tag: u16::from(other),
@@ -269,14 +246,57 @@ fn decode_cursor_shape(dec: &mut Decoder<'_>) -> Result<CursorShape, DecodeError
         1 => Ok(CursorShape::Bar),
         2 => Ok(CursorShape::Underline),
         3 => Ok(CursorShape::BlockHollow),
-        other => Err(DecodeError::UnknownFrameKind {
-            tag: u16::from(other),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "CursorShape",
+            value: u32::from(other),
         }),
     }
 }
 
 fn decode_bool(dec: &mut Decoder<'_>) -> Result<bool, DecodeError> {
     Ok(dec.read_u8()? != 0)
+}
+
+/// Encode a [`CursorState`] (SPEC §8.5) for inclusion in a `PANE_DIFF` body.
+///
+/// Layout (all big-endian): `u16 row | u16 col | u8 visible | u8 shape | u8 blink`.
+/// `CursorState` is `Copy` and 8 bytes; pass by value to match clippy's
+/// `trivially_copy_pass_by_ref` heuristic.
+pub fn encode_cursor_state(state: CursorState, enc: &mut Encoder<'_>) {
+    enc.write_u16_be(state.row);
+    enc.write_u16_be(state.col);
+    enc.write_u8(u8::from(state.visible));
+    encode_cursor_shape(state.shape, enc);
+    enc.write_u8(u8::from(state.blink));
+}
+
+/// Decode a [`CursorState`] written by [`encode_cursor_state`].
+pub fn decode_cursor_state(dec: &mut Decoder<'_>) -> Result<CursorState, DecodeError> {
+    let row = dec.read_u16_be()?;
+    let col = dec.read_u16_be()?;
+    let visible = decode_bool(dec)?;
+    let shape = decode_cursor_shape(dec)?;
+    let blink = decode_bool(dec)?;
+    Ok(CursorState {
+        row,
+        col,
+        visible,
+        shape,
+        blink,
+    })
+}
+
+/// Encode a [`PaneModes`] bitset (SPEC §8.5) as a raw `u16` big-endian.
+///
+/// Unknown bits round-trip unchanged so additive minor-version protocol
+/// changes remain backward compatible per SPEC §16.
+pub fn encode_pane_modes(modes: PaneModes, enc: &mut Encoder<'_>) {
+    enc.write_u16_be(modes.bits());
+}
+
+/// Decode a [`PaneModes`] bitset written by [`encode_pane_modes`].
+pub fn decode_pane_modes(dec: &mut Decoder<'_>) -> Result<PaneModes, DecodeError> {
+    Ok(PaneModes::from_bits(dec.read_u16_be()?))
 }
 
 #[cfg(test)]
@@ -362,15 +382,28 @@ mod tests {
                 .prop_map(|(row, col, cells)| DiffOp::CellRun { row, col, cells }),
             (any::<u16>(), any::<u16>(), any::<u16>())
                 .prop_map(|(row, col, count)| DiffOp::Clear { row, col, count }),
-            (any::<u16>(), any::<u16>()).prop_map(|(row, col)| DiffOp::CursorMove { row, col }),
-            (any::<bool>(), arb_cursor_shape(), any::<bool>()).prop_map(
-                |(visible, shape, blink)| DiffOp::CursorStyle {
-                    visible,
-                    shape,
-                    blink,
-                },
-            ),
         ]
+    }
+
+    fn arb_cursor_state() -> impl Strategy<Value = CursorState> {
+        (
+            any::<u16>(),
+            any::<u16>(),
+            any::<bool>(),
+            arb_cursor_shape(),
+            any::<bool>(),
+        )
+            .prop_map(|(row, col, visible, shape, blink)| CursorState {
+                row,
+                col,
+                visible,
+                shape,
+                blink,
+            })
+    }
+
+    fn arb_pane_modes() -> impl Strategy<Value = PaneModes> {
+        any::<u16>().prop_map(PaneModes::from_bits)
     }
 
     proptest! {
@@ -397,6 +430,61 @@ mod tests {
             let decoded = decode_cell(&mut dec).unwrap();
             prop_assert_eq!(cell, decoded);
         }
+
+        #[test]
+        fn cursor_state_roundtrip(state in arb_cursor_state()) {
+            let mut buf = BytesMut::new();
+            {
+                let mut enc = Encoder::new(&mut buf);
+                encode_cursor_state(state, &mut enc);
+            }
+            let mut dec = Decoder::new(&buf);
+            let decoded = decode_cursor_state(&mut dec).unwrap();
+            prop_assert_eq!(state, decoded);
+        }
+
+        #[test]
+        fn pane_modes_roundtrip(modes in arb_pane_modes()) {
+            let mut buf = BytesMut::new();
+            {
+                let mut enc = Encoder::new(&mut buf);
+                encode_pane_modes(modes, &mut enc);
+            }
+            let mut dec = Decoder::new(&buf);
+            let decoded = decode_pane_modes(&mut dec).unwrap();
+            prop_assert_eq!(modes, decoded);
+        }
+    }
+
+    #[test]
+    fn cursor_state_invalid_shape_rejected() {
+        // Hand-build a CursorState with shape tag 0xFF.
+        let bytes = [0u8, 0, 0, 0, 0, 0xFF, 0]; // row=0 col=0 visible=0 shape=0xFF blink=0
+        let mut dec = Decoder::new(&bytes);
+        let err = decode_cursor_state(&mut dec).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::wire::error::DecodeError::UnknownEnumValue {
+                field: "CursorShape",
+                value: 0xFF
+            }
+        ));
+    }
+
+    #[test]
+    fn pane_modes_unknown_bits_preserved() {
+        // Reserved bit (0x4000) round-trips per SPEC §16 ("tolerate unknown
+        // trailing fields"). The decoder doesn't reject reserved bits;
+        // unknown future flags travel through untouched.
+        let modes = PaneModes::from_bits(0x4000);
+        let mut buf = BytesMut::new();
+        {
+            let mut enc = Encoder::new(&mut buf);
+            encode_pane_modes(modes, &mut enc);
+        }
+        let mut dec = Decoder::new(&buf);
+        let decoded = decode_pane_modes(&mut dec).unwrap();
+        assert_eq!(decoded.bits(), 0x4000);
     }
 
     #[test]

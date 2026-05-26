@@ -437,3 +437,61 @@ fn snap_bell() {
         pane_id: 0x0000_00BE,
     }));
 }
+
+// -----------------------------------------------------------------------------
+// phux-429: PANE_DIFF snapshot fixtures with the new SPEC §8.1 layout
+// (`pane_id, frame_id, base_frame_id, ops, cursor, modes, revision`).
+// Appended at the END of the file so parallel agents can append their own
+// sections without interleaving.
+// -----------------------------------------------------------------------------
+
+use phux_protocol::diff::{CursorShape, CursorState, PaneModes};
+
+#[test]
+fn cursor_field_snap_pane_diff_empty_ops_default_cursor() {
+    // Smallest meaningful PANE_DIFF: no ops, default cursor at (0,0),
+    // no modes set, revision 0. Confirms the new struct-field layout
+    // serialises predictably.
+    let frame = FrameKind::PaneDiff {
+        pane_id: 0x0000_0001,
+        frame_id: 1,
+        base_frame_id: 0,
+        ops: Vec::new(),
+        cursor: CursorState::default(),
+        modes: PaneModes::EMPTY,
+        revision: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn cursor_field_snap_pane_diff_with_cursor_and_modes() {
+    // Realistic PANE_DIFF: one CellRun op + a non-trivial cursor position
+    // + altscreen-active mode + a mouse-protocol nibble set.
+    let frame = FrameKind::PaneDiff {
+        pane_id: 0x0000_0042,
+        frame_id: 0x0000_0000_DEAD_BEEF,
+        base_frame_id: 0x0000_0000_DEAD_BEEE,
+        ops: vec![DiffOp::CellRun {
+            row: 5,
+            col: 9,
+            cells: vec![Cell {
+                text: smallvec::smallvec!['A'],
+                fg: Color::Palette(PaletteIndex(2)),
+                ..Cell::blank()
+            }],
+        }],
+        cursor: CursorState {
+            row: 5,
+            col: 10,
+            visible: true,
+            shape: CursorShape::Bar,
+            blink: false,
+        },
+        modes: PaneModes::EMPTY
+            .insert(PaneModes::ALTSCREEN_ACTIVE)
+            .with_mouse_protocol(0x3),
+        revision: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}

@@ -1,8 +1,11 @@
 //! [`DiffOp`] application to a [`DiffMirror`].
 //!
-//! Mirrors the semantics of `phux-server/examples/diff_spike.rs::apply_diff`
-//! and the inverse of `phux_protocol::compute_diff`. The replay invariant
-//! (see [`super`]) depends on these two staying in lockstep.
+//! Mirrors the semantics of the inverse of `phux_protocol::compute_diff`. The
+//! replay invariant (see [`super`]) depends on these two staying in lockstep.
+//!
+//! Per SPEC §8.1/§8.5, cursor state and pane modes are NOT in the op stream;
+//! callers update those via [`DiffMirror::apply_frame`] using the cursor and
+//! modes fields carried by the `PANE_DIFF` frame.
 
 use phux_protocol::{Cell, DiffOp};
 
@@ -45,23 +48,10 @@ fn apply_one(state: &mut DiffMirror, op: &DiffOp) {
                 }
             }
         }
-        DiffOp::CursorMove { row, col } => {
-            state.grid.cursor.row = *row;
-            state.grid.cursor.col = *col;
-            state.cursor.row = *row;
-            state.cursor.col = *col;
-        }
-        DiffOp::CursorStyle {
-            visible,
-            shape,
-            blink,
-        } => {
-            state.grid.cursor.visible = *visible;
-            state.grid.cursor.shape = *shape;
-            state.grid.cursor.blink = *blink;
-            state.cursor.visible = *visible;
-            state.cursor.shape = *shape;
-            state.cursor.blink = *blink;
-        }
+        // `DiffOp` is `#[non_exhaustive]`; future additive variants are
+        // silently dropped here until apply support lands for them. This
+        // matches the spec's "tolerate unknown trailing fields" guidance
+        // (SPEC §16) at the op-stream level.
+        _ => {}
     }
 }

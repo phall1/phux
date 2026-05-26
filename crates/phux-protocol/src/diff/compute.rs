@@ -1,9 +1,13 @@
-//! Canonical diff algorithm: `(Grid, Grid) -> Vec<DiffOp>`.
+//! Canonical diff algorithm: `(Grid, Grid) -> PaneDiffResult`.
 //!
-//! This first pass is intentionally simple. It scans row-by-row, identifies
-//! maximal runs of changed cells, and emits one `CellRun` per run. It does
-//! not yet detect scroll regions, run-length-encode identical cells, or
-//! coalesce attribute-only changes. Those optimizations land as needed and
+//! Per SPEC §8.1, a `PANE_DIFF` carries `ops`, `cursor`, and `modes` as
+//! separate fields — the cursor is **not** in the op stream. This module
+//! returns all three together via [`PaneDiffResult`].
+//!
+//! The op-emission pass is intentionally simple. It scans row-by-row,
+//! identifies maximal runs of changed cells, and emits one `CellRun` per run.
+//! It does not yet detect scroll regions, run-length-encode identical cells,
+//! or coalesce attribute-only changes. Those optimizations land as needed and
 //! are observable as fewer bytes on the wire, not as different rendered
 //! output — the algorithm's contract is correctness, not minimality.
 //!
@@ -14,16 +18,34 @@
 //! a wire-level distinction and not this function's concern.
 
 use super::cell::Cell;
+use super::cursor::{CursorState, PaneModes};
 use super::grid::Grid;
 use super::op::DiffOp;
 
+/// Output of [`compute_diff`]: the op stream plus the cursor and mode state
+/// that travel alongside it on `PANE_DIFF` per SPEC §8.1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneDiffResult {
+    /// Cell-level ops produced by the diff.
+    pub ops: Vec<DiffOp>,
+    /// Cursor state at the end of the new frame.
+    pub cursor: CursorState,
+    /// Pane-wide modes at the end of the new frame.
+    pub modes: PaneModes,
+}
+
 /// Compute the diff that transforms `prev` into `next`.
 ///
-/// The returned ops applied in order to `prev` MUST produce a grid equal to
-/// `next`. The current algorithm is row-by-row maximal-changed-run; see the
-/// module docs for what it does *not* do yet.
+/// The returned [`PaneDiffResult::ops`] applied in order to `prev` MUST
+/// reproduce `next`'s cell grid. The cursor and modes are reported as
+/// terminal-state fields (per SPEC §8.5), not as ops.
+///
+/// `modes` defaults to [`PaneModes::EMPTY`] for now — the `Grid` type does
+/// not yet carry mode state. Once libghostty mode tracking lands on the
+/// server side, callers will populate `modes` from there and this function
+/// will surface it directly.
 #[must_use]
-pub fn compute_diff(prev: &Grid, next: &Grid) -> Vec<DiffOp> {
+pub fn compute_diff(prev: &Grid, next: &Grid) -> PaneDiffResult {
     let mut ops = Vec::new();
 
     // Dimensions differ → emit a full repaint. Wire-level callers should
@@ -36,13 +58,11 @@ pub fn compute_diff(prev: &Grid, next: &Grid) -> Vec<DiffOp> {
             count: u16::MAX,
         });
         push_full_repaint(&mut ops, next);
-        if prev.cursor != next.cursor {
-            ops.push(DiffOp::CursorMove {
-                row: next.cursor.row,
-                col: next.cursor.col,
-            });
-        }
-        return ops;
+        return PaneDiffResult {
+            ops,
+            cursor: next.cursor,
+            modes: PaneModes::EMPTY,
+        };
     }
 
     for (row_idx, (prev_row, next_row)) in prev.cells.iter().zip(next.cells.iter()).enumerate() {
@@ -78,14 +98,11 @@ pub fn compute_diff(prev: &Grid, next: &Grid) -> Vec<DiffOp> {
         }
     }
 
-    if prev.cursor != next.cursor {
-        ops.push(DiffOp::CursorMove {
-            row: next.cursor.row,
-            col: next.cursor.col,
-        });
+    PaneDiffResult {
+        ops,
+        cursor: next.cursor,
+        modes: PaneModes::EMPTY,
     }
-
-    ops
 }
 
 fn cells_eq(a: Option<&Cell>, b: Option<&Cell>) -> bool {
@@ -123,9 +140,12 @@ mod tests {
     }
 
     #[test]
-    fn diff_of_equal_grids_is_empty() {
+    fn diff_of_equal_grids_has_no_ops() {
         let g = Grid::blank(3, 5);
-        assert_eq!(compute_diff(&g, &g), vec![]);
+        let result = compute_diff(&g, &g);
+        assert!(result.ops.is_empty());
+        assert_eq!(result.cursor, g.cursor);
+        assert_eq!(result.modes, PaneModes::EMPTY);
     }
 
     #[test]
@@ -133,9 +153,9 @@ mod tests {
         let prev = Grid::blank(2, 5);
         let mut next = prev.clone();
         next.cells[0][2] = cell_with_text("x");
-        let ops = compute_diff(&prev, &next);
-        assert_eq!(ops.len(), 1);
-        match &ops[0] {
+        let result = compute_diff(&prev, &next);
+        assert_eq!(result.ops.len(), 1);
+        match &result.ops[0] {
             DiffOp::CellRun { row, col, cells } => {
                 assert_eq!((*row, *col), (0, 2));
                 assert_eq!(cells.len(), 1);
@@ -152,9 +172,9 @@ mod tests {
         for (i, ch) in "hello".chars().enumerate() {
             next.cells[0][i] = cell_with_text(&ch.to_string());
         }
-        let ops = compute_diff(&prev, &next);
-        assert_eq!(ops.len(), 1);
-        match &ops[0] {
+        let result = compute_diff(&prev, &next);
+        assert_eq!(result.ops.len(), 1);
+        match &result.ops[0] {
             DiffOp::CellRun { row, col, cells } => {
                 assert_eq!((*row, *col), (0, 0));
                 assert_eq!(cells.len(), 5);
@@ -171,9 +191,9 @@ mod tests {
             prev.cells[0][i] = cell_with_text("x");
         }
         let next = Grid::blank(1, 5);
-        let ops = compute_diff(&prev, &next);
-        assert_eq!(ops.len(), 1);
-        match &ops[0] {
+        let result = compute_diff(&prev, &next);
+        assert_eq!(result.ops.len(), 1);
+        match &result.ops[0] {
             DiffOp::Clear { row, col, count } => {
                 assert_eq!((*row, *col, *count), (0, 0, 5));
             }
@@ -182,12 +202,16 @@ mod tests {
     }
 
     #[test]
-    fn cursor_move_emitted_when_position_changes() {
+    fn cursor_move_does_not_emit_an_op() {
+        // Per SPEC §8.1/§8.5: cursor changes ride on the PANE_DIFF struct,
+        // not in the op stream. The diff for a pure cursor move is empty.
         let prev = Grid::blank(3, 3);
         let mut next = prev.clone();
         next.cursor.col = 2;
-        let ops = compute_diff(&prev, &next);
-        assert_eq!(ops, vec![DiffOp::CursorMove { row: 0, col: 2 }]);
+        let result = compute_diff(&prev, &next);
+        assert!(result.ops.is_empty());
+        assert_eq!(result.cursor.col, 2);
+        assert_eq!(result.cursor.row, 0);
     }
 
     #[test]
@@ -198,9 +222,9 @@ mod tests {
             fg: Color::Rgb(RgbColor { r: 255, g: 0, b: 0 }),
             ..Cell::blank()
         };
-        let ops = compute_diff(&prev, &next);
-        assert_eq!(ops.len(), 1);
+        let result = compute_diff(&prev, &next);
+        assert_eq!(result.ops.len(), 1);
         // It's a CellRun because the cell isn't "blank" — fg is non-default.
-        assert!(matches!(ops[0], DiffOp::CellRun { .. }));
+        assert!(matches!(result.ops[0], DiffOp::CellRun { .. }));
     }
 }

@@ -11,7 +11,8 @@
 
 use phux_client::DiffMirror;
 use phux_protocol::{
-    Cell, CellFlags, Color, CursorShape, CursorState, DiffOp, Grid, Underline, compute_diff,
+    Cell, CellFlags, Color, CursorShape, CursorState, DiffOp, Grid, PaneModes, Underline,
+    compute_diff,
     diff::{PaletteIndex, RgbColor},
 };
 
@@ -76,32 +77,49 @@ fn clear_blanks_a_run_of_populated_cells() {
 }
 
 #[test]
-fn cursor_move_updates_cursor_position() {
+fn apply_frame_updates_cursor_position() {
+    // Per SPEC §8.1/§8.5: cursor state arrives on the PANE_DIFF struct, not
+    // in the op list. The mirror's `apply_frame` is the canonical entry
+    // point that consumes both at once.
     let mut mirror = DiffMirror::new(5, 5);
     assert_eq!(mirror.cursor.row, 0);
     assert_eq!(mirror.cursor.col, 0);
-    mirror.apply(&[DiffOp::CursorMove { row: 3, col: 4 }]);
+    let new_cursor = CursorState {
+        row: 3,
+        col: 4,
+        ..CursorState::default()
+    };
+    mirror.apply_frame(&[], new_cursor, PaneModes::EMPTY, 1);
     assert_eq!(mirror.cursor.row, 3);
     assert_eq!(mirror.cursor.col, 4);
     // Grid's embedded cursor mirrors the field.
     assert_eq!(mirror.grid.cursor.row, 3);
     assert_eq!(mirror.grid.cursor.col, 4);
+    assert_eq!(mirror.frame_id, 1);
 }
 
 #[test]
-fn cursor_style_propagates_to_cursor_state() {
+fn apply_frame_updates_cursor_style_and_modes() {
     let mut mirror = DiffMirror::new(2, 2);
-    mirror.apply(&[DiffOp::CursorStyle {
+    let new_cursor = CursorState {
+        row: 0,
+        col: 0,
         visible: false,
         shape: CursorShape::Bar,
         blink: false,
-    }]);
+    };
+    let new_modes = PaneModes::EMPTY
+        .insert(PaneModes::ALTSCREEN_ACTIVE)
+        .insert(PaneModes::BRACKETED_PASTE);
+    mirror.apply_frame(&[], new_cursor, new_modes, 7);
     assert!(!mirror.cursor.visible);
     assert_eq!(mirror.cursor.shape, CursorShape::Bar);
     assert!(!mirror.cursor.blink);
     assert!(!mirror.grid.cursor.visible);
     assert_eq!(mirror.grid.cursor.shape, CursorShape::Bar);
     assert!(!mirror.grid.cursor.blink);
+    assert!(mirror.modes.contains(PaneModes::ALTSCREEN_ACTIVE));
+    assert!(mirror.modes.contains(PaneModes::BRACKETED_PASTE));
 }
 
 #[test]
@@ -174,22 +192,26 @@ fn replay_invariant_hand_coded() {
     };
 
     let g0 = Grid::blank(6, 40);
-    let ops = compute_diff(&g0, &g1);
+    let diff = compute_diff(&g0, &g1);
 
-    // Sanity: the diff is non-empty and contains at least a CellRun and a
-    // CursorMove, matching the diff_spike shape.
-    assert!(!ops.is_empty());
+    // Sanity: the op stream is non-empty and contains at least a CellRun.
+    // Per SPEC §8.1/§8.5 cursor + modes are NOT in the op stream — they
+    // ride alongside on the PANE_DIFF struct (here in `diff.cursor`).
+    assert!(!diff.ops.is_empty());
     assert!(
-        ops.iter().any(|op| matches!(op, DiffOp::CellRun { .. })),
-        "expected at least one CellRun in {ops:?}",
+        diff.ops
+            .iter()
+            .any(|op| matches!(op, DiffOp::CellRun { .. })),
+        "expected at least one CellRun in {:?}",
+        diff.ops,
     );
-    assert!(
-        ops.iter().any(|op| matches!(op, DiffOp::CursorMove { .. })),
-        "expected a CursorMove in {ops:?}",
+    assert_eq!(
+        diff.cursor, g1.cursor,
+        "diff.cursor should mirror next grid cursor"
     );
 
     let mut mirror = DiffMirror::new(6, 40);
-    mirror.apply(&ops);
+    mirror.apply_frame(&diff.ops, diff.cursor, diff.modes, 1);
 
     // Byte-identical reproduction — this is the protocol invariant.
     assert_eq!(mirror.grid, g1, "client mirror did not reproduce G1");
@@ -212,15 +234,16 @@ fn replay_invariant_with_clear_op() {
     }
     let g1 = Grid::blank(2, 8);
 
-    let ops = compute_diff(&g0, &g1);
+    let diff = compute_diff(&g0, &g1);
     assert!(
-        ops.iter().any(|op| matches!(op, DiffOp::Clear { .. })),
-        "expected a Clear op in {ops:?}",
+        diff.ops.iter().any(|op| matches!(op, DiffOp::Clear { .. })),
+        "expected a Clear op in {:?}",
+        diff.ops,
     );
 
     let mut mirror = DiffMirror::new(2, 8);
     mirror.ingest_snapshot(&g0, 0);
-    mirror.apply(&ops);
+    mirror.apply(&diff.ops);
     assert_eq!(mirror.grid, g1);
 }
 
@@ -237,9 +260,9 @@ fn underline_and_flags_roundtrip_through_replay() {
     };
 
     let g0 = Grid::blank(1, 4);
-    let ops = compute_diff(&g0, &g1);
+    let diff = compute_diff(&g0, &g1);
 
     let mut mirror = DiffMirror::new(1, 4);
-    mirror.apply(&ops);
+    mirror.apply(&diff.ops);
     assert_eq!(mirror.grid, g1);
 }

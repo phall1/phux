@@ -9,7 +9,8 @@
 
 use bytes::BytesMut;
 use phux_protocol::diff::{
-    Cell, CellFlags, Color, CursorShape, DiffOp, PaletteIndex, RgbColor, Underline,
+    Cell, CellFlags, Color, CursorShape, CursorState, DiffOp, PaletteIndex, PaneModes, RgbColor,
+    Underline,
 };
 use phux_protocol::wire::diff::encode_diff_ops;
 use phux_protocol::wire::encode::Encoder;
@@ -167,22 +168,6 @@ fn snap_clear_midrow() {
 }
 
 #[test]
-fn snap_cursor_move() {
-    let ops = vec![DiffOp::CursorMove { row: 9, col: 41 }];
-    insta::assert_snapshot!(dump_ops(&ops));
-}
-
-#[test]
-fn snap_cursor_style_block_no_blink() {
-    let ops = vec![DiffOp::CursorStyle {
-        visible: true,
-        shape: CursorShape::Block,
-        blink: false,
-    }];
-    insta::assert_snapshot!(dump_ops(&ops));
-}
-
-#[test]
 fn snap_mixed_op_sequence() {
     let ops = vec![
         DiffOp::CellRun {
@@ -199,7 +184,6 @@ fn snap_mixed_op_sequence() {
                 },
             ],
         },
-        DiffOp::CursorMove { row: 0, col: 2 },
         DiffOp::Clear {
             row: 1,
             col: 0,
@@ -211,21 +195,31 @@ fn snap_mixed_op_sequence() {
 
 #[test]
 fn snap_full_pane_diff_frame() {
+    // SPEC §8.1: PANE_DIFF body carries cursor + modes + base_frame_id +
+    // revision as struct fields. Cursor moves no longer appear in the op
+    // stream (per phux-429).
     let frame = FrameKind::PaneDiff {
         pane_id: 0x0000_0042,
         frame_id: 0x0000_0000_DEAD_BEEF,
-        ops: vec![
-            DiffOp::CellRun {
-                row: 0,
-                col: 0,
-                cells: vec![Cell {
-                    text: vec!['O', 'K'].into_iter().take(1).collect(),
-                    fg: Color::Palette(PaletteIndex(2)),
-                    ..Cell::blank()
-                }],
-            },
-            DiffOp::CursorMove { row: 0, col: 1 },
-        ],
+        base_frame_id: 0x0000_0000_DEAD_BEEE,
+        ops: vec![DiffOp::CellRun {
+            row: 0,
+            col: 0,
+            cells: vec![Cell {
+                text: vec!['O', 'K'].into_iter().take(1).collect(),
+                fg: Color::Palette(PaletteIndex(2)),
+                ..Cell::blank()
+            }],
+        }],
+        cursor: CursorState {
+            row: 0,
+            col: 1,
+            visible: true,
+            shape: CursorShape::Block,
+            blink: true,
+        },
+        modes: PaneModes::EMPTY,
+        revision: 0,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);

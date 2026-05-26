@@ -192,16 +192,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Frame tick → capture + diff + report
             _ = tick.tick() => {
                 let next = capture.capture(&terminal)?;
-                let ops = compute_diff(&prev, &next);
-                if !ops.is_empty() {
+                let diff = compute_diff(&prev, &next);
+                if !diff.ops.is_empty() {
                     frame_count += 1;
-                    total_ops += ops.len() as u64;
+                    total_ops += diff.ops.len() as u64;
                     eprintln!(
                         "[one_pane] frame {frame_count:>4} ops={:>3} cursor=({:>2},{:>2}) summary={}",
-                        ops.len(),
-                        next.cursor.row,
-                        next.cursor.col,
-                        summarize(&ops),
+                        diff.ops.len(),
+                        diff.cursor.row,
+                        diff.cursor.col,
+                        summarize(&diff.ops),
                     );
                 }
                 prev = next;
@@ -226,14 +226,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One last capture so we don't drop the trailing frame between the
     // final tick and exit.
     let final_grid = capture.capture(&terminal)?;
-    let final_ops = compute_diff(&prev, &final_grid);
-    if !final_ops.is_empty() {
+    let final_diff = compute_diff(&prev, &final_grid);
+    if !final_diff.ops.is_empty() {
         frame_count += 1;
-        total_ops += final_ops.len() as u64;
+        total_ops += final_diff.ops.len() as u64;
         eprintln!(
             "[one_pane] frame {frame_count:>4} ops={:>3} (final flush) summary={}",
-            final_ops.len(),
-            summarize(&final_ops),
+            final_diff.ops.len(),
+            summarize(&final_diff.ops),
         );
     }
 
@@ -272,17 +272,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn summarize(ops: &[DiffOp]) -> String {
     let mut cell_runs = 0usize;
     let mut clears = 0usize;
-    let mut cursor_moves = 0usize;
-    let mut cursor_styles = 0usize;
+    let mut other = 0usize;
     for op in ops {
         match op {
             DiffOp::CellRun { .. } => cell_runs += 1,
             DiffOp::Clear { .. } => clears += 1,
-            DiffOp::CursorMove { .. } => cursor_moves += 1,
-            DiffOp::CursorStyle { .. } => cursor_styles += 1,
+            // `DiffOp` is `#[non_exhaustive]` per phux-429 / SPEC §8.3.
+            // Cursor lives on the PANE_DIFF frame, not in the op stream.
+            _ => other += 1,
         }
     }
-    format!(
-        "cellruns={cell_runs} clears={clears} cursor_moves={cursor_moves} cursor_styles={cursor_styles}"
-    )
+    format!("cellruns={cell_runs} clears={clears} other={other}")
 }

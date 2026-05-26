@@ -6,7 +6,7 @@
 //! it the same way.
 
 use super::cell::Cell;
-use super::op::CursorState;
+use super::cursor::CursorState;
 
 /// A complete pane state at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
