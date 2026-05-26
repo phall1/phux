@@ -2,6 +2,9 @@
 
 [Introduction](./README.md)
 
+# Vision
+- [Vision](./VISION.md)
+
 # Specification
 - [Wire Protocol](./SPEC.md)
 
@@ -20,3 +23,7 @@
 - [0011 Protocol/Core Independence + IdBridge](./ADR/0011-protocol-core-independence.md)
 - [0012 Binary Split-Tree Window Layout](./ADR/0012-binary-split-tree-layout.md)
 - [0013 Libghostty Bytes on the Wire](./ADR/0013-libghostty-bytes-on-wire.md)
+- [0014 Server-Side Per-Terminal Actor](./ADR/0014-server-terminal-pane-actor.md)
+- [0015 Protocol Layering: L1/L2/L3 + Cross-Cuts](./ADR/0015-protocol-layering.md)
+- [0016 TerminalId as Wire Primary](./ADR/0016-terminal-id-as-wire-primary.md)
+- [0017 Reference TUI Not Protocol-Privileged](./ADR/0017-tui-not-protocol-privileged.md)

@@ -23,6 +23,10 @@ Nygard's template][nygard].
 | [0011](./0011-protocol-core-independence.md) | `phux-protocol` and `phux-core` are independent; `IdBridge` is their only meeting point | Accepted |
 | [0012](./0012-binary-split-tree-layout.md) | Window layout is a binary split tree, not n-ary | Accepted |
 | [0013](./0013-libghostty-bytes-on-wire.md) | Libghostty bytes on the wire; structured input remains | Accepted (supersedes [0002](./0002-diff-based-protocol.md)) |
+| [0014](./0014-server-terminal-pane-actor.md) | Server-side per-terminal actor pattern (`!Send` Terminal on a LocalSet) | Accepted |
+| [0015](./0015-protocol-layering.md) | Protocol layering: L1 substrate / L2 collections / L3 metadata; federation + automation as cross-cuts | Accepted |
+| [0016](./0016-terminal-id-as-wire-primary.md) | `TerminalId` is the wire identity for a managed terminal; `PaneId` is removed | Accepted |
+| [0017](./0017-tui-not-protocol-privileged.md) | The reference TUI is one consumer among several, with no protocol-level privileges | Accepted (refines [0010](./0010-frontend-agnostic-tmux-cc-reserved.md)) |
 
 ## When to write an ADR
 
