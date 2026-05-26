@@ -789,6 +789,46 @@ async fn handle_attach(
     }
 
     for (pane_id, handle, wire_pane_id) in panes_to_snapshot {
+        // Subscribe to live PTY output BEFORE requesting the snapshot.
+        // Subscribing first means anything the PaneActor broadcasts
+        // after this point lands in our receiver; we then ask for a
+        // snapshot so the client has a complete starting picture, and
+        // any subsequent PaneOutput we forward is "post-snapshot
+        // delta" rather than racing against it.
+        let mut output_rx = handle.output.subscribe();
+        let pump_out_tx = out_tx.clone();
+        let pump_wire_pane_id = wire_pane_id.get();
+        tokio::task::spawn_local(async move {
+            let mut seq: u64 = 0;
+            loop {
+                match output_rx.recv().await {
+                    Ok(bytes) => {
+                        seq = seq.wrapping_add(1);
+                        if pump_out_tx
+                            .send(FrameKind::PaneOutput {
+                                pane_id: pump_wire_pane_id,
+                                seq,
+                                bytes: bytes.to_vec(),
+                            })
+                            .await
+                            .is_err()
+                        {
+                            // Client mailbox closed (detach or disconnect).
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            pane_id = pump_wire_pane_id,
+                            dropped = n,
+                            "PaneOutput pump lagged; consider larger broadcast capacity",
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         let (reply_tx, reply_rx) = oneshot::channel();
         if handle
             .snapshot
