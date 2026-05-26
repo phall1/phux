@@ -32,6 +32,7 @@ use std::io::Write as _;
 use libghostty_vt::{
     RenderState, Terminal,
     render::{CellIterator, CursorVisualStyle, RowIterator},
+    screen::CellWide,
     style::{RgbColor, Style},
     terminal::Mode,
 };
@@ -103,21 +104,22 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             write_cup(&mut out, row_index, 0);
             let mut cell_iter = self.cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
+                // Discriminate wide-cell tails (the right half of a
+                // double-width glyph) from genuinely-blank cells. The base
+                // grapheme on the wide cell already advanced the cursor
+                // across both columns, so the tail must NOT emit a space
+                // (which would clobber the right half of the wide glyph).
+                // See libghostty's `CellWide`: `SpacerTail` is documented
+                // as "do not render".
+                let wide = cell.raw_cell()?.wide()?;
+                if matches!(wide, CellWide::SpacerTail) {
+                    continue;
+                }
+
                 let graphemes = cell.graphemes()?;
                 if graphemes.is_empty() {
-                    // Two cases:
-                    //   - Wide-cell tail: skipped (the base grapheme already
-                    //     covered both columns).
-                    //   - Blank cell: emit a space so the column advances.
-                    // RenderState doesn't surface `at_wide_tail` directly
-                    // through `CellIteration`; the canonical way is to use
-                    // the raw cell. For v0 we approximate: emit a space.
-                    // Wide-tail mis-emission would leave a redundant blank
-                    // on the right half of a wide cell, which the parser on
-                    // the receiving side will overwrite when the base
-                    // grapheme is emitted. The end-state grid still matches.
-                    // TODO(byc.8+): consult `cell.raw_cell()` to skip tails
-                    // exactly.
+                    // Genuinely blank cell — emit a space so the column
+                    // advances. (Wide-tail case was handled above.)
                     out.push(b' ');
                     continue;
                 }
@@ -358,6 +360,44 @@ mod tests {
         assert!(snap.bytes.starts_with(b"\x1b[!p\x1b[2J\x1b[H"));
     }
 
+    /// Walk the viewport of `t` and collect each row as a string,
+    /// reproducing wide-cell tail handling so the comparison is grid-
+    /// equivalent rather than byte-equivalent.
+    fn render_grid(t: &Terminal<'_, '_>) -> Vec<String> {
+        let mut rs = RenderState::new().expect("RenderState::new");
+        let snap = rs.update(t).expect("update");
+        let rows_n = snap.rows().expect("rows");
+        let mut row_iter_storage = RowIterator::new().expect("RowIterator::new");
+        let mut cell_iter_storage = CellIterator::new().expect("CellIterator::new");
+        let mut row_iter = row_iter_storage.update(&snap).expect("row update");
+        let mut grid: Vec<String> = Vec::with_capacity(usize::from(rows_n));
+        let mut i: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if i >= rows_n {
+                break;
+            }
+            let mut line = String::new();
+            let mut cell_iter = cell_iter_storage.update(row).expect("cell update");
+            while let Some(cell) = cell_iter.next() {
+                let wide = cell.raw_cell().expect("raw_cell").wide().expect("wide");
+                if matches!(wide, CellWide::SpacerTail) {
+                    continue;
+                }
+                let graphemes = cell.graphemes().expect("graphemes");
+                if graphemes.is_empty() {
+                    line.push(' ');
+                } else {
+                    for ch in &graphemes {
+                        line.push(*ch);
+                    }
+                }
+            }
+            grid.push(line);
+            i += 1;
+        }
+        grid
+    }
+
     #[test]
     fn synthesizer_round_trips_via_libghostty() {
         // Feed bytes into a Terminal, synthesise a snapshot, feed the
@@ -379,5 +419,44 @@ mod tests {
         let bx = b.cursor_x().expect("cursor_x b");
         let by = b.cursor_y().expect("cursor_y b");
         assert_eq!((ax, ay), (bx, by), "cursor position should round-trip");
+    }
+
+    /// Regression test for phux-073: a wide CJK glyph (here `你`) takes
+    /// two columns; libghostty marks the second column as
+    /// `CellWide::SpacerTail`. Before the fix the synthesizer treated
+    /// that tail as a blank cell and emitted a space, producing the
+    /// wrong layout on replay. After the fix the tail is skipped and
+    /// the grid round-trips exactly.
+    #[test]
+    fn synthesizer_skips_wide_cell_tails() {
+        let mut a = fresh(10, 2);
+        // Two CJK glyphs (4 columns wide total) followed by ASCII.
+        a.vt_write("你好ab".as_bytes());
+
+        // Sanity: the source grid should contain both wide glyphs.
+        let src_grid = render_grid(&a);
+        assert_eq!(src_grid[0], "你好ab    ", "source grid layout");
+
+        let synth = synthesize(&a).expect("synth");
+        let mut b = fresh(synth.cols, synth.rows);
+        b.vt_write(&synth.bytes);
+
+        let dst_grid = render_grid(&b);
+        assert_eq!(
+            src_grid, dst_grid,
+            "grid must round-trip through synthesizer for wide glyphs"
+        );
+
+        // Bytes must NOT contain a stray space between the two wide
+        // glyphs (`你` followed by ` ` would be the wide-tail bug).
+        let bytes_str = String::from_utf8_lossy(&synth.bytes);
+        assert!(
+            bytes_str.contains("你好"),
+            "synthesized bytes should contain consecutive wide glyphs, got: {bytes_str:?}"
+        );
+        assert!(
+            !bytes_str.contains("你 好"),
+            "synthesized bytes must not insert a space between wide glyphs (wide-tail bug)"
+        );
     }
 }
