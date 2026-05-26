@@ -10,7 +10,7 @@
 //!    correlated by `request_id`).
 //! 2. The error message mentions the requested session name, so
 //!    operators get an actionable diagnostic.
-//! 3. No `ATTACHED` frame and no `PANE_SNAPSHOT` frame are sent
+//! 3. No `ATTACHED` frame and no `TERMINAL_SNAPSHOT` frame are sent
 //!    (the ATTACH must fail atomically — never partially-attach).
 //! 4. The connection stays open: per SPEC §14 only *fatal* errors
 //!    are followed by `DETACHED { reason: PROTOCOL_ERROR }` and
@@ -98,7 +98,7 @@ fn byc_6_6_attach_unknown_session_returns_error_keeps_connection_open() {
 
         // ---- Negative: NO spurious follow-up frames ----
         // The ATTACH failed atomically; the server must NOT have queued
-        // an ATTACHED or PANE_SNAPSHOT. Read for a short window with a
+        // an ATTACHED or TERMINAL_SNAPSHOT. Read for a short window with a
         // tight deadline and assert no bytes arrive. The server is
         // single-threaded on a current_thread runtime; if it were going
         // to send anything more, it would be in the writer's mailbox

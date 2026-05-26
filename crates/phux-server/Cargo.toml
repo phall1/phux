@@ -42,7 +42,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Optional: opt-in via the `tokio-console` feature. See the feature
 # comment above for the build incantation.
 console-subscriber = { version = "0.4", optional = true }
-# portable-pty is the PTY backend PaneActor drives (phux-byc.5). It is a
+# portable-pty is the PTY backend TerminalActor drives (phux-byc.5). It is a
 # regular dependency because the actor owns the master fd; its blocking
 # read/write halves bridge to async via spawn_blocking + mpsc channels.
 portable-pty.workspace = true

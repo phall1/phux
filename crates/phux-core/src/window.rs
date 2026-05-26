@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::ids::{PaneId, SessionId, WindowId};
+use crate::ids::{SessionId, TerminalId, WindowId};
 
 /// A window: an ordered collection of panes belonging to a session.
 ///
@@ -30,22 +30,22 @@ pub struct Window {
     /// The session that owns this window.
     pub session: SessionId,
     /// Panes belonging to this window, in insertion order.
-    pub panes: Vec<PaneId>,
+    pub panes: Vec<TerminalId>,
     /// The pane layout as a binary split tree, or `None` when no panes exist.
     pub layout: Option<LayoutNode>,
     /// The currently focused pane, if any.
-    pub active: Option<PaneId>,
+    pub active: Option<TerminalId>,
 }
 
 /// A node in the binary split tree.
 ///
-/// A `Leaf` holds a single [`PaneId`]; a `Split` divides its rectangle
+/// A `Leaf` holds a single [`TerminalId`]; a `Split` divides its rectangle
 /// between two children along [`SplitDir`] at `ratio` (the left/top child
 /// gets `ratio` of the parent's dimension along the split axis).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayoutNode {
     /// A single pane — the recursion base.
-    Leaf(PaneId),
+    Leaf(TerminalId),
     /// An interior node that splits its rectangle in two.
     Split {
         /// The axis the split is taken along.
@@ -100,9 +100,9 @@ pub struct Rect {
 /// Errors returned by layout operations on a [`Window`].
 #[derive(Debug, Clone, Copy, PartialEq, Error)]
 pub enum LayoutError {
-    /// The target [`PaneId`] is not present in this window's layout.
+    /// The target [`TerminalId`] is not present in this window's layout.
     #[error("pane not in layout: {0:?}")]
-    PaneNotInLayout(PaneId),
+    PaneNotInLayout(TerminalId),
     /// The requested split ratio is outside the half-open `(0.0, 1.0)` range,
     /// or is NaN.
     #[error("invalid split ratio: {0}")]
@@ -118,22 +118,22 @@ impl LayoutNode {
     ///
     /// [`Leaf`]: LayoutNode::Leaf
     #[must_use]
-    pub fn contains(&self, pane: PaneId) -> bool {
+    pub fn contains(&self, pane: TerminalId) -> bool {
         match self {
             Self::Leaf(p) => *p == pane,
             Self::Split { left, right, .. } => left.contains(pane) || right.contains(pane),
         }
     }
 
-    /// Collect every [`PaneId`] in this subtree in left-to-right traversal order.
+    /// Collect every [`TerminalId`] in this subtree in left-to-right traversal order.
     #[must_use]
-    pub fn leaves(&self) -> Vec<PaneId> {
+    pub fn leaves(&self) -> Vec<TerminalId> {
         let mut out = Vec::new();
         self.collect_leaves(&mut out);
         out
     }
 
-    fn collect_leaves(&self, out: &mut Vec<PaneId>) {
+    fn collect_leaves(&self, out: &mut Vec<TerminalId>) {
         match self {
             Self::Leaf(p) => out.push(*p),
             Self::Split { left, right, .. } => {
@@ -153,8 +153,8 @@ impl LayoutNode {
     /// [`Split`]: LayoutNode::Split
     fn split_at(
         &mut self,
-        target: PaneId,
-        new_pane: PaneId,
+        target: TerminalId,
+        new_pane: TerminalId,
         dir: SplitDir,
         ratio: f32,
     ) -> Result<(), LayoutError> {
@@ -185,7 +185,7 @@ impl LayoutNode {
     ///
     /// Rounding ensures the children's dims sum exactly to the parent's
     /// dim along the split axis — no slop, no overlap.
-    fn fill_rects(&self, bounds: Rect, out: &mut HashMap<PaneId, Rect>) {
+    fn fill_rects(&self, bounds: Rect, out: &mut HashMap<TerminalId, Rect>) {
         match self {
             Self::Leaf(p) => {
                 out.insert(*p, bounds);
@@ -275,8 +275,8 @@ impl Window {
     /// * [`LayoutError::InvalidRatio`] if `ratio` is NaN or outside `(0, 1)`.
     pub fn split(
         &mut self,
-        target: PaneId,
-        new_pane: PaneId,
+        target: TerminalId,
+        new_pane: TerminalId,
         dir: SplitDir,
         ratio: f32,
     ) -> Result<(), LayoutError> {
@@ -297,7 +297,7 @@ impl Window {
     /// # Errors
     /// Returns [`LayoutError::PaneNotInLayout`] if the layout is already
     /// initialized — a guard against silently clobbering the tree.
-    pub fn seed_layout(&mut self, pane: PaneId) -> Result<(), LayoutError> {
+    pub fn seed_layout(&mut self, pane: TerminalId) -> Result<(), LayoutError> {
         if self.layout.is_some() {
             return Err(LayoutError::PaneNotInLayout(pane));
         }
@@ -313,7 +313,7 @@ impl Window {
     /// * [`LayoutError::PaneNotInLayout`] if `target` is not present.
     /// * [`LayoutError::LastPane`] if `target` is the only leaf — the caller
     ///   must remove the whole window.
-    pub fn kill_pane(&mut self, target: PaneId) -> Result<(), LayoutError> {
+    pub fn kill_pane(&mut self, target: TerminalId) -> Result<(), LayoutError> {
         let Some(layout) = self.layout.as_mut() else {
             return Err(LayoutError::PaneNotInLayout(target));
         };
@@ -340,7 +340,7 @@ impl Window {
         }
     }
 
-    /// Return the neighbouring [`PaneId`] in `dir` from `current`, if any.
+    /// Return the neighbouring [`TerminalId`] in `dir` from `current`, if any.
     ///
     /// The algorithm:
     /// 1. Record the root-to-leaf path of (Split, `ChildSide`) steps to
@@ -356,7 +356,7 @@ impl Window {
     /// Returns `None` if `current` is not in the layout or if no neighbour
     /// exists in that direction.
     #[must_use]
-    pub fn focus_direction(&self, current: PaneId, dir: Direction) -> Option<PaneId> {
+    pub fn focus_direction(&self, current: TerminalId, dir: Direction) -> Option<TerminalId> {
         let layout = self.layout.as_ref()?;
         let mut path: Vec<(SplitDir, ChildSide)> = Vec::new();
         if !record_path(layout, current, &mut path) {
@@ -387,7 +387,7 @@ impl Window {
     /// `(0, 0, dims.0, dims.1)` rect exactly: dims sum to the parent's dim
     /// along the split axis at every interior node.
     #[must_use]
-    pub fn pane_rects(&self, dims: (u16, u16)) -> HashMap<PaneId, Rect> {
+    pub fn pane_rects(&self, dims: (u16, u16)) -> HashMap<TerminalId, Rect> {
         let mut out = HashMap::new();
         if let Some(layout) = self.layout.as_ref() {
             layout.fill_rects(
@@ -407,7 +407,7 @@ impl Window {
 /// Walk `node`, removing the leaf for `target`, collapsing the parent Split
 /// so the sibling takes its place. Returns the rewritten tree and whether
 /// `target` was found.
-fn collapse(node: LayoutNode, target: PaneId) -> (LayoutNode, bool) {
+fn collapse(node: LayoutNode, target: TerminalId) -> (LayoutNode, bool) {
     match node {
         LayoutNode::Leaf(p) => (LayoutNode::Leaf(p), false),
         LayoutNode::Split {
@@ -461,7 +461,11 @@ enum ChildSide {
 }
 
 /// Record the root-to-leaf path to `target`. Returns `true` iff found.
-fn record_path(node: &LayoutNode, target: PaneId, out: &mut Vec<(SplitDir, ChildSide)>) -> bool {
+fn record_path(
+    node: &LayoutNode,
+    target: TerminalId,
+    out: &mut Vec<(SplitDir, ChildSide)>,
+) -> bool {
     match node {
         LayoutNode::Leaf(p) => *p == target,
         LayoutNode::Split {
@@ -533,7 +537,11 @@ fn sibling_at_depth<'a>(
 /// When the descent encounters a Split parallel to `dir`, hug the shared
 /// edge (leftmost/topmost for moves into a sibling rightward/downward;
 /// rightmost/bottommost for the reverse).
-fn descend_to_leaf(node: &LayoutNode, dir: Direction, suffix: &[(SplitDir, ChildSide)]) -> PaneId {
+fn descend_to_leaf(
+    node: &LayoutNode,
+    dir: Direction,
+    suffix: &[(SplitDir, ChildSide)],
+) -> TerminalId {
     let perp = perpendicular_axis(dir);
     // Hints in shallow→deep order — same order as we'll encounter them
     // during descent.

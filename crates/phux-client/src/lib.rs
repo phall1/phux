@@ -1,6 +1,6 @@
 //! phux TUI client.
 //!
-//! Receives `PANE_OUTPUT` byte frames from a phux server (see
+//! Receives `TERMINAL_OUTPUT` byte frames from a phux server (see
 //! `phux-protocol`), feeds them into a local `libghostty_vt::Terminal`
 //! per attached pane, and renders dirty rows back out to the outer
 //! terminal via `RenderState`. Knows nothing about PTYs.

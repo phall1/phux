@@ -3,7 +3,7 @@
 //! libghostty exposes paste as two free functions
 //! (`paste::is_safe`, `paste::encode`) rather than a typed event, so there
 //! is no libghostty struct to `From`-convert into. Instead, the wire
-//! [`PasteEvent`] flows through [`PerPanePasteEncoder::encode`], which:
+//! [`PasteEvent`] flows through [`PerTerminalPasteEncoder::encode`], which:
 //!
 //! 1. Classifies untrusted payloads with `paste::is_safe`.
 //! 2. Applies the per-pane policy ([`UntrustedPolicy`]) — reject /
@@ -50,7 +50,7 @@ pub enum PasteOutcome<'a> {
 
 /// Per-pane paste encoder.
 #[derive(Debug)]
-pub struct PerPanePasteEncoder {
+pub struct PerTerminalPasteEncoder {
     /// Reusable scratch buffer for `paste::encode`'s in-place input mutation.
     scratch: Vec<u8>,
     /// Reusable output buffer.
@@ -59,13 +59,13 @@ pub struct PerPanePasteEncoder {
     pub policy: UntrustedPolicy,
 }
 
-impl Default for PerPanePasteEncoder {
+impl Default for PerTerminalPasteEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PerPanePasteEncoder {
+impl PerTerminalPasteEncoder {
     /// Construct a new per-pane paste encoder with the default
     /// [`UntrustedPolicy::Reject`] policy.
     #[must_use]
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn trusted_paste_encodes_without_bracketing_when_mode_2004_off() {
         let terminal = make_terminal();
-        let mut enc = PerPanePasteEncoder::new();
+        let mut enc = PerTerminalPasteEncoder::new();
         let ev = PasteEvent {
             trust: PasteTrust::Trusted,
             data: b"hello".to_vec(),
@@ -194,7 +194,7 @@ mod tests {
         terminal
             .set_mode(Mode::BRACKETED_PASTE, true)
             .expect("enable 2004");
-        let mut enc = PerPanePasteEncoder::new();
+        let mut enc = PerTerminalPasteEncoder::new();
         let ev = PasteEvent {
             trust: PasteTrust::Trusted,
             data: b"hi".to_vec(),
@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn untrusted_unsafe_is_rejected_by_default() {
         let terminal = make_terminal();
-        let mut enc = PerPanePasteEncoder::new();
+        let mut enc = PerTerminalPasteEncoder::new();
         // Newline makes `is_safe` return false.
         let ev = PasteEvent {
             trust: PasteTrust::Untrusted,
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn untrusted_safe_is_allowed_by_default() {
         let terminal = make_terminal();
-        let mut enc = PerPanePasteEncoder::new();
+        let mut enc = PerTerminalPasteEncoder::new();
         let ev = PasteEvent {
             trust: PasteTrust::Untrusted,
             data: b"safe payload".to_vec(),
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn sanitize_policy_forwards_unsafe() {
         let terminal = make_terminal();
-        let mut enc = PerPanePasteEncoder::new();
+        let mut enc = PerTerminalPasteEncoder::new();
         enc.set_policy(UntrustedPolicy::Sanitize);
         let ev = PasteEvent {
             trust: PasteTrust::Untrusted,

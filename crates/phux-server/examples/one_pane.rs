@@ -1,5 +1,5 @@
 //! `one_pane` — spawn a real shell in a real PTY, pipe its output into a
-//! `libghostty_vt::Terminal`, and emit `PANE_OUTPUT` frame summaries to
+//! `libghostty_vt::Terminal`, and emit `TERMINAL_OUTPUT` frame summaries to
 //! stderr.
 //!
 //! This is the end-to-end PTY → Terminal → bytes-on-wire smoke test for
@@ -15,11 +15,11 @@
 //!                                       (per-client capability tier)
 //!                                              │
 //!                                              ▼
-//!                                  `FrameKind::PaneOutput { … }`
+//!                                  `FrameKind::TerminalOutput { … }`
 //!                                       (encoded; logged to stderr)
 //!
 //! No IPC, no connected client: the goal is "real bytes flowing through a
-//! real PTY into a real Terminal, with valid `PANE_OUTPUT` frames falling
+//! real PTY into a real Terminal, with valid `TERMINAL_OUTPUT` frames falling
 //! out the other side." Useful for hand-eyeballing the byte stream.
 //!
 //! ## Stdin → PTY
@@ -165,13 +165,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_frames: u64 = 0;
     let mut pending: Vec<u8> = Vec::new();
     let mut seq: u64 = 0;
-    let pane_id: u32 = 1;
+    let terminal_id: u32 = 1;
     let started = Instant::now();
     let mut child_exit_status: Option<portable_pty::ExitStatus> = None;
     let mut saw_eof = false;
 
     eprintln!(
-        "[one_pane] shell={shell} cols=80 rows=24 — emitting PANE_OUTPUT frames every 16ms (stderr)"
+        "[one_pane] shell={shell} cols=80 rows=24 — emitting TERMINAL_OUTPUT frames every 16ms (stderr)"
     );
 
     loop {
@@ -191,8 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ = tick.tick() => {
                 if !pending.is_empty() {
                     let rewritten = downsample::rewrite_bytes(&pending, client_caps);
-                    let frame = FrameKind::PaneOutput {
-                        pane_id,
+                    let frame = FrameKind::TerminalOutput {
+                        terminal_id,
                         seq,
                         bytes: rewritten,
                     };
@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     frame.encode(&mut enc);
                     total_frames += 1;
                     eprintln!(
-                        "[one_pane] frame {total_frames:>4} seq={seq} pane={pane_id} \
+                        "[one_pane] frame {total_frames:>4} seq={seq} pane={terminal_id} \
                          body_bytes={body} encoded={enc} preview={preview}",
                         body = pending.len(),
                         enc = enc.len(),
@@ -226,8 +226,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Final flush so trailing bytes aren't lost.
     if !pending.is_empty() {
         let rewritten = downsample::rewrite_bytes(&pending, client_caps);
-        let frame = FrameKind::PaneOutput {
-            pane_id,
+        let frame = FrameKind::TerminalOutput {
+            terminal_id,
             seq,
             bytes: rewritten,
         };
@@ -235,7 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         frame.encode(&mut enc);
         total_frames += 1;
         eprintln!(
-            "[one_pane] frame {total_frames:>4} seq={seq} pane={pane_id} (final flush) body_bytes={body} encoded={enc}",
+            "[one_pane] frame {total_frames:>4} seq={seq} pane={terminal_id} (final flush) body_bytes={body} encoded={enc}",
             body = pending.len(),
             enc = enc.len(),
         );

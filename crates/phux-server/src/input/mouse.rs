@@ -52,12 +52,12 @@ pub fn mouse_event_to_libghostty(ev: &MouseEvent) -> Result<LgMouseEvent<'static
 /// Per-pane: tracking mode, output format, and motion-deduplication state
 /// reflect a single pane's terminal modes.
 #[derive(Debug)]
-pub struct PerPaneMouseEncoder {
+pub struct PerTerminalMouseEncoder {
     encoder: LgMouseEncoder<'static>,
     buf: Vec<u8>,
 }
 
-impl PerPaneMouseEncoder {
+impl PerTerminalMouseEncoder {
     /// Construct a new per-pane mouse encoder.
     pub fn new() -> Result<Self, Error> {
         Ok(Self {

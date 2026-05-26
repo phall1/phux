@@ -1,6 +1,6 @@
 //! Layout-tree unit tests for [`Window`].
 //!
-//! Uses [`Registry`] to bootstrap real `PaneId`s, then exercises the
+//! Uses [`Registry`] to bootstrap real `TerminalId`s, then exercises the
 //! tree operations on the `Window` directly. The layout invariants live in
 //! `tests/layout_proptest.rs`.
 
@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use phux_core::{Direction, LayoutNode, PaneId, Rect, Registry, SplitDir};
+use phux_core::{Direction, LayoutNode, Rect, Registry, SplitDir, TerminalId};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,11 +21,11 @@ use phux_core::{Direction, LayoutNode, PaneId, Rect, Registry, SplitDir};
 
 /// Build a Registry seeded with one session, one window, and one initial
 /// pane. Returns the (window_id, pane_id) plus the Registry.
-fn seeded() -> (Registry, phux_core::WindowId, PaneId) {
+fn seeded() -> (Registry, phux_core::WindowId, TerminalId) {
     let mut reg = Registry::new();
     let s = reg.new_session("test".to_owned());
     let w = reg.new_window(s).expect("session exists");
-    let p = reg.new_pane(w).expect("window exists");
+    let p = reg.new_terminal(w).expect("window exists");
     (reg, w, p)
 }
 
@@ -57,7 +57,7 @@ fn single_pane_layout_is_leaf_and_fills_the_window() {
 fn horizontal_split_half_tiles_exactly() {
     let (mut reg, w, p1) = seeded();
     // Allocate a second pane id by creating it then re-splitting at p1.
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
     // Reset the layout to a known shape via the Window API: byc.1's Registry
     // auto-splits, but we want a controlled state.
     {
@@ -89,7 +89,7 @@ fn horizontal_split_half_tiles_exactly() {
 #[test]
 fn vertical_split_half_tiles_exactly() {
     let (mut reg, w, p1) = seeded();
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p1));
@@ -113,7 +113,7 @@ fn vertical_split_half_tiles_exactly() {
 #[test]
 fn split_with_awkward_ratio_still_tiles_exactly() {
     let (mut reg, w, p1) = seeded();
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p1));
@@ -137,7 +137,7 @@ fn split_with_awkward_ratio_still_tiles_exactly() {
 #[test]
 fn kill_pane_collapses_parent_split() {
     let (mut reg, w, p1) = seeded();
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p1));
@@ -155,7 +155,7 @@ fn kill_pane_collapses_parent_split() {
 #[test]
 fn kill_pane_not_in_layout_errors() {
     let (mut reg, w, p1) = seeded();
-    let bogus = PaneId::default();
+    let bogus = TerminalId::default();
     let win = reg.window_mut(w).expect("window exists");
     win.layout = Some(LayoutNode::Leaf(p1));
     let err = win.kill_pane(bogus).unwrap_err();
@@ -185,9 +185,9 @@ fn focus_direction_across_balanced_grid() {
     //     left  = Vertical { top: p_tl, bottom: p_bl }
     //     right = Vertical { top: p_tr, bottom: p_br }
     let (mut reg, w, p_tl) = seeded();
-    let p_tr = reg.new_pane(w).expect("window exists");
-    let p_bl = reg.new_pane(w).expect("window exists");
-    let p_br = reg.new_pane(w).expect("window exists");
+    let p_tr = reg.new_terminal(w).expect("window exists");
+    let p_bl = reg.new_terminal(w).expect("window exists");
+    let p_br = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p_tl));
@@ -225,9 +225,9 @@ fn focus_direction_across_balanced_grid() {
 #[test]
 fn leaves_match_panes_after_a_sequence_of_splits() {
     let (mut reg, w, p1) = seeded();
-    let p2 = reg.new_pane(w).expect("window exists");
-    let p3 = reg.new_pane(w).expect("window exists");
-    let p4 = reg.new_pane(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
+    let p3 = reg.new_terminal(w).expect("window exists");
+    let p4 = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p1));
@@ -237,7 +237,7 @@ fn leaves_match_panes_after_a_sequence_of_splits() {
     }
 
     let win = reg.window(w).expect("window exists");
-    let leaves: HashSet<PaneId> = win.layout.as_ref().unwrap().leaves().into_iter().collect();
-    let expected: HashSet<PaneId> = [p1, p2, p3, p4].iter().copied().collect();
+    let leaves: HashSet<TerminalId> = win.layout.as_ref().unwrap().leaves().into_iter().collect();
+    let expected: HashSet<TerminalId> = [p1, p2, p3, p4].iter().copied().collect();
     assert_eq!(leaves, expected);
 }

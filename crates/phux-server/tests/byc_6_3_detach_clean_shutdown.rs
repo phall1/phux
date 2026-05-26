@@ -8,7 +8,7 @@
 //!
 //! Coverage matrix (mapped to SPEC §7.3 and the byc.6.3 ticket):
 //!
-//! 1. After ATTACH the server emits ATTACHED + `PANE_SNAPSHOT` as usual.
+//! 1. After ATTACH the server emits ATTACHED + `TERMINAL_SNAPSHOT` as usual.
 //! 2. Client sends DETACH; server replies with DETACHED.
 //! 3. Client drops the stream; server observes EOF cleanly (no
 //!    `client task ended with error` log line — proven indirectly by
@@ -19,7 +19,7 @@
 //!    (`ServerState::new_client_id`) means a re-issued id would
 //!    indicate the registry was clobbered — distinct ids prove
 //!    fresh-client cleanly attached to a still-intact session.
-//! 5. The re-attaching client also gets a `PANE_SNAPSHOT` — the
+//! 5. The re-attaching client also gets a `TERMINAL_SNAPSHOT` — the
 //!    pane actor survived the detach and is still serving snapshots.
 //!
 //! The byc.6.3 ticket asks us to verify the wire-level mirror of the
@@ -41,7 +41,7 @@
 
 mod common;
 
-use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_PANE_SNAPSHOT};
+use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_TERMINAL_SNAPSHOT};
 use tempfile::TempDir;
 
 use crate::common::{
@@ -81,11 +81,11 @@ fn byc_6_3_detach_releases_state_and_allows_fresh_reattach() {
             "client A: initial_client_id must be allocated, got {client_a_id}",
         );
 
-        // Drain PANE_SNAPSHOT — required by SPEC §13 step 2.
+        // Drain TERMINAL_SNAPSHOT — required by SPEC §13 step 2.
         let (type_byte, _snap_a) = recv_typed(&mut client_a).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "client A: second frame PANE_SNAPSHOT",
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "client A: second frame TERMINAL_SNAPSHOT",
         );
 
         // ============================================================
@@ -115,7 +115,7 @@ fn byc_6_3_detach_releases_state_and_allows_fresh_reattach() {
         // ============================================================
         // Phase 4: Fresh client B connects + attaches. Must succeed,
         // must receive a NEW client id, must receive a fresh
-        // PANE_SNAPSHOT (proving the pane actor is still alive).
+        // TERMINAL_SNAPSHOT (proving the pane actor is still alive).
         // ============================================================
         let mut client_b = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
         send_frame(&mut client_b, &attach_by_name("default")).await;
@@ -151,11 +151,11 @@ fn byc_6_3_detach_releases_state_and_allows_fresh_reattach() {
         // The pane actor survived: client B got a usable snapshot.
         let (type_byte, snap_b) = recv_typed(&mut client_b).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "client B: second frame PANE_SNAPSHOT (pane actor still alive)",
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "client B: second frame TERMINAL_SNAPSHOT (pane actor still alive)",
         );
         match snap_b {
-            FrameKind::PaneSnapshot {
+            FrameKind::TerminalSnapshot {
                 cols,
                 rows,
                 vt_replay_bytes,
@@ -173,7 +173,7 @@ fn byc_6_3_detach_releases_state_and_allows_fresh_reattach() {
                     "client B: byc.8 never emits scrollback_bytes",
                 );
             }
-            other => panic!("client B: expected PaneSnapshot, got {other:?}"),
+            other => panic!("client B: expected TerminalSnapshot, got {other:?}"),
         }
 
         // Clean teardown.

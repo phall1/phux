@@ -14,11 +14,11 @@ use phux_protocol::input::focus::FocusEvent;
 /// libghostty free function (`Event::encode`); the type exists for API
 /// symmetry with the other per-pane encoders and to own the byte buffer.
 #[derive(Debug, Default)]
-pub struct PerPaneFocusEncoder {
+pub struct PerTerminalFocusEncoder {
     buf: Vec<u8>,
 }
 
-impl PerPaneFocusEncoder {
+impl PerTerminalFocusEncoder {
     /// Construct a new per-pane focus encoder.
     #[must_use]
     pub fn new() -> Self {
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn encode_drops_when_mode_1004_off() {
         let terminal = make_terminal();
-        let mut enc = PerPaneFocusEncoder::new();
+        let mut enc = PerTerminalFocusEncoder::new();
         let out = enc.encode(FocusEvent::Gained, &terminal).expect("encode");
         assert!(out.is_none(), "expected drop, got {out:?}");
     }
@@ -85,7 +85,7 @@ mod tests {
         terminal
             .set_mode(Mode::FOCUS_EVENT, true)
             .expect("enable 1004");
-        let mut enc = PerPaneFocusEncoder::new();
+        let mut enc = PerTerminalFocusEncoder::new();
         let bytes = enc
             .encode(FocusEvent::Gained, &terminal)
             .expect("encode")
@@ -103,7 +103,7 @@ mod tests {
         terminal
             .set_mode(Mode::FOCUS_EVENT, true)
             .expect("enable 1004");
-        let mut enc = PerPaneFocusEncoder::new();
+        let mut enc = PerTerminalFocusEncoder::new();
         let bytes = enc
             .encode(FocusEvent::Lost, &terminal)
             .expect("encode")

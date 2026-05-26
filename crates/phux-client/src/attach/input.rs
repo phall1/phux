@@ -103,16 +103,16 @@ pub enum InputEvent {
 
 impl InputEvent {
     /// Wrap this event in the appropriate [`FrameKind`] addressed to
-    /// `pane_id`. [`InputEvent::DetachRequested`] returns `None` — the
+    /// `terminal_id`. [`InputEvent::DetachRequested`] returns `None` — the
     /// driver issues a [`FrameKind::Detach`] directly, since `DETACH`
     /// is session-level and pane-id-agnostic.
     #[must_use]
-    pub fn into_frame(self, pane_id: u32) -> Option<FrameKind> {
+    pub fn into_frame(self, terminal_id: u32) -> Option<FrameKind> {
         match self {
-            Self::Key(event) => Some(FrameKind::InputKey { pane_id, event }),
-            Self::Mouse(event) => Some(FrameKind::InputMouse { pane_id, event }),
-            Self::Focus(event) => Some(FrameKind::InputFocus { pane_id, event }),
-            Self::Paste(event) => Some(FrameKind::InputPaste { pane_id, event }),
+            Self::Key(event) => Some(FrameKind::InputKey { terminal_id, event }),
+            Self::Mouse(event) => Some(FrameKind::InputMouse { terminal_id, event }),
+            Self::Focus(event) => Some(FrameKind::InputFocus { terminal_id, event }),
+            Self::Paste(event) => Some(FrameKind::InputPaste { terminal_id, event }),
             Self::DetachRequested => None,
         }
     }
@@ -1138,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn into_frame_carries_pane_id() {
+    fn into_frame_carries_terminal_id() {
         let key = KeyEvent {
             action: KeyAction::Press,
             key: PhysicalKey::A,
@@ -1150,7 +1150,7 @@ mod tests {
         };
         let frame = InputEvent::Key(key).into_frame(42).expect("frame");
         match frame {
-            FrameKind::InputKey { pane_id, .. } => assert_eq!(pane_id, 42),
+            FrameKind::InputKey { terminal_id, .. } => assert_eq!(terminal_id, 42),
             other => panic!("expected InputKey, got {other:?}"),
         }
     }

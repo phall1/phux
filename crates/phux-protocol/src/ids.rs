@@ -41,16 +41,16 @@ id_type!(
     WindowId
 );
 id_type!(
-    /// Identifier for a pane within a server.
-    PaneId
+    /// Identifier for a terminal within a server.
+    TerminalId
 );
 id_type!(
     /// Identifier for a currently-connected client.
     ClientId
 );
 
-/// Identifier for a pane frame. Monotonically increasing per pane; `0` is the
-/// empty initial frame.
+/// Identifier for a terminal frame. Monotonically increasing per terminal; `0`
+/// is the empty initial frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct FrameId(pub u64);
 

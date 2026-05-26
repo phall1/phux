@@ -1,4 +1,4 @@
-//! Integration tests for the PTY pump in `PaneActor` (`phux-byc.5`).
+//! Integration tests for the PTY pump in `TerminalActor` (`phux-byc.5`).
 //!
 //! These tests spawn real subprocesses behind real PTYs and assert
 //! end-to-end behavior of the actor:
@@ -28,8 +28,8 @@ use std::time::Duration;
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-use phux_server::pane_actor::{PaneActor, SnapshotRequest};
-use phux_server::state::PaneInput;
+use phux_server::state::TerminalInput;
+use phux_server::terminal_actor::{SnapshotRequest, TerminalActor};
 use portable_pty::CommandBuilder;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -85,7 +85,7 @@ fn pty_output_reaches_broadcast_and_terminal() {
         .expect("rt");
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async {
-        let bundle = PaneActor::new_with_command(printf_cmd("hello\\r\\nworld\\r\\n"), 80, 24)
+        let bundle = TerminalActor::new_with_command(printf_cmd("hello\\r\\nworld\\r\\n"), 80, 24)
             .expect("spawn pty actor");
         let handle = bundle.handle.clone();
         let token = bundle.token;
@@ -144,7 +144,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
         // so input is line-buffered; sending `a` then `\r` makes cat
         // emit `a\r\n` back).
         let cmd = CommandBuilder::new("/bin/cat");
-        let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn cat");
+        let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn cat");
         let handle = bundle.handle.clone();
         let token = bundle.token;
         let mut sub = handle.output.subscribe();
@@ -162,7 +162,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
         };
         handle
             .input
-            .send(PaneInput::Key(key))
+            .send(TerminalInput::Key(key))
             .await
             .expect("send key");
 
@@ -178,7 +178,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
         };
         handle
             .input
-            .send(PaneInput::Key(enter))
+            .send(TerminalInput::Key(enter))
             .await
             .expect("send enter");
 
@@ -206,7 +206,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
 /// must kill+reap it (not leak a zombie). We can't directly assert
 /// "no zombie" from outside the process, but we *can* assert the actor
 /// exits promptly (which only happens after `Child::wait` returns —
-/// see `PaneActor::shutdown_pty`).
+/// see `TerminalActor::shutdown_pty`).
 #[test]
 fn shutdown_signal_terminates_long_running_child() {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -217,7 +217,7 @@ fn shutdown_signal_terminates_long_running_child() {
     rt.block_on(local.run_until(async {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "sleep 60"]);
-        let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn sleep");
+        let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn sleep");
         let token = bundle.token;
         let join = tokio::task::spawn_local(bundle.actor.run());
 
@@ -247,7 +247,7 @@ fn snapshot_after_pty_output_round_trips_through_fresh_terminal() {
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async {
         let bundle =
-            PaneActor::new_with_command(printf_cmd("phux-byc.5\\r\\n"), 80, 24).expect("spawn");
+            TerminalActor::new_with_command(printf_cmd("phux-byc.5\\r\\n"), 80, 24).expect("spawn");
         let handle = bundle.handle.clone();
         let token = bundle.token;
 
@@ -300,8 +300,8 @@ fn broadcast_fanout_delivers_same_bytes_to_two_subscribers() {
         .expect("rt");
     let local = tokio::task::LocalSet::new();
     rt.block_on(local.run_until(async {
-        let bundle =
-            PaneActor::new_with_command(printf_cmd("fanout-test\\r\\n"), 80, 24).expect("spawn");
+        let bundle = TerminalActor::new_with_command(printf_cmd("fanout-test\\r\\n"), 80, 24)
+            .expect("spawn");
         let handle = bundle.handle.clone();
         let token = bundle.token;
 
@@ -347,7 +347,7 @@ fn resize_path_does_not_panic_against_pty() {
     rt.block_on(local.run_until(async {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "sleep 30"]);
-        let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn");
+        let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn");
         let handle = bundle.handle.clone();
         let token = bundle.token;
         let join = tokio::task::spawn_local(bundle.actor.run());

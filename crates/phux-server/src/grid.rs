@@ -1,8 +1,8 @@
-//! Synthesize a `PANE_SNAPSHOT` `vt_replay_bytes` blob from a
+//! Synthesize a `TERMINAL_SNAPSHOT` `vt_replay_bytes` blob from a
 //! `libghostty_vt::Terminal`.
 //!
 //! Under [ADR-0013] the wire carries VT bytes, not structured grids.
-//! When a client attaches, the server owes it a `PANE_SNAPSHOT`
+//! When a client attaches, the server owes it a `TERMINAL_SNAPSHOT`
 //! (SPEC §8.4) whose body is a self-contained VT byte sequence that —
 //! when `vt_write`-en into a fresh `Terminal` of the matching `cols × rows`
 //! — reproduces the current grid. This module owns that synthesis.
@@ -77,7 +77,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// reproduces it on a fresh Terminal.
     ///
     /// Returns the synthesised bytes plus the queried `(cols, rows)`
-    /// dimensions, since `PANE_SNAPSHOT` carries them alongside the
+    /// dimensions, since `TERMINAL_SNAPSHOT` carries them alongside the
     /// replay body (SPEC §8.4).
     pub fn synthesize(
         &mut self,

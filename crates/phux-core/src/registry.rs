@@ -1,13 +1,13 @@
-//! The [`Registry`] — single source of truth for sessions, windows, and panes.
+//! The [`Registry`] — single source of truth for sessions, windows, and terminals.
 //!
 //! All domain entities live in [`slotmap::SlotMap`]s keyed by the typed IDs
 //! from [`crate::ids`]. The registry preserves parent → child invariants:
 //!
-//! * Removing a [`Pane`] removes it from its parent [`Window`]'s `panes`
+//! * Removing a [`Terminal`] removes it from its parent [`Window`]'s `panes`
 //!   list and collapses it out of the layout tree.
-//! * Removing a [`Window`] cascades to all of its panes and unlinks the
+//! * Removing a [`Window`] cascades to all of its terminals and unlinks the
 //!   window from its parent [`Session`].
-//! * Removing a [`Session`] cascades fully to every window and pane it owns.
+//! * Removing a [`Session`] cascades fully to every window and terminal it owns.
 //!
 //! Lookups by an unknown (e.g. removed) key return `None`. Mutating calls
 //! that reference an unknown parent return [`RegistryError`].
@@ -18,9 +18,9 @@ use std::time::SystemTime;
 use slotmap::SlotMap;
 use thiserror::Error;
 
-use crate::ids::{PaneId, SessionId, WindowId};
-use crate::pane::Pane;
+use crate::ids::{SessionId, TerminalId, WindowId};
 use crate::session::Session;
+use crate::terminal::Terminal;
 use crate::window::{SplitDir, Window};
 
 /// Errors returned by the [`Registry`] when a parent ID does not resolve.
@@ -33,12 +33,12 @@ pub enum RegistryError {
     /// The provided [`WindowId`] does not refer to a live window.
     #[error("unknown window id: {0:?}")]
     UnknownWindow(WindowId),
-    /// The provided [`PaneId`] does not refer to a live pane.
-    #[error("unknown pane id: {0:?}")]
-    UnknownPane(PaneId),
+    /// The provided [`TerminalId`] does not refer to a live terminal.
+    #[error("unknown terminal id: {0:?}")]
+    UnknownTerminal(TerminalId),
 }
 
-/// Owns every session, window, and pane in a running phux server.
+/// Owns every session, window, and terminal in a running phux server.
 ///
 /// The registry is single-threaded and synchronous; concurrent access is the
 /// caller's responsibility (the server crate wraps it behind its actor /
@@ -47,7 +47,7 @@ pub enum RegistryError {
 pub struct Registry {
     sessions: SlotMap<SessionId, Session>,
     windows: SlotMap<WindowId, Window>,
-    panes: SlotMap<PaneId, Pane>,
+    terminals: SlotMap<TerminalId, Terminal>,
 }
 
 impl Registry {
@@ -99,20 +99,20 @@ impl Registry {
         Ok(window_id)
     }
 
-    /// Insert a new pane under `window` and return its ID.
+    /// Insert a new terminal under `window` and return its ID.
     ///
-    /// The pane is appended to the window's `panes` list and inserted into
-    /// the layout tree. If the window was empty the new pane becomes the
+    /// The terminal is appended to the window's `panes` list and inserted into
+    /// the layout tree. If the window was empty the new terminal becomes the
     /// sole [`Leaf`](crate::window::LayoutNode::Leaf); otherwise it is added
-    /// by splitting the currently active pane horizontally at `0.5`
-    /// (tmux-default behavior). If the window had no active pane, the new
-    /// pane becomes active. Default dims are `(80, 24)`; cwd defaults to
+    /// by splitting the currently active terminal horizontally at `0.5`
+    /// (tmux-default behavior). If the window had no active terminal, the new
+    /// terminal becomes active. Default dims are `(80, 24)`; cwd defaults to
     /// the empty path; title is `None`.
-    pub fn new_pane(&mut self, window: WindowId) -> Result<PaneId, RegistryError> {
+    pub fn new_terminal(&mut self, window: WindowId) -> Result<TerminalId, RegistryError> {
         if !self.windows.contains_key(window) {
             return Err(RegistryError::UnknownWindow(window));
         }
-        let pane_id = self.panes.insert_with_key(|id| Pane {
+        let terminal_id = self.terminals.insert_with_key(|id| Terminal {
             id,
             window,
             dims: (80, 24),
@@ -121,40 +121,40 @@ impl Registry {
         });
         if let Some(w) = self.windows.get_mut(window) {
             let target = w.active;
-            w.panes.push(pane_id);
+            w.panes.push(terminal_id);
             match target {
                 None => {
                     // Window was empty — seed the layout. This cannot fail
                     // because the layout is None here.
-                    let _ = w.seed_layout(pane_id);
-                    w.active = Some(pane_id);
+                    let _ = w.seed_layout(terminal_id);
+                    w.active = Some(terminal_id);
                 }
                 Some(t) => {
-                    // Split the active pane horizontally at the tmux default
-                    // ratio. If the active pane is somehow not in the tree
+                    // Split the active terminal horizontally at the tmux default
+                    // ratio. If the active terminal is somehow not in the tree
                     // (shouldn't happen), fall back to seeding — but we
                     // intentionally swallow the error here rather than
-                    // making `new_pane` fallible on layout grounds; the
+                    // making `new_terminal` fallible on layout grounds; the
                     // proptest invariants would catch any drift.
-                    let _ = w.split(t, pane_id, SplitDir::Horizontal, 0.5);
+                    let _ = w.split(t, terminal_id, SplitDir::Horizontal, 0.5);
                 }
             }
         }
-        Ok(pane_id)
+        Ok(terminal_id)
     }
 
     // ---- removal ----------------------------------------------------------
 
-    /// Remove a pane and unlink it from its parent window.
+    /// Remove a terminal and unlink it from its parent window.
     ///
-    /// Returns the removed [`Pane`] if it existed, otherwise `None`. The
+    /// Returns the removed [`Terminal`] if it existed, otherwise `None`. The
     /// parent window's `panes`, layout tree, and `active` are all updated
-    /// to drop the removed key. When the removed pane was the only leaf the
-    /// window's `layout` is cleared (the window persists with no panes
+    /// to drop the removed key. When the removed terminal was the only leaf the
+    /// window's `layout` is cleared (the window persists with no terminals
     /// until [`Self::remove_window`] is called).
-    pub fn remove_pane(&mut self, id: PaneId) -> Option<Pane> {
-        let pane = self.panes.remove(id)?;
-        if let Some(w) = self.windows.get_mut(pane.window) {
+    pub fn remove_terminal(&mut self, id: TerminalId) -> Option<Terminal> {
+        let terminal = self.terminals.remove(id)?;
+        if let Some(w) = self.windows.get_mut(terminal.window) {
             w.panes.retain(|p| *p != id);
             // Collapse the layout. `LastPane` is fine — the layout becomes
             // None and the window can be removed by a subsequent call.
@@ -163,18 +163,18 @@ impl Registry {
                 w.active = w.panes.first().copied();
             }
         }
-        Some(pane)
+        Some(terminal)
     }
 
-    /// Remove a window, cascading to all of its panes.
+    /// Remove a window, cascading to all of its terminals.
     ///
-    /// Returns the removed [`Window`] if it existed. All panes that belonged
-    /// to the window are removed from the pane map. The parent session's
-    /// `windows` and `active` are updated.
+    /// Returns the removed [`Window`] if it existed. All terminals that
+    /// belonged to the window are removed from the terminal map. The parent
+    /// session's `windows` and `active` are updated.
     pub fn remove_window(&mut self, id: WindowId) -> Option<Window> {
         let window = self.windows.remove(id)?;
-        for pane_id in &window.panes {
-            let _ = self.panes.remove(*pane_id);
+        for terminal_id in &window.panes {
+            let _ = self.terminals.remove(*terminal_id);
         }
         if let Some(s) = self.sessions.get_mut(window.session) {
             s.windows.retain(|w| *w != id);
@@ -185,15 +185,15 @@ impl Registry {
         Some(window)
     }
 
-    /// Remove a session, cascading to all of its windows and their panes.
+    /// Remove a session, cascading to all of its windows and their terminals.
     ///
     /// Returns the removed [`Session`] if it existed.
     pub fn remove_session(&mut self, id: SessionId) -> Option<Session> {
         let session = self.sessions.remove(id)?;
         for window_id in &session.windows {
             if let Some(window) = self.windows.remove(*window_id) {
-                for pane_id in &window.panes {
-                    let _ = self.panes.remove(*pane_id);
+                for terminal_id in &window.panes {
+                    let _ = self.terminals.remove(*terminal_id);
                 }
             }
         }
@@ -241,16 +241,16 @@ impl Registry {
         self.windows.get_mut(id)
     }
 
-    /// Borrow a pane by ID, or `None` if the ID is unknown.
+    /// Borrow a terminal by ID, or `None` if the ID is unknown.
     #[must_use]
-    pub fn pane(&self, id: PaneId) -> Option<&Pane> {
-        self.panes.get(id)
+    pub fn terminal(&self, id: TerminalId) -> Option<&Terminal> {
+        self.terminals.get(id)
     }
 
-    /// Mutably borrow a pane by ID, or `None` if the ID is unknown.
+    /// Mutably borrow a terminal by ID, or `None` if the ID is unknown.
     #[must_use]
-    pub fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
-        self.panes.get_mut(id)
+    pub fn terminal_mut(&mut self, id: TerminalId) -> Option<&mut Terminal> {
+        self.terminals.get_mut(id)
     }
 
     // ---- counts -----------------------------------------------------------
@@ -267,9 +267,9 @@ impl Registry {
         self.windows.len()
     }
 
-    /// Number of live panes.
+    /// Number of live terminals.
     #[must_use]
-    pub fn pane_count(&self) -> usize {
-        self.panes.len()
+    pub fn terminal_count(&self) -> usize {
+        self.terminals.len()
     }
 }

@@ -4,7 +4,7 @@
 //! * `attach_returns_attached_and_pane_snapshot` — the happy path. A
 //!   pre-seeded `default` session is on the server; the client sends
 //!   `ATTACH { ByName("default") }` and receives `ATTACHED` followed by
-//!   exactly one `PANE_SNAPSHOT` (the seeded session has one pane).
+//!   exactly one `TERMINAL_SNAPSHOT` (the seeded session has one pane).
 //! * `attach_unknown_session_returns_error` — the failure path. The
 //!   client sends `ATTACH { ByName("ghost") }` against a server with
 //!   no session of that name and receives `ERROR { code:
@@ -23,7 +23,8 @@ use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, TYPE_PANE_SNAPSHOT, ViewportInfo,
+    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, TYPE_TERMINAL_SNAPSHOT,
+    ViewportInfo,
 };
 use phux_server::{ServerConfig, ServerError, ServerRuntime};
 use tempfile::TempDir;
@@ -139,7 +140,7 @@ where
     local.block_on(&rt, fut);
 }
 
-/// Happy path: `ATTACH { ByName("default") }` → `ATTACHED` + `PANE_SNAPSHOT`.
+/// Happy path: `ATTACH { ByName("default") }` → `ATTACHED` + `TERMINAL_SNAPSHOT`.
 #[test]
 fn attach_returns_attached_and_pane_snapshot() {
     run_local(async {
@@ -177,21 +178,21 @@ fn attach_returns_attached_and_pane_snapshot() {
             other => panic!("expected Attached, got {other:?}"),
         }
 
-        // Frame 2: PANE_SNAPSHOT for the session's one pane.
+        // Frame 2: TERMINAL_SNAPSHOT for the session's one pane.
         let (type_byte, frame) = read_typed_frame(&mut stream).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "second frame should be PANE_SNAPSHOT",
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "second frame should be TERMINAL_SNAPSHOT",
         );
         match frame {
-            FrameKind::PaneSnapshot {
-                pane_id: _,
+            FrameKind::TerminalSnapshot {
+                terminal_id: _,
                 cols,
                 rows,
                 vt_replay_bytes,
                 scrollback_bytes,
             } => {
-                // Pane was created with `PaneActor::new(80, 24)` per
+                // Pane was created with `TerminalActor::new(80, 24)` per
                 // the runtime's seed path.
                 assert_eq!(cols, 80);
                 assert_eq!(rows, 24);
@@ -206,7 +207,7 @@ fn attach_returns_attached_and_pane_snapshot() {
                     "byc.8 never sends scrollback (deferred to byc.5)",
                 );
             }
-            other => panic!("expected PaneSnapshot, got {other:?}"),
+            other => panic!("expected TerminalSnapshot, got {other:?}"),
         }
 
         drop(stream);

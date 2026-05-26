@@ -1,6 +1,6 @@
 //! Snapshot-graph types delivered with `ATTACHED` per `SPEC.md` §13.
 //!
-//! SPEC §13 references `SessionInfo`, `WindowInfo`, `PaneInfo`, and
+//! SPEC §13 references `SessionInfo`, `WindowInfo`, `TerminalInfo`, and
 //! `SessionSnapshot` but does not define their fields. This module fills that
 //! gap with wire-portable shapes that mirror `phux_core::{Session, Window,
 //! Pane, LayoutNode, SplitDir}` semantics WITHOUT crossing the
@@ -9,10 +9,10 @@
 //!
 //! The snapshot is the minimum a reconnecting client needs to render
 //! UI chrome, status bars, and pane layout — the grid contents themselves
-//! flow as separate `PANE_SNAPSHOT` frames per SPEC §13's attach sequence
-//! (`ATTACHED` → N×`PANE_SNAPSHOT` → diffs).
+//! flow as separate `TERMINAL_SNAPSHOT` frames per SPEC §13's attach sequence
+//! (`ATTACHED` → N×`TERMINAL_SNAPSHOT` → diffs).
 
-use crate::ids::{ClientId, PaneId, SessionId, WindowId};
+use crate::ids::{ClientId, SessionId, TerminalId, WindowId};
 
 use super::decode::Decoder;
 use super::encode::Encoder;
@@ -53,7 +53,7 @@ pub enum SplitDir {
 
 /// Wire-side mirror of `phux_core::window::LayoutNode`.
 ///
-/// `Leaf` carries a single [`PaneId`]; `Split` divides its rectangle between
+/// `Leaf` carries a single [`TerminalId`]; `Split` divides its rectangle between
 /// two children along [`SplitDir`] at `ratio` (the left/top child gets
 /// `ratio` of the parent dimension along the split axis).
 ///
@@ -63,7 +63,7 @@ pub enum SplitDir {
 #[non_exhaustive]
 pub enum LayoutNode {
     /// A single pane — recursion base.
-    Leaf(PaneId),
+    Leaf(TerminalId),
     /// An interior node that splits its rectangle in two.
     Split {
         /// The axis the split is taken along.
@@ -81,7 +81,7 @@ pub enum LayoutNode {
 }
 
 // -----------------------------------------------------------------------------
-// SessionInfo / WindowInfo / PaneInfo / SessionSnapshot
+// SessionInfo / WindowInfo / TerminalInfo / SessionSnapshot
 // -----------------------------------------------------------------------------
 
 /// Description of a single session, sufficient for UI chrome and `phux ls`.
@@ -174,7 +174,7 @@ impl SessionInfo {
 /// Description of a single window, sufficient for tab/pane chrome.
 ///
 /// Excludes the panes themselves — those are flattened into
-/// [`SessionSnapshot::panes`] and joined via `PaneInfo::window_id`.
+/// [`SessionSnapshot::panes`] and joined via `TerminalInfo::window_id`.
 ///
 /// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +193,7 @@ pub struct WindowInfo {
     /// Human-readable window name.
     pub name: String,
     /// Window's remembered focused pane.
-    pub active_pane: Option<PaneId>,
+    pub active_pane: Option<TerminalId>,
     /// Pane layout as a binary split tree.
     ///
     /// `None` iff this window has no panes — `SessionSnapshot::panes`
@@ -227,7 +227,7 @@ impl WindowInfo {
 
     /// Builder setter for [`Self::active_pane`].
     #[must_use]
-    pub const fn with_active_pane(mut self, active_pane: Option<PaneId>) -> Self {
+    pub const fn with_active_pane(mut self, active_pane: Option<TerminalId>) -> Self {
         self.active_pane = active_pane;
         self
     }
@@ -240,44 +240,44 @@ impl WindowInfo {
     }
 }
 
-/// Description of a single pane, sufficient for layout chrome.
+/// Description of a single terminal, sufficient for layout chrome.
 ///
 /// Excludes grid contents, cursor state, scrollback, and process info.
 /// Grid contents and (optionally) scrollback flow as separate
-/// `PANE_SNAPSHOT` frames per SPEC §13. Process info (PID, command, exit
-/// status) is not yet modeled in `phux_core::Pane`; adding wire fields the
+/// `TERMINAL_SNAPSHOT` frames per SPEC §13. Process info (PID, command, exit
+/// status) is not yet modeled in `phux_core::Terminal`; adding wire fields the
 /// server can only send `None` for is premature. Revisit when core grows
 /// process tracking.
 ///
 /// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct PaneInfo {
-    /// Stable pane identifier.
-    pub id: PaneId,
+pub struct TerminalInfo {
+    /// Stable terminal identifier.
+    pub id: TerminalId,
     /// Foreign key into [`SessionSnapshot::windows`].
     pub window_id: WindowId,
-    /// Current grid width in cells (from `core::Pane::dims.0`).
+    /// Current grid width in cells (from `core::Terminal::dims.0`).
     pub cols: u16,
-    /// Current grid height in cells (from `core::Pane::dims.1`).
+    /// Current grid height in cells (from `core::Terminal::dims.1`).
     pub rows: u16,
     /// User-set title, distinct from any title the shell may set.
     pub title: Option<String>,
     /// Working directory as a UTF-8 string.
     ///
-    /// `phux_core::Pane::cwd` is `PathBuf`; conversion uses
+    /// `phux_core::Terminal::cwd` is `PathBuf`; conversion uses
     /// `to_string_lossy().into_owned()`. Lossy on non-UTF-8 cwds (rare on
     /// modern systems) and acceptable for a display field.
     pub cwd: Option<String>,
 }
 
-impl PaneInfo {
-    /// Construct a `PaneInfo` from its load-bearing fields.
+impl TerminalInfo {
+    /// Construct a `TerminalInfo` from its load-bearing fields.
     ///
     /// `title` and `cwd` default to `None`; set them via the `with_*`
     /// helpers when the server has the data.
     #[must_use]
-    pub const fn new(id: PaneId, window_id: WindowId, cols: u16, rows: u16) -> Self {
+    pub const fn new(id: TerminalId, window_id: WindowId, cols: u16, rows: u16) -> Self {
         Self {
             id,
             window_id,
@@ -316,22 +316,22 @@ impl PaneInfo {
 /// # Example
 ///
 /// ```
-/// use phux_protocol::wire::info::{PaneInfo, SessionInfo, SessionSnapshot, WindowInfo};
-/// use phux_protocol::{PaneId, SessionId, WindowId};
+/// use phux_protocol::wire::info::{TerminalInfo, SessionInfo, SessionSnapshot, WindowInfo};
+/// use phux_protocol::{TerminalId, SessionId, WindowId};
 ///
 /// let snapshot = SessionSnapshot::new(
 ///     SessionId::new(1),
 ///     WindowId::new(10),
-///     PaneId::new(100),
+///     TerminalId::new(100),
 /// )
 /// .with_sessions(vec![SessionInfo::new(SessionId::new(1), "work")
 ///     .with_window_count(1)
 ///     .with_attached_client_count(1)])
 /// .with_windows(vec![
 ///     WindowInfo::new(WindowId::new(10), SessionId::new(1), "code")
-///         .with_active_pane(Some(PaneId::new(100))),
+///         .with_active_pane(Some(TerminalId::new(100))),
 /// ])
-/// .with_panes(vec![PaneInfo::new(PaneId::new(100), WindowId::new(10), 80, 24)]);
+/// .with_panes(vec![TerminalInfo::new(TerminalId::new(100), WindowId::new(10), 80, 24)]);
 /// assert_eq!(snapshot.sessions.len(), 1);
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -342,13 +342,13 @@ pub struct SessionSnapshot {
     /// Every window across every visible session.
     pub windows: Vec<WindowInfo>,
     /// Every pane across every visible window.
-    pub panes: Vec<PaneInfo>,
+    pub panes: Vec<TerminalInfo>,
     /// The attaching client's initial focused session.
     pub focused_session: SessionId,
     /// The attaching client's initial focused window.
     pub focused_window: WindowId,
     /// The attaching client's initial focused pane.
-    pub focused_pane: PaneId,
+    pub focused_pane: TerminalId,
 }
 
 impl SessionSnapshot {
@@ -359,7 +359,7 @@ impl SessionSnapshot {
     pub const fn new(
         focused_session: SessionId,
         focused_window: WindowId,
-        focused_pane: PaneId,
+        focused_pane: TerminalId,
     ) -> Self {
         Self {
             sessions: Vec::new(),
@@ -387,7 +387,7 @@ impl SessionSnapshot {
 
     /// Builder setter for [`Self::panes`].
     #[must_use]
-    pub fn with_panes(mut self, panes: Vec<PaneInfo>) -> Self {
+    pub fn with_panes(mut self, panes: Vec<TerminalInfo>) -> Self {
         self.panes = panes;
         self
     }
@@ -445,7 +445,7 @@ pub(super) fn decode_layout_node(dec: &mut Decoder<'_>) -> Result<LayoutNode, De
     let tag = dec.read_u8()?;
     match tag {
         LAYOUT_TAG_LEAF => {
-            let pane = PaneId::new(dec.read_u32_be()?);
+            let pane = TerminalId::new(dec.read_u32_be()?);
             Ok(LayoutNode::Leaf(pane))
         }
         LAYOUT_TAG_SPLIT => {
@@ -525,7 +525,7 @@ pub(super) fn encode_window_info(info: &WindowInfo, enc: &mut Encoder<'_>) {
     enc.write_u32_be(info.session_id.get());
     enc.write_u16_be(info.index);
     enc.write_str(&info.name);
-    encode_option_pane_id(info.active_pane, enc);
+    encode_option_terminal_id(info.active_pane, enc);
     encode_option_layout_node(info.layout.as_ref(), enc);
 }
 
@@ -534,7 +534,7 @@ pub(super) fn decode_window_info(dec: &mut Decoder<'_>) -> Result<WindowInfo, De
     let session_id = SessionId::new(dec.read_u32_be()?);
     let index = dec.read_u16_be()?;
     let name = dec.read_str()?.to_owned();
-    let active_pane = decode_option_pane_id(dec)?;
+    let active_pane = decode_option_terminal_id(dec)?;
     let layout = decode_option_layout_node(dec)?;
     Ok(WindowInfo {
         id,
@@ -546,7 +546,7 @@ pub(super) fn decode_window_info(dec: &mut Decoder<'_>) -> Result<WindowInfo, De
     })
 }
 
-pub(super) fn encode_pane_info(info: &PaneInfo, enc: &mut Encoder<'_>) {
+pub(super) fn encode_terminal_info(info: &TerminalInfo, enc: &mut Encoder<'_>) {
     enc.write_u32_be(info.id.get());
     enc.write_u32_be(info.window_id.get());
     enc.write_u16_be(info.cols);
@@ -555,14 +555,14 @@ pub(super) fn encode_pane_info(info: &PaneInfo, enc: &mut Encoder<'_>) {
     encode_option_str(info.cwd.as_deref(), enc);
 }
 
-pub(super) fn decode_pane_info(dec: &mut Decoder<'_>) -> Result<PaneInfo, DecodeError> {
-    let id = PaneId::new(dec.read_u32_be()?);
+pub(super) fn decode_terminal_info(dec: &mut Decoder<'_>) -> Result<TerminalInfo, DecodeError> {
+    let id = TerminalId::new(dec.read_u32_be()?);
     let window_id = WindowId::new(dec.read_u32_be()?);
     let cols = dec.read_u16_be()?;
     let rows = dec.read_u16_be()?;
     let title = decode_option_str(dec)?.map(str::to_owned);
     let cwd = decode_option_str(dec)?.map(str::to_owned);
-    Ok(PaneInfo {
+    Ok(TerminalInfo {
         id,
         window_id,
         cols,
@@ -583,7 +583,7 @@ pub(super) fn encode_session_snapshot(snap: &SessionSnapshot, enc: &mut Encoder<
     }
     encode_list_len(snap.panes.len(), enc);
     for p in &snap.panes {
-        encode_pane_info(p, enc);
+        encode_terminal_info(p, enc);
     }
     enc.write_u32_be(snap.focused_session.get());
     enc.write_u32_be(snap.focused_window.get());
@@ -606,11 +606,11 @@ pub(super) fn decode_session_snapshot(
     let panes_len = decode_list_len(dec)?;
     let mut panes = Vec::with_capacity(panes_len);
     for _ in 0..panes_len {
-        panes.push(decode_pane_info(dec)?);
+        panes.push(decode_terminal_info(dec)?);
     }
     let focused_session = SessionId::new(dec.read_u32_be()?);
     let focused_window = WindowId::new(dec.read_u32_be()?);
-    let focused_pane = PaneId::new(dec.read_u32_be()?);
+    let focused_pane = TerminalId::new(dec.read_u32_be()?);
     Ok(SessionSnapshot {
         sessions,
         windows,
@@ -650,7 +650,7 @@ pub(super) fn decode_option_window_id(
     }
 }
 
-pub(super) fn encode_option_pane_id(value: Option<PaneId>, enc: &mut Encoder<'_>) {
+pub(super) fn encode_option_terminal_id(value: Option<TerminalId>, enc: &mut Encoder<'_>) {
     match value {
         None => enc.write_u8(0),
         Some(id) => {
@@ -660,13 +660,15 @@ pub(super) fn encode_option_pane_id(value: Option<PaneId>, enc: &mut Encoder<'_>
     }
 }
 
-pub(super) fn decode_option_pane_id(dec: &mut Decoder<'_>) -> Result<Option<PaneId>, DecodeError> {
+pub(super) fn decode_option_terminal_id(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<TerminalId>, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
         0 => Ok(None),
-        1 => Ok(Some(PaneId::new(dec.read_u32_be()?))),
+        1 => Ok(Some(TerminalId::new(dec.read_u32_be()?))),
         other => Err(DecodeError::UnknownEnumValue {
-            field: "Option<PaneId> tag",
+            field: "Option<TerminalId> tag",
             value: u32::from(other),
         }),
     }

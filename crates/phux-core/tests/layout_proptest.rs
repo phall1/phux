@@ -33,12 +33,12 @@ proptest! {
         let s = reg.new_session("p".to_owned());
         let w = reg.new_window(s).unwrap();
         // Bootstrap one pane.
-        reg.new_pane(w).unwrap();
+        reg.new_terminal(w).unwrap();
 
         for op in &ops {
             match op {
                 Op::AddPane => {
-                    let _ = reg.new_pane(w);
+                    let _ = reg.new_terminal(w);
                 }
                 Op::KillPaneAt(idx) => {
                     let target = {
@@ -50,7 +50,7 @@ proptest! {
                         }
                     };
                     if let Some(t) = target {
-                        let _ = reg.remove_pane(t);
+                        let _ = reg.remove_terminal(t);
                     }
                 }
             }

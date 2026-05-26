@@ -19,6 +19,6 @@ new_key_type! {
     /// Identifies a window — a tab-like container of panes within a session.
     pub struct WindowId;
 
-    /// Identifies a pane — the leaf entity backed (eventually) by a PTY.
-    pub struct PaneId;
+    /// Identifies a terminal — the leaf entity backed (eventually) by a PTY.
+    pub struct TerminalId;
 }

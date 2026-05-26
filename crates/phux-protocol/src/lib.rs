@@ -2,7 +2,7 @@
 //!
 //! This crate defines the protocol described in [`SPEC.md`] at the workspace
 //! root: framing, message catalog, version negotiation, and the VT-bytes-on-
-//! wire pane content shape (per [ADR-0013]).
+//! wire terminal content shape (per [ADR-0013]).
 //!
 //! The protocol is the source of truth. Code in this crate is normative;
 //! implementations elsewhere defer to it.
@@ -37,7 +37,7 @@ pub mod caps;
 pub mod ids;
 
 pub use caps::ColorSupport;
-pub use ids::{ClientId, FrameId, PaneId, SessionId, WindowId};
+pub use ids::{ClientId, FrameId, SessionId, TerminalId, WindowId};
 
 /// Protocol version this crate implements.
 pub const PROTOCOL_VERSION: Version = Version {

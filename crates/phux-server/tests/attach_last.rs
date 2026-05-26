@@ -44,7 +44,7 @@ const fn attach_last() -> FrameKind {
 }
 
 /// Drain the per-attach response sequence: ATTACHED then one
-/// `PANE_SNAPSHOT` per pane in the focused window. The server pre-seeds
+/// `TERMINAL_SNAPSHOT` per pane in the focused window. The server pre-seeds
 /// exactly one pane, so we read both frames and assert types.
 async fn drain_successful_attach(stream: &mut tokio::net::UnixStream, expected_name: &str) {
     let (type_byte, frame) = recv_typed(stream).await;
@@ -63,7 +63,7 @@ async fn drain_successful_attach(stream: &mut tokio::net::UnixStream, expected_n
         other => panic!("expected FrameKind::Attached, got {other:?}"),
     }
 
-    // One PANE_SNAPSHOT follows. We don't inspect its body; the
+    // One TERMINAL_SNAPSHOT follows. We don't inspect its body; the
     // round-trip / dim assertions live in byc_6_1. Just consume it so
     // subsequent reads see a clean stream boundary.
     let (_type_byte, _snap_frame) = recv_typed(stream).await;

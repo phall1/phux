@@ -1,17 +1,17 @@
 //! Integration tests for [`phux_core::Registry`].
 
-use phux_core::{LayoutNode, PaneId, Registry, RegistryError, SessionId, WindowId};
+use phux_core::{LayoutNode, Registry, RegistryError, SessionId, TerminalId, WindowId};
 
 #[test]
 fn new_session_window_pane_chain_yields_distinct_lookups() {
     let mut reg = Registry::new();
     let s = reg.new_session("main".to_string());
     let w = reg.new_window(s).expect("session exists");
-    let p = reg.new_pane(w).expect("window exists");
+    let p = reg.new_terminal(w).expect("window exists");
 
     assert!(reg.session(s).is_some());
     assert!(reg.window(w).is_some());
-    let pane = reg.pane(p).expect("pane exists");
+    let pane = reg.terminal(p).expect("pane exists");
     assert_eq!(pane.id, p);
     assert_eq!(pane.window, w);
 
@@ -39,26 +39,26 @@ fn new_window_against_unknown_session_errors() {
 }
 
 #[test]
-fn new_pane_against_unknown_window_errors() {
+fn new_terminal_against_unknown_window_errors() {
     let mut reg = Registry::new();
     let bogus: WindowId = WindowId::default();
-    match reg.new_pane(bogus) {
+    match reg.new_terminal(bogus) {
         Err(RegistryError::UnknownWindow(id)) => assert_eq!(id, bogus),
         other => panic!("expected UnknownWindow, got {other:?}"),
     }
 }
 
 #[test]
-fn remove_pane_invalidates_key_and_unlinks_from_window() {
+fn remove_terminal_invalidates_key_and_unlinks_from_window() {
     let mut reg = Registry::new();
     let s = reg.new_session("s".to_string());
     let w = reg.new_window(s).expect("session exists");
-    let p1 = reg.new_pane(w).expect("window exists");
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p1 = reg.new_terminal(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
 
-    let removed = reg.remove_pane(p1).expect("pane existed");
+    let removed = reg.remove_terminal(p1).expect("pane existed");
     assert_eq!(removed.id, p1);
-    assert!(reg.pane(p1).is_none());
+    assert!(reg.terminal(p1).is_none());
 
     let window = reg.window(w).expect("window exists");
     assert!(!window.panes.contains(&p1));
@@ -70,13 +70,13 @@ fn remove_pane_invalidates_key_and_unlinks_from_window() {
 }
 
 #[test]
-fn remove_pane_clears_active_when_last() {
+fn remove_terminal_clears_active_when_last() {
     let mut reg = Registry::new();
     let s = reg.new_session("s".to_string());
     let w = reg.new_window(s).expect("session exists");
-    let p = reg.new_pane(w).expect("window exists");
+    let p = reg.new_terminal(w).expect("window exists");
 
-    reg.remove_pane(p).expect("pane existed");
+    reg.remove_terminal(p).expect("pane existed");
     let window = reg.window(w).expect("window exists");
     assert_eq!(window.active, None);
     assert!(window.panes.is_empty());
@@ -85,10 +85,10 @@ fn remove_pane_clears_active_when_last() {
 }
 
 #[test]
-fn remove_pane_unknown_returns_none() {
+fn remove_terminal_unknown_returns_none() {
     let mut reg = Registry::new();
-    let bogus: PaneId = PaneId::default();
-    assert!(reg.remove_pane(bogus).is_none());
+    let bogus: TerminalId = TerminalId::default();
+    assert!(reg.remove_terminal(bogus).is_none());
 }
 
 #[test]
@@ -96,19 +96,19 @@ fn remove_window_cascades_to_panes() {
     let mut reg = Registry::new();
     let s = reg.new_session("s".to_string());
     let w = reg.new_window(s).expect("session exists");
-    let p1 = reg.new_pane(w).expect("window exists");
-    let p2 = reg.new_pane(w).expect("window exists");
+    let p1 = reg.new_terminal(w).expect("window exists");
+    let p2 = reg.new_terminal(w).expect("window exists");
 
     let removed = reg.remove_window(w).expect("window existed");
     assert_eq!(removed.id, w);
     assert!(reg.window(w).is_none());
-    assert!(reg.pane(p1).is_none());
-    assert!(reg.pane(p2).is_none());
+    assert!(reg.terminal(p1).is_none());
+    assert!(reg.terminal(p2).is_none());
 
     let session = reg.session(s).expect("session exists");
     assert!(!session.windows.contains(&w));
     assert_eq!(session.active, None);
-    assert_eq!(reg.pane_count(), 0);
+    assert_eq!(reg.terminal_count(), 0);
 }
 
 #[test]
@@ -130,37 +130,37 @@ fn remove_session_cascades_fully() {
     let s = reg.new_session("s".to_string());
     let w1 = reg.new_window(s).expect("session exists");
     let w2 = reg.new_window(s).expect("session exists");
-    let p1 = reg.new_pane(w1).expect("window exists");
-    let p2 = reg.new_pane(w2).expect("window exists");
-    let p3 = reg.new_pane(w2).expect("window exists");
+    let p1 = reg.new_terminal(w1).expect("window exists");
+    let p2 = reg.new_terminal(w2).expect("window exists");
+    let p3 = reg.new_terminal(w2).expect("window exists");
 
     let removed = reg.remove_session(s).expect("session existed");
     assert_eq!(removed.id, s);
     assert!(reg.session(s).is_none());
     assert!(reg.window(w1).is_none());
     assert!(reg.window(w2).is_none());
-    assert!(reg.pane(p1).is_none());
-    assert!(reg.pane(p2).is_none());
-    assert!(reg.pane(p3).is_none());
+    assert!(reg.terminal(p1).is_none());
+    assert!(reg.terminal(p2).is_none());
+    assert!(reg.terminal(p3).is_none());
     assert_eq!(reg.session_count(), 0);
     assert_eq!(reg.window_count(), 0);
-    assert_eq!(reg.pane_count(), 0);
+    assert_eq!(reg.terminal_count(), 0);
 }
 
 #[test]
 fn ids_are_distinct_across_kinds() {
-    // Compile-time: SessionId/WindowId/PaneId cannot be mixed up. This test
+    // Compile-time: SessionId/WindowId/TerminalId cannot be mixed up. This test
     // exists to anchor the property in the suite — the assertion is trivial,
     // the value is the *types* of the locals.
     let mut reg = Registry::new();
     let s: SessionId = reg.new_session("s".to_string());
     let w: WindowId = reg.new_window(s).expect("session exists");
-    let p: PaneId = reg.new_pane(w).expect("window exists");
+    let p: TerminalId = reg.new_terminal(w).expect("window exists");
     assert_eq!(reg.session_count(), 1);
     assert_eq!(reg.window_count(), 1);
-    assert_eq!(reg.pane_count(), 1);
+    assert_eq!(reg.terminal_count(), 1);
     // Force the IDs to be used so the bindings are not dead code.
-    assert_eq!(reg.pane(p).map(|x| x.id), Some(p));
+    assert_eq!(reg.terminal(p).map(|x| x.id), Some(p));
 }
 
 // ---- proptest: random op sequences keep the registry self-consistent ------
@@ -194,7 +194,7 @@ proptest! {
         let mut reg = Registry::new();
         let mut sessions: Vec<SessionId> = Vec::new();
         let mut windows: Vec<WindowId> = Vec::new();
-        let mut panes: Vec<PaneId> = Vec::new();
+        let mut panes: Vec<TerminalId> = Vec::new();
 
         for op in ops {
             match op {
@@ -213,7 +213,7 @@ proptest! {
                 Op::NewPane(i) => {
                     if !windows.is_empty() {
                         let w = windows[i % windows.len()];
-                        if let Ok(p) = reg.new_pane(w) {
+                        if let Ok(p) = reg.new_terminal(w) {
                             panes.push(p);
                         }
                     }
@@ -221,7 +221,7 @@ proptest! {
                 Op::RemovePane(i) => {
                     if !panes.is_empty() {
                         let p = panes.swap_remove(i % panes.len());
-                        let _ = reg.remove_pane(p);
+                        let _ = reg.remove_terminal(p);
                     }
                 }
                 Op::RemoveWindow(i) => {
@@ -239,7 +239,7 @@ proptest! {
             }
 
             // Invariant: every WindowId in a Session.windows resolves and
-            // links back; every PaneId in a Window.panes resolves and links
+            // links back; every TerminalId in a Window.panes resolves and links
             // back; layout.panes mirrors panes; active references are live.
             let session_ids: Vec<SessionId> = sessions.iter().copied().filter(|id| reg.session(*id).is_some()).collect();
             for sid in session_ids {
@@ -248,7 +248,7 @@ proptest! {
                     let window = reg.window(*wid).expect("session points at live window");
                     prop_assert_eq!(window.session, sid);
                     // Layout leaves match the window's pane set.
-                    let leaves: Vec<phux_core::PaneId> = window
+                    let leaves: Vec<phux_core::TerminalId> = window
                         .layout
                         .as_ref()
                         .map(LayoutNode::leaves)
@@ -258,7 +258,7 @@ proptest! {
                     prop_assert_eq!(pane_set, leaf_set);
                     prop_assert_eq!(leaves.len(), window.panes.len());
                     for pid in &window.panes {
-                        let pane = reg.pane(*pid).expect("window points at live pane");
+                        let pane = reg.terminal(*pid).expect("window points at live pane");
                         prop_assert_eq!(pane.window, *wid);
                     }
                     if let Some(a) = window.active {
@@ -276,7 +276,7 @@ proptest! {
             // instead, iterate our tracked panes vec and check those still
             // present in the registry.
             for pid in &panes {
-                if let Some(pane) = reg.pane(*pid) {
+                if let Some(pane) = reg.terminal(*pid) {
                     let window = reg.window(pane.window).expect("pane's parent window must be live");
                     prop_assert!(window.panes.contains(pid));
                 }

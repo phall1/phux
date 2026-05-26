@@ -1,9 +1,9 @@
 //! Demonstrates the `common::screen::Screen` helper end-to-end.
 //!
 //! Companion to `input_dispatch.rs` (which counts `b'a'` bytes in the
-//! emitted `PANE_OUTPUT` stream). This test does the same wire dance —
+//! emitted `TERMINAL_OUTPUT` stream). This test does the same wire dance —
 //! spin up a server with a real PTY backed by `cat`, attach, send a
-//! keystroke — but then feeds every `PANE_OUTPUT` byte chunk into a
+//! keystroke — but then feeds every `TERMINAL_OUTPUT` byte chunk into a
 //! `Screen` and asserts on the *rendered text*, not raw byte counts.
 //!
 //! Why it matters: the parent agent spent half a day debugging a render
@@ -25,7 +25,9 @@ mod common;
 use std::time::Duration;
 
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT};
+use phux_protocol::wire::frame::{
+    FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+};
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -63,7 +65,7 @@ const fn enter_key() -> KeyEvent {
     }
 }
 
-/// Drain `PANE_OUTPUT` frames into the `Screen` until either `needle`
+/// Drain `TERMINAL_OUTPUT` frames into the `Screen` until either `needle`
 /// appears in the rendered grid or `WIRE_RECV_TIMEOUT` elapses. Returns
 /// the total bytes fed, for diagnostic reporting on failure.
 async fn drain_into_screen(stream: &mut UnixStream, screen: &mut Screen, needle: &str) -> usize {
@@ -74,10 +76,10 @@ async fn drain_into_screen(stream: &mut UnixStream, screen: &mut Screen, needle:
         let Ok((type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
             break;
         };
-        if type_byte != TYPE_PANE_OUTPUT {
+        if type_byte != TYPE_TERMINAL_OUTPUT {
             continue;
         }
-        if let FrameKind::PaneOutput { bytes, .. } = frame {
+        if let FrameKind::TerminalOutput { bytes, .. } = frame {
             total += bytes.len();
             screen.write(&bytes);
             if screen.contains(needle) {
@@ -104,7 +106,7 @@ fn screen_helper_observes_pty_echo_through_wire() {
 
         let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
 
-        // --- ATTACH + ATTACHED + PANE_SNAPSHOT ---
+        // --- ATTACH + ATTACHED + TERMINAL_SNAPSHOT ---
         send_frame(&mut stream, &attach_by_name("default")).await;
         let (type_byte, attached) = recv_typed(&mut stream).await;
         assert_eq!(type_byte, TYPE_ATTACHED, "first frame must be ATTACHED");
@@ -114,8 +116,8 @@ fn screen_helper_observes_pty_echo_through_wire() {
         };
         let (type_byte, _snap) = recv_typed(&mut stream).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "second frame must be PANE_SNAPSHOT"
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "second frame must be TERMINAL_SNAPSHOT"
         );
 
         // Build a Screen sized to the ATTACH viewport (80x24, matching
@@ -126,7 +128,7 @@ fn screen_helper_observes_pty_echo_through_wire() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                pane_id: wire_pane_id,
+                terminal_id: wire_pane_id,
                 event: ascii_key('a', PhysicalKey::A),
             },
         )
@@ -134,14 +136,14 @@ fn screen_helper_observes_pty_echo_through_wire() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                pane_id: wire_pane_id,
+                terminal_id: wire_pane_id,
                 event: enter_key(),
             },
         )
         .await;
 
         // The whole point of the harness: assert on the rendered text,
-        // not byte counts. If the dispatch is broken, no PANE_OUTPUT
+        // not byte counts. If the dispatch is broken, no TERMINAL_OUTPUT
         // arrives and `screen.row(0)` stays "" — the assertion message
         // shows exactly what the user would see on attach.
         let bytes_fed = drain_into_screen(&mut stream, &mut screen, "a").await;

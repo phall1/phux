@@ -9,7 +9,7 @@
 //! `!Send + !Sync`, so it can't live behind a `tokio::spawn` future. It
 //! lives inside a `spawn_local` task that runs on the server's existing
 //! current-thread runtime via a `LocalSet`. All cross-task coordination
-//! flows through channel handles ([`PaneHandle`]) that are `Send` —
+//! flows through channel handles ([`TerminalHandle`]) that are `Send` —
 //! the actor itself never crosses a thread boundary.
 //!
 //! # PTY async wrapper choice
@@ -46,9 +46,10 @@ use tracing::{debug, trace, warn};
 use crate::grid::{SnapshotBytes, SnapshotSynthesizer};
 use crate::input::paste::PasteOutcome;
 use crate::input::{
-    PerPaneFocusEncoder, PerPaneKeyEncoder, PerPaneMouseEncoder, PerPanePasteEncoder,
+    PerTerminalFocusEncoder, PerTerminalKeyEncoder, PerTerminalMouseEncoder,
+    PerTerminalPasteEncoder,
 };
-use crate::state::PaneInput;
+use crate::state::TerminalInput;
 
 /// Default depth of the per-pane input mailbox.
 ///
@@ -82,19 +83,19 @@ pub struct SnapshotRequest {
     pub reply: oneshot::Sender<SnapshotBytes>,
 }
 
-/// Cross-task handle to a [`PaneActor`].
+/// Cross-task handle to a [`TerminalActor`].
 ///
-/// `PaneHandle` is `Send + Clone`: per-client tasks clone it freely to
+/// `TerminalHandle` is `Send + Clone`: per-client tasks clone it freely to
 /// request snapshots, send input, or subscribe to the output broadcast.
 /// The actor itself (which owns the `!Send` `Terminal`) lives on the
 /// `LocalSet` and never crosses a thread boundary.
 #[derive(Debug, Clone)]
-pub struct PaneHandle {
+pub struct TerminalHandle {
     /// Sender for input events (keys, mouse, etc.). Drained by the
     /// actor and written to the PTY via the per-pane encoders.
-    pub input: mpsc::Sender<PaneInput>,
+    pub input: mpsc::Sender<TerminalInput>,
     /// Sender for snapshot requests. The ATTACH handler uses this to
-    /// build `PANE_SNAPSHOT` frames.
+    /// build `TERMINAL_SNAPSHOT` frames.
     pub snapshot: mpsc::Sender<SnapshotRequest>,
     /// Output broadcast channel; subscribers receive every PTY byte
     /// chunk forwarded by the actor.
@@ -111,7 +112,7 @@ pub struct PaneHandle {
 }
 
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
-/// input encoders, and serves the channels exposed via [`PaneHandle`].
+/// input encoders, and serves the channels exposed via [`TerminalHandle`].
 ///
 /// `Terminal<'static, 'static>` because we use [`Terminal::new`] (NULL
 /// allocator) — the lifetime parameters degenerate to `'static`. A
@@ -122,18 +123,18 @@ pub struct PaneHandle {
 /// inside `RefCell` so the `select!` arms (which conceptually borrow
 /// `&mut self`) can each take what they need without fighting the
 /// borrow checker over disjoint field access.
-pub struct PaneActor {
+pub struct TerminalActor {
     terminal: RefCell<Terminal<'static, 'static>>,
     synth: RefCell<SnapshotSynthesizer<'static>>,
-    key_enc: RefCell<PerPaneKeyEncoder>,
-    mouse_enc: RefCell<PerPaneMouseEncoder>,
-    focus_enc: RefCell<PerPaneFocusEncoder>,
-    paste_enc: RefCell<PerPanePasteEncoder>,
-    input_rx: mpsc::Receiver<PaneInput>,
+    key_enc: RefCell<PerTerminalKeyEncoder>,
+    mouse_enc: RefCell<PerTerminalMouseEncoder>,
+    focus_enc: RefCell<PerTerminalFocusEncoder>,
+    paste_enc: RefCell<PerTerminalPasteEncoder>,
+    input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
     resize_rx: mpsc::Receiver<(u16, u16)>,
     /// Bytes streaming in from the PTY reader thread. `None` when this
-    /// actor is the no-PTY test variant (`PaneActor::new`); the select!
+    /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
     /// branch becomes a no-op via `Option::as_mut`.
     pty_rx: Option<mpsc::UnboundedReceiver<PtyEvent>>,
     /// Outbound bytes destined for the PTY writer thread. `None` for
@@ -145,20 +146,20 @@ pub struct PaneActor {
     pty: Option<PtyOwned>,
     output_tx: broadcast::Sender<Bytes>,
     /// One-shot fired when the actor observes PTY EOF. Paired with the
-    /// matching receiver in [`PaneActorBundle::exit_notify`]; the
+    /// matching receiver in [`TerminalActorBundle::exit_notify`]; the
     /// runtime uses it to drive client-detach on shell exit (phux-it8).
     ///
     /// `Option` so the actor can `.take()` it after firing — sending on
     /// a `oneshot::Sender` is a by-value move. `None` after the first
     /// fire or if the bundle's receiver was never created (the test
-    /// constructor [`PaneActor::new_with_seed`] leaves it `Some` too,
+    /// constructor [`TerminalActor::new_with_seed`] leaves it `Some` too,
     /// but no consumer subscribes; the `.ok()` swallow is benign).
     exit_notify: Option<oneshot::Sender<()>>,
     /// Cancellation token watched by the actor's `select!`. Cancel to
     /// ask the actor to shut down cleanly (drains the PTY, reaps the
     /// child, and exits). A child token of the per-server root token
     /// when constructed via [`Self::build_with_token`]; an unlinked
-    /// fresh token when constructed via [`PaneActor::new`] et al.
+    /// fresh token when constructed via [`TerminalActor::new`] et al.
     /// Dropping the token does NOT cancel — call `.cancel()` explicitly
     /// (this is intentional; the prior `oneshot::Sender::drop` semantics
     /// were a hidden lifecycle coupling we want gone).
@@ -167,7 +168,7 @@ pub struct PaneActor {
     rows: u16,
 }
 
-/// Bundle of PTY-side resources owned by a [`PaneActor`] with a real PTY.
+/// Bundle of PTY-side resources owned by a [`TerminalActor`] with a real PTY.
 ///
 /// Fields are kept in struct-declaration order so drop order matches the
 /// teardown contract: writer thread first (so the writer channel closes
@@ -182,7 +183,7 @@ struct PtyOwned {
     #[allow(dead_code, reason = "kept alive; methods invoked through &self")]
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// Child process spawned on the slave side. Reaped in
-    /// [`PaneActor::shutdown_pty`].
+    /// [`TerminalActor::shutdown_pty`].
     child: Box<dyn Child + Send + Sync>,
     /// Reader-thread join handle. Reader exits when the master is
     /// dropped (EOF on the read fd) or when its `mpsc::Sender` closes.
@@ -209,9 +210,9 @@ enum PtyEvent {
     Eof,
 }
 
-/// Errors surfaced while constructing a [`PaneActor`].
+/// Errors surfaced while constructing a [`TerminalActor`].
 #[derive(Debug, thiserror::Error)]
-pub enum PaneActorError {
+pub enum TerminalActorError {
     /// Libghostty refused to allocate a [`Terminal`] or input encoder.
     #[error("libghostty allocation failed: {0}")]
     Terminal(#[from] libghostty_vt::Error),
@@ -230,7 +231,7 @@ pub enum PaneActorError {
     PtyIo(String),
 }
 
-/// Bundle returned from [`PaneActor::new`]: the actor itself plus a
+/// Bundle returned from [`TerminalActor::new`]: the actor itself plus a
 /// [`CancellationToken`] that, when cancelled, fires the actor's
 /// shutdown branch.
 ///
@@ -240,18 +241,18 @@ pub enum PaneActorError {
 /// `oneshot::Sender<()>`-shaped bundle, dropping `token` does NOT
 /// cancel the actor — cancellation must be explicit.
 #[must_use]
-pub struct PaneActorBundle {
+pub struct TerminalActorBundle {
     /// The actor; pass to `tokio::task::spawn_local`.
-    pub actor: PaneActor,
+    pub actor: TerminalActor,
     /// Cross-task handle to the actor.
-    pub handle: PaneHandle,
+    pub handle: TerminalHandle,
     /// Cancellation token. Call `.cancel()` to ask the actor to shut
     /// down cleanly. Cloneable; shares cancellation state with the
     /// actor's internal copy.
     pub token: CancellationToken,
     /// One-shot receiver that fires when the actor observes PTY EOF
     /// (the child process exited, the pane is dying). The runtime
-    /// pairs this with the pane's [`phux_core::ids::PaneId`] and uses
+    /// pairs this with the terminal's [`phux_core::ids::TerminalId`] and uses
     /// it to drive client-detach on shell-`exit` (phux-it8).
     ///
     /// Used by the runtime's per-pane EOF watcher task; tests that
@@ -263,9 +264,9 @@ pub struct PaneActorBundle {
     pub exit_notify: Option<oneshot::Receiver<()>>,
 }
 
-impl std::fmt::Debug for PaneActor {
+impl std::fmt::Debug for TerminalActor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PaneActor")
+        f.debug_struct("TerminalActor")
             .field("cols", &self.cols)
             .field("rows", &self.rows)
             .field("has_pty", &self.pty.is_some())
@@ -273,9 +274,9 @@ impl std::fmt::Debug for PaneActor {
     }
 }
 
-impl std::fmt::Debug for PaneActorBundle {
+impl std::fmt::Debug for TerminalActorBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PaneActorBundle")
+        f.debug_struct("TerminalActorBundle")
             .field("actor", &self.actor)
             .field("handle", &self.handle)
             .finish_non_exhaustive()
@@ -318,7 +319,7 @@ pub fn default_shell_command() -> CommandBuilder {
     cmd
 }
 
-impl PaneActor {
+impl TerminalActor {
     /// Build a fresh actor of the given dimensions **without** a backing
     /// PTY. Used by tests that exercise snapshot / shutdown semantics
     /// without driving a real process.
@@ -327,7 +328,7 @@ impl PaneActor {
     /// (NULL alloc → `'static` lifetimes). `max_scrollback` defaults to
     /// `10_000` — a tmux-style mid-range value.
     #[allow(clippy::new_ret_no_self, reason = "bundle-shaped constructor")]
-    pub fn new(cols: u16, rows: u16) -> Result<PaneActorBundle, PaneActorError> {
+    pub fn new(cols: u16, rows: u16) -> Result<TerminalActorBundle, TerminalActorError> {
         Self::build(cols, rows, None, CancellationToken::new())
     }
 
@@ -341,13 +342,16 @@ impl PaneActor {
         cmd: CommandBuilder,
         cols: u16,
         rows: u16,
-    ) -> Result<PaneActorBundle, PaneActorError> {
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
         Self::build(cols, rows, Some(cmd), CancellationToken::new())
     }
 
     /// Convenience: spawn the user's default shell (`$SHELL` or
     /// `/bin/sh`) in a fresh PTY.
-    pub fn new_with_default_shell(cols: u16, rows: u16) -> Result<PaneActorBundle, PaneActorError> {
+    pub fn new_with_default_shell(
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
         Self::new_with_command(default_shell_command(), cols, rows)
     }
 
@@ -364,7 +368,7 @@ impl PaneActor {
         rows: u16,
         cmd: Option<CommandBuilder>,
         token: CancellationToken,
-    ) -> Result<PaneActorBundle, PaneActorError> {
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
         Self::build(cols, rows, cmd, token)
     }
 
@@ -373,15 +377,15 @@ impl PaneActor {
         rows: u16,
         cmd: Option<CommandBuilder>,
         token: CancellationToken,
-    ) -> Result<PaneActorBundle, PaneActorError> {
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 10_000,
         })?;
         let synth = SnapshotSynthesizer::new()?;
-        let key_enc = PerPaneKeyEncoder::new()?;
-        let mouse_enc = PerPaneMouseEncoder::new()?;
+        let key_enc = PerTerminalKeyEncoder::new()?;
+        let mouse_enc = PerTerminalMouseEncoder::new()?;
 
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
@@ -402,8 +406,8 @@ impl PaneActor {
             synth: RefCell::new(synth),
             key_enc: RefCell::new(key_enc),
             mouse_enc: RefCell::new(mouse_enc),
-            focus_enc: RefCell::new(PerPaneFocusEncoder::new()),
-            paste_enc: RefCell::new(PerPanePasteEncoder::new()),
+            focus_enc: RefCell::new(PerTerminalFocusEncoder::new()),
+            paste_enc: RefCell::new(PerTerminalPasteEncoder::new()),
             input_rx,
             snapshot_rx,
             resize_rx,
@@ -416,7 +420,7 @@ impl PaneActor {
             cols,
             rows,
         };
-        let handle = PaneHandle {
+        let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
             output: output_tx,
@@ -424,7 +428,7 @@ impl PaneActor {
             cols,
             rows,
         };
-        Ok(PaneActorBundle {
+        Ok(TerminalActorBundle {
             actor,
             handle,
             token: bundle_token,
@@ -441,7 +445,7 @@ impl PaneActor {
         cols: u16,
         rows: u16,
         bytes: &[u8],
-    ) -> Result<PaneActorBundle, PaneActorError> {
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
         let bundle = Self::new(cols, rows)?;
         bundle.actor.terminal.borrow_mut().vt_write(bytes);
         Ok(bundle)
@@ -456,32 +460,32 @@ impl PaneActor {
         synth.synthesize(&terminal)
     }
 
-    /// Translate a [`PaneInput`] into PTY bytes via the per-pane
+    /// Translate a [`TerminalInput`] into PTY bytes via the per-pane
     /// encoders + the current terminal state.
     ///
     /// Returns `Ok(None)` when the event was deliberately dropped
     /// (e.g., focus events while DEC 1004 is off; rejected untrusted
     /// pastes). Returns `Err` on encoder failure; the caller logs and
     /// continues — a single bad input must not kill the actor.
-    fn encode_input(&self, input: &PaneInput) -> Result<Option<Vec<u8>>, libghostty_vt::Error> {
+    fn encode_input(&self, input: &TerminalInput) -> Result<Option<Vec<u8>>, libghostty_vt::Error> {
         let terminal = self.terminal.borrow();
         match input {
-            PaneInput::Key(event) => {
+            TerminalInput::Key(event) => {
                 let mut enc = self.key_enc.borrow_mut();
                 let bytes = enc.encode(event, &terminal)?;
                 Ok(Some(bytes.to_vec()))
             }
-            PaneInput::Mouse(event) => {
+            TerminalInput::Mouse(event) => {
                 let mut enc = self.mouse_enc.borrow_mut();
                 let bytes = enc.encode(event, &terminal)?;
                 Ok(Some(bytes.to_vec()))
             }
-            PaneInput::Focus(event) => {
+            TerminalInput::Focus(event) => {
                 let mut enc = self.focus_enc.borrow_mut();
                 let bytes = enc.encode(*event, &terminal)?;
                 Ok(bytes.map(<[u8]>::to_vec))
             }
-            PaneInput::Paste(event) => {
+            TerminalInput::Paste(event) => {
                 let mut enc = self.paste_enc.borrow_mut();
                 match enc.encode(event, &terminal)? {
                     PasteOutcome::Encoded(bytes) => Ok(Some(bytes.to_vec())),
@@ -604,7 +608,7 @@ impl PaneActor {
     ///   PTY winsize.
     #[allow(
         clippy::future_not_send,
-        reason = "ADR-0014: PaneActor owns !Send Terminal; lives on LocalSet"
+        reason = "ADR-0014: TerminalActor owns !Send Terminal; lives on LocalSet"
     )]
     #[allow(
         clippy::too_many_lines,
@@ -615,7 +619,7 @@ impl PaneActor {
             cols = self.cols,
             rows = self.rows,
             has_pty = self.pty.is_some(),
-            "PaneActor started",
+            "TerminalActor started",
         );
 
         loop {
@@ -628,7 +632,7 @@ impl PaneActor {
                 biased;
 
                 () = self.token.cancelled() => {
-                    debug!("PaneActor cancellation token fired");
+                    debug!("TerminalActor cancellation token fired");
                     self.shutdown_pty();
                     return;
                 }
@@ -746,7 +750,7 @@ async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> 
 /// Open a PTY pair, spawn `cmd` on the slave, and start the reader /
 /// writer bridge threads. Returns the actor-side channel endpoints and
 /// a [`PtyOwned`] bundle to keep the resources alive.
-fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, PaneActorError> {
+fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, TerminalActorError> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -755,12 +759,12 @@ fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, Pa
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|e| PaneActorError::OpenPty(e.to_string()))?;
+        .map_err(|e| TerminalActorError::OpenPty(e.to_string()))?;
 
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| PaneActorError::Spawn(e.to_string()))?;
+        .map_err(|e| TerminalActorError::Spawn(e.to_string()))?;
     // Drop the slave side: the child inherits the fds, and we don't
     // need our copy. Keeping it would prevent EOF on master read after
     // the child exits.
@@ -769,11 +773,11 @@ fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, Pa
     let mut reader = pair
         .master
         .try_clone_reader()
-        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
     let mut writer = pair
         .master
         .take_writer()
-        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
     let master = Arc::new(Mutex::new(pair.master));
 
     let (pty_tx_to_actor, pty_rx_for_actor) = mpsc::unbounded_channel::<PtyEvent>();
@@ -806,7 +810,7 @@ fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, Pa
                 }
             }
         })
-        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
 
     let writer_thread = std::thread::Builder::new()
         .name("phux-pty-writer".to_owned())
@@ -820,7 +824,7 @@ fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, Pa
                 }
             }
         })
-        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
 
     Ok((
         pty_rx_for_actor,
@@ -843,7 +847,7 @@ mod tests {
     /// synthesis helper directly.
     #[test]
     fn synthesize_blank_pane_returns_reset_preamble() {
-        let bundle = PaneActor::new(80, 24).expect("new");
+        let bundle = TerminalActor::new(80, 24).expect("new");
         let snap = bundle.actor.synthesize().expect("synthesize");
         assert_eq!(snap.cols, 80);
         assert_eq!(snap.rows, 24);
@@ -851,10 +855,10 @@ mod tests {
     }
 
     /// Synchronous test: seed bytes flow through to the synthesized
-    /// snapshot. Exercises [`PaneActor::new_with_seed`].
+    /// snapshot. Exercises [`TerminalActor::new_with_seed`].
     #[test]
     fn synthesize_seeded_pane_carries_visible_text() {
-        let bundle = PaneActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
         let snap = bundle.actor.synthesize().expect("synthesize");
         let body = String::from_utf8_lossy(&snap.bytes);
         assert!(
@@ -871,7 +875,8 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let bundle = PaneActor::new_with_seed(20, 5, b"hi there").expect("new_with_seed");
+                let bundle =
+                    TerminalActor::new_with_seed(20, 5, b"hi there").expect("new_with_seed");
                 let handle = bundle.handle.clone();
                 // Hold the token; under new semantics dropping it does
                 // NOT cancel, so the actor is alive regardless. Keep
@@ -905,7 +910,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let bundle = PaneActor::new(20, 5).expect("new");
+                let bundle = TerminalActor::new(20, 5).expect("new");
                 let handle = bundle.handle.clone();
                 let token = bundle.token;
                 let join = tokio::task::spawn_local(bundle.actor.run());
@@ -926,7 +931,7 @@ mod tests {
     }
 
     /// A parent token's `.cancel()` propagates to a `child_token()`-
-    /// linked `PaneActor`, which exits within a short deadline. Pins
+    /// linked `TerminalActor`, which exits within a short deadline. Pins
     /// down the hierarchical cascade introduced by the
     /// `CancellationToken` refactor.
     #[tokio::test(flavor = "current_thread")]
@@ -937,7 +942,7 @@ mod tests {
                 let parent = CancellationToken::new();
                 let child = parent.child_token();
                 let bundle =
-                    PaneActor::build_with_token(20, 5, None, child).expect("build_with_token");
+                    TerminalActor::build_with_token(20, 5, None, child).expect("build_with_token");
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
                 parent.cancel();
@@ -958,7 +963,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let bundle = PaneActor::new(80, 24).expect("new");
+                let bundle = TerminalActor::new(80, 24).expect("new");
                 let handle = bundle.handle.clone();
                 let token = bundle.token;
                 let join = tokio::task::spawn_local(bundle.actor.run());

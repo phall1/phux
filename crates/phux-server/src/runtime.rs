@@ -12,10 +12,10 @@
 //! * Accept connections and spawn a per-client task on a
 //!   [`tokio::task::LocalSet`] (per ADR-0014) that reads length-prefixed
 //!   frames (`SPEC.md` §5), echoes `PING` with `PONG` (`SPEC.md` §7.5),
-//!   and handles `ATTACH` / `DETACH` by talking to the per-pane
-//!   [`PaneActor`]s (`phux-byc.8`). The
+//!   and handles `ATTACH` / `DETACH` by talking to the per-terminal
+//!   `TerminalActor`s (`phux-byc.8`). The
 //!   remaining catalog (`INPUT_KEY`, etc.) is recorded against the
-//!   pane's input log but the PTY write side lands in `phux-byc.5`.
+//!   terminal's input log but the PTY write side lands in `phux-byc.5`.
 //! * Unlink the socket file on clean shutdown and refuse to start over an
 //!   already-live socket.
 //!
@@ -42,8 +42,8 @@ use tokio::task::{JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::pane_actor::{PaneActor, PaneHandle, SnapshotRequest};
-use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, PaneInput, SharedState};
+use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
+use crate::terminal_actor::{SnapshotRequest, TerminalActor, TerminalHandle};
 
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -67,7 +67,7 @@ pub struct ServerConfig {
     pub pre_seeded_session: Option<String>,
     /// When `true`, the pre-seeded session's initial pane spawns the user's
     /// default shell (`$SHELL`, falling back to `/bin/sh`) inside a real
-    /// PTY (see [`seed_session_with_pty`] / [`crate::pane_actor::PaneActor::new_with_default_shell`]).
+    /// PTY (see [`seed_session_with_pty`] / [`crate::terminal_actor::TerminalActor::new_with_default_shell`]).
     /// When `false`, the pre-seeded session's pane has a no-PTY actor —
     /// the actor exists for snapshot/input plumbing but no child process
     /// runs and no bytes flow.
@@ -84,7 +84,7 @@ pub struct ServerConfig {
     /// crisp wire round-trip assertion).
     ///
     /// Ignored when `seed_with_pty` is `false`. `None` (the default)
-    /// falls back to [`crate::pane_actor::default_shell_command`].
+    /// falls back to [`crate::terminal_actor::default_shell_command`].
     pub seed_command: Option<portable_pty::CommandBuilder>,
 }
 
@@ -228,7 +228,7 @@ impl ServerRuntime {
         // the LocalSet (see below). On `root_token.cancel()`:
         //   * `accept_loop` returns from its select! → its per-client
         //     `JoinSet` drops → in-flight client tasks abort.
-        //   * Every `PaneActor`'s child token fires → actors exit
+        //   * Every `TerminalActor`'s child token fires → actors exit
         //     cleanly via their own `select!` (shutdown_pty runs).
         let root_token = CancellationToken::new();
         let result = local
@@ -248,11 +248,11 @@ impl ServerRuntime {
                 // Pre-seed inside the LocalSet so we can `spawn_local`
                 // the pane actor. Without this, the pre-seed path
                 // would have to call `tokio::spawn`, which requires
-                // `Send` futures — exactly what `PaneActor` is not.
+                // `Send` futures — exactly what `TerminalActor` is not.
                 if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
-                        let cmd =
-                            seed_command.unwrap_or_else(crate::pane_actor::default_shell_command);
+                        let cmd = seed_command
+                            .unwrap_or_else(crate::terminal_actor::default_shell_command);
                         seed_session_with_pty(&state, name, cmd, &root_token)
                     } else {
                         seed_session_with_actor(&state, name, &root_token)
@@ -286,7 +286,7 @@ impl ServerRuntime {
     }
 }
 
-/// Seed `(session, window, pane)` and spawn a **no-PTY** `PaneActor`
+/// Seed `(session, window, pane)` and spawn a **no-PTY** `TerminalActor`
 /// on the current `LocalSet`. Used by tests that pre-seed a session
 /// to exercise the ATTACH path without spawning a real subprocess.
 ///
@@ -299,28 +299,28 @@ pub(crate) fn seed_session_with_actor(
     state: &SharedState,
     name: &str,
     root_token: &CancellationToken,
-) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
-    use phux_core::ids::PaneId;
-    let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
+) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
+    use phux_core::ids::TerminalId;
+    let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
     // Default 80x24 — same as `phux_core::Pane::new`'s default dims.
     // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
-    let pane_token = root_token.child_token();
-    let bundle = PaneActor::build_with_token(80, 24, None, pane_token.clone())?;
-    let crate::pane_actor::PaneActorBundle {
+    let terminal_token = root_token.child_token();
+    let bundle = TerminalActor::build_with_token(80, 24, None, terminal_token.clone())?;
+    let crate::terminal_actor::TerminalActorBundle {
         actor,
         handle,
         exit_notify,
         ..
     } = bundle;
     state.with_mut(|s| {
-        let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
+        let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
     });
-    spawn_pane_exit_watcher(state.clone(), pane, exit_notify);
-    Ok(pane)
+    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify);
+    Ok(terminal)
 }
 
 /// Seed `(session, window, pane)` and spawn a **PTY-backed**
-/// `PaneActor` running `cmd`. Sibling of the private
+/// `TerminalActor` running `cmd`. Sibling of the private
 /// `seed_session_with_actor` helper for the real server path
 /// (`phux-byc.5`).
 ///
@@ -329,7 +329,7 @@ pub(crate) fn seed_session_with_actor(
 /// * The `phux server` binary entry point, via
 ///   [`ServerConfig::seed_with_pty`] (with [`ServerConfig::seed_command`]
 ///   left `None` to fall back to
-///   [`crate::pane_actor::default_shell_command`] — the user's `$SHELL`,
+///   [`crate::terminal_actor::default_shell_command`] — the user's `$SHELL`,
 ///   or `/bin/sh` per the byc.5 convention).
 /// * Anything embedding `phux-server` and wanting a specific command
 ///   (e.g. an integration test driving a known fixture; see the
@@ -340,27 +340,27 @@ pub fn seed_session_with_pty(
     name: &str,
     cmd: portable_pty::CommandBuilder,
     root_token: &CancellationToken,
-) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
-    use phux_core::ids::PaneId;
-    let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
-    let pane_token = root_token.child_token();
-    let bundle = PaneActor::build_with_token(80, 24, Some(cmd), pane_token.clone())?;
-    let crate::pane_actor::PaneActorBundle {
+) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
+    use phux_core::ids::TerminalId;
+    let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
+    let terminal_token = root_token.child_token();
+    let bundle = TerminalActor::build_with_token(80, 24, Some(cmd), terminal_token.clone())?;
+    let crate::terminal_actor::TerminalActorBundle {
         actor,
         handle,
         exit_notify,
         ..
     } = bundle;
     state.with_mut(|s| {
-        let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
+        let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
     });
-    spawn_pane_exit_watcher(state.clone(), pane, exit_notify);
-    Ok(pane)
+    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify);
+    Ok(terminal)
 }
 
 /// Spawn the per-pane EOF watcher task (phux-it8).
 ///
-/// Awaits the `PaneActor`'s `exit_notify` oneshot. When the actor
+/// Awaits the `TerminalActor`'s `exit_notify` oneshot. When the actor
 /// observes PTY EOF (the child process has exited — typically the
 /// shell typed `exit`), this watcher walks the attached-client table
 /// and sends `FrameKind::Detached` to every client whose attached
@@ -384,9 +384,9 @@ pub fn seed_session_with_pty(
 /// in current code means the actor was dropped without going through
 /// the EOF branch — i.e. the pane is going away too. Detaching is
 /// still the right response.
-fn spawn_pane_exit_watcher(
+fn spawn_terminal_exit_watcher(
     state: SharedState,
-    pane: phux_core::ids::PaneId,
+    pane: phux_core::ids::TerminalId,
     exit_notify: Option<oneshot::Receiver<()>>,
 ) {
     let Some(rx) = exit_notify else {
@@ -397,7 +397,7 @@ fn spawn_pane_exit_watcher(
         // same as a fired EOF: in both cases the pane is dead and
         // every attached client focused on it needs to be detached.
         let _ = rx.await;
-        on_pane_exited(&state, pane).await;
+        on_terminal_exited(&state, pane).await;
     });
 }
 
@@ -414,7 +414,7 @@ fn spawn_pane_exit_watcher(
 /// from `attached` and clears its `pane_subscribers` entries, mirroring
 /// the existing explicit-detach path in `handle_client`'s
 /// `FrameKind::Detach` arm.
-async fn on_pane_exited(state: &SharedState, pane: phux_core::ids::PaneId) {
+async fn on_terminal_exited(state: &SharedState, pane: phux_core::ids::TerminalId) {
     // Gather under-lock: which clients have this pane as their
     // currently-focused pane? See SPEC §13 — focused pane is the only
     // pane a single-pane session has, so this matches the practical
@@ -433,13 +433,13 @@ async fn on_pane_exited(state: &SharedState, pane: phux_core::ids::PaneId) {
             .collect()
     });
     if doomed.is_empty() {
-        debug!(?pane, "PaneActor EOF: no attached clients to detach");
+        debug!(?pane, "TerminalActor EOF: no attached clients to detach");
         return;
     }
     debug!(
         ?pane,
         count = doomed.len(),
-        "PaneActor EOF: broadcasting DETACHED to attached clients",
+        "TerminalActor EOF: broadcasting DETACHED to attached clients",
     );
     for (client_id, tx) in doomed {
         // Best-effort: the writer task may already be gone if the
@@ -563,8 +563,8 @@ async fn accept_loop(
 /// `phux-byc.8`: implements the ATTACH path. Resolves the target,
 /// builds a [`SessionSnapshot`](phux_protocol::wire::info::SessionSnapshot)
 /// from the registry, requests a snapshot from each pane's
-/// [`PaneActor`](crate::pane_actor::PaneActor), and emits
-/// `ATTACHED` + `PANE_SNAPSHOT` frames per SPEC §13. On unknown
+/// [`TerminalActor`](crate::terminal_actor::TerminalActor), and emits
+/// `ATTACHED` + `TERMINAL_SNAPSHOT` frames per SPEC §13. On unknown
 /// session, emits an `ERROR` frame with `SessionNotFound` (SPEC §14).
 #[allow(
     clippy::too_many_lines,
@@ -704,30 +704,30 @@ async fn handle_client(
                 );
                 handle_viewport_resize(&state, client_id, &viewport);
             }
-            FrameKind::InputKey { pane_id, event } => {
-                handle_pane_input(
+            FrameKind::InputKey { terminal_id, event } => {
+                handle_terminal_input(
                     &state,
                     client_id,
-                    pane_id,
-                    PaneInput::Key(event),
+                    terminal_id,
+                    TerminalInput::Key(event),
                     "INPUT_KEY",
                 );
             }
-            FrameKind::InputMouse { pane_id, event } => {
-                handle_pane_input(
+            FrameKind::InputMouse { terminal_id, event } => {
+                handle_terminal_input(
                     &state,
                     client_id,
-                    pane_id,
-                    PaneInput::Mouse(event),
+                    terminal_id,
+                    TerminalInput::Mouse(event),
                     "INPUT_MOUSE",
                 );
             }
-            FrameKind::InputFocus { pane_id, event } => {
-                handle_pane_input(
+            FrameKind::InputFocus { terminal_id, event } => {
+                handle_terminal_input(
                     &state,
                     client_id,
-                    pane_id,
-                    PaneInput::Focus(event),
+                    terminal_id,
+                    TerminalInput::Focus(event),
                     "INPUT_FOCUS",
                 );
             }
@@ -781,9 +781,9 @@ type AttachPrepared = (
     phux_protocol::wire::info::SessionSnapshot,
     phux_protocol::ids::ClientId,
     Vec<(
-        phux_core::ids::PaneId,
-        crate::pane_actor::PaneHandle,
-        phux_protocol::ids::PaneId,
+        phux_core::ids::TerminalId,
+        crate::terminal_actor::TerminalHandle,
+        phux_protocol::ids::TerminalId,
     )>,
 );
 
@@ -894,17 +894,17 @@ fn prepare_attach(
             ));
         };
         let mut panes_to_snapshot: Vec<(
-            phux_core::ids::PaneId,
-            crate::pane_actor::PaneHandle,
-            phux_protocol::ids::PaneId,
+            phux_core::ids::TerminalId,
+            crate::terminal_actor::TerminalHandle,
+            phux_protocol::ids::TerminalId,
         )> = Vec::new();
         for wid in &session.windows {
             let Some(window) = s.registry.window(*wid).cloned() else {
                 continue;
             };
             for pid in &window.panes {
-                if let Some(handle) = s.pane_handle(*pid).cloned() {
-                    let wire = s.intern_pane_wire(*pid);
+                if let Some(handle) = s.terminal_handle(*pid).cloned() {
+                    let wire = s.intern_terminal_wire(*pid);
                     panes_to_snapshot.push((*pid, handle, wire));
                 }
             }
@@ -916,7 +916,7 @@ fn prepare_attach(
 }
 
 /// Resolve `target`, call [`prepare_attach`], and queue the
-/// `ATTACHED` + per-pane `PANE_SNAPSHOT` frames on `out_tx`.
+/// `ATTACHED` + per-pane `TERMINAL_SNAPSHOT` frames on `out_tx`.
 ///
 /// On any failure path, emits an `ERROR` frame and returns. We never
 /// partially-attach: either every frame queues or none does.
@@ -978,16 +978,16 @@ async fn handle_attach(
     // reply times. With `FuturesUnordered` it scales with the MAX —
     // one slow pane no longer stalls the rest.
     let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
-    for (pane_id, handle, wire_pane_id) in panes_to_snapshot {
+    for (terminal_id, handle, wire_terminal_id) in panes_to_snapshot {
         // Subscribe to live PTY output BEFORE requesting the snapshot.
-        // Subscribing first means anything the PaneActor broadcasts
+        // Subscribing first means anything the TerminalActor broadcasts
         // after this point lands in our receiver; we then ask for a
         // snapshot so the client has a complete starting picture, and
-        // any subsequent PaneOutput we forward is "post-snapshot
+        // any subsequent TerminalOutput we forward is "post-snapshot
         // delta" rather than racing against it.
         let mut output_rx = handle.output.subscribe();
         let pump_out_tx = out_tx.clone();
-        let pump_wire_pane_id = wire_pane_id.get();
+        let pump_wire_terminal_id = wire_terminal_id.get();
         tokio::task::spawn_local(async move {
             let mut seq: u64 = 0;
             loop {
@@ -995,8 +995,8 @@ async fn handle_attach(
                     Ok(bytes) => {
                         seq = seq.wrapping_add(1);
                         if pump_out_tx
-                            .send(Outbound::Frame(FrameKind::PaneOutput {
-                                pane_id: pump_wire_pane_id,
+                            .send(Outbound::Frame(FrameKind::TerminalOutput {
+                                terminal_id: pump_wire_terminal_id,
                                 seq,
                                 bytes: bytes.to_vec(),
                             }))
@@ -1009,9 +1009,9 @@ async fn handle_attach(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
-                            pane_id = pump_wire_pane_id,
+                            terminal_id = pump_wire_terminal_id,
                             dropped = n,
-                            "PaneOutput pump lagged; consider larger broadcast capacity",
+                            "TerminalOutput pump lagged; consider larger broadcast capacity",
                         );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1026,22 +1026,22 @@ async fn handle_attach(
             .await
             .is_err()
         {
-            warn!(?pane_id, "pane actor dropped; skipping snapshot");
+            warn!(?terminal_id, "pane actor dropped; skipping snapshot");
             continue;
         }
         // Tag each in-flight receiver with its identifiers so the drain
         // loop can warn / build a frame without re-deriving them.
-        pending.push(async move { (pane_id, wire_pane_id, reply_rx.await) });
+        pending.push(async move { (terminal_id, wire_terminal_id, reply_rx.await) });
     }
 
-    while let Some((pane_id, wire_pane_id, reply)) = pending.next().await {
+    while let Some((terminal_id, wire_terminal_id, reply)) = pending.next().await {
         let Ok(snap) = reply else {
-            warn!(?pane_id, "pane actor failed to reply with snapshot");
+            warn!(?terminal_id, "pane actor failed to reply with snapshot");
             continue;
         };
         if out_tx
-            .send(Outbound::Frame(FrameKind::PaneSnapshot {
-                pane_id: wire_pane_id,
+            .send(Outbound::Frame(FrameKind::TerminalSnapshot {
+                terminal_id: wire_terminal_id,
                 cols: snap.cols,
                 rows: snap.rows,
                 vt_replay_bytes: snap.bytes,
@@ -1060,13 +1060,13 @@ async fn handle_attach(
 /// Handle a client's `VIEWPORT_RESIZE` (SPEC §7.1 / §10.5).
 ///
 /// Look up the client's currently-focused pane and update the in-memory
-/// `dims` so future `PANE_SNAPSHOT` frames reflect the new size. This is
+/// `dims` so future `TERMINAL_SNAPSHOT` frames reflect the new size. This is
 /// the additive surface for phux-4hp: we deliberately do NOT push a
-/// resize into the [`PaneActor`] (or call `Terminal::set_size` /
+/// resize into the [`TerminalActor`] (or call `Terminal::set_size` /
 /// `pty.resize(...)`) because byc.5's PTY pump owns the actor-side
 /// `Terminal` / `portable-pty` resize integration. The follow-up there
 /// will consume this state change (or, if it prefers a direct channel,
-/// can add a new `PaneHandle` channel without touching this code).
+/// can add a new `TerminalHandle` channel without touching this code).
 ///
 /// Per SPEC §10.5, when multiple clients are attached with different
 /// sizes the server uses the smallest common bounding box per window.
@@ -1097,15 +1097,15 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
         let Some(window) = s.registry.window(window_id) else {
             return;
         };
-        let Some(pane_id) = window.active else {
+        let Some(terminal_id) = window.active else {
             return;
         };
-        if let Some(pane) = s.registry.pane_mut(pane_id) {
+        if let Some(pane) = s.registry.terminal_mut(terminal_id) {
             pane.dims = (viewport.cols, viewport.rows);
         }
-        // Fan the resize out to the PaneActor so libghostty's
+        // Fan the resize out to the TerminalActor so libghostty's
         // `Terminal::set_size` and the PTY `winsize` ioctl get
-        // updated. byc.5 added the `resize` channel on `PaneHandle`;
+        // updated. byc.5 added the `resize` channel on `TerminalHandle`;
         // this is the missing connector (4hp ↔ byc.5).
         //
         // We hold the state lock here so `try_send` is the right
@@ -1117,13 +1117,13 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
         // dropped resize is recoverable (the next resize, or the
         // next snapshot, re-syncs) and SPEC §10.5 explicitly classes
         // VIEWPORT_RESIZE as best-effort.
-        if let Some(handle) = s.panes.get(&pane_id) {
+        if let Some(handle) = s.terminals.get(&terminal_id) {
             match handle.resize.try_send((viewport.cols, viewport.rows)) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
                         ?client_id,
-                        ?pane_id,
+                        ?terminal_id,
                         cols = viewport.cols,
                         rows = viewport.rows,
                         "VIEWPORT_RESIZE: pane resize mailbox full; dropping (fire-and-forget per SPEC §10.5)",
@@ -1132,7 +1132,7 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!(
                         ?client_id,
-                        ?pane_id,
+                        ?terminal_id,
                         "VIEWPORT_RESIZE: pane actor gone; dropping resize",
                     );
                 }
@@ -1140,31 +1140,31 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
         } else {
             debug!(
                 ?client_id,
-                ?pane_id,
-                "VIEWPORT_RESIZE: no PaneHandle registered for pane; dropping resize",
+                ?terminal_id,
+                "VIEWPORT_RESIZE: no TerminalHandle registered for pane; dropping resize",
             );
         }
     });
 }
 
-/// Route an `INPUT_*` frame body to the target pane's [`PaneActor`].
+/// Route an `INPUT_*` frame body to the target pane's [`TerminalActor`].
 ///
 /// SPEC §9: input frames are fire-and-forget — no `Outbound` reply.
-/// On the wire the pane is identified by its `WirePaneId` (`u32`); we
-/// resolve it back to a core [`PaneId`] via [`ServerState::pane_from_wire`],
-/// then locate the [`PaneHandle`] and `try_send` the encoded
-/// [`PaneInput`] onto the actor's input mailbox.
+/// On the wire the pane is identified by its `WireTerminalId` (`u32`); we
+/// resolve it back to a core [`TerminalId`] via [`ServerState::terminal_from_wire`],
+/// then locate the [`TerminalHandle`] and `try_send` the encoded
+/// [`TerminalInput`] onto the actor's input mailbox.
 ///
 /// Validation: we drop with `warn!` (not `debug!`, this is observable
 /// misbehavior worth surfacing) on:
-///   * Unknown wire pane id (no [`PaneId`] mapping).
+///   * Unknown wire pane id (no [`TerminalId`] mapping).
 ///   * Client not attached (the per-client task should not be reading
 ///     frames from a detached identity, but we re-check defensively).
 ///   * Client attached but not subscribed to this pane — prevents one
 ///     client from steering another's pane (SPEC §9 leaves multi-client
 ///     subscription rules to per-pane policy; for now subscription is
 ///     the gate).
-///   * Pane has no registered [`PaneHandle`] (actor never spawned, or
+///   * Pane has no registered [`TerminalHandle`] (actor never spawned, or
 ///     spawned but evicted).
 ///
 /// `try_send` is used because we hold the `with_mut` lock while routing:
@@ -1172,27 +1172,27 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
 /// runtime, and an unbounded queue would let a slow PTY producer push
 /// memory through the roof. `Full` is treated as a backpressure event
 /// (warn-drop); `Closed` is logged at debug and dropped (actor gone).
-fn handle_pane_input(
+fn handle_terminal_input(
     state: &SharedState,
     client_id: ClientId,
-    wire_pane_id: u32,
-    input: PaneInput,
+    wire_terminal_id: u32,
+    input: TerminalInput,
     frame_label: &'static str,
 ) {
-    use phux_protocol::ids::PaneId as WirePaneId;
+    use phux_protocol::ids::TerminalId as WireTerminalId;
     state.with_mut(|s| {
-        let wire = WirePaneId(wire_pane_id);
-        let Some(pane) = s.pane_from_wire(wire) else {
+        let wire = WireTerminalId(wire_terminal_id);
+        let Some(pane) = s.terminal_from_wire(wire) else {
             warn!(
                 ?client_id,
-                wire_pane_id, frame_label, "input frame for unknown pane; dropping",
+                wire_terminal_id, frame_label, "input frame for unknown pane; dropping",
             );
             return;
         };
         let Some(attached) = s.attached.get(&client_id) else {
             warn!(
                 ?client_id,
-                wire_pane_id, frame_label, "input frame from non-attached client; dropping",
+                wire_terminal_id, frame_label, "input frame from non-attached client; dropping",
             );
             return;
         };
@@ -1202,21 +1202,21 @@ fn handle_pane_input(
         // richer SUBSCRIBE story (SPEC §7.4) will refine this without
         // changing the dispatch shape.
         let session = attached.session;
-        let is_subscribed = s.subscribers_for_pane(pane).contains(&client_id);
+        let is_subscribed = s.subscribers_for_terminal(pane).contains(&client_id);
         if !is_subscribed {
             warn!(
                 ?client_id,
-                wire_pane_id,
+                wire_terminal_id,
                 ?session,
                 frame_label,
                 "client not subscribed to pane; dropping input",
             );
             return;
         }
-        let Some(handle): Option<&PaneHandle> = s.pane_handle(pane) else {
+        let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
             warn!(
                 ?client_id,
-                wire_pane_id, frame_label, "no PaneHandle for pane; dropping input",
+                wire_terminal_id, frame_label, "no TerminalHandle for pane; dropping input",
             );
             return;
         };
@@ -1224,13 +1224,13 @@ fn handle_pane_input(
             Ok(()) => {
                 trace!(
                     ?client_id,
-                    wire_pane_id, frame_label, "input routed to PaneActor"
+                    wire_terminal_id, frame_label, "input routed to TerminalActor"
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
                     ?client_id,
-                    wire_pane_id,
+                    wire_terminal_id,
                     frame_label,
                     "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
                 );
@@ -1238,7 +1238,7 @@ fn handle_pane_input(
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 debug!(
                     ?client_id,
-                    wire_pane_id, frame_label, "pane actor gone; dropping input",
+                    wire_terminal_id, frame_label, "pane actor gone; dropping input",
                 );
             }
         }
@@ -1292,14 +1292,14 @@ mod tests {
     /// this state when it lands; today we just observe the mutation.
     #[test]
     fn viewport_resize_updates_focused_pane_dims() {
-        use phux_core::ids::PaneId as CorePaneId;
+        use phux_core::ids::TerminalId as CoreTerminalId;
 
         let state = SharedState::new();
         // Seed a session with a pane, then attach a client. Mirrors what
         // `seed_session_with_actor` does on the real path, minus the
-        // PaneActor spawn (we're not exercising the actor here — just
+        // TerminalActor spawn (we're not exercising the actor here — just
         // the state-side dim update).
-        let (sid, _wid, pid): (_, _, CorePaneId) =
+        let (sid, _wid, pid): (_, _, CoreTerminalId) =
             state.with_mut(|s| s.seed_session("test-session"));
         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
@@ -1309,7 +1309,7 @@ mod tests {
 
         // Sanity: starts at 80x24 (default core::Pane::dims).
         let before = state
-            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .with(|s| s.registry.terminal(pid).map(|p| p.dims))
             .expect("pane exists");
         assert_eq!(before, (80, 24));
 
@@ -1317,7 +1317,7 @@ mod tests {
         handle_viewport_resize(&state, client_id, &viewport);
 
         let after = state
-            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .with(|s| s.registry.terminal(pid).map(|p| p.dims))
             .expect("pane exists");
         assert_eq!(after, (132, 50));
 
@@ -1327,30 +1327,30 @@ mod tests {
     }
 
     /// `VIEWPORT_RESIZE` fans the new (cols, rows) tuple onto the
-    /// `PaneHandle::resize` channel byc.5 added. We inject a hand-
-    /// built `PaneHandle` (no real actor) so the test can observe the
+    /// `TerminalHandle::resize` channel byc.5 added. We inject a hand-
+    /// built `TerminalHandle` (no real actor) so the test can observe the
     /// receiver side directly — this pins the wire from
     /// `handle_viewport_resize` into the actor without needing to
     /// stand up libghostty or a PTY pair.
     #[test]
-    fn viewport_resize_sends_to_pane_actor_resize_channel() {
-        use crate::pane_actor::PaneHandle;
+    fn viewport_resize_sends_to_terminal_actor_resize_channel() {
+        use crate::terminal_actor::TerminalHandle;
         use bytes::Bytes;
-        use phux_core::ids::PaneId as CorePaneId;
+        use phux_core::ids::TerminalId as CoreTerminalId;
         use tokio::sync::{broadcast, mpsc};
 
         let state = SharedState::new();
-        let (_sid, _wid, pid): (_, _, CorePaneId) =
+        let (_sid, _wid, pid): (_, _, CoreTerminalId) =
             state.with_mut(|s| s.seed_session("test-session"));
 
-        // Build a `PaneHandle` directly. The actor side is not running;
+        // Build a `TerminalHandle` directly. The actor side is not running;
         // we only care that `handle.resize.try_send` lands. The other
         // channels exist purely to satisfy the struct shape.
         let (input_tx, _input_rx) = mpsc::channel(8);
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
-        let handle = PaneHandle {
+        let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
             output: output_tx,
@@ -1359,11 +1359,11 @@ mod tests {
             rows: 24,
         };
         state.with_mut(|s| {
-            // `register_pane_handle` wants a CancellationToken; build
+            // `register_terminal_handle` wants a CancellationToken; build
             // a fresh one. We don't keep a clone — no actor is running
             // for this test, so cancellation is moot.
             let token = CancellationToken::new();
-            let _ = s.register_pane_handle(pid, handle, token);
+            let _ = s.register_terminal_handle(pid, handle, token);
         });
 
         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
@@ -1383,7 +1383,7 @@ mod tests {
         assert_eq!(
             observed,
             (132, 50),
-            "PaneHandle::resize must receive the new viewport dims",
+            "TerminalHandle::resize must receive the new viewport dims",
         );
         assert!(
             resize_rx.try_recv().is_err(),
@@ -1393,7 +1393,7 @@ mod tests {
 
     /// Concurrency proof for the ATTACH per-pane snapshot fan-out.
     ///
-    /// Builds N hand-crafted `PaneHandle`s (no real `PaneActor`) whose
+    /// Builds N hand-crafted `TerminalHandle`s (no real `TerminalActor`) whose
     /// `snapshot_rx` ends the test holds. Registers them against a
     /// session, then drives `handle_attach`. With the sequential loop
     /// the test would deadlock: the handler would `await` pane 0's
@@ -1410,12 +1410,12 @@ mod tests {
         use std::time::Duration;
 
         use bytes::Bytes;
-        use phux_core::ids::PaneId as CorePaneId;
+        use phux_core::ids::TerminalId as CoreTerminalId;
         use tokio::sync::{broadcast, mpsc, oneshot};
         use tokio::task::LocalSet;
 
         use crate::grid::SnapshotBytes;
-        use crate::pane_actor::{PaneHandle, SnapshotRequest};
+        use crate::terminal_actor::{SnapshotRequest, TerminalHandle};
 
         const N: usize = 4;
 
@@ -1426,7 +1426,7 @@ mod tests {
                 // Seed one session with one window and N panes.
                 let (sid, wid, _first_pane) = state.with_mut(|s| s.seed_session("multi"));
                 // `seed_session` made one pane already; we want N total.
-                let mut pane_ids: Vec<CorePaneId> = Vec::with_capacity(N);
+                let mut terminal_ids: Vec<CoreTerminalId> = Vec::with_capacity(N);
                 state.with_mut(|s| {
                     let session = s.registry.session(sid).cloned().expect("session");
                     let window = s
@@ -1434,21 +1434,21 @@ mod tests {
                         .window(session.windows[0])
                         .cloned()
                         .expect("window");
-                    pane_ids.push(window.panes[0]);
+                    terminal_ids.push(window.panes[0]);
                     for _ in 1..N {
-                        let pid = s.registry.new_pane(wid).expect("new_pane");
-                        pane_ids.push(pid);
+                        let pid = s.registry.new_terminal(wid).expect("new_pane");
+                        terminal_ids.push(pid);
                     }
                 });
 
-                // Build N PaneHandles; keep the snapshot receivers in the test.
+                // Build N TerminalHandles; keep the snapshot receivers in the test.
                 let mut snapshot_rxs: Vec<mpsc::Receiver<SnapshotRequest>> = Vec::with_capacity(N);
-                for &pid in &pane_ids {
+                for &pid in &terminal_ids {
                     let (input_tx, _input_rx) = mpsc::channel(8);
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
                     let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
                     let (resize_tx, _resize_rx) = mpsc::channel::<(u16, u16)>(8);
-                    let handle = PaneHandle {
+                    let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
                         output: output_tx,
@@ -1457,13 +1457,13 @@ mod tests {
                         rows: 24,
                     };
                     state.with_mut(|s| {
-                        let _ = s.register_pane_handle(pid, handle, CancellationToken::new());
+                        let _ = s.register_terminal_handle(pid, handle, CancellationToken::new());
                     });
                     snapshot_rxs.push(snapshot_rx);
                 }
 
                 // Outbound channel for the would-be writer task; we read
-                // PANE_SNAPSHOT frames out of `out_rx` to verify all N
+                // TERMINAL_SNAPSHOT frames out of `out_rx` to verify all N
                 // shipped.
                 let (out_tx, mut out_rx) =
                     mpsc::channel::<Outbound>(crate::state::DEFAULT_CLIENT_MAILBOX);
@@ -1523,20 +1523,20 @@ mod tests {
                     let _ = reply.send(payload);
                 }
 
-                // Drain N PANE_SNAPSHOT frames out of the writer channel.
+                // Drain N TERMINAL_SNAPSHOT frames out of the writer channel.
                 let mut snaps_seen = 0usize;
                 for _ in 0..N {
                     let frame = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
                         .await
                         .expect("pane snapshot frame did not arrive")
                         .expect("out_rx closed before snapshot");
-                    if matches!(frame, Outbound::Frame(FrameKind::PaneSnapshot { .. })) {
+                    if matches!(frame, Outbound::Frame(FrameKind::TerminalSnapshot { .. })) {
                         snaps_seen += 1;
                     } else {
-                        panic!("expected PaneSnapshot, got {frame:?}");
+                        panic!("expected TerminalSnapshot, got {frame:?}");
                     }
                 }
-                assert_eq!(snaps_seen, N, "expected one PANE_SNAPSHOT per pane");
+                assert_eq!(snaps_seen, N, "expected one TERMINAL_SNAPSHOT per pane");
 
                 attach_task.await.expect("attach task panicked");
             })
@@ -1551,11 +1551,11 @@ mod tests {
         let (_sid, _wid, pid) = state.with_mut(|s| s.seed_session("session"));
         let bogus_client = ClientId(9999);
         let before = state
-            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .with(|s| s.registry.terminal(pid).map(|p| p.dims))
             .expect("pane exists");
         handle_viewport_resize(&state, bogus_client, &ViewportInfo::new(200, 60));
         let after = state
-            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .with(|s| s.registry.terminal(pid).map(|p| p.dims))
             .expect("pane exists");
         assert_eq!(before, after, "no mutation expected for unattached client");
     }

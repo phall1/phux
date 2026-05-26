@@ -16,16 +16,16 @@
 //!
 //! `length` is at least `1` (the type byte) and at most `MAX_FRAME_LEN`.
 //!
-//! Under [ADR-0013] pane content rides as raw VT bytes (`PANE_OUTPUT`).
+//! Under [ADR-0013] terminal content rides as raw VT bytes (`TERMINAL_OUTPUT`).
 //! There is no structured per-cell diff variant on this enum — earlier
 //! drafts carried `PaneDiff` at type byte `0x40`; that slot is retired
-//! and `PANE_OUTPUT` (type `0x90` per SPEC §7.2) takes its place.
+//! and `TERMINAL_OUTPUT` (type `0x90` per SPEC §7.2) takes its place.
 //!
 //! [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 
 use bytes::BytesMut;
 
-use crate::ids::{ClientId, PaneId, SessionId};
+use crate::ids::{ClientId, SessionId, TerminalId};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
@@ -87,21 +87,21 @@ pub const TYPE_BELL: u8 = 0xB0;
 pub const TYPE_ERROR: u8 = 0xC1;
 /// Discriminant for `PONG` (server to client, `SPEC.md` §7.5). Reserved.
 pub const TYPE_PONG: u8 = 0xFF;
-/// Discriminant for `PANE_OUTPUT` (server to client, `SPEC.md` §7.2 / §8.1).
+/// Discriminant for `TERMINAL_OUTPUT` (server to client, `SPEC.md` §7.2 / §8.1).
 ///
-/// Hot-path pane content under [ADR-0013]: the server forwards PTY bytes
+/// Hot-path terminal content under [ADR-0013]: the server forwards PTY bytes
 /// (possibly downsampled per the client's [`crate::caps::ColorSupport`])
-/// in `PANE_OUTPUT` frames. Supersedes the earlier `PANE_DIFF` slot;
+/// in `TERMINAL_OUTPUT` frames. Supersedes the earlier `PANE_DIFF` slot;
 /// `PANE_DIFF` is retired and its old discriminant (`0x40`) is no longer
 /// recognised.
-pub const TYPE_PANE_OUTPUT: u8 = 0x90;
-/// Discriminant for `PANE_SNAPSHOT` (server to client, `SPEC.md` §7.2 / §8.4).
+pub const TYPE_TERMINAL_OUTPUT: u8 = 0x90;
+/// Discriminant for `TERMINAL_SNAPSHOT` (server to client, `SPEC.md` §7.2 / §8.4).
 ///
 /// Required per SPEC §16 conformance. Under [ADR-0013] the payload is a
 /// synthesised VT byte sequence (`vt_replay_bytes`) plus optional
 /// `scrollback_bytes`; the client `vt_write`s them into a fresh Terminal
 /// of the declared `cols × rows`.
-pub const TYPE_PANE_SNAPSHOT: u8 = 0x91;
+pub const TYPE_TERMINAL_SNAPSHOT: u8 = 0x91;
 
 // -----------------------------------------------------------------------------
 // ErrorCode enum — SPEC §14.
@@ -143,8 +143,8 @@ pub enum ErrorCode {
     SessionNotFound = 102,
     /// The requested window does not exist.
     WindowNotFound = 103,
-    /// The requested pane does not exist.
-    PaneNotFound = 104,
+    /// The requested terminal does not exist.
+    TerminalNotFound = 104,
     /// The requested client id does not exist.
     ClientNotFound = 105,
 
@@ -181,7 +181,7 @@ impl ErrorCode {
             101 => Self::AlreadyAttached,
             102 => Self::SessionNotFound,
             103 => Self::WindowNotFound,
-            104 => Self::PaneNotFound,
+            104 => Self::TerminalNotFound,
             105 => Self::ClientNotFound,
             200 => Self::InvalidCommand,
             201 => Self::PermissionDenied,
@@ -278,11 +278,11 @@ impl ViewportInfo {
 /// The phux-6yl.4 scaffold populated `Hello`, `Ping`, and `PaneDiff`. The
 /// phux-4az pass added the message-catalog variants needed for the attach
 /// lifecycle. The phux-i58 SPEC §13 conformance pass conforms ATTACH/ATTACHED
-/// to spec and splits out `PANE_SNAPSHOT` per SPEC §16. Under [ADR-0013] the
-/// structured `PaneDiff` variant is replaced by `PaneOutput` (raw VT bytes)
-/// and `PaneSnapshot` carries `vt_replay_bytes` instead of a `DiffOp` list.
-/// The remaining SPEC §7 catalog (`Hello_Ok`, `Pong`, `OscEvent`, `Alert`,
-/// resize/ack/command/etc.) lands in sibling tasks.
+/// to spec and splits out `TERMINAL_SNAPSHOT` per SPEC §16. Under [ADR-0013] the
+/// structured `PaneDiff` variant is replaced by `TerminalOutput` (raw VT bytes)
+/// and `TerminalSnapshot` carries `vt_replay_bytes` instead of a `DiffOp` list.
+/// The remaining SPEC §7 catalog (`Hello_Ok`, `Pong`, `TerminalEvent`,
+/// `Alert`, resize/ack/command/etc.) lands in sibling tasks.
 ///
 /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 #[derive(Debug, Clone, PartialEq)]
@@ -313,23 +313,23 @@ pub enum FrameKind {
         nonce: u64,
     },
 
-    /// `PANE_OUTPUT` — server-to-client pane content (`SPEC.md` §8.1).
+    /// `TERMINAL_OUTPUT` — server-to-client terminal content (`SPEC.md` §8.1).
     ///
     /// The hot path under [ADR-0013]: the server forwards bytes from the
-    /// pane's PTY (after parsing into its canonical
+    /// terminal's PTY (after parsing into its canonical
     /// `libghostty_vt::Terminal` and after any per-client capability
     /// rewriting). The client feeds `bytes` into its local Terminal via
     /// `vt_write`; `RenderState` provides per-row dirty tracking for
     /// efficient local redraw.
     ///
-    /// `seq` is a monotonic per-pane sequence id used by `FRAME_ACK` /
+    /// `seq` is a monotonic per-terminal sequence id used by `FRAME_ACK` /
     /// predictive-echo correlation; it carries no structural meaning.
     ///
     /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
-    PaneOutput {
-        /// Target pane.
-        pane_id: u32,
-        /// Monotonic per-pane sequence id (`SPEC.md` §12).
+    TerminalOutput {
+        /// Target terminal.
+        terminal_id: u32,
+        /// Monotonic per-terminal sequence id (`SPEC.md` §12).
         seq: u64,
         /// VT bytes from the PTY (possibly downsampled per
         /// [`crate::caps::ColorSupport`]).
@@ -362,35 +362,35 @@ pub enum FrameKind {
 
     /// `INPUT_KEY` — client forwards a structured key event (`SPEC.md` §9.1).
     ///
-    /// Wire shape: `u32` pane id followed by the encoded [`KeyEvent`].
+    /// Wire shape: `u32` terminal id followed by the encoded [`KeyEvent`].
     InputKey {
-        /// Target pane.
-        pane_id: u32,
+        /// Target terminal.
+        terminal_id: u32,
         /// Structured key event; libghostty atoms inside.
         event: KeyEvent,
     },
 
     /// `INPUT_MOUSE` — client forwards a mouse event (`SPEC.md` §9.2).
     InputMouse {
-        /// Target pane.
-        pane_id: u32,
-        /// Structured mouse event; coordinates are pane-local pixels.
+        /// Target terminal.
+        terminal_id: u32,
+        /// Structured mouse event; coordinates are terminal-local pixels.
         event: MouseEvent,
     },
 
     /// `INPUT_FOCUS` — client reports focus change on its host window
     /// (`SPEC.md` §9.3).
     InputFocus {
-        /// Target pane.
-        pane_id: u32,
+        /// Target terminal.
+        terminal_id: u32,
         /// Whether the client window gained or lost focus.
         event: FocusEvent,
     },
 
     /// `INPUT_PASTE` — client forwards a paste payload (`SPEC.md` §9.4).
     InputPaste {
-        /// Target pane.
-        pane_id: u32,
+        /// Target terminal.
+        terminal_id: u32,
         /// Paste payload plus trust classification.
         event: PasteEvent,
     },
@@ -402,7 +402,7 @@ pub enum FrameKind {
     /// to — there is no `client_id` field on the wire (consistent with
     /// `ATTACH` / `INPUT_*` / etc., which also rely on the connection's
     /// implicit identity). The server uses this to update the resolved
-    /// pane dimensions for the client's currently-attached pane.
+    /// terminal dimensions for the client's currently-attached terminal.
     ///
     /// `viewport` reuses the [`ViewportInfo`] shape from `ATTACH`. SPEC
     /// §10.5 additionally defines `cell_w`/`cell_h`/`padding_*` for
@@ -417,9 +417,9 @@ pub enum FrameKind {
     /// (`SPEC.md` §13).
     ///
     /// Conforms to SPEC §13 as of phux-i58: full `SessionSnapshot` plus the
-    /// server-allocated `ClientId` identifying this attachment. The per-pane
-    /// initial state arrives separately via `PANE_SNAPSHOT` frames per the
-    /// SPEC §13 attach sequence.
+    /// server-allocated `ClientId` identifying this attachment. The per-
+    /// terminal initial state arrives separately via `TERMINAL_SNAPSHOT`
+    /// frames per the SPEC §13 attach sequence.
     Attached {
         /// Full graph of sessions/windows/panes plus the attaching client's
         /// initial focus triple.
@@ -436,13 +436,13 @@ pub enum FrameKind {
     /// once the server actually distinguishes shutdown causes.
     Detached,
 
-    /// `PANE_SNAPSHOT` — initial state of a single pane (`SPEC.md` §8.4).
+    /// `TERMINAL_SNAPSHOT` — initial state of a single terminal (`SPEC.md` §8.4).
     ///
-    /// REQUIRED per SPEC §16 conformance. Sent after `ATTACHED` for each pane
-    /// the client needs initialised; subsequent updates flow as `PANE_OUTPUT`.
-    /// The server MAY also emit `PANE_SNAPSHOT` mid-stream as a flow-control
-    /// catch-up (SPEC §12.2) or after a resize that requires full
-    /// retransmission.
+    /// REQUIRED per SPEC §16 conformance. Sent after `ATTACHED` for each
+    /// terminal the client needs initialised; subsequent updates flow as
+    /// `TERMINAL_OUTPUT`. The server MAY also emit `TERMINAL_SNAPSHOT`
+    /// mid-stream as a flow-control catch-up (SPEC §12.2) or after a resize
+    /// that requires full retransmission.
     ///
     /// Under [ADR-0013] the payload is a synthesised VT byte sequence:
     /// when written to a fresh `libghostty_vt::Terminal` of the declared
@@ -451,9 +451,9 @@ pub enum FrameKind {
     /// iff the attaching client requested scrollback in `ATTACH`.
     ///
     /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
-    PaneSnapshot {
-        /// Target pane.
-        pane_id: PaneId,
+    TerminalSnapshot {
+        /// Target terminal.
+        terminal_id: TerminalId,
         /// Grid width in cells at snapshot time.
         cols: u16,
         /// Grid height in cells at snapshot time.
@@ -469,10 +469,10 @@ pub enum FrameKind {
         scrollback_bytes: Option<Vec<u8>>,
     },
 
-    /// `BELL` — pane received a bell character (`SPEC.md` §7.6).
+    /// `BELL` — terminal received a bell character (`SPEC.md` §7.6).
     Bell {
-        /// Pane that bell'd.
-        pane_id: u32,
+        /// Terminal that bell'd.
+        terminal_id: u32,
     },
 
     /// `ERROR` — server-to-client structured error (`SPEC.md` §14).
@@ -503,7 +503,7 @@ impl FrameKind {
         match self {
             Self::Hello { .. } => TYPE_HELLO,
             Self::Ping { .. } => TYPE_PING,
-            Self::PaneOutput { .. } => TYPE_PANE_OUTPUT,
+            Self::TerminalOutput { .. } => TYPE_TERMINAL_OUTPUT,
             Self::Attach { .. } => TYPE_ATTACH,
             Self::Detach => TYPE_DETACH,
             Self::InputKey { .. } => TYPE_INPUT_KEY,
@@ -513,7 +513,7 @@ impl FrameKind {
             Self::ViewportResize { .. } => TYPE_VIEWPORT_RESIZE,
             Self::Attached { .. } => TYPE_ATTACHED,
             Self::Detached => TYPE_DETACHED,
-            Self::PaneSnapshot { .. } => TYPE_PANE_SNAPSHOT,
+            Self::TerminalSnapshot { .. } => TYPE_TERMINAL_SNAPSHOT,
             Self::Bell { .. } => TYPE_BELL,
             Self::Error { .. } => TYPE_ERROR,
         }
@@ -548,12 +548,12 @@ impl FrameKind {
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);
             }
-            Self::PaneOutput {
-                pane_id,
+            Self::TerminalOutput {
+                terminal_id,
                 seq,
                 bytes,
             } => {
-                enc.write_u32_be(*pane_id);
+                enc.write_u32_be(*terminal_id);
                 enc.write_u64_be(*seq);
                 enc.write_bytes(bytes);
             }
@@ -571,20 +571,20 @@ impl FrameKind {
             // `Detach` and `Detached` are unit variants: just the type byte,
             // no payload. Merged to satisfy `clippy::match_same_arms`.
             Self::Detach | Self::Detached => {}
-            Self::InputKey { pane_id, event } => {
-                enc.write_u32_be(*pane_id);
+            Self::InputKey { terminal_id, event } => {
+                enc.write_u32_be(*terminal_id);
                 encode_key_event(event, &mut enc);
             }
-            Self::InputMouse { pane_id, event } => {
-                enc.write_u32_be(*pane_id);
+            Self::InputMouse { terminal_id, event } => {
+                enc.write_u32_be(*terminal_id);
                 encode_mouse_event(event, &mut enc);
             }
-            Self::InputFocus { pane_id, event } => {
-                enc.write_u32_be(*pane_id);
+            Self::InputFocus { terminal_id, event } => {
+                enc.write_u32_be(*terminal_id);
                 enc.write_u8(encode_focus_event(*event));
             }
-            Self::InputPaste { pane_id, event } => {
-                enc.write_u32_be(*pane_id);
+            Self::InputPaste { terminal_id, event } => {
+                enc.write_u32_be(*terminal_id);
                 encode_paste_event(event, &mut enc);
             }
             Self::ViewportResize { viewport } => {
@@ -597,21 +597,21 @@ impl FrameKind {
                 encode_session_snapshot(snapshot, &mut enc);
                 encode_client_id(*initial_client_id, &mut enc);
             }
-            Self::PaneSnapshot {
-                pane_id,
+            Self::TerminalSnapshot {
+                terminal_id,
                 cols,
                 rows,
                 vt_replay_bytes,
                 scrollback_bytes,
             } => {
-                enc.write_u32_be(pane_id.get());
+                enc.write_u32_be(terminal_id.get());
                 enc.write_u16_be(*cols);
                 enc.write_u16_be(*rows);
                 enc.write_bytes(vt_replay_bytes);
                 encode_optional_bytes(scrollback_bytes.as_deref(), &mut enc);
             }
-            Self::Bell { pane_id } => {
-                enc.write_u32_be(*pane_id);
+            Self::Bell { terminal_id } => {
+                enc.write_u32_be(*terminal_id);
             }
             Self::Error {
                 request_id,

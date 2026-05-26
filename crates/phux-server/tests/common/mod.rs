@@ -63,7 +63,7 @@ pub const SOCKET_CONNECT_DEADLINE: Duration = Duration::from_secs(2);
 /// handle so each test can drive a clean shutdown.
 ///
 /// Per ADR-0014 the server runs on a `LocalSet` because per-pane
-/// `PaneActor`s own `!Send` `libghostty_vt::Terminal`s — callers MUST
+/// `TerminalActor`s own `!Send` `libghostty_vt::Terminal`s — callers MUST
 /// invoke this from inside a `LocalSet::run_until` (see [`run_local`]).
 pub fn spawn_server(
     socket_path: PathBuf,

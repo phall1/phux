@@ -13,8 +13,8 @@
 //! The encoder unit tests in [`key_encode_snapshot`] already pin down the
 //! encoder's behavior at the libghostty boundary. This test pins the
 //! end-to-end wire path: a `INPUT_KEY` frame for plain `q` (no mods) sent
-//! through `handle_client` → `PaneActor::encode_input` → PTY writer →
-//! `cat` echo → `PANE_OUTPUT` MUST contain the byte 0x71 (`q`) and MUST
+//! through `handle_client` → `TerminalActor::encode_input` → PTY writer →
+//! `cat` echo → `TERMINAL_OUTPUT` MUST contain the byte 0x71 (`q`) and MUST
 //! NOT contain a CSI-u escape, **provided** the pane's libghostty
 //! Terminal is in its default (legacy) keyboard mode.
 //!
@@ -35,9 +35,11 @@ use std::time::Duration;
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT};
-use phux_server::input::key::PerPaneKeyEncoder;
-use phux_server::pane_actor::default_shell_command;
+use phux_protocol::wire::frame::{
+    FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+};
+use phux_server::input::key::PerTerminalKeyEncoder;
+use phux_server::terminal_actor::default_shell_command;
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -86,7 +88,7 @@ const fn arrow_up_key() -> KeyEvent {
     }
 }
 
-/// Drain `PANE_OUTPUT` frames into a `Vec<u8>` until `needle` appears or
+/// Drain `TERMINAL_OUTPUT` frames into a `Vec<u8>` until `needle` appears or
 /// the deadline elapses. Returns whatever has accumulated either way.
 async fn collect_pane_output_until(stream: &mut UnixStream, needle: u8) -> Vec<u8> {
     let mut acc: Vec<u8> = Vec::new();
@@ -96,10 +98,10 @@ async fn collect_pane_output_until(stream: &mut UnixStream, needle: u8) -> Vec<u
         let Ok((type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
             break;
         };
-        if type_byte != TYPE_PANE_OUTPUT {
+        if type_byte != TYPE_TERMINAL_OUTPUT {
             continue;
         }
-        if let FrameKind::PaneOutput { bytes, .. } = frame {
+        if let FrameKind::TerminalOutput { bytes, .. } = frame {
             acc.extend_from_slice(&bytes);
             if acc.contains(&needle) {
                 return acc;
@@ -146,13 +148,13 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
             other => panic!("expected ATTACHED, got {other:?}"),
         };
         let (type_byte, _snap) = recv_typed(&mut stream).await;
-        assert_eq!(type_byte, TYPE_PANE_SNAPSHOT);
+        assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT);
 
         // Press `q` then Enter so cat's line buffer flushes.
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                pane_id: wire_pane_id,
+                terminal_id: wire_pane_id,
                 event: ascii_key('q', PhysicalKey::Q),
             },
         )
@@ -160,7 +162,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                pane_id: wire_pane_id,
+                terminal_id: wire_pane_id,
                 event: KeyEvent {
                     action: KeyAction::Press,
                     key: PhysicalKey::Enter,
@@ -180,7 +182,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         // that's the legacy plain-ASCII shape htop expects.
         assert!(
             acc.contains(&b'q'),
-            "expected plain `q` byte in PANE_OUTPUT echo, got {acc:?}",
+            "expected plain `q` byte in TERMINAL_OUTPUT echo, got {acc:?}",
         );
 
         // And the bytes must NOT contain a CSI-u quit-key encoding. The
@@ -191,7 +193,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         for pat in bad_patterns {
             assert!(
                 !acc.windows(pat.len()).any(|w| w == *pat),
-                "PANE_OUTPUT contained kitty CSI-u encoding {pat:?}; \
+                "TERMINAL_OUTPUT contained kitty CSI-u encoding {pat:?}; \
                  raw bytes={acc:?}",
             );
         }
@@ -240,18 +242,18 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
             other => panic!("expected ATTACHED, got {other:?}"),
         };
         let (type_byte, _snap) = recv_typed(&mut stream).await;
-        assert_eq!(type_byte, TYPE_PANE_SNAPSHOT);
+        assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT);
 
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                pane_id: wire_pane_id,
+                terminal_id: wire_pane_id,
                 event: ctrl_c_key(),
             },
         )
         .await;
 
-        // We allow either: no PANE_OUTPUT at all (cat killed before it
+        // We allow either: no TERMINAL_OUTPUT at all (cat killed before it
         // could echo) or some bytes that DON'T contain a CSI-u
         // encoding of Ctrl-C. The bug-shape we're guarding against is
         // CSI-u showing up here.
@@ -262,8 +264,8 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
             let Ok((type_byte, frame)) = timeout(remaining, recv_typed(&mut stream)).await else {
                 break;
             };
-            if type_byte == TYPE_PANE_OUTPUT
-                && let FrameKind::PaneOutput { bytes, .. } = frame
+            if type_byte == TYPE_TERMINAL_OUTPUT
+                && let FrameKind::TerminalOutput { bytes, .. } = frame
             {
                 acc.extend_from_slice(&bytes);
             }
@@ -282,7 +284,7 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
 }
 
 /// Direct encoder-level corroboration of the integration-test assertion
-/// above: a fresh libghostty `Terminal` (matching what `PaneActor::build`
+/// above: a fresh libghostty `Terminal` (matching what `TerminalActor::build`
 /// constructs at startup) puts the encoder in legacy mode, so `q` is
 /// `0x71`, Ctrl-C is `0x03`, and `ArrowUp` is `\x1b[A`.
 #[test]
@@ -293,7 +295,7 @@ fn encoder_emits_legacy_bytes_for_q_in_default_terminal_mode() {
         max_scrollback: 1000,
     })
     .expect("Terminal::new");
-    let mut enc = PerPaneKeyEncoder::new().expect("encoder");
+    let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
 
     let q_bytes = enc
         .encode(&ascii_key('q', PhysicalKey::Q), &terminal)
@@ -371,7 +373,7 @@ fn encoder_emits_kitty_csi_u_when_terminal_has_kitty_flags() {
     // the full kitty progressive enhancement writes exactly this.
     terminal.vt_write(b"\x1b[>31u");
 
-    let mut enc = PerPaneKeyEncoder::new().expect("encoder");
+    let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
     let q_bytes = enc
         .encode(&ascii_key('q', PhysicalKey::Q), &terminal)
         .expect("encode q")

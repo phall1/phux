@@ -8,7 +8,7 @@
 //!    list contains the pre-seeded `default` session, plus a server-
 //!    allocated `initial_client_id` that is non-zero (`ClientId`s are
 //!    monotonic from 1; see `ServerState::new_client_id`).
-//! 2. `PANE_SNAPSHOT` arrives for the session's lone pane carrying
+//! 2. `TERMINAL_SNAPSHOT` arrives for the session's lone pane carrying
 //!    `vt_replay_bytes` that, per ADR-0013, reproduces the server's
 //!    canonical grid when fed into a fresh `libghostty_vt::Terminal`.
 //!
@@ -54,7 +54,7 @@
 mod common;
 
 use libghostty_vt::{Terminal, TerminalOptions};
-use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_PANE_SNAPSHOT};
+use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_SNAPSHOT};
 use phux_server::grid::SnapshotSynthesizer;
 use tempfile::TempDir;
 
@@ -118,27 +118,27 @@ fn byc_6_1_attach_returns_session_id_and_round_trip_snapshot() {
 
                 // The seeded pane was created 80x24 (see runtime.rs
                 // seed_session_with_actor). Carry those forward as the
-                // expected PANE_SNAPSHOT dimensions for the next frame.
+                // expected TERMINAL_SNAPSHOT dimensions for the next frame.
                 (80_u16, 24_u16)
             }
             other => panic!("expected FrameKind::Attached, got {other:?}"),
         };
 
-        // ---- SPEC §13 step 2: PANE_SNAPSHOT (one per pane in focused window) ----
+        // ---- SPEC §13 step 2: TERMINAL_SNAPSHOT (one per pane in focused window) ----
         let (type_byte, snap_frame) = recv_typed(&mut stream).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "second server-to-client frame must be PANE_SNAPSHOT (got type 0x{type_byte:02x})",
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "second server-to-client frame must be TERMINAL_SNAPSHOT (got type 0x{type_byte:02x})",
         );
         let (snap_cols, snap_rows, vt_replay_bytes, scrollback_bytes) = match snap_frame {
-            FrameKind::PaneSnapshot {
-                pane_id: _,
+            FrameKind::TerminalSnapshot {
+                terminal_id: _,
                 cols,
                 rows,
                 vt_replay_bytes,
                 scrollback_bytes,
             } => (cols, rows, vt_replay_bytes, scrollback_bytes),
-            other => panic!("expected FrameKind::PaneSnapshot, got {other:?}"),
+            other => panic!("expected FrameKind::TerminalSnapshot, got {other:?}"),
         };
 
         assert_eq!(snap_cols, snapshot_cols_expected, "snapshot cols");

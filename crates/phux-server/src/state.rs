@@ -9,7 +9,7 @@
 //!   server-assigned monotonic [`ClientId`].
 //! * The list of subscribers per pane — used to fan diffs out to every client
 //!   that is currently observing a pane.
-//! * A per-pane input log (`pane_inputs`) where every keystroke, mouse event,
+//! * A per-pane input log (`terminal_inputs`) where every keystroke, mouse event,
 //!   focus change, and paste recorded against a pane is appended. The PTY
 //!   side of the pipeline (PTY writer task) reads from this log; for
 //!   `phux-byc.4` it serves both as the merge point for multi-client input
@@ -24,7 +24,7 @@
 //! futures are `!Send` and can hold `Rc<RefCell<_>>` if desired.
 //!
 //! [`ServerState`] itself stays behind `Arc<Mutex<_>>` because the
-//! [`crate::pane_actor::PaneHandle`] held inside `panes` is `Send` and
+//! [`crate::terminal_actor::TerminalHandle`] held inside `panes` is `Send` and
 //! the surrounding [`SharedState`] is used in a few sync contexts
 //! (pre-seed before `LocalSet` entry, test scaffolding). Critical sections
 //! are short (microseconds: a few `HashMap` ops), so atomic contention
@@ -38,14 +38,14 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::BytesMut;
-use phux_core::ids::{PaneId, SessionId, WindowId};
+use phux_core::ids::{SessionId, TerminalId, WindowId};
 use phux_core::registry::Registry;
 use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
-use crate::pane_actor::PaneHandle;
+use crate::terminal_actor::TerminalHandle;
 use phux_protocol::caps::ColorSupport;
-use phux_protocol::ids::{PaneId as WirePaneId, WindowId as WireWindowId};
+use phux_protocol::ids::{TerminalId as WireTerminalId, WindowId as WireWindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
@@ -60,7 +60,7 @@ use tokio_util::sync::CancellationToken;
 /// Bounded on purpose: a stuck client must not let the server accumulate
 /// unbounded backpressure. The exact number is small because outbound
 /// frames are *coalesced byte chunks* (see `SPEC.md` §8 and ADR-0013),
-/// not individual PTY reads; eight in-flight `PANE_OUTPUT` batches is
+/// not individual PTY reads; eight in-flight `TERMINAL_OUTPUT` batches is
 /// well above steady state.
 pub const DEFAULT_CLIENT_MAILBOX: usize = 8;
 
@@ -79,7 +79,7 @@ pub struct ClientId(pub u64);
 /// them into PTY writes. The variant set tracks `SPEC.md` §9 (Input
 /// events).
 #[derive(Debug, Clone)]
-pub enum PaneInput {
+pub enum TerminalInput {
     /// A keystroke (`INPUT_KEY` on the wire — `SPEC.md` §9.1).
     Key(KeyEvent),
     /// A mouse event (`INPUT_MOUSE` — `SPEC.md` §9.2).
@@ -98,8 +98,8 @@ pub enum PaneInput {
 /// * [`Outbound::Frame`] carries a [`phux_protocol::wire::frame::FrameKind`]
 ///   and is encoded via `FrameKind::encode` before being written. Per
 ///   ADR-0008 / ADR-0013 the protocol crate owns the wire types and the
-///   server defers to them for any variant — `Hello`, `PaneOutput`,
-///   `PaneSnapshot`, lifecycle frames, and so on.
+///   server defers to them for any variant — `Hello`, `TerminalOutput`,
+///   `TerminalSnapshot`, lifecycle frames, and so on.
 /// * [`Outbound::Raw`] carries pre-encoded bytes that bypass the encoder.
 ///   This is currently used only by the PONG path, because PONG (reserved
 ///   type byte `0xFF`) is not yet a `FrameKind` variant. Once the protocol
@@ -158,40 +158,40 @@ pub struct ServerState {
     /// Currently attached clients, keyed by server-assigned id.
     pub attached: HashMap<ClientId, AttachedClient>,
     /// For each pane, the clients currently observing it (and thus eligible
-    /// to receive `PANE_OUTPUT` frames for it).
-    pub pane_subscribers: HashMap<PaneId, Vec<ClientId>>,
+    /// to receive `TERMINAL_OUTPUT` frames for it).
+    pub terminal_subscribers: HashMap<TerminalId, Vec<ClientId>>,
     /// Per-pane input log. Inputs from all attached clients are merged into
     /// the same vec in arrival order; the PTY writer task drains it.
     ///
     /// For `phux-byc.4` no draining consumer exists yet — the log
     /// accumulates and tests inspect it via
-    /// [`Self::pane_input_log_for`].
-    pane_inputs: HashMap<PaneId, Vec<PaneInput>>,
+    /// [`Self::terminal_input_log_for`].
+    terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
     /// on each other — see [`crate::id_bridge`] module docs.
     pub session_id_bridge: IdBridge,
-    /// Per-pane actor handles, keyed by core [`PaneId`]. The
-    /// `PaneHandle` is `Send`; the underlying `PaneActor` (which owns
+    /// Per-pane actor handles, keyed by core [`TerminalId`]. The
+    /// `TerminalHandle` is `Send`; the underlying `TerminalActor` (which owns
     /// the `!Send` `Terminal`) lives on the `LocalSet` — see ADR-0014.
     ///
-    /// Populated by [`Self::register_pane_handle`] after the actor is
+    /// Populated by [`Self::register_terminal_handle`] after the actor is
     /// spawned. Looked up by the ATTACH handler to request snapshots
     /// and by future PTY-input branches to forward keystrokes.
-    pub panes: HashMap<PaneId, PaneHandle>,
+    pub terminals: HashMap<TerminalId, TerminalHandle>,
     /// Per-pane cancellation tokens. Cancelling a token fires the
-    /// matching `PaneActor`'s shutdown branch (see
-    /// `PaneActor::run`'s `select!`). Typically a child of the
+    /// matching `TerminalActor`'s shutdown branch (see
+    /// `TerminalActor::run`'s `select!`). Typically a child of the
     /// per-server root token, so a root cancel cascades to every
     /// pane in one step.
     ///
     /// Distinct from the prior `oneshot::Sender<()>` shutdown channel:
     /// dropping the token does NOT cancel — cancellation must be
-    /// explicit (see [`Self::detach_pane_actor`]).
-    pane_tokens: HashMap<PaneId, CancellationToken>,
-    /// `JoinSet` collecting the `PaneActor::run` futures spawned via
-    /// [`Self::spawn_pane_actor`]. Owned at this scope so cancellation
+    /// explicit (see [`Self::detach_terminal_actor`]).
+    terminal_tokens: HashMap<TerminalId, CancellationToken>,
+    /// `JoinSet` collecting the `TerminalActor::run` futures spawned via
+    /// [`Self::spawn_terminal_actor`]. Owned at this scope so cancellation
     /// of the per-server root token (or drop of `ServerState`) aborts
     /// every still-running pane actor in one go.
     ///
@@ -203,17 +203,17 @@ pub struct ServerState {
     /// thread that ran the `LocalSet`, so this `JoinSet`'s `Drop` is
     /// always on the spawning thread — no cross-thread poll of
     /// `!Send` futures occurs.
-    pane_tasks: JoinSet<()>,
+    terminal_tasks: JoinSet<()>,
     /// Wire-side identifier for each core pane id. Allocated
-    /// monotonically from `1` in [`Self::register_pane_handle`]. Mirrors
+    /// monotonically from `1` in [`Self::register_terminal_handle`]. Mirrors
     /// the `IdBridge` shape used for session ids — kept inline because
     /// adding a second `IdBridge` generic over an arbitrary id pair is
     /// out of scope for `phux-byc.8` (the session bridge has its own
     /// reverse-lookup story; pane reverse lookup is needed too for
     /// future `INPUT_KEY` routing).
-    pane_wire_forward: HashMap<PaneId, WirePaneId>,
-    pane_wire_reverse: HashMap<WirePaneId, PaneId>,
-    next_pane_wire_id: u32,
+    terminal_wire_forward: HashMap<TerminalId, WireTerminalId>,
+    terminal_wire_reverse: HashMap<WireTerminalId, TerminalId>,
+    next_terminal_wire_id: u32,
     /// Wire-side identifier for each core window id. Same shape as
     /// the pane bridge above; used to populate [`WindowInfo::id`] in
     /// the `ATTACHED` snapshot.
@@ -254,15 +254,15 @@ impl ServerState {
         Self {
             registry: Registry::new(),
             attached: HashMap::new(),
-            pane_subscribers: HashMap::new(),
-            pane_inputs: HashMap::new(),
+            terminal_subscribers: HashMap::new(),
+            terminal_inputs: HashMap::new(),
             session_id_bridge: IdBridge::new(),
-            panes: HashMap::new(),
-            pane_tokens: HashMap::new(),
-            pane_tasks: JoinSet::new(),
-            pane_wire_forward: HashMap::new(),
-            pane_wire_reverse: HashMap::new(),
-            next_pane_wire_id: 1,
+            terminals: HashMap::new(),
+            terminal_tokens: HashMap::new(),
+            terminal_tasks: JoinSet::new(),
+            terminal_wire_forward: HashMap::new(),
+            terminal_wire_reverse: HashMap::new(),
+            next_terminal_wire_id: 1,
             window_wire_forward: HashMap::new(),
             window_wire_reverse: HashMap::new(),
             next_window_wire_id: 1,
@@ -335,7 +335,7 @@ impl ServerState {
         // re-subscription on `FOCUS_CHANGED`) lives in `SUBSCRIBE` (§7.4)
         // and is deferred per SPEC.
         if let Some(active_pane) = self.active_pane_of_session(session_id) {
-            self.pane_subscribers
+            self.terminal_subscribers
                 .entry(active_pane)
                 .or_default()
                 .push(client_id);
@@ -344,37 +344,42 @@ impl ServerState {
     }
 
     /// Detach `client_id`, removing it from `attached` and from every
-    /// `pane_subscribers` list it appears in.
+    /// `terminal_subscribers` list it appears in.
     ///
     /// Silent no-op if the client is not currently attached — detach must be
     /// idempotent for the EOF cleanup path in `handle_client`.
     pub fn detach(&mut self, client_id: ClientId) {
         self.attached.remove(&client_id);
-        for subs in self.pane_subscribers.values_mut() {
+        for subs in self.terminal_subscribers.values_mut() {
             subs.retain(|c| *c != client_id);
         }
         // Drop entries that became empty so the map doesn't grow unboundedly
         // across attach/detach churn.
-        self.pane_subscribers.retain(|_, subs| !subs.is_empty());
+        self.terminal_subscribers.retain(|_, subs| !subs.is_empty());
     }
 
     /// Subscribers (snapshot) for `pane`. Returns an empty slice if no
     /// clients are currently observing the pane.
     #[must_use]
-    pub fn subscribers_for_pane(&self, pane: PaneId) -> &[ClientId] {
-        self.pane_subscribers.get(&pane).map_or(&[], Vec::as_slice)
+    pub fn subscribers_for_terminal(&self, terminal: TerminalId) -> &[ClientId] {
+        self.terminal_subscribers
+            .get(&terminal)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Append `input` to the per-pane log. The log is shared across all
     /// attached clients of the pane's session; this is the merge point for
     /// multi-client keystrokes.
-    pub fn record_pane_input(&mut self, pane: PaneId, input: PaneInput) {
-        self.pane_inputs.entry(pane).or_default().push(input);
+    pub fn record_terminal_input(&mut self, terminal: TerminalId, input: TerminalInput) {
+        self.terminal_inputs
+            .entry(terminal)
+            .or_default()
+            .push(input);
     }
 
     /// Look up the active pane of the active window of `session`, if any.
     #[must_use]
-    pub fn active_pane_of_session(&self, session: SessionId) -> Option<PaneId> {
+    pub fn active_pane_of_session(&self, session: SessionId) -> Option<TerminalId> {
         let session = self.registry.session(session)?;
         let window_id = session.active?;
         let window = self.registry.window(window_id)?;
@@ -399,7 +404,7 @@ impl ServerState {
     }
 
     /// Seed a session+window+pane. Returns the new
-    /// `(SessionId, WindowId, PaneId)`.
+    /// `(SessionId, WindowId, TerminalId)`.
     ///
     /// This is the entry point `ServerConfig::pre_seeded_session` uses to
     /// pre-populate the registry before clients connect.
@@ -411,10 +416,16 @@ impl ServerState {
     /// entity was created on the line above. A panic here indicates a
     /// `phux-core::Registry` regression.
     #[allow(clippy::expect_used, reason = "unreachable: parent just created")]
-    pub fn seed_session(&mut self, name: &str) -> (SessionId, phux_core::ids::WindowId, PaneId) {
+    pub fn seed_session(
+        &mut self,
+        name: &str,
+    ) -> (SessionId, phux_core::ids::WindowId, TerminalId) {
         let sid = self.registry.new_session(name.to_owned());
         let wid = self.registry.new_window(sid).expect("session just created");
-        let pid = self.registry.new_pane(wid).expect("window just created");
+        let pid = self
+            .registry
+            .new_terminal(wid)
+            .expect("window just created");
         (sid, wid, pid)
     }
 
@@ -425,37 +436,40 @@ impl ServerState {
     /// drain a real PTY consumer.
     #[cfg(test)]
     #[must_use]
-    pub fn pane_input_log_for(&self, pane: PaneId) -> Vec<PaneInput> {
-        self.pane_inputs.get(&pane).cloned().unwrap_or_default()
+    pub fn terminal_input_log_for(&self, terminal: TerminalId) -> Vec<TerminalInput> {
+        self.terminal_inputs
+            .get(&terminal)
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// Record a freshly-spawned [`PaneHandle`] against `pane` and
+    /// Record a freshly-spawned [`TerminalHandle`] against `pane` and
     /// allocate its wire id.
     ///
-    /// Called by the runtime after `PaneActor::new` /
+    /// Called by the runtime after `TerminalActor::new` /
     /// `build_with_token`. Subsequent attaches use
-    /// [`Self::pane_handle`] to look the handle up.
+    /// [`Self::terminal_handle`] to look the handle up.
     ///
-    /// `token` is stashed in `pane_tokens`; cancelling it (e.g. via
-    /// [`Self::detach_pane_actor`]) fires the actor's shutdown branch.
+    /// `token` is stashed in `terminal_tokens`; cancelling it (e.g. via
+    /// [`Self::detach_terminal_actor`]) fires the actor's shutdown branch.
     ///
     /// This method does NOT spawn the actor — pair it with
-    /// [`Self::spawn_pane_actor`] when you also want the actor task
+    /// [`Self::spawn_terminal_actor`] when you also want the actor task
     /// registered against the per-server `JoinSet`.
     ///
     /// Idempotent on the wire-id allocation (a second call for the
     /// same `pane` returns the same wire id) but overwrites the
-    /// `PaneHandle` / token. In practice the runtime calls this
+    /// `TerminalHandle` / token. In practice the runtime calls this
     /// exactly once per pane lifetime.
-    pub fn register_pane_handle(
+    pub fn register_terminal_handle(
         &mut self,
-        pane: PaneId,
-        handle: PaneHandle,
+        terminal: TerminalId,
+        handle: TerminalHandle,
         token: CancellationToken,
-    ) -> WirePaneId {
-        let wire = self.intern_pane_wire(pane);
-        self.panes.insert(pane, handle);
-        self.pane_tokens.insert(pane, token);
+    ) -> WireTerminalId {
+        let wire = self.intern_terminal_wire(terminal);
+        self.terminals.insert(terminal, handle);
+        self.terminal_tokens.insert(terminal, token);
         wire
     }
 
@@ -465,63 +479,63 @@ impl ServerState {
     /// own `!Send` `Terminal`s and are spawned via
     /// `JoinSet::spawn_local`).
     ///
-    /// Returns the wire pane id, matching [`Self::register_pane_handle`].
-    pub fn spawn_pane_actor<F>(
+    /// Returns the wire pane id, matching [`Self::register_terminal_handle`].
+    pub fn spawn_terminal_actor<F>(
         &mut self,
-        pane: PaneId,
-        handle: PaneHandle,
+        terminal: TerminalId,
+        handle: TerminalHandle,
         token: CancellationToken,
         actor_future: F,
-    ) -> WirePaneId
+    ) -> WireTerminalId
     where
         F: Future<Output = ()> + 'static,
     {
-        let wire = self.register_pane_handle(pane, handle, token);
-        self.pane_tasks.spawn_local(actor_future);
+        let wire = self.register_terminal_handle(terminal, handle, token);
+        self.terminal_tasks.spawn_local(actor_future);
         wire
     }
 
-    /// Cancel `pane`'s actor token, signalling the `PaneActor` to
+    /// Cancel `pane`'s actor token, signalling the `TerminalActor` to
     /// exit, and forget the token. Idempotent. Used by future
     /// pane-close lifecycle paths; not exercised by `phux-byc.8`.
     ///
     /// The actor task itself is drained from the per-server `JoinSet`
     /// when it returns from `run`; we don't need to touch
-    /// `pane_tasks` here.
-    pub fn detach_pane_actor(&mut self, pane: PaneId) {
-        if let Some(token) = self.pane_tokens.remove(&pane) {
+    /// `terminal_tasks` here.
+    pub fn detach_terminal_actor(&mut self, terminal: TerminalId) {
+        if let Some(token) = self.terminal_tokens.remove(&terminal) {
             token.cancel();
         }
     }
 
-    /// Look up the [`PaneHandle`] for `pane`, if registered.
+    /// Look up the [`TerminalHandle`] for `pane`, if registered.
     #[must_use]
-    pub fn pane_handle(&self, pane: PaneId) -> Option<&PaneHandle> {
-        self.panes.get(&pane)
+    pub fn terminal_handle(&self, terminal: TerminalId) -> Option<&TerminalHandle> {
+        self.terminals.get(&terminal)
     }
 
     /// Wire pane id for `pane`, allocating one if needed.
     ///
     /// Mirrors [`IdBridge::intern`] but inline here for pane ids — see
-    /// the field-level note on `pane_wire_forward` for why a second
+    /// the field-level note on `terminal_wire_forward` for why a second
     /// general-purpose `IdBridge` is deferred.
-    pub fn intern_pane_wire(&mut self, pane: PaneId) -> WirePaneId {
-        if let Some(w) = self.pane_wire_forward.get(&pane) {
+    pub fn intern_terminal_wire(&mut self, terminal: TerminalId) -> WireTerminalId {
+        if let Some(w) = self.terminal_wire_forward.get(&terminal) {
             return *w;
         }
-        let raw = self.next_pane_wire_id;
-        self.next_pane_wire_id = self.next_pane_wire_id.saturating_add(1);
-        let wire = WirePaneId(raw);
-        self.pane_wire_forward.insert(pane, wire);
-        self.pane_wire_reverse.insert(wire, pane);
+        let raw = self.next_terminal_wire_id;
+        self.next_terminal_wire_id = self.next_terminal_wire_id.saturating_add(1);
+        let wire = WireTerminalId(raw);
+        self.terminal_wire_forward.insert(terminal, wire);
+        self.terminal_wire_reverse.insert(wire, terminal);
         wire
     }
 
     /// Reverse lookup: which core pane id (if any) does `wire`
     /// resolve to?
     #[must_use]
-    pub fn pane_from_wire(&self, wire: WirePaneId) -> Option<PaneId> {
-        self.pane_wire_reverse.get(&wire).copied()
+    pub fn terminal_from_wire(&self, wire: WireTerminalId) -> Option<TerminalId> {
+        self.terminal_wire_reverse.get(&wire).copied()
     }
 
     /// Wire window id for `window`, allocating one if needed.
@@ -554,7 +568,7 @@ impl ServerState {
         &mut self,
         focus_session: SessionId,
     ) -> Option<phux_protocol::wire::info::SessionSnapshot> {
-        use phux_protocol::wire::info::{PaneInfo, SessionInfo, SessionSnapshot, WindowInfo};
+        use phux_protocol::wire::info::{SessionInfo, SessionSnapshot, TerminalInfo, WindowInfo};
 
         let attached_counts: HashMap<SessionId, u16> = {
             let mut counts: HashMap<SessionId, u16> = HashMap::new();
@@ -601,7 +615,7 @@ impl ServerState {
                     continue;
                 };
                 let window_wire = self.intern_window_wire(*wid);
-                let active_pane_wire = window.active.map(|p| self.intern_pane_wire(p));
+                let active_pane_wire = window.active.map(|p| self.intern_terminal_wire(p));
 
                 // Layout-on-the-wire mirroring is its own concern;
                 // for phux-byc.8 we ship `None` and let later tickets
@@ -614,16 +628,21 @@ impl ServerState {
                 );
 
                 for pid in &window.panes {
-                    let Some(pane) = self.registry.pane(*pid).cloned() else {
+                    let Some(terminal) = self.registry.terminal(*pid).cloned() else {
                         continue;
                     };
-                    let pane_wire = self.intern_pane_wire(*pid);
+                    let terminal_wire = self.intern_terminal_wire(*pid);
                     let cwd =
-                        Some(pane.cwd.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+                        Some(terminal.cwd.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
                     panes.push(
-                        PaneInfo::new(pane_wire, window_wire, pane.dims.0, pane.dims.1)
-                            .with_title(pane.title.clone())
-                            .with_cwd(cwd),
+                        TerminalInfo::new(
+                            terminal_wire,
+                            window_wire,
+                            terminal.dims.0,
+                            terminal.dims.1,
+                        )
+                        .with_title(terminal.title.clone())
+                        .with_cwd(cwd),
                     );
                 }
             }
@@ -635,7 +654,7 @@ impl ServerState {
 
         let focused_session_wire = self.session_id_bridge.intern(focus_session);
         let focused_window_wire = self.intern_window_wire(focused_window);
-        let focused_pane_wire = self.intern_pane_wire(focused_pane);
+        let focused_pane_wire = self.intern_terminal_wire(focused_pane);
 
         Some(
             SessionSnapshot::new(focused_session_wire, focused_window_wire, focused_pane_wire)
@@ -732,7 +751,7 @@ mod tests {
         let returned_sid = s.attach(cid, "default", mk_tx()).unwrap();
         assert_eq!(returned_sid, sid);
         assert!(s.attached.contains_key(&cid));
-        assert_eq!(s.subscribers_for_pane(pid), &[cid]);
+        assert_eq!(s.subscribers_for_terminal(pid), &[cid]);
     }
 
     #[test]
@@ -753,7 +772,7 @@ mod tests {
         let b = s.new_client_id();
         s.attach(a, "default", mk_tx()).unwrap();
         s.attach(b, "default", mk_tx()).unwrap();
-        let subs = s.subscribers_for_pane(pid);
+        let subs = s.subscribers_for_terminal(pid);
         assert!(subs.contains(&a) && subs.contains(&b));
         assert_eq!(subs.len(), 2);
     }
@@ -764,11 +783,14 @@ mod tests {
         let (_sid, _wid, pid) = s.seed_session("default");
         let cid = s.new_client_id();
         s.attach(cid, "default", mk_tx()).unwrap();
-        assert!(!s.subscribers_for_pane(pid).is_empty());
+        assert!(!s.subscribers_for_terminal(pid).is_empty());
         s.detach(cid);
         assert!(!s.attached.contains_key(&cid));
-        assert!(s.subscribers_for_pane(pid).is_empty());
-        assert!(s.pane_subscribers.is_empty(), "empty lists should be GC'd");
+        assert!(s.subscribers_for_terminal(pid).is_empty());
+        assert!(
+            s.terminal_subscribers.is_empty(),
+            "empty lists should be GC'd"
+        );
     }
 
     #[test]
@@ -781,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn record_pane_input_appends_in_call_order() {
+    fn record_terminal_input_appends_in_call_order() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
         let mut s = ServerState::new();
         let (_sid, _wid, pid) = s.seed_session("default");
@@ -796,16 +818,16 @@ mod tests {
             unshifted_codepoint: Some(text.chars().next().unwrap() as u32),
         };
 
-        s.record_pane_input(pid, PaneInput::Key(mk(PhysicalKey::A, "a")));
-        s.record_pane_input(pid, PaneInput::Key(mk(PhysicalKey::B, "b")));
-        s.record_pane_input(pid, PaneInput::Key(mk(PhysicalKey::C, "c")));
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::A, "a")));
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::B, "b")));
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::C, "c")));
 
-        let log = s.pane_input_log_for(pid);
+        let log = s.terminal_input_log_for(pid);
         assert_eq!(log.len(), 3);
         let texts: Vec<String> = log
             .into_iter()
             .map(|pi| match pi {
-                PaneInput::Key(k) => k.text.unwrap_or_default(),
+                TerminalInput::Key(k) => k.text.unwrap_or_default(),
                 _ => unreachable!(),
             })
             .collect();
@@ -846,7 +868,7 @@ mod tests {
     fn shared_state_with_and_with_mut_round_trip() {
         let shared = SharedState::new();
         let (_sid, _wid, pid) = shared.with_mut(|s| s.seed_session("default"));
-        let count = shared.with(|s| s.subscribers_for_pane(pid).len());
+        let count = shared.with(|s| s.subscribers_for_terminal(pid).len());
         assert_eq!(count, 0);
     }
 }

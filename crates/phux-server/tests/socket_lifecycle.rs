@@ -31,7 +31,7 @@ use tokio::time::sleep;
 /// Spawn a server task and return its shutdown channel + `JoinHandle`.
 ///
 /// Per ADR-0014, `ServerRuntime::run_async` returns a `!Send` future
-/// because the per-pane `PaneActor` it spawns owns a libghostty
+/// because the per-pane `TerminalActor` it spawns owns a libghostty
 /// `Terminal` (which is `!Send`). Tests therefore call this helper
 /// inside a `tokio::task::LocalSet::run_until` and use
 /// `tokio::task::spawn_local` instead of `tokio::spawn`.

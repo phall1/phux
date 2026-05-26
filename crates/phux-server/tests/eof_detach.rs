@@ -3,14 +3,14 @@
 //!
 //! Reproduces the user-visible "type `exit` in the inner shell and the
 //! client freezes forever in alt-screen" bug. Before the fix, the
-//! `PaneActor`'s EOF branch just dropped its PTY receiver and kept the
+//! `TerminalActor`'s EOF branch just dropped its PTY receiver and kept the
 //! actor alive "for snapshot/input drain" — but neither the runtime
 //! nor any attached client got told the pane was dead, so the client
 //! sat in its `tokio::select!` waiting for frames that never came.
 //!
 //! The fix (option (a) in the bd phux-it8 ticket):
 //!
-//! 1. `PaneActor` fires an internal `exit_notify` oneshot when it sees
+//! 1. `TerminalActor` fires an internal `exit_notify` oneshot when it sees
 //!    `PtyEvent::Eof`, then exits cleanly.
 //! 2. The runtime spawns a per-pane EOF watcher when it seeds the
 //!    pane. On notification, the watcher walks `attached` and sends
@@ -31,7 +31,7 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_PANE_SNAPSHOT};
+use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_TERMINAL_SNAPSHOT};
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -45,13 +45,13 @@ use crate::common::{
 /// `/bin/true` (POSIX) and `/usr/bin/true` (some Linux distros) are
 /// both common. Pick the first one that resolves at test time so the
 /// test is robust across CI images. Falls back to `/bin/true` and
-/// lets `PaneActor::new_with_command` surface the real `spawn` error
+/// lets `TerminalActor::new_with_command` surface the real `spawn` error
 /// if neither exists — that itself is a useful failure signal.
 fn pick_true_command() -> CommandBuilder {
     // `/bin/sh -c 'sleep 0.2; exit 0'` instead of bare `/bin/true`.
     //
     // We want the child to live long enough for the test client to
-    // complete ATTACH + receive PANE_SNAPSHOT (the existing wire
+    // complete ATTACH + receive TERMINAL_SNAPSHOT (the existing wire
     // contract) BEFORE the EOF fires — otherwise we're asserting on
     // a race we don't actually care about ("client never even
     // received the snapshot because the actor was already gone"),
@@ -68,13 +68,13 @@ fn pick_true_command() -> CommandBuilder {
     cmd
 }
 
-/// Drain non-`DETACHED` frames (`ATTACHED`, `PANE_SNAPSHOT`, late
-/// `PANE_OUTPUT`) until a `DETACHED` frame arrives or `deadline` elapses.
+/// Drain non-`DETACHED` frames (`ATTACHED`, `TERMINAL_SNAPSHOT`, late
+/// `TERMINAL_OUTPUT`) until a `DETACHED` frame arrives or `deadline` elapses.
 ///
 /// We can't just `recv_typed` once and assert: between `ATTACHED` and
-/// the EOF-driven `DETACHED`, the runtime ships one `PANE_SNAPSHOT` per
-/// pane, and the `PaneActor`'s PTY pump may emit a few stray
-/// `PANE_OUTPUT` chunks from libghostty's snapshot replay before the
+/// the EOF-driven `DETACHED`, the runtime ships one `TERMINAL_SNAPSHOT` per
+/// pane, and the `TerminalActor`'s PTY pump may emit a few stray
+/// `TERMINAL_OUTPUT` chunks from libghostty's snapshot replay before the
 /// EOF fires. Skip those rather than fail on them — they're correct
 /// behavior on the byc.5 PTY path.
 async fn await_detached(stream: &mut UnixStream, deadline: Duration) -> bool {
@@ -97,7 +97,7 @@ async fn await_detached(stream: &mut UnixStream, deadline: Duration) -> bool {
     }
 }
 
-/// `PaneActor` PTY EOF (from `/bin/true` exiting promptly) drives the
+/// `TerminalActor` PTY EOF (from `/bin/true` exiting promptly) drives the
 /// runtime to send `FrameKind::Detached` to the attached client.
 ///
 /// Before phux-it8, the client would never receive any post-snapshot
@@ -131,11 +131,11 @@ fn pty_eof_drives_detached_frame_to_attached_client() {
             "first server-to-client frame must be ATTACHED",
         );
 
-        // ---- PANE_SNAPSHOT (one per pane in focused window) ----
+        // ---- TERMINAL_SNAPSHOT (one per pane in focused window) ----
         let (type_byte, _snap_frame) = recv_typed(&mut stream).await;
         assert_eq!(
-            type_byte, TYPE_PANE_SNAPSHOT,
-            "second server-to-client frame must be PANE_SNAPSHOT",
+            type_byte, TYPE_TERMINAL_SNAPSHOT,
+            "second server-to-client frame must be TERMINAL_SNAPSHOT",
         );
 
         // ---- DETACHED (the contract under test) ----

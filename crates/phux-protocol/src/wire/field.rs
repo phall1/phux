@@ -34,8 +34,8 @@ pub const PONG_NONCE: u32 = 1;
 // `INPUT_KEY` — §9.1
 // -----------------------------------------------------------------------------
 
-/// `INPUT_KEY`: target `PaneId`.
-pub const INPUT_KEY_PANE: u32 = 1;
+/// `INPUT_KEY`: target `TerminalId`.
+pub const INPUT_KEY_TERMINAL: u32 = 1;
 /// `INPUT_KEY`: physical/logical key code (libghostty `Key`).
 pub const INPUT_KEY_KEY: u32 = 2;
 /// `INPUT_KEY`: modifier bitset.
@@ -49,8 +49,8 @@ pub const INPUT_KEY_TEXT: u32 = 5;
 // `INPUT_MOUSE` — §9.2
 // -----------------------------------------------------------------------------
 
-/// `INPUT_MOUSE`: target `PaneId`.
-pub const INPUT_MOUSE_PANE: u32 = 1;
+/// `INPUT_MOUSE`: target `TerminalId`.
+pub const INPUT_MOUSE_TERMINAL: u32 = 1;
 /// `INPUT_MOUSE`: action (press/release/motion) — libghostty `mouse::Action`.
 pub const INPUT_MOUSE_ACTION: u32 = 2;
 /// `INPUT_MOUSE`: button identity — libghostty `mouse::Button`.
@@ -66,8 +66,8 @@ pub const INPUT_MOUSE_Y: u32 = 6;
 // `INPUT_FOCUS` — §9.3
 // -----------------------------------------------------------------------------
 
-/// `INPUT_FOCUS`: target `PaneId`.
-pub const INPUT_FOCUS_PANE: u32 = 1;
+/// `INPUT_FOCUS`: target `TerminalId`.
+pub const INPUT_FOCUS_TERMINAL: u32 = 1;
 /// `INPUT_FOCUS`: focus kind (gained=0, lost=1).
 pub const INPUT_FOCUS_KIND: u32 = 2;
 
@@ -75,15 +75,15 @@ pub const INPUT_FOCUS_KIND: u32 = 2;
 // `INPUT_PASTE` — §9.4
 // -----------------------------------------------------------------------------
 
-/// `INPUT_PASTE`: target `PaneId`.
-pub const INPUT_PASTE_PANE: u32 = 1;
+/// `INPUT_PASTE`: target `TerminalId`.
+pub const INPUT_PASTE_TERMINAL: u32 = 1;
 /// `INPUT_PASTE`: trust classification (0=untrusted, 1=trusted).
 pub const INPUT_PASTE_TRUST: u32 = 2;
 /// `INPUT_PASTE`: raw payload bytes.
 pub const INPUT_PASTE_DATA: u32 = 3;
 
 // -----------------------------------------------------------------------------
-// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` / `PANE_SNAPSHOT` —
+// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` / `TERMINAL_SNAPSHOT` —
 //   §7.1-§7.3, §8.4, §13. Field IDs are positional-codec-anticipatory
 //   (unused today); TLV migration is tracked in phux-i58.
 // -----------------------------------------------------------------------------
@@ -106,27 +106,27 @@ pub const ATTACHED_INITIAL_CLIENT_ID: u32 = 2;
 // `DETACHED { reason, message }` from SPEC §7.3 lands in a follow-up.
 
 // -----------------------------------------------------------------------------
-// `PANE_SNAPSHOT` body — §8.4 (separate frame per SPEC §13's attach sequence).
+// `TERMINAL_SNAPSHOT` body — §8.4 (separate frame per SPEC §13's attach sequence).
 // -----------------------------------------------------------------------------
 
-/// `PANE_SNAPSHOT`: target `PaneId`.
-pub const PANE_SNAPSHOT_PANE: u32 = 1;
-/// `PANE_SNAPSHOT`: grid columns.
-pub const PANE_SNAPSHOT_COLS: u32 = 2;
-/// `PANE_SNAPSHOT`: grid rows.
-pub const PANE_SNAPSHOT_ROWS: u32 = 3;
-/// `PANE_SNAPSHOT`: opening sequence of `DiffOp` against a blank grid.
-pub const PANE_SNAPSHOT_OPS: u32 = 4;
+/// `TERMINAL_SNAPSHOT`: target `TerminalId`.
+pub const TERMINAL_SNAPSHOT_TERMINAL: u32 = 1;
+/// `TERMINAL_SNAPSHOT`: grid columns.
+pub const TERMINAL_SNAPSHOT_COLS: u32 = 2;
+/// `TERMINAL_SNAPSHOT`: grid rows.
+pub const TERMINAL_SNAPSHOT_ROWS: u32 = 3;
+/// `TERMINAL_SNAPSHOT`: opening sequence of `DiffOp` against a blank grid.
+pub const TERMINAL_SNAPSHOT_OPS: u32 = 4;
 
 // -----------------------------------------------------------------------------
 // `BELL` — §7.6
 // -----------------------------------------------------------------------------
 
-/// `BELL`: pane that received the bell character.
-pub const BELL_PANE: u32 = 1;
+/// `BELL`: terminal that received the bell character.
+pub const BELL_TERMINAL: u32 = 1;
 
 // -----------------------------------------------------------------------------
-// `PANE_DIFF` / `PANE_SNAPSHOT` — §8
+// `PANE_DIFF` / `TERMINAL_SNAPSHOT` — §8
 // -----------------------------------------------------------------------------
 
 /// Pane identifier for diff/snapshot frames.
@@ -145,11 +145,11 @@ pub const PANE_DIFF_MODES: u32 = 6;
 pub const PANE_DIFF_REVISION: u32 = 7;
 
 // -----------------------------------------------------------------------------
-// `VIEWPORT_RESIZE` / `PANE_RESIZED` — §10.5
+// `VIEWPORT_RESIZE` / `TERMINAL_RESIZED` — §10.5
 // -----------------------------------------------------------------------------
 
-/// Target pane id for a resize.
-pub const VIEWPORT_RESIZE_PANE: u32 = 1;
+/// Target terminal id for a resize.
+pub const VIEWPORT_RESIZE_TERMINAL: u32 = 1;
 /// New column count.
 pub const VIEWPORT_RESIZE_COLS: u32 = 2;
 /// New row count.
@@ -159,8 +159,8 @@ pub const VIEWPORT_RESIZE_ROWS: u32 = 3;
 // `FRAME_ACK` — §12
 // -----------------------------------------------------------------------------
 
-/// Acked pane id.
-pub const FRAME_ACK_PANE: u32 = 1;
+/// Acked terminal id.
+pub const FRAME_ACK_TERMINAL: u32 = 1;
 /// Acked frame id.
 pub const FRAME_ACK_FRAME_ID: u32 = 2;
 

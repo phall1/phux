@@ -5,20 +5,20 @@
 //! returns `DecodeError` rather than panicking.
 //!
 //! Under ADR-0013 the structured-diff codec is gone; the strategies here
-//! cover `PaneOutput` (raw VT bytes) and the new `PaneSnapshot` (bytes
+//! cover `TerminalOutput` (raw VT bytes) and the new `TerminalSnapshot` (bytes
 //! body) in place of the deleted `PaneDiff` strategies.
 
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::ids::{ClientId, PaneId, SessionId, WindowId};
+use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{AttachTarget, ErrorCode, ViewportInfo};
 use phux_protocol::wire::info::{
-    LayoutNode, PaneInfo, SessionInfo, SessionSnapshot, SplitDir, WindowInfo,
+    LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
 use phux_protocol::wire::{DecodeError, decode::Decoder, frame::FrameKind};
 use proptest::prelude::*;
@@ -64,7 +64,7 @@ fn arb_split_dir() -> impl Strategy<Value = SplitDir> {
 /// Bounded recursion: at most depth 4 keeps prop-test work tractable while
 /// still exercising recursive split-tree encoding/decoding.
 fn arb_layout_node() -> impl Strategy<Value = LayoutNode> {
-    let leaf = any::<u32>().prop_map(|id| LayoutNode::Leaf(PaneId::new(id)));
+    let leaf = any::<u32>().prop_map(|id| LayoutNode::Leaf(TerminalId::new(id)));
     leaf.prop_recursive(4, 32, 2, |inner| {
         (arb_split_dir(), 0.0001f32..0.9999f32, inner.clone(), inner).prop_map(
             |(dir, ratio, left, right)| LayoutNode::Split {
@@ -116,12 +116,12 @@ fn arb_window_info() -> impl Strategy<Value = WindowInfo> {
         .prop_map(|(id, session_id, index, name, active_pane, layout)| {
             WindowInfo::new(WindowId::new(id), SessionId::new(session_id), name)
                 .with_index(index)
-                .with_active_pane(active_pane.map(PaneId::new))
+                .with_active_pane(active_pane.map(TerminalId::new))
                 .with_layout(layout)
         })
 }
 
-fn arb_pane_info() -> impl Strategy<Value = PaneInfo> {
+fn arb_pane_info() -> impl Strategy<Value = TerminalInfo> {
     (
         any::<u32>(),
         any::<u32>(),
@@ -131,7 +131,7 @@ fn arb_pane_info() -> impl Strategy<Value = PaneInfo> {
         proptest::option::of(".{0,32}"),
     )
         .prop_map(|(id, window_id, cols, rows, title, cwd)| {
-            PaneInfo::new(PaneId::new(id), WindowId::new(window_id), cols, rows)
+            TerminalInfo::new(TerminalId::new(id), WindowId::new(window_id), cols, rows)
                 .with_title(title)
                 .with_cwd(cwd)
         })
@@ -147,7 +147,7 @@ fn arb_session_snapshot() -> impl Strategy<Value = SessionSnapshot> {
         any::<u32>(),
     )
         .prop_map(|(sessions, windows, panes, fs, fw, fp)| {
-            SessionSnapshot::new(SessionId::new(fs), WindowId::new(fw), PaneId::new(fp))
+            SessionSnapshot::new(SessionId::new(fs), WindowId::new(fw), TerminalId::new(fp))
                 .with_sessions(sessions)
                 .with_windows(windows)
                 .with_panes(panes)
@@ -155,7 +155,7 @@ fn arb_session_snapshot() -> impl Strategy<Value = SessionSnapshot> {
 }
 
 /// Strategy producing one of the simple-payload `FrameKind` variants. The
-/// structured variants (`ATTACH`, `ATTACHED`, `PANE_SNAPSHOT`, `PANE_OUTPUT`,
+/// structured variants (`ATTACH`, `ATTACHED`, `TERMINAL_SNAPSHOT`, `TERMINAL_OUTPUT`,
 /// input frames) have dedicated proptests below.
 fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
     prop_oneof![
@@ -170,7 +170,7 @@ fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
         any::<u64>().prop_map(|nonce| FrameKind::Ping { nonce }),
         Just(FrameKind::Detach),
         Just(FrameKind::Detached),
-        any::<u32>().prop_map(|pane_id| FrameKind::Bell { pane_id }),
+        any::<u32>().prop_map(|terminal_id| FrameKind::Bell { terminal_id }),
     ]
 }
 
@@ -273,7 +273,7 @@ fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
         Just(ErrorCode::AlreadyAttached),
         Just(ErrorCode::SessionNotFound),
         Just(ErrorCode::WindowNotFound),
-        Just(ErrorCode::PaneNotFound),
+        Just(ErrorCode::TerminalNotFound),
         Just(ErrorCode::ClientNotFound),
         Just(ErrorCode::InvalidCommand),
         Just(ErrorCode::PermissionDenied),
@@ -291,7 +291,7 @@ fn arb_paste_event() -> impl Strategy<Value = PasteEvent> {
 }
 
 /// VT byte stream, capped at 4 KiB for test speed. Empty payloads are
-/// legal — `PANE_OUTPUT` carries whatever the PTY produced, including
+/// legal — `TERMINAL_OUTPUT` carries whatever the PTY produced, including
 /// zero bytes (which the rate-limiter just won't emit, but the codec
 /// must round-trip).
 fn arb_vt_bytes() -> impl Strategy<Value = Vec<u8>> {
@@ -318,11 +318,11 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_output(
-        pane_id in any::<u32>(),
+        terminal_id in any::<u32>(),
         seq in any::<u64>(),
         bytes in arb_vt_bytes(),
     ) {
-        let frame = FrameKind::PaneOutput { pane_id, seq, bytes };
+        let frame = FrameKind::TerminalOutput { terminal_id, seq, bytes };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -332,14 +332,14 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_snapshot(
-        pane_id in any::<u32>(),
+        terminal_id in any::<u32>(),
         cols in any::<u16>(),
         rows in any::<u16>(),
         vt_replay_bytes in arb_vt_bytes(),
         scrollback_bytes in proptest::option::of(arb_vt_bytes()),
     ) {
-        let frame = FrameKind::PaneSnapshot {
-            pane_id: PaneId::new(pane_id),
+        let frame = FrameKind::TerminalSnapshot {
+            terminal_id: TerminalId::new(terminal_id),
             cols,
             rows,
             vt_replay_bytes,
@@ -381,8 +381,8 @@ fn ping_round_trip() {
 
 #[test]
 fn pane_output_round_trip_hello_world() {
-    let frame = FrameKind::PaneOutput {
-        pane_id: 1,
+    let frame = FrameKind::TerminalOutput {
+        terminal_id: 1,
         seq: 0,
         bytes: b"hello world\r\n".to_vec(),
     };
@@ -395,8 +395,8 @@ fn pane_output_round_trip_hello_world() {
 
 #[test]
 fn pane_snapshot_round_trip_minimal() {
-    let frame = FrameKind::PaneSnapshot {
-        pane_id: PaneId::new(100),
+    let frame = FrameKind::TerminalSnapshot {
+        terminal_id: TerminalId::new(100),
         cols: 80,
         rows: 24,
         vt_replay_bytes: b"\x1b[!p\x1b[2J\x1b[H".to_vec(),
@@ -411,8 +411,8 @@ fn pane_snapshot_round_trip_minimal() {
 
 #[test]
 fn pane_snapshot_round_trip_with_scrollback() {
-    let frame = FrameKind::PaneSnapshot {
-        pane_id: PaneId::new(100),
+    let frame = FrameKind::TerminalSnapshot {
+        terminal_id: TerminalId::new(100),
         cols: 80,
         rows: 24,
         vt_replay_bytes: b"vt".to_vec(),
@@ -522,7 +522,7 @@ fn tail_is_returned_after_single_frame() {
 }
 
 // -----------------------------------------------------------------------------
-// SPEC §13 conformance: ATTACH / ATTACHED / PANE_SNAPSHOT envelope.
+// SPEC §13 conformance: ATTACH / ATTACHED / TERMINAL_SNAPSHOT envelope.
 // -----------------------------------------------------------------------------
 
 proptest! {
@@ -562,8 +562,8 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_key(pane_id in any::<u32>(), event in arb_key_event()) {
-        let frame = FrameKind::InputKey { pane_id, event };
+    fn roundtrip_input_key(terminal_id in any::<u32>(), event in arb_key_event()) {
+        let frame = FrameKind::InputKey { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -572,8 +572,8 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_mouse(pane_id in any::<u32>(), event in arb_mouse_event()) {
-        let frame = FrameKind::InputMouse { pane_id, event };
+    fn roundtrip_input_mouse(terminal_id in any::<u32>(), event in arb_mouse_event()) {
+        let frame = FrameKind::InputMouse { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -582,8 +582,8 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_focus(pane_id in any::<u32>(), event in arb_focus_event()) {
-        let frame = FrameKind::InputFocus { pane_id, event };
+    fn roundtrip_input_focus(terminal_id in any::<u32>(), event in arb_focus_event()) {
+        let frame = FrameKind::InputFocus { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -592,8 +592,8 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_paste(pane_id in any::<u32>(), event in arb_paste_event()) {
-        let frame = FrameKind::InputPaste { pane_id, event };
+    fn roundtrip_input_paste(terminal_id in any::<u32>(), event in arb_paste_event()) {
+        let frame = FrameKind::InputPaste { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -603,7 +603,7 @@ proptest! {
 
     #[test]
     fn roundtrip_session_info(info in arb_session_info()) {
-        let snap = SessionSnapshot::new(info.id, WindowId::new(0), PaneId::new(0))
+        let snap = SessionSnapshot::new(info.id, WindowId::new(0), TerminalId::new(0))
             .with_sessions(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
@@ -615,7 +615,7 @@ proptest! {
 
     #[test]
     fn roundtrip_window_info(info in arb_window_info()) {
-        let snap = SessionSnapshot::new(info.session_id, info.id, PaneId::new(0))
+        let snap = SessionSnapshot::new(info.session_id, info.id, TerminalId::new(0))
             .with_windows(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
@@ -641,7 +641,7 @@ proptest! {
     fn roundtrip_layout_node(layout in arb_layout_node()) {
         let win = WindowInfo::new(WindowId::new(1), SessionId::new(1), "w")
             .with_layout(Some(layout));
-        let snap = SessionSnapshot::new(SessionId::new(1), WindowId::new(1), PaneId::new(0))
+        let snap = SessionSnapshot::new(SessionId::new(1), WindowId::new(1), TerminalId::new(0))
             .with_windows(vec![win]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
@@ -668,8 +668,8 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_bell(pane_id in any::<u32>()) {
-        let frame = FrameKind::Bell { pane_id };
+    fn roundtrip_bell(terminal_id in any::<u32>()) {
+        let frame = FrameKind::Bell { terminal_id };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -780,7 +780,7 @@ fn error_round_trip_with_request_id() {
     let frame = FrameKind::Error {
         request_id: Some(42),
         code: ErrorCode::InvalidCommand,
-        message: "missing field: pane_id".to_owned(),
+        message: "missing field: terminal_id".to_owned(),
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -825,7 +825,7 @@ fn error_code_wire_values_match_spec() {
     assert_eq!(ErrorCode::AlreadyAttached.as_wire(), 101);
     assert_eq!(ErrorCode::SessionNotFound.as_wire(), 102);
     assert_eq!(ErrorCode::WindowNotFound.as_wire(), 103);
-    assert_eq!(ErrorCode::PaneNotFound.as_wire(), 104);
+    assert_eq!(ErrorCode::TerminalNotFound.as_wire(), 104);
     assert_eq!(ErrorCode::ClientNotFound.as_wire(), 105);
     assert_eq!(ErrorCode::InvalidCommand.as_wire(), 200);
     assert_eq!(ErrorCode::PermissionDenied.as_wire(), 201);
@@ -836,7 +836,7 @@ fn error_code_wire_values_match_spec() {
 #[test]
 fn bell_round_trip() {
     let frame = FrameKind::Bell {
-        pane_id: 0x1234_5678,
+        terminal_id: 0x1234_5678,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);

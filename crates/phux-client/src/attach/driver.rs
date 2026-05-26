@@ -11,7 +11,7 @@
 //! * a stdin reader,
 //! * a SIGWINCH listener (currently a no-op; once `VIEWPORT_RESIZE` lands
 //!   in phux-4hp it will start sending resize frames upstream),
-//! * a local `libghostty_vt::Terminal` + [`PaneRenderer`] for the focused
+//! * a local `libghostty_vt::Terminal` + [`TerminalRenderer`] for the focused
 //!   pane (under ADR-0013 the client is bytes-in / `vt_write` / dirty-row
 //!   redraw — see `research/2026-05-25-libghostty-renderstate.md`).
 
@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::ids::PaneId;
+use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
@@ -36,7 +36,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
-use super::render::{PaneRenderer, write_reset};
+use super::render::{TerminalRenderer, write_reset};
 
 /// Idle window before a parser-pending bare ESC is interpreted as the
 /// Escape key. Chosen to be long enough to absorb same-burst arrival of
@@ -244,7 +244,7 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
 /// `initial_attached` is the `FrameKind::Attached` frame that
 /// [`wait_for_attached`] already pulled off the wire; we replay it
 /// through `handle_server_frame` so the focused-pane bookkeeping lives
-/// in one place. Subsequent `PANE_SNAPSHOT` / `PANE_OUTPUT` frames come
+/// in one place. Subsequent `TERMINAL_SNAPSHOT` / `TERMINAL_OUTPUT` frames come
 /// off the wire as usual.
 #[allow(
     clippy::future_not_send,
@@ -256,16 +256,16 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
 )]
 async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result<(), AttachError> {
     // Client-side Terminal + renderer for the focused pane. Dimensions
-    // get replaced on the first PANE_SNAPSHOT; sizing to (80, 24) is the
+    // get replaced on the first TERMINAL_SNAPSHOT; sizing to (80, 24) is the
     // safest no-content default for a Terminal that may receive
-    // PANE_OUTPUT before its snapshot for any reason.
+    // TERMINAL_OUTPUT before its snapshot for any reason.
     let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 10_000,
     })?;
-    let mut renderer = PaneRenderer::new()?;
-    let mut focused_pane: Option<PaneId> = None;
+    let mut renderer = TerminalRenderer::new()?;
+    let mut focused_pane: Option<TerminalId> = None;
     let mut parser = StdinParser::new();
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
@@ -421,7 +421,7 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
 async fn dispatch_input_events(
     conn: &mut Connection,
     events: Vec<InputEvent>,
-    focused_pane: Option<PaneId>,
+    focused_pane: Option<TerminalId>,
     detach_pending: &mut bool,
 ) -> Result<(), AttachError> {
     for ev in events {
@@ -448,8 +448,8 @@ async fn dispatch_input_events(
 fn handle_server_frame(
     frame: FrameKind,
     terminal: &mut Terminal<'static, 'static>,
-    renderer: &mut PaneRenderer<'static>,
-    focused_pane: &mut Option<PaneId>,
+    renderer: &mut TerminalRenderer<'static>,
+    focused_pane: &mut Option<TerminalId>,
 ) -> Result<bool, AttachError> {
     match frame {
         FrameKind::Attached {
@@ -461,11 +461,11 @@ fn handle_server_frame(
             *focused_pane = Some(snapshot.focused_pane);
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
-            // PANE_SNAPSHOT.
+            // TERMINAL_SNAPSHOT.
             Ok(false)
         }
-        FrameKind::PaneSnapshot {
-            pane_id,
+        FrameKind::TerminalSnapshot {
+            terminal_id,
             cols,
             rows,
             vt_replay_bytes,
@@ -474,7 +474,7 @@ fn handle_server_frame(
             // For v0 only the focused pane's snapshot drives our local
             // Terminal — multi-pane composition is downstream of phux-9gw.3
             // (the windowing / layout work).
-            if Some(pane_id) == *focused_pane {
+            if Some(terminal_id) == *focused_pane {
                 terminal.resize(cols, rows, 0, 0)?;
                 // Apply scrollback first (if any), then the visible-state
                 // replay — order per SPEC §8.4 / §13.
@@ -487,12 +487,12 @@ fn handle_server_frame(
             }
             Ok(false)
         }
-        FrameKind::PaneOutput {
-            pane_id,
+        FrameKind::TerminalOutput {
+            terminal_id,
             seq: _,
             bytes,
         } => {
-            if Some(PaneId::new(pane_id)) == *focused_pane {
+            if Some(TerminalId::new(terminal_id)) == *focused_pane {
                 terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);

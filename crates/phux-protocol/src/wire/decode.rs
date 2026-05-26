@@ -4,15 +4,16 @@
 //! (primitives). Every decode method returns `Result` and refuses to read
 //! past the end of the borrowed slice.
 
-use crate::ids::PaneId;
+use crate::ids::TerminalId;
 
 use super::error::DecodeError;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
     TYPE_DETACHED, TYPE_ERROR, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
-    TYPE_INPUT_PASTE, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, TYPE_VIEWPORT_RESIZE,
-    decode_attach_target, decode_focus_event, decode_key_event, decode_mouse_event,
-    decode_optional_bytes, decode_optional_u32, decode_paste_event, decode_viewport_info,
+    TYPE_INPUT_PASTE, TYPE_PING, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+    TYPE_VIEWPORT_RESIZE, decode_attach_target, decode_focus_event, decode_key_event,
+    decode_mouse_event, decode_optional_bytes, decode_optional_u32, decode_paste_event,
+    decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 
@@ -174,12 +175,12 @@ impl<'a> Decoder<'a> {
                 let nonce = self.read_u64_be()?;
                 FrameKind::Ping { nonce }
             }
-            TYPE_PANE_OUTPUT => {
-                let pane_id = self.read_u32_be()?;
+            TYPE_TERMINAL_OUTPUT => {
+                let terminal_id = self.read_u32_be()?;
                 let seq = self.read_u64_be()?;
                 let bytes = self.read_bytes()?.to_vec();
-                FrameKind::PaneOutput {
-                    pane_id,
+                FrameKind::TerminalOutput {
+                    terminal_id,
                     seq,
                     bytes,
                 }
@@ -198,24 +199,24 @@ impl<'a> Decoder<'a> {
             }
             TYPE_DETACH => FrameKind::Detach,
             TYPE_INPUT_KEY => {
-                let pane_id = self.read_u32_be()?;
+                let terminal_id = self.read_u32_be()?;
                 let event = decode_key_event(self)?;
-                FrameKind::InputKey { pane_id, event }
+                FrameKind::InputKey { terminal_id, event }
             }
             TYPE_INPUT_MOUSE => {
-                let pane_id = self.read_u32_be()?;
+                let terminal_id = self.read_u32_be()?;
                 let event = decode_mouse_event(self)?;
-                FrameKind::InputMouse { pane_id, event }
+                FrameKind::InputMouse { terminal_id, event }
             }
             TYPE_INPUT_FOCUS => {
-                let pane_id = self.read_u32_be()?;
+                let terminal_id = self.read_u32_be()?;
                 let event = decode_focus_event(self.read_u8()?)?;
-                FrameKind::InputFocus { pane_id, event }
+                FrameKind::InputFocus { terminal_id, event }
             }
             TYPE_INPUT_PASTE => {
-                let pane_id = self.read_u32_be()?;
+                let terminal_id = self.read_u32_be()?;
                 let event = decode_paste_event(self)?;
-                FrameKind::InputPaste { pane_id, event }
+                FrameKind::InputPaste { terminal_id, event }
             }
             TYPE_VIEWPORT_RESIZE => {
                 let viewport = decode_viewport_info(self)?;
@@ -229,14 +230,14 @@ impl<'a> Decoder<'a> {
                     initial_client_id,
                 }
             }
-            TYPE_PANE_SNAPSHOT => {
-                let pane_id = PaneId::new(self.read_u32_be()?);
+            TYPE_TERMINAL_SNAPSHOT => {
+                let terminal_id = TerminalId::new(self.read_u32_be()?);
                 let cols = self.read_u16_be()?;
                 let rows = self.read_u16_be()?;
                 let vt_replay_bytes = self.read_bytes()?.to_vec();
                 let scrollback_bytes = decode_optional_bytes(self)?;
-                FrameKind::PaneSnapshot {
-                    pane_id,
+                FrameKind::TerminalSnapshot {
+                    terminal_id,
                     cols,
                     rows,
                     vt_replay_bytes,
@@ -245,8 +246,8 @@ impl<'a> Decoder<'a> {
             }
             TYPE_DETACHED => FrameKind::Detached,
             TYPE_BELL => {
-                let pane_id = self.read_u32_be()?;
-                FrameKind::Bell { pane_id }
+                let terminal_id = self.read_u32_be()?;
+                FrameKind::Bell { terminal_id }
             }
             TYPE_ERROR => {
                 let request_id = decode_optional_u32(self)?;
@@ -265,8 +266,8 @@ impl<'a> Decoder<'a> {
                 }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
-            // (`OscEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.) are
-            // recognised by the SPEC §7 catalog but not yet populated as
+            // (`TerminalEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.)
+            // are recognised by the SPEC §7 catalog but not yet populated as
             // `FrameKind` variants. Sibling tasks lift them in during the
             // integration pass. Treat them as unknown alongside genuinely
             // unallocated tags.

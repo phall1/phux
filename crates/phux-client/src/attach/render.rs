@@ -2,7 +2,7 @@
 //! terminal as VT escape sequences.
 //!
 //! Under ADR-0013 the client owns one `Terminal` per attached pane;
-//! `PANE_OUTPUT` byte frames are fed into it via `vt_write`. This
+//! `TERMINAL_OUTPUT` byte frames are fed into it via `vt_write`. This
 //! module reads the resulting structured state back out via
 //! `RenderState` (per-row dirty tracking) and emits VT to stdout.
 //!
@@ -42,13 +42,13 @@ pub enum RenderError {
 /// Owns the libghostty render iterators so they're reused across frames
 /// instead of reallocated each tick.
 #[derive(Debug)]
-pub struct PaneRenderer<'alloc> {
+pub struct TerminalRenderer<'alloc> {
     state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
 }
 
-impl<'alloc> PaneRenderer<'alloc> {
+impl<'alloc> TerminalRenderer<'alloc> {
     /// Allocate render scaffolding for one pane. Do this once per pane,
     /// not per frame.
     pub fn new() -> Result<Self, RenderError> {
@@ -296,7 +296,7 @@ mod tests {
     fn renderer_writes_cursor_hide_then_show_for_dirty_full() {
         let mut terminal = fresh(5, 2);
         terminal.vt_write(b"ab");
-        let mut renderer = PaneRenderer::new().expect("PaneRenderer::new");
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
         let mut buf = Vec::new();
         let _ = renderer.render(&terminal, &mut buf).expect("render");
         // Must start by hiding the cursor.

@@ -5,8 +5,8 @@
 //! mirrors. So this module no longer has enum-conversion functions; it just
 //! composes libghostty's allocator-bound `Event` from the wire fields.
 //!
-//! [`PerPaneKeyEncoder`] owns the per-pane `libghostty_vt::key::Encoder`
-//! plus a reusable byte buffer — call [`PerPaneKeyEncoder::encode`] with
+//! [`PerTerminalKeyEncoder`] owns the per-pane `libghostty_vt::key::Encoder`
+//! plus a reusable byte buffer — call [`PerTerminalKeyEncoder::encode`] with
 //! the pane's current [`Terminal`] and the wire event; the returned
 //! `&[u8]` is the PTY payload.
 
@@ -44,12 +44,12 @@ pub fn key_event_to_libghostty(ev: &KeyEvent) -> Result<LgKeyEvent<'static>, Err
 /// so encoder state (KIP flags, modifyOtherKeys, etc.) reflects only that
 /// pane's terminal state. See ADR-0006 §"Encoder options stay server-local".
 #[derive(Debug)]
-pub struct PerPaneKeyEncoder {
+pub struct PerTerminalKeyEncoder {
     encoder: LgKeyEncoder<'static>,
     buf: Vec<u8>,
 }
 
-impl PerPaneKeyEncoder {
+impl PerTerminalKeyEncoder {
     /// Construct a new per-pane key encoder with a fresh libghostty allocator.
     pub fn new() -> Result<Self, Error> {
         Ok(Self {
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn encodes_plain_letter_a_to_byte_a() {
         let terminal = make_terminal();
-        let mut enc = PerPaneKeyEncoder::new().expect("encoder");
+        let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
         let ev = KeyEvent {
             action: KeyAction::Press,
             key: PhysicalKey::A,

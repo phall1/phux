@@ -1,7 +1,7 @@
 //! Snapshot tests for the server-side key encoder (phux-6yl.3).
 //!
 //! Each test builds a representative `KeyEvent`, runs it through
-//! [`PerPaneKeyEncoder`], hex-dumps the produced PTY bytes, and asserts
+//! [`PerTerminalKeyEncoder`], hex-dumps the produced PTY bytes, and asserts
 //! against a committed insta snapshot under `tests/snapshots/`. The key
 //! encoding contract is a cross-implementation interface: any change in
 //! what bytes a given (key, mods, terminal state) triple produces MUST
@@ -15,7 +15,7 @@
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-use phux_server::input::key::PerPaneKeyEncoder;
+use phux_server::input::key::PerTerminalKeyEncoder;
 
 /// Render `bytes` in a `xxd`-style hex dump: 16 columns per row, formatted as
 /// `OFFSET | HEX HEX HEX ... | ASCII`. Mirrors the style used by
@@ -87,7 +87,7 @@ fn push_kitty_flags(t: &mut Terminal<'_, '_>, flags: u8) {
 
 /// Encode one event with a fresh per-pane encoder and return the hex dump.
 fn dump_encode(event: &KeyEvent, terminal: &Terminal<'_, '_>) -> String {
-    let mut enc = PerPaneKeyEncoder::new().expect("encoder");
+    let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
     let bytes = enc.encode(event, terminal).expect("encode");
     hex_dump(bytes)
 }
