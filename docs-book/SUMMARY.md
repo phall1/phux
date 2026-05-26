@@ -8,7 +8,7 @@
 # Architecture Decision Records
 - [ADRs Overview](./ADR/README.md)
 - [0001 Language: Rust](./ADR/0001-language-rust.md)
-- [0002 Diff-based Protocol](./ADR/0002-diff-based-protocol.md)
+- [0002 Diff-based Protocol (superseded)](./ADR/0002-diff-based-protocol.md)
 - [0003 Server Process Model](./ADR/0003-server-process-model.md)
 - [0004 libghostty-vt as Grid](./ADR/0004-libghostty-vt-as-grid.md)
 - [0005 Relationship to zmx + zmosh](./ADR/0005-relationship-to-zmx-and-zmosh.md)
@@ -19,3 +19,4 @@
 - [0010 Frontend-Agnostic Server + tmux CC Reserved](./ADR/0010-frontend-agnostic-tmux-cc-reserved.md)
 - [0011 Protocol/Core Independence + IdBridge](./ADR/0011-protocol-core-independence.md)
 - [0012 Binary Split-Tree Window Layout](./ADR/0012-binary-split-tree-layout.md)
+- [0013 Libghostty Bytes on the Wire](./ADR/0013-libghostty-bytes-on-wire.md)

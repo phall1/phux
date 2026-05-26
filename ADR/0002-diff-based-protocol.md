@@ -1,5 +1,10 @@
 # 0002 — Diff-based wire protocol, not VT byte replay
 
+> **Status update (2026-05-25):** SUPERSEDED by [ADR-0013](./0013-libghostty-bytes-on-wire.md).
+> The cost model that motivated this decision was wrong (parse cost is invisible at modern
+> libghostty speeds; protocol-design cost is perpetual). The decision below is preserved as
+> historical context. Do not implement against it.
+
 Status: Accepted
 Date: 2026-05-24
 

@@ -11,7 +11,7 @@ Nygard's template][nygard].
 | # | Decision | Status |
 |---|----------|--------|
 | [0001](./0001-language-rust.md) | Use Rust | Accepted |
-| [0002](./0002-diff-based-protocol.md) | Diff-based wire protocol, not VT byte replay | Accepted |
+| [0002](./0002-diff-based-protocol.md) | Diff-based wire protocol, not VT byte replay | Superseded by [0013](./0013-libghostty-bytes-on-wire.md) |
 | [0003](./0003-server-process-model.md) | Single server, many sessions | Accepted |
 | [0004](./0004-libghostty-vt-as-grid.md) | libghostty-vt is the canonical grid | Accepted |
 | [0005](./0005-relationship-to-zmx-and-zmosh.md) | Greenfield relative to zmx / zmosh | Accepted |
@@ -22,6 +22,7 @@ Nygard's template][nygard].
 | [0010](./0010-frontend-agnostic-tmux-cc-reserved.md) | Frontend-agnostic server; tmux control mode reserved as compat | Accepted (forward-compat); CC adapter not on the roadmap |
 | [0011](./0011-protocol-core-independence.md) | `phux-protocol` and `phux-core` are independent; `IdBridge` is their only meeting point | Accepted |
 | [0012](./0012-binary-split-tree-layout.md) | Window layout is a binary split tree, not n-ary | Accepted |
+| [0013](./0013-libghostty-bytes-on-wire.md) | Libghostty bytes on the wire; structured input remains | Accepted (supersedes [0002](./0002-diff-based-protocol.md)) |
 
 ## When to write an ADR
 
