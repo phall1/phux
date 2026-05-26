@@ -8,11 +8,11 @@ use crate::ids::PaneId;
 
 use super::error::DecodeError;
 use super::frame::{
-    FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH, TYPE_DETACHED,
-    TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE,
-    TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target, decode_focus_event,
-    decode_key_event, decode_mouse_event, decode_optional_bytes, decode_paste_event,
-    decode_viewport_info,
+    ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
+    TYPE_DETACHED, TYPE_ERROR, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
+    TYPE_INPUT_PASTE, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target,
+    decode_focus_event, decode_key_event, decode_mouse_event, decode_optional_bytes,
+    decode_optional_u32, decode_paste_event, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 
@@ -243,6 +243,22 @@ impl<'a> Decoder<'a> {
             TYPE_BELL => {
                 let pane_id = self.read_u32_be()?;
                 FrameKind::Bell { pane_id }
+            }
+            TYPE_ERROR => {
+                let request_id = decode_optional_u32(self)?;
+                let code_raw = self.read_u16_be()?;
+                let code = ErrorCode::from_wire(code_raw).ok_or_else(|| {
+                    DecodeError::UnknownEnumValue {
+                        field: "ErrorCode",
+                        value: u32::from(code_raw),
+                    }
+                })?;
+                let message = self.read_str()?.to_owned();
+                FrameKind::Error {
+                    request_id,
+                    code,
+                    message,
+                }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
             // (`OscEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.) are

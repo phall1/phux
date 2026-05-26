@@ -16,7 +16,7 @@ use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, ViewportInfo};
+use phux_protocol::wire::frame::{AttachTarget, ErrorCode, ViewportInfo};
 use phux_protocol::wire::info::{
     LayoutNode, PaneInfo, SessionInfo, SessionSnapshot, SplitDir, WindowInfo,
 };
@@ -274,6 +274,27 @@ fn arb_mouse_event() -> impl Strategy<Value = MouseEvent> {
             x,
             y,
         })
+}
+
+/// One of every `ErrorCode` known to SPEC §14. The decoder must round-trip
+/// every wire value defined by the spec.
+fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
+    prop_oneof![
+        Just(ErrorCode::VersionIncompatible),
+        Just(ErrorCode::UnknownMessageType),
+        Just(ErrorCode::MalformedMessage),
+        Just(ErrorCode::FrameTooLarge),
+        Just(ErrorCode::NotAttached),
+        Just(ErrorCode::AlreadyAttached),
+        Just(ErrorCode::SessionNotFound),
+        Just(ErrorCode::WindowNotFound),
+        Just(ErrorCode::PaneNotFound),
+        Just(ErrorCode::ClientNotFound),
+        Just(ErrorCode::InvalidCommand),
+        Just(ErrorCode::PermissionDenied),
+        Just(ErrorCode::ResourceExhausted),
+        Just(ErrorCode::InternalError),
+    ]
 }
 
 fn arb_paste_event() -> impl Strategy<Value = PasteEvent> {
@@ -700,6 +721,20 @@ proptest! {
         prop_assert_eq!(decoded, frame);
         prop_assert!(tail.is_empty());
     }
+
+    #[test]
+    fn roundtrip_error(
+        request_id in proptest::option::of(any::<u32>()),
+        code in arb_error_code(),
+        message in ".{0,256}",
+    ) {
+        let frame = FrameKind::Error { request_id, code, message };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
 }
 
 #[test]
@@ -757,6 +792,80 @@ fn input_focus_unknown_kind_is_rejected() {
             value: 0xAB,
         }
     );
+}
+
+#[test]
+fn error_round_trip_session_not_found() {
+    // The canonical case unblocking phux-byc.6.6: the server replies to an
+    // ATTACH targeting an unknown session with ERROR { SESSION_NOT_FOUND }.
+    let frame = FrameKind::Error {
+        request_id: None,
+        code: ErrorCode::SessionNotFound,
+        message: "no such session: 'work'".to_owned(),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn error_round_trip_with_request_id() {
+    let frame = FrameKind::Error {
+        request_id: Some(42),
+        code: ErrorCode::InvalidCommand,
+        message: "missing field: pane_id".to_owned(),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn error_unknown_code_is_rejected() {
+    // Hand-roll a TYPE_ERROR (0xC1) frame with a code that the v0.1 decoder
+    // does not recognise. The decoder MUST surface UnknownEnumValue rather
+    // than silently mapping to a placeholder variant.
+    let mut body = vec![0xC1u8];
+    body.push(0); // request_id: None tag
+    body.extend_from_slice(&0x9999u16.to_be_bytes()); // unknown code
+    body.extend_from_slice(&0u32.to_be_bytes()); // empty message
+
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::UnknownEnumValue {
+            field: "ErrorCode",
+            value: 0x9999,
+        }
+    );
+}
+
+#[test]
+fn error_code_wire_values_match_spec() {
+    // SPEC §14 names these wire values; lock them in so a refactor cannot
+    // silently renumber the enum.
+    assert_eq!(ErrorCode::VersionIncompatible.as_wire(), 1);
+    assert_eq!(ErrorCode::UnknownMessageType.as_wire(), 2);
+    assert_eq!(ErrorCode::MalformedMessage.as_wire(), 3);
+    assert_eq!(ErrorCode::FrameTooLarge.as_wire(), 4);
+    assert_eq!(ErrorCode::NotAttached.as_wire(), 100);
+    assert_eq!(ErrorCode::AlreadyAttached.as_wire(), 101);
+    assert_eq!(ErrorCode::SessionNotFound.as_wire(), 102);
+    assert_eq!(ErrorCode::WindowNotFound.as_wire(), 103);
+    assert_eq!(ErrorCode::PaneNotFound.as_wire(), 104);
+    assert_eq!(ErrorCode::ClientNotFound.as_wire(), 105);
+    assert_eq!(ErrorCode::InvalidCommand.as_wire(), 200);
+    assert_eq!(ErrorCode::PermissionDenied.as_wire(), 201);
+    assert_eq!(ErrorCode::ResourceExhausted.as_wire(), 202);
+    assert_eq!(ErrorCode::InternalError.as_wire(), 65535);
 }
 
 #[test]

@@ -70,6 +70,13 @@ pub const TYPE_ATTACHED: u8 = 0x81;
 pub const TYPE_DETACHED: u8 = 0x82;
 /// Discriminant for `BELL` (server to client, `SPEC.md` §7.6).
 pub const TYPE_BELL: u8 = 0xB0;
+/// Discriminant for `ERROR` (server to client, `SPEC.md` §14).
+///
+/// Carries a structured [`ErrorCode`] plus a human-readable UTF-8 message
+/// and an optional `request_id` correlating the error with a prior
+/// `COMMAND` (per SPEC §14). Fatal errors MUST be followed by `DETACHED
+/// { reason: PROTOCOL_ERROR }` and transport close.
+pub const TYPE_ERROR: u8 = 0xC1;
 /// Discriminant for `PONG` (server to client, `SPEC.md` §7.5). Reserved.
 pub const TYPE_PONG: u8 = 0xFF;
 /// Discriminant for `PANE_OUTPUT` (server to client, `SPEC.md` §7.2 / §8.1).
@@ -87,6 +94,95 @@ pub const TYPE_PANE_OUTPUT: u8 = 0x90;
 /// `scrollback_bytes`; the client `vt_write`s them into a fresh Terminal
 /// of the declared `cols × rows`.
 pub const TYPE_PANE_SNAPSHOT: u8 = 0x91;
+
+// -----------------------------------------------------------------------------
+// ErrorCode enum — SPEC §14.
+// -----------------------------------------------------------------------------
+
+/// Structured error code carried by [`FrameKind::Error`], per SPEC §14.
+///
+/// Marked `#[non_exhaustive]` so future minor protocol versions can add
+/// codes without breaking downstream matches (per the protocol/core
+/// independence principle in ADR-0011). Unknown wire values surface as
+/// [`DecodeError::UnknownEnumValue`] rather than being silently mapped to
+/// a placeholder variant — misinterpreting an error code can mask the
+/// underlying failure.
+///
+/// The numeric values are the wire encoding: `u16` big-endian. The space
+/// is intentionally sparse (handshake errors clustered at `1..=9`,
+/// attach/session at `100..=199`, command errors at `200..=299`, internal
+/// at `u16::MAX`) so future codes can slot in without renumbering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+#[repr(u16)]
+pub enum ErrorCode {
+    /// SPEC §6.1: HELLO version negotiation found no compatible version.
+    VersionIncompatible = 1,
+    /// SPEC §6: the peer sent a type byte the receiver does not recognise.
+    UnknownMessageType = 2,
+    /// SPEC §5 / Appendix A: a message could not be decoded (truncated,
+    /// bad enum, invalid UTF-8, ...).
+    MalformedMessage = 3,
+    /// SPEC §5: a frame's declared length exceeded the protocol cap.
+    FrameTooLarge = 4,
+
+    /// SPEC §13: the client issued an operation that requires an attach
+    /// while not attached.
+    NotAttached = 100,
+    /// SPEC §13: the client requested attach while already attached.
+    AlreadyAttached = 101,
+    /// SPEC §13: the requested session does not exist.
+    SessionNotFound = 102,
+    /// The requested window does not exist.
+    WindowNotFound = 103,
+    /// The requested pane does not exist.
+    PaneNotFound = 104,
+    /// The requested client id does not exist.
+    ClientNotFound = 105,
+
+    /// SPEC §11: the requested COMMAND payload was structurally invalid.
+    InvalidCommand = 200,
+    /// SPEC §15: the requested operation is forbidden for this peer.
+    PermissionDenied = 201,
+    /// The server has run out of a resource needed to satisfy the request
+    /// (file descriptors, memory, PTYs, ...).
+    ResourceExhausted = 202,
+
+    /// Catch-all for unexpected server-side failures. Carries
+    /// `u16::MAX = 65535` on the wire.
+    InternalError = 65535,
+}
+
+impl ErrorCode {
+    /// Wire encoding of this code: the `#[repr(u16)]` discriminant.
+    #[must_use]
+    pub const fn as_wire(self) -> u16 {
+        self as u16
+    }
+
+    /// Inverse of [`Self::as_wire`]; returns `None` for values that do not
+    /// correspond to any code in this protocol version.
+    #[must_use]
+    pub const fn from_wire(value: u16) -> Option<Self> {
+        Some(match value {
+            1 => Self::VersionIncompatible,
+            2 => Self::UnknownMessageType,
+            3 => Self::MalformedMessage,
+            4 => Self::FrameTooLarge,
+            100 => Self::NotAttached,
+            101 => Self::AlreadyAttached,
+            102 => Self::SessionNotFound,
+            103 => Self::WindowNotFound,
+            104 => Self::PaneNotFound,
+            105 => Self::ClientNotFound,
+            200 => Self::InvalidCommand,
+            201 => Self::PermissionDenied,
+            202 => Self::ResourceExhausted,
+            65535 => Self::InternalError,
+            _ => return None,
+        })
+    }
+}
 
 // -----------------------------------------------------------------------------
 // AttachTarget tagged union — SPEC §13.
@@ -325,6 +421,26 @@ pub enum FrameKind {
         /// Pane that bell'd.
         pane_id: u32,
     },
+
+    /// `ERROR` — server-to-client structured error (`SPEC.md` §14).
+    ///
+    /// Carries a numeric [`ErrorCode`] plus a human-readable UTF-8
+    /// `message`. `request_id` is `Some(_)` when the error correlates with
+    /// a prior `COMMAND` per SPEC §14, and `None` for spontaneous server
+    /// errors (e.g. malformed `ATTACH`, fatal protocol violations).
+    ///
+    /// A fatal error MUST be followed by `DETACHED { reason:
+    /// PROTOCOL_ERROR }` and transport close.
+    Error {
+        /// Correlates this error with a prior `COMMAND`'s `request_id`,
+        /// if applicable. `None` for non-command-correlated errors.
+        request_id: Option<u32>,
+        /// Structured error code; see [`ErrorCode`].
+        code: ErrorCode,
+        /// Human-readable, UTF-8, free-form message. Implementations
+        /// SHOULD keep this short enough to log inline.
+        message: String,
+    },
 }
 
 impl FrameKind {
@@ -345,6 +461,7 @@ impl FrameKind {
             Self::Detached => TYPE_DETACHED,
             Self::PaneSnapshot { .. } => TYPE_PANE_SNAPSHOT,
             Self::Bell { .. } => TYPE_BELL,
+            Self::Error { .. } => TYPE_ERROR,
         }
     }
 
@@ -438,6 +555,15 @@ impl FrameKind {
             }
             Self::Bell { pane_id } => {
                 enc.write_u32_be(*pane_id);
+            }
+            Self::Error {
+                request_id,
+                code,
+                message,
+            } => {
+                encode_optional_u32(*request_id, &mut enc);
+                enc.write_u16_be(code.as_wire());
+                enc.write_str(message);
             }
         }
 
@@ -701,7 +827,7 @@ fn encode_optional_u32(value: Option<u32>, enc: &mut Encoder<'_>) {
     }
 }
 
-fn decode_optional_u32(dec: &mut Decoder<'_>) -> Result<Option<u32>, DecodeError> {
+pub(super) fn decode_optional_u32(dec: &mut Decoder<'_>) -> Result<Option<u32>, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
         0 => Ok(None),
