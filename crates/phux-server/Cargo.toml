@@ -18,6 +18,11 @@ phux-core.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
+# tokio-util gives us `CancellationToken` (hierarchical cancellation,
+# replacing the per-actor / per-loop `oneshot::Sender<()>` shutdown
+# pattern). The `rt` feature is what gates `sync::CancellationToken`
+# in current tokio-util releases.
+tokio-util = { version = "0.7", default-features = false, features = ["rt"] }
 bytes.workspace = true
 # portable-pty is the PTY backend PaneActor drives (phux-byc.5). It is a
 # regular dependency because the actor owns the master fd; its blocking

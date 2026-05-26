@@ -36,7 +36,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
 use tokio::sync::oneshot;
-use tokio::task::LocalSet;
+use tokio::task::{JoinSet, LocalSet};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::pane_actor::{PaneActor, SnapshotRequest};
@@ -208,17 +209,38 @@ impl ServerRuntime {
         let pre_seeded = self.cfg.pre_seeded_session.clone();
         let seed_with_pty = self.cfg.seed_with_pty;
         let local = LocalSet::new();
+        // Hierarchical cancellation: a single root token is the parent
+        // of every per-client / per-pane child. The external `shutdown`
+        // future is folded into this token by a small task spawned on
+        // the LocalSet (see below). On `root_token.cancel()`:
+        //   * `accept_loop` returns from its select! → its per-client
+        //     `JoinSet` drops → in-flight client tasks abort.
+        //   * Every `PaneActor`'s child token fires → actors exit
+        //     cleanly via their own `select!` (shutdown_pty runs).
+        let root_token = CancellationToken::new();
         let result = local
             .run_until(async move {
+                // Fold the external shutdown future into the root
+                // token. `spawn_local` (not `tokio::spawn`) because
+                // the runtime is current-thread with no worker pool.
+                {
+                    let token = root_token.clone();
+                    tokio::task::spawn_local(async move {
+                        shutdown.await;
+                        debug!("shutdown future resolved; cancelling root token");
+                        token.cancel();
+                    });
+                }
+
                 // Pre-seed inside the LocalSet so we can `spawn_local`
                 // the pane actor. Without this, the pre-seed path
                 // would have to call `tokio::spawn`, which requires
                 // `Send` futures — exactly what `PaneActor` is not.
                 if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
-                        seed_session_with_default_shell(&state, name)
+                        seed_session_with_default_shell(&state, name, &root_token)
                     } else {
-                        seed_session_with_actor(&state, name)
+                        seed_session_with_actor(&state, name, &root_token)
                     };
                     if let Err(err) = seeded {
                         warn!(
@@ -234,7 +256,7 @@ impl ServerRuntime {
                         );
                     }
                 }
-                accept_loop(&listener, state, shutdown).await
+                accept_loop(&listener, state, root_token).await
             })
             .await;
 
@@ -261,20 +283,17 @@ impl ServerRuntime {
 pub(crate) fn seed_session_with_actor(
     state: &SharedState,
     name: &str,
+    root_token: &CancellationToken,
 ) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
     use phux_core::ids::PaneId;
     let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
     // Default 80x24 — same as `phux_core::Pane::new`'s default dims.
     // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
-    let bundle = PaneActor::new(80, 24)?;
-    let crate::pane_actor::PaneActorBundle {
-        actor,
-        handle,
-        shutdown,
-    } = bundle;
-    tokio::task::spawn_local(actor.run());
+    let pane_token = root_token.child_token();
+    let bundle = PaneActor::build_with_token(80, 24, None, pane_token.clone())?;
+    let crate::pane_actor::PaneActorBundle { actor, handle, .. } = bundle;
     state.with_mut(|s| {
-        let _ = s.register_pane_handle(pane, handle, shutdown);
+        let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
     });
     Ok(pane)
 }
@@ -295,18 +314,15 @@ pub(crate) fn seed_session_with_pty(
     state: &SharedState,
     name: &str,
     cmd: portable_pty::CommandBuilder,
+    root_token: &CancellationToken,
 ) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
     use phux_core::ids::PaneId;
     let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
-    let bundle = PaneActor::new_with_command(cmd, 80, 24)?;
-    let crate::pane_actor::PaneActorBundle {
-        actor,
-        handle,
-        shutdown,
-    } = bundle;
-    tokio::task::spawn_local(actor.run());
+    let pane_token = root_token.child_token();
+    let bundle = PaneActor::build_with_token(80, 24, Some(cmd), pane_token.clone())?;
+    let crate::pane_actor::PaneActorBundle { actor, handle, .. } = bundle;
     state.with_mut(|s| {
-        let _ = s.register_pane_handle(pane, handle, shutdown);
+        let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
     });
     Ok(pane)
 }
@@ -320,8 +336,14 @@ pub(crate) fn seed_session_with_pty(
 pub(crate) fn seed_session_with_default_shell(
     state: &SharedState,
     name: &str,
+    root_token: &CancellationToken,
 ) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
-    seed_session_with_pty(state, name, crate::pane_actor::default_shell_command())
+    seed_session_with_pty(
+        state,
+        name,
+        crate::pane_actor::default_shell_command(),
+        root_token,
+    )
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.
@@ -369,21 +391,27 @@ async fn handle_existing_socket(socket_path: &Path) -> Result<(), ServerError> {
 /// Core accept loop. Pulled out to keep `run_async` flat.
 ///
 /// Per ADR-0014, every per-client task spawns via
-/// [`tokio::task::spawn_local`]; the futures we hand it are `!Send`
-/// because they call into pane actors that own `!Send` `Terminal`s.
-async fn accept_loop<F>(
+/// [`tokio::task::JoinSet::spawn_local`]; the futures we hand it are
+/// `!Send` because they call into pane actors that own `!Send`
+/// `Terminal`s.
+///
+/// `root_token` is the per-server root cancellation token. Cancellation
+/// drives a clean return from this loop (the `JoinSet` of per-client
+/// tasks then drops, aborting any in-flight client tasks).
+async fn accept_loop(
     listener: &UnixListener,
     state: SharedState,
-    shutdown: F,
-) -> Result<(), ServerError>
-where
-    F: Future<Output = ()> + Send + 'static,
-{
-    tokio::pin!(shutdown);
+    root_token: CancellationToken,
+) -> Result<(), ServerError> {
+    // JoinSet of per-client tasks. Dropping this set on loop exit
+    // aborts every still-running client task in one step — much
+    // shorter than waiting for each task's own `select!` to observe
+    // its child token's cancellation.
+    let mut clients: JoinSet<()> = JoinSet::new();
     loop {
         tokio::select! {
-            () = &mut shutdown => {
-                info!("shutdown signal received");
+            () = root_token.cancelled() => {
+                info!("root cancellation token fired; accept loop exiting");
                 return Ok(());
             }
             accept = listener.accept() => {
@@ -394,8 +422,9 @@ where
                         // task can detach itself cleanly on EOF.
                         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
                         let task_state = state.clone();
-                        tokio::task::spawn_local(async move {
-                            if let Err(err) = handle_client(stream, task_state.clone(), client_id).await {
+                        let client_token = root_token.child_token();
+                        clients.spawn_local(async move {
+                            if let Err(err) = handle_client(stream, task_state.clone(), client_id, client_token).await {
                                 warn!(error = %err, "client task ended with error");
                             }
                             // Implicit detach on EOF / error path — matches
@@ -435,6 +464,7 @@ async fn handle_client(
     stream: UnixStream,
     state: SharedState,
     client_id: ClientId,
+    token: CancellationToken,
 ) -> io::Result<()> {
     debug!(?client_id, "client task started");
     let (mut reader, writer) = stream.into_split();
@@ -447,7 +477,12 @@ async fn handle_client(
     // fairly via `select!`.
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<OutboundFrame>(DEFAULT_CLIENT_MAILBOX);
     let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<BytesMut>(DEFAULT_CLIENT_MAILBOX);
-    tokio::task::spawn_local(writer_task(writer, out_rx, raw_rx, client_id));
+    // Per-client `JoinSet` for sibling tasks (today: just the writer).
+    // Held in this scope so it drops with `handle_client` and the
+    // writer aborts if it hasn't already exited via its own
+    // close-on-EOF path. Keeps lifecycle plumbing local.
+    let mut sibling_tasks: JoinSet<()> = JoinSet::new();
+    sibling_tasks.spawn_local(writer_task(writer, out_rx, raw_rx, client_id));
 
     let mut header = [0u8; LENGTH_PREFIX];
     let mut payload = BytesMut::new();
@@ -456,7 +491,17 @@ async fn handle_client(
     loop {
         // Read the length prefix. EOF cleanly ends the session; a partial read
         // is treated as a malformed frame and also ends the session.
-        match reader.read_exact(&mut header).await {
+        // Cancellation token wins via biased select so a server-wide
+        // shutdown can preempt a slow client read.
+        let read_result = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                debug!(?client_id, "client task cancelled by root token");
+                return Ok(());
+            }
+            res = reader.read_exact(&mut header) => res,
+        };
+        match read_result {
             Ok(_) => {}
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
                 debug!("client disconnected (eof)");
@@ -1056,7 +1101,6 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
-        let (_shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let handle = PaneHandle {
             input: input_tx,
             snapshot: snapshot_tx,
@@ -1066,10 +1110,11 @@ mod tests {
             rows: 24,
         };
         state.with_mut(|s| {
-            // `register_pane_handle` also wants the shutdown sender,
-            // but we don't keep it for the test; build a throwaway.
-            let (sd_tx, _sd_rx) = tokio::sync::oneshot::channel::<()>();
-            let _ = s.register_pane_handle(pid, handle, sd_tx);
+            // `register_pane_handle` wants a CancellationToken; build
+            // a fresh one. We don't keep a clone — no actor is running
+            // for this test, so cancellation is moot.
+            let token = CancellationToken::new();
+            let _ = s.register_pane_handle(pid, handle, token);
         });
 
         let client_id = state.with_mut(crate::state::ServerState::new_client_id);

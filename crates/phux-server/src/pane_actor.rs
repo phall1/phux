@@ -40,6 +40,7 @@ use bytes::Bytes;
 use libghostty_vt::{Terminal, TerminalOptions};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use crate::grid::{SnapshotBytes, SnapshotSynthesizer};
@@ -143,7 +144,15 @@ pub struct PaneActor {
     /// reader/writer threads.
     pty: Option<PtyOwned>,
     output_tx: broadcast::Sender<Bytes>,
-    shutdown: oneshot::Receiver<()>,
+    /// Cancellation token watched by the actor's `select!`. Cancel to
+    /// ask the actor to shut down cleanly (drains the PTY, reaps the
+    /// child, and exits). A child token of the per-server root token
+    /// when constructed via [`Self::build_with_token`]; an unlinked
+    /// fresh token when constructed via [`PaneActor::new`] et al.
+    /// Dropping the token does NOT cancel — call `.cancel()` explicitly
+    /// (this is intentional; the prior `oneshot::Sender::drop` semantics
+    /// were a hidden lifecycle coupling we want gone).
+    token: CancellationToken,
     cols: u16,
     rows: u16,
 }
@@ -212,16 +221,24 @@ pub enum PaneActorError {
 }
 
 /// Bundle returned from [`PaneActor::new`]: the actor itself plus a
-/// shutdown sender that fires the actor's exit branch when dropped or
-/// signaled.
+/// [`CancellationToken`] that, when cancelled, fires the actor's
+/// shutdown branch.
+///
+/// The token is **clone-shared** with the actor: callers can clone it
+/// before handing the actor off to `spawn_local`, hold the clone, and
+/// call `.cancel()` to ask the actor to exit. Unlike the prior
+/// `oneshot::Sender<()>`-shaped bundle, dropping `token` does NOT
+/// cancel the actor — cancellation must be explicit.
 #[must_use]
 pub struct PaneActorBundle {
     /// The actor; pass to `tokio::task::spawn_local`.
     pub actor: PaneActor,
     /// Cross-task handle to the actor.
     pub handle: PaneHandle,
-    /// Drop or `send(())` to shut the actor down cleanly.
-    pub shutdown: oneshot::Sender<()>,
+    /// Cancellation token. Call `.cancel()` to ask the actor to shut
+    /// down cleanly. Cloneable; shares cancellation state with the
+    /// actor's internal copy.
+    pub token: CancellationToken,
 }
 
 impl std::fmt::Debug for PaneActor {
@@ -265,21 +282,21 @@ impl PaneActor {
     /// `10_000` — a tmux-style mid-range value.
     #[allow(clippy::new_ret_no_self, reason = "bundle-shaped constructor")]
     pub fn new(cols: u16, rows: u16) -> Result<PaneActorBundle, PaneActorError> {
-        Self::build(cols, rows, None)
+        Self::build(cols, rows, None, CancellationToken::new())
     }
 
     /// Build a fresh actor backed by a real PTY running `cmd`.
     ///
     /// Spawns the command on the slave side, kicks off the reader and
     /// writer bridge threads, and returns the bundle. The caller hands
-    /// `actor` to `spawn_local` and keeps `handle` + `shutdown` to talk
+    /// `actor` to `spawn_local` and keeps `handle` + `token` to talk
     /// to and tear down the actor.
     pub fn new_with_command(
         cmd: CommandBuilder,
         cols: u16,
         rows: u16,
     ) -> Result<PaneActorBundle, PaneActorError> {
-        Self::build(cols, rows, Some(cmd))
+        Self::build(cols, rows, Some(cmd), CancellationToken::new())
     }
 
     /// Convenience: spawn the user's default shell (`$SHELL` or
@@ -288,10 +305,28 @@ impl PaneActor {
         Self::new_with_command(default_shell_command(), cols, rows)
     }
 
+    /// Build an actor whose cancellation token is `token` (typically a
+    /// `root_token.child_token()` from [`crate::runtime::ServerRuntime`]).
+    /// The bundle's `token` field is a clone of the same token, so
+    /// cancelling either propagates to the actor.
+    ///
+    /// This is the path the runtime uses; tests use [`Self::new`] /
+    /// [`Self::new_with_command`] which generate an unlinked fresh
+    /// token internally.
+    pub fn build_with_token(
+        cols: u16,
+        rows: u16,
+        cmd: Option<CommandBuilder>,
+        token: CancellationToken,
+    ) -> Result<PaneActorBundle, PaneActorError> {
+        Self::build(cols, rows, cmd, token)
+    }
+
     fn build(
         cols: u16,
         rows: u16,
         cmd: Option<CommandBuilder>,
+        token: CancellationToken,
     ) -> Result<PaneActorBundle, PaneActorError> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
@@ -306,7 +341,7 @@ impl PaneActor {
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let bundle_token = token.clone();
 
         let (pty_rx, pty_tx, pty) = if let Some(cmd) = cmd {
             let (rx, tx, owned) = spawn_pty(cmd, cols, rows)?;
@@ -329,7 +364,7 @@ impl PaneActor {
             pty_tx,
             pty,
             output_tx: output_tx.clone(),
-            shutdown: shutdown_rx,
+            token,
             cols,
             rows,
         };
@@ -344,7 +379,7 @@ impl PaneActor {
         Ok(PaneActorBundle {
             actor,
             handle,
-            shutdown: shutdown_tx,
+            token: bundle_token,
         })
     }
 
@@ -543,8 +578,8 @@ impl PaneActor {
             tokio::select! {
                 biased;
 
-                _ = &mut self.shutdown => {
-                    debug!("PaneActor shutdown signal");
+                () = self.token.cancelled() => {
+                    debug!("PaneActor cancellation token fired");
                     self.shutdown_pty();
                     return;
                 }
@@ -770,7 +805,11 @@ mod tests {
             .run_until(async {
                 let bundle = PaneActor::new_with_seed(20, 5, b"hi there").expect("new_with_seed");
                 let handle = bundle.handle.clone();
-                let _shutdown_tx = bundle.shutdown;
+                // Hold the token; under new semantics dropping it does
+                // NOT cancel, so the actor is alive regardless. Keep
+                // the binding for parallel structure with the other
+                // tests in this module.
+                let _token = bundle.token;
                 tokio::task::spawn_local(bundle.actor.run());
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -791,19 +830,19 @@ mod tests {
             .await;
     }
 
-    /// The actor stops promptly when the shutdown oneshot fires, even
-    /// if input/snapshot channels stay open.
+    /// The actor stops promptly when its cancellation token fires,
+    /// even if input/snapshot channels stay open.
     #[tokio::test(flavor = "current_thread")]
-    async fn actor_exits_on_shutdown_signal() {
+    async fn actor_exits_on_cancellation() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let bundle = PaneActor::new(20, 5).expect("new");
                 let handle = bundle.handle.clone();
-                let shutdown_tx = bundle.shutdown;
+                let token = bundle.token;
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
-                shutdown_tx.send(()).expect("send shutdown");
+                token.cancel();
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
                     .await
                     .expect("actor did not exit within 500ms")
@@ -818,6 +857,31 @@ mod tests {
             .await;
     }
 
+    /// A parent token's `.cancel()` propagates to a `child_token()`-
+    /// linked `PaneActor`, which exits within a short deadline. Pins
+    /// down the hierarchical cascade introduced by the
+    /// `CancellationToken` refactor.
+    #[tokio::test(flavor = "current_thread")]
+    async fn parent_token_cancel_cascades_to_pane_actor() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let parent = CancellationToken::new();
+                let child = parent.child_token();
+                let bundle =
+                    PaneActor::build_with_token(20, 5, None, child).expect("build_with_token");
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                parent.cancel();
+
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms of parent cancel")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
     /// Resize updates both the libghostty `Terminal` and (when present)
     /// the PTY winsize. We only assert the Terminal side here — the
     /// PTY ioctl path is exercised in the integration test.
@@ -828,7 +892,7 @@ mod tests {
             .run_until(async {
                 let bundle = PaneActor::new(80, 24).expect("new");
                 let handle = bundle.handle.clone();
-                let shutdown_tx = bundle.shutdown;
+                let token = bundle.token;
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
                 handle.resize.send((120, 40)).await.expect("send resize");
@@ -839,7 +903,7 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
 
-                shutdown_tx.send(()).expect("send shutdown");
+                token.cancel();
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
                     .await
                     .expect("actor did not exit within 500ms")

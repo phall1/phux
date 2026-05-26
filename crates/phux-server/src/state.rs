@@ -34,6 +34,7 @@
 //! while holding it.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use phux_core::ids::{PaneId, SessionId, WindowId};
@@ -49,7 +50,9 @@ use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
 use phux_protocol::input::paste::PasteEvent;
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 /// Default per-client outbound mailbox depth.
 ///
@@ -165,12 +168,30 @@ pub struct ServerState {
     /// spawned. Looked up by the ATTACH handler to request snapshots
     /// and by future PTY-input branches to forward keystrokes.
     pub panes: HashMap<PaneId, PaneHandle>,
-    /// Per-pane actor shutdown senders. Held here so the actor lives
-    /// as long as `ServerState` does — dropping the sender fires the
-    /// actor's shutdown branch. `phux-byc.8` registers these alongside
-    /// the handles; per-pane lifecycle (close, kill, etc.) lands with
-    /// the corresponding wire frames in a later ticket.
-    pane_shutdowns: HashMap<PaneId, oneshot::Sender<()>>,
+    /// Per-pane cancellation tokens. Cancelling a token fires the
+    /// matching `PaneActor`'s shutdown branch (see
+    /// `PaneActor::run`'s `select!`). Typically a child of the
+    /// per-server root token, so a root cancel cascades to every
+    /// pane in one step.
+    ///
+    /// Distinct from the prior `oneshot::Sender<()>` shutdown channel:
+    /// dropping the token does NOT cancel — cancellation must be
+    /// explicit (see [`Self::detach_pane_actor`]).
+    pane_tokens: HashMap<PaneId, CancellationToken>,
+    /// `JoinSet` collecting the `PaneActor::run` futures spawned via
+    /// [`Self::spawn_pane_actor`]. Owned at this scope so cancellation
+    /// of the per-server root token (or drop of `ServerState`) aborts
+    /// every still-running pane actor in one go.
+    ///
+    /// **Drop-safety note:** `JoinSet<()>` is `Send`, but the futures it
+    /// holds are `!Send` (pane actors own a `!Send` `Terminal` per
+    /// ADR-0014). They were spawned via `JoinSet::spawn_local`, which
+    /// is only legal inside a `LocalSet`. `ServerState` is dropped at
+    /// the tail of `runtime::ServerRuntime::run_async` on the same
+    /// thread that ran the `LocalSet`, so this `JoinSet`'s `Drop` is
+    /// always on the spawning thread — no cross-thread poll of
+    /// `!Send` futures occurs.
+    pane_tasks: JoinSet<()>,
     /// Wire-side identifier for each core pane id. Allocated
     /// monotonically from `1` in [`Self::register_pane_handle`]. Mirrors
     /// the `IdBridge` shape used for session ids — kept inline because
@@ -225,7 +246,8 @@ impl ServerState {
             pane_inputs: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             panes: HashMap::new(),
-            pane_shutdowns: HashMap::new(),
+            pane_tokens: HashMap::new(),
+            pane_tasks: JoinSet::new(),
             pane_wire_forward: HashMap::new(),
             pane_wire_reverse: HashMap::new(),
             next_pane_wire_id: 1,
@@ -398,36 +420,66 @@ impl ServerState {
     /// Record a freshly-spawned [`PaneHandle`] against `pane` and
     /// allocate its wire id.
     ///
-    /// Called by the runtime after `PaneActor::new` and
-    /// `tokio::task::spawn_local`. Subsequent attaches use
+    /// Called by the runtime after `PaneActor::new` /
+    /// `build_with_token`. Subsequent attaches use
     /// [`Self::pane_handle`] to look the handle up.
     ///
-    /// The `shutdown` sender is stashed in `pane_shutdowns` so the
-    /// actor stays alive as long as `ServerState` does; dropping the
-    /// sender (e.g. via [`Self::detach_pane_actor`]) fires the
-    /// actor's shutdown branch.
+    /// `token` is stashed in `pane_tokens`; cancelling it (e.g. via
+    /// [`Self::detach_pane_actor`]) fires the actor's shutdown branch.
+    ///
+    /// This method does NOT spawn the actor — pair it with
+    /// [`Self::spawn_pane_actor`] when you also want the actor task
+    /// registered against the per-server `JoinSet`.
     ///
     /// Idempotent on the wire-id allocation (a second call for the
     /// same `pane` returns the same wire id) but overwrites the
-    /// `PaneHandle` / shutdown sender. In practice the runtime calls
-    /// this exactly once per pane lifetime.
+    /// `PaneHandle` / token. In practice the runtime calls this
+    /// exactly once per pane lifetime.
     pub fn register_pane_handle(
         &mut self,
         pane: PaneId,
         handle: PaneHandle,
-        shutdown: oneshot::Sender<()>,
+        token: CancellationToken,
     ) -> WirePaneId {
         let wire = self.intern_pane_wire(pane);
         self.panes.insert(pane, handle);
-        self.pane_shutdowns.insert(pane, shutdown);
+        self.pane_tokens.insert(pane, token);
         wire
     }
 
-    /// Drop the actor-shutdown sender for `pane`, signalling the
-    /// `PaneActor` to exit. Idempotent. Used by future pane-close
-    /// lifecycle paths; not exercised by `phux-byc.8`.
+    /// One-shot helper: register `handle`/`token` AND spawn
+    /// `actor_future` onto the per-server pane `JoinSet`. Must be
+    /// called from inside a `LocalSet` (per ADR-0014; pane actors
+    /// own `!Send` `Terminal`s and are spawned via
+    /// `JoinSet::spawn_local`).
+    ///
+    /// Returns the wire pane id, matching [`Self::register_pane_handle`].
+    pub fn spawn_pane_actor<F>(
+        &mut self,
+        pane: PaneId,
+        handle: PaneHandle,
+        token: CancellationToken,
+        actor_future: F,
+    ) -> WirePaneId
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        let wire = self.register_pane_handle(pane, handle, token);
+        self.pane_tasks.spawn_local(actor_future);
+        wire
+    }
+
+    /// Cancel `pane`'s actor token, signalling the `PaneActor` to
+    /// exit, and forget the token. Idempotent. Used by future
+    /// pane-close lifecycle paths; not exercised by `phux-byc.8`.
+    ///
+    /// The actor task itself is drained from the per-server `JoinSet`
+    /// when it returns from `run`; we don't need to touch
+    /// `pane_tasks` here.
     pub fn detach_pane_actor(&mut self, pane: PaneId) {
-        self.pane_shutdowns.remove(&pane);
+        if let Some(token) = self.pane_tokens.remove(&pane) {
+            token.cancel();
+        }
     }
 
     /// Look up the [`PaneHandle`] for `pane`, if registered.

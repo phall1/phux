@@ -88,7 +88,7 @@ fn pty_output_reaches_broadcast_and_terminal() {
         let bundle = PaneActor::new_with_command(printf_cmd("hello\\r\\nworld\\r\\n"), 80, 24)
             .expect("spawn pty actor");
         let handle = bundle.handle.clone();
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
 
         // Subscribe BEFORE the actor starts polling. Even though the
         // reader thread is already alive, the actor's broadcast send
@@ -122,7 +122,7 @@ fn pty_output_reaches_broadcast_and_terminal() {
 
         // The actor stays alive after PTY EOF so late snapshots still
         // work; we shut it down explicitly here.
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         timeout(Duration::from_secs(3), join)
             .await
             .expect("actor did not exit within timeout")
@@ -146,7 +146,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
         let cmd = CommandBuilder::new("/bin/cat");
         let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn cat");
         let handle = bundle.handle.clone();
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
         let mut sub = handle.output.subscribe();
         let join = tokio::task::spawn_local(bundle.actor.run());
 
@@ -192,7 +192,7 @@ fn input_keystroke_reaches_pty_and_echoes_back() {
         );
 
         // Tear down: shutdown signal must kill cat and reap it.
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         timeout(Duration::from_secs(3), join)
             .await
             .expect("actor did not exit within timeout")
@@ -218,7 +218,7 @@ fn shutdown_signal_terminates_long_running_child() {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "sleep 60"]);
         let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn sleep");
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
         let join = tokio::task::spawn_local(bundle.actor.run());
 
         // Let the child actually start before signaling. A tight
@@ -226,7 +226,7 @@ fn shutdown_signal_terminates_long_running_child() {
         // exercises the kill+reap path more honestly.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         // The reap (Child::wait) plus thread joins are the slowest
         // part; 3 seconds is plenty.
         timeout(Duration::from_secs(3), join)
@@ -249,7 +249,7 @@ fn snapshot_after_pty_output_round_trips_through_fresh_terminal() {
         let bundle =
             PaneActor::new_with_command(printf_cmd("phux-byc.5\\r\\n"), 80, 24).expect("spawn");
         let handle = bundle.handle.clone();
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
 
         // Subscribe before spawn — see comment in `pty_output_...`.
         let mut sub = handle.output.subscribe();
@@ -280,7 +280,7 @@ fn snapshot_after_pty_output_round_trips_through_fresh_terminal() {
         .expect("Terminal");
         replay.vt_write(&snap.bytes);
 
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         timeout(Duration::from_secs(3), join)
             .await
             .expect("actor did not exit within timeout")
@@ -303,7 +303,7 @@ fn broadcast_fanout_delivers_same_bytes_to_two_subscribers() {
         let bundle =
             PaneActor::new_with_command(printf_cmd("fanout-test\\r\\n"), 80, 24).expect("spawn");
         let handle = bundle.handle.clone();
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
 
         // Subscribe BEFORE spawn — see comment in `pty_output_...`.
         // byc.6.4/6.5's two-client fanout depends on this same pattern.
@@ -325,7 +325,7 @@ fn broadcast_fanout_delivers_same_bytes_to_two_subscribers() {
             String::from_utf8_lossy(&acc_b),
         );
 
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         timeout(Duration::from_secs(3), join)
             .await
             .expect("actor did not exit within timeout")
@@ -349,7 +349,7 @@ fn resize_path_does_not_panic_against_pty() {
         cmd.args(["-c", "sleep 30"]);
         let bundle = PaneActor::new_with_command(cmd, 80, 24).expect("spawn");
         let handle = bundle.handle.clone();
-        let shutdown_tx = bundle.shutdown;
+        let token = bundle.token;
         let join = tokio::task::spawn_local(bundle.actor.run());
 
         handle.resize.send((120, 40)).await.expect("resize");
@@ -358,7 +358,7 @@ fn resize_path_does_not_panic_against_pty() {
             tokio::task::yield_now().await;
         }
 
-        shutdown_tx.send(()).expect("send shutdown");
+        token.cancel();
         timeout(Duration::from_secs(3), join)
             .await
             .expect("actor did not exit within timeout")
