@@ -47,13 +47,27 @@ sessions to users — as a TUI inside another terminal, or as a native
 GUI, or as something else entirely.
 
 The protocol described here is the contract between server and client.
-Unlike traditional multiplexers, phux does **not** transport raw VT
-bytes between server and client. The server is the canonical owner of
-every pane's screen state; the wire format carries **structured
-cell-level diffs**. Clients render those diffs directly.
+The wire is **asymmetric**:
 
-This decision is the protocol's defining trait. Everything else follows
-from it.
+- **Server → Client (pane content):** VT bytes. The server forwards the
+  byte stream produced by each pane's PTY (after canonical parsing into
+  the server's `libghostty_vt::Terminal` for state ownership, and after
+  per-client capability downsampling — see §6.2, §8).
+- **Client → Server (input events):** structured `KeyEvent`,
+  `MouseEvent`, `FocusEvent`, paste, and viewport messages — never raw
+  VT bytes (§9).
+
+A `libghostty_vt::Terminal` runs on **both** ends. The server's
+Terminal is the canonical state (authoritative grid, scrollback,
+cursor, modes). The client parses the received VT bytes into its own
+local Terminal for rendering. Cell data, cursor position, and pane
+modes are queried out of libghostty's `Terminal` API on each end; they
+are not separate wire concepts.
+
+This is the protocol's defining trait. Everything else follows from
+it. See [ADR-0013] for the design rationale.
+
+[ADR-0013]: ./ADR/0013-libghostty-bytes-on-wire.md
 
 ---
 
@@ -79,17 +93,20 @@ from it.
 ┌────────────────────────────┐                  ┌─────────────────────────┐
 │        phux server         │ ◄─── transport ►│      phux client        │
 │                            │                  │                         │
-│  Sessions                  │     PANE_DIFF    │  Renderer               │
-│  └─ Windows                │  ───────────────►│  (TUI composes panes    │
-│      └─ Panes              │                  │   into outer screen;    │
-│          ├─ PTY            │     INPUT_KEY    │   GUI renders to        │
-│          └─ Terminal       │  ◄───────────────│   surfaces)             │
-│             (libghostty-vt)│                  │                         │
+│  Sessions                  │   PANE_OUTPUT    │  Renderer               │
+│  └─ Windows                │  (VT bytes, S→C) │  ├─ Terminal            │
+│      └─ Panes              │  ───────────────►│  │   (libghostty-vt;    │
+│          ├─ PTY            │                  │  │    local parse for   │
+│          └─ Terminal       │     INPUT_KEY    │  │    rendering)        │
+│             (libghostty-vt)│  ◄───────────────│  └─ Render loop         │
+│             — canonical    │                  │     (per-row dirty)     │
 └────────────────────────────┘                  └─────────────────────────┘
 ```
 
-The server is authoritative for all state. Clients hold only what they
-currently render, derived entirely from server messages.
+The server is authoritative for all state. The client's local Terminal
+is a mirror, fed by the server's downsampled VT byte stream; the
+client's renderer uses libghostty's `RenderState` per-row dirty
+tracking for efficient redraw. The server is the only source of truth.
 
 ---
 
@@ -217,9 +234,37 @@ ServerCapabilities {
 }
 ```
 
-Servers MUST adapt outbound messages to the client's capabilities. For
-example, a client advertising `Indexed256` MUST never receive truecolor
-RGB cells; the server must downsample.
+Servers MUST adapt outbound `PANE_OUTPUT` (§8) byte streams to each
+client's capabilities. The downsampling is performed as a server-side
+**VT byte stream rewrite**, not a per-cell structured transform:
+
+- **Color.** For a client advertising `Indexed256`, the server MUST
+  rewrite truecolor SGR sequences (`CSI 38;2;R;G;B m` / `CSI 48;2;R;G;B m`)
+  to their indexed equivalents (`CSI 38;5;N m` / `CSI 48;5;N m`) before
+  forwarding. For a client advertising `Indexed16`, the server MUST
+  further quantize to the standard / bright ANSI ranges
+  (`CSI 3N m` / `CSI 9N m` and their background counterparts).
+- **Images.** For each image protocol the client does not advertise
+  (`Sixel`, `KittyGraphics`, `Iterm2`), the server MUST drop or
+  transform the corresponding escape sequences before forwarding so the
+  client never receives bytes for a protocol it cannot render.
+- **Keyboard protocols.** APC keyboard-reply sequences (kitty keyboard
+  protocol, modifyOtherKeys, etc.) MUST be gated to clients advertising
+  the matching `kbd_protocols` bit; the server's canonical Terminal
+  still processes them locally, but they are stripped from the outbound
+  byte stream for clients that did not negotiate the protocol.
+- **Hyperlinks (OSC 8) and other terminal features** SHOULD be stripped
+  when the corresponding capability bit is unset.
+
+The downsampling MUST be deterministic and MUST NOT alter the visible
+grid state on the client beyond what the capability reduction implies.
+See [ADR-0013] for the rationale and the byte-stream rewriter design.
+
+The legacy `RenderingMode` field on `ClientCapabilities` (`Diff` vs.
+`VtReplay`) is **deprecated** as of this revision: with `PANE_OUTPUT`
+carrying VT bytes, every client renders via local libghostty parse —
+there is no longer a structured-diff alternative. Decoders MUST accept
+the field for forward-compat and SHOULD ignore its value.
 
 ---
 
@@ -263,7 +308,7 @@ Within each half:
 | 0x80  | `HELLO_OK`        | §6.1      |
 | 0x81  | `ATTACHED`        | §13       |
 | 0x82  | `DETACHED`        | §7.3      |
-| 0x90  | `PANE_DIFF`       | §8        |
+| 0x90  | `PANE_OUTPUT`     | §8        |
 | 0x91  | `PANE_SNAPSHOT`   | §8.4      |
 | 0x92  | `PANE_RESIZED`    | §10.5     |
 | 0xA0  | `PANE_OPENED`     | §10.2     |
@@ -282,6 +327,14 @@ Within each half:
 | 0xC0  | `COMMAND_RESULT`  | §11       |
 | 0xC1  | `ERROR`           | §14       |
 | 0xFF  | `PONG`            | §7.5      |
+
+> **Note (deprecation).** Earlier drafts of this SPEC carried
+> `PANE_DIFF` at `0x90` (S → C) with a structured ops body. It is
+> **superseded** by `PANE_OUTPUT` at the same discriminant per
+> [ADR-0013]. The discriminant slot is reused; the body shape and
+> semantics are entirely different (VT bytes, not `DiffOp` list).
+> Implementations of earlier drafts MUST be updated; there is no
+> on-wire compatibility between `PANE_DIFF` and `PANE_OUTPUT`.
 
 ### 7.3 DETACH / DETACHED
 
@@ -409,195 +462,147 @@ AlertKind = enum {
 
 ## 8. Pane state synchronization — the hot path
 
-This section is the protocol's centerpiece. The server owns each pane's
-canonical grid (in a `libghostty_vt::Terminal`). Clients render that
-grid. The protocol carries the changes between them.
+This section is the protocol's centerpiece. The server's
+`libghostty_vt::Terminal` is the **canonical** owner of each pane's
+grid, scrollback, cursor, and modes. The client runs its own local
+`libghostty_vt::Terminal` as a rendering mirror. Pane content flows
+between them as a **stream of VT bytes**, not as structured diffs. See
+[ADR-0013] for the design rationale (libghostty-bytes-on-wire).
 
 ### 8.1 The frame model
 
-Each pane has a monotonically increasing `frame_id`, a `u64`. Frame `0`
-is the empty grid at pane creation; subsequent frames represent the
-state of the grid after some change.
-
-The server emits frames at most at a per-pane refresh-rate cap (default
-60 Hz, configurable, may be lowered for background panes). Between
-frames, output is coalesced into the next frame.
-
-A `PANE_DIFF` describes the transition from one frame to the next:
+A pane's content on the wire is a sequence of `PANE_OUTPUT` frames:
 
 ```
-PANE_DIFF {
+PANE_OUTPUT {
     pane_id: PaneId,
-    frame_id: u64,           // the frame this produces
-    base_frame_id: u64,      // the frame this applies on top of; 0 = empty
-    ops: list<DiffOp>,
-    cursor: CursorState,
-    modes: PaneModes,
-    revision: u8,            // 0 today; reserved for compression schemes
+    seq: u64,        // monotonic per-pane sequence id, for ack /
+                     //   predictive-echo correlation (see §12)
+    bytes: bytes,    // VT bytes from the PTY (canonicalised by the
+                     //   server's libghostty Terminal and possibly
+                     //   downsampled for this client's caps per §6.2)
 }
 ```
 
-A `PANE_SNAPSHOT` (§8.4) is a self-contained frame: a full grid plus
-scrollback. It is functionally equivalent to a `PANE_DIFF` whose
-`base_frame_id` is `0` and whose `ops` describe the entire grid.
+The flow is:
+
+1. The pane's PTY emits VT bytes.
+2. The server feeds those bytes to the pane's canonical
+   `libghostty_vt::Terminal`, which becomes the authoritative parse
+   (grid, scrollback, cursor, modes).
+3. The server forwards bytes to each attached client, having applied
+   per-client capability downsampling (§6.2) — for example rewriting
+   truecolor SGR sequences to 256-color or 16-color forms, or stripping
+   unsupported image escape sequences.
+4. The client feeds the received bytes into its own
+   `libghostty_vt::Terminal`. Both ends now hold equivalent (post-
+   downsampling) grid state.
+
+Coalescing remains a server concern: the server SHOULD batch bytes
+between transport writes, and MAY rate-limit the per-pane output
+stream (default cap 60 Hz of `PANE_OUTPUT` emissions; configurable),
+but the emissions themselves carry raw PTY bytes — no structured frame
+boundaries, no `frame_id` / `base_frame_id` relationship, no
+per-emission cursor/modes block. Frame identity is replaced by the
+sequence number `seq`, used solely for acknowledgement (§12) and
+predictive-echo correlation; `seq` carries no structural meaning.
+
+A `PANE_SNAPSHOT` (§8.4) is a self-contained replay: a synthesized VT
+byte sequence that, when applied to a fresh Terminal of the matching
+dimensions, reproduces the current grid (and optionally the scrollback).
 
 ### 8.2 Cells
 
-The unit on the wire is the **cell**: one grapheme cluster plus rendering
-attributes, fully resolved server-side. There is no SGR ambiguity in
-transit.
-
-```
-Cell {
-    text: GraphemeCluster,         // 1+ codepoints
-    fg: Color,
-    bg: Color,
-    underline: Underline,
-    underline_color: Color,
-    flags: CellFlags,              // bitset
-    hyperlink_id: optional<u32>,
-}
-
-GraphemeCluster = list<u32>        // codepoints; length-prefixed
-
-Color = tagged_union {
-    DEFAULT,                       // foreground or background "default"
-    INDEXED(u8),                   // 0..=255, terminal palette
-    RGB(u8, u8, u8),               // truecolor; servers MUST NOT emit this
-                                   //   to clients without TrueColor cap
-}
-
-Underline = enum {
-    NONE = 0, SINGLE = 1, DOUBLE = 2, CURLY = 3, DOTTED = 4, DASHED = 5,
-}
-
-CellFlags = bitset {
-    BOLD              = 0x0001,
-    FAINT             = 0x0002,
-    ITALIC            = 0x0004,
-    BLINK_SLOW        = 0x0008,
-    BLINK_FAST        = 0x0010,
-    REVERSE           = 0x0020,
-    INVISIBLE         = 0x0040,
-    STRIKETHROUGH     = 0x0080,
-    OVERLINED         = 0x0100,
-    WIDE_LEFT         = 0x0200,   // first half of a wide character
-    WIDE_RIGHT        = 0x0400,   // second half (always follows WIDE_LEFT)
-    PROTECTED         = 0x0800,
-}
-```
+Cells are not wire-level concepts in phux. Each end's
+`libghostty_vt::Terminal` owns its own grid representation. Clients
+that need rendered cell data (for layout, copy/paste, search) use
+libghostty's `Terminal::grid_ref()` and related APIs to query their
+local Terminal; they do not reconstruct cells from wire frames. Cell
+attribute encoding on the wire is whatever the PTY's byte stream
+produces (SGR sequences, OSC 8 hyperlinks, etc.), as canonicalised by
+the server's Terminal and downsampled per the client's capabilities.
 
 ### 8.3 Diff operations
 
-```
-DiffOp = tagged_union {
-    CELL_RUN     {  row: u16, col: u16,
-                    attrs: CellAttrs,
-                    cells: list<TextRun>  },
-    REPEAT       {  row: u16, col: u16,
-                    cell: Cell,
-                    count: u16  },
-    CLEAR        {  row: u16, col: u16, count: u16  },
-    ERASE_LINE   {  row: u16, mode: EraseLineMode  },
-    SCROLL_UP    {  region: ScrollRegion, lines: u16  },
-    SCROLL_DOWN  {  region: ScrollRegion, lines: u16  },
-    HYPERLINK    {  id: u32, uri: str, params: str  },
-    IMAGE        {  placement: ImagePlacement  },
-}
+Diff operations are not present on the wire. See [ADR-0013]. The PTY's
+own byte stream IS the canonical delta from one observed state to the
+next; libghostty's VT parser applies it deterministically and
+identically on the server (canonical) and on each client (mirror).
 
-CellAttrs = Cell with the `text` field omitted; describes a run of cells
-that share rendering attributes.
+Local rendering optimisation — skipping unchanged rows on redraw — is a
+**client-local** concern using libghostty's `RenderState` per-row
+dirty tracking. It is invisible to the wire format. There is no notion
+of `CELL_RUN`, `REPEAT`, `CLEAR`, `ERASE_LINE`, `SCROLL_UP`, or
+`SCROLL_DOWN` as wire operations; those concepts live inside
+libghostty's parser implementation.
 
-TextRun = GraphemeCluster
-
-EraseLineMode = enum {
-    LEFT_OF_CURSOR = 0,
-    RIGHT_OF_CURSOR = 1,
-    ALL = 2,
-}
-
-ScrollRegion = { top: u16, bottom: u16, left: u16, right: u16 }
-```
-
-Notes on the operation set:
-
-- `CELL_RUN` is the dominant op: a contiguous horizontal run of cells
-  that share attributes. `cells` is a list of grapheme clusters, one per
-  cell position.
-- `REPEAT` is run-length encoding for cases where the same cell repeats
-  (a blank line, a box of dashes).
-- `CLEAR` zeros a horizontal span with default attributes; smaller wire
-  than a CELL_RUN of spaces.
-- `SCROLL_UP` / `SCROLL_DOWN` are **preserved as semantic operations**.
-  Clients with scrollback can keep their history intact. This is one of
-  the explicit wins over tmux's tty.c, which clobbers history on scroll.
-- `HYPERLINK` registers a hyperlink in a per-pane intern table referenced
-  by `hyperlink_id` on cells.
-- `IMAGE` is reserved for sixel / kitty graphics. Concrete encoding in
-  v0.2.
+Hyperlinks (OSC 8) and image escape sequences (sixel, kitty graphics,
+iTerm2) flow as bytes within the same `PANE_OUTPUT` stream, subject
+to the capability gating in §6.2.
 
 ### 8.4 Snapshots
 
 ```
 PANE_SNAPSHOT {
     pane_id: PaneId,
-    frame_id: u64,
-    grid: Grid,
-    scrollback: optional<Scrollback>,  // present iff the client opted in
-    cursor: CursorState,
-    modes: PaneModes,
-}
-
-Grid {
     cols: u16,
     rows: u16,
-    cells: list<DiffOp>,   // typically a sequence of CELL_RUN covering the grid
-}
-
-Scrollback {
-    compression: CompressionKind,  // NONE | LZ4 | ZSTD
-    rows: u32,                     // number of scrollback rows
-    data: bytes,                   // compressed payload of CELL_RUN ops
+    vt_replay_bytes: bytes,
+    scrollback_bytes: optional<bytes>,
 }
 ```
+
+`vt_replay_bytes` is a self-contained VT byte sequence synthesized by
+the server from its canonical Terminal's current grid state. When the
+client writes the bytes to a fresh `libghostty_vt::Terminal` of the
+declared `cols × rows`, the result MUST reproduce the server's grid
+state at the moment of snapshot emission. The byte sequence is
+**Mosh-style** and **opaque** to the client: the client MUST NOT
+attempt to parse or rewrite it beyond feeding it to its Terminal.
+
+Servers SHOULD produce `vt_replay_bytes` whose effect is independent
+of any prior Terminal state. A typical implementation begins with
+cursor-home + erase-display (resetting visible screen), emits per-row
+SGR and cell text, ends with a final cursor-position move and the
+appropriate DECSET/DECRST pairs to re-establish modes, and avoids
+escape sequences whose meaning depends on prior parser state. The
+exact construction is implementation-defined; only the **end result**
+(client Terminal grid == server Terminal grid at snapshot time) is
+normative.
+
+`scrollback_bytes` is present iff the attaching client requested
+scrollback replay (`ATTACH.request_scrollback = true`, §13), bounded
+by `ATTACH.scrollback_limit_lines`. It is also an opaque VT byte
+sequence; when applied to a fresh Terminal **before** `vt_replay_bytes`
+(or under whatever construction the server chooses), it reproduces
+the requested scrollback history.
 
 Servers emit `PANE_SNAPSHOT` when:
 
 1. A client first attaches (§13).
-2. Backpressure forced the server to drop intermediate diffs (§12).
-3. The grid resized (§10.5).
+2. Backpressure forced the server to compact pending output and resume
+   from a known state (§12).
+3. The grid resized in a way that requires full retransmission (§10.5).
 4. The protocol requires it for correctness in any future case.
+
+After a `PANE_SNAPSHOT`, the next `PANE_OUTPUT` for the same pane
+continues the live byte stream. The client's local Terminal is in
+sync after applying the snapshot bytes and before consuming the next
+`PANE_OUTPUT`.
 
 ### 8.5 Cursor and modes
 
-Cursor state and pane-wide modes ride along with every diff. They are
-small and changing them mid-frame is common; pulling them out into
-separate messages would increase wire chatter for no benefit.
+Cursor state (position, visibility, shape, blink) and pane modes
+(altscreen, bracketed paste, app cursor keys, mouse protocol,
+focus reporting, origin mode, etc.) live entirely inside each end's
+`libghostty_vt::Terminal`. They are **not** separate wire concepts.
 
-```
-CursorState {
-    row: u16,
-    col: u16,
-    visible: bool,
-    shape: CursorShape,    // BLOCK | BAR | UNDERLINE
-    blink: bool,
-}
-
-PaneModes = bitset {
-    ALTSCREEN_ACTIVE  = 0x0001,
-    BRACKETED_PASTE   = 0x0002,
-    APP_CURSOR_KEYS   = 0x0004,
-    APP_KEYPAD        = 0x0008,
-    MOUSE_PROTOCOL    = 0x00F0,  // 4 bits of MouseProtocol enum
-    MOUSE_ENCODING    = 0x0F00,  // 4 bits of MouseEncoding enum
-    FOCUS_REPORTING   = 0x1000,
-    ORIGIN_MODE       = 0x2000,
-}
-```
-
-A pane's `modes` are part of the protocol because clients need to know
-them — for example, a client must know whether `MOUSE_PROTOCOL` is
-active before forwarding pointer events.
+Clients that need cursor or mode state — for example to render a
+local cursor overlay, to decide whether to forward mouse events, or
+to enable bracketed paste in the outer terminal — MUST query their
+local Terminal via libghostty's API (`Terminal::screen()`,
+`Terminal::modes()`, etc.). They MUST NOT expect a `CursorState` or
+`PaneModes` block in `PANE_OUTPUT` or `PANE_SNAPSHOT`.
 
 ---
 
@@ -1193,12 +1198,25 @@ queue exceeds its bound is forcibly disconnected with
 
 When a client sends `ATTACH`, the server's response sequence is:
 
-1. `ATTACHED { snapshot: SessionSnapshot }` — full graph of sessions,
-   windows, panes, layouts, the attaching client's initial focus, and
-   per-pane size.
+1. `ATTACHED { snapshot: SessionSnapshot, initial_client_id }` — full
+   graph of sessions, windows, panes, layouts, the attaching client's
+   initial focus, and per-pane size. This is **session graph metadata
+   only**; it carries no pane content.
 2. For each pane in the focused window of the targeted session, one
-   `PANE_SNAPSHOT` with grid and (optionally) scrollback.
-3. Subsequent `PANE_DIFF` messages flow live.
+   `PANE_SNAPSHOT { pane_id, cols, rows, vt_replay_bytes, scrollback_bytes? }`
+   per §8.4. The client applies `scrollback_bytes` (if present) and
+   then `vt_replay_bytes` to a fresh `libghostty_vt::Terminal` of the
+   declared dimensions; the client's local Terminal is then in sync
+   with the server's canonical Terminal for that pane.
+3. Subsequent `PANE_OUTPUT { pane_id, seq, bytes }` messages flow
+   live, continuing the per-pane VT byte stream from where the
+   snapshot left off.
+
+The per-pane `seq` numbering used by `PANE_OUTPUT` resumes from the
+server's chosen base after snapshot emission; clients MUST treat the
+first `PANE_OUTPUT` after a `PANE_SNAPSHOT` as authoritative for the
+sequence base and MUST NOT assume `seq` continuity across the
+snapshot boundary. See [ADR-0013] for the bytes-on-wire rationale.
 
 ```
 ATTACH {
@@ -1303,7 +1321,7 @@ An implementation conforms to this specification if:
    set of REQUIRED messages is:
    - `HELLO`, `HELLO_OK`, `ATTACH`, `ATTACHED`, `DETACH`, `DETACHED`,
      `PING`, `PONG`, `ERROR`,
-   - `PANE_DIFF`, `PANE_SNAPSHOT`, `PANE_RESIZED`,
+   - `PANE_OUTPUT`, `PANE_SNAPSHOT`, `PANE_RESIZED`,
    - `INPUT_KEY`, `INPUT_PASTE`, `VIEWPORT_RESIZE`, `FRAME_ACK`,
    - `PANE_OPENED`, `PANE_CLOSED`,
      `WINDOW_OPENED`, `WINDOW_CLOSED`,
@@ -1392,3 +1410,4 @@ against this document.
 |---------|------------|----------------------------------------------|
 | 0.1.0-draft | 2026-05-24 | Initial draft. Subject to change.            |
 | 0.1.0-draft.2 | 2026-05-24 | §7.7, §9, §10.5 revised to mirror libghostty input/OSC APIs. ADR-0006. |
+| 0.1.0-draft.3 | 2026-05-25 | §8 rewritten for bytes-on-wire pane state sync; `PANE_DIFF` superseded by `PANE_OUTPUT`; `PANE_SNAPSHOT` carries `vt_replay_bytes`; §6.2 capability downsampling described as a server-side VT byte stream rewrite; §13 replay sequence and §16 conformance updated. ADR-0013. |
