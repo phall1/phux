@@ -284,13 +284,37 @@ impl std::fmt::Debug for PaneActorBundle {
 
 /// Resolve the default shell. Reads `$SHELL`; falls back to `/bin/sh`
 /// (POSIX-guaranteed) when unset.
+///
+/// Sets `TERM=xterm-256color` on the spawned process. This is deliberate
+/// (phux-7vx): we previously advertised `TERM=ghostty`, but ghostty's
+/// terminfo carries the `fullkbd` extended capability that ncurses
+/// applications read as "kitty keyboard protocol available." Several
+/// ncurses TUIs (htop is the canonical reproducer) then push the kitty
+/// progressive-enhancement flags on startup via `CSI > N u`. libghostty's
+/// per-pane `Terminal` honours that push, after which the per-pane key
+/// encoder correctly emits CSI-u sequences (e.g. `\x1b[113;1u` for `q`).
+/// The trouble is the round-trip on the app's side: htop in particular
+/// does NOT actually parse incoming CSI-u for the keys it cares about,
+/// so the user's `q` quit no longer reaches htop's key dispatch.
+///
+/// `xterm-256color` is the universally-recognised safe baseline: 256
+/// colours and the standard xterm key vocabulary, no kitty advertisement.
+/// Apps that want kitty mode still get it — they have to enable it
+/// explicitly with `CSI > N u`, at which point the encoder pivots to
+/// CSI-u (validated in `tests/htop_keys.rs`). The encoder's terminal-
+/// state awareness is unchanged; only the default advertisement is.
+///
+/// Trade-off: phux loses ghostty-specific terminfo extensions (sixel,
+/// kitty graphics caps as advertised by terminfo, the ghostty-specific
+/// SGR colour extensions). Those features are still reachable when the
+/// app opts in directly. When phux's own input/output layer fully
+/// supports the kitty keyboard protocol round-trip, revert this to
+/// `ghostty` (or expose a config switch).
 #[must_use]
 pub fn default_shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
     let mut cmd = CommandBuilder::new(shell);
-    // libghostty advertises itself as TERM=ghostty; programs that don't
-    // recognize it gracefully degrade.
-    cmd.env("TERM", "ghostty");
+    cmd.env("TERM", "xterm-256color");
     cmd
 }
 
