@@ -497,18 +497,26 @@ Hook points (initial):
 
 ## 10. Recording and playback
 
-> **Status:** Design intent. Not yet implemented as of 2026-05-25.
-> Neither `phux capture --record` nor `phux play` exists; no
-> asciinema writer or reader in the crates today. No tickets filed.
+> **Status:** Design — implementation pending a ticket filed during the
+> ADR-0013 follow-up sweep. Neither `phux capture --record` nor
+> `phux play` exists in the crates today, but the underlying
+> mechanism is now mechanical: under ADR-0013 the pane content on the
+> wire *is* the byte stream we would want to record.
 
 `phux capture --record TARGET --out FILE.cast` records a pane's session
 to an [asciinema] v3-compatible file. v3 is a strict superset of v2 in
 the features we need; players that only know v2 read v3 with reduced
 fidelity rather than failing.
 
-Replay is `phux play FILE.cast` — a thin wrapper that streams the cast
-into a new pane (via INPUT_RAW). We do not ship a full player; the
-ecosystem has plenty.
+The record path is a tee on the server's outbound `PANE_OUTPUT` byte
+stream for the target pane, wrapped in asciinema timing metadata.
+There is no diff-to-bytes conversion step — the bytes are already
+what we need.
+
+Replay is `phux play FILE.cast` — a thin wrapper that streams the
+recorded bytes into a new pane (via `INPUT_RAW`, where the server's
+canonical `Terminal` parses them like any other PTY output). We do
+not ship a full player; the ecosystem has plenty.
 
 We do not record per-keystroke timing client-side; recordings reflect
 output as the server emitted it. This matches what users expect and
@@ -599,19 +607,26 @@ require breaking changes:
 
 - **Resilient remote transport** (zmosh-style UDP/SSP). Hooks into the
   `Transport` abstraction in `SPEC.md` §4.
-- **Native GUI client** (libghostty surface). Talks the same protocol;
-  see ADR-0002.
+- **Native GUI client** (libghostty surface). Talks the same protocol
+  as the TUI client — the client's `libghostty_vt::Terminal` already
+  parses `PANE_OUTPUT` bytes locally (ADR-0013); a GUI client swaps
+  the TUI's `RenderState`-to-VT renderer for a `RenderState`-to-GPU
+  renderer and reuses everything else.
 - **Multi-user shared sessions.** Today's protocol already supports
   multiple clients per session; ACL and identity will be a future
   authenticated transport addition.
 - **Tabbed layouts** (nested tab containers). `SPEC.md` §10.3 reserves
   the `TABBED` layout node.
-- **Image protocols** (sixel, kitty graphics). `SPEC.md` §8.3 reserves
-  `IMAGE` diff ops.
+- **Image protocols** (sixel, kitty graphics). Under ADR-0013 these
+  ride on the `PANE_OUTPUT` byte stream like any other VT sequence;
+  per-client gating happens in the server's capability rewriter
+  (SPEC §6.2). The `Sixel` / `KittyGraphics` / `Iterm2` capability
+  bits already exist; the work is in the rewriter, not the wire
+  format.
 - **tmux control mode (CC) frontend.** Optional adapter that would let
   a CC-aware terminal (iTerm2 today; Ghostty when 1.4+ binds its
   parser to the GUI) render phux panes as native splits of that
-  terminal. Native cell-diff protocol stays primary and strictly more
-  capable; CC is reserved as a compatibility option, not a roadmap
-  commitment. See ADR-0010 and the `CC_FRONTEND` capability bit in
-  `SPEC.md` §6.2.
+  terminal. The native byte-stream protocol (ADR-0013) stays primary
+  and strictly more capable; CC is reserved as a compatibility
+  option, not a roadmap commitment. See ADR-0010 and the
+  `CC_FRONTEND` capability bit in `SPEC.md` §6.2.

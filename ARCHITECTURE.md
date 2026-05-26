@@ -1,5 +1,14 @@
 # Architecture
 
+> **Updated 2026-05-25 for [ADR-0013](./ADR/0013-libghostty-bytes-on-wire.md).**
+> Pane content moved from a structured cell-level diff to VT bytes on the
+> wire. Input remains structured. Both server and client now run
+> `libghostty_vt::Terminal`. References to `DiffOp`, `DiffMirror`, and
+> "diff stream / diff emission" in this document have been replaced with
+> their byte-forwarding equivalents; obsolete modules (`phux-protocol::diff`,
+> `phux-client::mirror`) are scheduled for deletion in the Wave 2 refactor
+> and are not described here.
+
 This document describes phux's internal structure: the process model, the
 data model, threading, persistence, and testing strategy. The wire
 protocol is described separately in [`SPEC.md`](./SPEC.md) — that is the
@@ -44,13 +53,15 @@ should never have to think about a daemon.
                   │          │           │
             ┌─────▼───┐  ┌───▼────┐  ┌───▼────┐
             │ server  │  │ client │  │ config │
-            └──┬────┬─┘  └───┬────┘  └────────┘
-               │    │        │
-       ┌───────▼─┐  │   ┌────▼──────────┐
-       │  core   │  └──►│   protocol    │──► libghostty-vt
-       └─────────┘      │ (codec, diff, │
-                        │  input types) │
-                        └───────────────┘
+            └──┬────┬─┘  └─┬──┬───┘  └────────┘
+               │    │      │  │
+               │    │      │  └─────────────────┐
+       ┌───────▼─┐  │   ┌──▼────────────┐       │
+       │  core   │  └──►│   protocol    │──► libghostty-vt ◄┘
+       └─────────┘      │ (codec, input │       (client also links;
+                        │  events, wire │        runs a local Terminal
+                        │  envelopes)   │        per attached pane —
+                        └───────────────┘        ADR-0013)
 ```
 
 Two boundaries are load-bearing:
@@ -68,12 +79,41 @@ Two boundaries are load-bearing:
    default-features-off shell exists so `crates.io`/`docs.rs` see a
    git-dep-free surface (libghostty-vt is a git-only dep today).
 
-`server` and `client` both depend on `protocol`. `server` additionally
-drives `libghostty-vt`'s encoders and reads `RenderState` from
-`Terminal`; `client` does not link libghostty.
+`server` and `client` both depend on `protocol`. Both also depend on
+`libghostty-vt` directly: the server's `Terminal` is the canonical
+state for each pane and drives the structured-input encoders
+(ADR-0006, ADR-0008); the client's `Terminal` is a local replica fed
+by `PANE_OUTPUT` bytes for the panes that client has attached, with
+`RenderState` providing per-row dirty tracking for efficient redraw.
+See ADR-0013 and `research/2026-05-25-libghostty-renderstate.md` for
+the renderer-side contract on both ends.
 
 `phux-config` is a sibling of `core` and is consumed by the binary and
 the client.
+
+## Wire protocol: bytes on the wire (ADR-0013)
+
+The protocol is asymmetric. Server-to-client *pane content* is a
+stream of VT bytes (`PANE_OUTPUT { pane_id, seq, bytes }`); the
+server forwards what the PTY emitted, after a per-client capability
+rewrite. Client-to-server *input* is structured (`INPUT_KEY`,
+`INPUT_MOUSE`, `INPUT_FOCUS`, `INPUT_PASTE`, `INPUT_RAW`), built from
+libghostty's input atoms per ADR-0006 / ADR-0008. Session/window/pane
+lifecycle and commands stay structured — the session graph is phux's
+vocabulary, not libghostty's. See [SPEC.md](./SPEC.md) §8 for the
+wire shape and ADR-0013 for the rationale.
+
+The shape follows libghostty's interface: `Terminal::vt_write(&[u8])`
+is the **only** way to feed grid content into a `Terminal`, and
+structured readout (`grid_ref()`, `mode()`, `cursor_*`, `RenderState`)
+is the only way to draw from one. Carrying bytes on the wire means
+each end can keep a `Terminal` as its source of truth and the
+protocol stops mirroring libghostty's grid model in a parallel
+structure. Per-client capability downsampling moves from a per-cell
+operation to a server-side VT byte-stream rewriter (SGR rewriting for
+truecolor → 256-color → 16-color, OSC 8 stripping, image-protocol
+gating, kitty-keyboard gating) sitting between the canonical PTY
+stream and each subscribed client's send queue.
 
 ## Data model
 
@@ -160,10 +200,11 @@ fn main() -> std::io::Result<()> {
 
 Hot paths that *can* go multi-threaded later if needed:
 
-- PTY-byte-to-terminal feed and diff computation per pane. Each pane is
+- PTY-byte feed to the canonical `Terminal` per pane plus per-client
+  capability rewriting on outbound `PANE_OUTPUT` frames. Each pane is
   independent; trivial to fan out via `spawn_blocking` or a dedicated
   worker thread per pane.
-- Compression of large snapshots before transmission.
+- Compression of large `PANE_SNAPSHOT` bodies before transmission.
 
 We do not parallelize on day one. Premature.
 
@@ -186,11 +227,15 @@ additive:
   existing SSH paths.
 
 Predictive local echo (the Mosh property users actually feel) is
-implemented in `phux-client` against the diff mirror, not in the
-transport. It reconciles on `FRAME_ACK` (SPEC §6) and works over any
-transport — including the Unix socket. Treating it as a client feature
-rather than a transport feature is deliberate: shipping it in v0.1
-unlocks the most visible Mosh-class UX without waiting for QUIC.
+implemented in `phux-client` against the client's local `Terminal`,
+not in the transport. The client speculatively `vt_write`s its own
+keystrokes into a side `Terminal` (or applies a small overlay on top
+of the canonical replica) and reconciles on `FRAME_ACK` (SPEC §6),
+when the server's bytes for those keystrokes arrive. It works over
+any transport — including the Unix socket. Treating it as a client
+feature rather than a transport feature is deliberate: shipping it
+in v0.1 unlocks the most visible Mosh-class UX without waiting for
+QUIC.
 
 See ADR-0007 for the full forward-compat invariants (URI-shaped
 session IDs, hub-and-spoke satellite topology, per-pane encoder
@@ -233,7 +278,7 @@ file rolling writer. The filter is configured via:
 Spans we instrument by convention:
 
 - `attach` (client_id, session_id) — wraps an attachment for its lifetime.
-- `pane` (pane_id) — wraps PTY pump and diff emission per pane.
+- `pane` (pane_id) — wraps PTY pump and `PANE_OUTPUT` fanout per pane.
 - `command` (request_id, kind) — wraps a `COMMAND` dispatch.
 
 The server exposes a `phux server status --json` subcommand for runtime
@@ -252,18 +297,24 @@ crate; do not retrofit older layouts onto new work.
 src/
   lib.rs              — re-exports, top-level docs, PROTOCOL_VERSION
   ids.rs              — SessionId, WindowId, PaneId, ClientId, FrameId
-  diff/               — cell-level diff (SPEC §8)
-    cell.rs, grid.rs, op.rs, compute.rs, mod.rs
   input/              — INPUT_* event types (SPEC §9)
     key.rs, mouse.rs, focus.rs, paste.rs, mod.rs
   wire/               — TLV codec (SPEC Appendix A)
     frame.rs          — FrameKind + length-prefix framing
-    encode.rs, decode.rs, field.rs, diff.rs, info.rs, error.rs
+    encode.rs, decode.rs, field.rs, info.rs, error.rs
 ```
 
-The `diff`, `input`, and `wire` modules are gated behind the `server`
-cargo feature so the no-feature shell compiles without
-`libghostty-vt`. See `lib.rs` for the docs.rs / crates.io rationale.
+The `input` and `wire` modules are gated behind the `server` cargo
+feature so the no-feature shell compiles without `libghostty-vt`.
+See `lib.rs` for the docs.rs / crates.io rationale.
+
+**Pending removal (Wave 2 refactor under ADR-0013):** the `diff/`
+module (`cell.rs`, `grid.rs`, `op.rs`, `compute.rs`) and
+`wire/diff.rs` are still in tree at the time of writing but no longer
+describe the wire — `PANE_OUTPUT` carries raw VT bytes. They will be
+deleted alongside the client-side `mirror/` module in the refactor
+that lands the bytes-on-wire shape. Do not build new work on top of
+them.
 
 ### `phux-core`
 
@@ -288,12 +339,15 @@ src/
   runtime.rs          — tokio current-thread + UDS listener + accept loop
   state.rs            — ServerState, SharedState, attach/detach, subscribers
   id_bridge.rs        — core SessionId <-> wire SessionId (u32)
-  grid.rs             — capture phux_protocol::Grid from libghostty Terminal
+  grid.rs             — legacy: captures phux_protocol::Grid via RenderState;
+                        slated for replacement by a snapshot-bytes synthesizer
+                        (see research/2026-05-25-libghostty-renderstate.md §7)
   input/              — server-side encoders bridging wire input -> PTY bytes
     key.rs, mouse.rs, focus.rs, paste.rs, mod.rs
 examples/
-  one_pane.rs         — PTY child -> Terminal -> diff stream (phux-bc1.2)
-  diff_spike.rs       — diff codec smoke
+  one_pane.rs         — PTY child -> Terminal -> PANE_OUTPUT (will be rewritten
+                        in the bytes-on-wire refactor; legacy diff stream today)
+  diff_spike.rs       — legacy codec smoke; removed in the refactor
 benches/capture.rs    — capture iterator throughput
 ```
 
@@ -302,14 +356,24 @@ future work; their absence here is intentional, not drift.
 
 ### `phux-client`
 
+Under ADR-0013 the client owns a `libghostty_vt::Terminal` per
+attached pane and a `RenderState` per pane for incremental redraw.
+The existing `mirror/` module (a hand-rolled Grid that applied
+`DiffOp`s) is **legacy** — slated for deletion in the Wave 2
+refactor. The new layout will be:
+
 ```
 src/
   lib.rs              — re-exports
-  mirror/             — client-side Grid that applies DiffOps
-    state.rs, apply.rs, snapshot.rs, mod.rs
+  pane/               — per-pane Terminal + RenderState bookkeeping (pending)
+  render/             — RenderState-driven incremental redraw (pending)
+  attach/             — frame loop, ATTACHED handling, predictive echo (partial)
 ```
 
-No renderer, no input pipeline, no chrome composer yet.
+Today's tree still contains `mirror/` (legacy) and an `attach/render.rs`
+that emits VT from a `DiffMirror`. Both go away with the refactor.
+See `research/2026-05-25-libghostty-renderstate.md` for the contract
+the new modules implement.
 
 ### `phux-config`
 
@@ -354,8 +418,13 @@ Three layers:
    - Protocol codec roundtrip (encode → decode → equal).
    - State machine invariants (e.g. "after any sequence of Commands, the
      layout tree is well-formed").
-   - Diff correctness: applying diffs to a snapshot reproduces the next
-     snapshot.
+   - Replay equivalence: for any PTY byte stream `bs`, writing `bs` to a
+     fresh `Terminal` on the client reproduces the same visible grid as
+     the server's `Terminal` saw, up to the documented downsampling
+     rewrites. The snapshot-on-attach synthesis algorithm
+     (research/2026-05-25-libghostty-renderstate.md §7) is checked the
+     same way: synthesize, replay into a fresh `Terminal`, compare
+     `RenderState` snapshots.
 3. **Snapshot tests** (`insta`) for:
    - Wire bytes of representative messages, so accidental format changes
      are loud.
