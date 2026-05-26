@@ -635,13 +635,33 @@ async fn resolve_attach_target(
             resolved
         }
         AttachTarget::Last => {
-            send_error(
-                out_tx,
-                ErrorCode::SessionNotFound,
-                "AttachTarget::Last is not yet implemented",
-            )
-            .await;
-            None
+            // Resolve against the global per-server "last attached
+            // session" slot (see ServerState::last_attached_session).
+            // If a prior attach exists and that session is still live
+            // in the registry, return its name; otherwise treat as
+            // "not found" — matches SPEC §13's allowance that
+            // "implementations without prior-attach memory MAY return
+            // SESSION_NOT_FOUND". We follow the same code path when
+            // the prior session has been killed since the last attach.
+            //
+            // TODO(error-codes): introduce ErrorCode::NoLastSession
+            // (and a sibling variant for "last session killed") so
+            // clients can distinguish "no history" from "history is
+            // stale" without parsing the message string. Additive
+            // ErrorCode work is intentionally out of scope here.
+            let resolved = state.with(|s| {
+                s.last_attached_session()
+                    .and_then(|sid| s.registry.session(sid).map(|sess| sess.name.clone()))
+            });
+            if resolved.is_none() {
+                send_error(
+                    out_tx,
+                    ErrorCode::SessionNotFound,
+                    "no prior-attach memory: AttachTarget::Last has nothing to resolve",
+                )
+                .await;
+            }
+            resolved
         }
         AttachTarget::CreateIfMissing { .. } => {
             send_error(
@@ -678,6 +698,13 @@ fn prepare_attach(
 ) -> Result<AttachPrepared, crate::state::AttachError> {
     state.with_mut(|s| {
         let sid = s.attach(client_id, session_name, out_tx.clone())?;
+        // Record success into the global "last attached" slot before
+        // we build the snapshot. The order doesn't matter for
+        // correctness (we're still inside the with_mut critical
+        // section), but doing it here keeps the recording adjacent to
+        // the attach call that justified it — easier to reason about
+        // when reading the code.
+        s.set_last_attached_session(sid);
         let snapshot = s
             .build_session_snapshot(sid)
             .ok_or_else(|| crate::state::AttachError::UnknownSession(session_name.to_owned()))?;
@@ -840,6 +867,47 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
         if let Some(pane) = s.registry.pane_mut(pane_id) {
             pane.dims = (viewport.cols, viewport.rows);
         }
+        // Fan the resize out to the PaneActor so libghostty's
+        // `Terminal::set_size` and the PTY `winsize` ioctl get
+        // updated. byc.5 added the `resize` channel on `PaneHandle`;
+        // this is the missing connector (4hp ↔ byc.5).
+        //
+        // We hold the state lock here so `try_send` is the right
+        // primitive: VIEWPORT_RESIZE is fire-and-forget per SPEC §10.5,
+        // and an `.await` inside `with_mut` would deadlock the
+        // single-threaded runtime. On send failure (actor terminated,
+        // mailbox full — both rare; the resize mailbox is sized at
+        // `DEFAULT_INPUT_MAILBOX` = 64), we log and continue: a
+        // dropped resize is recoverable (the next resize, or the
+        // next snapshot, re-syncs) and SPEC §10.5 explicitly classes
+        // VIEWPORT_RESIZE as best-effort.
+        if let Some(handle) = s.panes.get(&pane_id) {
+            match handle.resize.try_send((viewport.cols, viewport.rows)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        ?client_id,
+                        ?pane_id,
+                        cols = viewport.cols,
+                        rows = viewport.rows,
+                        "VIEWPORT_RESIZE: pane resize mailbox full; dropping (fire-and-forget per SPEC §10.5)",
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        ?client_id,
+                        ?pane_id,
+                        "VIEWPORT_RESIZE: pane actor gone; dropping resize",
+                    );
+                }
+            }
+        } else {
+            debug!(
+                ?client_id,
+                ?pane_id,
+                "VIEWPORT_RESIZE: no PaneHandle registered for pane; dropping resize",
+            );
+        }
     });
 }
 
@@ -922,6 +990,71 @@ mod tests {
         // Sanity: the session linkage didn't get clobbered.
         let attached_session = state.with(|s| s.attached.get(&client_id).map(|c| c.session));
         assert_eq!(attached_session, Some(sid));
+    }
+
+    /// `VIEWPORT_RESIZE` fans the new (cols, rows) tuple onto the
+    /// `PaneHandle::resize` channel byc.5 added. We inject a hand-
+    /// built `PaneHandle` (no real actor) so the test can observe the
+    /// receiver side directly — this pins the wire from
+    /// `handle_viewport_resize` into the actor without needing to
+    /// stand up libghostty or a PTY pair.
+    #[test]
+    fn viewport_resize_sends_to_pane_actor_resize_channel() {
+        use crate::pane_actor::PaneHandle;
+        use bytes::Bytes;
+        use phux_core::ids::PaneId as CorePaneId;
+        use tokio::sync::{broadcast, mpsc};
+
+        let state = SharedState::new();
+        let (_sid, _wid, pid): (_, _, CorePaneId) =
+            state.with_mut(|s| s.seed_session("test-session"));
+
+        // Build a `PaneHandle` directly. The actor side is not running;
+        // we only care that `handle.resize.try_send` lands. The other
+        // channels exist purely to satisfy the struct shape.
+        let (input_tx, _input_rx) = mpsc::channel(8);
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
+        let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
+        let (_shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = PaneHandle {
+            input: input_tx,
+            snapshot: snapshot_tx,
+            output: output_tx,
+            resize: resize_tx,
+            cols: 80,
+            rows: 24,
+        };
+        state.with_mut(|s| {
+            // `register_pane_handle` also wants the shutdown sender,
+            // but we don't keep it for the test; build a throwaway.
+            let (sd_tx, _sd_rx) = tokio::sync::oneshot::channel::<()>();
+            let _ = s.register_pane_handle(pid, handle, sd_tx);
+        });
+
+        let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        state
+            .with_mut(|s| s.attach(client_id, "test-session", tx))
+            .expect("attach");
+
+        let viewport = ViewportInfo::new(132, 50);
+        handle_viewport_resize(&state, client_id, &viewport);
+
+        // The connector ran inside the same task; the channel must
+        // already carry exactly one (cols, rows) tuple.
+        let observed = resize_rx
+            .try_recv()
+            .expect("resize tuple must be queued on the channel");
+        assert_eq!(
+            observed,
+            (132, 50),
+            "PaneHandle::resize must receive the new viewport dims",
+        );
+        assert!(
+            resize_rx.try_recv().is_err(),
+            "exactly one resize tuple should be queued — got more",
+        );
     }
 
     /// A `VIEWPORT_RESIZE` from a non-attached client is a benign no-op —

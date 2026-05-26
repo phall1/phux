@@ -188,6 +188,24 @@ pub struct ServerState {
     window_wire_reverse: HashMap<WireWindowId, WindowId>,
     next_window_wire_id: u32,
     next_client_id: u64,
+    /// The most-recently-attached session, used to resolve
+    /// [`phux_protocol::wire::frame::AttachTarget::Last`].
+    ///
+    /// Recorded by the runtime ATTACH handler after a successful
+    /// `attach()` (any variant — `ByName`, `ById`, eventually `Last`
+    /// itself once chained re-attach exists). Stays `None` until the
+    /// first successful attach.
+    ///
+    /// **Memory model: global, per-server.** A single slot, shared
+    /// across all clients. Rationale: phux is single-user — the
+    /// canonical workflow is "attach → detach → attach again later"
+    /// from the same human. A global slot captures that intent with
+    /// minimum state. A per-client model would be more accurate when
+    /// multiple humans drive distinct connections, but that's not the
+    /// shipping workload; the field can be migrated to a per-connection
+    /// memory (e.g. carried on the per-client task's stack) without
+    /// changing the wire surface.
+    last_attached_session: Option<SessionId>,
 }
 
 impl Default for ServerState {
@@ -215,7 +233,27 @@ impl ServerState {
             window_wire_reverse: HashMap::new(),
             next_window_wire_id: 1,
             next_client_id: 1,
+            last_attached_session: None,
         }
+    }
+
+    /// Most-recently-attached session, if any. Resolves
+    /// `AttachTarget::Last`. Returns the raw [`SessionId`] without
+    /// validating that the session is still live — callers must
+    /// re-check against the registry (a session may have been killed
+    /// between the prior attach and this lookup).
+    #[must_use]
+    pub const fn last_attached_session(&self) -> Option<SessionId> {
+        self.last_attached_session
+    }
+
+    /// Record `session` as the most-recently-attached session. Called
+    /// by the runtime ATTACH handler after a successful attach.
+    ///
+    /// Overwrites unconditionally — the contract is "last", not
+    /// "first" or "most-popular".
+    pub const fn set_last_attached_session(&mut self, session: SessionId) {
+        self.last_attached_session = Some(session);
     }
 
     /// Allocate the next monotonic [`ClientId`].
@@ -721,6 +759,23 @@ mod tests {
         s.attach(cid, "default", mk_tx()).unwrap();
         let client = s.attached.get(&cid).unwrap();
         assert_eq!(client.color_support, ColorSupport::TrueColor);
+    }
+
+    #[test]
+    fn last_attached_session_starts_none_and_round_trips() {
+        let mut s = ServerState::new();
+        assert!(
+            s.last_attached_session().is_none(),
+            "fresh state has no prior-attach memory",
+        );
+        let (sid, _wid, _pid) = s.seed_session("default");
+        s.set_last_attached_session(sid);
+        assert_eq!(s.last_attached_session(), Some(sid));
+
+        // Overwrite semantics: setting again replaces the previous slot.
+        let (sid2, _w, _p) = s.seed_session("other");
+        s.set_last_attached_session(sid2);
+        assert_eq!(s.last_attached_session(), Some(sid2));
     }
 
     #[test]
