@@ -1,6 +1,6 @@
 # 0018 — Lazy state synchronization is the wire's long-arc shape
 
-Status: Accepted
+Status: Accepted (addendum 2026-05-26 revises the implementation gate; see end)
 Date: 2026-05-26
 
 ## Context
@@ -213,3 +213,72 @@ the upstream primitive landing.
   primitive. Until that lands, phux can ship its own externally-
   computed diff against libghostty's readout APIs; the ticket
   describes both the local-first and upstream paths.
+
+## Addendum — 2026-05-26: implementation gate revised
+
+The original Decision section above describes implementation as "gated
+on a libghostty state-snapshot primitive" and sketches a
+`Terminal::snapshot_grid()` + `Terminal::diff_into()` API that does not
+exist upstream. Re-reading the upstream C headers
+(`include/ghostty/vt/render.h`) and the in-tree Rust usage shows that
+framing is too pessimistic. The gate has two pieces; one is already
+solved.
+
+**Cache primitive: solved by `RenderState`.** `GhosttyRenderState` /
+`libghostty_vt::RenderState` is explicitly designed for "repeated
+updates from a single terminal instance and only updating dirty regions
+of the screen" (render.h:21–34). It supports N instances per Terminal
+(threading note: "safely multi-threaded as long as a lock is held
+during the update call"), and `Snapshot::set_dirty(Dirty::Clean)` is
+caller-driven, so each consumer's RenderState can hold its
+"dirty-since-last-acked-seq" state independently. That is exactly the
+per-consumer cached reference state Mosh's framework needs. We already
+hold a RenderState per renderer in two places: the server's
+`SnapshotSynthesizer` (`crates/phux-server/src/grid.rs`) and the
+client's `PaneRenderer` (`crates/phux-client/src/attach/render.rs`).
+Generalizing this to one RenderState per (terminal × attached consumer)
+is a server-side lifecycle change, not a new upstream primitive.
+
+**Synthesis primitive: still phux's work, but smaller than estimated
+and not load-bearing on upstream.** The diff-emit half — "given dirty
+rows + current cells, emit minimum VT to make a blank-or-stale row
+match" — does not exist in libghostty and is correctly described in
+the Tradeoffs section above. But the bulk is already in
+`SnapshotSynthesizer::synthesize` today as the *from-empty* case
+(DECSTR + ED 2 + CUP home + paint everything). The incremental case
+generalizes that walk to consult `Snapshot::dirty()` + `Row::dirty()`
+instead of resetting, and to manage per-consumer dirty resets driven
+by FRAME_ACK. The full row-alignment / line-insert-delete optimization
+the original Decision section names as "ncurses-class" is not needed
+in v0.2 — RenderState's per-row dirty bits give us the row set
+directly, so the synthesizer is per-dirty-row pen-tracking only.
+Estimate revised from ~500–1000 LOC to ~200–400 LOC of new code,
+plus per-consumer lifecycle in `TerminalActor`.
+
+**Upstream contribution is still worth doing, but is decoupled.** A
+COW-backed snapshot handle in upstream libghostty would help federation
+hubs where one Terminal fans out to many consumers (the per-consumer
+RenderState pattern is O(N × grid) per tick; COW pages would amortize
+the cost across consumers). That's a v0.3+ optimization for federation
+scale, not a v0.2 blocker. Filing an upstream issue still has value;
+it stops blocking phux.
+
+**What's actually load-bearing:**
+
+1. `RenderState::Snapshot::dirty()` returning a value in
+   `{Clean, Partial, Full}` reliably on second-and-subsequent updates.
+   The deferred regression case in `phux-l0t` (FFI returned a Dirty
+   value outside that set) becomes a real blocker once state-sync
+   reads dirty per-tick. Re-prioritize.
+2. Per-`TerminalActor` ownership of N RenderStates (one per attached
+   consumer), with lifecycle tied to ATTACH/DETACH. Blocked on
+   `phux-28f` settling actor placement.
+3. The screen-diff-to-VT synthesizer extension to SnapshotSynthesizer.
+4. Tick scheduler + FRAME_ACK-driven dirty reset.
+
+**No change to Decision, Rationale, Tradeoffs, or Alternatives.** The
+wire shape, the framework choice, and the algorithm are unchanged.
+This addendum only revises *what's blocking implementation* and
+*where the work lives*. The "Consequences" bullet about
+"implementation ticket blocked on the libghostty primitive" is
+superseded by the new tickets filed under the state-sync epic.

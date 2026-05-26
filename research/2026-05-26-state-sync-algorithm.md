@@ -1,9 +1,13 @@
 # State synchronization for libghostty Terminals: algorithm composition
 
-**Date:** 2026-05-26
+**Date:** 2026-05-26 (substantially revised 2026-05-26; see "Revision
+history" at end)
 **Status:** Research note. Captures the algorithm we expect to land for
-phux's long-arc wire semantics. Implementation is gated on a
-libghostty primitive that does not yet exist; see "Dependencies."
+phux's long-arc wire semantics. Ratified by ADR-0018. The original
+framing claimed implementation was gated on a missing libghostty
+primitive; that turned out to be wrong on the cache side — `RenderState`
+fills that role and is already in use in-tree. See "Dependencies"
+(revised) for the current picture.
 
 ---
 
@@ -292,48 +296,101 @@ target state when applied to the receiver's current state).
 
 ---
 
-## Dependencies
+## Dependencies (revised 2026-05-26)
 
-Two things have to exist before this is implementable cleanly:
+The original version of this section claimed the algorithm gated on a
+new libghostty primitive (`Terminal::snapshot_grid()` +
+`Terminal::diff_into()`). Re-reading upstream's C headers and the
+in-tree usage shows that's wrong on the cache half. Updated picture:
 
-### 1. A libghostty state-snapshot primitive
+### 1. Cache primitive — already exists as `RenderState`
 
-What we need from libghostty (or our own wrapper, if libghostty
-declines):
+`libghostty_vt::RenderState` (C: `GhosttyRenderState`) is documented in
+`include/ghostty/vt/render.h:21–34` as:
 
-```rust
-impl Terminal {
-    /// A handle to the current grid state. Conceptually a deep clone,
-    /// implementation may use COW. Snapshot lifecycle is independent
-    /// of the live Terminal — the live Terminal may continue receiving
-    /// vt_write calls.
-    fn snapshot_grid(&self) -> GridSnapshot;
+> Represents the state required to render a visible screen (a viewport)
+> of a terminal instance. This is stateful and optimized for repeated
+> updates from a single terminal instance and only updating dirty
+> regions of the screen … only needs read/write access to the terminal
+> instance during the update call … safely multi-threaded as long as a
+> lock is held during the update call to ensure exclusive access to
+> the terminal instance.
 
-    /// Emit VT bytes that, when applied via vt_write to a Terminal whose
-    /// grid matches `base`, produce a Terminal whose grid matches self's
-    /// current grid. Cursor and modes are included in the transition.
-    /// May emit a full-clear-and-redraw when that's cheaper than a diff.
-    fn diff_into(&self, base: &GridSnapshot, out: &mut Vec<u8>);
-}
+And critically (render.h, "Dirty Tracking"): *"The `update` call does
+not unset dirty state, it only updates it."* Dirty bits are
+caller-managed via `Snapshot::set_dirty(Dirty::Clean)` and
+`Row::set_dirty(false)`. That means each consumer can hold its own
+RenderState whose dirty bits track "what's changed since this
+consumer's last-acked seq" — exactly the per-consumer cached reference
+state Mosh's framework requires. N RenderStates per Terminal is the
+supported pattern, not a workaround.
 
-struct GridSnapshot {
-    // Implementation detail. Externally: a structural handle that can
-    // be passed to diff_into, dropped when no longer referenced.
-}
-```
+phux already does this in two places:
 
-The naive version: `GridSnapshot` is a full copy of the grid plus
-cursor plus modes; `diff_into` walks both grids and emits the
-curses-class transition VT described above. ~1000 lines.
+- Server: `crates/phux-server/src/grid.rs::SnapshotSynthesizer` owns a
+  `RenderState<'alloc>`, calls `update(terminal)` on demand, walks
+  rows+cells, emits VT.
+- Client: `crates/phux-client/src/attach/render.rs::PaneRenderer` does
+  the same on the mirror side for terminal output.
 
-The optimized version: `GridSnapshot` shares page-COW storage with the
-live grid; `diff_into` walks only the dirty pages. Requires libghostty
-internal cooperation — possibly an upstream patch.
+The state-sync server work is **lifecycle**, not a new primitive:
+generalize SnapshotSynthesizer to hold one RenderState per attached
+consumer (today: one per Terminal), and drive per-consumer dirty
+resets from FRAME_ACK instead of from synthesis completion.
 
-### 2. RTT measurement
+The original "naive `GridSnapshot` = full grid copy ~160 KiB per
+consumer" budget still applies — that's just RenderState's per-instance
+working set. The COW optimization called out in the original draft is
+still wanted at federation scale (many consumers × one Terminal), and
+that *is* an upstream ask, but it is not a v0.2 blocker: a hub with
+~10 consumers × ~10 terminals × ~160 KiB ≈ 16 MiB, which is fine
+without COW.
+
+### 2. Synthesis primitive — still phux's work, smaller than estimated
+
+The screen-diff-to-VT emitter does not exist in libghostty. It also
+does not need to. The "from empty" case is already implemented in
+`SnapshotSynthesizer::synthesize` (DECSTR + ED 2 + CUP home + per-row
+SGR-deltas + cursor restore + mode replay). The state-sync extension
+is the *incremental* case:
+
+1. Skip the reset header. Consult `Snapshot::dirty()` to decide whether
+   to emit anything at all.
+2. If Partial, walk rows; skip rows with `Row::dirty() == false`.
+3. For each dirty row, do exactly what `synthesize` does today — CUP
+   to row, emit per-cell SGR-delta + grapheme.
+4. Diff cursor and mode bits flat against the consumer's last-acked
+   cursor/mode set (small, server tracks these per consumer).
+5. After emission for consumer C, **do not** clear C's dirty bits
+   until C's FRAME_ACK arrives. Loss tolerance falls out: a lost
+   packet means the bits stay set, next tick emits a larger diff
+   against the same older reference.
+
+Because we get the dirty row set directly from RenderState, we do not
+need the full ncurses-class row alignment / line-insert-delete
+optimization. The synthesizer is per-dirty-row pen-tracking,
+identical to what SnapshotSynthesizer already does. Estimate revised
+from ~500–1000 LOC to ~200–400 LOC of new code, most of it shared
+with the existing synthesizer.
+
+### 3. RTT measurement
 
 Either round-trip timing on `PING`/`PONG` (we have these) or
 piggybacked timestamps on `FRAME_ACK`. Small.
+
+### 4. Load-bearing prerequisites
+
+- **`Snapshot::dirty()` reliability on subsequent updates.** The
+  deferred test in `phux-l0t` saw `Error::InvalidValue` (FFI returned
+  a `Dirty` value outside `{Clean, Partial, Full}`) when re-`update()`
+  was called without an intervening `set_dirty(Clean)`. Production
+  paths reset between updates and work fine; state-sync depends on
+  dirty consultation per tick, so re-prioritize phux-l0t and either
+  characterize the FFI behavior or document the required reset
+  invariant.
+- **Per-consumer RenderState ownership.** Lives in the per-Terminal
+  actor. Blocks on `phux-28f` (server-side Terminal placement —
+  spawn_local vs. actor pattern) settling first.
 
 ---
 
@@ -392,7 +449,23 @@ piggybacked timestamps on `FRAME_ACK`. Small.
 ## Status of this note
 
 Captures the algorithm shape phux is aiming at for the long-arc wire
-behavior. Not yet an implementation. Gates on (1) above. When the
-libghostty primitive lands (or we ship our own wrapper), this note
-becomes the basis for the implementation ticket and the supersession
-of ADR-0013's "PTY pass-through bytes" framing.
+behavior. Ratified as ADR-0018. Implementation is not gated on an
+upstream libghostty primitive — see Dependencies §1, revised — and
+proceeds against the in-tree `RenderState` cache + an extension to
+`SnapshotSynthesizer` for the incremental synthesis path.
+
+---
+
+## Revision history
+
+- **2026-05-26 (initial)**: drafted alongside ADR-0018. Framed
+  implementation as gated on a missing libghostty primitive
+  (`Terminal::snapshot_grid()` + `Terminal::diff_into()`).
+- **2026-05-26 (revised)**: corrected the Dependencies framing after
+  re-reading upstream C headers (`include/ghostty/vt/render.h`) and
+  the existing in-tree `SnapshotSynthesizer` / `PaneRenderer` usage.
+  `RenderState` fills the per-consumer cache role; the synthesis half
+  is phux-side work that extends `SnapshotSynthesizer`. ADR-0018
+  carries the matching addendum. Original "Dependencies" text is
+  preserved below the revised section header in git history (commit
+  history is the canonical record).
