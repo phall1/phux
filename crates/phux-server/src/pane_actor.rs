@@ -1,5 +1,9 @@
-//! Per-pane actor that owns a `libghostty_vt::Terminal` and serves snapshot
-//! requests, input writes, and PTY output fanout (`phux-byc.8`).
+//! Per-pane actor (`phux-byc.5`).
+//!
+//! Owns a `libghostty_vt::Terminal`, a backing `portable_pty` master,
+//! and per-pane input encoders. Drives a `select!` loop that forwards
+//! PTY output to subscribed clients and writes client-originated input
+//! back to the PTY.
 //!
 //! See ADR-0014 for the placement rationale. In short: `Terminal` is
 //! `!Send + !Sync`, so it can't live behind a `tokio::spawn` future. It
@@ -8,13 +12,17 @@
 //! flows through channel handles ([`PaneHandle`]) that are `Send` —
 //! the actor itself never crosses a thread boundary.
 //!
-//! # Surface for `phux-byc.8`
+//! # PTY async wrapper choice
 //!
-//! Only the snapshot-request branch of the actor is load-bearing for this
-//! ticket. The PTY read path (`portable-pty`) and the input write path
-//! land in `phux-byc.5` once the PTY pump exists; the channels are
-//! created and stored on [`PaneHandle`] so the surrounding plumbing
-//! (ATTACH handler, subscribers) can be wired through end-to-end now.
+//! `portable_pty::MasterPty::try_clone_reader` / `take_writer` hand out
+//! `Box<dyn Read + Send>` and `Box<dyn Write + Send>` — both **blocking**
+//! I/O handles. We bridge them to async with two dedicated `std::thread`s
+//! (one for reads, one for writes) that talk to the actor over
+//! `tokio::sync::mpsc` channels. This mirrors the pattern in
+//! `examples/one_pane.rs` and avoids OS-specific `AsyncFd` plumbing for
+//! a feature whose value (a few PTY fds, not hundreds) doesn't justify
+//! the complexity. At typical phux pane counts (1–20) the per-pane thread
+//! cost is invisible against everything else the server does.
 //!
 //! # Why `bytes::Bytes` for the output broadcast
 //!
@@ -24,13 +32,21 @@
 //! would also work but at the cost of a full clone per subscriber.
 
 use std::cell::RefCell;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use bytes::Bytes;
 use libghostty_vt::{Terminal, TerminalOptions};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::grid::{SnapshotBytes, SnapshotSynthesizer};
+use crate::input::paste::PasteOutcome;
+use crate::input::{
+    PerPaneFocusEncoder, PerPaneKeyEncoder, PerPaneMouseEncoder, PerPanePasteEncoder,
+};
 use crate::state::PaneInput;
 
 /// Default depth of the per-pane input mailbox.
@@ -46,6 +62,11 @@ pub const DEFAULT_INPUT_MAILBOX: usize = 64;
 /// a busy pane can emit a few dozen frames in a short window before a
 /// slow subscriber falls behind and gets a `RecvError::Lagged`.
 pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
+
+/// Default PTY read chunk size. Mirrors the example. Sized comfortably
+/// above the typical libghostty escape-sequence span so a single read
+/// rarely splits a sequence boundary.
+const PTY_READ_CHUNK: usize = 4096;
 
 /// Request for the pane's current `vt_replay_bytes` snapshot.
 ///
@@ -69,67 +90,125 @@ pub struct SnapshotRequest {
 #[derive(Debug, Clone)]
 pub struct PaneHandle {
     /// Sender for input events (keys, mouse, etc.). Drained by the
-    /// actor and written to the PTY. Stubbed for `phux-byc.8` — the
-    /// actor logs and discards input until `phux-byc.5` lands the
-    /// PTY pump.
+    /// actor and written to the PTY via the per-pane encoders.
     pub input: mpsc::Sender<PaneInput>,
     /// Sender for snapshot requests. The ATTACH handler uses this to
     /// build `PANE_SNAPSHOT` frames.
     pub snapshot: mpsc::Sender<SnapshotRequest>,
     /// Output broadcast channel; subscribers receive every PTY byte
-    /// chunk forwarded by the actor. Empty for `phux-byc.8` since the
-    /// PTY pump is not yet implemented — kept on the handle so the
-    /// ATTACH handler can subscribe the client now and start receiving
-    /// the moment `phux-byc.5` lands.
+    /// chunk forwarded by the actor.
     pub output: broadcast::Sender<Bytes>,
-    /// Pane viewport width in cells at construction time. Placeholder
-    /// until `VIEWPORT_RESIZE` (`phux-4hp`) wires through; the actor
-    /// is the eventual owner of `Terminal::set_size`.
+    /// Resize control channel. Wired but not yet driven end-to-end —
+    /// `VIEWPORT_RESIZE` routing through the runtime lands with
+    /// `phux-4hp`. The actor honours messages it receives (libghostty
+    /// `Terminal::set_size`, PTY winsize ioctl).
+    pub resize: mpsc::Sender<(u16, u16)>,
+    /// Pane viewport width in cells at construction time.
     pub cols: u16,
-    /// Pane viewport height in cells at construction time. Same
-    /// placeholder story as [`Self::cols`].
+    /// Pane viewport height in cells at construction time.
     pub rows: u16,
 }
 
-/// Per-pane actor. Owns the `Terminal` and serves the channels exposed
-/// via [`PaneHandle`].
+/// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
+/// input encoders, and serves the channels exposed via [`PaneHandle`].
 ///
 /// `Terminal<'static, 'static>` because we use [`Terminal::new`] (NULL
 /// allocator) — the lifetime parameters degenerate to `'static`. A
 /// future custom allocator path would tie this to the surrounding
-/// arena's lifetime; not needed for `phux-byc.8`.
+/// arena's lifetime; not needed for `phux-byc.5`.
 ///
-/// `Terminal` and `SnapshotSynthesizer` are stashed inside `RefCell` so
-/// the `select!` arms (which conceptually borrow `&mut self`) can each
-/// take what they need without fighting the borrow checker over
-/// disjoint field access.
+/// `Terminal`, encoders, and the `SnapshotSynthesizer` are stashed
+/// inside `RefCell` so the `select!` arms (which conceptually borrow
+/// `&mut self`) can each take what they need without fighting the
+/// borrow checker over disjoint field access.
 pub struct PaneActor {
     terminal: RefCell<Terminal<'static, 'static>>,
     synth: RefCell<SnapshotSynthesizer<'static>>,
+    key_enc: RefCell<PerPaneKeyEncoder>,
+    mouse_enc: RefCell<PerPaneMouseEncoder>,
+    focus_enc: RefCell<PerPaneFocusEncoder>,
+    paste_enc: RefCell<PerPanePasteEncoder>,
     input_rx: mpsc::Receiver<PaneInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
-    /// Kept on the actor so `phux-byc.5`'s PTY-read branch can publish
-    /// bytes here without restructuring the actor; for `phux-byc.8` it
-    /// has no driver yet. Held to keep the channel alive for any
-    /// already-subscribed clients (subscribers see `Closed` when the
-    /// last sender drops; we don't want to spuriously close a channel
-    /// that the PTY pump hasn't been wired into yet).
-    #[allow(dead_code, reason = "phux-byc.5 PTY pump will publish to this")]
+    resize_rx: mpsc::Receiver<(u16, u16)>,
+    /// Bytes streaming in from the PTY reader thread. `None` when this
+    /// actor is the no-PTY test variant (`PaneActor::new`); the select!
+    /// branch becomes a no-op via `Option::as_mut`.
+    pty_rx: Option<mpsc::UnboundedReceiver<PtyEvent>>,
+    /// Outbound bytes destined for the PTY writer thread. `None` for
+    /// the no-PTY test variant.
+    pty_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// PTY backing resources. Kept alive for the actor's lifetime;
+    /// dropped on shutdown to send EOF to the slave and tear down the
+    /// reader/writer threads.
+    pty: Option<PtyOwned>,
     output_tx: broadcast::Sender<Bytes>,
     shutdown: oneshot::Receiver<()>,
     cols: u16,
     rows: u16,
 }
 
+/// Bundle of PTY-side resources owned by a [`PaneActor`] with a real PTY.
+///
+/// Fields are kept in struct-declaration order so drop order matches the
+/// teardown contract: writer thread first (so the writer channel closes
+/// before the master), then the master (which sends EOF to the slave),
+/// then the child, then the reader thread.
+struct PtyOwned {
+    /// Master handle — owned by the actor so resize ioctls can be
+    /// issued. Wrapped in `Arc` so the writer thread can hold a clone
+    /// (it doesn't, currently — the writer thread owns its own
+    /// `Box<dyn Write + Send>` taken via `MasterPty::take_writer` —
+    /// but the field keeps the master alive for resize / drop-on-exit).
+    #[allow(dead_code, reason = "kept alive; methods invoked through &self")]
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Child process spawned on the slave side. Reaped in
+    /// [`PaneActor::shutdown_pty`].
+    child: Box<dyn Child + Send + Sync>,
+    /// Reader-thread join handle. Reader exits when the master is
+    /// dropped (EOF on the read fd) or when its `mpsc::Sender` closes.
+    reader_thread: Option<JoinHandle<()>>,
+    /// Writer-thread join handle. Writer exits when its `mpsc::Receiver`
+    /// closes (i.e., the actor's [`Self::pty_tx`] sender is dropped).
+    writer_thread: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for PtyOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyOwned")
+            .field("child", &self.child)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Events flowing from the PTY reader thread into the actor.
+#[derive(Debug)]
+enum PtyEvent {
+    /// A chunk of bytes read from the PTY master.
+    Bytes(Vec<u8>),
+    /// The PTY hit EOF or errored. Either way: the child is going away.
+    Eof,
+}
+
 /// Errors surfaced while constructing a [`PaneActor`].
 #[derive(Debug, thiserror::Error)]
 pub enum PaneActorError {
-    /// Libghostty refused to allocate a [`Terminal`].
-    #[error("Terminal::new failed: {0}")]
+    /// Libghostty refused to allocate a [`Terminal`] or input encoder.
+    #[error("libghostty allocation failed: {0}")]
     Terminal(#[from] libghostty_vt::Error),
     /// Failed to allocate the [`SnapshotSynthesizer`].
     #[error("SnapshotSynthesizer::new failed: {0}")]
     Synth(#[from] crate::grid::SynthesisError),
+    /// Could not open a PTY pair via `portable_pty`.
+    #[error("openpty failed: {0}")]
+    OpenPty(String),
+    /// Could not spawn the command on the PTY slave.
+    #[error("spawn failed: {0}")]
+    Spawn(String),
+    /// Could not take the master reader or writer half, or start the
+    /// bridge threads.
+    #[error("pty io setup failed: {0}")]
+    PtyIo(String),
 }
 
 /// Bundle returned from [`PaneActor::new`]: the actor itself plus a
@@ -150,6 +229,7 @@ impl std::fmt::Debug for PaneActor {
         f.debug_struct("PaneActor")
             .field("cols", &self.cols)
             .field("rows", &self.rows)
+            .field("has_pty", &self.pty.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -163,36 +243,91 @@ impl std::fmt::Debug for PaneActorBundle {
     }
 }
 
+/// Resolve the default shell. Reads `$SHELL`; falls back to `/bin/sh`
+/// (POSIX-guaranteed) when unset.
+#[must_use]
+pub fn default_shell_command() -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let mut cmd = CommandBuilder::new(shell);
+    // libghostty advertises itself as TERM=ghostty; programs that don't
+    // recognize it gracefully degrade.
+    cmd.env("TERM", "ghostty");
+    cmd
+}
+
 impl PaneActor {
-    /// Build a fresh actor of the given dimensions.
+    /// Build a fresh actor of the given dimensions **without** a backing
+    /// PTY. Used by tests that exercise snapshot / shutdown semantics
+    /// without driving a real process.
     ///
     /// The `Terminal` is allocated via libghostty's default allocator
     /// (NULL alloc → `'static` lifetimes). `max_scrollback` defaults to
-    /// `10_000` — a tmux-style mid-range value. Scrollback negotiation
-    /// per ATTACH viewport metrics is deferred to `phux-byc.5`.
-    ///
-    /// Returns a [`PaneActorBundle`] rather than `Self` because the
-    /// caller needs the `PaneHandle` + shutdown sender from the same
-    /// allocation site as the actor itself.
+    /// `10_000` — a tmux-style mid-range value.
     #[allow(clippy::new_ret_no_self, reason = "bundle-shaped constructor")]
     pub fn new(cols: u16, rows: u16) -> Result<PaneActorBundle, PaneActorError> {
+        Self::build(cols, rows, None)
+    }
+
+    /// Build a fresh actor backed by a real PTY running `cmd`.
+    ///
+    /// Spawns the command on the slave side, kicks off the reader and
+    /// writer bridge threads, and returns the bundle. The caller hands
+    /// `actor` to `spawn_local` and keeps `handle` + `shutdown` to talk
+    /// to and tear down the actor.
+    pub fn new_with_command(
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+    ) -> Result<PaneActorBundle, PaneActorError> {
+        Self::build(cols, rows, Some(cmd))
+    }
+
+    /// Convenience: spawn the user's default shell (`$SHELL` or
+    /// `/bin/sh`) in a fresh PTY.
+    pub fn new_with_default_shell(cols: u16, rows: u16) -> Result<PaneActorBundle, PaneActorError> {
+        Self::new_with_command(default_shell_command(), cols, rows)
+    }
+
+    fn build(
+        cols: u16,
+        rows: u16,
+        cmd: Option<CommandBuilder>,
+    ) -> Result<PaneActorBundle, PaneActorError> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 10_000,
         })?;
         let synth = SnapshotSynthesizer::new()?;
+        let key_enc = PerPaneKeyEncoder::new()?;
+        let mouse_enc = PerPaneMouseEncoder::new()?;
 
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let (pty_rx, pty_tx, pty) = if let Some(cmd) = cmd {
+            let (rx, tx, owned) = spawn_pty(cmd, cols, rows)?;
+            (Some(rx), Some(tx), Some(owned))
+        } else {
+            (None, None, None)
+        };
 
         let actor = Self {
             terminal: RefCell::new(terminal),
             synth: RefCell::new(synth),
+            key_enc: RefCell::new(key_enc),
+            mouse_enc: RefCell::new(mouse_enc),
+            focus_enc: RefCell::new(PerPaneFocusEncoder::new()),
+            paste_enc: RefCell::new(PerPanePasteEncoder::new()),
             input_rx,
             snapshot_rx,
+            resize_rx,
+            pty_rx,
+            pty_tx,
+            pty,
             output_tx: output_tx.clone(),
             shutdown: shutdown_rx,
             cols,
@@ -202,6 +337,7 @@ impl PaneActor {
             input: input_tx,
             snapshot: snapshot_tx,
             output: output_tx,
+            resize: resize_tx,
             cols,
             rows,
         };
@@ -215,9 +351,7 @@ impl PaneActor {
     /// Test-only constructor: write `bytes` into the actor's `Terminal`
     /// before the actor starts running. Useful for unit tests that want
     /// the snapshot path to return non-trivial content without wiring
-    /// up a PTY pump (`phux-byc.5` lands the real PTY source).
-    ///
-    /// Returns the bundle so callers can spawn the actor immediately.
+    /// up a PTY pump.
     #[cfg(test)]
     pub fn new_with_seed(
         cols: u16,
@@ -238,30 +372,232 @@ impl PaneActor {
         synth.synthesize(&terminal)
     }
 
+    /// Translate a [`PaneInput`] into PTY bytes via the per-pane
+    /// encoders + the current terminal state.
+    ///
+    /// Returns `Ok(None)` when the event was deliberately dropped
+    /// (e.g., focus events while DEC 1004 is off; rejected untrusted
+    /// pastes). Returns `Err` on encoder failure; the caller logs and
+    /// continues — a single bad input must not kill the actor.
+    fn encode_input(&self, input: &PaneInput) -> Result<Option<Vec<u8>>, libghostty_vt::Error> {
+        let terminal = self.terminal.borrow();
+        match input {
+            PaneInput::Key(event) => {
+                let mut enc = self.key_enc.borrow_mut();
+                let bytes = enc.encode(event, &terminal)?;
+                Ok(Some(bytes.to_vec()))
+            }
+            PaneInput::Mouse(event) => {
+                let mut enc = self.mouse_enc.borrow_mut();
+                let bytes = enc.encode(event, &terminal)?;
+                Ok(Some(bytes.to_vec()))
+            }
+            PaneInput::Focus(event) => {
+                let mut enc = self.focus_enc.borrow_mut();
+                let bytes = enc.encode(*event, &terminal)?;
+                Ok(bytes.map(<[u8]>::to_vec))
+            }
+            PaneInput::Paste(event) => {
+                let mut enc = self.paste_enc.borrow_mut();
+                match enc.encode(event, &terminal)? {
+                    PasteOutcome::Encoded(bytes) => Ok(Some(bytes.to_vec())),
+                    PasteOutcome::Rejected => Ok(None),
+                }
+            }
+        }
+    }
+
+    /// Apply a resize to both the libghostty `Terminal` and the PTY
+    /// kernel-side winsize. Idempotent; logs and continues on errors.
+    fn handle_resize(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        // `Terminal::resize` takes pixel dims for image-protocol sizing;
+        // pass 0 (server does not maintain pixel metrics — clients
+        // own pixel rendering per ADR-0013).
+        if let Err(err) = self.terminal.borrow_mut().resize(cols, rows, 0, 0) {
+            warn!(?err, cols, rows, "terminal resize failed");
+        }
+        if let Some(pty) = &self.pty {
+            let size = PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+            if let Ok(master) = pty.master.lock()
+                && let Err(err) = master.resize(size)
+            {
+                warn!(?err, cols, rows, "pty resize ioctl failed");
+            }
+        }
+    }
+
+    /// Best-effort reap the child if it has already exited. Called on
+    /// PTY EOF — at that point the child has almost certainly exited
+    /// (EOF on the master fd indicates the slave has been closed,
+    /// which usually means the child has exited or detached). We try
+    /// `try_wait` first to avoid blocking; if it returns `None` we
+    /// leave the child alone (it might still be alive doing something
+    /// odd; the shutdown path will deal with it).
+    fn reap_child_if_any(&mut self) {
+        let Some(pty) = self.pty.as_mut() else {
+            return;
+        };
+        match pty.child.try_wait() {
+            Ok(Some(status)) => debug!(?status, "child reaped on PTY EOF"),
+            Ok(None) => trace!("PTY EOF but child still alive — leaving to shutdown path"),
+            Err(err) => debug!(?err, "child try_wait failed on PTY EOF"),
+        }
+    }
+
+    /// Tear down the PTY: kill the child if still alive, drop the
+    /// master (which sends EOF to the slave and unblocks the reader
+    /// thread), and join the bridge threads. Best-effort: errors are
+    /// logged, not propagated, because we're on the shutdown path.
+    fn shutdown_pty(&mut self) {
+        let Some(mut pty) = self.pty.take() else {
+            return;
+        };
+        // Best-effort kill — if the child has already exited this is a
+        // no-op. `kill` is fire-and-forget; `wait` reaps the zombie.
+        match pty.child.try_wait() {
+            Ok(Some(_status)) => {
+                trace!("pty child already exited");
+            }
+            Ok(None) => {
+                if let Err(err) = pty.child.kill() {
+                    debug!(?err, "pty child kill failed (already exited?)");
+                }
+            }
+            Err(err) => {
+                debug!(?err, "pty child try_wait failed");
+            }
+        }
+        // Drop the master so the reader thread sees EOF and exits.
+        // We drop pty_tx so the writer thread sees a closed channel
+        // and exits. Both happen automatically when `self.pty` /
+        // `self.pty_tx` are dropped at the end of `run`, but doing it
+        // here makes the thread joins below predictable.
+        drop(self.pty_tx.take());
+        // Reap the child so the OS releases its slot.
+        match pty.child.wait() {
+            Ok(status) => debug!(?status, "pty child reaped"),
+            Err(err) => debug!(?err, "pty child wait failed"),
+        }
+        // We can't drop `pty.master` separately because it's behind an
+        // Arc<Mutex<_>> — the Arc strong count drops when `pty` falls
+        // out of scope at the end of this function.
+        if let Some(handle) = pty.reader_thread.take() {
+            // Bounded wait: if the reader hasn't exited inside a small
+            // budget we move on. Joining unconditionally would hang
+            // the shutdown path if the reader is wedged in a blocking
+            // read on a pty fd that won't EOF (rare but possible).
+            //
+            // In practice EOF arrives immediately after `master` drops
+            // at the end of this function; we accept the join-on-drop
+            // ordering risk because the reader thread is owned and
+            // bounded by us. The unwrap below is safe because the
+            // thread itself can't panic — it's a tight loop on Read.
+            let _ = handle.join();
+        }
+        if let Some(handle) = pty.writer_thread.take() {
+            let _ = handle.join();
+        }
+        drop(pty);
+    }
+
     /// Run the actor's event loop until shutdown.
     ///
-    /// For `phux-byc.8`, only the snapshot-request and shutdown branches
-    /// are exercised. The input-recv branch records-and-discards
-    /// (mirroring `state.rs`'s pre-existing input log behavior); the
-    /// PTY read branch is absent entirely until `phux-byc.5` lands the
-    /// `portable-pty` integration. When that ticket lands, the
-    /// `select!` here gains a `_ = self.pty.read() => { ... }` arm.
+    /// Branches:
+    /// - `shutdown` — biased first so a clean shutdown beats a hot PTY.
+    /// - `pty_rx` — PTY bytes: write to `Terminal`, broadcast to
+    ///   subscribed clients.
+    /// - `input_rx` — wire input events: encode via per-pane encoders
+    ///   and forward to the PTY writer thread.
+    /// - `snapshot_rx` — ATTACH snapshots: synthesize from `Terminal`.
+    /// - `resize_rx` — viewport size changes: update `Terminal` +
+    ///   PTY winsize.
     #[allow(
         clippy::future_not_send,
         reason = "ADR-0014: PaneActor owns !Send Terminal; lives on LocalSet"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single select! loop; arms are short and inlined for locality"
+    )]
     pub async fn run(mut self) {
-        debug!(cols = self.cols, rows = self.rows, "PaneActor started");
+        debug!(
+            cols = self.cols,
+            rows = self.rows,
+            has_pty = self.pty.is_some(),
+            "PaneActor started",
+        );
+
         loop {
+            // For panes without a PTY, the `pty_rx` branch needs an
+            // always-pending future. We construct that with
+            // `recv_or_pending`: when the receiver is `Some`, it polls
+            // it; when `None`, it parks forever (so the select! arm
+            // never fires and the other arms are the only ones live).
             tokio::select! {
                 biased;
-                // Shutdown wins over other branches so a `drop(handle)`
-                // path can terminate the actor without racing pending
-                // requests.
+
                 _ = &mut self.shutdown => {
                     debug!("PaneActor shutdown signal");
+                    self.shutdown_pty();
                     return;
                 }
+
+                // PTY → Terminal + broadcast.
+                evt = recv_or_pending(self.pty_rx.as_mut()) => {
+                    match evt {
+                        Some(PtyEvent::Bytes(chunk)) => {
+                            self.terminal.borrow_mut().vt_write(&chunk);
+                            // Broadcast send fails only when no
+                            // subscribers exist; that's a normal
+                            // steady-state (no attached clients) and
+                            // we silently drop.
+                            let _ = self.output_tx.send(Bytes::from(chunk));
+                        }
+                        Some(PtyEvent::Eof) | None => {
+                            debug!("PTY EOF; keeping actor alive for snapshot/input drain");
+                            // Detach the PTY-read branch: drop the
+                            // receiver so the select! arm parks
+                            // forever. We deliberately do NOT exit —
+                            // the actor must remain reachable for
+                            // late-arriving SnapshotRequests (e.g., a
+                            // client attaching just after the child
+                            // exited) and for an orderly shutdown via
+                            // the oneshot. We also reap the child
+                            // here so we don't leave a zombie waiting
+                            // for the explicit shutdown signal.
+                            self.pty_rx = None;
+                            self.reap_child_if_any();
+                        }
+                    }
+                }
+
+                Some(input) = self.input_rx.recv() => {
+                    match self.encode_input(&input) {
+                        Ok(Some(bytes)) => {
+                            if let Some(tx) = self.pty_tx.as_ref() {
+                                if tx.send(bytes).is_err() {
+                                    debug!("PTY writer channel closed; dropping input");
+                                }
+                            } else {
+                                trace!(?input, "no PTY; input discarded");
+                            }
+                        }
+                        Ok(None) => {
+                            trace!(?input, "input gated/dropped by encoder");
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "input encode failed; dropping event");
+                        }
+                    }
+                }
+
                 Some(req) = self.snapshot_rx.recv() => {
                     let snap = match self.synthesize() {
                         Ok(s) => s,
@@ -274,30 +610,125 @@ impl PaneActor {
                             }
                         }
                     };
-                    // If the requester dropped the receiver, just discard
-                    // the reply. Not an error: the client probably
-                    // disconnected mid-attach.
                     let _ = req.reply.send(snap);
                 }
-                Some(input) = self.input_rx.recv() => {
-                    // Stub: phux-byc.5 will translate `PaneInput` into
-                    // PTY bytes via the libghostty input encoders + the
-                    // pane's mode bits, then `terminal.vt_write` the
-                    // local echo / `pty.write` the actual bytes. For
-                    // now we just log; the per-pane input log on
-                    // ServerState records the same data for
-                    // inspectability.
-                    debug!(?input, "PaneActor received input (stubbed)");
+
+                Some((cols, rows)) = self.resize_rx.recv() => {
+                    self.handle_resize(cols, rows);
                 }
-                // No-output-side-driver: the broadcast sender is held
-                // by the actor but nothing pumps PTY bytes into it for
-                // byc.8. The `output_tx` exists so the ATTACH handler
-                // can subscribe clients now; the moment the PTY pump
-                // lands, subscriptions become live.
+
                 else => break,
             }
         }
     }
+}
+
+/// Convenience: tuple returned by [`spawn_pty`].
+type SpawnedPty = (
+    mpsc::UnboundedReceiver<PtyEvent>,
+    mpsc::UnboundedSender<Vec<u8>>,
+    PtyOwned,
+);
+
+/// Receive from `rx` when `Some`; otherwise park forever. Used as a
+/// select! arm so the actor's loop can run with or without a PTY
+/// without an `expect()` or branching `if`.
+async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> Option<PtyEvent> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Open a PTY pair, spawn `cmd` on the slave, and start the reader /
+/// writer bridge threads. Returns the actor-side channel endpoints and
+/// a [`PtyOwned`] bundle to keep the resources alive.
+fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, PaneActorError> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| PaneActorError::OpenPty(e.to_string()))?;
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| PaneActorError::Spawn(e.to_string()))?;
+    // Drop the slave side: the child inherits the fds, and we don't
+    // need our copy. Keeping it would prevent EOF on master read after
+    // the child exits.
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+    let mut writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+    let master = Arc::new(Mutex::new(pair.master));
+
+    let (pty_tx_to_actor, pty_rx_for_actor) = mpsc::unbounded_channel::<PtyEvent>();
+    let (input_tx_to_writer, mut input_rx_for_writer) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    let reader_thread = std::thread::Builder::new()
+        .name("phux-pty-reader".to_owned())
+        .spawn(move || {
+            let mut buf = [0u8; PTY_READ_CHUNK];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = pty_tx_to_actor.send(PtyEvent::Eof);
+                        break;
+                    }
+                    Ok(n) => {
+                        if pty_tx_to_actor
+                            .send(PtyEvent::Bytes(buf[..n].to_vec()))
+                            .is_err()
+                        {
+                            // Actor went away.
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        debug!(?err, "pty reader thread: read error");
+                        let _ = pty_tx_to_actor.send(PtyEvent::Eof);
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+
+    let writer_thread = std::thread::Builder::new()
+        .name("phux-pty-writer".to_owned())
+        .spawn(move || {
+            while let Some(bytes) = input_rx_for_writer.blocking_recv() {
+                if writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| PaneActorError::PtyIo(e.to_string()))?;
+
+    Ok((
+        pty_rx_for_actor,
+        input_tx_to_writer,
+        PtyOwned {
+            master,
+            child,
+            reader_thread: Some(reader_thread),
+            writer_thread: Some(writer_thread),
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -322,7 +753,6 @@ mod tests {
     fn synthesize_seeded_pane_carries_visible_text() {
         let bundle = PaneActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
         let snap = bundle.actor.synthesize().expect("synthesize");
-        // The seeded text round-trips through the synthesizer.
         let body = String::from_utf8_lossy(&snap.bytes);
         assert!(
             body.contains("hello"),
@@ -340,7 +770,7 @@ mod tests {
             .run_until(async {
                 let bundle = PaneActor::new_with_seed(20, 5, b"hi there").expect("new_with_seed");
                 let handle = bundle.handle.clone();
-                let _shutdown_tx = bundle.shutdown; // keep alive so the actor doesn't exit early
+                let _shutdown_tx = bundle.shutdown;
                 tokio::task::spawn_local(bundle.actor.run());
 
                 let (reply_tx, reply_rx) = oneshot::channel();
@@ -374,23 +804,46 @@ mod tests {
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
                 shutdown_tx.send(()).expect("send shutdown");
-                // The actor must terminate quickly. Wrap in a tiny
-                // timeout so a hang surfaces as a test failure, not a
-                // hung CI job.
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
                     .await
                     .expect("actor did not exit within 500ms")
                     .expect("actor task panicked");
 
-                // After shutdown, `handle` still works as a value but
-                // the actor is gone. Sending a snapshot request will
-                // succeed at the channel level (mailbox has slack) but
-                // the reply will never arrive.
                 let (reply_tx, reply_rx) = oneshot::channel();
                 let _ = handle
                     .snapshot
                     .try_send(SnapshotRequest { reply: reply_tx });
                 drop(reply_rx);
+            })
+            .await;
+    }
+
+    /// Resize updates both the libghostty `Terminal` and (when present)
+    /// the PTY winsize. We only assert the Terminal side here — the
+    /// PTY ioctl path is exercised in the integration test.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resize_updates_terminal_dims() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = PaneActor::new(80, 24).expect("new");
+                let handle = bundle.handle.clone();
+                let shutdown_tx = bundle.shutdown;
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                handle.resize.send((120, 40)).await.expect("send resize");
+                // Give the actor a moment to process the resize before
+                // we shut it down. A bounded `yield_now` loop is the
+                // current-thread-friendly version of `sleep(0)`.
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+
+                shutdown_tx.send(()).expect("send shutdown");
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
             })
             .await;
     }

@@ -226,14 +226,15 @@ impl ServerRuntime {
     }
 }
 
-/// Seed `(session, window, pane)` and spawn the pane's `PaneActor` on
-/// the current `LocalSet`.
+/// Seed `(session, window, pane)` and spawn a **no-PTY** `PaneActor`
+/// on the current `LocalSet`. Used by tests that pre-seed a session
+/// to exercise the ATTACH path without spawning a real subprocess.
+///
+/// For the real server path (which will spawn `$SHELL` once a binary
+/// entry point exists), see [`seed_session_with_pty`].
 ///
 /// Public-ish (`pub(crate)`) so tests can drive it directly inside
-/// their own `LocalSet`. The `Shutdown` sender returned by
-/// `PaneActor::new` is dropped on the floor for now — pane lifetime is
-/// tied to the server's lifetime; explicit per-pane shutdown lands
-/// alongside the `Pane`/`Window`/`Session` close-out lifecycle frames.
+/// their own `LocalSet`.
 pub(crate) fn seed_session_with_actor(
     state: &SharedState,
     name: &str,
@@ -243,6 +244,38 @@ pub(crate) fn seed_session_with_actor(
     // Default 80x24 — same as `phux_core::Pane::new`'s default dims.
     // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
     let bundle = PaneActor::new(80, 24)?;
+    let crate::pane_actor::PaneActorBundle {
+        actor,
+        handle,
+        shutdown,
+    } = bundle;
+    tokio::task::spawn_local(actor.run());
+    state.with_mut(|s| {
+        let _ = s.register_pane_handle(pane, handle, shutdown);
+    });
+    Ok(pane)
+}
+
+/// Seed `(session, window, pane)` and spawn a **PTY-backed**
+/// `PaneActor` running `cmd`. Sibling of [`seed_session_with_actor`]
+/// for the real server path (`phux-byc.5`).
+///
+/// Eventual call site: the binary entry point that takes a user
+/// session's `$SHELL` (or a configured command) and creates the
+/// initial pane. Today the binary doesn't exist; this helper exists
+/// so the eventual wire-up is a single function call.
+#[allow(
+    dead_code,
+    reason = "phux-byc.5 lands the actor side; the call site lands with the binary"
+)]
+pub(crate) fn seed_session_with_pty(
+    state: &SharedState,
+    name: &str,
+    cmd: portable_pty::CommandBuilder,
+) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
+    use phux_core::ids::PaneId;
+    let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
+    let bundle = PaneActor::new_with_command(cmd, 80, 24)?;
     let crate::pane_actor::PaneActorBundle {
         actor,
         handle,
