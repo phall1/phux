@@ -1,12 +1,17 @@
 # Architecture
 
-> **Updated 2026-05-26 for [ADR-0013](./ADR/0013-libghostty-bytes-on-wire.md).**
-> Pane content rides as VT bytes on the wire; input remains structured.
-> Both server and client run `libghostty_vt::Terminal`. The obsolete
-> `phux-protocol::diff` and `phux-client::mirror` modules have been
-> deleted; a small amount of stale doc-comment text inside
-> `phux-protocol/src/wire/field.rs` still references `DiffOp` and is
-> scheduled for cleanup.
+> **Updated 2026-05-26 for [ADR-0015](./ADR/0015-protocol-layering.md).**
+> The wire is now layered (L1 Terminal substrate, L2 Collection
+> lifecycle bundle, L3 opaque metadata) with federation and automation
+> as orthogonal axes. The implementation in tree still uses the
+> pre-layering vocabulary (`Pane`, `Window`, `Session`,
+> `LayoutNode` on the wire); the rename to `TerminalId`
+> ([ADR-0016](./ADR/0016-terminal-id-as-wire-primary.md)) and the
+> demotion of layout/window/focus to TUI-consumer metadata
+> ([ADR-0017](./ADR/0017-tui-not-protocol-privileged.md)) are scheduled
+> cascades, not yet landed. This document calls out where current
+> names map onto layers; the [Protocol layering](#protocol-layering-and-this-implementation)
+> section below is the master mapping.
 
 This document describes phux's internal structure: the process model, the
 data model, threading, persistence, and testing strategy. The wire
@@ -93,17 +98,48 @@ the renderer-side contract on both ends.
 `phux-config` is a sibling of `core` and is consumed by the binary and
 the client.
 
+## Protocol layering and this implementation
+
+[ADR-0015](./ADR/0015-protocol-layering.md) layers the wire into three
+tiers plus two orthogonal cross-cuts. Mapping each onto code currently
+in tree:
+
+| Layer | Concept | Implemented in tree as | Status |
+|---|---|---|---|
+| **L1** | Terminal: PTY + libghostty `Terminal` + identity + I/O + snapshot + event stream | `PaneActor` in `phux-server::pane_actor`; wire `PaneId` and the `PANE_OUTPUT` / `PANE_SNAPSHOT` / `INPUT_*` / `BELL` / `OSC_EVENT` (currently spec-only) messages | shipped under pre-layering vocabulary; rename to `TerminalId` is ADR-0016 |
+| **L2** | Collection: named lifecycle bundle of Terminals | `phux-core::Session` plus the session/window registries on `ServerState`; the "session" CLI noun | partial — session lifecycle today bundles windows AND terminals; ADR-0015 splits Collection (bundle of terminals) from the TUI's "windows" presentation |
+| **L3** | Opaque metadata KV scoped to Terminal / Collection / global | not yet implemented — closest analog is the in-memory window/layout state on `ServerState` | spec-only |
+
+Cross-cuts:
+
+- **Federation** ([ADR-0007](./ADR/0007-mosh-class-transport-and-satellites.md)) — addressing scheme. The wire's `SessionId` already has a `LOCAL` / `SATELLITE` tag union per the ADR; `TerminalId` (ADR-0016) extends the same shape to every identity. Today's server constructs `LOCAL` only.
+- **Automation** — server-side rules subscribing to L1 events. Not yet implemented; an optional service when it lands.
+
+A consumer's tier set is declared at HELLO time. Today's `phux-client`
+is an L1+L2+L3-equivalent TUI consumer. A future `phux-client-sdk`
+will be L1-only; a future native GUI consumer will be L1+L3 with its
+own metadata schema. The reference TUI is **not** protocol-privileged
+([ADR-0017](./ADR/0017-tui-not-protocol-privileged.md)) — the wire
+carries nothing that exists for it alone.
+
+The cascades that align the in-tree implementation with this layering
+are queued, not landed: rename `PaneId` → `TerminalId` workspace-wide;
+split `phux-server` so L1 (terminal supervision) is mountable without
+the L2/L3 services; reify L3 as a real KV store; demote `LayoutNode`,
+`WindowId`, `WINDOW_*`, `LAYOUT_CHANGED`, `FOCUS_CHANGED` from the
+wire into the TUI's L3 metadata conventions.
+
 ## Wire protocol: bytes on the wire (ADR-0013)
 
-The protocol is asymmetric. Server-to-client *pane content* is a
-stream of VT bytes (`PANE_OUTPUT { pane_id, seq, bytes }`); the
-server forwards what the PTY emitted, after a per-client capability
+The protocol is asymmetric. Server-to-client *terminal content* is a
+stream of VT bytes (`PANE_OUTPUT { pane_id, seq, bytes }` today; under
+ADR-0016 the message will be `TERMINAL_OUTPUT { terminal_id, ... }`);
+the server forwards what the PTY emitted, after a per-client capability
 rewrite. Client-to-server *input* is structured (`INPUT_KEY`,
 `INPUT_MOUSE`, `INPUT_FOCUS`, `INPUT_PASTE`, `INPUT_RAW`), built from
-libghostty's input atoms per ADR-0006 / ADR-0008. Session/window/pane
-lifecycle and commands stay structured — the session graph is phux's
-vocabulary, not libghostty's. See [SPEC.md](./SPEC.md) §8 for the
-wire shape and ADR-0013 for the rationale.
+libghostty's input atoms per ADR-0006 / ADR-0008. Lifecycle and
+commands stay structured. See [SPEC.md](./SPEC.md) §8 for the wire
+shape and ADR-0013 for the bytes-on-wire rationale.
 
 The shape follows libghostty's interface: `Terminal::vt_write(&[u8])`
 is the **only** way to feed grid content into a `Terminal`, and
@@ -123,10 +159,9 @@ The server is a graph of long-lived nodes with stable identity. The
 domain (`phux-core`) uses one `SlotMap` per node type rather than
 `Rc<RefCell<>>` because:
 
-- Stable IDs are exactly what the wire protocol needs anyway
-  (`SessionId`, `WindowId`, `PaneId`).
-- Cross-references ("this client's active pane") become `PaneId`, not
-  borrowed references — no aliasing problem.
+- Stable IDs are exactly what the wire protocol needs anyway.
+- Cross-references ("this client's active terminal") become an ID, not
+  a borrowed reference — no aliasing problem.
 - Deletion is `O(1)` and slotmap's generational keys catch
   use-after-free in tests.
 
@@ -136,17 +171,22 @@ deliberate; see ADR-0008 and the crate-graph note above.
 
 ```rust
 // phux-core::registry::Registry — domain only, no I/O.
+// Pre-ADR-0015 vocabulary; layer mapping in parens.
 pub struct Registry {
-    sessions: SlotMap<SessionId, Session>,
-    windows:  SlotMap<WindowId,  Window>,
-    panes:    SlotMap<PaneId,    Pane>,
+    sessions: SlotMap<SessionId, Session>,    // L2 Collection (kind of —
+                                              //   currently bundles windows too)
+    windows:  SlotMap<WindowId,  Window>,     // demotes to TUI L3 metadata
+    panes:    SlotMap<PaneId,    Pane>,       // L1 Terminal
 }
 
 pub struct Session  { id, name, windows: Vec<WindowId>, active: Option<WindowId> }
 pub struct Window   { id, session, panes: Vec<PaneId>, layout: Option<LayoutNode>, active: Option<PaneId> }
 pub struct Pane     { id, window, dims, cwd, title }
-// LayoutNode is a binary split tree of PaneId leaves; see ADR-0010 and
-// `phux-core::window`. TABBED is reserved (SPEC §10.3) and absent.
+// LayoutNode is a binary split tree of PaneId leaves. Under ADR-0017
+// this whole tree (LayoutNode + Window + active pane focus) demotes
+// from a wire-protocol concept to a TUI-consumer convention stored
+// in L3 metadata. ADR-0012's "binary split, not n-ary" decision
+// continues to apply *to the TUI's tree*, not to the wire.
 ```
 
 The PTY handle and `libghostty_vt::Terminal` for a pane are NOT fields
