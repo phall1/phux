@@ -17,22 +17,29 @@ phux is a single binary with subcommands. The naked invocation —
 `phux` — is the common case: attach to the user's server, lazily
 spawning it if it isn't running.
 
+> **Status (2026-05-26):** today's binary ships only `attach` and
+> `server`. The naked `phux` invocation errors with a usage hint
+> instead of attaching to the last session. Auto-spawn from `attach`
+> works (the client forks itself as `phux server` if the socket is
+> missing, polls 25 ms / 2 s). The rest of the table below is design
+> intent.
+
 ```
 phux                          # attach to default session, autostart server
-phux attach [session]         # attach explicitly; session optional
+phux attach [session]         # attach explicitly; session optional      shipped
+phux server  [--session N]    # run server in foreground (incl. for SSH) shipped (no --stdio yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
-                              # create a session
-phux ls                       # list sessions (alias: list-sessions)
-phux windows [-s SESSION]     # list windows
-phux panes [-w WINDOW]        # list panes
-phux kill TARGET              # kill session/window/pane by selector
-phux send TARGET KEYS...      # send keys to a pane (scripting)
-phux capture TARGET           # dump pane grid (for piping/scripting)
-phux server [--stdio] [-f]    # run server in foreground (for ssh/stdio)
-phux config [show|edit|path]  # config inspection
-phux messages                 # recent server-emitted messages for this user
-phux version                  # print version
-phux help [COMMAND]
+                              # create a session                         spec-only
+phux ls                       # list sessions (alias: list-sessions)     spec-only
+phux windows [-s SESSION]     # list windows                             spec-only
+phux panes [-w WINDOW]        # list panes                               spec-only
+phux kill TARGET              # kill session/window/pane by selector     spec-only
+phux send TARGET KEYS...      # send keys to a pane (scripting)          spec-only
+phux capture TARGET           # dump pane grid (for piping/scripting)    spec-only
+phux config [show|edit|path]  # config inspection                        spec-only
+phux messages                 # recent server-emitted messages           spec-only
+phux version                  # print version                            spec-only
+phux help [COMMAND]                                                       spec-only
 ```
 
 All subcommands accept `--target` / `-t` consistently where applicable.
@@ -96,18 +103,28 @@ Config is read in order, later files overriding earlier:
 1. `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`)
 2. `$PHUX_CONFIG` if set, replacing the above (used by `phux --config`)
 
-Per-server-instance state lives at
-`$XDG_STATE_HOME/phux/` (default `~/.local/state/phux/`):
+Runtime and persistent state are split. The Unix socket lives in the
+runtime dir (where it's expected to disappear on reboot); persistent
+state lives in the state dir.
 
 ```
-~/.local/state/phux/
-├── socket             # SOCK_STREAM, perms 0600
+$XDG_RUNTIME_DIR/phux/phux.sock     # SOCK_STREAM, parent dir mode 0o700
+                                    #   (fallback: /tmp/phux-$UID/phux.sock)
+
+$XDG_STATE_HOME/phux/               # design intent; not yet implemented
 ├── server.pid
 ├── log/
-│   └── server.log     # tracing output, rotated daily
+│   └── server.log                  # tracing output, rotated daily
 └── journal/
-    └── <pane_id>.log  # per-pane PTY journal, capped ring (default 10 MiB)
+    └── <pane_id>.log               # per-pane PTY journal, capped ring
+                                    #   (default 10 MiB)
 ```
+
+Today only the socket is real (see
+[`phux-server::runtime::default_socket_path`](./crates/phux-server/src/runtime.rs)).
+The state-dir layout matches what
+[`ARCHITECTURE.md`](./ARCHITECTURE.md#process-model) describes; both
+docs treat it as the destination shape.
 
 ### 4.2 Format
 

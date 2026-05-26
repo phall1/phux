@@ -4,10 +4,15 @@ A terminal multiplexer built on
 [libghostty-vt](https://github.com/Uzaaft/libghostty-rs).
 
 phux is in the shape of tmux — a long-lived server, attaching clients, sessions
-of windows of panes — but the wire protocol carries **structured cell-level
-diffs** (not VT byte streams) and **semantic key events** (so modern keyboard
-protocols pass cleanly through to inner programs). The outer composition lives
-in phux; the terminal emulation is delegated to libghostty.
+of windows of panes — but the wire is asymmetric (ADR-0013): server→client
+*pane content* is **VT bytes** forwarded from the PTY (after per-client
+capability rewriting), while client→server *input* is **structured key, mouse,
+focus, and paste events** built from libghostty's own atoms. Both ends run
+`libghostty_vt::Terminal`; the server's is canonical, the client's is a local
+mirror used for rendering. Modern keyboard protocols pass cleanly through to
+inner programs because the multiplexer never re-parses VT to do them. The
+outer composition lives in phux; the terminal emulation is delegated to
+libghostty.
 
 This book is the authoritative reference for the protocol and architecture:
 

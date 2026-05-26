@@ -9,14 +9,17 @@ A terminal multiplexer built on [libghostty-vt][lghvt-rs].
 phux is in the shape of tmux — a long-lived server, attaching clients,
 sessions of windows of panes — but the architecture underneath is different:
 
-- The server owns each pane's terminal state as a `libghostty_vt::Terminal`.
-- The wire protocol carries **structured cell-level diffs**, not VT byte
-  streams.
-- Clients (TUI or native GUI) render diffs directly; nothing re-parses VT
-  along the way.
-- Input is carried as **semantic key events**, so the kitty keyboard
-  protocol and friends pass through cleanly to inner programs — the thing
-  every existing multiplexer fights to do and none quite manages.
+- Both ends run `libghostty_vt::Terminal`. The server's is the
+  canonical pane state; the client's is a local mirror used for
+  rendering.
+- The wire is asymmetric (ADR-0013): server→client *pane content* is
+  **VT bytes** (forwarded from the PTY after per-client capability
+  rewriting); client→server *input* is **structured key, mouse, focus,
+  and paste events** built from libghostty's own atoms.
+- Carrying input as semantic events — not raw VT — is what lets the
+  kitty keyboard protocol and friends pass through cleanly to inner
+  programs. Carrying pane content as bytes — not a parallel cell-diff
+  model — is what keeps phux from re-implementing libghostty's grid.
 
 The result is a multiplexer where the *outer composition* (panes, splits,
 status, chrome) is cleanly separated from the *terminal emulation* (which
@@ -44,28 +47,42 @@ design; the things we say no to are listed in
 
 ## Status
 
-**Pre-alpha. Spec first, code second.** No end-to-end attach yet.
+**Pre-alpha. Spec first, code second.** End-to-end attach works for a
+single pre-seeded session/window/pane; most of the SPEC's session
+graph, command, and event surface is not yet wired.
 
 What is wired up today:
 
 - [`SPEC.md`](./SPEC.md) — normative wire protocol.
 - [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DESIGN.md`](./DESIGN.md), and
   [`ADR/`](./ADR/) — recorded decisions.
-- `phux-protocol` — frame codec (length-prefixed TLV, `SPEC.md` Appendix A),
-  cell diff codec, structured input types (key / mouse / focus / paste).
-- `phux-core` — `SessionId`/`WindowId`/`PaneId` registries (slotmaps) and
-  the binary split-tree window layout.
-- `phux-server` — tokio current-thread runtime, UDS listener with PING/PONG,
-  server-side state scaffold (attach/detach, pane-subscriber routing,
-  per-pane input log), and a `IdBridge` between core slotmap keys and
-  wire `u32` IDs.
-- `phux-client` — diff mirror: applies `DiffOp`s to a local `Grid`.
+- `phux-protocol` — length-prefixed TLV frame codec (SPEC Appendix A),
+  the `HELLO` / `ATTACH` / `DETACH` / `PANE_OUTPUT` / `PANE_SNAPSHOT` /
+  `INPUT_*` / `BELL` / `ERROR` / `PING` subset of the message catalog,
+  and structured input types that re-export libghostty's atoms directly
+  (ADR-0008).
+- `phux-core` — `SessionId` / `WindowId` / `PaneId` registries
+  (slotmaps) and the binary split-tree window layout (ADR-0012).
+- `phux-server` — tokio current-thread runtime, UDS listener at
+  `$XDG_RUNTIME_DIR/phux/phux.sock`, per-pane actor (ADR-0014) that
+  owns a `libghostty_vt::Terminal` and a real PTY child, per-pane
+  input encoders (ADR-0006), broadcast `PANE_OUTPUT` fanout,
+  `PANE_SNAPSHOT` synthesis from `RenderState`, a per-client capability
+  rewriter for outbound bytes, and an `IdBridge` between core slotmap
+  keys and wire `u32` IDs.
+- `phux-client` — UDS attach loop, raw-mode/altscreen guard, stdin
+  keyboard parser, and a `libghostty_vt::Terminal` per attached pane
+  with `RenderState`-driven per-row dirty redraw (ADR-0013).
 - `phux-config` — TOML schema + loader with `line:col` errors, keybind
-  parser/trie resolver, status `Widget` trait + time/session-name widgets.
+  parser/trie resolver, status `Widget` trait + time/session-name
+  widgets.
 
-What is not wired up yet: full ATTACH/DETACH lifecycle on the server,
-PTY supervision inside the multiplexer state machine, the renderer, and
-the binary's subcommand dispatch.
+What is not wired up yet: most of the command/event surface (sessions,
+windows, layout, focus, OSC events, hooks), `VIEWPORT_RESIZE` routing,
+predictive local echo, mouse / bracketed-paste parsing on the client,
+client-side keybinding dispatch, journaling and crash recovery, and
+the full subcommand set (`new`, `ls`, `kill`, etc. — today's binary
+ships `attach` and `server` only, with tmux-style auto-spawn).
 
 ## Quickstart
 
@@ -82,11 +99,11 @@ plus `nextest`, `deny`, `watch`, `insta`, `mutants`, and `just`.
 
 | Crate              | Purpose                                                        |
 |--------------------|----------------------------------------------------------------|
-| `phux`             | Single binary; subcommands for server, attach, new, ls, kill   |
+| `phux`             | Single binary; `attach` and `server` subcommands today         |
 | `phux-protocol`    | Wire types, codec, version negotiation; publish-ready          |
-| `phux-core`        | Domain types: Session, Window, Pane, Layout                    |
-| `phux-server`      | Daemon: PTYs, terminal grids, IPC, diff emission               |
-| `phux-client`      | TUI client: composes pane grids + chrome, emits VT             |
+| `phux-core`        | Domain types: Session, Window, Pane, binary-split Layout       |
+| `phux-server`      | Daemon: per-pane actor, PTY supervision, `PANE_OUTPUT` fanout  |
+| `phux-client`      | TUI client: local libghostty Terminal + per-row dirty redraw   |
 | `phux-config`      | TOML config schema + status widget contract                    |
 
 `phux-protocol` is the only crate intended for publication; the rest are

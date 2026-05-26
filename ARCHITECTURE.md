@@ -1,13 +1,12 @@
 # Architecture
 
-> **Updated 2026-05-25 for [ADR-0013](./ADR/0013-libghostty-bytes-on-wire.md).**
-> Pane content moved from a structured cell-level diff to VT bytes on the
-> wire. Input remains structured. Both server and client now run
-> `libghostty_vt::Terminal`. References to `DiffOp`, `DiffMirror`, and
-> "diff stream / diff emission" in this document have been replaced with
-> their byte-forwarding equivalents; obsolete modules (`phux-protocol::diff`,
-> `phux-client::mirror`) are scheduled for deletion in the Wave 2 refactor
-> and are not described here.
+> **Updated 2026-05-26 for [ADR-0013](./ADR/0013-libghostty-bytes-on-wire.md).**
+> Pane content rides as VT bytes on the wire; input remains structured.
+> Both server and client run `libghostty_vt::Terminal`. The obsolete
+> `phux-protocol::diff` and `phux-client::mirror` modules have been
+> deleted; a small amount of stale doc-comment text inside
+> `phux-protocol/src/wire/field.rs` still references `DiffOp` and is
+> scheduled for cleanup.
 
 This document describes phux's internal structure: the process model, the
 data model, threading, persistence, and testing strategy. The wire
@@ -23,12 +22,15 @@ The runtime path resolution lives in
 [`phux-server/src/runtime.rs`](./crates/phux-server/src/runtime.rs): the
 socket is `$XDG_RUNTIME_DIR/phux/phux.sock` when that variable is set,
 otherwise `/tmp/phux-$UID/phux.sock`. The parent directory is created
-mode `0o700`. Persistent per-user state (logs, journals) lives under
-`$XDG_STATE_HOME/phux/` (default `~/.local/state/phux/`):
+mode `0o700`.
+
+The persistent per-user state directory below is **design intent, not
+yet implemented**. Today the server keeps state only in memory; logs go
+to stderr by default; journaling and crash recovery have not landed.
 
 ```
 $XDG_RUNTIME_DIR/phux/phux.sock     # SOCK_STREAM, perms 0o700 dir
-$XDG_STATE_HOME/phux/
+$XDG_STATE_HOME/phux/               # NOT YET IMPLEMENTED
 ├── server.pid
 ├── log/
 │   └── server.log
@@ -226,20 +228,105 @@ additive:
   process's stdin/stdout, used by hub servers to reach satellites over
   existing SSH paths.
 
-Predictive local echo (the Mosh property users actually feel) is
-implemented in `phux-client` against the client's local `Terminal`,
-not in the transport. The client speculatively `vt_write`s its own
-keystrokes into a side `Terminal` (or applies a small overlay on top
-of the canonical replica) and reconciles on `FRAME_ACK` (SPEC §6),
-when the server's bytes for those keystrokes arrive. It works over
-any transport — including the Unix socket. Treating it as a client
-feature rather than a transport feature is deliberate: shipping it
-in v0.1 unlocks the most visible Mosh-class UX without waiting for
-QUIC.
-
 See ADR-0007 for the full forward-compat invariants (URI-shaped
 session IDs, hub-and-spoke satellite topology, per-pane encoder
 isolation).
+
+## Predictive local echo
+
+> **Status:** Design intent. Not yet implemented as of 2026-05-26.
+> The mirror `Terminal` and `RenderState` redraw path landed with
+> ADR-0013; the overlay layer below is the next step.
+
+Predictive local echo is the Mosh property users actually feel on a
+slow link: the cell paints under your finger, the network round-trip
+catches up later. We implement it as a **client feature** layered on
+top of the local mirror `Terminal`, not as a transport feature, so it
+works uniformly over UDS, SSH-stdio, and a future QUIC transport.
+
+### Mechanism
+
+Three structures inside the client, all per attached pane:
+
+- **Mirror Terminal** — `libghostty_vt::Terminal` fed by `PANE_OUTPUT`.
+  Authoritative for the user's visible grid. Predictions never modify it.
+- **Prediction overlay** — a sparse `(row, col) -> PredictedCell` map
+  drawn on top of the mirror at render time. Cells are styled (dim /
+  underline) until the server confirms them.
+- **Epoch counter** — monotonic id tagging each prediction with the
+  network state at the time it was made. Predictions older than a TTL
+  with no confirming `PANE_OUTPUT` are killed (treated as wrong).
+
+phux's structured-input choice (ADR-0006 / ADR-0008) means the client
+cannot byte-predict the way Mosh does: the libghostty `Encoder` lives
+server-side, so the client doesn't know whether the user's `'a'` will
+hit the PTY as `0x61` (insertable text) or be swallowed by the inner
+program (vim normal mode, less, etc.). v0.1 therefore predicts at the
+**grapheme level** — "if the cursor is plausibly in insertable-text
+context, the next visible cell will be this grapheme." Conservative by
+default; matches Mosh's safety posture. A future v0.2 enlargement may
+add a parallel client-side encoder for richer predictions, with the
+extra divergence risk that implies.
+
+### Sequence
+
+The happy path (single keypress, server echoes the same grapheme back):
+
+```
+User      Client                                          Server                          PTY/Shell
+ │         │                                                │                                │
+ │ key 'a' │                                                │                                │
+ ├────────►│                                                │                                │
+ │         │ 1. predict: paint 'a' at cursor in overlay     │                                │
+ │         │    (epoch = N, style = dim/underline)          │                                │
+ │         │ 2. INPUT_KEY {pane, KeyEvent('a', …)}          │                                │
+ │         ├───────────────────────────────────────────────►│                                │
+ │         │                                                │ 3. libghostty Encoder → 0x61   │
+ │         │                                                │ 4. write to PTY                │
+ │         │                                                ├───────────────────────────────►│
+ │         │                                                │                                │ 5. shell
+ │         │                                                │                                │    echoes
+ │         │                                                │ 6. feed bytes to canonical     │◄─┐
+ │         │                                                │    libghostty Terminal         │  │
+ │         │                                                │◄───────────────────────────────┘  │
+ │         │ 7. PANE_OUTPUT {pane, seq=K, bytes=0x61}       │                                   │
+ │         │◄───────────────────────────────────────────────┤                                   │
+ │         │ 8. vt_write bytes into mirror Terminal         │                                   │
+ │         │ 9. reconcile: prediction at (row,col,'a')      │                                   │
+ │         │    matches mirror at (row,col,'a') → CONFIRM,  │                                   │
+ │         │    drop overlay entry                          │                                   │
+ │         │                                                │                                   │
+ │         │ 10. FRAME_ACK {pane, seq=K} ──────────────────►│                                   │
+ │         │                                                │                                   │
+
+  Contradiction path (e.g. user is in vim normal mode):
+ │         │ 7'. PANE_OUTPUT bytes do NOT place 'a' at      │                                   │
+ │         │     cursor (cursor moves instead, no insert)   │                                   │
+ │         │ 8'. reconcile: prediction CONTRADICTED         │                                   │
+ │         │     drop overlay entry; redraw cell from       │                                   │
+ │         │     mirror                                     │                                   │
+
+  Timeout path (server silent, no confirming output ever arrives):
+ │         │ -. epoch N has lived > predict_ttl_ms without  │                                   │
+ │         │    a confirming PANE_OUTPUT → KILL prediction, │                                   │
+ │         │    redraw cell from mirror                     │                                   │
+```
+
+Three properties hold:
+
+1. **The mirror is authoritative.** Predictions are an overlay drawn on
+   top at render time; they never mutate the mirror. A bug in the
+   predictor cannot corrupt the user's visible grid past the next
+   redraw.
+2. **Reconciliation runs on `PANE_OUTPUT` arrival**, not on
+   `FRAME_ACK`. The ack is a server-side flow-control signal (SPEC
+   §12.2); it carries no rendering meaning. This means predictive echo
+   continues to function correctly even if a future minor version
+   reshapes the ack protocol.
+3. **Epochs + TTL are the safety net.** If the server is silent
+   (network dead, app not echoing, app crashed), predictions don't
+   accumulate forever; they age out and the displayed cell falls back
+   to the mirror's truth.
 
 ## Error model
 
@@ -306,15 +393,11 @@ src/
 
 The `input` and `wire` modules are gated behind the `server` cargo
 feature so the no-feature shell compiles without `libghostty-vt`.
-See `lib.rs` for the docs.rs / crates.io rationale.
-
-**Pending removal (Wave 2 refactor under ADR-0013):** the `diff/`
-module (`cell.rs`, `grid.rs`, `op.rs`, `compute.rs`) and
-`wire/diff.rs` are still in tree at the time of writing but no longer
-describe the wire — `PANE_OUTPUT` carries raw VT bytes. They will be
-deleted alongside the client-side `mirror/` module in the refactor
-that lands the bytes-on-wire shape. Do not build new work on top of
-them.
+See `lib.rs` for the docs.rs / crates.io rationale. The pre-ADR-0013
+`diff/` module and its companion `wire/diff.rs` have been deleted;
+`PANE_OUTPUT` and `PANE_SNAPSHOT` carry VT bytes directly. A small
+amount of stale doc-comment text inside `wire/field.rs` still mentions
+`DiffOp` and is scheduled for cleanup.
 
 ### `phux-core`
 
@@ -335,45 +418,71 @@ config lives in its own crate.
 
 ```
 src/
-  lib.rs              — re-exports
-  runtime.rs          — tokio current-thread + UDS listener + accept loop
-  state.rs            — ServerState, SharedState, attach/detach, subscribers
+  lib.rs              — re-exports of ServerRuntime, ServerState, PaneActor, ...
+  runtime.rs          — tokio current-thread + UDS listener + accept loop;
+                        spawns per-client tasks on a LocalSet
+  state.rs            — ServerState, SharedState, AttachedClient, ClientId,
+                        PaneInput, Outbound
+  pane_actor.rs       — PaneActor: owns the pane's libghostty Terminal (!Send,
+                        in RefCell on the LocalSet), per-pane input encoders,
+                        PTY reader/writer threads, broadcast PANE_OUTPUT fanout,
+                        snapshot synthesis on demand (ADR-0014)
+  grid.rs             — SnapshotSynthesizer: walks the canonical Terminal via
+                        RenderState and emits a self-contained vt_replay_bytes
+                        sequence for PANE_SNAPSHOT (per-row SGR deltas +
+                        graphemes + cursor restore + DECSCUSR)
+  downsample.rs       — per-client capability rewrite of outbound VT bytes
+                        (truecolor → 256/16, OSC 8 / image / KIP gating)
   id_bridge.rs        — core SessionId <-> wire SessionId (u32)
-  grid.rs             — legacy: captures phux_protocol::Grid via RenderState;
-                        slated for replacement by a snapshot-bytes synthesizer
-                        (see research/2026-05-25-libghostty-renderstate.md §7)
-  input/              — server-side encoders bridging wire input -> PTY bytes
+  telemetry.rs        — tracing setup; opt-in tokio-console behind a feature
+  input/              — server-side encoders bridging wire input -> PTY bytes;
+                        each pane owns its own PerPane{Key,Mouse,Focus,Paste}
+                        encoder, refreshed from Terminal state per encode
     key.rs, mouse.rs, focus.rs, paste.rs, mod.rs
 examples/
-  one_pane.rs         — PTY child -> Terminal -> PANE_OUTPUT (will be rewritten
-                        in the bytes-on-wire refactor; legacy diff stream today)
-  diff_spike.rs       — legacy codec smoke; removed in the refactor
-benches/capture.rs    — capture iterator throughput
+  one_pane.rs         — end-to-end PTY → Terminal → bytes-on-wire smoke test
+                        under ADR-0013 (logs encoded PANE_OUTPUT to stderr)
 ```
 
 No `pty/`, `journal/`, `command.rs`, or `hooks.rs` yet — these are
-future work; their absence here is intentional, not drift.
+future work; their absence here is intentional, not drift. PTY supervision
+today lives inside `pane_actor.rs` (two `std::thread`s bridging blocking
+`portable_pty` I/O to the async actor over `mpsc` channels).
 
 ### `phux-client`
 
 Under ADR-0013 the client owns a `libghostty_vt::Terminal` per
-attached pane and a `RenderState` per pane for incremental redraw.
-The existing `mirror/` module (a hand-rolled Grid that applied
-`DiffOp`s) is **legacy** — slated for deletion in the Wave 2
-refactor. The new layout will be:
+attached pane and uses `RenderState` for per-row dirty redraw. The
+hand-rolled `mirror/` module from earlier drafts has been deleted.
 
 ```
 src/
-  lib.rs              — re-exports
-  pane/               — per-pane Terminal + RenderState bookkeeping (pending)
-  render/             — RenderState-driven incremental redraw (pending)
-  attach/             — frame loop, ATTACHED handling, predictive echo (partial)
+  lib.rs              — re-exports of attach::run
+  attach/
+    mod.rs            — public run(socket, target); ties everything together
+    connection.rs     — UDS transport, length-prefixed frame I/O
+    driver.rs         — tokio::select! lifecycle, RawModeGuard RAII for
+                        outer terminal state (raw mode + altscreen, restored
+                        on any exit)
+    render.rs         — PaneRenderer: feeds PANE_OUTPUT bytes into the local
+                        Terminal, then walks RenderState dirty rows to emit
+                        cursor positioning + per-cell SGR deltas + graphemes
+    input.rs          — StdinParser: keyboard + UTF-8 + escape sequences;
+                        hardcoded Ctrl-B D detach chord
 ```
 
-Today's tree still contains `mirror/` (legacy) and an `attach/render.rs`
-that emits VT from a `DiffMirror`. Both go away with the refactor.
-See `research/2026-05-25-libghostty-renderstate.md` for the contract
-the new modules implement.
+What this tree does NOT contain yet, deliberately:
+
+- Mouse / bracketed-paste parsing on the client (keyboard only in v0).
+- Predictive local echo (see "Predictive local echo" above for the
+  design that lives on top of the mirror Terminal).
+- `VIEWPORT_RESIZE` routing end-to-end (frame exists; SIGWINCH handler
+  not yet wired).
+- Client-side keybinding dispatch (only the hardcoded detach chord).
+- Config loading.
+
+See `research/2026-05-25-libghostty-renderstate.md` for the renderer
+contract these modules implement.
 
 ### `phux-config`
 
@@ -392,14 +501,31 @@ src/
 ### `phux` (binary)
 
 ```
-src/main.rs           — prints version stub; subcommand dispatch unimplemented.
+src/main.rs           — clap subcommand dispatch:
+                          `phux attach [SESSION] [--socket PATH]`
+                          `phux server  [--session NAME] [--socket PATH]`
+                        Auto-spawns a detached `phux server` if the socket
+                        doesn't exist when `attach` is invoked (25 ms poll,
+                        2 s timeout). Opt-in cargo features: `dhat-heap`
+                        (binary), and `tokio-console` via `phux-server`.
 ```
+
+The wider subcommand surface in DESIGN.md §1 (`new`, `ls`, `windows`,
+`panes`, `kill`, `send`, `capture`, `config`, `messages`, `version`,
+`help`) is not yet wired.
 
 ## State replay & crash recovery
 
-The server journals raw PTY output to disk, per pane, in `journal/<pane_id>.log`.
-Journals are append-only, fsync'd on close, and capped (default: 10 MB
-ring per pane).
+> **Status:** Design intent. Not yet implemented as of 2026-05-26.
+> Nothing in the server currently writes to disk; `server.pid`,
+> per-pane journals, and `--recover` do not exist. The bytes-on-wire
+> shape (ADR-0013) makes the implementation mechanical when its turn
+> comes — the PTY byte stream we forward to clients is also exactly
+> what a journal would record.
+
+The intended shape: the server journals raw PTY output to disk, per
+pane, in `journal/<pane_id>.log`. Journals are append-only, fsync'd
+on close, and capped (default: 10 MB ring per pane).
 
 On startup, if `server.pid` is stale, the server can be invoked with
 `--recover`. It reads each journal, replays it into a fresh
@@ -407,7 +533,7 @@ On startup, if `server.pid` is stale, the server can be invoked with
 file alongside the journals.
 
 Crash recovery is therefore a property of the design, not an
-add-on. tmux loses everything on a daemon crash; phux does not.
+add-on. tmux loses everything on a daemon crash; phux will not.
 
 ## Testing strategy
 

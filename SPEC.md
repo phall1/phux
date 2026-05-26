@@ -283,50 +283,65 @@ Within each half:
 - `0x40 – 0x4F` / `0xB0 – 0xBF`: events and signals.
 - `0x7F` / `0xFF`: PING / PONG.
 
+The **Status** column below tracks reference-implementation coverage in
+this repository as of 2026-05-26. It is informative, not normative: a
+conforming peer implements whatever the negotiated version of this
+spec requires (see §16), independent of what `phux-protocol` happens
+to ship today.
+
+- `shipped` — message is in [`phux_protocol::wire::frame::FrameKind`]
+  and round-trips through the encoder/decoder.
+- `partial` — message is on the wire but at least one end does not yet
+  produce or consume it (e.g. the client does not yet emit
+  `VIEWPORT_RESIZE` even though the frame round-trips).
+- `spec-only` — defined here, no codec entry yet.
+
+[`phux_protocol::wire::frame::FrameKind`]: ./crates/phux-protocol/src/wire/frame.rs
+
 ### 7.1 Client → Server
 
-| ID    | Name              | Reference |
-|-------|-------------------|-----------|
-| 0x01  | `HELLO`           | §6.1      |
-| 0x02  | `ATTACH`          | §13       |
-| 0x03  | `DETACH`          | §7.3      |
-| 0x10  | `INPUT_KEY`       | §9.1      |
-| 0x11  | `INPUT_PASTE`     | §9.4      |
-| 0x12  | `INPUT_MOUSE`     | §9.2      |
-| 0x13  | `INPUT_RAW`       | §9.5      |
-| 0x14  | `INPUT_FOCUS`     | §9.3      |
-| 0x20  | `VIEWPORT_RESIZE` | §10.5     |
-| 0x21  | `FRAME_ACK`       | §12       |
-| 0x30  | `COMMAND`         | §11       |
-| 0x40  | `SUBSCRIBE`       | §7.4      |
-| 0x7F  | `PING`            | §7.5      |
+| ID    | Name              | Reference | Status    |
+|-------|-------------------|-----------|-----------|
+| 0x01  | `HELLO`           | §6.1      | shipped   |
+| 0x02  | `ATTACH`          | §13       | shipped   |
+| 0x03  | `DETACH`          | §7.3      | shipped   |
+| 0x10  | `INPUT_KEY`       | §9.1      | shipped   |
+| 0x11  | `INPUT_PASTE`     | §9.4      | partial (server decodes; client doesn't emit yet) |
+| 0x12  | `INPUT_MOUSE`     | §9.2      | partial (server decodes; client doesn't emit yet) |
+| 0x13  | `INPUT_RAW`       | §9.5      | spec-only |
+| 0x14  | `INPUT_FOCUS`     | §9.3      | partial (server decodes; client doesn't emit yet) |
+| 0x20  | `VIEWPORT_RESIZE` | §10.5     | partial (frame defined; SIGWINCH not wired) |
+| 0x21  | `FRAME_ACK`       | §12       | spec-only |
+| 0x30  | `COMMAND`         | §11       | spec-only |
+| 0x40  | `SUBSCRIBE`       | §7.4      | spec-only |
+| 0x7F  | `PING`            | §7.5      | shipped   |
 
 ### 7.2 Server → Client
 
-| ID    | Name              | Reference |
-|-------|-------------------|-----------|
-| 0x80  | `HELLO_OK`        | §6.1      |
-| 0x81  | `ATTACHED`        | §13       |
-| 0x82  | `DETACHED`        | §7.3      |
-| 0x90  | `PANE_OUTPUT`     | §8        |
-| 0x91  | `PANE_SNAPSHOT`   | §8.4      |
-| 0x92  | `PANE_RESIZED`    | §10.5     |
-| 0xA0  | `PANE_OPENED`     | §10.2     |
-| 0xA1  | `PANE_CLOSED`     | §10.2     |
-| 0xA2  | `WINDOW_OPENED`   | §10.1     |
-| 0xA3  | `WINDOW_CLOSED`   | §10.1     |
-| 0xA4  | `WINDOW_RENAMED`  | §10.1     |
-| 0xA5  | `LAYOUT_CHANGED`  | §10.3     |
-| 0xA6  | `SESSION_OPENED`  | §10       |
-| 0xA7  | `SESSION_CLOSED`  | §10       |
-| 0xA8  | `SESSION_RENAMED` | §10       |
-| 0xA9  | `FOCUS_CHANGED`   | §10.4     |
-| 0xB0  | `BELL`            | §7.6      |
-| 0xB1  | `OSC_EVENT`       | §7.7      |
-| 0xB2  | `ALERT`           | §7.8      |
-| 0xC0  | `COMMAND_RESULT`  | §11       |
-| 0xC1  | `ERROR`           | §14       |
-| 0xFF  | `PONG`            | §7.5      |
+| ID    | Name              | Reference | Status    |
+|-------|-------------------|-----------|-----------|
+| 0x80  | `HELLO_OK`        | §6.1      | spec-only (today: `HELLO` is used symmetrically) |
+| 0x81  | `ATTACHED`        | §13       | shipped   |
+| 0x82  | `DETACHED`        | §7.3      | shipped   |
+| 0x90  | `PANE_OUTPUT`     | §8        | shipped   |
+| 0x91  | `PANE_SNAPSHOT`   | §8.4      | shipped   |
+| 0x92  | `PANE_RESIZED`    | §10.5     | spec-only |
+| 0xA0  | `PANE_OPENED`     | §10.2     | spec-only |
+| 0xA1  | `PANE_CLOSED`     | §10.2     | spec-only |
+| 0xA2  | `WINDOW_OPENED`   | §10.1     | spec-only |
+| 0xA3  | `WINDOW_CLOSED`   | §10.1     | spec-only |
+| 0xA4  | `WINDOW_RENAMED`  | §10.1     | spec-only |
+| 0xA5  | `LAYOUT_CHANGED`  | §10.3     | spec-only |
+| 0xA6  | `SESSION_OPENED`  | §10       | spec-only |
+| 0xA7  | `SESSION_CLOSED`  | §10       | spec-only |
+| 0xA8  | `SESSION_RENAMED` | §10       | spec-only |
+| 0xA9  | `FOCUS_CHANGED`   | §10.4     | spec-only |
+| 0xB0  | `BELL`            | §7.6      | shipped   |
+| 0xB1  | `OSC_EVENT`       | §7.7      | spec-only |
+| 0xB2  | `ALERT`           | §7.8      | spec-only |
+| 0xC0  | `COMMAND_RESULT`  | §11       | spec-only |
+| 0xC1  | `ERROR`           | §14       | shipped   |
+| 0xFF  | `PONG`            | §7.5      | partial (server sends as a pre-encoded raw frame; no `FrameKind` variant yet) |
 
 > **Note (deprecation).** Earlier drafts of this SPEC carried
 > `PANE_DIFF` at `0x90` (S → C) with a structured ops body. It is
@@ -1445,3 +1460,4 @@ longer exists as a wire concept.)
 | 0.1.0-draft.2 | 2026-05-24 | §7.7, §9, §10.5 revised to mirror libghostty input/OSC APIs. ADR-0006. |
 | 0.1.0-draft.3 | 2026-05-25 | §8 rewritten for bytes-on-wire pane state sync; `PANE_DIFF` superseded by `PANE_OUTPUT`; `PANE_SNAPSHOT` carries `vt_replay_bytes`; §6.2 capability downsampling described as a server-side VT byte stream rewrite; §13 replay sequence and §16 conformance updated. ADR-0013. |
 | 0.1.0-draft.4 | 2026-05-26 | Post-ADR-0013 cleanup: §2 Frame term re-anchored on per-pane `seq`; §6.2 inline comment on deprecated `RenderingMode`; §11.1 ADR cross-reference points at ADR-0013; §12 flow control rewritten for `PANE_OUTPUT` / per-pane `seq` (was `PANE_DIFF` / `frame_id`); Appendix B reserved-range guidance drops `DiffOp`. |
+| 0.1.0-draft.5 | 2026-05-26 | Editorial: §7.1 / §7.2 message catalogs grow a `Status` column tracking reference-implementation coverage (informative, non-normative). No wire change. |
