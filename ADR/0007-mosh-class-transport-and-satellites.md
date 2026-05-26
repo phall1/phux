@@ -1,5 +1,22 @@
 # 0007 — Mosh-class transport semantics and satellite forward-compat
 
+> **Post-ADR-0013 amendment (2026-05-25):** ADR-0013 supersedes
+> ADR-0002 — pane content now ships as VT bytes (`PANE_OUTPUT`), not
+> structured cell diffs. The Mosh-decomposition table below has been
+> updated inline; the rest of this ADR (Transport trait, URI-shaped
+> SessionId, hub-and-spoke satellites, forward-compat invariants)
+> stands as-is. Satellite relaying is in fact *simpler* under ADR-0013
+> because the hub forwards opaque byte payloads instead of having to
+> understand cell structure.
+>
+> Predictive local echo prose: pre-ADR-0013 the client maintained a
+> "diff mirror" that the prediction overlay sat on top of. Under
+> ADR-0013 the client maintains a libghostty `Terminal` directly;
+> predictive echo speculatively `vt_write`s encoded keystrokes into a
+> shadow terminal (or overlay), reconciles when authoritative
+> `PANE_OUTPUT` bytes arrive. The UX guarantee is unchanged; the
+> substrate is libghostty, not a phux-defined mirror.
+
 Status: Accepted (forward-compat invariants); implementation deferred to v0.2+.
 Date: 2026-05-25
 
@@ -31,26 +48,32 @@ preclude either.
 "Support Mosh" is rejected as an ambiguous goal. Mosh bundles three
 ideas; we treat them separately.
 
-| Mosh innovation              | Our treatment                                    | Where it lives        |
-|------------------------------|--------------------------------------------------|-----------------------|
-| Cell-level state + diffs     | **Already done.** This is the bet of ADR-0002.  | `phux-protocol::diff` |
-| Predictive local echo        | **Adopt as client feature.** Transport-agnostic. | `phux-client`         |
-| UDP State Sync Protocol (SSP) | **Reject. Use QUIC instead** for v0.2+.         | `phux-server::transport` |
+| Mosh innovation              | Our treatment                                    | Where it lives                              |
+|------------------------------|--------------------------------------------------|---------------------------------------------|
+| Authoritative server state synthesized on attach | **Adopted via byte-replay snapshots** per ADR-0013. The server walks its libghostty `Terminal` grid to emit a VT byte sequence that catches a new client up — exactly Mosh's snapshot trick, mapped onto our bytes-on-the-wire shape. | `phux-protocol::wire::frame::PaneOutput` (and `PaneSnapshot`) |
+| Predictive local echo        | **Adopt as client feature.** Transport-agnostic. | `phux-client`                               |
+| UDP State Sync Protocol (SSP) | **Reject. Use QUIC instead** for v0.2+.         | `phux-server::transport`                    |
 
 Reasoning:
 
-- **Cell diffs already exist.** SPEC §8 is the canonical statement.
+- **Authoritative server + byte-replay snapshots already exist.**
+  SPEC §8 is the canonical statement; ADR-0013 records the
+  bytes-on-the-wire shape that makes Mosh-style snapshot synthesis
+  the natural attach path.
 - **Predictive echo is a client concern**, not a transport concern.
-  The client maintains a local prediction overlay against its diff
-  mirror, dim-renders predicted cells, and reconciles on server
-  `FRAME_ACK` (SPEC §6). It works over any transport — Unix socket,
-  TCP, QUIC.
+  The client speculatively `vt_write`s keystrokes (encoded via
+  libghostty's encoders + the client's best guess at mode) into a
+  shadow `Terminal` or directly into the rendered one with a
+  predicted-cells overlay, then reconciles when the authoritative
+  `PANE_OUTPUT` arrives — diff-of-grids via `grid_ref()`. It works
+  over any transport — Unix socket, TCP, QUIC.
 - **QUIC strictly dominates SSP for our use case.** QUIC gives us
   connection migration (roaming), 0-RTT resumption (sub-second
   reconnect), TLS encryption, and congestion control — all the UX
   properties of SSP. SSP's unreliable+resync model is only a win when
-  the stream is large and lossy; our protocol ships small ordered cell
-  diffs, for which reliable+ordered is correct. Reimplementing SSP
+  the stream is large and lossy; our protocol ships small ordered
+  VT byte frames (ADR-0013) and structured input frames, for which
+  reliable+ordered is correct. Reimplementing SSP
   (~1500 LoC of UDP framing, OCB-AES, ack windows, roaming) buys us
   nothing that `quinn` doesn't already provide.
 
@@ -160,8 +183,14 @@ aren't shipping.
 
 ## Related
 
-- ADR-0002 — diff-based protocol (the bet that makes Mosh-class
-  semantics possible).
+- ADR-0013 — libghostty bytes on the wire (supersedes ADR-0002).
+  The bytes-on-wire shape is what makes Mosh-style snapshot synthesis
+  on attach the natural code path. Hub-and-spoke satellite relaying
+  is also simpler under 0013 — the hub forwards opaque byte payloads
+  instead of having to understand cell structure.
+- ADR-0002 — diff-based protocol (superseded; retained as historical
+  context for the bet that earlier framing of "Mosh-class semantics
+  via cell diffs" rested on).
 - ADR-0006 — input mirrors libghostty (encoder locality, which the hub
   inherits).
 - SPEC §6 — FRAME_ACK and snapshot fallback (the protocol substrate

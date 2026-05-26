@@ -5,6 +5,34 @@ Status: Accepted. Supersedes parts of ADR-0002 (the
 supersedes the discriminant-equality claim and the post-hoc divergence
 amendment in ADR-0006.
 
+> **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002 in
+> full (pane content moves from structured cell diffs to VT bytes on
+> the wire). This ADR is *reinforced* on the input side and *partially
+> obsoleted* on the output/style side:
+>
+> - **Input atoms (`PhysicalKey`, `KeyAction`, `ModSet`, `MouseAction`,
+>   `MouseButton`, `FocusEvent`) are still re-exported and still
+>   load-bearing.** Structured input is exactly what ADR-0013 keeps on
+>   the wire client→server, because only the server knows pane mode.
+> - **Style atoms (`Color`, `RgbColor`, `PaletteIndex`, `Underline`)
+>   are no longer on the wire** — they were re-exported for use inside
+>   the now-superseded `Cell` wire type. They remain useful as
+>   libghostty re-exports for any non-wire purpose (e.g. a renderer
+>   reading `grid_ref()` on the client side), but they no longer
+>   participate in the wire format.
+> - **Phux-defined `Cell`, `Grid`, `DiffOp`, `CursorState`,
+>   `CursorShape`, `CellFlags` are dead as wire types.** They are
+>   listed in ADR-0013's "no longer needed in the implementation"
+>   section. The §"What stays phux-defined" table below has been
+>   amended inline to reflect that the wire shrinks to envelopes +
+>   `PANE_OUTPUT` bytes + `PANE_SNAPSHOT` VT replay bytes.
+>
+> The core argument of this ADR — "where libghostty already models a
+> plain type, re-export it instead of mirroring" — is unaffected. If
+> anything, ADR-0013 takes the same insight one layer up (re-use
+> libghostty's `Terminal` on both ends of the wire instead of
+> mirroring its grid model).
+
 Date: 2026-05-25
 
 ## Context
@@ -74,16 +102,24 @@ fields, composing libghostty's atoms.
 
 **2. Multiplexer concepts libghostty doesn't model.**
 
-- `Cell` — wire shape composed of libghostty's color + underline atoms
-  plus a grapheme-cluster `text: Vec<char>` and a compact `CellFlags`
-  bitfield (which packs libghostty `Style`'s eight per-bool fields plus
-  phux-specific render hints into one `u16`).
-- `Grid`, `DiffOp`, `CursorState`, `CursorShape` — phux's diff protocol.
-- `FrameKind`, `SessionId`, etc. — phux's wire format and multiplexer
-  domain.
+Per ADR-0013, the wire-content shape on the output side collapses to
+opaque byte payloads. What stays phux-defined on the wire is:
+
+- `FrameKind`, `SessionId`, the envelope layer, lifecycle frames
+  (`ATTACHED`, `DETACHED`, `PANE_OPENED`, etc.) — phux's wire format
+  and multiplexer domain. Unaffected by ADR-0013.
+- `PaneOutput { pane_id, bytes }` and `PaneSnapshot { pane_id, cols,
+  rows, vt_replay_bytes }` — phux-defined envelopes whose *payload*
+  is opaque VT bytes (ADR-0013).
 - `PasteTrust` / `PasteEvent` — libghostty's `paste` module is *free
   functions* (`is_safe`, `encode`), not a typed event. `PasteTrust` is
   phux-defined per-pane policy metadata, not a mirror of anything.
+
+Pre-ADR-0013 this category also included `Cell`, `Grid`, `DiffOp`,
+`CursorState`, `CursorShape`, and the `CellFlags` `u16` bitfield —
+all of which were wire shapes for the structured cell-diff protocol.
+ADR-0013 retires them as wire types. They may persist briefly during
+the bytes-on-the-wire transition; do not extend them.
 
 ### Wire byte stability
 
@@ -129,18 +165,22 @@ phux bytes, not by raw `as u32` cast.
 - **We inherit libghostty's naming choices.** `StyleColor::None` (not
   `Default`), `mouse::Button::Unknown` (not `None`), `focus::Event` is
   an enum not a struct. These are aesthetic frictions, not blockers.
-- **ADR-0002 is partially superseded.** "Protocol independent of
-  emulator implementation" no longer applies to input or style atoms.
-  It still applies to the diff protocol (cells, ops, grid) and the
-  multiplexer domain (sessions, windows, panes), which are
-  phux-defined and not in libghostty's vocabulary.
+- **ADR-0002 is partially superseded by this ADR, and fully
+  superseded by ADR-0013.** This ADR narrowed "protocol independent
+  of emulator implementation" away from input/style atoms; ADR-0013
+  then retires the diff protocol entirely in favor of bytes on the
+  wire. The "protocol-independent-of-emulator" claim survives only
+  for the multiplexer domain (sessions, windows, panes, lifecycle
+  frames), which is phux-defined and not in libghostty's vocabulary.
 
 ## What this ADR replaces
 
 - **ADR-0002** §"protocol is independent of any specific emulator
-  implementation" — narrow to: the *diff protocol shape* and
-  *multiplexer domain* are emulator-independent. Input atoms and style
-  atoms are not.
+  implementation" — narrowed by this ADR to: the *diff protocol
+  shape* and *multiplexer domain* are emulator-independent (input
+  atoms and style atoms are not). **ADR-0013 then supersedes ADR-0002
+  in full** — the diff protocol shape is gone; only the multiplexer
+  domain remains as the emulator-independent surface.
 - **ADR-0006** §"The numeric values of `PhysicalKey`, `MouseButton`,
   `MouseAction`, `KeyAction` match libghostty's enums verbatim" — true
   now by construction (same types). The post-hoc divergence amendment
@@ -155,14 +195,19 @@ phux bytes, not by raw `as u32` cast.
   upstream. Our `PasteTrust` is phux-specific policy metadata, now
   documented as such.
 - libghostty's `style::Style` (a plain struct with eight per-bool fields)
-  is not currently re-exported; phux packs its bools into the `CellFlags`
-  `u16` bitfield for compact wire transit. We may reconsider if
-  CellFlags ever needs to grow beyond u16.
+  was not re-exported; phux originally packed its bools into the
+  `CellFlags` `u16` bitfield for compact wire transit. Under ADR-0013
+  `CellFlags` is dead as a wire type — bytes on the wire carry SGR
+  state inline — so this reconsideration is moot.
 
 ## Related
 
 - ADR-0001 — language: Rust (chose Rust *because* of libghostty-rs).
-- ADR-0002 — diff-based protocol (partial supersede; see above).
+- ADR-0002 — diff-based protocol (this ADR partial-superseded it on
+  input/style; **ADR-0013 supersedes it in full**).
+- ADR-0013 — libghostty bytes on the wire. The same "use libghostty's
+  shape, don't mirror it" insight applied at the protocol layer
+  instead of the type layer.
 - ADR-0004 — libghostty-vt as grid source.
 - ADR-0006 — input mirrors libghostty (partial supersede; the
   discriminant-equality claim and divergence amendment are dropped).

@@ -1,5 +1,26 @@
 # 0010 — phux is frontend-agnostic; tmux control mode reserved as compat option
 
+> **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002 —
+> pane content moves from structured cell diffs to VT bytes on the
+> wire. The "native > CC" argument below is *stronger* under ADR-0013,
+> not weaker, but the substrate it leans on changes:
+>
+> - **Pre-0013 framing:** native wins because cell-diffs are more
+>   structured than CC's region-redraw model.
+> - **Post-0013 framing:** native wins because (a) the wire is bytes
+>   + structured input, so every libghostty wire feature (Kitty
+>   graphics, modern key protocol, sixel, hyperlinks, selection APIs)
+>   reaches phux clients on `cargo update` with no protocol work —
+>   the ADR-0008 dividend extended to grid content; (b) the wire is
+>   simpler than tmux CC's framing while losing no fidelity; and (c)
+>   a byte-stream wire is *more* friendly to non-libghostty
+>   consumers (recording, inspection, replay) than CC's tmux-shaped
+>   messages, which means the frontend-agnosticism claim is
+>   structurally stronger than it was under ADR-0002.
+>
+> Inline prose below has been touched up where it leaned specifically
+> on cell-diff terminology; the conclusion is unchanged.
+
 Status: Accepted (forward-compat invariants); CC adapter not on the
 roadmap.
 Date: 2026-05-25
@@ -32,9 +53,11 @@ It's tempting. It's also the wrong default. CC is fundamentally a
 
 ## Decision
 
-**phux's native cell-diff protocol (SPEC §8) is the primary and only
-required frontend wire format. CC is reserved as an optional future
-adapter — no implementation, no roadmap commitment, no v0.2+ promise.**
+**phux's native wire protocol (SPEC §8; bytes-on-wire for pane
+content + structured envelopes for everything else, per ADR-0013) is
+the primary and only required frontend wire format. CC is reserved
+as an optional future adapter — no implementation, no roadmap
+commitment, no v0.2+ promise.**
 
 But: phux-server, phux-protocol, and phux-client MUST NOT preclude a
 second frontend. The architecture is frontend-agnostic from day one;
@@ -42,42 +65,55 @@ adding CC later is purely additive work, not a refactor.
 
 ## Why native > CC
 
-Cell-level diffs vs. CC's region-redraw model. SPEC §8 ships ops at
-single-cell granularity (`PUT_CELL`, `RUN`, `COPY_RECT`, `CLEAR_RECT`)
-with explicit `FrameId` ordering and `FRAME_ACK` for predictive echo.
-CC's surface is screen-region updates and tmux-shaped layout messages
-— good enough to draw a terminal, but not enough for:
+phux's native wire (VT bytes + structured envelopes, ADR-0013) versus
+CC's region-redraw + tmux-shaped layout messages. The native wire is
+strictly more capable along the axes that matter to phux:
 
-- **Predictive local echo** (ADR-0007) — phux clients render predicted
-  cells against the diff mirror and reconcile on `FRAME_ACK`. CC has
-  no equivalent signal.
-- **Multi-attach with per-client viewport sizes.** SPEC §8.4 snapshot
-  fallback is per-client. CC's update stream assumes one consumer's
-  geometry.
-- **Satellite-routed sessions** (ADR-0007) — relies on the wire being
-  ours to evolve. CC freezes us against tmux's framing.
-- **`AGENT_HOOKS` and future capability bits** (SPEC §6.2). Adding new
-  ServerFeature variants is a one-line change on a wire we own. CC
-  would have to invent extension mechanisms that aren't tmux-shaped.
+- **Predictive local echo** (ADR-0007) — phux clients hold a
+  libghostty `Terminal` locally and speculatively `vt_write`
+  keystrokes into it (or into an overlay), reconciling when the
+  authoritative `PANE_OUTPUT` bytes arrive. CC has no equivalent
+  signal and no way to surface the speculative/authoritative
+  distinction.
+- **Multi-attach with per-client viewport sizes.** SPEC §8.4
+  snapshot fallback is per-client: `PANE_SNAPSHOT` carries a fresh
+  VT replay byte sequence synthesized for the attaching client's
+  geometry. CC's update stream assumes one consumer's geometry.
+- **Satellite-routed sessions** (ADR-0007) — relies on the wire
+  being ours to evolve, and on byte payloads being opaquely
+  forwardable through a hub. CC freezes us against tmux's framing
+  and forces re-encoding at every hop.
+- **`AGENT_HOOKS` and future capability bits** (SPEC §6.2). Adding
+  new ServerFeature variants is a one-line change on a wire we own.
+  CC would have to invent extension mechanisms that aren't
+  tmux-shaped.
+- **Per-client byte-stream rewriting for capability downsampling.**
+  Truecolor → 256 → 16 rewriting happens server-side per client
+  (ADR-0013). CC has no equivalent — every CC consumer gets the
+  same stream.
 
-We also inherit libghostty's input/style atoms directly (ADR-0008), so
-every upstream Ghostty wire feature — new keys, new SGR forms,
-selection APIs — lands on phux via `cargo update`. CC would
-re-translate those into tmux-shaped messages and lose fidelity at the
-seam.
+We also inherit libghostty's input/style atoms directly (ADR-0008),
+and under ADR-0013 we inherit libghostty's grid model directly on
+both ends of the wire. Every upstream Ghostty wire feature — new
+keys, new SGR forms, selection APIs, Kitty graphics, sixel,
+hyperlinks, future image protocols — lands on phux via `cargo
+update` with zero protocol work. CC would re-translate those into
+tmux-shaped messages and lose fidelity at the seam, every time.
 
 ## Why CC is worth reserving anyway
 
 One scenario, and one only: a CC-aware terminal renders phux panes as
 native splits without any phux UI being drawn. The user gets phux's
-persistence + multi-attach + diff protocol + satellite roadmap, with
-Ghostty/iTerm2's native chrome and GPU rendering on top.
+persistence + multi-attach + native wire protocol + satellite
+roadmap, with Ghostty/iTerm2's native chrome and GPU rendering on
+top.
 
-That's a real win — but it's a *secondary* frontend, not a peer to the
-native protocol. Our TUI client still wants cell-diffs. Our future
-GUI client (DESIGN §14) still wants cell-diffs. CC is "free
-integration with terminals we didn't write, when those terminals do
-the work to consume it."
+That's a real win — but it's a *secondary* frontend, not a peer to
+the native protocol. Our TUI client still wants the native wire
+(bytes + structured envelopes, into a local libghostty `Terminal`).
+Our future GUI client (DESIGN §14) still wants the native wire. CC
+is "free integration with terminals we didn't write, when those
+terminals do the work to consume it."
 
 So we leave the door open. We don't walk through it until someone
 walks through from the other side.
@@ -89,7 +125,8 @@ These are bugs in v0.1 even though no CC adapter is shipping.
 1. **No frontend-specific assumption in domain code.** phux-server,
    phux-core, and phux-protocol never assume "exactly one frontend
    protocol exists." The frame emission path (SPEC §8) is the only
-   place that knows about cell-diffs; everything upstream (PTY pump,
+   place that knows about the native wire shape (PTY-byte forwarding
+   + snapshot synthesis per ADR-0013); everything upstream (PTY pump,
    terminal state, layout) is frontend-agnostic. This is the *same*
    shape as the `Transport` trait pattern from ADR-0007 — multiple
    impls behind one boundary — applied at the rendering layer instead
@@ -105,20 +142,23 @@ These are bugs in v0.1 even though no CC adapter is shipping.
    when we do.
 
 3. **Frame emission is not the only code path that touches pane
-   state.** Today only `phux-server/src/diff/compute.rs` reads a
-   pane's terminal grid to emit diffs. That's fine, but it's a
-   convention, not an enforced invariant. If a future PR makes
-   `compute.rs` the *only* place that can read pane state (e.g. by
-   moving the terminal handle behind a `DiffEmitter` API), reject it.
-   A CC adapter is another reader; the pane needs to keep being
-   readable by N consumers.
+   state.** Today, the byte-forwarding path (ADR-0013) and the
+   snapshot synthesizer that walks `grid_ref()` are the readers of
+   pane state for the native wire. That's fine, but it's a convention,
+   not an enforced invariant. If a future PR makes the snapshot
+   synthesizer or the byte forwarder the *only* place that can read
+   pane state (e.g. by moving the terminal handle behind a
+   `PaneOutputEmitter` API), reject it. A CC adapter is another
+   reader; the pane needs to keep being readable by N consumers.
+   (Pre-ADR-0013 this invariant was phrased in terms of
+   `phux-server/src/diff/compute.rs`; the principle is the same.)
 
 4. **No PaneState field elides information CC would need.** The
    server retains screen-region info today as a byproduct of
    libghostty-vt's render-state. We do not optimize that away in v0.1
-   on the assumption that only cell-diff consumers exist. If we ever
-   want to strip render-state for memory reasons, we add it under a
-   feature flag, not as a default.
+   on the assumption that only native-wire consumers exist. If we
+   ever want to strip render-state for memory reasons, we add it
+   under a feature flag, not as a default.
 
 ## When (and whether) to actually build it
 
@@ -195,10 +235,13 @@ The "Decision" above is a claim about what the wire protocol permits.
 It is not a claim about what has been demonstrated. Be honest about
 which one you're reading.
 
-What the wire protocol does: it carries cell-diffs (SPEC §8), input
-atoms (SPEC §9), and capability bits (SPEC §6.2) without any field
-that names "TUI" or assumes a terminal renderer. Nothing in SPEC.md
-precludes a non-TUI consumer.
+What the wire protocol does: it carries pane-content as VT bytes
+(SPEC §8, per ADR-0013), input atoms (SPEC §9), and capability bits
+(SPEC §6.2) without any field that names "TUI" or assumes a
+terminal renderer. Nothing in SPEC.md precludes a non-TUI consumer
+— a byte-stream wire is in fact *more* friendly to non-libghostty
+consumers (recording, inspection, replay) than the pre-ADR-0013
+phux-defined cell semantics were.
 
 What the reference implementation does: it serves exactly one client
 shape, `phux-client`'s TUI renderer. No GUI client, no structured-
@@ -212,15 +255,18 @@ This distinction matters. Subtle TUI-coupling is exactly the kind
 of bug that survives until a non-TUI consumer surfaces it. Four
 things to watch:
 
-- **`RenderingMode::VtReplay` (SPEC §6.2).** The spec splits `Diff`
-  from `VtReplay` but the latter is sketched, not specified. A
-  non-VT renderer that receives a VtReplay frame today has no
-  defined behavior. That's a hole.
-- **`PaneDiff::ops` are 2D grid ops.** `PUT_CELL` / `RUN` /
-  `COPY_RECT` / `CLEAR_RECT` make sense to consumers that have a
-  grid. A structured-output or accessibility consumer would project
-  them onto a different model — fine, but we haven't proved the
-  projection is lossless because no one has tried.
+- **`PANE_OUTPUT` is opaque VT bytes (ADR-0013).** A consumer that
+  wants structured cells must either embed libghostty (one
+  dependency line in Rust), wire up a `vte`-class parser, or
+  operate at the byte-stream level. This is intentional — bytes
+  on the wire are *more* friendly to non-libghostty consumers
+  than a phux-defined structured cell grid would have been — but
+  it remains structural rather than validated: no recording /
+  inspection / replay consumer has been built against it.
+- **`RenderingMode` in SPEC §6.2** (formerly splitting `Diff` from
+  `VtReplay`) reduces to a single shape under ADR-0013. Any
+  `RenderingMode` enum surfacing CC support is one new variant; the
+  pre-existing `Diff` variant is dead and tracked for removal.
 - **Input atoms (ADR-0006/0008) are re-exported from libghostty.**
   They reflect terminal-input semantics: KEY/MOUSE/FOCUS/PASTE with
   KIP-flavored modifiers. A GUI consumer would translate at the
@@ -245,8 +291,13 @@ Tracked in `bd show phux-3dj`.
 
 ## Related
 
-- ADR-0002 — diff-based protocol (the bet that makes native strictly
-  better than CC for our use case).
+- ADR-0013 — libghostty bytes on the wire (supersedes ADR-0002).
+  The current substrate of the "native > CC" argument: bytes +
+  structured envelopes + libghostty `Terminal` on both ends, giving
+  automatic feature parity with upstream Ghostty and a wire CC
+  cannot match.
+- ADR-0002 — diff-based protocol (superseded; historical context for
+  the original "native strictly better than CC" framing).
 - ADR-0003 — single server, many sessions (the headless property a
   CC adapter would consume).
 - ADR-0007 — Mosh-class transport + satellites (the same "trait for
@@ -256,8 +307,8 @@ Tracked in `bd show phux-3dj`.
   upstream Ghostty wire features land on phux automatically; CC
   would lose this).
 - SPEC §6.2 — ServerFeature bitset (where `CC_FRONTEND` lives).
-- SPEC §8 — pane state synchronization (the cell-diff protocol CC
-  cannot match).
+- SPEC §8 — pane state synchronization (the native wire protocol —
+  bytes-on-wire per ADR-0013 — that CC cannot match).
 - DESIGN §14 — "Out of scope, but on the radar" (the user-facing
   surface where CC is mentioned).
 - [Ghostty 1.3.0 release notes](https://ghostty.org/docs/install/release-notes/1-3-0) — the source for the CC roadmap quotes above.

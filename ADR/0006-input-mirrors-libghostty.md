@@ -5,6 +5,14 @@ the supersession by ADR-0008; see git history for the original draft and
 its two amendments. The decision recorded below is the current decision —
 ADR-0008 is the *why*, this ADR is the *what* for the input wire.
 
+> **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002
+> (bytes-on-wire for pane content). This ADR is *reinforced*, not
+> weakened, by ADR-0013: structured input is exactly what ADR-0013
+> keeps phux-defined on the client→server direction, because only the
+> server knows the pane's current mode and therefore which PTY byte
+> encoding a key/mouse event should land in. Re-exporting libghostty's
+> input atoms is now the load-bearing wire shape for input, full stop.
+
 Date: 2026-05-24 (original) / 2026-05-25 (rewrite)
 
 ## Context
@@ -176,9 +184,14 @@ intact. The implementation just got simpler.
 - ADR-0008 — use libghostty-vt's types directly. The *why* behind this
   ADR's *what*. Read 0008 if you want the dep-graph and forward-compat
   argument in full.
-- ADR-0002 — diff-based protocol. Partial supersede by 0008 for input
-  and style atoms; the diff protocol shape remains
-  emulator-independent.
+- ADR-0002 — diff-based protocol. **Superseded in full by ADR-0013**
+  (bytes-on-wire for pane content). Partial-supersede-by-0008 note for
+  input and style atoms is now subsumed by 0013's broader change on
+  the output side; the input side (this ADR) is unaffected by 0013
+  and in fact reinforced — see the post-ADR-0013 note above.
+- ADR-0013 — libghostty bytes on the wire. The reason structured input
+  becomes more, not less, justified: only the server knows pane mode,
+  so input cannot be pre-encoded client-side.
 - ADR-0004 — libghostty-vt as grid source. Same load-bearing dep on
   the server side.
 - ADR-0007 — Mosh-class transport and satellites. Inherits the

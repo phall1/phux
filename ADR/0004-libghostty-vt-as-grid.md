@@ -1,5 +1,15 @@
 # 0004 — libghostty-vt is the canonical grid
 
+> **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002
+> (bytes-on-wire replaces structured cell diffs). This ADR is
+> unaffected in substance — libghostty-vt is still the canonical
+> server-side grid — but the *use* the server makes of it changed:
+> the server now forwards PTY bytes directly on `PANE_OUTPUT` and
+> only consults the libghostty `Terminal` to synthesize `PANE_SNAPSHOT`
+> VT replay bytes on attach (mosh-style: walk `grid_ref()`, emit
+> SGR runs + cells). It no longer "emits diffs from there." Inline
+> wording below has been touched up; the decision itself is intact.
+
 Status: Accepted
 Date: 2026-05-24
 
@@ -7,7 +17,11 @@ Date: 2026-05-24
 
 Every pane has a terminal screen state — the grid, plus scrollback,
 plus modes, plus cursor. The server must maintain this state because
-it is the source of truth for diffs (ADR-0002).
+it is the source of truth that snapshots are synthesized from when a
+client attaches, and (originally) the source of truth that wire-side
+diffs were computed from (ADR-0002, now superseded by ADR-0013 —
+content flows as VT bytes on the wire; the server-side grid still
+backs `PANE_SNAPSHOT` synthesis).
 
 The implementation can be:
 
@@ -18,8 +32,10 @@ The implementation can be:
 ## Decision
 
 Per-pane state is a `libghostty_vt::Terminal`. The server feeds PTY
-output into it, queries the resulting grid via `RenderState`, and
-emits diffs from there.
+output into it and forwards those same bytes to attached clients via
+`PANE_OUTPUT` (ADR-0013); on attach, the server walks the resulting
+grid via `RenderState` / `grid_ref()` to synthesize the
+`PANE_SNAPSHOT` VT replay bytes that catch a new client up.
 
 ## Rationale
 
@@ -35,8 +51,11 @@ emits diffs from there.
   multiplexing, layout, IPC, and rendering — not terminal emulation.
   This is the largest single way phux is smaller than tmux.
 - **Aligned with the protocol shape.** libghostty-vt's `RenderState`
-  exposes a row/cell iterator API that maps cleanly to our cell-level
-  diff format.
+  exposes a row/cell iterator API that drives `PANE_SNAPSHOT` byte
+  synthesis on attach (ADR-0013) and provides local dirty tracking
+  on the server's own grid. (Pre-ADR-0013 this same iterator drove
+  cell-level diff emission; the iterator is just as well-suited to
+  the byte-synthesis path.)
 
 ## Tradeoffs
 

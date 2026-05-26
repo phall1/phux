@@ -199,7 +199,10 @@ re-versioning, no migration of stored sessions.
   `LayoutNode` exists in both crates).
 - SPEC §10.3 — wire-level layout types, including the reserved
   `TABBED` variant.
-- ADR-0002 — diff-based protocol (layout snapshots flow through the
-  same `ATTACHED` path as cell diffs).
+- ADR-0013 — libghostty bytes on the wire (supersedes ADR-0002).
+  Layout snapshots flow through the same `ATTACHED` path as
+  `PANE_SNAPSHOT` byte frames. The lifecycle/layout shape on the wire
+  is unchanged by ADR-0013 — only the pane-content payload moved from
+  structured cell-diffs to VT replay bytes.
 - `bd` ticket `phux-byc.2` — implementation that shipped the
   binary-tree model.
