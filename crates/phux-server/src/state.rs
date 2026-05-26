@@ -45,6 +45,7 @@ use phux_core::registry::Registry;
 use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
+use phux_protocol::diff::ColorSupport;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
@@ -110,6 +111,17 @@ pub struct AttachedClient {
     /// Outbound mailbox; the per-client write task drains this and writes to
     /// the socket.
     pub tx: mpsc::Sender<OutboundFrame>,
+    /// The client's advertised color tier (SPEC §6.2). The server MUST
+    /// downsample outbound color values to this tier before fanout —
+    /// see [`crate::downsample`] for the helper byc.5's fanout layer
+    /// will plug into.
+    ///
+    /// Defaults to [`ColorSupport::TrueColor`] (most-permissive) for
+    /// clients that have not yet advertised caps; this never silently
+    /// downgrades. The HELLO/ClientCapabilities handshake (SPEC §6.1)
+    /// is NOT wired through yet — see follow-up ticket "Wire
+    /// `ColorSupport` through HELLO/ClientCapabilities per SPEC §6.1/§6.2".
+    pub color_support: ColorSupport,
 }
 
 /// Errors returned by [`ServerState::attach`].
@@ -205,6 +217,9 @@ impl ServerState {
                 id: client_id,
                 session: session_id,
                 tx,
+                // Default tier until HELLO wiring (SPEC §6.1) lands;
+                // most-permissive so we never silently downgrade.
+                color_support: ColorSupport::default(),
             },
         );
 
@@ -472,6 +487,19 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn attached_client_color_support_defaults_to_truecolor() {
+        // Default tier until HELLO wiring lands. If this assertion ever
+        // needs to change, also update the comment in `attach()` and
+        // the deferral note on `AttachedClient::color_support`.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach(cid, "default", mk_tx()).unwrap();
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.color_support, ColorSupport::TrueColor);
     }
 
     #[test]

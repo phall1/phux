@@ -17,7 +17,10 @@ mod compute;
 mod grid;
 mod op;
 
-pub use cell::{Cell, CellFlags, Color, PaletteIndex, RgbColor, Underline};
+pub use cell::{
+    Cell, CellFlags, Color, ColorDownsample, ColorSupport, PaletteIndex, RgbColor, Underline,
+    downsample_color, nearest_xterm_16, nearest_xterm_256, xterm_256_to_rgb,
+};
 pub use compute::compute_diff;
 pub use grid::Grid;
 pub use op::{CursorShape, CursorState, DiffOp};

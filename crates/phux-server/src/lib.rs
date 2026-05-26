@@ -7,6 +7,7 @@
 
 #![warn(missing_docs)]
 
+pub mod downsample;
 pub mod grid;
 pub mod id_bridge;
 pub mod input;
