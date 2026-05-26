@@ -42,8 +42,8 @@ use tokio::task::{JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::pane_actor::{PaneActor, SnapshotRequest};
-use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState};
+use crate::pane_actor::{PaneActor, PaneHandle, SnapshotRequest};
+use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, PaneInput, SharedState};
 
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -77,6 +77,15 @@ pub struct ServerConfig {
     /// keep the default (no-PTY) so they can exercise the registry/wire
     /// surface without forking shells.
     pub seed_with_pty: bool,
+    /// When `Some` and [`Self::seed_with_pty`] is `true`, the pre-seeded
+    /// pane spawns this command instead of the user's default shell.
+    /// Mostly useful for integration tests that need a deterministic
+    /// PTY-backed actor (e.g. `cat`, which echoes input → output for a
+    /// crisp wire round-trip assertion).
+    ///
+    /// Ignored when `seed_with_pty` is `false`. `None` (the default)
+    /// falls back to [`crate::pane_actor::default_shell_command`].
+    pub seed_command: Option<portable_pty::CommandBuilder>,
 }
 
 impl ServerConfig {
@@ -88,6 +97,7 @@ impl ServerConfig {
             socket_path: default_socket_path(),
             pre_seeded_session: None,
             seed_with_pty: false,
+            seed_command: None,
         }
     }
 }
@@ -210,6 +220,7 @@ impl ServerRuntime {
         // inside the future are polled on the same thread.
         let pre_seeded = self.cfg.pre_seeded_session.clone();
         let seed_with_pty = self.cfg.seed_with_pty;
+        let seed_command = self.cfg.seed_command.clone();
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -240,7 +251,9 @@ impl ServerRuntime {
                 // `Send` futures — exactly what `PaneActor` is not.
                 if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
-                        seed_session_with_default_shell(&state, name, &root_token)
+                        let cmd =
+                            seed_command.unwrap_or_else(crate::pane_actor::default_shell_command);
+                        seed_session_with_pty(&state, name, cmd, &root_token)
                     } else {
                         seed_session_with_actor(&state, name, &root_token)
                     };
@@ -306,13 +319,16 @@ pub(crate) fn seed_session_with_actor(
 ///
 /// Call sites:
 ///
-/// * The `phux server` binary entry point, via the thin
-///   [`seed_session_with_default_shell`] wrapper that uses
-///   [`crate::pane_actor::default_shell_command`] for the user's
-///   `$SHELL` (falling back to `/bin/sh` per the byc.5 convention).
+/// * The `phux server` binary entry point, via
+///   [`ServerConfig::seed_with_pty`] (with [`ServerConfig::seed_command`]
+///   left `None` to fall back to
+///   [`crate::pane_actor::default_shell_command`] — the user's `$SHELL`,
+///   or `/bin/sh` per the byc.5 convention).
 /// * Anything embedding `phux-server` and wanting a specific command
-///   (e.g. an integration test driving a known fixture).
-pub(crate) fn seed_session_with_pty(
+///   (e.g. an integration test driving a known fixture; see the
+///   `input_dispatch.rs` test, which seeds with `cat` to get
+///   deterministic echo).
+pub fn seed_session_with_pty(
     state: &SharedState,
     name: &str,
     cmd: portable_pty::CommandBuilder,
@@ -327,25 +343,6 @@ pub(crate) fn seed_session_with_pty(
         let _ = s.spawn_pane_actor(pane, handle, pane_token, actor.run());
     });
     Ok(pane)
-}
-
-/// Seed `(session, window, pane)` and spawn a PTY-backed `PaneActor`
-/// running the user's default shell (`$SHELL`, or `/bin/sh` if unset).
-///
-/// Thin wrapper over [`seed_session_with_pty`] used by the `phux
-/// server` binary entry point when `ServerConfig::seed_with_pty` is
-/// `true`.
-pub(crate) fn seed_session_with_default_shell(
-    state: &SharedState,
-    name: &str,
-    root_token: &CancellationToken,
-) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
-    seed_session_with_pty(
-        state,
-        name,
-        crate::pane_actor::default_shell_command(),
-        root_token,
-    )
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.
@@ -464,6 +461,10 @@ async fn accept_loop(
 /// [`PaneActor`](crate::pane_actor::PaneActor), and emits
 /// `ATTACHED` + `PANE_SNAPSHOT` frames per SPEC §13. On unknown
 /// session, emits an `ERROR` frame with `SessionNotFound` (SPEC §14).
+#[allow(
+    clippy::too_many_lines,
+    reason = "single per-client dispatch loop; each frame arm is small and the catalog grows linearly. Extracting arms hides the wire→state seam without simplifying it."
+)]
 async fn handle_client(
     stream: UnixStream,
     state: SharedState,
@@ -597,6 +598,33 @@ async fn handle_client(
                     "VIEWPORT_RESIZE"
                 );
                 handle_viewport_resize(&state, client_id, &viewport);
+            }
+            FrameKind::InputKey { pane_id, event } => {
+                handle_pane_input(
+                    &state,
+                    client_id,
+                    pane_id,
+                    PaneInput::Key(event),
+                    "INPUT_KEY",
+                );
+            }
+            FrameKind::InputMouse { pane_id, event } => {
+                handle_pane_input(
+                    &state,
+                    client_id,
+                    pane_id,
+                    PaneInput::Mouse(event),
+                    "INPUT_MOUSE",
+                );
+            }
+            FrameKind::InputFocus { pane_id, event } => {
+                handle_pane_input(
+                    &state,
+                    client_id,
+                    pane_id,
+                    PaneInput::Focus(event),
+                    "INPUT_FOCUS",
+                );
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -1010,6 +1038,104 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
                 ?pane_id,
                 "VIEWPORT_RESIZE: no PaneHandle registered for pane; dropping resize",
             );
+        }
+    });
+}
+
+/// Route an `INPUT_*` frame body to the target pane's [`PaneActor`].
+///
+/// SPEC §9: input frames are fire-and-forget — no `Outbound` reply.
+/// On the wire the pane is identified by its `WirePaneId` (`u32`); we
+/// resolve it back to a core [`PaneId`] via [`ServerState::pane_from_wire`],
+/// then locate the [`PaneHandle`] and `try_send` the encoded
+/// [`PaneInput`] onto the actor's input mailbox.
+///
+/// Validation: we drop with `warn!` (not `debug!`, this is observable
+/// misbehavior worth surfacing) on:
+///   * Unknown wire pane id (no [`PaneId`] mapping).
+///   * Client not attached (the per-client task should not be reading
+///     frames from a detached identity, but we re-check defensively).
+///   * Client attached but not subscribed to this pane — prevents one
+///     client from steering another's pane (SPEC §9 leaves multi-client
+///     subscription rules to per-pane policy; for now subscription is
+///     the gate).
+///   * Pane has no registered [`PaneHandle`] (actor never spawned, or
+///     spawned but evicted).
+///
+/// `try_send` is used because we hold the `with_mut` lock while routing:
+/// awaiting inside a `with_mut` would deadlock the single-threaded
+/// runtime, and an unbounded queue would let a slow PTY producer push
+/// memory through the roof. `Full` is treated as a backpressure event
+/// (warn-drop); `Closed` is logged at debug and dropped (actor gone).
+fn handle_pane_input(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_pane_id: u32,
+    input: PaneInput,
+    frame_label: &'static str,
+) {
+    use phux_protocol::ids::PaneId as WirePaneId;
+    state.with_mut(|s| {
+        let wire = WirePaneId(wire_pane_id);
+        let Some(pane) = s.pane_from_wire(wire) else {
+            warn!(
+                ?client_id,
+                wire_pane_id, frame_label, "input frame for unknown pane; dropping",
+            );
+            return;
+        };
+        let Some(attached) = s.attached.get(&client_id) else {
+            warn!(
+                ?client_id,
+                wire_pane_id, frame_label, "input frame from non-attached client; dropping",
+            );
+            return;
+        };
+        // Subscription gate: the pane must be one the client is observing.
+        // For byc.8's "active pane only" subscription model this is the
+        // same as "is the pane in the client's attached session"; a
+        // richer SUBSCRIBE story (SPEC §7.4) will refine this without
+        // changing the dispatch shape.
+        let session = attached.session;
+        let is_subscribed = s.subscribers_for_pane(pane).contains(&client_id);
+        if !is_subscribed {
+            warn!(
+                ?client_id,
+                wire_pane_id,
+                ?session,
+                frame_label,
+                "client not subscribed to pane; dropping input",
+            );
+            return;
+        }
+        let Some(handle): Option<&PaneHandle> = s.pane_handle(pane) else {
+            warn!(
+                ?client_id,
+                wire_pane_id, frame_label, "no PaneHandle for pane; dropping input",
+            );
+            return;
+        };
+        match handle.input.try_send(input) {
+            Ok(()) => {
+                trace!(
+                    ?client_id,
+                    wire_pane_id, frame_label, "input routed to PaneActor"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    ?client_id,
+                    wire_pane_id,
+                    frame_label,
+                    "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!(
+                    ?client_id,
+                    wire_pane_id, frame_label, "pane actor gone; dropping input",
+                );
+            }
         }
     });
 }

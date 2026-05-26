@@ -46,6 +46,7 @@ fn spawn_server_with_seeded_session(
         socket_path,
         pre_seeded_session: pre_seeded.map(str::to_owned),
         seed_with_pty: false,
+        seed_command: None,
     };
     let handle = tokio::task::spawn_local(async move {
         let server = ServerRuntime::new(cfg);

@@ -72,6 +72,33 @@ pub fn spawn_server(
         socket_path,
         pre_seeded_session: pre_seeded.map(str::to_owned),
         seed_with_pty: false,
+        seed_command: None,
+    };
+    let handle = tokio::task::spawn_local(async move {
+        let server = ServerRuntime::new(cfg);
+        server
+            .run_async(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (tx, handle)
+}
+
+/// Like [`spawn_server`] but pre-seeds a PTY-backed pane running `cmd`.
+/// Used by the `input_dispatch` test to drive a deterministic echo
+/// fixture (`cat`) for wire→PTY round-trip assertions.
+pub fn spawn_server_with_seed_cmd(
+    socket_path: PathBuf,
+    pre_seeded: &str,
+    cmd: portable_pty::CommandBuilder,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    let (tx, rx) = oneshot::channel::<()>();
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: Some(pre_seeded.to_owned()),
+        seed_with_pty: true,
+        seed_command: Some(cmd),
     };
     let handle = tokio::task::spawn_local(async move {
         let server = ServerRuntime::new(cfg);

@@ -189,6 +189,7 @@ fn run_server(session: &str, socket: Option<PathBuf>) -> ExitCode {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
         seed_with_pty: true,
+        seed_command: None,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
