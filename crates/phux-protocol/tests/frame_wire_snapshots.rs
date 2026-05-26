@@ -72,21 +72,11 @@ fn dump_frame(frame: &FrameKind) -> String {
 // -----------------------------------------------------------------------------
 
 const fn vp_no_pixels() -> ViewportInfo {
-    ViewportInfo {
-        cols: 80,
-        rows: 24,
-        pixel_w: None,
-        pixel_h: None,
-    }
+    ViewportInfo::new(80, 24)
 }
 
 const fn vp_with_pixels() -> ViewportInfo {
-    ViewportInfo {
-        cols: 80,
-        rows: 24,
-        pixel_w: Some(1280),
-        pixel_h: Some(720),
-    }
+    ViewportInfo::new(80, 24).with_pixels(Some(1280), Some(720))
 }
 
 #[test]
@@ -266,21 +256,12 @@ fn snap_input_paste_trusted_ascii() {
 
 #[test]
 fn snap_attached_empty_graph() {
-    let snapshot = SessionSnapshot {
-        sessions: vec![SessionInfo {
-            id: SessionId::new(1),
-            name: "default".to_owned(),
-            active_window: None,
-            created_at_unix_secs: 1_700_000_000,
-            window_count: 0,
-            attached_client_count: 1,
-        }],
-        windows: Vec::new(),
-        panes: Vec::new(),
-        focused_session: SessionId::new(1),
-        focused_window: WindowId::new(0),
-        focused_pane: PaneId::new(0),
-    };
+    let snapshot = SessionSnapshot::new(SessionId::new(1), WindowId::new(0), PaneId::new(0))
+        .with_sessions(vec![
+            SessionInfo::new(SessionId::new(1), "default")
+                .with_created_at_unix_secs(1_700_000_000)
+                .with_attached_client_count(1),
+        ]);
     let frame = FrameKind::Attached {
         snapshot,
         initial_client_id: ClientId::new(42),
@@ -291,99 +272,50 @@ fn snap_attached_empty_graph() {
 #[test]
 fn snap_attached_realistic_graph() {
     let sessions = vec![
-        SessionInfo {
-            id: SessionId::new(1),
-            name: "work".to_owned(),
-            active_window: Some(WindowId::new(10)),
-            created_at_unix_secs: 1_700_000_000,
-            window_count: 2,
-            attached_client_count: 1,
-        },
-        SessionInfo {
-            id: SessionId::new(2),
-            name: "personal".to_owned(),
-            active_window: Some(WindowId::new(30)),
-            created_at_unix_secs: 1_700_000_500,
-            window_count: 1,
-            attached_client_count: 0,
-        },
+        SessionInfo::new(SessionId::new(1), "work")
+            .with_active_window(Some(WindowId::new(10)))
+            .with_created_at_unix_secs(1_700_000_000)
+            .with_window_count(2)
+            .with_attached_client_count(1),
+        SessionInfo::new(SessionId::new(2), "personal")
+            .with_active_window(Some(WindowId::new(30)))
+            .with_created_at_unix_secs(1_700_000_500)
+            .with_window_count(1),
     ];
 
     let windows = vec![
-        WindowInfo {
-            id: WindowId::new(10),
-            session_id: SessionId::new(1),
-            index: 0,
-            name: "code".to_owned(),
-            active_pane: Some(PaneId::new(100)),
-            layout: Some(LayoutNode::Split {
+        WindowInfo::new(WindowId::new(10), SessionId::new(1), "code")
+            .with_active_pane(Some(PaneId::new(100)))
+            .with_layout(Some(LayoutNode::Split {
                 dir: SplitDir::Horizontal,
                 ratio: 0.5,
                 left: Box::new(LayoutNode::Leaf(PaneId::new(100))),
                 right: Box::new(LayoutNode::Leaf(PaneId::new(101))),
-            }),
-        },
-        WindowInfo {
-            id: WindowId::new(20),
-            session_id: SessionId::new(1),
-            index: 1,
-            name: "logs".to_owned(),
-            active_pane: Some(PaneId::new(102)),
-            layout: Some(LayoutNode::Leaf(PaneId::new(102))),
-        },
-        WindowInfo {
-            id: WindowId::new(30),
-            session_id: SessionId::new(2),
-            index: 0,
-            name: "scratch".to_owned(),
-            active_pane: Some(PaneId::new(103)),
-            layout: Some(LayoutNode::Leaf(PaneId::new(103))),
-        },
+            })),
+        WindowInfo::new(WindowId::new(20), SessionId::new(1), "logs")
+            .with_index(1)
+            .with_active_pane(Some(PaneId::new(102)))
+            .with_layout(Some(LayoutNode::Leaf(PaneId::new(102)))),
+        WindowInfo::new(WindowId::new(30), SessionId::new(2), "scratch")
+            .with_active_pane(Some(PaneId::new(103)))
+            .with_layout(Some(LayoutNode::Leaf(PaneId::new(103)))),
     ];
 
     let panes = vec![
-        PaneInfo {
-            id: PaneId::new(100),
-            window_id: WindowId::new(10),
-            cols: 80,
-            rows: 24,
-            title: Some("editor".to_owned()),
-            cwd: Some("/home/u/src".to_owned()),
-        },
-        PaneInfo {
-            id: PaneId::new(101),
-            window_id: WindowId::new(10),
-            cols: 80,
-            rows: 24,
-            title: None,
-            cwd: Some("/home/u/src".to_owned()),
-        },
-        PaneInfo {
-            id: PaneId::new(102),
-            window_id: WindowId::new(20),
-            cols: 160,
-            rows: 48,
-            title: None,
-            cwd: None,
-        },
-        PaneInfo {
-            id: PaneId::new(103),
-            window_id: WindowId::new(30),
-            cols: 80,
-            rows: 24,
-            title: None,
-            cwd: Some("/home/u".to_owned()),
-        },
+        PaneInfo::new(PaneId::new(100), WindowId::new(10), 80, 24)
+            .with_title(Some("editor".to_owned()))
+            .with_cwd(Some("/home/u/src".to_owned())),
+        PaneInfo::new(PaneId::new(101), WindowId::new(10), 80, 24)
+            .with_cwd(Some("/home/u/src".to_owned())),
+        PaneInfo::new(PaneId::new(102), WindowId::new(20), 160, 48),
+        PaneInfo::new(PaneId::new(103), WindowId::new(30), 80, 24)
+            .with_cwd(Some("/home/u".to_owned())),
     ];
 
-    let snapshot = SessionSnapshot {
-        sessions,
-        windows,
-        panes,
-        focused_session: SessionId::new(1),
-        focused_window: WindowId::new(10),
-        focused_pane: PaneId::new(100),
-    };
+    let snapshot = SessionSnapshot::new(SessionId::new(1), WindowId::new(10), PaneId::new(100))
+        .with_sessions(sessions)
+        .with_windows(windows)
+        .with_panes(panes);
     let frame = FrameKind::Attached {
         snapshot,
         initial_client_id: ClientId::new(1),

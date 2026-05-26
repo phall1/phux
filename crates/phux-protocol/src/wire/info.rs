@@ -88,7 +88,13 @@ pub enum LayoutNode {
 ///
 /// Excludes the windows themselves — those are flattened into
 /// [`SessionSnapshot::windows`] and joined via `WindowInfo::session_id`.
+///
+/// Marked `#[non_exhaustive]` so additive field growth (process info, last-
+/// attach timestamp, ...) is non-breaking. Construct via [`Self::new`] plus
+/// the `with_*` setters; field-literal syntax is reserved for the crate's
+/// own decoder and tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SessionInfo {
     /// Stable session identifier.
     pub id: SessionId,
@@ -118,11 +124,61 @@ pub struct SessionInfo {
     pub attached_client_count: u16,
 }
 
+impl SessionInfo {
+    /// Construct a `SessionInfo` from its load-bearing fields.
+    ///
+    /// `active_window`, `created_at_unix_secs`, `window_count`, and
+    /// `attached_client_count` default to "unknown" sentinels (`None` / `0`);
+    /// fill them via the `with_*` setters when the server has the data.
+    #[must_use]
+    pub fn new(id: SessionId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            active_window: None,
+            created_at_unix_secs: 0,
+            window_count: 0,
+            attached_client_count: 0,
+        }
+    }
+
+    /// Builder setter for [`Self::active_window`].
+    #[must_use]
+    pub const fn with_active_window(mut self, active_window: Option<WindowId>) -> Self {
+        self.active_window = active_window;
+        self
+    }
+
+    /// Builder setter for [`Self::created_at_unix_secs`].
+    #[must_use]
+    pub const fn with_created_at_unix_secs(mut self, created_at_unix_secs: i64) -> Self {
+        self.created_at_unix_secs = created_at_unix_secs;
+        self
+    }
+
+    /// Builder setter for [`Self::window_count`].
+    #[must_use]
+    pub const fn with_window_count(mut self, window_count: u16) -> Self {
+        self.window_count = window_count;
+        self
+    }
+
+    /// Builder setter for [`Self::attached_client_count`].
+    #[must_use]
+    pub const fn with_attached_client_count(mut self, attached_client_count: u16) -> Self {
+        self.attached_client_count = attached_client_count;
+        self
+    }
+}
+
 /// Description of a single window, sufficient for tab/pane chrome.
 ///
 /// Excludes the panes themselves — those are flattened into
 /// [`SessionSnapshot::panes`] and joined via `PaneInfo::window_id`.
+///
+/// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct WindowInfo {
     /// Stable window identifier.
     pub id: WindowId,
@@ -145,6 +201,45 @@ pub struct WindowInfo {
     pub layout: Option<LayoutNode>,
 }
 
+impl WindowInfo {
+    /// Construct a `WindowInfo` from its load-bearing fields.
+    ///
+    /// `index` defaults to `0`; `active_pane` and `layout` default to
+    /// `None`. Use the `with_*` setters to fill them when meaningful.
+    #[must_use]
+    pub fn new(id: WindowId, session_id: SessionId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            session_id,
+            index: 0,
+            name: name.into(),
+            active_pane: None,
+            layout: None,
+        }
+    }
+
+    /// Builder setter for [`Self::index`].
+    #[must_use]
+    pub const fn with_index(mut self, index: u16) -> Self {
+        self.index = index;
+        self
+    }
+
+    /// Builder setter for [`Self::active_pane`].
+    #[must_use]
+    pub const fn with_active_pane(mut self, active_pane: Option<PaneId>) -> Self {
+        self.active_pane = active_pane;
+        self
+    }
+
+    /// Builder setter for [`Self::layout`].
+    #[must_use]
+    pub fn with_layout(mut self, layout: Option<LayoutNode>) -> Self {
+        self.layout = layout;
+        self
+    }
+}
+
 /// Description of a single pane, sufficient for layout chrome.
 ///
 /// Excludes grid contents, cursor state, scrollback, and process info.
@@ -153,7 +248,10 @@ pub struct WindowInfo {
 /// status) is not yet modeled in `phux_core::Pane`; adding wire fields the
 /// server can only send `None` for is premature. Revisit when core grows
 /// process tracking.
+///
+/// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PaneInfo {
     /// Stable pane identifier.
     pub id: PaneId,
@@ -173,6 +271,38 @@ pub struct PaneInfo {
     pub cwd: Option<String>,
 }
 
+impl PaneInfo {
+    /// Construct a `PaneInfo` from its load-bearing fields.
+    ///
+    /// `title` and `cwd` default to `None`; set them via the `with_*`
+    /// helpers when the server has the data.
+    #[must_use]
+    pub const fn new(id: PaneId, window_id: WindowId, cols: u16, rows: u16) -> Self {
+        Self {
+            id,
+            window_id,
+            cols,
+            rows,
+            title: None,
+            cwd: None,
+        }
+    }
+
+    /// Builder setter for [`Self::title`].
+    #[must_use]
+    pub fn with_title(mut self, title: Option<String>) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// Builder setter for [`Self::cwd`].
+    #[must_use]
+    pub fn with_cwd(mut self, cwd: Option<String>) -> Self {
+        self.cwd = cwd;
+        self
+    }
+}
+
 /// Flat graph of sessions/windows/panes delivered with `ATTACHED`.
 ///
 /// All three lists are joined by id. The triple of `focused_*` fields
@@ -180,7 +310,32 @@ pub struct PaneInfo {
 /// per-container `SessionInfo::active_window` / `WindowInfo::active_pane`,
 /// which record the container's remembered focus from when no client was
 /// attached (tmux behavior: detach → attach later restores last focus).
+///
+/// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
+///
+/// # Example
+///
+/// ```
+/// use phux_protocol::wire::info::{PaneInfo, SessionInfo, SessionSnapshot, WindowInfo};
+/// use phux_protocol::{PaneId, SessionId, WindowId};
+///
+/// let snapshot = SessionSnapshot::new(
+///     SessionId::new(1),
+///     WindowId::new(10),
+///     PaneId::new(100),
+/// )
+/// .with_sessions(vec![SessionInfo::new(SessionId::new(1), "work")
+///     .with_window_count(1)
+///     .with_attached_client_count(1)])
+/// .with_windows(vec![
+///     WindowInfo::new(WindowId::new(10), SessionId::new(1), "code")
+///         .with_active_pane(Some(PaneId::new(100))),
+/// ])
+/// .with_panes(vec![PaneInfo::new(PaneId::new(100), WindowId::new(10), 80, 24)]);
+/// assert_eq!(snapshot.sessions.len(), 1);
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct SessionSnapshot {
     /// Every session the attaching client can see.
     pub sessions: Vec<SessionInfo>,
@@ -194,6 +349,48 @@ pub struct SessionSnapshot {
     pub focused_window: WindowId,
     /// The attaching client's initial focused pane.
     pub focused_pane: PaneId,
+}
+
+impl SessionSnapshot {
+    /// Construct a `SessionSnapshot` from the attaching client's initial
+    /// focus triple. Lists default to empty; populate them via the `with_*`
+    /// setters.
+    #[must_use]
+    pub const fn new(
+        focused_session: SessionId,
+        focused_window: WindowId,
+        focused_pane: PaneId,
+    ) -> Self {
+        Self {
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            panes: Vec::new(),
+            focused_session,
+            focused_window,
+            focused_pane,
+        }
+    }
+
+    /// Builder setter for [`Self::sessions`].
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Vec<SessionInfo>) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    /// Builder setter for [`Self::windows`].
+    #[must_use]
+    pub fn with_windows(mut self, windows: Vec<WindowInfo>) -> Self {
+        self.windows = windows;
+        self
+    }
+
+    /// Builder setter for [`Self::panes`].
+    #[must_use]
+    pub fn with_panes(mut self, panes: Vec<PaneInfo>) -> Self {
+        self.panes = panes;
+        self
+    }
 }
 
 // -----------------------------------------------------------------------------

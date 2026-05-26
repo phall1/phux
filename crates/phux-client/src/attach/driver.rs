@@ -332,29 +332,21 @@ fn current_viewport() -> Result<ViewportInfo, AttachError> {
     if !stdout.is_terminal() {
         // Fall back to a sane default if stdout isn't a TTY (rare for the
         // attach path; the early TTY check should have caught this).
-        return Ok(ViewportInfo {
-            cols: 80,
-            rows: 24,
-            pixel_w: None,
-            pixel_h: None,
-        });
+        return Ok(ViewportInfo::new(80, 24));
     }
     let size = rustix::termios::tcgetwinsize(stdout.as_fd())
         .map_err(|err| AttachError::Terminal(format!("tcgetwinsize: {err}")))?;
-    Ok(ViewportInfo {
-        cols: size.ws_col,
-        rows: size.ws_row,
-        pixel_w: if size.ws_xpixel == 0 {
-            None
-        } else {
-            Some(size.ws_xpixel)
-        },
-        pixel_h: if size.ws_ypixel == 0 {
-            None
-        } else {
-            Some(size.ws_ypixel)
-        },
-    })
+    let pixel_w = if size.ws_xpixel == 0 {
+        None
+    } else {
+        Some(size.ws_xpixel)
+    };
+    let pixel_h = if size.ws_ypixel == 0 {
+        None
+    } else {
+        Some(size.ws_ypixel)
+    };
+    Ok(ViewportInfo::new(size.ws_col, size.ws_row).with_pixels(pixel_w, pixel_h))
 }
 
 /// RAII handle that flips stdin into raw mode and stdout into the alt

@@ -52,11 +52,8 @@ fn arb_viewport_info() -> impl Strategy<Value = ViewportInfo> {
         proptest::option::of(any::<u16>()),
         proptest::option::of(any::<u16>()),
     )
-        .prop_map(|(cols, rows, pixel_w, pixel_h)| ViewportInfo {
-            cols,
-            rows,
-            pixel_w,
-            pixel_h,
+        .prop_map(|(cols, rows, pixel_w, pixel_h)| {
+            ViewportInfo::new(cols, rows).with_pixels(pixel_w, pixel_h)
         })
 }
 
@@ -98,14 +95,11 @@ fn arb_session_info() -> impl Strategy<Value = SessionInfo> {
                 window_count,
                 attached_client_count,
             )| {
-                SessionInfo {
-                    id: SessionId::new(id),
-                    name,
-                    active_window: active_window.map(WindowId::new),
-                    created_at_unix_secs,
-                    window_count,
-                    attached_client_count,
-                }
+                SessionInfo::new(SessionId::new(id), name)
+                    .with_active_window(active_window.map(WindowId::new))
+                    .with_created_at_unix_secs(created_at_unix_secs)
+                    .with_window_count(window_count)
+                    .with_attached_client_count(attached_client_count)
             },
         )
 }
@@ -119,16 +113,12 @@ fn arb_window_info() -> impl Strategy<Value = WindowInfo> {
         proptest::option::of(any::<u32>()),
         proptest::option::of(arb_layout_node()),
     )
-        .prop_map(
-            |(id, session_id, index, name, active_pane, layout)| WindowInfo {
-                id: WindowId::new(id),
-                session_id: SessionId::new(session_id),
-                index,
-                name,
-                active_pane: active_pane.map(PaneId::new),
-                layout,
-            },
-        )
+        .prop_map(|(id, session_id, index, name, active_pane, layout)| {
+            WindowInfo::new(WindowId::new(id), SessionId::new(session_id), name)
+                .with_index(index)
+                .with_active_pane(active_pane.map(PaneId::new))
+                .with_layout(layout)
+        })
 }
 
 fn arb_pane_info() -> impl Strategy<Value = PaneInfo> {
@@ -140,13 +130,10 @@ fn arb_pane_info() -> impl Strategy<Value = PaneInfo> {
         proptest::option::of(".{0,32}"),
         proptest::option::of(".{0,32}"),
     )
-        .prop_map(|(id, window_id, cols, rows, title, cwd)| PaneInfo {
-            id: PaneId::new(id),
-            window_id: WindowId::new(window_id),
-            cols,
-            rows,
-            title,
-            cwd,
+        .prop_map(|(id, window_id, cols, rows, title, cwd)| {
+            PaneInfo::new(PaneId::new(id), WindowId::new(window_id), cols, rows)
+                .with_title(title)
+                .with_cwd(cwd)
         })
 }
 
@@ -159,13 +146,11 @@ fn arb_session_snapshot() -> impl Strategy<Value = SessionSnapshot> {
         any::<u32>(),
         any::<u32>(),
     )
-        .prop_map(|(sessions, windows, panes, fs, fw, fp)| SessionSnapshot {
-            sessions,
-            windows,
-            panes,
-            focused_session: SessionId::new(fs),
-            focused_window: WindowId::new(fw),
-            focused_pane: PaneId::new(fp),
+        .prop_map(|(sessions, windows, panes, fs, fw, fp)| {
+            SessionSnapshot::new(SessionId::new(fs), WindowId::new(fw), PaneId::new(fp))
+                .with_sessions(sessions)
+                .with_windows(windows)
+                .with_panes(panes)
         })
 }
 
@@ -545,7 +530,7 @@ proptest! {
     fn roundtrip_attach_target(target in arb_attach_target()) {
         let frame = FrameKind::Attach {
             target,
-            viewport: ViewportInfo { cols: 80, rows: 24, pixel_w: None, pixel_h: None },
+            viewport: ViewportInfo::new(80, 24),
             request_scrollback: false,
             scrollback_limit_lines: 0,
         };
@@ -618,14 +603,8 @@ proptest! {
 
     #[test]
     fn roundtrip_session_info(info in arb_session_info()) {
-        let snap = SessionSnapshot {
-            sessions: vec![info.clone()],
-            windows: Vec::new(),
-            panes: Vec::new(),
-            focused_session: info.id,
-            focused_window: WindowId::new(0),
-            focused_pane: PaneId::new(0),
-        };
+        let snap = SessionSnapshot::new(info.id, WindowId::new(0), PaneId::new(0))
+            .with_sessions(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -636,14 +615,8 @@ proptest! {
 
     #[test]
     fn roundtrip_window_info(info in arb_window_info()) {
-        let snap = SessionSnapshot {
-            sessions: Vec::new(),
-            windows: vec![info.clone()],
-            panes: Vec::new(),
-            focused_session: info.session_id,
-            focused_window: info.id,
-            focused_pane: PaneId::new(0),
-        };
+        let snap = SessionSnapshot::new(info.session_id, info.id, PaneId::new(0))
+            .with_windows(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -654,14 +627,8 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_info(info in arb_pane_info()) {
-        let snap = SessionSnapshot {
-            sessions: Vec::new(),
-            windows: Vec::new(),
-            panes: vec![info.clone()],
-            focused_session: SessionId::new(0),
-            focused_window: info.window_id,
-            focused_pane: info.id,
-        };
+        let snap = SessionSnapshot::new(SessionId::new(0), info.window_id, info.id)
+            .with_panes(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -672,22 +639,10 @@ proptest! {
 
     #[test]
     fn roundtrip_layout_node(layout in arb_layout_node()) {
-        let win = WindowInfo {
-            id: WindowId::new(1),
-            session_id: SessionId::new(1),
-            index: 0,
-            name: "w".to_owned(),
-            active_pane: None,
-            layout: Some(layout),
-        };
-        let snap = SessionSnapshot {
-            sessions: Vec::new(),
-            windows: vec![win],
-            panes: Vec::new(),
-            focused_session: SessionId::new(1),
-            focused_window: WindowId::new(1),
-            focused_pane: PaneId::new(0),
-        };
+        let win = WindowInfo::new(WindowId::new(1), SessionId::new(1), "w")
+            .with_layout(Some(layout));
+        let snap = SessionSnapshot::new(SessionId::new(1), WindowId::new(1), PaneId::new(0))
+            .with_windows(vec![win]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);

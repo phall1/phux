@@ -226,7 +226,10 @@ pub enum AttachTarget {
 /// SPEC §13: `{ cols, rows, pixel_w: optional<u16>, pixel_h: optional<u16> }`.
 /// Pixel dimensions support sub-cell rendering and image protocols; cells are
 /// the load-bearing axis.
+///
+/// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_pixels`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ViewportInfo {
     /// Viewport width in cells.
     pub cols: u16,
@@ -236,6 +239,30 @@ pub struct ViewportInfo {
     pub pixel_w: Option<u16>,
     /// Optional viewport height in pixels.
     pub pixel_h: Option<u16>,
+}
+
+impl ViewportInfo {
+    /// Construct a `ViewportInfo` from cell dimensions, the load-bearing
+    /// axis per SPEC §13. Pixel dimensions default to `None`; supply them
+    /// via [`Self::with_pixels`] when the host kernel reports them.
+    #[must_use]
+    pub const fn new(cols: u16, rows: u16) -> Self {
+        Self {
+            cols,
+            rows,
+            pixel_w: None,
+            pixel_h: None,
+        }
+    }
+
+    /// Builder setter for the optional pixel dimensions (`pixel_w`,
+    /// `pixel_h`). Pass `None` for either axis the kernel did not report.
+    #[must_use]
+    pub const fn with_pixels(mut self, pixel_w: Option<u16>, pixel_h: Option<u16>) -> Self {
+        self.pixel_w = pixel_w;
+        self.pixel_h = pixel_h;
+        self
+    }
 }
 
 /// Decoded wire frame.
