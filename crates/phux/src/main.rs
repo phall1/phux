@@ -17,6 +17,16 @@
     reason = "binary entry point; stderr is the report"
 )]
 
+// Opt-in dhat heap profiling. Swaps the global allocator for
+// `dhat::Alloc` and the `Profiler::new_heap()` guard installed in
+// `main()` writes `dhat-heap.json` to CWD on clean shutdown. View with
+// https://nnethercote.github.io/dh_view/dh_view.html. The instrumented
+// allocator is significantly slower than the system allocator — debug
+// / profiling use only.
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -87,6 +97,12 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Heap profiler must outlive everything else in `main` — its Drop
+    // is what flushes `dhat-heap.json`. Bind to `_dhat` (NOT `_`, which
+    // would drop immediately) so the guard lives until `main` returns.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
+
     eprintln!(
         "phux {} (pre-alpha; see SPEC.md)",
         env!("CARGO_PKG_VERSION")

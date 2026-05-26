@@ -1219,6 +1219,7 @@ name = "phux"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "dhat",
  "phux-client",
  "phux-core",
  "phux-protocol",

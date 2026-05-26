@@ -130,6 +130,22 @@ cargo install --locked tokio-console
 tokio-console   # connects to 127.0.0.1:6669 by default
 ```
 
+## Heap profiling: dhat
+
+The `phux` binary has an opt-in `dhat-heap` cargo feature that swaps in
+the [dhat](https://docs.rs/dhat) allocator and installs a heap profiler
+for the lifetime of `main()`. On clean shutdown, a `dhat-heap.json`
+report is written to the current working directory:
+
+```sh
+cargo run --features dhat-heap -- server
+# Ctrl-C the server to flush; then open dhat-heap.json at:
+#   https://nnethercote.github.io/dh_view/dh_view.html
+```
+
+The instrumented allocator is significantly slower than the system
+allocator — use for profiling only, never for production builds.
+
 ## Reviewing your own work before opening a PR
 
 - Did the public API change? Rustdoc updated?

@@ -22,6 +22,18 @@ phux-core.workspace = true
 phux-server.workspace = true
 phux-client.workspace = true
 clap.workspace = true
+dhat = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[features]
+# Heap profiling via dhat. Swaps the global allocator for `dhat::Alloc`
+# and installs a `dhat::Profiler` guard for the lifetime of `main()`.
+# On clean shutdown, the guard's Drop writes `./dhat-heap.json` (viewable
+# at https://nnethercote.github.io/dh_view/dh_view.html).
+#
+# Run with: cargo run --features dhat-heap -- server
+# Warning: the instrumented allocator is significantly slower than the
+# system allocator; do not use in production builds.
+dhat-heap = ["dep:dhat"]
