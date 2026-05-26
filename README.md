@@ -72,7 +72,10 @@ What is wired up today:
   keys and wire `u32` IDs.
 - `phux-client` — UDS attach loop, raw-mode/altscreen guard, stdin
   keyboard parser, and a `libghostty_vt::Terminal` per attached pane
-  with `RenderState`-driven per-row dirty redraw (ADR-0013).
+  driven by `RenderState` (ADR-0013). The intended per-row dirty
+  path is currently bypassed in favour of a full-screen redraw per
+  frame, pending the libghostty FFI investigation tracked as
+  `phux-l0t`.
 - `phux-config` — TOML schema + loader with `line:col` errors, keybind
   parser/trie resolver, status `Widget` trait + time/session-name
   widgets.
@@ -103,7 +106,7 @@ plus `nextest`, `deny`, `watch`, `insta`, `mutants`, and `just`.
 | `phux-protocol`    | Wire types, codec, version negotiation; publish-ready          |
 | `phux-core`        | Domain types: Session, Window, Pane, binary-split Layout       |
 | `phux-server`      | Daemon: per-pane actor, PTY supervision, `PANE_OUTPUT` fanout  |
-| `phux-client`      | TUI client: local libghostty Terminal + per-row dirty redraw   |
+| `phux-client`      | TUI client: local libghostty Terminal + RenderState redraw     |
 | `phux-config`      | TOML config schema + status widget contract                    |
 
 `phux-protocol` is the only crate intended for publication; the rest are
