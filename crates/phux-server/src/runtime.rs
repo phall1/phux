@@ -9,10 +9,13 @@
 //! * Bind a `SOCK_STREAM` Unix domain socket at a resolved path under
 //!   `$XDG_RUNTIME_DIR` (falling back to `/tmp/phux-$UID/`), as described in
 //!   `SPEC.md` §4 (Transport).
-//! * Accept connections and spawn a per-client task that reads length-prefixed
-//!   frames (`SPEC.md` §5) and, for now, echoes `PING` with `PONG`
-//!   (`SPEC.md` §7.5). The full message catalog (`ATTACH`, `DETACH`,
-//!   `INPUT_KEY`, ...) lands in `phux-byc.4`.
+//! * Accept connections and spawn a per-client task on a
+//!   [`tokio::task::LocalSet`] (per ADR-0014) that reads length-prefixed
+//!   frames (`SPEC.md` §5), echoes `PING` with `PONG` (`SPEC.md` §7.5),
+//!   and handles `ATTACH` / `DETACH` by talking to the per-pane
+//!   [`PaneActor`](crate::pane_actor::PaneActor)s (`phux-byc.8`). The
+//!   remaining catalog (`INPUT_KEY`, etc.) is recorded against the
+//!   pane's input log but the PTY write side lands in `phux-byc.5`.
 //! * Unlink the socket file on clean shutdown and refuse to start over an
 //!   already-live socket.
 //!
@@ -26,13 +29,16 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use phux_protocol::wire::frame::{FrameKind, MAX_FRAME_LEN, TYPE_PONG};
+use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_PONG};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
+use tokio::sync::oneshot;
+use tokio::task::LocalSet;
 use tracing::{debug, error, info, warn};
 
-use crate::state::SharedState;
+use crate::pane_actor::{PaneActor, SnapshotRequest};
+use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, OutboundFrame, SharedState};
 
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -154,6 +160,16 @@ impl ServerRuntime {
     }
 
     /// Async variant for tests and embedders that already own a runtime.
+    ///
+    /// Per ADR-0014, the accept loop and every per-client task run on a
+    /// [`tokio::task::LocalSet`] driven by the current async context.
+    /// `!Send` futures are legal — and required — because pane actors
+    /// own a [`libghostty_vt::Terminal`], which carries no `Send`/`Sync`
+    /// impls.
+    #[allow(
+        clippy::future_not_send,
+        reason = "ADR-0014: server runs on a LocalSet; per-pane actors are !Send"
+    )]
     pub async fn run_async<F>(self, shutdown: F) -> Result<(), ServerError>
     where
         F: Future<Output = ()> + Send + 'static,
@@ -162,21 +178,40 @@ impl ServerRuntime {
         prepare_socket_dir(&socket_path)?;
         handle_existing_socket(&socket_path).await?;
 
-        // Build and pre-seed shared state. The state is the merge point
-        // for multi-client input and the routing table for diffs (see
+        // Build shared state. The state is the merge point for multi-
+        // client input and the routing table for fanout (see
         // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
         let state = SharedState::new();
-        if let Some(name) = self.cfg.pre_seeded_session.as_deref() {
-            state.with_mut(|s| {
-                let (_sid, _wid, _pid) = s.seed_session(name);
-            });
-            debug!(session = name, "pre-seeded session in registry");
-        }
 
         let listener = UnixListener::bind(&socket_path).map_err(ServerError::Bind)?;
         info!(path = %socket_path.display(), "phux-server listening on UDS");
 
-        let result = accept_loop(&listener, state, shutdown).await;
+        // The LocalSet hosts per-client tasks and per-pane actors —
+        // both `!Send`. `LocalSet::run_until` drives the set to the
+        // future's completion; tasks spawned via `spawn_local` from
+        // inside the future are polled on the same thread.
+        let pre_seeded = self.cfg.pre_seeded_session.clone();
+        let local = LocalSet::new();
+        let result = local
+            .run_until(async move {
+                // Pre-seed inside the LocalSet so we can `spawn_local`
+                // the pane actor. Without this, the pre-seed path
+                // would have to call `tokio::spawn`, which requires
+                // `Send` futures — exactly what `PaneActor` is not.
+                if let Some(name) = pre_seeded.as_deref() {
+                    if let Err(err) = seed_session_with_actor(&state, name) {
+                        warn!(
+                            session = name,
+                            error = %err,
+                            "failed to spawn pane actor for pre-seeded session",
+                        );
+                    } else {
+                        debug!(session = name, "pre-seeded session in registry");
+                    }
+                }
+                accept_loop(&listener, state, shutdown).await
+            })
+            .await;
 
         // Always try to unlink the socket on the way out; ignore NotFound.
         if let Err(err) = std::fs::remove_file(&socket_path)
@@ -187,6 +222,35 @@ impl ServerRuntime {
 
         result
     }
+}
+
+/// Seed `(session, window, pane)` and spawn the pane's `PaneActor` on
+/// the current `LocalSet`.
+///
+/// Public-ish (`pub(crate)`) so tests can drive it directly inside
+/// their own `LocalSet`. The `Shutdown` sender returned by
+/// `PaneActor::new` is dropped on the floor for now — pane lifetime is
+/// tied to the server's lifetime; explicit per-pane shutdown lands
+/// alongside the `Pane`/`Window`/`Session` close-out lifecycle frames.
+pub(crate) fn seed_session_with_actor(
+    state: &SharedState,
+    name: &str,
+) -> Result<phux_core::ids::PaneId, crate::pane_actor::PaneActorError> {
+    use phux_core::ids::PaneId;
+    let pane: PaneId = state.with_mut(|s| s.seed_session(name).2);
+    // Default 80x24 — same as `phux_core::Pane::new`'s default dims.
+    // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
+    let bundle = PaneActor::new(80, 24)?;
+    let crate::pane_actor::PaneActorBundle {
+        actor,
+        handle,
+        shutdown,
+    } = bundle;
+    tokio::task::spawn_local(actor.run());
+    state.with_mut(|s| {
+        let _ = s.register_pane_handle(pane, handle, shutdown);
+    });
+    Ok(pane)
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.
@@ -232,6 +296,10 @@ async fn handle_existing_socket(socket_path: &Path) -> Result<(), ServerError> {
 }
 
 /// Core accept loop. Pulled out to keep `run_async` flat.
+///
+/// Per ADR-0014, every per-client task spawns via
+/// [`tokio::task::spawn_local`]; the futures we hand it are `!Send`
+/// because they call into pane actors that own `!Send` `Terminal`s.
 async fn accept_loop<F>(
     listener: &UnixListener,
     state: SharedState,
@@ -255,7 +323,7 @@ where
                         // task can detach itself cleanly on EOF.
                         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
                         let task_state = state.clone();
-                        tokio::spawn(async move {
+                        tokio::task::spawn_local(async move {
                             if let Err(err) = handle_client(stream, task_state.clone(), client_id).await {
                                 warn!(error = %err, "client task ended with error");
                             }
@@ -278,21 +346,38 @@ where
     }
 }
 
-/// Per-client task. Reads frames in a loop; for each `PING` echoes a `PONG`;
-/// logs and drops anything else for now.
+/// Per-client task. Reads frames in a loop and dispatches each one.
 ///
-/// The `ATTACH` / `DETACH` / `INPUT_*` routing branches are still stubbed —
-/// see `phux-byc.8` for the full ATTACH handler, which will use
-/// `SnapshotSynthesizer` (`grid.rs`) to build the `vt_replay_bytes` for
-/// `PANE_SNAPSHOT` per SPEC §13 / ADR-0013. The gap is intentional; this
-/// commit only lands the wire shape.
+/// Outbound frames are routed through a per-client `mpsc` channel
+/// drained by a sibling writer task (also `spawn_local`'d). This gives
+/// us one place to back-pressure on slow clients without entangling
+/// the read side, and matches the `tx: mpsc::Sender<OutboundFrame>`
+/// shape `ServerState::attach` already wants.
+///
+/// `phux-byc.8`: implements the ATTACH path. Resolves the target,
+/// builds a [`SessionSnapshot`](phux_protocol::wire::info::SessionSnapshot)
+/// from the registry, requests a snapshot from each pane's
+/// [`PaneActor`](crate::pane_actor::PaneActor), and emits
+/// `ATTACHED` + `PANE_SNAPSHOT` frames per SPEC §13. On unknown
+/// session, emits an `ERROR` frame with `SessionNotFound` (SPEC §14).
 async fn handle_client(
     stream: UnixStream,
-    _state: SharedState,
-    client_id: crate::state::ClientId,
+    state: SharedState,
+    client_id: ClientId,
 ) -> io::Result<()> {
     debug!(?client_id, "client task started");
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, writer) = stream.into_split();
+
+    // Allocate the per-client outbound mailbox + spawn the writer task.
+    // Structured frames flow through `out_tx`; pre-encoded raw byte
+    // blobs (currently only PONG — see `encode_pong` and the wire-
+    // protocol comment on `TYPE_PONG`) flow through `raw_tx`. Both
+    // channels feed the same writer task; the writer drains them
+    // fairly via `select!`.
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<OutboundFrame>(DEFAULT_CLIENT_MAILBOX);
+    let (raw_tx, raw_rx) = tokio::sync::mpsc::channel::<BytesMut>(DEFAULT_CLIENT_MAILBOX);
+    tokio::task::spawn_local(writer_task(writer, out_rx, raw_rx, client_id));
+
     let mut header = [0u8; LENGTH_PREFIX];
     let mut payload = BytesMut::new();
     let mut framed = BytesMut::new();
@@ -340,19 +425,308 @@ async fn handle_client(
 
         match frame {
             FrameKind::Ping { nonce } => {
+                // PONG isn't a `FrameKind` variant yet (the type byte
+                // `0xFF` is reserved). Ship the pre-encoded bytes
+                // through the writer's `raw_tx` side channel. Once
+                // the protocol crate lifts `Pong` into the enum, this
+                // collapses to a structured send through `out_tx`.
                 debug!(nonce, "PING -> PONG");
-                let mut out = BytesMut::new();
-                encode_pong(nonce, &mut out);
-                if let Err(err) = writer.write_all(&out).await {
-                    debug!(error = %err, "client write error on PONG");
-                    return Ok(());
-                }
+                let mut buf = BytesMut::new();
+                encode_pong(nonce, &mut buf);
+                let _ = raw_tx.send(buf).await;
+            }
+            FrameKind::Attach {
+                target,
+                viewport,
+                request_scrollback,
+                scrollback_limit_lines,
+            } => {
+                handle_attach(
+                    &state,
+                    client_id,
+                    target,
+                    viewport,
+                    request_scrollback,
+                    scrollback_limit_lines,
+                    &out_tx,
+                )
+                .await;
+            }
+            FrameKind::Detach => {
+                debug!(?client_id, "DETACH");
+                // SPEC §7.3: server responds with DETACHED, then closes.
+                // For byc.8 we emit DETACHED and let the read loop
+                // continue — actual transport close lands when the
+                // client drops, which is the path the existing
+                // socket-lifecycle tests exercise.
+                let _ = out_tx.send(FrameKind::Detached).await;
+                state.with_mut(|s| s.detach(client_id));
             }
             other => {
-                debug!(kind = ?other, "unhandled message type (ATTACH/INPUT_* etc. land in byc.8)");
+                debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
             }
         }
     }
+}
+
+/// Writer task: drain the per-client outbound channels and write each
+/// frame to the socket. Encodes [`FrameKind`] frames via
+/// `FrameKind::encode`; pre-encoded raw byte blobs (PONG today) go
+/// straight to the wire.
+///
+/// Exits when **both** channels close — i.e. the client task drops its
+/// senders. Either channel closing alone is not a shutdown signal:
+/// `select!` with `.recv()` returns `None` on closure, and we ignore
+/// `None` from one branch as long as the other stays open.
+async fn writer_task(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut frame_rx: tokio::sync::mpsc::Receiver<OutboundFrame>,
+    mut raw_rx: tokio::sync::mpsc::Receiver<BytesMut>,
+    client_id: ClientId,
+) {
+    let mut buf = BytesMut::with_capacity(1024);
+    let mut frame_open = true;
+    let mut raw_open = true;
+    while frame_open || raw_open {
+        tokio::select! {
+            biased;
+            maybe_frame = frame_rx.recv(), if frame_open => match maybe_frame {
+                Some(frame) => {
+                    buf.clear();
+                    frame.encode(&mut buf);
+                    if let Err(err) = writer.write_all(&buf).await {
+                        debug!(?client_id, error = %err, "writer error on frame; client task ending");
+                        return;
+                    }
+                }
+                None => frame_open = false,
+            },
+            maybe_raw = raw_rx.recv(), if raw_open => match maybe_raw {
+                Some(bytes) => {
+                    if let Err(err) = writer.write_all(&bytes).await {
+                        debug!(?client_id, error = %err, "writer error on raw; client task ending");
+                        return;
+                    }
+                }
+                None => raw_open = false,
+            },
+        }
+    }
+    debug!(?client_id, "writer task exiting (both channels closed)");
+}
+
+/// Tuple bundling everything `handle_attach` needs after it's done
+/// touching `ServerState`. Cloned out of the critical section so the
+/// remaining awaits don't hold the state lock.
+type AttachPrepared = (
+    phux_protocol::wire::info::SessionSnapshot,
+    phux_protocol::ids::ClientId,
+    Vec<(
+        phux_core::ids::PaneId,
+        crate::pane_actor::PaneHandle,
+        phux_protocol::ids::PaneId,
+    )>,
+);
+
+/// Resolve `target` to a session name. SPEC §13: `ByName` is the only
+/// fully-implemented mode in byc.8; the others fail with
+/// `SessionNotFound` until follow-up tickets land.
+async fn resolve_attach_target(
+    state: &SharedState,
+    target: AttachTarget,
+    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+) -> Option<String> {
+    match target {
+        AttachTarget::ByName(name) => Some(name),
+        AttachTarget::ById(id) => {
+            let resolved = state
+                .with(|s| s.session_id_bridge.resolve(id))
+                .and_then(|sid| {
+                    state.with(|s| s.registry.session(sid).map(|sess| sess.name.clone()))
+                });
+            if resolved.is_none() {
+                send_error(
+                    out_tx,
+                    ErrorCode::SessionNotFound,
+                    &format!("session id {} not found", id.get()),
+                )
+                .await;
+            }
+            resolved
+        }
+        AttachTarget::Last => {
+            send_error(
+                out_tx,
+                ErrorCode::SessionNotFound,
+                "AttachTarget::Last is not yet implemented",
+            )
+            .await;
+            None
+        }
+        AttachTarget::CreateIfMissing { .. } => {
+            send_error(
+                out_tx,
+                ErrorCode::SessionNotFound,
+                "AttachTarget::CreateIfMissing is not yet implemented",
+            )
+            .await;
+            None
+        }
+        _ => {
+            send_error(
+                out_tx,
+                ErrorCode::SessionNotFound,
+                "unknown AttachTarget variant",
+            )
+            .await;
+            None
+        }
+    }
+}
+
+/// Perform the attach mutation in one critical section: call
+/// [`crate::state::ServerState::attach`], build the snapshot, collect
+/// the per-pane handles + wire ids to snapshot.
+///
+/// Pulled out so [`handle_attach`] stays under clippy's
+/// `too_many_lines` ceiling.
+fn prepare_attach(
+    state: &SharedState,
+    client_id: ClientId,
+    session_name: &str,
+    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+) -> Result<AttachPrepared, crate::state::AttachError> {
+    state.with_mut(|s| {
+        let sid = s.attach(client_id, session_name, out_tx.clone())?;
+        let snapshot = s
+            .build_session_snapshot(sid)
+            .ok_or_else(|| crate::state::AttachError::UnknownSession(session_name.to_owned()))?;
+        let Some(session) = s.registry.session(sid).cloned() else {
+            // Defensive: attach said yes but the session vanished.
+            return Err(crate::state::AttachError::UnknownSession(
+                session_name.to_owned(),
+            ));
+        };
+        let mut panes_to_snapshot: Vec<(
+            phux_core::ids::PaneId,
+            crate::pane_actor::PaneHandle,
+            phux_protocol::ids::PaneId,
+        )> = Vec::new();
+        for wid in &session.windows {
+            let Some(window) = s.registry.window(*wid).cloned() else {
+                continue;
+            };
+            for pid in &window.panes {
+                if let Some(handle) = s.pane_handle(*pid).cloned() {
+                    let wire = s.intern_pane_wire(*pid);
+                    panes_to_snapshot.push((*pid, handle, wire));
+                }
+            }
+        }
+        let initial_client_id =
+            phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
+        Ok((snapshot, initial_client_id, panes_to_snapshot))
+    })
+}
+
+/// Resolve `target`, call [`prepare_attach`], and queue the
+/// `ATTACHED` + per-pane `PANE_SNAPSHOT` frames on `out_tx`.
+///
+/// On any failure path, emits an `ERROR` frame and returns. We never
+/// partially-attach: either every frame queues or none does.
+async fn handle_attach(
+    state: &SharedState,
+    client_id: ClientId,
+    target: AttachTarget,
+    _viewport: phux_protocol::wire::frame::ViewportInfo,
+    _request_scrollback: bool,
+    _scrollback_limit_lines: u32,
+    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+) {
+    let Some(session_name) = resolve_attach_target(state, target, out_tx).await else {
+        return;
+    };
+
+    let (snapshot, initial_client_id, panes_to_snapshot) =
+        match prepare_attach(state, client_id, &session_name, out_tx) {
+            Ok(t) => t,
+            Err(crate::state::AttachError::UnknownSession(name)) => {
+                send_error(
+                    out_tx,
+                    ErrorCode::SessionNotFound,
+                    &format!("session {name:?} not found"),
+                )
+                .await;
+                return;
+            }
+            Err(crate::state::AttachError::AlreadyAttached(_)) => {
+                send_error(
+                    out_tx,
+                    ErrorCode::AlreadyAttached,
+                    "client is already attached",
+                )
+                .await;
+                return;
+            }
+        };
+
+    if out_tx
+        .send(FrameKind::Attached {
+            snapshot,
+            initial_client_id,
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    for (pane_id, handle, wire_pane_id) in panes_to_snapshot {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if handle
+            .snapshot
+            .send(SnapshotRequest { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            warn!(?pane_id, "pane actor dropped; skipping snapshot");
+            continue;
+        }
+        let Ok(snap) = reply_rx.await else {
+            warn!(?pane_id, "pane actor failed to reply with snapshot");
+            continue;
+        };
+        if out_tx
+            .send(FrameKind::PaneSnapshot {
+                pane_id: wire_pane_id,
+                cols: snap.cols,
+                rows: snap.rows,
+                vt_replay_bytes: snap.bytes,
+                // Scrollback negotiation per ATTACH viewport metrics
+                // lands with the PTY pump; byc.8 always sends None.
+                scrollback_bytes: None,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+}
+
+/// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
+async fn send_error(
+    out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    code: ErrorCode,
+    message: &str,
+) {
+    let _ = out_tx
+        .send(FrameKind::Error {
+            request_id: None,
+            code,
+            message: message.to_owned(),
+        })
+        .await;
 }
 
 /// Encode a `PONG { nonce }` frame directly, since `phux-protocol`'s

@@ -19,39 +19,37 @@
 //!
 //! The server runs on a `tokio::runtime::Builder::new_current_thread`
 //! executor (see `runtime.rs`, ADR-0003 "one server per user, one event
-//! loop"). Per-client tasks are spawned via `tokio::spawn`, which —
-//! regardless of runtime flavor — requires `Send + 'static` futures. That
-//! rules out the otherwise-cheaper `Rc<RefCell<_>>` here; switching to a
-//! local `LocalSet` would require refactoring `accept_loop` and is
-//! out-of-scope for `phux-byc.4`.
+//! loop"). Per-client tasks are spawned via `tokio::task::spawn_local`
+//! onto a [`tokio::task::LocalSet`] (per ADR-0014), so per-client
+//! futures are `!Send` and can hold `Rc<RefCell<_>>` if desired.
 //!
-//! We therefore wrap state in `Arc<Mutex<ServerState>>`. Critical sections
-//! are short (microseconds: an `attach` is a few `HashMap` ops), so atomic
-//! contention is not a concern in steady state. The `std::sync::Mutex`
-//! avoids `tokio::sync::Mutex`'s async-friendly futures-park machinery
-//! because every section in this module is sync and finite — we never
-//! `.await` while holding it.
-//!
-//! If a future task moves the server to a `LocalSet`-based per-client
-//! task model, this is the file that needs to change: swap
-//! `Arc<Mutex<_>>` for `Rc<RefCell<_>>` and drop the `Send` requirement.
-//! The public surface of [`SharedState`] is the single seam.
+//! [`ServerState`] itself stays behind `Arc<Mutex<_>>` because the
+//! [`crate::pane_actor::PaneHandle`] held inside `panes` is `Send` and
+//! the surrounding [`SharedState`] is used in a few sync contexts
+//! (pre-seed before `LocalSet` entry, test scaffolding). Critical sections
+//! are short (microseconds: a few `HashMap` ops), so atomic contention
+//! is not a concern in steady state. The `std::sync::Mutex` avoids
+//! `tokio::sync::Mutex`'s async-friendly futures-park machinery because
+//! every section in this module is sync and finite — we never `.await`
+//! while holding it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use phux_core::ids::{PaneId, SessionId};
+use phux_core::ids::{PaneId, SessionId, WindowId};
 use phux_core::registry::Registry;
 use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
+use crate::pane_actor::PaneHandle;
 use phux_protocol::caps::ColorSupport;
+use phux_protocol::ids::{PaneId as WirePaneId, WindowId as WireWindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
 use phux_protocol::input::paste::PasteEvent;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// Default per-client outbound mailbox depth.
 ///
@@ -94,6 +92,10 @@ pub enum PaneInput {
 /// any variant — `Hello`, `PaneOutput`, `PaneSnapshot`, lifecycle frames —
 /// without a parallel server-side enum. Per ADR-0008 / ADR-0013, the
 /// protocol crate owns the wire types and the server defers to them.
+///
+/// PONG (reserved type byte `0xFF`) is not yet a `FrameKind` variant.
+/// The writer task supports a side-channel for pre-encoded bytes via
+/// [`OutboundMessage`] — see the runtime module.
 pub type OutboundFrame = phux_protocol::wire::frame::FrameKind;
 
 /// An attached client: routing identity plus outbound mailbox.
@@ -155,6 +157,36 @@ pub struct ServerState {
     /// this crate) because `phux-core` and `phux-protocol` must not depend
     /// on each other — see [`crate::id_bridge`] module docs.
     pub session_id_bridge: IdBridge,
+    /// Per-pane actor handles, keyed by core [`PaneId`]. The
+    /// `PaneHandle` is `Send`; the underlying `PaneActor` (which owns
+    /// the `!Send` `Terminal`) lives on the `LocalSet` — see ADR-0014.
+    ///
+    /// Populated by [`Self::register_pane_handle`] after the actor is
+    /// spawned. Looked up by the ATTACH handler to request snapshots
+    /// and by future PTY-input branches to forward keystrokes.
+    pub panes: HashMap<PaneId, PaneHandle>,
+    /// Per-pane actor shutdown senders. Held here so the actor lives
+    /// as long as `ServerState` does — dropping the sender fires the
+    /// actor's shutdown branch. `phux-byc.8` registers these alongside
+    /// the handles; per-pane lifecycle (close, kill, etc.) lands with
+    /// the corresponding wire frames in a later ticket.
+    pane_shutdowns: HashMap<PaneId, oneshot::Sender<()>>,
+    /// Wire-side identifier for each core pane id. Allocated
+    /// monotonically from `1` in [`Self::register_pane_handle`]. Mirrors
+    /// the `IdBridge` shape used for session ids — kept inline because
+    /// adding a second `IdBridge` generic over an arbitrary id pair is
+    /// out of scope for `phux-byc.8` (the session bridge has its own
+    /// reverse-lookup story; pane reverse lookup is needed too for
+    /// future `INPUT_KEY` routing).
+    pane_wire_forward: HashMap<PaneId, WirePaneId>,
+    pane_wire_reverse: HashMap<WirePaneId, PaneId>,
+    next_pane_wire_id: u32,
+    /// Wire-side identifier for each core window id. Same shape as
+    /// the pane bridge above; used to populate [`WindowInfo::id`] in
+    /// the `ATTACHED` snapshot.
+    window_wire_forward: HashMap<WindowId, WireWindowId>,
+    window_wire_reverse: HashMap<WireWindowId, WindowId>,
+    next_window_wire_id: u32,
     next_client_id: u64,
 }
 
@@ -174,6 +206,14 @@ impl ServerState {
             pane_subscribers: HashMap::new(),
             pane_inputs: HashMap::new(),
             session_id_bridge: IdBridge::new(),
+            panes: HashMap::new(),
+            pane_shutdowns: HashMap::new(),
+            pane_wire_forward: HashMap::new(),
+            pane_wire_reverse: HashMap::new(),
+            next_pane_wire_id: 1,
+            window_wire_forward: HashMap::new(),
+            window_wire_reverse: HashMap::new(),
+            next_window_wire_id: 1,
             next_client_id: 1,
         }
     }
@@ -315,6 +355,192 @@ impl ServerState {
     #[must_use]
     pub fn pane_input_log_for(&self, pane: PaneId) -> Vec<PaneInput> {
         self.pane_inputs.get(&pane).cloned().unwrap_or_default()
+    }
+
+    /// Record a freshly-spawned [`PaneHandle`] against `pane` and
+    /// allocate its wire id.
+    ///
+    /// Called by the runtime after `PaneActor::new` and
+    /// `tokio::task::spawn_local`. Subsequent attaches use
+    /// [`Self::pane_handle`] to look the handle up.
+    ///
+    /// The `shutdown` sender is stashed in `pane_shutdowns` so the
+    /// actor stays alive as long as `ServerState` does; dropping the
+    /// sender (e.g. via [`Self::detach_pane_actor`]) fires the
+    /// actor's shutdown branch.
+    ///
+    /// Idempotent on the wire-id allocation (a second call for the
+    /// same `pane` returns the same wire id) but overwrites the
+    /// `PaneHandle` / shutdown sender. In practice the runtime calls
+    /// this exactly once per pane lifetime.
+    pub fn register_pane_handle(
+        &mut self,
+        pane: PaneId,
+        handle: PaneHandle,
+        shutdown: oneshot::Sender<()>,
+    ) -> WirePaneId {
+        let wire = self.intern_pane_wire(pane);
+        self.panes.insert(pane, handle);
+        self.pane_shutdowns.insert(pane, shutdown);
+        wire
+    }
+
+    /// Drop the actor-shutdown sender for `pane`, signalling the
+    /// `PaneActor` to exit. Idempotent. Used by future pane-close
+    /// lifecycle paths; not exercised by `phux-byc.8`.
+    pub fn detach_pane_actor(&mut self, pane: PaneId) {
+        self.pane_shutdowns.remove(&pane);
+    }
+
+    /// Look up the [`PaneHandle`] for `pane`, if registered.
+    #[must_use]
+    pub fn pane_handle(&self, pane: PaneId) -> Option<&PaneHandle> {
+        self.panes.get(&pane)
+    }
+
+    /// Wire pane id for `pane`, allocating one if needed.
+    ///
+    /// Mirrors [`IdBridge::intern`] but inline here for pane ids — see
+    /// the field-level note on `pane_wire_forward` for why a second
+    /// general-purpose `IdBridge` is deferred.
+    pub fn intern_pane_wire(&mut self, pane: PaneId) -> WirePaneId {
+        if let Some(w) = self.pane_wire_forward.get(&pane) {
+            return *w;
+        }
+        let raw = self.next_pane_wire_id;
+        self.next_pane_wire_id = self.next_pane_wire_id.saturating_add(1);
+        let wire = WirePaneId(raw);
+        self.pane_wire_forward.insert(pane, wire);
+        self.pane_wire_reverse.insert(wire, pane);
+        wire
+    }
+
+    /// Reverse lookup: which core pane id (if any) does `wire`
+    /// resolve to?
+    #[must_use]
+    pub fn pane_from_wire(&self, wire: WirePaneId) -> Option<PaneId> {
+        self.pane_wire_reverse.get(&wire).copied()
+    }
+
+    /// Wire window id for `window`, allocating one if needed.
+    pub fn intern_window_wire(&mut self, window: WindowId) -> WireWindowId {
+        if let Some(w) = self.window_wire_forward.get(&window) {
+            return *w;
+        }
+        let raw = self.next_window_wire_id;
+        self.next_window_wire_id = self.next_window_wire_id.saturating_add(1);
+        let wire = WireWindowId(raw);
+        self.window_wire_forward.insert(window, wire);
+        self.window_wire_reverse.insert(wire, window);
+        wire
+    }
+
+    /// Build a [`SessionSnapshot`] describing the entire registry plus
+    /// the attaching client's initial focus.
+    ///
+    /// Used by the ATTACH handler in [`crate::runtime`] to populate the
+    /// `ATTACHED` frame per SPEC §13. Allocates wire ids on demand so
+    /// every entity in the registry gets one before this returns.
+    ///
+    /// `focus_session` is the resolved target of the ATTACH request;
+    /// the attaching client's focused window/pane fall back to the
+    /// session's `active` / window's `active` (tmux semantics).
+    /// Returns `None` if `focus_session` has no active window or pane,
+    /// since `SessionSnapshot::focused_window` / `focused_pane` are
+    /// required fields on the wire.
+    pub fn build_session_snapshot(
+        &mut self,
+        focus_session: SessionId,
+    ) -> Option<phux_protocol::wire::info::SessionSnapshot> {
+        use phux_protocol::wire::info::{PaneInfo, SessionInfo, SessionSnapshot, WindowInfo};
+
+        let attached_counts: HashMap<SessionId, u16> = {
+            let mut counts: HashMap<SessionId, u16> = HashMap::new();
+            for c in self.attached.values() {
+                *counts.entry(c.session).or_insert(0) = counts
+                    .get(&c.session)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(1);
+            }
+            counts
+        };
+
+        let session_pairs: Vec<(SessionId, Session)> = self
+            .registry
+            .sessions()
+            .map(|(id, s)| (id, s.clone()))
+            .collect();
+
+        let mut sessions = Vec::with_capacity(session_pairs.len());
+        let mut windows = Vec::new();
+        let mut panes = Vec::new();
+
+        for (sid, session) in &session_pairs {
+            let session_wire = self.session_id_bridge.intern(*sid);
+            // Pre-intern the active window so `active_window` round-trips.
+            let active_window_wire = session.active.map(|w| self.intern_window_wire(w));
+
+            let created_at_unix_secs = session
+                .created_at
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            sessions.push(
+                SessionInfo::new(session_wire, session.name.clone())
+                    .with_active_window(active_window_wire)
+                    .with_created_at_unix_secs(created_at_unix_secs)
+                    .with_window_count(u16::try_from(session.windows.len()).unwrap_or(u16::MAX))
+                    .with_attached_client_count(attached_counts.get(sid).copied().unwrap_or(0)),
+            );
+
+            for (index, wid) in session.windows.iter().enumerate() {
+                let Some(window) = self.registry.window(*wid).cloned() else {
+                    continue;
+                };
+                let window_wire = self.intern_window_wire(*wid);
+                let active_pane_wire = window.active.map(|p| self.intern_pane_wire(p));
+
+                // Layout-on-the-wire mirroring is its own concern;
+                // for phux-byc.8 we ship `None` and let later tickets
+                // translate `phux_core::LayoutNode` →
+                // `phux_protocol::wire::info::LayoutNode`.
+                windows.push(
+                    WindowInfo::new(window_wire, session_wire, format!("window-{index}"))
+                        .with_index(u16::try_from(index).unwrap_or(u16::MAX))
+                        .with_active_pane(active_pane_wire),
+                );
+
+                for pid in &window.panes {
+                    let Some(pane) = self.registry.pane(*pid).cloned() else {
+                        continue;
+                    };
+                    let pane_wire = self.intern_pane_wire(*pid);
+                    let cwd =
+                        Some(pane.cwd.to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+                    panes.push(
+                        PaneInfo::new(pane_wire, window_wire, pane.dims.0, pane.dims.1)
+                            .with_title(pane.title.clone())
+                            .with_cwd(cwd),
+                    );
+                }
+            }
+        }
+
+        let session = self.registry.session(focus_session)?;
+        let focused_window = session.active?;
+        let focused_pane = self.registry.window(focused_window)?.active?;
+
+        let focused_session_wire = self.session_id_bridge.intern(focus_session);
+        let focused_window_wire = self.intern_window_wire(focused_window);
+        let focused_pane_wire = self.intern_pane_wire(focused_pane);
+
+        Some(
+            SessionSnapshot::new(focused_session_wire, focused_window_wire, focused_pane_wire)
+                .with_sessions(sessions)
+                .with_windows(windows)
+                .with_panes(panes),
+        )
     }
 }
 

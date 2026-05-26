@@ -29,6 +29,12 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
 /// Spawn a server task and return its shutdown channel + `JoinHandle`.
+///
+/// Per ADR-0014, `ServerRuntime::run_async` returns a `!Send` future
+/// because the per-pane `PaneActor` it spawns owns a libghostty
+/// `Terminal` (which is `!Send`). Tests therefore call this helper
+/// inside a `tokio::task::LocalSet::run_until` and use
+/// `tokio::task::spawn_local` instead of `tokio::spawn`.
 fn spawn_server(
     socket_path: PathBuf,
 ) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
@@ -37,7 +43,7 @@ fn spawn_server(
         socket_path,
         pre_seeded_session: None,
     };
-    let handle = tokio::spawn(async move {
+    let handle = tokio::task::spawn_local(async move {
         let server = ServerRuntime::new(cfg);
         server
             .run_async(async move {
@@ -89,122 +95,145 @@ async fn read_one_frame(stream: &mut UnixStream) -> (u8, Vec<u8>) {
     (type_byte, body)
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn lifecycle_ping_pong() {
-    let tmp = TempDir::new().unwrap();
-    let socket_path = tmp.path().join("phux.sock");
-
-    let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
-    let mut stream = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
-
-    let nonce = 0xCAFE_BABE_1234_5678_u64;
-    let ping = encode_ping(nonce);
-    stream.write_all(&ping).await.unwrap();
-    stream.flush().await.unwrap();
-
-    let (type_byte, body) = read_one_frame(&mut stream).await;
-    assert_eq!(type_byte, TYPE_PONG, "expected PONG type byte");
-    assert_eq!(body.len(), 9, "PONG body = type(1) + nonce(8)");
-    let echoed = u64::from_be_bytes(body[1..9].try_into().unwrap());
-    assert_eq!(echoed, nonce, "PONG nonce must match PING nonce");
-
-    // Trigger shutdown and let the server drain.
-    drop(stream);
-    shutdown_tx.send(()).ok();
-    let result = server_handle.await.unwrap();
-    assert!(result.is_ok(), "server returned: {result:?}");
-
-    // Clean shutdown should remove the socket file.
-    assert!(
-        !socket_path.exists(),
-        "socket {} should have been unlinked on shutdown",
-        socket_path.display(),
-    );
+/// Drive an async test body inside a `LocalSet` so the helpers can
+/// call `spawn_local`. Wrapping at the function level (instead of
+/// inside each test) keeps the test bodies focused on assertions.
+fn run_local<F>(fut: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&rt, fut);
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn lifecycle_stale_socket() {
-    let tmp = TempDir::new().unwrap();
-    let socket_path = tmp.path().join("phux.sock");
-    // Simulate a dead-server crash: a leftover regular file at the path.
-    std::fs::write(&socket_path, b"stale leftover").unwrap();
-    assert!(socket_path.exists());
+#[test]
+fn lifecycle_ping_pong() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
 
-    let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
-    // The server should have bound successfully — verify with a quick PING.
-    let mut stream = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
-    let ping = encode_ping(7);
-    stream.write_all(&ping).await.unwrap();
-    let (type_byte, body) = read_one_frame(&mut stream).await;
-    assert_eq!(type_byte, TYPE_PONG);
-    assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), 7);
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
+        let mut stream = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
 
-    drop(stream);
-    shutdown_tx.send(()).ok();
-    server_handle.await.unwrap().unwrap();
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn lifecycle_busy_socket() {
-    let tmp = TempDir::new().unwrap();
-    let socket_path = tmp.path().join("phux.sock");
-
-    // Start server A.
-    let (shutdown_a, handle_a) = spawn_server(socket_path.clone());
-    let _probe = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
-
-    // Start server B at the same path; it should error with SocketBusy.
-    let cfg_b = ServerConfig {
-        socket_path: socket_path.clone(),
-        pre_seeded_session: None,
-    };
-    let server_b = ServerRuntime::new(cfg_b);
-    let (_never_tx, never_rx) = oneshot::channel::<()>();
-    let result_b = server_b
-        .run_async(async move {
-            let _ = never_rx.await;
-        })
-        .await;
-    match result_b {
-        Err(ServerError::SocketBusy(p)) => {
-            assert_eq!(p, socket_path);
-        }
-        other => panic!("expected SocketBusy, got {other:?}"),
-    }
-
-    // Tear A down cleanly.
-    shutdown_a.send(()).ok();
-    handle_a.await.unwrap().unwrap();
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn lifecycle_partial_frame_disconnect() {
-    let tmp = TempDir::new().unwrap();
-    let socket_path = tmp.path().join("phux.sock");
-
-    let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
-    let initial = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
-
-    // Connect, send only 2 of 4 length-prefix bytes, then drop.
-    {
-        let mut stream = initial;
-        stream.write_all(&[0x00, 0x09]).await.unwrap();
+        let nonce = 0xCAFE_BABE_1234_5678_u64;
+        let ping = encode_ping(nonce);
+        stream.write_all(&ping).await.unwrap();
         stream.flush().await.unwrap();
-        // Drop (Tokio shuts down the write half on drop).
-    }
 
-    // Give the server a moment to process the disconnect.
-    sleep(Duration::from_millis(50)).await;
+        let (type_byte, body) = read_one_frame(&mut stream).await;
+        assert_eq!(type_byte, TYPE_PONG, "expected PONG type byte");
+        assert_eq!(body.len(), 9, "PONG body = type(1) + nonce(8)");
+        let echoed = u64::from_be_bytes(body[1..9].try_into().unwrap());
+        assert_eq!(echoed, nonce, "PONG nonce must match PING nonce");
 
-    // The server must still be alive and accept a new connection.
-    let mut stream2 = UnixStream::connect(&socket_path).await.unwrap();
-    let nonce = 42_u64;
-    stream2.write_all(&encode_ping(nonce)).await.unwrap();
-    let (type_byte, body) = read_one_frame(&mut stream2).await;
-    assert_eq!(type_byte, TYPE_PONG);
-    assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), nonce);
+        // Trigger shutdown and let the server drain.
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        let result = server_handle.await.unwrap();
+        assert!(result.is_ok(), "server returned: {result:?}");
 
-    drop(stream2);
-    shutdown_tx.send(()).ok();
-    server_handle.await.unwrap().unwrap();
+        // Clean shutdown should remove the socket file.
+        assert!(
+            !socket_path.exists(),
+            "socket {} should have been unlinked on shutdown",
+            socket_path.display(),
+        );
+    });
+}
+
+#[test]
+fn lifecycle_stale_socket() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // Simulate a dead-server crash: a leftover regular file at the path.
+        std::fs::write(&socket_path, b"stale leftover").unwrap();
+        assert!(socket_path.exists());
+
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
+        // The server should have bound successfully — verify with a quick PING.
+        let mut stream = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
+        let ping = encode_ping(7);
+        stream.write_all(&ping).await.unwrap();
+        let (type_byte, body) = read_one_frame(&mut stream).await;
+        assert_eq!(type_byte, TYPE_PONG);
+        assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), 7);
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn lifecycle_busy_socket() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // Start server A.
+        let (shutdown_a, handle_a) = spawn_server(socket_path.clone());
+        let _probe = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
+
+        // Start server B at the same path; it should error with SocketBusy.
+        let cfg_b = ServerConfig {
+            socket_path: socket_path.clone(),
+            pre_seeded_session: None,
+        };
+        let server_b = ServerRuntime::new(cfg_b);
+        let (_never_tx, never_rx) = oneshot::channel::<()>();
+        let result_b = server_b
+            .run_async(async move {
+                let _ = never_rx.await;
+            })
+            .await;
+        match result_b {
+            Err(ServerError::SocketBusy(p)) => {
+                assert_eq!(p, socket_path);
+            }
+            other => panic!("expected SocketBusy, got {other:?}"),
+        }
+
+        // Tear A down cleanly.
+        shutdown_a.send(()).ok();
+        handle_a.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn lifecycle_partial_frame_disconnect() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
+        let initial = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
+
+        // Connect, send only 2 of 4 length-prefix bytes, then drop.
+        {
+            let mut stream = initial;
+            stream.write_all(&[0x00, 0x09]).await.unwrap();
+            stream.flush().await.unwrap();
+            // Drop (Tokio shuts down the write half on drop).
+        }
+
+        // Give the server a moment to process the disconnect.
+        sleep(Duration::from_millis(50)).await;
+
+        // The server must still be alive and accept a new connection.
+        let mut stream2 = UnixStream::connect(&socket_path).await.unwrap();
+        let nonce = 42_u64;
+        stream2.write_all(&encode_ping(nonce)).await.unwrap();
+        let (type_byte, body) = read_one_frame(&mut stream2).await;
+        assert_eq!(type_byte, TYPE_PONG);
+        assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), nonce);
+
+        drop(stream2);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
 }
