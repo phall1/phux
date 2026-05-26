@@ -172,8 +172,11 @@ The substrate cut, with the TUI riding on top.
   blobs. No conventions are normative; we ship the TUI's conventions
   as documentation in the TUI's design doc.
 - **The reference TUI works** on L1 + L3 metadata for layout. Tmux-
-  shaped: attach, detach, splits, layouts, status bar, keybindings,
-  predictive local echo.
+  shaped: attach, detach, splits, layouts, status bar, keybindings.
+  (Predictive local echo is *designed for* in
+  [`ARCHITECTURE.md`](./ARCHITECTURE.md#predictive-local-echo) but
+  deliberately not built until a transport whose round-trip
+  actually needs it lands — local UDS and fast SSH stdio don't.)
 - **The agent SDK ships** as a thin L1-only wrapper. Examples that
   spawn a build, wait for it to finish, read its exit code. This is
   what makes the agent-first thesis real, not aspirational.
