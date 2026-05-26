@@ -60,6 +60,14 @@ pub const TYPE_INPUT_PASTE: u8 = 0x11;
 pub const TYPE_INPUT_MOUSE: u8 = 0x12;
 /// Discriminant for `INPUT_FOCUS` (client to server, `SPEC.md` §9.3).
 pub const TYPE_INPUT_FOCUS: u8 = 0x14;
+/// Discriminant for `VIEWPORT_RESIZE` (client to server, `SPEC.md` §7.1 / §10.5).
+///
+/// The client emits this when its outer terminal changes size (SIGWINCH on
+/// Unix, the GUI resize event on graphical hosts). Payload reuses the
+/// [`ViewportInfo`] shape carried by `ATTACH` (§13) — phux-4hp keeps the wire
+/// shape minimal and lets future tickets grow the per-cell pixel + padding
+/// metrics from SPEC §10.5 when the mouse-encoder needs them.
+pub const TYPE_VIEWPORT_RESIZE: u8 = 0x20;
 /// Discriminant for `PING` (client to server, `SPEC.md` §7.5).
 pub const TYPE_PING: u8 = 0x7F;
 /// Discriminant for `HELLO_OK` (server to client, `SPEC.md` §6.1). Reserved.
@@ -387,6 +395,24 @@ pub enum FrameKind {
         event: PasteEvent,
     },
 
+    /// `VIEWPORT_RESIZE` — the attached client's outer terminal changed
+    /// size (`SPEC.md` §7.1 / §10.5).
+    ///
+    /// The connection itself identifies which client this resize belongs
+    /// to — there is no `client_id` field on the wire (consistent with
+    /// `ATTACH` / `INPUT_*` / etc., which also rely on the connection's
+    /// implicit identity). The server uses this to update the resolved
+    /// pane dimensions for the client's currently-attached pane.
+    ///
+    /// `viewport` reuses the [`ViewportInfo`] shape from `ATTACH`. SPEC
+    /// §10.5 additionally defines `cell_w`/`cell_h`/`padding_*` for
+    /// pixel-precise mouse encoding; those grow alongside the mouse
+    /// encoder rework and don't gate the byc.4hp wiring.
+    ViewportResize {
+        /// New outer-terminal metrics.
+        viewport: ViewportInfo,
+    },
+
     /// `ATTACHED` — server acknowledges attach with initial state
     /// (`SPEC.md` §13).
     ///
@@ -484,6 +510,7 @@ impl FrameKind {
             Self::InputMouse { .. } => TYPE_INPUT_MOUSE,
             Self::InputFocus { .. } => TYPE_INPUT_FOCUS,
             Self::InputPaste { .. } => TYPE_INPUT_PASTE,
+            Self::ViewportResize { .. } => TYPE_VIEWPORT_RESIZE,
             Self::Attached { .. } => TYPE_ATTACHED,
             Self::Detached => TYPE_DETACHED,
             Self::PaneSnapshot { .. } => TYPE_PANE_SNAPSHOT,
@@ -559,6 +586,9 @@ impl FrameKind {
             Self::InputPaste { pane_id, event } => {
                 enc.write_u32_be(*pane_id);
                 encode_paste_event(event, &mut enc);
+            }
+            Self::ViewportResize { viewport } => {
+                encode_viewport_info(viewport, &mut enc);
             }
             Self::Attached {
                 snapshot,

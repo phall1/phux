@@ -690,6 +690,16 @@ proptest! {
         prop_assert_eq!(decoded, frame);
         prop_assert!(tail.is_empty());
     }
+
+    #[test]
+    fn roundtrip_viewport_resize(viewport in arb_viewport_info()) {
+        let frame = FrameKind::ViewportResize { viewport };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
 }
 
 #[test]

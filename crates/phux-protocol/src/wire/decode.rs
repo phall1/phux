@@ -10,9 +10,9 @@ use super::error::DecodeError;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
     TYPE_DETACHED, TYPE_ERROR, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
-    TYPE_INPUT_PASTE, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target,
-    decode_focus_event, decode_key_event, decode_mouse_event, decode_optional_bytes,
-    decode_optional_u32, decode_paste_event, decode_viewport_info,
+    TYPE_INPUT_PASTE, TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, TYPE_VIEWPORT_RESIZE,
+    decode_attach_target, decode_focus_event, decode_key_event, decode_mouse_event,
+    decode_optional_bytes, decode_optional_u32, decode_paste_event, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 
@@ -216,6 +216,10 @@ impl<'a> Decoder<'a> {
                 let pane_id = self.read_u32_be()?;
                 let event = decode_paste_event(self)?;
                 FrameKind::InputPaste { pane_id, event }
+            }
+            TYPE_VIEWPORT_RESIZE => {
+                let viewport = decode_viewport_info(self)?;
+                FrameKind::ViewportResize { viewport }
             }
             TYPE_ATTACHED => {
                 let snapshot = decode_session_snapshot(self)?;

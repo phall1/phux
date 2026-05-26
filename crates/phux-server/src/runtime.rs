@@ -29,7 +29,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::BytesMut;
-use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_PONG};
+use phux_protocol::wire::frame::{
+    AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_PONG, ViewportInfo,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
@@ -462,6 +464,15 @@ async fn handle_client(
                 let _ = out_tx.send(FrameKind::Detached).await;
                 state.with_mut(|s| s.detach(client_id));
             }
+            FrameKind::ViewportResize { viewport } => {
+                debug!(
+                    ?client_id,
+                    cols = viewport.cols,
+                    rows = viewport.rows,
+                    "VIEWPORT_RESIZE"
+                );
+                handle_viewport_resize(&state, client_id, &viewport);
+            }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
             }
@@ -714,6 +725,55 @@ async fn handle_attach(
     }
 }
 
+/// Handle a client's `VIEWPORT_RESIZE` (SPEC §7.1 / §10.5).
+///
+/// Look up the client's currently-focused pane and update the in-memory
+/// `dims` so future `PANE_SNAPSHOT` frames reflect the new size. This is
+/// the additive surface for phux-4hp: we deliberately do NOT push a
+/// resize into the [`PaneActor`] (or call `Terminal::set_size` /
+/// `pty.resize(...)`) because byc.5's PTY pump owns the actor-side
+/// `Terminal` / `portable-pty` resize integration. The follow-up there
+/// will consume this state change (or, if it prefers a direct channel,
+/// can add a new `PaneHandle` channel without touching this code).
+///
+/// Per SPEC §10.5, when multiple clients are attached with different
+/// sizes the server uses the smallest common bounding box per window.
+/// That negotiation lives with byc.5 too; today the last writer wins,
+/// which matches single-attach behavior (the only path exercised).
+///
+/// Silent on every "not-found" path. A `VIEWPORT_RESIZE` from an
+/// unattached client is a benign race (the client may have sent it
+/// before its ATTACH completed); logging at `debug!` is enough.
+fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &ViewportInfo) {
+    state.with_mut(|s| {
+        let Some(client) = s.attached.get(&client_id) else {
+            debug!(
+                ?client_id,
+                "VIEWPORT_RESIZE from non-attached client; ignoring"
+            );
+            return;
+        };
+        let session_id = client.session;
+        let Some(session) = s.registry.session(session_id) else {
+            debug!(?client_id, "VIEWPORT_RESIZE: client's session vanished");
+            return;
+        };
+        let Some(window_id) = session.active else {
+            debug!(?client_id, "VIEWPORT_RESIZE: no active window in session");
+            return;
+        };
+        let Some(window) = s.registry.window(window_id) else {
+            return;
+        };
+        let Some(pane_id) = window.active else {
+            return;
+        };
+        if let Some(pane) = s.registry.pane_mut(pane_id) {
+            pane.dims = (viewport.cols, viewport.rows);
+        }
+    });
+}
+
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
 async fn send_error(
     out_tx: &tokio::sync::mpsc::Sender<OutboundFrame>,
@@ -754,5 +814,61 @@ mod tests {
         assert_eq!(&buf[0..4], &9u32.to_be_bytes());
         assert_eq!(buf[4], TYPE_PONG);
         assert_eq!(&buf[5..13], &0xDEAD_BEEF_CAFE_BABE_u64.to_be_bytes());
+    }
+
+    /// `VIEWPORT_RESIZE` updates the focused pane's stored dims on the
+    /// canonical `Registry`. byc.5's PTY-resize integration will read
+    /// this state when it lands; today we just observe the mutation.
+    #[test]
+    fn viewport_resize_updates_focused_pane_dims() {
+        use phux_core::ids::PaneId as CorePaneId;
+
+        let state = SharedState::new();
+        // Seed a session with a pane, then attach a client. Mirrors what
+        // `seed_session_with_actor` does on the real path, minus the
+        // PaneActor spawn (we're not exercising the actor here — just
+        // the state-side dim update).
+        let (sid, _wid, pid): (_, _, CorePaneId) =
+            state.with_mut(|s| s.seed_session("test-session"));
+        let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        state
+            .with_mut(|s| s.attach(client_id, "test-session", tx))
+            .expect("attach");
+
+        // Sanity: starts at 80x24 (default core::Pane::dims).
+        let before = state
+            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .expect("pane exists");
+        assert_eq!(before, (80, 24));
+
+        let viewport = ViewportInfo::new(132, 50).with_pixels(Some(1320), Some(750));
+        handle_viewport_resize(&state, client_id, &viewport);
+
+        let after = state
+            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .expect("pane exists");
+        assert_eq!(after, (132, 50));
+
+        // Sanity: the session linkage didn't get clobbered.
+        let attached_session = state.with(|s| s.attached.get(&client_id).map(|c| c.session));
+        assert_eq!(attached_session, Some(sid));
+    }
+
+    /// A `VIEWPORT_RESIZE` from a non-attached client is a benign no-op —
+    /// the handler must not panic or mutate state.
+    #[test]
+    fn viewport_resize_from_unattached_client_is_noop() {
+        let state = SharedState::new();
+        let (_sid, _wid, pid) = state.with_mut(|s| s.seed_session("session"));
+        let bogus_client = ClientId(9999);
+        let before = state
+            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .expect("pane exists");
+        handle_viewport_resize(&state, bogus_client, &ViewportInfo::new(200, 60));
+        let after = state
+            .with(|s| s.registry.pane(pid).map(|p| p.dims))
+            .expect("pane exists");
+        assert_eq!(before, after, "no mutation expected for unattached client");
     }
 }

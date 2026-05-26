@@ -407,3 +407,23 @@ fn snap_bell() {
         pane_id: 0x0000_00BE,
     }));
 }
+
+// -----------------------------------------------------------------------------
+// VIEWPORT_RESIZE — SPEC §10.5. Cell-only and pixel-augmented viewports.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_viewport_resize_cells_only() {
+    let frame = FrameKind::ViewportResize {
+        viewport: ViewportInfo::new(120, 40),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_viewport_resize_with_pixels() {
+    let frame = FrameKind::ViewportResize {
+        viewport: ViewportInfo::new(120, 40).with_pixels(Some(1920), Some(1080)),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}

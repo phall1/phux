@@ -253,14 +253,15 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
                 .await?;
             }
 
-            // SIGWINCH — terminal was resized.
+            // SIGWINCH — terminal was resized. Read the new viewport
+            // and ship a VIEWPORT_RESIZE upstream (SPEC §7.1 / §10.5).
+            // The server uses this to recompute layout and update the
+            // attached pane's dims. On query failure we fall back to a
+            // sane default (logged) rather than skip the frame — the
+            // server still benefits from knowing a resize happened.
             _ = sigwinch.recv() => {
-                // TODO(phux-4hp): when the `VIEWPORT_RESIZE` FrameKind
-                // variant exists, encode `current_viewport()?` and send
-                // it upstream. The wire frame is defined in SPEC §10.5
-                // but is not yet a FrameKind variant, so the v0 attach
-                // loop just notices the resize and re-renders.
-                let _ = current_viewport();
+                let viewport = current_viewport_or_default();
+                conn.send(&viewport_resize_frame(viewport)).await?;
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(&terminal, &mut stdout);
             }
@@ -372,6 +373,29 @@ fn handle_server_frame(
             // frames.
             tracing::debug!(kind = ?other, "ignoring server frame");
             Ok(false)
+        }
+    }
+}
+
+/// Build a `VIEWPORT_RESIZE` frame from a [`ViewportInfo`].
+///
+/// Pure function, factored out of [`main_loop`] so unit tests can
+/// exercise the encoder-feeding side without firing a real SIGWINCH or
+/// driving a tokio runtime. The wire shape matches SPEC §7.1 / §10.5.
+const fn viewport_resize_frame(viewport: ViewportInfo) -> FrameKind {
+    FrameKind::ViewportResize { viewport }
+}
+
+/// Read the current viewport, falling back to 80x24 with a logged
+/// warning if the kernel query fails. Used by the SIGWINCH branch
+/// where we'd rather ship a stale-but-plausible viewport than skip
+/// the upstream notification entirely.
+fn current_viewport_or_default() -> ViewportInfo {
+    match current_viewport() {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::warn!(error = %err, "tcgetwinsize failed; falling back to 80x24");
+            ViewportInfo::new(80, 24)
         }
     }
 }
@@ -505,5 +529,34 @@ mod tests {
         let a = AttachError::Disconnected;
         let b = AttachError::Io(io::Error::other("foo"));
         assert_ne!(std::mem::discriminant(&a), std::mem::discriminant(&b),);
+    }
+
+    /// The factored builder produces a `ViewportResize` frame carrying
+    /// the supplied viewport unchanged. Lets us assert the encoder-
+    /// feeding side of the SIGWINCH path without firing a real signal
+    /// or driving a tokio runtime.
+    #[test]
+    fn viewport_resize_frame_carries_viewport_unchanged() {
+        let vp = ViewportInfo::new(132, 50).with_pixels(Some(1320), Some(750));
+        match viewport_resize_frame(vp) {
+            FrameKind::ViewportResize { viewport } => {
+                assert_eq!(viewport.cols, 132);
+                assert_eq!(viewport.rows, 50);
+                assert_eq!(viewport.pixel_w, Some(1320));
+                assert_eq!(viewport.pixel_h, Some(750));
+            }
+            other => panic!("expected ViewportResize, got {other:?}"),
+        }
+    }
+
+    /// `current_viewport_or_default` returns _something_ even when stdout
+    /// isn't a TTY (cargo test path). The exact dims aren't load-bearing
+    /// — what matters is that we never return an error and always have a
+    /// frame to send.
+    #[test]
+    fn current_viewport_or_default_never_panics() {
+        let vp = current_viewport_or_default();
+        // Cell dims fit in u16 by construction; just exercise the path.
+        let _ = (vp.cols, vp.rows);
     }
 }
