@@ -26,9 +26,10 @@
 //!   phux-4hp.
 //! * Configurable detach key — `Ctrl-b d` is hardcoded for v0; tracked
 //!   under phux-631.
-//! * Smart VT input parsing — the stdin parser handles ASCII printable,
-//!   a small set of control chars, and the detach chord. Arrow keys,
-//!   function keys, mouse reports, and bracketed paste land in phux-19e.
+//! * Mouse / bracketed-paste parsing — keyboard input (ASCII, UTF-8,
+//!   CSI / SS3 sequences, modifier-bearing chords, Alt-chords) is
+//!   handled by [`input::StdinParser`]; mouse reports and bracketed
+//!   paste are deferred follow-ups (see the input module docs).
 
 pub mod connection;
 pub mod driver;

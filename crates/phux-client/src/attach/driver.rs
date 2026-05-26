@@ -23,6 +23,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::time::Duration;
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
@@ -35,6 +36,13 @@ use tokio::signal::unix::{SignalKind, signal};
 use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{PaneRenderer, write_reset};
+
+/// Idle window before a parser-pending bare ESC is interpreted as the
+/// Escape key. Chosen to be long enough to absorb same-burst arrival of
+/// `ESC [` / `ESC O` sequences over local UDS-or-PTY paths (which are
+/// effectively zero-latency), but short enough that the user's perception
+/// of pressing Escape stays snappy. xterm uses ~50ms by default; we match.
+const ESC_FLUSH_IDLE: Duration = Duration::from_millis(50);
 
 /// Errors the attach loop can surface to its caller.
 ///
@@ -170,6 +178,17 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
     let mut detach_pending = false;
 
     loop {
+        // Arm the bare-ESC idle timer only when the parser has pending
+        // state. When no flush is pending we substitute a never-resolving
+        // future so the select! arm parks forever; this keeps the steady-
+        // state cost at one always-`Pending` future and avoids unused-
+        // `Option` branches inside `select!`.
+        let flush_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = if parser.has_pending() {
+            Box::pin(tokio::time::sleep(ESC_FLUSH_IDLE))
+        } else {
+            Box::pin(std::future::pending::<()>())
+        };
+
         tokio::select! {
             biased;
 
@@ -211,25 +230,27 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
                     continue;
                 }
                 let events = parser.feed(&stdin_buf[..n]);
-                for ev in events {
-                    if matches!(ev, InputEvent::DetachRequested) {
-                        if !detach_pending {
-                            conn.send(&FrameKind::Detach).await?;
-                            detach_pending = true;
-                        }
-                        continue;
-                    }
-                    let Some(pane) = focused_pane else {
-                        // Pre-`ATTACHED`: drop input. The server hasn't
-                        // told us which pane is focused yet, and the
-                        // wire spec has no "pre-attach key buffer".
-                        tracing::debug!("dropping input received before ATTACHED");
-                        continue;
-                    };
-                    if let Some(frame) = ev.into_frame(pane.get()) {
-                        conn.send(&frame).await?;
-                    }
-                }
+                dispatch_input_events(
+                    conn,
+                    events,
+                    focused_pane,
+                    &mut detach_pending,
+                )
+                .await?;
+            }
+
+            // Bare-ESC idle timeout. Only armed when the parser has
+            // pending state; resolves an ambiguous lone ESC into the
+            // Escape key (see input::StdinParser::flush docs).
+            () = flush_sleep => {
+                let events = parser.flush();
+                dispatch_input_events(
+                    conn,
+                    events,
+                    focused_pane,
+                    &mut detach_pending,
+                )
+                .await?;
             }
 
             // SIGWINCH — terminal was resized.
@@ -245,6 +266,37 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
             }
         }
     }
+}
+
+/// Translate a batch of parser events into wire frames and ship them.
+///
+/// Detach requests short-circuit into a single `FrameKind::Detach` and
+/// flip `detach_pending`. Pre-attach events (no `focused_pane` yet) are
+/// dropped with a debug log — the wire spec has no "pre-attach buffer"
+/// notion.
+async fn dispatch_input_events(
+    conn: &mut Connection,
+    events: Vec<InputEvent>,
+    focused_pane: Option<PaneId>,
+    detach_pending: &mut bool,
+) -> Result<(), AttachError> {
+    for ev in events {
+        if matches!(ev, InputEvent::DetachRequested) {
+            if !*detach_pending {
+                conn.send(&FrameKind::Detach).await?;
+                *detach_pending = true;
+            }
+            continue;
+        }
+        let Some(pane) = focused_pane else {
+            tracing::debug!("dropping input received before ATTACHED");
+            continue;
+        };
+        if let Some(frame) = ev.into_frame(pane.get()) {
+            conn.send(&frame).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Process one server-to-client frame. Returns `true` if the loop should
