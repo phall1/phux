@@ -80,7 +80,7 @@ it. See [ADR-0013] for the design rationale.
 | **Session** | A named, persistent container for one or more windows. Survives client disconnect. |
 | **Window** | A tab inside a session. Contains a layout tree of panes. |
 | **Pane** | A leaf of a window's layout tree. Has one PTY and one terminal grid. |
-| **Frame** | A coherent server-rendered view of one pane, identified by a monotonically increasing `frame_id`. |
+| **Frame** | A server-emitted `PANE_OUTPUT` carrying a contiguous batch of VT bytes for one pane, identified by a monotonically increasing per-pane `seq`. |
 | **Grid** | The two-dimensional cell matrix that is a pane's visible viewport. |
 | **Scrollback** | Lines that have scrolled out of the grid but are retained for review. |
 | **Cell** | One character position in a grid: a grapheme cluster plus rendering attributes. |
@@ -217,7 +217,7 @@ ClientCapabilities {
     images: bitset<ImageProtocol>, // Sixel | KittyGraphics | Iterm2
     hyperlinks: bool,
     unicode_version: u8,
-    rendering: RenderingMode,      // Diff | VtReplay (TUI clients can request VtReplay)
+    rendering: RenderingMode,      // Diff | VtReplay (deprecated; see prose below)
 }
 
 ServerCapabilities {
@@ -1151,40 +1151,69 @@ evaluator, no formatting language. Commands are an enum. Strings appear
 only as user-supplied names, paths, and arguments.
 
 This is a directional decision documented in
-[`ADR/0002-diff-based-protocol.md`](./ADR/0002-diff-based-protocol.md)
-and [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+[`ADR/0013-libghostty-bytes-on-wire.md`](./ADR/0013-libghostty-bytes-on-wire.md)
+(which supersedes ADR-0002) and [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ---
 
 ## 12. Flow control
 
-### 12.1 Frame pacing
+### 12.1 Output pacing
 
-The server MUST cap per-pane diff emission at a configurable refresh
-rate (default 60 Hz). Between emissions, output is coalesced into a
-single forthcoming frame. There is no "every change emits a frame" mode;
+The server MUST cap per-pane `PANE_OUTPUT` emission at a configurable
+refresh rate (default 60 Hz). Between emissions, PTY bytes are
+accumulated and shipped as a single coalesced `PANE_OUTPUT` carrying
+the batched VT bytes. There is no "every byte emits a frame" mode;
 that would not survive a `yes` flood.
 
-### 12.2 Frame acknowledgement
+Coalescing operates at the byte level: the server concatenates the
+PTY's output across the pacing interval into the next `PANE_OUTPUT`'s
+`bytes` field. Because libghostty's parser is deterministic over the
+full byte stream, coalescing has no observable effect on the client's
+local Terminal state beyond timing.
 
-Clients acknowledge frames they have rendered:
+### 12.2 Per-pane acknowledgement
+
+Clients acknowledge `PANE_OUTPUT` emissions they have processed
+(applied to their local libghostty `Terminal`):
 
 ```
-FRAME_ACK { pane_id: PaneId, frame_id: u64 }
+FRAME_ACK { pane_id: PaneId, seq: u64 }
 ```
 
-The server tracks per-client `last_acked_frame` per pane. When
-`pending_unacked` exceeds `flow_control_threshold` (default: 32 frames,
-configurable per-server, never disable-able), the server:
+`seq` is the monotonic per-pane sequence number from `PANE_OUTPUT`
+(§8.1). An ack is cumulative: acknowledging `seq = N` implies all
+prior `PANE_OUTPUT`s for that pane up to and including `N` have been
+applied.
 
-1. Stops sending `PANE_DIFF` for that pane to that client.
-2. Coalesces all pending state for that pane.
-3. Emits a single `PANE_SNAPSHOT` representing the current state.
-4. Resumes diffs from the snapshot.
+The server tracks per-client `last_acked_seq` per pane. When
+`pending_unacked_bytes` (or equivalently the count of unacked
+`PANE_OUTPUT` emissions) for a pane exceeds a configurable
+`flow_control_threshold` (default: 32 unacked emissions, per-server
+configurable, never disable-able), the server:
+
+1. Stops sending live `PANE_OUTPUT` for that pane to that client.
+2. Drops the queued byte backlog for that pane / client.
+3. Emits a single `PANE_SNAPSHOT` (§8.4) synthesized from the
+   server's canonical Terminal — `vt_replay_bytes` reproduces the
+   current grid on a fresh client Terminal.
+4. Resumes live `PANE_OUTPUT` from the post-snapshot byte stream.
+   The next `seq` after the snapshot establishes a fresh base
+   (§13); clients MUST NOT assume `seq` continuity across the
+   snapshot boundary.
 
 This is the playbook Mosh uses, generalized to per-pane streams. It
 ensures a slow client cannot block the server, and the worst-case
-catch-up cost is one snapshot, not an unbounded queue replay.
+catch-up cost is one snapshot's worth of synthesized VT bytes, not an
+unbounded queue of accumulated PTY output.
+
+Scrollback that scrolls off during a backpressure-induced snapshot is
+**not** retransmitted to the lagging client; clients that require
+gap-free scrollback during heavy output SHOULD configure their server
+with a higher `flow_control_threshold` or accept snapshot-driven
+truncation. Servers MAY include bounded scrollback in
+`PANE_SNAPSHOT.scrollback_bytes` if configured to do so on
+backpressure (implementation-defined; not normative).
 
 ### 12.3 Per-client isolation
 
@@ -1398,9 +1427,13 @@ For implementers extending the protocol:
   plane.
 - Message IDs `0x41..=0x4F` and `0xB3..=0xBF`: reserved for events.
 
-DiffOp tag values, NamedKey enum values, and ErrorCode enum values are
-allocated sequentially. Implementers proposing new values open a PR
-against this document.
+`PhysicalKey` enum values and `ErrorCode` enum values are allocated
+sequentially. Implementers proposing new values open a PR against
+this document.
+
+(Earlier drafts of this SPEC reserved a `DiffOp` tag range here; per
+[ADR-0013], pane content is now a VT byte stream and `DiffOp` no
+longer exists as a wire concept.)
 
 ---
 
@@ -1411,3 +1444,4 @@ against this document.
 | 0.1.0-draft | 2026-05-24 | Initial draft. Subject to change.            |
 | 0.1.0-draft.2 | 2026-05-24 | §7.7, §9, §10.5 revised to mirror libghostty input/OSC APIs. ADR-0006. |
 | 0.1.0-draft.3 | 2026-05-25 | §8 rewritten for bytes-on-wire pane state sync; `PANE_DIFF` superseded by `PANE_OUTPUT`; `PANE_SNAPSHOT` carries `vt_replay_bytes`; §6.2 capability downsampling described as a server-side VT byte stream rewrite; §13 replay sequence and §16 conformance updated. ADR-0013. |
+| 0.1.0-draft.4 | 2026-05-26 | Post-ADR-0013 cleanup: §2 Frame term re-anchored on per-pane `seq`; §6.2 inline comment on deprecated `RenderingMode`; §11.1 ADR cross-reference points at ADR-0013; §12 flow control rewritten for `PANE_OUTPUT` / per-pane `seq` (was `PANE_DIFF` / `frame_id`); Appendix B reserved-range guidance drops `DiffOp`. |
