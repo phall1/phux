@@ -670,8 +670,12 @@ require breaking changes:
   format.
 - **tmux control mode (CC) frontend.** Optional adapter that would let
   a CC-aware terminal (iTerm2 today; Ghostty when 1.4+ binds its
-  parser to the GUI) render phux panes as native splits of that
+  parser to the GUI) render phux Terminals as native splits of that
   terminal. The native byte-stream protocol (ADR-0013) stays primary
-  and strictly more capable; CC is reserved as a compatibility
-  option, not a roadmap commitment. See ADR-0010 and the
-  `CC_FRONTEND` capability bit in `SPEC.md` §6.2.
+  and strictly more capable; CC is one possible alternative consumer,
+  not a roadmap commitment. Per
+  [ADR-0017](./ADR/0017-tui-not-protocol-privileged.md) the
+  reference TUI has no protocol-level privilege, so a CC adapter
+  picks its tier set (typically L1+L3) the same way the native TUI
+  does. The earlier `CC_FRONTEND` capability bit in `SPEC.md` §6.2
+  is **reclaimed** under ADR-0017; no capability bit is needed.
