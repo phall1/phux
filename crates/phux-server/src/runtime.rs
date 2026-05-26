@@ -13,7 +13,7 @@
 //!   [`tokio::task::LocalSet`] (per ADR-0014) that reads length-prefixed
 //!   frames (`SPEC.md` §5), echoes `PING` with `PONG` (`SPEC.md` §7.5),
 //!   and handles `ATTACH` / `DETACH` by talking to the per-pane
-//!   [`PaneActor`](crate::pane_actor::PaneActor)s (`phux-byc.8`). The
+//!   [`PaneActor`]s (`phux-byc.8`). The
 //!   remaining catalog (`INPUT_KEY`, etc.) is recorded against the
 //!   pane's input log but the PTY write side lands in `phux-byc.5`.
 //! * Unlink the socket file on clean shutdown and refuse to start over an
@@ -320,8 +320,9 @@ pub(crate) fn seed_session_with_actor(
 }
 
 /// Seed `(session, window, pane)` and spawn a **PTY-backed**
-/// `PaneActor` running `cmd`. Sibling of [`seed_session_with_actor`]
-/// for the real server path (`phux-byc.5`).
+/// `PaneActor` running `cmd`. Sibling of the private
+/// `seed_session_with_actor` helper for the real server path
+/// (`phux-byc.5`).
 ///
 /// Call sites:
 ///

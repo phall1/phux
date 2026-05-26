@@ -695,7 +695,8 @@ fn write_enter_alt_screen<W: Write>(out: &mut W) -> io::Result<()> {
 /// show the cursor, and (if we ever entered the alt screen) leave it.
 ///
 /// Used by both [`RawModeGuard::drop`] and the signal-handler arms in
-/// [`main_loop`]. Safe to call multiple times — the second call sees
+/// the private `main_loop` function. Safe to call multiple times — the
+/// second call sees
 /// `ALT_SCREEN_ACTIVE == false` and skips the leave sequence.
 pub fn write_terminal_reset<W: Write>(out: &mut W) -> io::Result<()> {
     write_reset(out)?;
