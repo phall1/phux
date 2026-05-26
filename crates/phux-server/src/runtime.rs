@@ -787,6 +787,10 @@ fn prepare_attach(
 ///
 /// On any failure path, emits an `ERROR` frame and returns. We never
 /// partially-attach: either every frame queues or none does.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear attach orchestration: resolve target -> prepare -> spawn per-pane output pumps -> fan out snapshot requests via FuturesUnordered -> drain; splitting it would scatter context"
+)]
 async fn handle_attach(
     state: &SharedState,
     client_id: ClientId,
