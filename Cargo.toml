@@ -77,3 +77,11 @@ debug = "line-tables-only"
 inherits = "release"
 debug = "line-tables-only"
 strip = "none"
+
+# Profile for sampling profilers (samply, perf). Inherits release codegen
+# so the hot path matches production, but keeps line-table debug info and
+# symbols so flame views resolve to source. See `just profile`.
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"
