@@ -836,7 +836,6 @@ dependencies = [
  "phux-server",
  "proptest",
  "rustix 0.38.44",
- "smallvec",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -876,7 +875,6 @@ dependencies = [
  "insta",
  "libghostty-vt",
  "proptest",
- "smallvec",
  "thiserror 2.0.18",
 ]
 

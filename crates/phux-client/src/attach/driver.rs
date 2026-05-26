@@ -9,9 +9,11 @@
 //!   mode + alt screen on construction and restores it on drop (panic-safe
 //!   per ADR-0003's "no hung outer terminals" requirement),
 //! * a stdin reader,
-//! * a SIGWINCH listener (currently a no-op once `VIEWPORT_RESIZE` lands
+//! * a SIGWINCH listener (currently a no-op; once `VIEWPORT_RESIZE` lands
 //!   in phux-4hp it will start sending resize frames upstream),
-//! * the [`DiffMirror`](crate::DiffMirror) accumulating server diffs.
+//! * a local `libghostty_vt::Terminal` + [`PaneRenderer`] for the focused
+//!   pane (under ADR-0013 the client is bytes-in / `vt_write` / dirty-row
+//!   redraw — see `research/2026-05-25-libghostty-renderstate.md`).
 
 #![allow(
     clippy::result_large_err,
@@ -22,6 +24,7 @@ use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
 
+use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::ids::PaneId;
 use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
@@ -29,11 +32,9 @@ use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::DiffMirror;
-
 use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
-use super::render::{render_frame, write_reset};
+use super::render::{PaneRenderer, write_reset};
 
 /// Errors the attach loop can surface to its caller.
 ///
@@ -67,11 +68,24 @@ pub enum AttachError {
     /// silently no-op'ing.
     #[error("stdin is not a terminal; attach requires an interactive TTY")]
     NotATty,
+
+    /// A libghostty operation failed on the client's local Terminal.
+    #[error("libghostty: {0}")]
+    Ghostty(#[from] libghostty_vt::Error),
 }
 
 impl From<io::Error> for AttachError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+impl From<super::render::RenderError> for AttachError {
+    fn from(value: super::render::RenderError) -> Self {
+        match value {
+            super::render::RenderError::Io(e) => Self::Io(e),
+            super::render::RenderError::Ghostty(e) => Self::Ghostty(e),
+        }
     }
 }
 
@@ -81,7 +95,14 @@ impl From<io::Error> for AttachError {
 ///
 /// The function is `async` because it relies on tokio; embedders must
 /// drive it on a tokio runtime. Per ADR-0003 the canonical runtime is
-/// `tokio::runtime::Builder::new_current_thread`, but any runtime works.
+/// `tokio::runtime::Builder::new_current_thread` — the returned future
+/// is intentionally `!Send` because libghostty's `Terminal` is `!Send`
+/// and lives on the attach task's stack across `await` points. The
+/// single-threaded runtime never moves the future between threads.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
 pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError> {
     // Raw mode + alt screen first, before any other I/O — if the user
     // sees us print something on the normal screen because UDS connect
@@ -126,8 +147,21 @@ async fn send_attach(conn: &mut Connection, target: AttachTarget) -> Result<(), 
 }
 
 /// Drive the `tokio::select!` loop until detach.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
 async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
-    let mut mirror = DiffMirror::new(0, 0);
+    // Client-side Terminal + renderer for the focused pane. Dimensions
+    // get replaced on the first PANE_SNAPSHOT; sizing to (80, 24) is the
+    // safest no-content default for a Terminal that may receive
+    // PANE_OUTPUT before its snapshot for any reason.
+    let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
+        cols: 80,
+        rows: 24,
+        max_scrollback: 10_000,
+    })?;
+    let mut renderer = PaneRenderer::new()?;
     let mut focused_pane: Option<PaneId> = None;
     let mut parser = StdinParser::new();
     let mut stdin = tokio::io::stdin();
@@ -144,7 +178,12 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
             frame = conn.recv() => {
                 match frame {
                     Ok(f) => {
-                        let exit = handle_server_frame(f, &mut mirror, &mut focused_pane);
+                        let exit = handle_server_frame(
+                            f,
+                            &mut terminal,
+                            &mut renderer,
+                            &mut focused_pane,
+                        )?;
                         if exit {
                             return Ok(());
                         }
@@ -201,7 +240,8 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
                 // but is not yet a FrameKind variant, so the v0 attach
                 // loop just notices the resize and re-renders.
                 let _ = current_viewport();
-                let _ = render_frame(&mirror, &mut io::stdout().lock());
+                let mut stdout = io::stdout().lock();
+                let _ = renderer.render(&terminal, &mut stdout);
             }
         }
     }
@@ -209,16 +249,12 @@ async fn main_loop(conn: &mut Connection) -> Result<(), AttachError> {
 
 /// Process one server-to-client frame. Returns `true` if the loop should
 /// exit cleanly (i.e. the server sent `DETACHED`).
-///
-/// Currently never fails — render errors are deliberately swallowed so a
-/// transient write hiccup on stdout doesn't kill the attach. If a future
-/// frame variant needs to bubble up a protocol error, this will become
-/// `Result`-returning.
 fn handle_server_frame(
     frame: FrameKind,
-    mirror: &mut DiffMirror,
+    terminal: &mut Terminal<'static, 'static>,
+    renderer: &mut PaneRenderer<'static>,
     focused_pane: &mut Option<PaneId>,
-) -> bool {
+) -> Result<bool, AttachError> {
     match frame {
         FrameKind::Attached {
             snapshot,
@@ -230,42 +266,44 @@ fn handle_server_frame(
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
             // PANE_SNAPSHOT.
-            false
+            Ok(false)
         }
-        FrameKind::PaneSnapshot { pane_id, snapshot } => {
+        FrameKind::PaneSnapshot {
+            pane_id,
+            cols,
+            rows,
+            vt_replay_bytes,
+            scrollback_bytes,
+        } => {
             // For v0 only the focused pane's snapshot drives our local
-            // mirror — multi-pane composition is downstream of phux-9gw.3
+            // Terminal — multi-pane composition is downstream of phux-9gw.3
             // (the windowing / layout work).
             if Some(pane_id) == *focused_pane {
-                use phux_protocol::Grid;
-                let blank = Grid::blank(snapshot.rows, snapshot.cols);
-                // Reconstitute the starting grid by replaying the snapshot
-                // ops onto a blank canvas — same recipe used by the server
-                // example `one_pane.rs`.
-                mirror.ingest_snapshot(&blank, 0);
-                mirror.apply(&snapshot.ops);
+                terminal.resize(cols, rows, 0, 0)?;
+                // Apply scrollback first (if any), then the visible-state
+                // replay — order per SPEC §8.4 / §13.
+                if let Some(sb) = scrollback_bytes {
+                    terminal.vt_write(&sb);
+                }
+                terminal.vt_write(&vt_replay_bytes);
                 let mut stdout = io::stdout().lock();
-                let _ = render_frame(mirror, &mut stdout);
+                let _ = renderer.render(terminal, &mut stdout);
             }
-            false
+            Ok(false)
         }
-        FrameKind::PaneDiff {
+        FrameKind::PaneOutput {
             pane_id,
-            frame_id,
-            base_frame_id: _,
-            ops,
-            cursor,
-            modes,
-            revision: _,
+            seq: _,
+            bytes,
         } => {
             if Some(PaneId::new(pane_id)) == *focused_pane {
-                mirror.apply_frame(&ops, cursor, modes, frame_id);
+                terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
-                let _ = render_frame(mirror, &mut stdout);
+                let _ = renderer.render(terminal, &mut stdout);
             }
-            false
+            Ok(false)
         }
-        FrameKind::Detached => true,
+        FrameKind::Detached => Ok(true),
         FrameKind::Bell { .. } => {
             // Forward bell to the outer terminal. The user's terminal
             // emulator decides whether to render visually, audibly, or
@@ -273,7 +311,7 @@ fn handle_server_frame(
             let mut stdout = io::stdout().lock();
             let _ = stdout.write_all(b"\x07");
             let _ = stdout.flush();
-            false
+            Ok(false)
         }
         other => {
             // Anything else — `HELLO_OK`, `PONG`, future spec frames — is
@@ -281,7 +319,7 @@ fn handle_server_frame(
             // discriminants; this branch handles known-but-not-yet-wired
             // frames.
             tracing::debug!(kind = ?other, "ignoring server frame");
-            false
+            Ok(false)
         }
     }
 }

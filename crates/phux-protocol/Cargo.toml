@@ -12,26 +12,19 @@ authors.workspace = true
 workspace = true
 
 [features]
-# By default phux-protocol is a near-empty shell: only stable IDs and the
-# protocol-version constant. This is what docs.rs and crates.io see — it has
-# no git-only deps, so it publishes cleanly.
+# By default phux-protocol is a near-empty shell: stable IDs, capability
+# atoms, and the protocol-version constant. This is what docs.rs and
+# crates.io see — it has no git-only deps, so it publishes cleanly.
 default = []
-# `server` activates the full type surface, including libghostty-vt
-# re-exports (ADR-0008) and the wire codec. Every in-workspace consumer
-# enables this; external consumers will too.
-server = ["dep:libghostty-vt", "dep:smallvec"]
+# `server` activates the full type surface, including libghostty-vt input-
+# atom re-exports (ADR-0008) and the wire codec. Every in-workspace
+# consumer enables this; external consumers will too.
+server = ["dep:libghostty-vt"]
 
 [dependencies]
 thiserror.workspace = true
 bytes.workspace = true
 bitflags = "2"
-# `smallvec` gives `Cell::text` inline storage for the common case
-# (empty / ASCII / one-base + one-combining grapheme), eliminating the
-# per-cell `Vec` header + heap allocation on 80x24+ grids. Wire format
-# is unchanged — the codec encodes length-prefix + chars regardless of
-# the in-memory collection type. Optional because it's only used by the
-# server-gated `diff` module.
-smallvec = { workspace = true, optional = true }
 libghostty-vt = { workspace = true, optional = true }
 
 [dev-dependencies]

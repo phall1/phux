@@ -33,10 +33,6 @@ tokio.workspace = true
 tempfile = "3"
 
 [[example]]
-name = "diff_spike"
-path = "examples/diff_spike.rs"
-
-[[example]]
 name = "one_pane"
 path = "examples/one_pane.rs"
 

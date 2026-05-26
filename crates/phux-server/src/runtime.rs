@@ -281,12 +281,11 @@ where
 /// Per-client task. Reads frames in a loop; for each `PING` echoes a `PONG`;
 /// logs and drops anything else for now.
 ///
-/// `client_id` and `state` are wired in `phux-byc.4`. The `ATTACH` /
-/// `DETACH` / `INPUT_*` routing branches will fill in once the wire
-/// variants land in `phux-protocol` — until then those discriminants
-/// arrive only as undecodable bytes (the protocol decoder rejects them)
-/// and the connection closes, which is the conservative behavior. See the
-/// `phux-byc.4` report for the protocol-crate scope ask.
+/// The `ATTACH` / `DETACH` / `INPUT_*` routing branches are still stubbed —
+/// see `phux-byc.8` for the full ATTACH handler, which will use
+/// `SnapshotSynthesizer` (`grid.rs`) to build the `vt_replay_bytes` for
+/// `PANE_SNAPSHOT` per SPEC §13 / ADR-0013. The gap is intentional; this
+/// commit only lands the wire shape.
 async fn handle_client(
     stream: UnixStream,
     _state: SharedState,
@@ -350,7 +349,7 @@ async fn handle_client(
                 }
             }
             other => {
-                debug!(kind = ?other, "unhandled message type (will be wired in byc.4)");
+                debug!(kind = ?other, "unhandled message type (ATTACH/INPUT_* etc. land in byc.8)");
             }
         }
     }

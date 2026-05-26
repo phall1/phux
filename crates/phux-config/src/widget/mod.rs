@@ -4,14 +4,22 @@
 //! (a parsed `[[status.widgets]]` entry from TOML); the runtime trait here
 //! is called [`StatusWidget`] to avoid the name collision.
 //!
-//! `Cell` is sourced from `phux-protocol` (which re-exports libghostty's
-//! style atoms per ADR-0008). We never define a parallel `Cell` type here.
+//! ## Why a local `Cell` here
+//!
+//! The status bar is a *frontend* concern: phux-config composes cells, the
+//! TUI client lays them out, the wire never sees them. Under ADR-0013 the
+//! protocol crate no longer exposes a `Cell` type (pane content moved to
+//! VT bytes on the wire); the status bar accordingly carries its own
+//! lightweight cell shape — just a grapheme cluster — and renders it via
+//! the same SGR emission code path the renderer uses for live panes. If a
+//! richer widget style surface ever lands (foreground color, bold flag,
+//! etc.), grow this struct here — the wire doesn't care.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
-use phux_protocol::Cell;
+use smallvec::SmallVec;
 
 use crate::schema::WidgetSpec;
 
@@ -19,6 +27,19 @@ mod widgets;
 
 pub use widgets::session_name::SessionNameWidget;
 pub use widgets::time::TimeWidget;
+
+/// A single status-bar cell.
+///
+/// Local to phux-config — see the module-level doc for rationale. Grapheme
+/// storage matches the inline-then-spill pattern phux-protocol once used
+/// for its (now-deleted) `Cell::text` field.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Cell {
+    /// Grapheme cluster occupying this cell. May be empty for a blank cell.
+    /// First element is the base codepoint; remaining elements are combining
+    /// codepoints in source order.
+    pub text: SmallVec<[char; 2]>,
+}
 
 /// Context passed to a [`StatusWidget`] at render time.
 ///
@@ -36,8 +57,7 @@ pub struct WidgetContext<'a> {
 
 /// A horizontal strip of cells produced by a widget for one render pass.
 ///
-/// `Cell` is the protocol cell from `phux-protocol` (ADR-0008); we never
-/// define a local cell type.
+/// `Cell` is the local widget cell type — see the module-level doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetCells {
     /// Cells in left-to-right display order.
@@ -55,7 +75,6 @@ impl WidgetCells {
             .chars()
             .map(|c| Cell {
                 text: smallvec::smallvec![c],
-                ..Cell::default()
             })
             .collect();
         Self { cells }

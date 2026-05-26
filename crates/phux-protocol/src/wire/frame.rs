@@ -1,6 +1,6 @@
 //! Frame header and `FrameKind` enum.
 //!
-//! Owned by phux-6yl.4. See `SPEC.md` §5 (framing) and §7 (message catalog).
+//! See `SPEC.md` §5 (framing) and §7 (message catalog).
 //!
 //! Wire layout (per `SPEC.md` §5):
 //!
@@ -15,10 +15,16 @@
 //! ```
 //!
 //! `length` is at least `1` (the type byte) and at most `MAX_FRAME_LEN`.
+//!
+//! Under [ADR-0013] pane content rides as raw VT bytes (`PANE_OUTPUT`).
+//! There is no structured per-cell diff variant on this enum — earlier
+//! drafts carried `PaneDiff` at type byte `0x40`; that slot is retired
+//! and `PANE_OUTPUT` (type `0x90` per SPEC §7.2) takes its place.
+//!
+//! [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 
 use bytes::BytesMut;
 
-use crate::diff::{CursorState, DiffOp, PaneModes};
 use crate::ids::{ClientId, PaneId, SessionId};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
@@ -26,7 +32,6 @@ use crate::input::mouse::MouseEvent;
 use crate::input::paste::PasteEvent;
 
 use super::decode::Decoder;
-use super::diff::{encode_cursor_state, encode_diff_ops, encode_pane_modes};
 use super::encode::Encoder;
 use super::error::DecodeError;
 use super::info::{SessionSnapshot, encode_client_id, encode_session_snapshot};
@@ -67,15 +72,20 @@ pub const TYPE_DETACHED: u8 = 0x82;
 pub const TYPE_BELL: u8 = 0xB0;
 /// Discriminant for `PONG` (server to client, `SPEC.md` §7.5). Reserved.
 pub const TYPE_PONG: u8 = 0xFF;
-/// Discriminant for `PANE_DIFF` (server to client, `SPEC.md` §7).
+/// Discriminant for `PANE_OUTPUT` (server to client, `SPEC.md` §7.2 / §8.1).
 ///
-/// Picked from the §7 free range. v0.2+ may renumber when the `SessionId`
-/// tagged-union routing lands; the discriminant is local to phux-6yl.5.
-pub const TYPE_PANE_DIFF: u8 = 0x40;
+/// Hot-path pane content under [ADR-0013]: the server forwards PTY bytes
+/// (possibly downsampled per the client's [`crate::caps::ColorSupport`])
+/// in `PANE_OUTPUT` frames. Supersedes the earlier `PANE_DIFF` slot;
+/// `PANE_DIFF` is retired and its old discriminant (`0x40`) is no longer
+/// recognised.
+pub const TYPE_PANE_OUTPUT: u8 = 0x90;
 /// Discriminant for `PANE_SNAPSHOT` (server to client, `SPEC.md` §7.2 / §8.4).
 ///
-/// Required per SPEC §16 conformance. Separated from `ATTACHED` per SPEC §13's
-/// attach sequence: `ATTACHED` → N×`PANE_SNAPSHOT` → `PANE_DIFF` stream.
+/// Required per SPEC §16 conformance. Under [ADR-0013] the payload is a
+/// synthesised VT byte sequence (`vt_replay_bytes`) plus optional
+/// `scrollback_bytes`; the client `vt_write`s them into a fresh Terminal
+/// of the declared `cols × rows`.
 pub const TYPE_PANE_SNAPSHOT: u8 = 0x91;
 
 // -----------------------------------------------------------------------------
@@ -132,51 +142,18 @@ pub struct ViewportInfo {
     pub pixel_h: Option<u16>,
 }
 
-// -----------------------------------------------------------------------------
-// PaneSnapshotPayload — body of the PANE_SNAPSHOT frame.
-// -----------------------------------------------------------------------------
-
-/// Initial state of a single pane, delivered as a `PANE_SNAPSHOT` frame.
-///
-/// **Phux-4az → phux-i58 minimum:** grid dimensions plus an opening sequence
-/// of [`DiffOp`] that, applied to a blank `cols × rows` grid, reproduces the
-/// pane. SPEC §8.4 also specifies cursor state, pane modes, and optional
-/// scrollback; those fields land when the server-side replay path needs them
-/// (see TODO below).
-///
-/// Renamed from `PaneSnapshot` (the type) → `PaneSnapshotPayload` in the
-/// phux-i58 SPEC §13 conformance pass so the name `FrameKind::PaneSnapshot`
-/// (the frame variant) is available.
-///
-/// Extending this struct is a breaking wire change with the current
-/// positional encoder. SPEC.md Appendix A mandates TLV
-/// (`{field_id: varint, wire_type: u8, value}`), under which extension
-/// becomes additive; migration is tracked separately — see
-/// `bd show phux-i58`.
-///
-/// TODO(post-phux-i58): extend with `cursor: CursorState`, `modes: PaneModes`,
-/// and `scrollback: Option<Scrollback>` per SPEC §8.4 once the server-side
-/// bridge needs them. The cursor/modes types are not yet modeled in
-/// `phux_core`; do not invent them here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PaneSnapshotPayload {
-    /// Grid width in cells.
-    pub cols: u16,
-    /// Grid height in cells.
-    pub rows: u16,
-    /// Diff operations that, applied to a blank `cols×rows` grid, reproduce
-    /// the pane's current cell contents. See `SPEC.md` §8.4.
-    pub ops: Vec<DiffOp>,
-}
-
 /// Decoded wire frame.
 ///
 /// The phux-6yl.4 scaffold populated `Hello`, `Ping`, and `PaneDiff`. The
 /// phux-4az pass added the message-catalog variants needed for the attach
 /// lifecycle. The phux-i58 SPEC §13 conformance pass conforms ATTACH/ATTACHED
-/// to spec and splits out `PANE_SNAPSHOT` per SPEC §16. The remaining SPEC §7
-/// catalog (`Hello_Ok`, `Pong`, `OscEvent`, `Alert`, resize/ack/command/etc.)
-/// lands in sibling tasks.
+/// to spec and splits out `PANE_SNAPSHOT` per SPEC §16. Under [ADR-0013] the
+/// structured `PaneDiff` variant is replaced by `PaneOutput` (raw VT bytes)
+/// and `PaneSnapshot` carries `vt_replay_bytes` instead of a `DiffOp` list.
+/// The remaining SPEC §7 catalog (`Hello_Ok`, `Pong`, `OscEvent`, `Alert`,
+/// resize/ack/command/etc.) lands in sibling tasks.
+///
+/// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FrameKind {
@@ -205,35 +182,27 @@ pub enum FrameKind {
         nonce: u64,
     },
 
-    /// `PANE_DIFF` — server-to-client incremental pane update (`SPEC.md` §8.1).
+    /// `PANE_OUTPUT` — server-to-client pane content (`SPEC.md` §8.1).
     ///
-    /// The body shape conforms to SPEC §8.1's `PANE_DIFF { pane_id, frame_id,
-    /// base_frame_id, ops, cursor, modes, revision }`. Per SPEC §8.5 the
-    /// `cursor` and `modes` fields ride along with every diff rather than as
-    /// separate frames — pulling them into the op stream would increase
-    /// wire chatter without benefit.
+    /// The hot path under [ADR-0013]: the server forwards bytes from the
+    /// pane's PTY (after parsing into its canonical
+    /// `libghostty_vt::Terminal` and after any per-client capability
+    /// rewriting). The client feeds `bytes` into its local Terminal via
+    /// `vt_write`; `RenderState` provides per-row dirty tracking for
+    /// efficient local redraw.
     ///
-    /// `revision` is `0` today; SPEC §8.1 reserves it for future
-    /// compression schemes (e.g. per-frame LZ4). The `pane_id` is a plain
-    /// `u32` for now; the `SessionId` tagged-union from ADR-0007 §3 will
-    /// replace it once satellite routing lands.
-    PaneDiff {
+    /// `seq` is a monotonic per-pane sequence id used by `FRAME_ACK` /
+    /// predictive-echo correlation; it carries no structural meaning.
+    ///
+    /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
+    PaneOutput {
         /// Target pane.
         pane_id: u32,
-        /// Monotonic frame counter for this pane — the frame this produces.
-        frame_id: u64,
-        /// Frame counter this diff applies on top of. `0` means "the empty
-        /// grid at pane creation"; see SPEC §8.1.
-        base_frame_id: u64,
-        /// Diff operations to apply, in order.
-        ops: Vec<DiffOp>,
-        /// Cursor state at the end of this frame (SPEC §8.5).
-        cursor: CursorState,
-        /// Pane-wide modes at the end of this frame (SPEC §8.5).
-        modes: PaneModes,
-        /// Revision tag; `0` today, reserved for SPEC §8.1 compression
-        /// schemes.
-        revision: u8,
+        /// Monotonic per-pane sequence id (`SPEC.md` §12).
+        seq: u64,
+        /// VT bytes from the PTY (possibly downsampled per
+        /// [`crate::caps::ColorSupport`]).
+        bytes: Vec<u8>,
     },
 
     /// `ATTACH` — client requests to attach to a session (`SPEC.md` §13).
@@ -321,14 +290,34 @@ pub enum FrameKind {
     /// `PANE_SNAPSHOT` — initial state of a single pane (`SPEC.md` §8.4).
     ///
     /// REQUIRED per SPEC §16 conformance. Sent after `ATTACHED` for each pane
-    /// the client needs initialised; subsequent updates flow as `PANE_DIFF`.
+    /// the client needs initialised; subsequent updates flow as `PANE_OUTPUT`.
     /// The server MAY also emit `PANE_SNAPSHOT` mid-stream as a flow-control
-    /// catch-up (SPEC §12.2).
+    /// catch-up (SPEC §12.2) or after a resize that requires full
+    /// retransmission.
+    ///
+    /// Under [ADR-0013] the payload is a synthesised VT byte sequence:
+    /// when written to a fresh `libghostty_vt::Terminal` of the declared
+    /// `cols × rows`, `vt_replay_bytes` reproduces the server's grid state
+    /// at the moment of snapshot emission. `scrollback_bytes` is present
+    /// iff the attaching client requested scrollback in `ATTACH`.
+    ///
+    /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
     PaneSnapshot {
         /// Target pane.
         pane_id: PaneId,
-        /// Initial grid state and (eventually) cursor/modes/scrollback.
-        snapshot: PaneSnapshotPayload,
+        /// Grid width in cells at snapshot time.
+        cols: u16,
+        /// Grid height in cells at snapshot time.
+        rows: u16,
+        /// Synthesised VT byte sequence that reproduces the grid when fed
+        /// to a fresh `libghostty_vt::Terminal` of `cols × rows`. Opaque
+        /// to the client beyond `vt_write`.
+        vt_replay_bytes: Vec<u8>,
+        /// Optional scrollback replay bytes. Present iff the client
+        /// requested scrollback in `ATTACH` and the server can supply it.
+        /// Applied before `vt_replay_bytes` (or under whatever construction
+        /// the server chooses, per SPEC §8.4).
+        scrollback_bytes: Option<Vec<u8>>,
     },
 
     /// `BELL` — pane received a bell character (`SPEC.md` §7.6).
@@ -345,7 +334,7 @@ impl FrameKind {
         match self {
             Self::Hello { .. } => TYPE_HELLO,
             Self::Ping { .. } => TYPE_PING,
-            Self::PaneDiff { .. } => TYPE_PANE_DIFF,
+            Self::PaneOutput { .. } => TYPE_PANE_OUTPUT,
             Self::Attach { .. } => TYPE_ATTACH,
             Self::Detach => TYPE_DETACH,
             Self::InputKey { .. } => TYPE_INPUT_KEY,
@@ -388,22 +377,14 @@ impl FrameKind {
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);
             }
-            Self::PaneDiff {
+            Self::PaneOutput {
                 pane_id,
-                frame_id,
-                base_frame_id,
-                ops,
-                cursor,
-                modes,
-                revision,
+                seq,
+                bytes,
             } => {
                 enc.write_u32_be(*pane_id);
-                enc.write_u64_be(*frame_id);
-                enc.write_u64_be(*base_frame_id);
-                encode_diff_ops(ops, &mut enc);
-                encode_cursor_state(*cursor, &mut enc);
-                encode_pane_modes(*modes, &mut enc);
-                enc.write_u8(*revision);
+                enc.write_u64_be(*seq);
+                enc.write_bytes(bytes);
             }
             Self::Attach {
                 target,
@@ -442,9 +423,18 @@ impl FrameKind {
                 encode_session_snapshot(snapshot, &mut enc);
                 encode_client_id(*initial_client_id, &mut enc);
             }
-            Self::PaneSnapshot { pane_id, snapshot } => {
+            Self::PaneSnapshot {
+                pane_id,
+                cols,
+                rows,
+                vt_replay_bytes,
+                scrollback_bytes,
+            } => {
                 enc.write_u32_be(pane_id.get());
-                encode_pane_snapshot_payload(snapshot, &mut enc);
+                enc.write_u16_be(*cols);
+                enc.write_u16_be(*rows);
+                enc.write_bytes(vt_replay_bytes);
+                encode_optional_bytes(scrollback_bytes.as_deref(), &mut enc);
             }
             Self::Bell { pane_id } => {
                 enc.write_u32_be(*pane_id);
@@ -652,22 +642,6 @@ pub(super) fn decode_paste_event(dec: &mut Decoder<'_>) -> Result<PasteEvent, De
     Ok(PasteEvent { trust, data })
 }
 
-pub(super) fn encode_pane_snapshot_payload(snap: &PaneSnapshotPayload, enc: &mut Encoder<'_>) {
-    enc.write_u16_be(snap.cols);
-    enc.write_u16_be(snap.rows);
-    encode_diff_ops(&snap.ops, enc);
-}
-
-pub(super) fn decode_pane_snapshot_payload(
-    dec: &mut Decoder<'_>,
-) -> Result<PaneSnapshotPayload, DecodeError> {
-    use super::diff::decode_diff_ops;
-    let cols = dec.read_u16_be()?;
-    let rows = dec.read_u16_be()?;
-    let ops = decode_diff_ops(dec)?;
-    Ok(PaneSnapshotPayload { cols, rows, ops })
-}
-
 // -----------------------------------------------------------------------------
 // Small option-of-primitive helpers. Local to this module — `info.rs` has its
 // own parallel set tuned to its types (id newtypes, layout nodes).
@@ -772,6 +746,28 @@ fn decode_optional_string_list(dec: &mut Decoder<'_>) -> Result<Option<Vec<Strin
         }
         other => Err(DecodeError::UnknownEnumValue {
             field: "Option<list<str>> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+fn encode_optional_bytes(value: Option<&[u8]>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(b) => {
+            enc.write_u8(1);
+            enc.write_bytes(b);
+        }
+    }
+}
+
+pub(super) fn decode_optional_bytes(dec: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(dec.read_bytes()?.to_vec())),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<bytes> tag",
             value: u32::from(other),
         }),
     }

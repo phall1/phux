@@ -6,13 +6,12 @@
 
 use crate::ids::PaneId;
 
-use super::diff::{decode_cursor_state, decode_diff_ops, decode_pane_modes};
 use super::error::DecodeError;
 use super::frame::{
     FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH, TYPE_DETACHED,
     TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE,
-    TYPE_PANE_DIFF, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target, decode_focus_event,
-    decode_key_event, decode_mouse_event, decode_pane_snapshot_payload, decode_paste_event,
+    TYPE_PANE_OUTPUT, TYPE_PANE_SNAPSHOT, TYPE_PING, decode_attach_target, decode_focus_event,
+    decode_key_event, decode_mouse_event, decode_optional_bytes, decode_paste_event,
     decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
@@ -175,22 +174,14 @@ impl<'a> Decoder<'a> {
                 let nonce = self.read_u64_be()?;
                 FrameKind::Ping { nonce }
             }
-            TYPE_PANE_DIFF => {
+            TYPE_PANE_OUTPUT => {
                 let pane_id = self.read_u32_be()?;
-                let frame_id = self.read_u64_be()?;
-                let base_frame_id = self.read_u64_be()?;
-                let ops = decode_diff_ops(self)?;
-                let cursor = decode_cursor_state(self)?;
-                let modes = decode_pane_modes(self)?;
-                let revision = self.read_u8()?;
-                FrameKind::PaneDiff {
+                let seq = self.read_u64_be()?;
+                let bytes = self.read_bytes()?.to_vec();
+                FrameKind::PaneOutput {
                     pane_id,
-                    frame_id,
-                    base_frame_id,
-                    ops,
-                    cursor,
-                    modes,
-                    revision,
+                    seq,
+                    bytes,
                 }
             }
             TYPE_ATTACH => {
@@ -236,8 +227,17 @@ impl<'a> Decoder<'a> {
             }
             TYPE_PANE_SNAPSHOT => {
                 let pane_id = PaneId::new(self.read_u32_be()?);
-                let snapshot = decode_pane_snapshot_payload(self)?;
-                FrameKind::PaneSnapshot { pane_id, snapshot }
+                let cols = self.read_u16_be()?;
+                let rows = self.read_u16_be()?;
+                let vt_replay_bytes = self.read_bytes()?.to_vec();
+                let scrollback_bytes = decode_optional_bytes(self)?;
+                FrameKind::PaneSnapshot {
+                    pane_id,
+                    cols,
+                    rows,
+                    vt_replay_bytes,
+                    scrollback_bytes,
+                }
             }
             TYPE_DETACHED => FrameKind::Detached,
             TYPE_BELL => {

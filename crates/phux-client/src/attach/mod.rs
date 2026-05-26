@@ -6,7 +6,8 @@
 //! * [`driver`] — the `tokio::select!` lifecycle, the file that owns the
 //!   process's stdout, stdin, and SIGWINCH handles for the duration of the
 //!   attach.
-//! * [`render`] — VT emission from a [`DiffMirror`](crate::DiffMirror).
+//! * [`render`] — VT emission from a local `libghostty_vt::Terminal` /
+//!   `RenderState` pair per ADR-0013.
 //! * [`input`] — stdin bytes → structured input events plus the hardcoded
 //!   `Ctrl-b d` detach chord.
 //!

@@ -45,7 +45,7 @@ use phux_core::registry::Registry;
 use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
-use phux_protocol::diff::ColorSupport;
+use phux_protocol::caps::ColorSupport;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
@@ -57,8 +57,9 @@ use tokio::sync::mpsc;
 ///
 /// Bounded on purpose: a stuck client must not let the server accumulate
 /// unbounded backpressure. The exact number is small because outbound
-/// frames are *coalesced diffs* (see `SPEC.md` §8), not individual cell
-/// updates; eight in-flight diffs is well above steady state.
+/// frames are *coalesced byte chunks* (see `SPEC.md` §8 and ADR-0013),
+/// not individual PTY reads; eight in-flight `PANE_OUTPUT` batches is
+/// well above steady state.
 pub const DEFAULT_CLIENT_MAILBOX: usize = 8;
 
 /// Server-assigned identifier for an attached client.
@@ -89,16 +90,10 @@ pub enum PaneInput {
 
 /// A frame queued on a client's outbound mailbox.
 ///
-/// `phux-byc.4` only routes [`Hello`] and [`PaneDiff`] for now (the
-/// `FrameKind` variants for `ATTACHED` / `DETACHED` / input messages have
-/// not yet been added in `phux-protocol`; see the report). The full enum
-/// will be `phux_protocol::wire::frame::FrameKind` once those variants
-/// land — by ADR-0008, the server does not maintain a parallel frame
-/// type, so consumers can use `phux_protocol::wire::frame::FrameKind`
-/// directly via this re-export-friendly alias.
-///
-/// [`Hello`]: phux_protocol::wire::frame::FrameKind::Hello
-/// [`PaneDiff`]: phux_protocol::wire::frame::FrameKind::PaneDiff
+/// Aliased to `phux_protocol::wire::frame::FrameKind` so consumers can route
+/// any variant — `Hello`, `PaneOutput`, `PaneSnapshot`, lifecycle frames —
+/// without a parallel server-side enum. Per ADR-0008 / ADR-0013, the
+/// protocol crate owns the wire types and the server defers to them.
 pub type OutboundFrame = phux_protocol::wire::frame::FrameKind;
 
 /// An attached client: routing identity plus outbound mailbox.
@@ -146,7 +141,7 @@ pub struct ServerState {
     /// Currently attached clients, keyed by server-assigned id.
     pub attached: HashMap<ClientId, AttachedClient>,
     /// For each pane, the clients currently observing it (and thus eligible
-    /// to receive `PANE_DIFF` frames for it).
+    /// to receive `PANE_OUTPUT` frames for it).
     pub pane_subscribers: HashMap<PaneId, Vec<ClientId>>,
     /// Per-pane input log. Inputs from all attached clients are merged into
     /// the same vec in arrival order; the PTY writer task drains it.

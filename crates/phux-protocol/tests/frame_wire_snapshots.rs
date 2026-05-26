@@ -1,21 +1,21 @@
 //! Snapshot tests for the SPEC §13-conformant wire frames.
 //!
 //! Each test encodes a representative fixture of an `ATTACH` / `ATTACHED` /
-//! `PANE_SNAPSHOT` / `DETACH` / `DETACHED` / `INPUT_*` / `BELL` frame,
-//! hex-dumps the bytes, and compares against a committed `.snap` file under
-//! `tests/snapshots/`. The wire format is a cross-implementation contract —
-//! any change MUST surface as a visible diff in pull-request review.
+//! `PANE_SNAPSHOT` / `PANE_OUTPUT` / `DETACH` / `DETACHED` / `INPUT_*` /
+//! `BELL` frame, hex-dumps the bytes, and compares against a committed
+//! `.snap` file under `tests/snapshots/`. The wire format is a
+//! cross-implementation contract — any change MUST surface as a visible
+//! diff in pull-request review.
 
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::diff::{Cell, Color, DiffOp, PaletteIndex};
 use phux_protocol::ids::{ClientId, PaneId, SessionId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, PaneSnapshotPayload, ViewportInfo};
+use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
 use phux_protocol::wire::info::{
     LayoutNode, PaneInfo, SessionInfo, SessionSnapshot, SplitDir, WindowInfo,
 };
@@ -164,7 +164,7 @@ fn snap_attach_viewport_with_pixels() {
 }
 
 // -----------------------------------------------------------------------------
-// DETACH / DETACHED — unit messages; unchanged from phux-4az.
+// DETACH / DETACHED — unit messages.
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -178,7 +178,7 @@ fn snap_detached() {
 }
 
 // -----------------------------------------------------------------------------
-// INPUT_* — unchanged from phux-4az.
+// INPUT_*.
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -266,7 +266,6 @@ fn snap_input_paste_trusted_ascii() {
 
 #[test]
 fn snap_attached_empty_graph() {
-    // Single session, no windows or panes — the smallest legal ATTACHED.
     let snapshot = SessionSnapshot {
         sessions: vec![SessionInfo {
             id: SessionId::new(1),
@@ -291,7 +290,6 @@ fn snap_attached_empty_graph() {
 
 #[test]
 fn snap_attached_realistic_graph() {
-    // 2 sessions, 3 windows, 4 panes, non-trivial layout including a Split.
     let sessions = vec![
         SessionInfo {
             id: SessionId::new(1),
@@ -394,39 +392,79 @@ fn snap_attached_realistic_graph() {
 }
 
 // -----------------------------------------------------------------------------
-// PANE_SNAPSHOT — separate frame per SPEC §13 attach sequence + §16.
+// PANE_OUTPUT (SPEC §8.1, ADR-0013) — hot-path bytes-on-wire.
 // -----------------------------------------------------------------------------
 
 #[test]
-fn snap_pane_snapshot_empty() {
-    let frame = FrameKind::PaneSnapshot {
-        pane_id: PaneId::new(100),
-        snapshot: PaneSnapshotPayload {
-            cols: 80,
-            rows: 24,
-            ops: Vec::new(),
-        },
+fn snap_pane_output_hello_world() {
+    // A representative PANE_OUTPUT carrying ASCII bytes: "hello world\r\n".
+    let frame = FrameKind::PaneOutput {
+        pane_id: 1,
+        seq: 0,
+        bytes: b"hello world\r\n".to_vec(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
 
 #[test]
-fn snap_pane_snapshot_with_initial_diff() {
+fn snap_pane_output_empty_bytes() {
+    let frame = FrameKind::PaneOutput {
+        pane_id: 0x0000_002A,
+        seq: 1,
+        bytes: Vec::new(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_pane_output_with_sgr() {
+    // A short bold-red sequence: validates the wire envelope is bytes-
+    // transparent — the SGR is opaque to the protocol.
+    let frame = FrameKind::PaneOutput {
+        pane_id: 7,
+        seq: 42,
+        bytes: b"\x1b[1;31mERR\x1b[0m".to_vec(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// PANE_SNAPSHOT — SPEC §8.4, ADR-0013. vt_replay_bytes body shape.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_pane_snapshot_empty_vt() {
     let frame = FrameKind::PaneSnapshot {
         pane_id: PaneId::new(100),
-        snapshot: PaneSnapshotPayload {
-            cols: 4,
-            rows: 1,
-            ops: vec![DiffOp::CellRun {
-                row: 0,
-                col: 0,
-                cells: vec![Cell {
-                    text: smallvec::smallvec!['H'],
-                    fg: Color::Palette(PaletteIndex(2)),
-                    ..Cell::blank()
-                }],
-            }],
-        },
+        cols: 80,
+        rows: 24,
+        vt_replay_bytes: Vec::new(),
+        scrollback_bytes: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_pane_snapshot_minimal_replay() {
+    // Reset + CUP home + a single ASCII char + cursor placement.
+    let frame = FrameKind::PaneSnapshot {
+        pane_id: PaneId::new(100),
+        cols: 80,
+        rows: 24,
+        vt_replay_bytes: b"\x1b[!p\x1b[2J\x1b[HH\x1b[1;2H".to_vec(),
+        scrollback_bytes: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_pane_snapshot_with_scrollback() {
+    let frame = FrameKind::PaneSnapshot {
+        pane_id: PaneId::new(100),
+        cols: 80,
+        rows: 24,
+        vt_replay_bytes: b"\x1b[!p\x1b[2J\x1b[H".to_vec(),
+        scrollback_bytes: Some(b"prior line one\r\nprior line two\r\n".to_vec()),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -436,62 +474,4 @@ fn snap_bell() {
     insta::assert_snapshot!(dump_frame(&FrameKind::Bell {
         pane_id: 0x0000_00BE,
     }));
-}
-
-// -----------------------------------------------------------------------------
-// phux-429: PANE_DIFF snapshot fixtures with the new SPEC §8.1 layout
-// (`pane_id, frame_id, base_frame_id, ops, cursor, modes, revision`).
-// Appended at the END of the file so parallel agents can append their own
-// sections without interleaving.
-// -----------------------------------------------------------------------------
-
-use phux_protocol::diff::{CursorShape, CursorState, PaneModes};
-
-#[test]
-fn cursor_field_snap_pane_diff_empty_ops_default_cursor() {
-    // Smallest meaningful PANE_DIFF: no ops, default cursor at (0,0),
-    // no modes set, revision 0. Confirms the new struct-field layout
-    // serialises predictably.
-    let frame = FrameKind::PaneDiff {
-        pane_id: 0x0000_0001,
-        frame_id: 1,
-        base_frame_id: 0,
-        ops: Vec::new(),
-        cursor: CursorState::default(),
-        modes: PaneModes::EMPTY,
-        revision: 0,
-    };
-    insta::assert_snapshot!(dump_frame(&frame));
-}
-
-#[test]
-fn cursor_field_snap_pane_diff_with_cursor_and_modes() {
-    // Realistic PANE_DIFF: one CellRun op + a non-trivial cursor position
-    // + altscreen-active mode + a mouse-protocol nibble set.
-    let frame = FrameKind::PaneDiff {
-        pane_id: 0x0000_0042,
-        frame_id: 0x0000_0000_DEAD_BEEF,
-        base_frame_id: 0x0000_0000_DEAD_BEEE,
-        ops: vec![DiffOp::CellRun {
-            row: 5,
-            col: 9,
-            cells: vec![Cell {
-                text: smallvec::smallvec!['A'],
-                fg: Color::Palette(PaletteIndex(2)),
-                ..Cell::blank()
-            }],
-        }],
-        cursor: CursorState {
-            row: 5,
-            col: 10,
-            visible: true,
-            shape: CursorShape::Bar,
-            blink: false,
-        },
-        modes: PaneModes::EMPTY
-            .insert(PaneModes::ALTSCREEN_ACTIVE)
-            .with_mouse_protocol(0x3),
-        revision: 0,
-    };
-    insta::assert_snapshot!(dump_frame(&frame));
 }

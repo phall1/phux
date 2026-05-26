@@ -15,6 +15,11 @@ workspace = true
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
+# Under ADR-0013 the client runs its own libghostty Terminal per attached
+# pane. Pulled in as a direct dep (was transitive via phux-protocol's
+# server feature) so the client can construct and drive a Terminal +
+# RenderState without depending on protocol-internal modules.
+libghostty-vt.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 # Async I/O + UDS transport for the attach loop (phux-9gw.3). The workspace
@@ -35,8 +40,5 @@ rustix = { version = "0.38", default-features = false, features = ["std", "termi
 
 [dev-dependencies]
 phux-server.workspace = true
-libghostty-vt.workspace = true
 proptest.workspace = true
 insta.workspace = true
-# Used by `tests/mirror_replay.rs` to build `Cell::text` (a `SmallVec`).
-smallvec.workspace = true
