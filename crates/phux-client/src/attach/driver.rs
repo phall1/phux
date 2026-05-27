@@ -29,18 +29,19 @@ use std::time::{Duration, SystemTime};
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::caps::{ClientCapabilities, detect_color_support};
-use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
+use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
+use phux_protocol::ids::{CollectionId, TerminalId};
+use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
 
+use super::actions::{self, ActionError};
 use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
 use super::status_bar::{Position, StatusBarPainter, make_context};
-use crate::layout::LayoutState;
+use crate::layout::{Direction, LayoutState, SplitDir};
 use crate::predict::{
     Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output_per_cell,
 };
@@ -273,7 +274,14 @@ async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
     // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
     // `detect_color_support`. The advertised tier feeds the server's
     // per-client `downsample::rewrite_bytes` (SPEC §6.2).
-    let client_caps = ClientCapabilities::new().with_color_support(detect_color_support());
+    //
+    // phux-4li.5: declare L3 (`Layer::L3`) so the server forwards
+    // `MetadataChanged` events for the `phux.tui.layout/v1` key — the
+    // reconcile-on-attach path in `main_loop` subscribes to that key
+    // and re-renders multi-pane when another client mutates the layout.
+    let client_caps = ClientCapabilities::new()
+        .with_color_support(detect_color_support())
+        .with_layers(LayerSet::with(&[Layer::L3]));
     conn.send(&FrameKind::Hello {
         client_name: format!("phux-client/{}", env!("CARGO_PKG_VERSION")),
         protocol_major: PROTOCOL_VERSION.major,
@@ -340,6 +348,10 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
     clippy::too_many_lines,
     reason = "tokio::select! arms inflate function length; splitting would require carrying ~10 mutable locals through helpers"
 )]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "select! arms + phux-4li.5 outcome dispatch; ditto"
+)]
 async fn main_loop(
     conn: &mut Connection,
     initial_attached: FrameKind,
@@ -361,6 +373,14 @@ async fn main_loop(
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
     let mut layout_state = LayoutState::default();
     let mut focused_pane: Option<TerminalId> = None;
+    // phux-4li.5: keybind resolver + request-id allocator for L3 GET
+    // correlation. The resolver consumes `InputEvent::Key` events
+    // *before* they would be forwarded to the focused pane; a chord
+    // that resolves to a layout action mutates `layout_state` here
+    // and never reaches the server's input pipe.
+    let mut resolver = build_resolver();
+    let mut layout_get_request_id: Option<u32> = None;
+    let mut next_request_id: u32 = 1;
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -393,7 +413,7 @@ async fn main_loop(
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place.
-    let exit = handle_server_frame(
+    let outcome = handle_server_frame(
         initial_attached,
         &mut panes,
         &mut layout_state,
@@ -403,9 +423,31 @@ async fn main_loop(
         viewport_dims,
         &mut predict,
         &overlay,
+        layout_get_request_id,
     )?;
-    if exit {
+    if outcome.exit {
         return Ok(());
+    }
+    if outcome.subscribe_layout {
+        // phux-4li.5: ask the server for any persisted layout, then
+        // subscribe to future mutations. Both frames are best-effort —
+        // if the server rejects them with an ERROR (we'd see one in a
+        // later loop iteration) we just stay in the single-pane
+        // bootstrap.
+        let req_id = next_request_id;
+        layout_get_request_id = Some(req_id);
+        next_request_id = next_request_id.wrapping_add(1);
+        conn.send(&FrameKind::GetMetadata {
+            request_id: req_id,
+            scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+            key: LAYOUT_KEY.to_owned(),
+        })
+        .await?;
+        conn.send(&FrameKind::SubscribeMetadata {
+            scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+            key: LAYOUT_KEY.to_owned(),
+        })
+        .await?;
     }
 
     loop {
@@ -440,7 +482,7 @@ async fn main_loop(
             frame = conn.recv() => {
                 match frame {
                     Ok(f) => {
-                        let exit = handle_server_frame(
+                        let outcome = handle_server_frame(
                             f,
                             &mut panes,
                             &mut layout_state,
@@ -450,9 +492,27 @@ async fn main_loop(
                             viewport_dims,
                             &mut predict,
                             &overlay,
+                            layout_get_request_id,
                         )?;
-                        if exit {
+                        if outcome.exit {
                             return Ok(());
+                        }
+                        if outcome.layout_replaced {
+                            // phux-4li.5: layout changed under us
+                            // (either the GET reply or a peer's broadcast).
+                            // Trigger a full repaint: clear screen + paint
+                            // dividers + re-render every pane.
+                            repaint_multi_pane(
+                                &layout_state,
+                                &mut panes,
+                                viewport_dims,
+                                status_bar.as_mut(),
+                                &session_name,
+                            );
+                            // The GET reply is single-use; clear the
+                            // pending request id so a stray late
+                            // MetadataValue can't trample state.
+                            layout_get_request_id = None;
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -478,14 +538,21 @@ async fn main_loop(
                     continue;
                 }
                 let events = parser.feed(&stdin_buf[..n]);
+                let mut ctx = DispatchCtx {
+                    resolver: resolver.as_mut(),
+                    layout_state: &mut layout_state,
+                    viewport: viewport_dims,
+                    next_request_id: &mut next_request_id,
+                };
                 dispatch_input_events(
                     conn,
                     events,
-                    focused_pane.as_ref(),
+                    &mut focused_pane,
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
                     &mut panes,
+                    &mut ctx,
                 )
                 .await?;
             }
@@ -495,14 +562,21 @@ async fn main_loop(
             // Escape key (see input::StdinParser::flush docs).
             () = flush_sleep => {
                 let events = parser.flush();
+                let mut ctx = DispatchCtx {
+                    resolver: resolver.as_mut(),
+                    layout_state: &mut layout_state,
+                    viewport: viewport_dims,
+                    next_request_id: &mut next_request_id,
+                };
                 dispatch_input_events(
                     conn,
                     events,
-                    focused_pane.as_ref(),
+                    &mut focused_pane,
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
                     &mut panes,
+                    &mut ctx,
                 )
                 .await?;
             }
@@ -594,12 +668,41 @@ async fn main_loop(
     }
 }
 
+/// Mutable context the input-dispatch path needs to update on a chord
+/// that resolves to a layout action (phux-4li.5). Bundles the items
+/// that would otherwise inflate `dispatch_input_events`'s argument
+/// list past clippy's threshold.
+struct DispatchCtx<'a> {
+    /// Keybind resolver state. `None` when the on-disk config failed
+    /// to parse; the dispatcher then forwards every key to the focused
+    /// pane unchanged.
+    resolver: Option<&'a mut phux_config::keybind::Resolver>,
+    /// Client-side layout mirror. Action helpers in [`super::actions`]
+    /// take `&LayoutState` and return a new state which the dispatcher
+    /// swaps in place.
+    layout_state: &'a mut LayoutState,
+    /// Outer-viewport `(cols, rows)`. Used by `apply_resize` to convert
+    /// `amount` (cells) to a ratio delta.
+    viewport: (u16, u16),
+    /// Monotonic source of new request ids. We don't currently issue
+    /// per-action correlated requests (the only side-channel today is
+    /// the layout `SET_METADATA`, which doesn't need a reply), but we
+    /// reserve the counter for future `SPAWN`/kill wiring.
+    next_request_id: &'a mut u32,
+}
+
 /// Translate a batch of parser events into wire frames and ship them.
 ///
 /// Detach requests short-circuit into a single `FrameKind::Detach` and
 /// flip `detach_pending`. Pre-attach events (no `focused_pane` yet) are
 /// dropped with a debug log — the wire spec has no "pre-attach buffer"
 /// notion.
+///
+/// phux-4li.5: when a `KeyEvent` matches a configured keybind, the
+/// chord is consumed by the dispatcher and the corresponding layout
+/// action runs (focus move / resize / etc.). The key is NOT forwarded
+/// to the focused pane in that case — same convention as tmux's
+/// `prefix` table.
 // arg list bundles transport + render + predict context; follow-up to
 // refactor into a context struct.
 #[allow(clippy::too_many_arguments, reason = "see comment above")]
@@ -610,13 +713,15 @@ async fn main_loop(
 async fn dispatch_input_events(
     conn: &mut Connection,
     events: Vec<InputEvent>,
-    focused_pane: Option<&TerminalId>,
+    focused_pane: &mut Option<TerminalId>,
     detach_pending: &mut bool,
     predict: &mut PredictionState,
     overlay: &Overlay,
     panes: &mut HashMap<TerminalId, PaneSlot>,
+    ctx: &mut DispatchCtx<'_>,
 ) -> Result<(), AttachError> {
     let mut predicted_any = false;
+    let mut layout_changed = false;
     for ev in events {
         if matches!(ev, InputEvent::DetachRequested) {
             if !*detach_pending {
@@ -624,6 +729,51 @@ async fn dispatch_input_events(
                 *detach_pending = true;
             }
             continue;
+        }
+        // phux-4li.5: resolver intercept. Run BEFORE the predict layer
+        // so a chord that resolves to e.g. `focus-direction` doesn't
+        // leave a stale ghost overlay on the previous focused pane.
+        if let InputEvent::Key(ref key_event) = ev
+            && let Some(outcome) = consume_chord(ctx, key_event)
+        {
+            match outcome {
+                ChordOutcome::Partial => {
+                    // Still waiting on the next chord in a multi-chord
+                    // sequence; absorb the byte and move on.
+                    continue;
+                }
+                ChordOutcome::Resolved(resolved) => {
+                    let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                    if effects.layout_mutated {
+                        layout_changed = true;
+                    }
+                    if effects.set_focus.is_some() {
+                        *focused_pane = effects.set_focus;
+                    }
+                    if effects.set_metadata {
+                        // Send SET_METADATA carrying the new envelope.
+                        // Encoding can fail only if the state is empty
+                        // (we just produced it — should not happen),
+                        // but propagate cleanly if it ever does.
+                        if let Some(bytes) = encode_layout_or_log(ctx.layout_state) {
+                            let request_id = *ctx.next_request_id;
+                            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+                            conn.send(&FrameKind::SetMetadata {
+                                request_id,
+                                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+                                key: LAYOUT_KEY.to_owned(),
+                                value: bytes,
+                            })
+                            .await?;
+                        }
+                    }
+                    if effects.bell {
+                        let mut stdout = io::stdout().lock();
+                        let _ = actions::write_bell(&mut stdout);
+                    }
+                    continue;
+                }
+            }
         }
         // Predictive echo only fires for key events; mouse / paste / focus
         // intentionally bypass the prediction layer (they target the
@@ -641,7 +791,7 @@ async fn dispatch_input_events(
         // (per ADR-0019 decision 6); the predict layer follows.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
-            && let Some(fid) = focused_pane
+            && let Some(fid) = focused_pane.as_ref()
             && let Some(slot) = panes.get_mut(fid)
         {
             use crate::predict::PredictionOutcome;
@@ -655,7 +805,7 @@ async fn dispatch_input_events(
                 predicted_any = true;
             }
         }
-        let Some(pane) = focused_pane else {
+        let Some(pane) = focused_pane.as_ref() else {
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
@@ -670,17 +820,283 @@ async fn dispatch_input_events(
         let mut stdout = io::stdout().lock();
         let _ = overlay.render(predict, &mut stdout);
     }
+    if layout_changed {
+        // Repaint dividers + every leaf. Driver-side repaint is the
+        // single point that decides what reaches stdout after an action
+        // mutates the tree; the action helpers themselves never paint.
+        repaint_multi_pane(ctx.layout_state, panes, ctx.viewport, None, "");
+    }
     Ok(())
 }
 
-/// Process one server-to-client frame. Returns `true` if the loop should
-/// exit cleanly (i.e. the server sent `DETACHED`).
+/// Result of feeding a key event through the resolver.
+enum ChordOutcome {
+    /// Chord extended a partial sequence; absorb and wait.
+    Partial,
+    /// Chord completed a binding; effects follow.
+    Resolved(phux_config::keybind::ResolvedAction),
+}
+
+/// Convert a `KeyEvent` into a `KeyChord` and feed the resolver. Returns
+/// `None` when the resolver is disabled (no config) or the chord
+/// doesn't match any binding — caller forwards normally in that case.
+///
+/// Release / repeat events are NOT fed to the resolver — chord matching
+/// is press-only, matching the convention of `phux-config::keybind`'s
+/// tests and tmux's prefix table. Repeats of held keys (e.g. arrow keys
+/// scrolling) would otherwise re-fire actions per-tick.
+fn consume_chord(
+    ctx: &mut DispatchCtx<'_>,
+    key_event: &phux_protocol::input::key::KeyEvent,
+) -> Option<ChordOutcome> {
+    use phux_protocol::input::key::KeyAction;
+    let resolver = ctx.resolver.as_deref_mut()?;
+    if !matches!(key_event.action, KeyAction::Press) {
+        return None;
+    }
+    let chord = phux_config::keybind::KeyChord {
+        modifiers: key_event.mods,
+        key: key_event.key,
+    };
+    match resolver.feed(chord) {
+        phux_config::keybind::Feed::NoMatch => None,
+        phux_config::keybind::Feed::Partial => Some(ChordOutcome::Partial),
+        phux_config::keybind::Feed::Resolved(r) => Some(ChordOutcome::Resolved(r)),
+    }
+}
+
+/// Side-effects a resolved action wants from the driver.
+#[derive(Debug, Default)]
+struct ActionEffects {
+    /// `true` ⇒ `layout_state` was mutated in-place; driver repaints.
+    layout_mutated: bool,
+    /// `Some(new_focus)` ⇒ swap the driver's `focused_pane` (input
+    /// routing follows). The action helper already updated
+    /// `layout_state.focus`; this carries the new id so the driver
+    /// doesn't have to re-read it.
+    set_focus: Option<TerminalId>,
+    /// `true` ⇒ emit `SET_METADATA` carrying the new layout envelope.
+    set_metadata: bool,
+    /// `true` ⇒ emit a terminal bell (BEL `\x07`).
+    bell: bool,
+}
+
+/// Dispatch a resolved action against the driver's context.
+///
+/// Returns the [`ActionEffects`] the caller needs to apply. The function
+/// is sync: it never touches the connection — frame I/O happens in the
+/// caller (`dispatch_input_events`) so a hypothetical async wire-send
+/// failure doesn't leave layout state half-mutated.
+fn run_action(
+    resolved: &phux_config::keybind::ResolvedAction,
+    ctx: &mut DispatchCtx<'_>,
+    focused: Option<&TerminalId>,
+) -> ActionEffects {
+    let _ = focused;
+    let mut effects = ActionEffects::default();
+    match resolved.action.as_str() {
+        "split-pane" => {
+            // SPAWN frame doesn't yet exist in the wire (no
+            // `FrameKind::SpawnTerminal` / reply variant). Without it
+            // we can't allocate a new `TerminalId` server-side, so
+            // split-pane bells and logs in v0.1. Filed as a follow-up
+            // — see phux-4li session notes.
+            tracing::warn!(
+                "split-pane: deferred pending SPAWN wire-frame allocation; \
+                 see phux-4li.5 deferred-scope note"
+            );
+            effects.bell = true;
+        }
+        "kill-pane" => {
+            // Same blocker as split-pane: no `TERMINAL_CLOSED` frame
+            // and no SPAWN_KILL exists in the wire. Once either lands
+            // (TERMINAL_CLOSED-driven cleanup OR an explicit kill
+            // frame), wire `actions::apply_kill` here + emit
+            // SET_METADATA. Until then bell + log.
+            tracing::warn!(
+                "kill-pane: deferred pending TERMINAL_CLOSED or kill-frame wire allocation"
+            );
+            effects.bell = true;
+        }
+        "focus-direction" => {
+            if let Some(dir) = direction_arg(resolved) {
+                if let Some(new_state) = actions::apply_focus(ctx.layout_state, dir) {
+                    let new_focus = new_state.focus.clone();
+                    *ctx.layout_state = new_state;
+                    effects.layout_mutated = true;
+                    effects.set_focus = new_focus;
+                }
+                // No-neighbour case: silently drop (tmux convention —
+                // bumping into the layout edge isn't a bell).
+            } else {
+                tracing::warn!(args = ?resolved.args, "focus-direction missing/bad `direction` arg");
+                effects.bell = true;
+            }
+        }
+        "resize-pane" => {
+            if let (Some(dir), Some(amount)) = (direction_arg(resolved), amount_arg(resolved)) {
+                match actions::apply_resize(ctx.layout_state, dir, amount, ctx.viewport) {
+                    Ok(Some(new_state)) => {
+                        *ctx.layout_state = new_state;
+                        effects.layout_mutated = true;
+                        effects.set_metadata = true;
+                    }
+                    Ok(None) | Err(ActionError::NoResizableBoundary) => {
+                        // Underflow guard tripped or no matching axis —
+                        // bell-no-op (ADR-0019 decision 5).
+                        effects.bell = true;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "resize-pane failed");
+                        effects.bell = true;
+                    }
+                }
+            } else {
+                tracing::warn!(args = ?resolved.args, "resize-pane missing args");
+                effects.bell = true;
+            }
+        }
+        "next-pane" => {
+            if let Some(new_state) = actions::apply_next_pane(ctx.layout_state) {
+                let new_focus = new_state.focus.clone();
+                *ctx.layout_state = new_state;
+                effects.layout_mutated = true;
+                effects.set_focus = new_focus;
+            }
+        }
+        "previous-pane" => {
+            if let Some(new_state) = actions::apply_previous_pane(ctx.layout_state) {
+                let new_focus = new_state.focus.clone();
+                *ctx.layout_state = new_state;
+                effects.layout_mutated = true;
+                effects.set_focus = new_focus;
+            }
+        }
+        other => {
+            tracing::debug!(action = other, "unhandled resolved action");
+        }
+    }
+    effects
+}
+
+/// Pull a `Direction` out of a [`ResolvedAction`]'s `direction = "..."`
+/// arg.
+fn direction_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Direction> {
+    let s = resolved.args.get("direction")?.as_str()?;
+    match s {
+        "up" => Some(Direction::Up),
+        "down" => Some(Direction::Down),
+        "left" => Some(Direction::Left),
+        "right" => Some(Direction::Right),
+        // `split-pane direction=horizontal|vertical` uses a different
+        // axis vocabulary; this helper is only for focus/resize.
+        _ => None,
+    }
+}
+
+/// Pull an `amount = N` arg out of a [`ResolvedAction`]. TOML integers
+/// decode as `i64`; we clamp to `i16` (the [`actions::apply_resize`]
+/// signature). Out-of-range values are silently clamped — a `resize-pane
+/// amount = 99999` user binding gets a 32767-cell amount, which the
+/// underflow guard inside `apply_resize` then rejects.
+#[allow(clippy::cast_possible_truncation)]
+fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
+    let v = resolved.args.get("amount")?.as_integer()?;
+    Some(v.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16)
+}
+
+/// Encode `state` for `SET_METADATA`, logging encode failures. Returns
+/// `None` on failure — caller should not emit a frame in that case.
+fn encode_layout_or_log(state: &LayoutState) -> Option<Vec<u8>> {
+    match state.encode_cbor() {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            tracing::warn!(error = %err, "layout CBOR encode failed; SET_METADATA skipped");
+            None
+        }
+    }
+}
+
+/// Allow `SplitDir` to be parsed from a `direction = "horizontal|vertical"`
+/// arg on a `split-pane` action. Lives here (not in `actions.rs`) so the
+/// pure helper module stays free of `ResolvedAction` parsing.
+#[allow(dead_code)] // wired in once SPAWN lands; kept for symmetry + warning-free build.
+fn split_dir_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<SplitDir> {
+    let s = resolved.args.get("direction")?.as_str()?;
+    match s {
+        "horizontal" => Some(SplitDir::Horizontal),
+        "vertical" => Some(SplitDir::Vertical),
+        _ => None,
+    }
+}
+
+/// Repaint the multi-pane composition after a layout mutation or a
+/// reconcile. Clears the viewport, then asks each pane's `TerminalRenderer`
+/// to paint into its own `Rect`, then writes dividers and the status bar.
+///
+/// `status_bar` and `session_name` are threaded only so the bar can be
+/// repainted in the same pass; callers that already paint the bar (e.g.
+/// the status-tick branch) pass `None`/`""`.
+fn repaint_multi_pane(
+    layout_state: &LayoutState,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    viewport_dims: (u16, u16),
+    status_bar: Option<&mut StatusBarPainter>,
+    session_name: &str,
+) {
+    let multi = super::multi_pane::compute_layout(layout_state, viewport_dims);
+    let mut stdout = io::stdout().lock();
+    // ED2 (clear screen) + cursor home. Cheap and unambiguous.
+    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+    // Render each pane at its allocated origin. `render_at` writes into
+    // the per-pane sub-rectangle without touching pixels outside it.
+    for (id, rect) in &multi.rects {
+        if let Some(slot) = panes.get_mut(id) {
+            // Resize the libghostty Terminal to match its new Rect so
+            // the renderer's CUP math lines up with the destination
+            // sub-region. Best-effort: a libghostty resize failure
+            // means the pane redraws stale; not fatal.
+            let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+            let _ = slot
+                .renderer
+                .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
+        }
+    }
+    let _ = super::multi_pane::paint_dividers(&mut stdout, &multi);
+    paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
+}
+
+/// Outcome of processing a single server-to-client frame.
+///
+/// The driver translates these into async actions (send a frame, exit
+/// the loop, repaint). Keeping the side-effect-free decision inside
+/// [`handle_server_frame`] lets the function stay synchronous.
+#[derive(Debug, Clone, Default)]
+struct FrameOutcome {
+    /// `true` ⇒ the loop should exit cleanly (server sent `DETACHED`).
+    exit: bool,
+    /// `true` ⇒ ATTACHED just landed; the driver should emit
+    /// `GET_METADATA` + `SUBSCRIBE_METADATA` for the layout key so
+    /// other clients' mutations broadcast back to us (ADR-0019).
+    subscribe_layout: bool,
+    /// `true` ⇒ `layout_state` was replaced by a server-side layout
+    /// envelope (`MetadataValue` reply or `MetadataChanged` broadcast).
+    /// The driver triggers a full repaint of the multi-pane composition.
+    layout_replaced: bool,
+}
+
+/// Process one server-to-client frame. Returns a [`FrameOutcome`]
+/// describing any follow-up the async driver needs to perform.
 ///
 /// `status_bar` is `Option<&mut StatusBarPainter>` so an attach with no
 /// configured widgets pays nothing for the chrome path. `viewport_dims`
 /// is `(cols, rows)` of the outer terminal — used by the painter to
 /// pick the bottom row.
 #[allow(clippy::too_many_arguments)] // arg list bundles status-bar + predict state; follow-up to refactor into a context struct
+#[allow(
+    clippy::too_many_lines,
+    reason = "phux-4li.5 added L3 reconcile branches; refactor with the status-bar arg-list cleanup"
+)]
 fn handle_server_frame(
     frame: FrameKind,
     panes: &mut HashMap<TerminalId, PaneSlot>,
@@ -691,7 +1107,8 @@ fn handle_server_frame(
     viewport_dims: (u16, u16),
     predict: &mut PredictionState,
     overlay: &Overlay,
-) -> Result<bool, AttachError> {
+    pending_layout_request: Option<u32>,
+) -> Result<FrameOutcome, AttachError> {
     match frame {
         FrameKind::Attached {
             snapshot,
@@ -723,7 +1140,16 @@ fn handle_server_frame(
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
             // TERMINAL_SNAPSHOT.
-            Ok(false)
+            //
+            // phux-4li.5: signal the driver to emit GET_METADATA and
+            // SUBSCRIBE_METADATA for the layout key so we (a) reconcile
+            // against a persisted layout from a previous session and
+            // (b) receive METADATA_CHANGED broadcasts from sibling
+            // clients (ADR-0019 decision 2).
+            Ok(FrameOutcome {
+                subscribe_layout: true,
+                ..FrameOutcome::default()
+            })
         }
         FrameKind::TerminalSnapshot {
             terminal_id,
@@ -766,7 +1192,7 @@ fn handle_server_frame(
                 // repaint over it.
                 paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
-            Ok(false)
+            Ok(FrameOutcome::default())
         }
         FrameKind::TerminalOutput {
             terminal_id,
@@ -811,9 +1237,12 @@ fn handle_server_frame(
                 let _ = overlay.render(predict, &mut stdout);
                 paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
-            Ok(false)
+            Ok(FrameOutcome::default())
         }
-        FrameKind::Detached => Ok(true),
+        FrameKind::Detached => Ok(FrameOutcome {
+            exit: true,
+            ..FrameOutcome::default()
+        }),
         FrameKind::Bell { .. } => {
             // Forward bell to the outer terminal. The user's terminal
             // emulator decides whether to render visually, audibly, or
@@ -821,7 +1250,75 @@ fn handle_server_frame(
             let mut stdout = io::stdout().lock();
             let _ = stdout.write_all(b"\x07");
             let _ = stdout.flush();
-            Ok(false)
+            Ok(FrameOutcome::default())
+        }
+        // phux-4li.5: reconcile-on-attach reply path. The driver sends
+        // `GET_METADATA { request_id }` immediately after ATTACHED;
+        // the server replies with `MetadataValue { request_id, value }`.
+        // Match by id, decode the v1 CBOR envelope, and replace
+        // `layout_state` in place. `value: None` means "no persisted
+        // layout" — keep the single-pane bootstrap untouched.
+        FrameKind::MetadataValue { request_id, value } => {
+            if Some(request_id) != pending_layout_request {
+                tracing::debug!(
+                    request_id,
+                    "dropping MetadataValue with no matching pending request"
+                );
+                return Ok(FrameOutcome::default());
+            }
+            let Some(bytes) = value else {
+                return Ok(FrameOutcome::default());
+            };
+            match LayoutState::decode_cbor(&bytes) {
+                Ok(new_state) => {
+                    *layout_state =
+                        reconcile_loaded_layout(new_state, focused_pane.as_ref(), panes);
+                    Ok(FrameOutcome {
+                        layout_replaced: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to decode persisted layout; keeping bootstrap");
+                    Ok(FrameOutcome::default())
+                }
+            }
+        }
+        // phux-4li.5: broadcast reconcile. Another attached client
+        // mutated `phux.tui.layout/v1`; decode + replace + repaint.
+        // Tombstones (`value: None`) are treated as "layout reset" —
+        // fall back to the single-pane bootstrap so the next render
+        // doesn't try to draw against a stale tree.
+        FrameKind::MetadataChanged { scope, key, value } => {
+            if !is_layout_key(&scope, &key) {
+                return Ok(FrameOutcome::default());
+            }
+            if let Some(bytes) = value {
+                match LayoutState::decode_cbor(&bytes) {
+                    Ok(new_state) => {
+                        *layout_state =
+                            reconcile_loaded_layout(new_state, focused_pane.as_ref(), panes);
+                        Ok(FrameOutcome {
+                            layout_replaced: true,
+                            ..FrameOutcome::default()
+                        })
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "broadcast layout decode failed; ignoring");
+                        Ok(FrameOutcome::default())
+                    }
+                }
+            } else {
+                // Tombstone: layout reset. Fall back to single-pane
+                // bootstrap (or empty if there's no focus to anchor on).
+                *layout_state = focused_pane
+                    .clone()
+                    .map_or_else(LayoutState::default, LayoutState::single);
+                Ok(FrameOutcome {
+                    layout_replaced: true,
+                    ..FrameOutcome::default()
+                })
+            }
         }
         other => {
             // Anything else — `HELLO_OK`, `PONG`, future spec frames — is
@@ -829,7 +1326,88 @@ fn handle_server_frame(
             // discriminants; this branch handles known-but-not-yet-wired
             // frames.
             tracing::debug!(kind = ?other, "ignoring server frame");
-            Ok(false)
+            Ok(FrameOutcome::default())
+        }
+    }
+}
+
+/// Decide whether `(scope, key)` matches the layout-coordination key
+/// ADR-0019 reserves (`phux.tui.layout/v1`, scoped to the default
+/// Collection).
+fn is_layout_key(scope: &Scope, key: &str) -> bool {
+    matches!(scope, Scope::Collection(id) if *id == DEFAULT_COLLECTION_ID) && key == LAYOUT_KEY
+}
+
+/// Sanity-check a freshly decoded layout against the panes the driver
+/// has slots for, and fall back to a safe focus if the persisted focus
+/// no longer exists (e.g. the leaf was killed in a previous session).
+///
+/// We accept the persisted tree as-is — panes that don't yet have a
+/// `PaneSlot` will get one lazily when their first `TERMINAL_OUTPUT`
+/// arrives, so an arbitrary tree shape is fine. Focus is the one
+/// invariant we can't recover from: if the persisted focused leaf
+/// isn't a member of the tree the renderer would have no focused
+/// pane to draw input chrome on.
+fn reconcile_loaded_layout(
+    mut state: LayoutState,
+    bootstrap_focus: Option<&TerminalId>,
+    _panes: &HashMap<TerminalId, PaneSlot>,
+) -> LayoutState {
+    let tree_leaves = state
+        .tree
+        .as_ref()
+        .map(crate::layout::leaves)
+        .unwrap_or_default();
+    let focus_ok = state
+        .focus
+        .as_ref()
+        .is_some_and(|f| tree_leaves.contains(f));
+    if !focus_ok {
+        // Prefer the bootstrap focus if it's actually in the tree;
+        // otherwise pick the first leaf (ADR-0019 decision 6 default);
+        // otherwise clear focus entirely.
+        state.focus = bootstrap_focus
+            .filter(|f| tree_leaves.contains(f))
+            .cloned()
+            .or_else(|| tree_leaves.into_iter().next());
+    }
+    state
+}
+
+/// phux-4li.5: L3 metadata key under which the multi-pane layout
+/// envelope persists (ADR-0019 decision 1). The reference TUI is the
+/// sole consumer; other clients (a future GUI, an agent) never read
+/// or write it.
+const LAYOUT_KEY: &str = "phux.tui.layout/v1";
+
+/// phux-4li.5: the single Collection v0.1 servers expose. L2
+/// (Collection lifecycle) is not yet wire-allocated; until it ships,
+/// every L3 key the reference TUI cares about is scoped to this
+/// constant. Matches `phux_server::state::DEFAULT_COLLECTION_ID`
+/// (the server picks the same numeric value; if they ever drift, the
+/// L3 reconcile path silently no-ops because the broadcast scope
+/// won't match).
+const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
+
+/// phux-4li.5: build a [`phux_config::keybind::Resolver`] from the
+/// on-disk config. Failures log and return `None` — a malformed
+/// `[keybindings]` table degrades to "no actions are bound" rather
+/// than blocking attach. The existing `Ctrl-b d` detach chord is
+/// parsed by [`super::input::StdinParser`] and is independent of
+/// this resolver, so even with no resolver the user can still detach.
+fn build_resolver() -> Option<phux_config::keybind::Resolver> {
+    let cfg = match phux_config::loader::load() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "phux-config load failed; keybind resolver disabled");
+            return None;
+        }
+    };
+    match phux_config::keybind::Resolver::new(&cfg.keybindings) {
+        Ok(r) => Some(r),
+        Err(err) => {
+            tracing::warn!(error = %err, "keybind resolver build failed; disabled");
+            None
         }
     }
 }
