@@ -17,7 +17,9 @@ use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, ErrorCode, Scope, ViewportInfo};
+use phux_protocol::wire::frame::{
+    AttachTarget, ErrorCode, Scope, SpawnError, SpawnResult, ViewportInfo,
+};
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
@@ -1319,6 +1321,227 @@ fn scope_unknown_tag_is_rejected() {
         err,
         DecodeError::UnknownEnumValue {
             field: "Scope",
+            value: 0xFE,
+        }
+    );
+}
+
+// -----------------------------------------------------------------------------
+// L1 Terminal lifecycle frames — SPEC §7.2 / §10.1 (phux-4li.10).
+//
+// Wire substrate for split-pane / kill-pane (phux-4li.5) and post-SIGWINCH
+// per-pane `ioctl(TIOCSWINSZ)` (phux-4li.9). Server-side handler + client-
+// side emission land in follow-up tickets; the codec lands here.
+// -----------------------------------------------------------------------------
+
+fn arb_env_pair() -> impl Strategy<Value = (String, String)> {
+    (".{0,16}", ".{0,32}")
+}
+
+fn arb_spawn_error() -> impl Strategy<Value = SpawnError> {
+    prop_oneof![
+        Just(SpawnError::CollectionNotFound),
+        ".{0,128}".prop_map(SpawnError::SpawnFailed),
+    ]
+}
+
+fn arb_spawn_result() -> impl Strategy<Value = SpawnResult> {
+    prop_oneof![
+        arb_terminal_id().prop_map(SpawnResult::Ok),
+        arb_spawn_error().prop_map(SpawnResult::Err),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn roundtrip_spawn_terminal(
+        request_id in any::<u32>(),
+        collection in any::<u32>(),
+        command in proptest::option::of(proptest::collection::vec(".{0,16}", 0..4)),
+        cwd in proptest::option::of(".{0,32}"),
+        env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
+    ) {
+        let frame = FrameKind::SpawnTerminal {
+            request_id,
+            collection: CollectionId::new(collection),
+            command,
+            cwd,
+            env,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_terminal_spawned(
+        request_id in any::<u32>(),
+        result in arb_spawn_result(),
+    ) {
+        let frame = FrameKind::TerminalSpawned { request_id, result };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_terminal_closed(
+        terminal_id in arb_terminal_id(),
+        exit_status in proptest::option::of(any::<i32>()),
+    ) {
+        let frame = FrameKind::TerminalClosed { terminal_id, exit_status };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_terminal_resize(
+        terminal_id in arb_terminal_id(),
+        cols in any::<u16>(),
+        rows in any::<u16>(),
+    ) {
+        let frame = FrameKind::TerminalResize { terminal_id, cols, rows };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn spawn_terminal_empty_command_vec_round_trips() {
+    // `command = Some(vec![])` is distinct from `command = None` and the
+    // codec must round-trip both faithfully. (Servers MAY treat an empty
+    // argv as malformed at the dispatch layer; the wire is agnostic.)
+    let frame = FrameKind::SpawnTerminal {
+        request_id: 1,
+        collection: CollectionId::new(1),
+        command: Some(Vec::new()),
+        cwd: None,
+        env: None,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn spawn_terminal_empty_env_vec_round_trips() {
+    // `env = Some(vec![])` is the "start with empty environment" sentinel
+    // and is distinct from `env = None` ("inherit server's env"). The
+    // codec must preserve the distinction.
+    let frame = FrameKind::SpawnTerminal {
+        request_id: 2,
+        collection: CollectionId::new(1),
+        command: None,
+        cwd: None,
+        env: Some(Vec::new()),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn terminal_resize_zero_dims_round_trips() {
+    // SPEC §10.2 leaves zero dims implementation-defined (the server's PTY
+    // layer SHOULD treat them as no-ops rather than kernel errors). The
+    // wire codec is agnostic and round-trips zeros faithfully.
+    let frame = FrameKind::TerminalResize {
+        terminal_id: TerminalId::local(1),
+        cols: 0,
+        rows: 0,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn terminal_closed_signal_exit_uses_none() {
+    // `exit_status = None` is the wire encoding for "killed by signal /
+    // unknown cause" — a deliberately compact subset of SPEC §10.1's
+    // `ExitStatus` tagged union. The full tagged union grows in a follow-
+    // up wire bump if the additional structure proves load-bearing.
+    let frame = FrameKind::TerminalClosed {
+        terminal_id: TerminalId::local(7),
+        exit_status: None,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn terminal_closed_exit_status_negative_round_trips() {
+    // `i32` is encoded as `u32` two's-complement on the wire; negative
+    // values round-trip faithfully.
+    let frame = FrameKind::TerminalClosed {
+        terminal_id: TerminalId::local(7),
+        exit_status: Some(-1),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn terminal_spawned_unknown_result_tag_is_rejected() {
+    // A `TERMINAL_SPAWNED` carrying an unknown `SpawnResult` tag MUST
+    // surface as `UnknownEnumValue`, not silently coerce. Hand-roll a
+    // frame body: type byte 0xA2, then u32 request_id, then a bogus tag.
+    let mut body = vec![0xA2u8];
+    body.extend_from_slice(&7u32.to_be_bytes()); // request_id
+    body.push(0xFE); // unknown SpawnResult tag
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::UnknownEnumValue {
+            field: "SpawnResult",
+            value: 0xFE,
+        }
+    );
+}
+
+#[test]
+fn terminal_spawned_unknown_spawn_error_tag_is_rejected() {
+    // Inside the `Err` arm of `SpawnResult`, an unknown `SpawnError` tag
+    // MUST also surface as `UnknownEnumValue`.
+    let mut body = vec![0xA2u8];
+    body.extend_from_slice(&7u32.to_be_bytes()); // request_id
+    body.push(0x01); // SpawnResult::Err
+    body.push(0xFE); // unknown SpawnError tag
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::UnknownEnumValue {
+            field: "SpawnError",
             value: 0xFE,
         }
     );

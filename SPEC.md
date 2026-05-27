@@ -402,11 +402,14 @@ by the server.
 | 0x13  | C → S     | `INPUT_RAW`          | §9.5      | spec-only |
 | 0x14  | C → S     | `INPUT_FOCUS`        | §9.3      | partial   |
 | 0x20  | C → S     | `VIEWPORT_RESIZE`    | §10.2     | partial   |
+| 0x22  | C → S     | `SPAWN_TERMINAL`     | §7.2.1    | partial   |
+| 0x23  | C → S     | `TERMINAL_RESIZE`    | §7.2.1    | partial   |
 | 0x90  | S → C     | `TERMINAL_OUTPUT`    | §8        | shipped   |
 | 0x91  | S → C     | `TERMINAL_SNAPSHOT`  | §8.4      | shipped   |
 | 0x92  | S → C     | `TERMINAL_RESIZED`   | §10.2     | spec-only |
 | 0xA0  | S → C     | `TERMINAL_OPENED`    | §10.1     | spec-only |
-| 0xA1  | S → C     | `TERMINAL_CLOSED`    | §10.1     | spec-only |
+| 0xA1  | S → C     | `TERMINAL_CLOSED`    | §7.2.1    | partial   |
+| 0xA2  | S → C     | `TERMINAL_SPAWNED`   | §7.2.1    | partial   |
 | 0xB0  | S → C     | `BELL`               | §7.L1.1   | shipped   |
 | 0xB1  | S → C     | `TERMINAL_EVENT`     | §7.L1.2   | spec-only |
 | 0xB2  | S → C     | `ALERT`              | §7.L1.3   | spec-only |
@@ -423,6 +426,78 @@ expect L1-shaped `CommandResult` payloads (typically a `TerminalId`).
 > Implementations of pre-0.1.0-draft.3 drafts MUST be updated; there
 > is no on-wire compatibility between `PANE_DIFF` and
 > `TERMINAL_OUTPUT`.
+
+#### 7.2.1 Terminal lifecycle frames
+
+Allocated by phux-4li.10. Four L1 frames unblock the daily-drive arc:
+split-pane / kill-pane (previously stubbed warn+bell in the reference
+client) and per-pane `ioctl(TIOCSWINSZ)` after a SIGWINCH (the
+server-side half of phux-4li.9's reflow wire-up).
+
+Wire bodies (positional, per Appendix A primitives):
+
+```
+SPAWN_TERMINAL   { request_id: u32,
+                   collection: CollectionId,
+                   command: optional<list<str>>,
+                   cwd: optional<str>,
+                   env: optional<list<(str, str)>> }
+TERMINAL_SPAWNED { request_id: u32, result: SpawnResult }
+TERMINAL_CLOSED  { terminal_id: TerminalId, exit_status: optional<i32> }
+TERMINAL_RESIZE  { terminal_id: TerminalId, cols: u16, rows: u16 }
+
+SpawnResult = tagged_union {
+    OK  (TerminalId),  // tag 0x00
+    ERR (SpawnError),  // tag 0x01
+}
+
+SpawnError = tagged_union {
+    COLLECTION_NOT_FOUND,        // tag 0x00; empty body
+    SPAWN_FAILED (str),          // tag 0x01; UTF-8 diagnostic
+    // #[non_exhaustive] — future codes (PermissionDenied,
+    // ResourceExhausted, ...) MAY be added without bumping major.
+}
+```
+
+The `SpawnResult` tag convention (`Ok = 0x00`, `Err = 0x01`) is
+established here for reuse by future `Result<T, E>`-shaped reply
+frames; it deliberately mirrors the `Option` tag convention (`None =
+0x00`, `Some = 0x01`) so hex-dump readers do not need a second
+per-shape table.
+
+`SPAWN_TERMINAL` is asynchronous: the server replies with
+`TERMINAL_SPAWNED` correlated by `request_id`. `command = None` means
+"use the server's default shell" (same convention as
+`AttachTarget::CreateIfMissing.command = None` from §13). `cwd =
+None` means "use the server's default cwd" (typically the user's
+`$HOME`; the exact policy is implementation-defined). `env = None`
+inherits the server's environment as-is; `env = Some([])` is
+distinct — it starts with an empty environment.
+
+v0.1 servers expose a single default Collection at `CollectionId(1)`
+(per the L2-dependency note in §7.4). Other collection ids MAY
+surface as `SpawnError::CollectionNotFound` in the reply frame's
+`SpawnResult::Err` arm.
+
+`TERMINAL_CLOSED.exit_status` is `Some(n)` when the process called
+`_exit(n)` and `None` for signal kills and unknown-cause exits — a
+deliberately compact subset of §10.1's `ExitStatus` tagged union.
+The wider `ExitStatus` shape grows in a follow-up wire bump if the
+additional structure proves load-bearing; the `Option<i32>` shape is
+sufficient for the v0.1 split-pane / kill-pane use cases.
+
+`TERMINAL_RESIZE` is sent in addition to (not in place of)
+`VIEWPORT_RESIZE`: the outer-viewport frame conveys the client's
+smallest-common-bounding-box; `TERMINAL_RESIZE` conveys the resolved
+per-pane dimensions after the client's layout walk. The server's PTY
+layer drives `ioctl(TIOCSWINSZ)` from this. Implementations SHOULD
+treat `cols` or `rows` of zero as a no-op rather than a kernel
+error; the wire codec round-trips zero faithfully.
+
+`TERMINAL_RESIZE` (this section) is the C→S resize frame. The S→C
+`TERMINAL_RESIZED` discriminant at `0x92` is left spec-only for now;
+it lands when multi-client per-Terminal resize fan-out (§10.2)
+becomes load-bearing for non-attaching observers.
 
 ### 7.3 L2 — Collection lifecycle (OPTIONAL)
 
@@ -1887,6 +1962,9 @@ For implementers extending the protocol:
   lifecycle messages.
 - Message IDs `0x14..=0x1F` and `0x93..=0x9F`: reserved for hot-path
   messages.
+- Message IDs `0x24..=0x2F` and `0xA3..=0xAF`: reserved for further L1
+  Terminal lifecycle / per-pane control frames (phux-4li.10 allocated
+  `0x22..=0x23` C→S and `0xA1..=0xA2` S→C from these ranges).
 - Message IDs `0x31..=0x3F` and `0xC2..=0xCF`: reserved for control
   plane.
 - Message IDs `0x41..=0x4F` and `0xB3..=0xBF`: reserved for events.
@@ -1914,3 +1992,4 @@ longer exists as a wire concept.)
 | 0.2.0-draft | 2026-05-27 | phux-vp0.4: `TerminalId` becomes a tagged union (`LOCAL { id: u32 }` tag=0, `SATELLITE { host: str, id: u32 }` tag=1) per ADR-0016. Every `TerminalId` field on the wire gains a 1-byte tag prefix; the reference snapshot fixtures (§16) re-baseline accordingly. `ErrorCode::UnsupportedSatelliteRoute = 106` is added (was already SPEC-reserved). v0.1 servers only construct `LOCAL`; v0.1 decoders MUST accept `SATELLITE` and, if not a federation hub, reply `ERROR { UnsupportedSatelliteRoute }`. PROTOCOL_VERSION bumped 0.1.0 → 0.2.0 (pre-1.0 wire break). |
 | 0.1.0-draft.7 | 2026-05-26 | L1 vocabulary cascade Wave C (phux-vp0.2). §7 catalog reorganized by tier (proto / L1 / L2 / L3); §7.L1 messages renamed `PANE_*` → `TERMINAL_*` and `pane_id` → `terminal_id` per ADR-0016 (wire bytes unchanged). §7.3/§7.4 declare L2 (Collections) and L3 (Metadata) as reserved tiers with TBD discriminants. §6.1 HELLO gains `layers: bitset<Layer>` inside `ClientCapabilities` / `ServerCapabilities` (Appendix A field-tag extensibility keeps the wire compatible). §10 collapses Sessions/Windows/Panes/Layout/Focus into §10.1 Terminal lifecycle and §10.2 Viewport resize; the demoted TUI vocabulary lands non-normative in new §17. §6.2 reclaims the `CC_FRONTEND` capability slot per ADR-0017. §14 renames `PANE_NOT_FOUND` → `TERMINAL_NOT_FOUND` (numeric discriminant 104 preserved). §16 conformance restructured per-tier (16.0 common, 16.1 L1, 16.2 L1+L3, 16.3 L1+L2+L3). No wire bytes changed; no version bump. |
 | 0.2.0-draft.1 | 2026-05-27 | phux-4li.2: L3 metadata frames wire-allocated. C→S discriminants `GET_METADATA = 0x50`, `SET_METADATA = 0x51`, `DELETE_METADATA = 0x52`, `LIST_METADATA = 0x53`, `SUBSCRIBE_METADATA = 0x54`; S→C `METADATA_CHANGED = 0xD0`. `Scope` tagged union allocated (`Terminal` tag 0x00, `Collection` tag 0x01, `Global` tag 0x02). `METADATA_CHANGED` carries the new value inline (`optional<bytes>`) — supersedes the earlier "consumers re-GET after notification" sketch. `ClientCapabilities.layers` now wire-encoded as a trailing `u8` after `color_support` (additive trailing field per SPEC §6, no version bump beyond the L3 allocation). `CollectionId(u32)` allocated; L2 (which defines its full tagged-union shape) is still TBD. Reply path for GET/LIST defers to the `COMMAND_RESULT` envelope (§11). |
+| 0.2.0-draft.2 | 2026-05-27 | phux-4li.10: L1 Terminal lifecycle frames wire-allocated (§7.2.1). C→S discriminants `SPAWN_TERMINAL = 0x22`, `TERMINAL_RESIZE = 0x23`; S→C `TERMINAL_CLOSED = 0xA1` (honours the spec-only reservation from §7.2), `TERMINAL_SPAWNED = 0xA2`. `SpawnResult` and `SpawnError` tagged unions allocated (`Ok = 0x00`/`Err = 0x01` for `SpawnResult` — the convention extends to future `Result<T, E>` reply frames; `CollectionNotFound = 0x00`/`SpawnFailed(str) = 0x01` for `SpawnError`, both `#[non_exhaustive]`). `TERMINAL_CLOSED.exit_status: optional<i32>` is a deliberately compact subset of §10.1's `ExitStatus` tagged union — `Some(n)` for `_exit(n)`, `None` for signal kills and unknown causes; the wider tagged union grows in a follow-up if needed. `TERMINAL_RESIZE` is per-Terminal PTY resize, sent in addition to `VIEWPORT_RESIZE`. Appendix B reserved-range guidance updated for `0x24..=0x2F` and `0xA3..=0xAF`. Server / client wire-up lands in follow-up tickets; the codec is wire-complete on this commit. |

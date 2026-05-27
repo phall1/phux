@@ -161,6 +161,66 @@ pub const TYPE_METADATA_VALUE: u8 = 0xD1;
 /// Allocated by phux-4li.8.
 pub const TYPE_METADATA_KEYS: u8 = 0xD2;
 
+// -----------------------------------------------------------------------------
+// L1 Terminal lifecycle frame discriminants — SPEC §7.2 / §10.1 (phux-4li.10).
+//
+// Allocates the SPAWN / CLOSED / RESIZE wire-frames needed to lift split-pane
+// and kill-pane out of the `phux-4li.5` warn+bell stubs and to drive per-pane
+// `ioctl(TIOCSWINSZ)` from the post-SIGWINCH ReflowDiff (phux-4li.9). The
+// server-side handler + client-side emission land in follow-up tickets.
+//
+// C→S allocations slot into `0x22..=0x23`, the first free pair after
+// VIEWPORT_RESIZE (`0x20`) / FRAME_ACK (`0x21`). The 0x14..=0x1F
+// hot-path reservation in Appendix B is preserved by skipping past it.
+// S→C allocations honour the spec-only reservations carried in SPEC §7.2
+// (`0xA1 TERMINAL_CLOSED`) and extend by one (`0xA2 TERMINAL_SPAWNED`)
+// for the dedicated SPAWN reply — see SPEC Appendix C for the
+// 0.2.0-draft.2 entry.
+// -----------------------------------------------------------------------------
+
+/// Discriminant for `SPAWN_TERMINAL` (client to server, `SPEC.md` §7.2 / §10.1).
+///
+/// Carries `{ request_id, collection, command: Option<list<str>>,
+/// cwd: Option<str>, env: Option<list<(str, str)>> }`. The reply rides on
+/// [`TYPE_TERMINAL_SPAWNED`] correlated by `request_id`.
+pub const TYPE_SPAWN_TERMINAL: u8 = 0x22;
+/// Discriminant for `TERMINAL_RESIZE` (client to server, `SPEC.md` §7.2 / §10.2).
+///
+/// Per-Terminal PTY resize. Drives `ioctl(TIOCSWINSZ)` server-side; the
+/// outer-viewport `VIEWPORT_RESIZE` (`0x20`) remains the
+/// minimum-bounding-box signal. Both flow from a single SIGWINCH on the
+/// client (phux-4li.9).
+pub const TYPE_TERMINAL_RESIZE: u8 = 0x23;
+
+/// Discriminant for `TERMINAL_CLOSED` (server to client, `SPEC.md` §7.2 / §10.1).
+///
+/// Push notification when a Terminal's PTY exits, naturally or via
+/// `KILL_TERMINAL`. Honours the spec-only reservation at `0xA1`.
+pub const TYPE_TERMINAL_CLOSED: u8 = 0xA1;
+/// Discriminant for `TERMINAL_SPAWNED` (server to client, `SPEC.md` §7.2 / §10.1).
+///
+/// Reply frame for `SPAWN_TERMINAL`; correlated by `request_id`. Carries a
+/// `Result<TerminalId, SpawnError>` tagged union — see [`SpawnResult`].
+pub const TYPE_TERMINAL_SPAWNED: u8 = 0xA2;
+
+// Wire tags for the `SpawnResult` tagged union (SPEC §7.2 / §10.1).
+//
+// Convention: `Ok = 0x00`, `Err = 0x01` — established here by phux-4li.10
+// and reusable by future `Result<T, E>`-shaped reply frames (e.g. when
+// `COMMAND_RESULT` lands per SPEC §11). The convention deliberately
+// matches the `Option` tag convention (`None = 0x00`, `Some = 0x01`) so
+// hex-dump readers do not have to remember a second per-shape table.
+/// Wire tag for [`SpawnResult::Ok`].
+pub(crate) const SPAWN_RESULT_OK: u8 = 0;
+/// Wire tag for [`SpawnResult::Err`].
+pub(crate) const SPAWN_RESULT_ERR: u8 = 1;
+
+// Wire tags for the `SpawnError` tagged union (SPEC §7.2 / §10.1).
+/// Wire tag for [`SpawnError::CollectionNotFound`].
+pub(crate) const SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND: u8 = 0;
+/// Wire tag for [`SpawnError::SpawnFailed`].
+pub(crate) const SPAWN_ERROR_TAG_SPAWN_FAILED: u8 = 1;
+
 // Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
 /// Wire tag for [`Scope::Terminal`].
 pub(crate) const SCOPE_TAG_TERMINAL: u8 = 0;
@@ -373,6 +433,64 @@ pub enum Scope {
     Collection(CollectionId),
     /// Server-wide keys.
     Global,
+}
+
+// -----------------------------------------------------------------------------
+// SpawnError / SpawnResult — SPEC §7.2 / §10.1 (phux-4li.10).
+//
+// `SpawnResult` is the `Result<TerminalId, SpawnError>` carried inside
+// `TERMINAL_SPAWNED`. Modelled as a dedicated tagged union (rather than
+// reusing the Rust `Result` type directly on the wire) so the codec
+// stays in lockstep with the SPEC text and so future error variants can
+// land without touching call sites that match on the type.
+//
+// Both `SpawnResult` and `SpawnError` are `#[non_exhaustive]`: forward-
+// compatible additions are protocol-minor changes, mirroring the
+// existing [`ErrorCode`] / [`AttachTarget`] / [`Scope`] precedent.
+//
+// Wire encoding:
+//   SpawnResult tag 0x00 Ok  → tagged TerminalId
+//   SpawnResult tag 0x01 Err → SpawnError
+//   SpawnError  tag 0x00 CollectionNotFound → no body
+//   SpawnError  tag 0x01 SpawnFailed        → length-prefixed UTF-8 str
+// -----------------------------------------------------------------------------
+
+/// Error variants for [`FrameKind::TerminalSpawned`], SPEC §7.2 / §10.1.
+///
+/// `#[non_exhaustive]` so a v0.2.x server may add codes (e.g.
+/// `PermissionDenied`, `ResourceExhausted`) without breaking downstream
+/// matches. Unknown wire tags surface as
+/// [`DecodeError::UnknownEnumValue`] rather than coercing to a
+/// placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpawnError {
+    /// The `collection` named in [`FrameKind::SpawnTerminal`] does not
+    /// exist on this server. v0.1 servers expose a single default
+    /// Collection at `CollectionId(1)` (SPEC §7.4 L2-dependency note);
+    /// any other id MAY surface this error.
+    CollectionNotFound,
+    /// Spawning the underlying PTY failed for an implementation-specific
+    /// reason. The carried string is a human-readable diagnostic — short
+    /// enough to log inline; the SPEC does not constrain its contents
+    /// beyond UTF-8.
+    SpawnFailed(String),
+}
+
+/// Tagged union carried by [`FrameKind::TerminalSpawned`], SPEC §7.2 / §10.1.
+///
+/// Either the server-allocated [`TerminalId`] of the freshly spawned
+/// Terminal, or a structured [`SpawnError`]. Modelled as a dedicated
+/// enum rather than the Rust `core::result::Result` directly so the
+/// codec mirrors the SPEC's tagged-union vocabulary and so the
+/// `#[non_exhaustive]` contract carries through unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpawnResult {
+    /// The freshly spawned Terminal's identifier.
+    Ok(TerminalId),
+    /// Structured failure; see [`SpawnError`].
+    Err(SpawnError),
 }
 
 /// Decoded wire frame.
@@ -782,6 +900,98 @@ pub enum FrameKind {
         /// (clients fetch them separately via `GET_METADATA`).
         keys: Vec<String>,
     },
+
+    // -------------------------------------------------------------------------
+    // L1 Terminal lifecycle frames — SPEC §7.2 / §10.1 (phux-4li.10).
+    //
+    // Unblocks split-pane / kill-pane (was warn+bell in phux-4li.5) and the
+    // per-pane `ioctl(TIOCSWINSZ)` half of phux-4li.9's SIGWINCH wire-up.
+    // The server-side handler + client-side emission land in follow-up
+    // tickets; this enum allocation is the wire substrate they build on.
+    // -------------------------------------------------------------------------
+    /// `SPAWN_TERMINAL` — client requests a new Terminal under `collection`
+    /// (`SPEC.md` §7.2 / §10.1).
+    ///
+    /// Async: the server replies with [`FrameKind::TerminalSpawned`]
+    /// correlated by `request_id`. `command = None` means "use the server's
+    /// default shell" (the same convention as
+    /// `AttachTarget::CreateIfMissing.command = None`). `cwd = None` means
+    /// "use the server's default working directory" — typically the user's
+    /// `$HOME`; the exact policy is implementation-defined. `env = None`
+    /// inherits the server's environment as-is; `env = Some([])` is
+    /// distinct (start with an empty environment).
+    ///
+    /// v0.1 servers expose a single default Collection at
+    /// `CollectionId(1)` (SPEC §7.4 L2-dependency note). Other collection
+    /// ids MAY surface as [`SpawnError::CollectionNotFound`] inside the
+    /// reply frame's [`SpawnResult::Err`] arm.
+    SpawnTerminal {
+        /// Correlates this request with the eventual `TerminalSpawned`.
+        request_id: u32,
+        /// Collection under which to spawn the new Terminal.
+        collection: CollectionId,
+        /// Command + argv, or `None` to invoke the server's default shell.
+        command: Option<Vec<String>>,
+        /// Working directory for the new Terminal, or `None` for the
+        /// server's default.
+        cwd: Option<String>,
+        /// Environment variables for the new Terminal, or `None` to
+        /// inherit the server's environment. `Some(vec![])` is distinct
+        /// from `None`: it starts with an empty environment.
+        env: Option<Vec<(String, String)>>,
+    },
+
+    /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
+    /// (`SPEC.md` §7.2 / §10.1).
+    ///
+    /// Correlated to the originating request by `request_id`. `result`
+    /// carries either the freshly allocated [`TerminalId`] or a structured
+    /// [`SpawnError`]. The structured error is deliberately separate from
+    /// the generic [`FrameKind::Error`] catch-all so command-correlated
+    /// failures stay typed end-to-end (matching the
+    /// `METADATA_VALUE` precedent from phux-4li.8).
+    TerminalSpawned {
+        /// Correlates this reply with a prior `SpawnTerminal.request_id`.
+        request_id: u32,
+        /// Either the freshly allocated Terminal, or a structured error.
+        result: SpawnResult,
+    },
+
+    /// `TERMINAL_CLOSED` — server notifies clients that a Terminal exited
+    /// (`SPEC.md` §7.2 / §10.1).
+    ///
+    /// Emitted when the underlying PTY exits, whether by `_exit(n)`, by
+    /// signal, or via a `KILL_TERMINAL` command. `exit_status = Some(n)`
+    /// reports the process's exit code; `None` covers signal kills and
+    /// unknown-cause exits (a deliberately compact subset of SPEC §10.1's
+    /// `ExitStatus` tagged union — the wider tagged union grows in a
+    /// follow-up wire bump if the additional structure proves
+    /// load-bearing).
+    TerminalClosed {
+        /// The Terminal that exited.
+        terminal_id: TerminalId,
+        /// Process exit code (`_exit(n)`), or `None` for signals / unknown.
+        exit_status: Option<i32>,
+    },
+
+    /// `TERMINAL_RESIZE` — client signals a per-Terminal PTY resize
+    /// (`SPEC.md` §7.2 / §10.2).
+    ///
+    /// Sent in addition to (not in place of) `VIEWPORT_RESIZE`: the
+    /// outer-viewport frame conveys the client's smallest-common-bounding-
+    /// box; this frame conveys the resolved per-pane dimensions after the
+    /// client's layout walk. The server's PTY layer drives
+    /// `ioctl(TIOCSWINSZ)` from this. Implementations SHOULD treat `cols`
+    /// or `rows` of zero as a no-op rather than a kernel error (the
+    /// codec round-trips zero faithfully).
+    TerminalResize {
+        /// Target Terminal.
+        terminal_id: TerminalId,
+        /// New width in cells.
+        cols: u16,
+        /// New height in cells.
+        rows: u16,
+    },
 }
 
 impl FrameKind {
@@ -813,6 +1023,10 @@ impl FrameKind {
             Self::MetadataChanged { .. } => TYPE_METADATA_CHANGED,
             Self::MetadataValue { .. } => TYPE_METADATA_VALUE,
             Self::MetadataKeys { .. } => TYPE_METADATA_KEYS,
+            Self::SpawnTerminal { .. } => TYPE_SPAWN_TERMINAL,
+            Self::TerminalSpawned { .. } => TYPE_TERMINAL_SPAWNED,
+            Self::TerminalClosed { .. } => TYPE_TERMINAL_CLOSED,
+            Self::TerminalResize { .. } => TYPE_TERMINAL_RESIZE,
         }
     }
 
@@ -995,6 +1209,39 @@ impl FrameKind {
                 for k in keys {
                     enc.write_str(k);
                 }
+            }
+            Self::SpawnTerminal {
+                request_id,
+                collection,
+                command,
+                cwd,
+                env,
+            } => {
+                enc.write_u32_be(*request_id);
+                enc.write_u32_be(collection.get());
+                encode_optional_string_list(command.as_deref(), &mut enc);
+                encode_optional_str(cwd.as_deref(), &mut enc);
+                encode_optional_env(env.as_deref(), &mut enc);
+            }
+            Self::TerminalSpawned { request_id, result } => {
+                enc.write_u32_be(*request_id);
+                encode_spawn_result(result, &mut enc);
+            }
+            Self::TerminalClosed {
+                terminal_id,
+                exit_status,
+            } => {
+                encode_terminal_id(terminal_id, &mut enc);
+                encode_optional_i32(*exit_status, &mut enc);
+            }
+            Self::TerminalResize {
+                terminal_id,
+                cols,
+                rows,
+            } => {
+                encode_terminal_id(terminal_id, &mut enc);
+                enc.write_u16_be(*cols);
+                enc.write_u16_be(*rows);
             }
         }
 
@@ -1267,7 +1514,9 @@ fn encode_optional_str(value: Option<&str>, enc: &mut Encoder<'_>) {
     }
 }
 
-fn decode_optional_str<'a>(dec: &mut Decoder<'a>) -> Result<Option<&'a str>, DecodeError> {
+pub(super) fn decode_optional_str<'a>(
+    dec: &mut Decoder<'a>,
+) -> Result<Option<&'a str>, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
         0 => Ok(None),
@@ -1341,7 +1590,9 @@ fn encode_optional_string_list(value: Option<&[String]>, enc: &mut Encoder<'_>) 
     }
 }
 
-fn decode_optional_string_list(dec: &mut Decoder<'_>) -> Result<Option<Vec<String>>, DecodeError> {
+pub(super) fn decode_optional_string_list(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<Vec<String>>, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
         0 => Ok(None),
@@ -1418,6 +1669,163 @@ pub(super) fn decode_scope(dec: &mut Decoder<'_>) -> Result<Scope, DecodeError> 
         SCOPE_TAG_GLOBAL => Ok(Scope::Global),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Scope",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// SpawnResult / SpawnError codec — SPEC §7.2 / §10.1 (phux-4li.10).
+//
+// Layout (outer SpawnResult, the body of `TERMINAL_SPAWNED.result`):
+//   tag 0x00 Ok  → tagged TerminalId
+//   tag 0x01 Err → SpawnError body:
+//                    tag 0x00 CollectionNotFound → no further bytes
+//                    tag 0x01 SpawnFailed        → length-prefixed UTF-8
+//
+// The `Ok = 0x00 / Err = 0x01` convention deliberately mirrors the
+// `Option` tag convention (`None = 0x00 / Some = 0x01`) so hex-dump
+// readers do not need a second per-shape table.
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_spawn_result(result: &SpawnResult, enc: &mut Encoder<'_>) {
+    match result {
+        SpawnResult::Ok(terminal_id) => {
+            enc.write_u8(SPAWN_RESULT_OK);
+            encode_terminal_id(terminal_id, enc);
+        }
+        SpawnResult::Err(err) => {
+            enc.write_u8(SPAWN_RESULT_ERR);
+            encode_spawn_error(err, enc);
+        }
+    }
+}
+
+pub(super) fn decode_spawn_result(dec: &mut Decoder<'_>) -> Result<SpawnResult, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        SPAWN_RESULT_OK => Ok(SpawnResult::Ok(decode_terminal_id(dec)?)),
+        SPAWN_RESULT_ERR => Ok(SpawnResult::Err(decode_spawn_error(dec)?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "SpawnResult",
+            value: u32::from(other),
+        }),
+    }
+}
+
+fn encode_spawn_error(err: &SpawnError, enc: &mut Encoder<'_>) {
+    match err {
+        SpawnError::CollectionNotFound => {
+            enc.write_u8(SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND);
+        }
+        SpawnError::SpawnFailed(msg) => {
+            enc.write_u8(SPAWN_ERROR_TAG_SPAWN_FAILED);
+            enc.write_str(msg);
+        }
+    }
+}
+
+fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND => Ok(SpawnError::CollectionNotFound),
+        SPAWN_ERROR_TAG_SPAWN_FAILED => Ok(SpawnError::SpawnFailed(dec.read_str()?.to_owned())),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "SpawnError",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `Option<i32>` codec — used by `TERMINAL_CLOSED.exit_status` (SPEC §10.1).
+//
+// Tag convention matches every other `Option` on the wire: `0 = None`,
+// `1 = Some(value)`. The body is the two's-complement bit pattern
+// reinterpreted as `u32` (matching how the `i64` encoder treats
+// timestamps in `info.rs`).
+// -----------------------------------------------------------------------------
+
+fn encode_optional_i32(value: Option<i32>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(n) => {
+            enc.write_u8(1);
+            // Two's-complement bit pattern reinterpreted as u32 — bit-
+            // identical to the `i64` encoder treatment in `info.rs`. Using
+            // `i32::to_be_bytes` avoids the sign-loss clippy lint that a
+            // direct `n as u32` cast triggers (the in-memory bits are the
+            // same; the lint is right that the *value* changes meaning).
+            enc.write_u32_be(u32::from_be_bytes(n.to_be_bytes()));
+        }
+    }
+}
+
+pub(super) fn decode_optional_i32(dec: &mut Decoder<'_>) -> Result<Option<i32>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => {
+            // Symmetric to the encoder: reinterpret the u32's big-endian
+            // bytes as the i32 two's-complement bit pattern.
+            let bits = dec.read_u32_be()?;
+            Ok(Some(i32::from_be_bytes(bits.to_be_bytes())))
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<i32> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `Option<Vec<(String, String)>>` codec — used by `SPAWN_TERMINAL.env`
+// (SPEC §7.2 / §10.1).
+//
+// Mirrors `encode_optional_string_list`'s shape: outer 1-byte presence
+// tag, then (when `Some`) a `u32` element count followed by N pairs of
+// length-prefixed UTF-8 strings. Each pair is `(key, value)` in that
+// order.
+// -----------------------------------------------------------------------------
+
+fn encode_optional_env(value: Option<&[(String, String)]>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(list) => {
+            enc.write_u8(1);
+            debug_assert!(
+                u32::try_from(list.len()).is_ok(),
+                "env list length exceeds u32",
+            );
+            let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+            enc.write_u32_be(len);
+            for (k, v) in list {
+                enc.write_str(k);
+                enc.write_str(v);
+            }
+        }
+    }
+}
+
+pub(super) fn decode_optional_env(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<Vec<(String, String)>>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => {
+            let len = dec.read_u32_be()?;
+            let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
+            let mut out = Vec::with_capacity(len_usize);
+            for _ in 0..len_usize {
+                let k = dec.read_str()?.to_owned();
+                let v = dec.read_str()?.to_owned();
+                out.push((k, v));
+            }
+            Ok(Some(out))
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<list<(str, str)>> tag",
             value: u32::from(other),
         }),
     }

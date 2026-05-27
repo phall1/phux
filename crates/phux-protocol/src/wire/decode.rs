@@ -10,13 +10,16 @@ use super::frame::{
     TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_FRAME_ACK,
     TYPE_GET_METADATA, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
     TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED, TYPE_METADATA_KEYS,
-    TYPE_METADATA_VALUE, TYPE_PING, TYPE_SET_METADATA, TYPE_SUBSCRIBE_METADATA,
-    TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT, TYPE_VIEWPORT_RESIZE, decode_attach_target,
+    TYPE_METADATA_VALUE, TYPE_PING, TYPE_SET_METADATA, TYPE_SPAWN_TERMINAL,
+    TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_RESIZE,
+    TYPE_TERMINAL_SNAPSHOT, TYPE_TERMINAL_SPAWNED, TYPE_VIEWPORT_RESIZE, decode_attach_target,
     decode_focus_event, decode_key_event, decode_mouse_event, decode_optional_bytes,
-    decode_optional_u32, decode_paste_event, decode_scope, decode_terminal_id,
+    decode_optional_env, decode_optional_i32, decode_optional_str, decode_optional_string_list,
+    decode_optional_u32, decode_paste_event, decode_scope, decode_spawn_result, decode_terminal_id,
     decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
+use crate::ids::CollectionId;
 
 /// Cursor-style decoder over an immutable byte slice.
 ///
@@ -352,6 +355,46 @@ impl<'a> Decoder<'a> {
                     keys.push(self.read_str()?.to_owned());
                 }
                 FrameKind::MetadataKeys { request_id, keys }
+            }
+            TYPE_SPAWN_TERMINAL => {
+                let request_id = self.read_u32_be()?;
+                let collection = CollectionId::new(self.read_u32_be()?);
+                // `command`, `cwd`, `env` follow the standard
+                // `0/1`-tagged `Option` convention. See SPEC §7.2 / §10.1
+                // (phux-4li.10) and the encoder symmetry in `frame.rs`.
+                let command = decode_optional_string_list(self)?;
+                let cwd = decode_optional_str(self)?.map(str::to_owned);
+                let env = decode_optional_env(self)?;
+                FrameKind::SpawnTerminal {
+                    request_id,
+                    collection,
+                    command,
+                    cwd,
+                    env,
+                }
+            }
+            TYPE_TERMINAL_SPAWNED => {
+                let request_id = self.read_u32_be()?;
+                let result = decode_spawn_result(self)?;
+                FrameKind::TerminalSpawned { request_id, result }
+            }
+            TYPE_TERMINAL_CLOSED => {
+                let terminal_id = decode_terminal_id(self)?;
+                let exit_status = decode_optional_i32(self)?;
+                FrameKind::TerminalClosed {
+                    terminal_id,
+                    exit_status,
+                }
+            }
+            TYPE_TERMINAL_RESIZE => {
+                let terminal_id = decode_terminal_id(self)?;
+                let cols = self.read_u16_be()?;
+                let rows = self.read_u16_be()?;
+                FrameKind::TerminalResize {
+                    terminal_id,
+                    cols,
+                    rows,
+                }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
             // (`TerminalEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.)

@@ -16,7 +16,9 @@ use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, Scope, ViewportInfo};
+use phux_protocol::wire::frame::{
+    AttachTarget, ErrorCode, FrameKind, Scope, SpawnError, SpawnResult, ViewportInfo,
+};
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
@@ -707,6 +709,98 @@ fn snap_metadata_keys_populated() {
             "phux.tui.layout/v1".to_owned(),
             "phux.tui.window_order/v1".to_owned(),
         ],
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// L1 Terminal lifecycle frames — SPEC §7.2 / §10.1 (phux-4li.10).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_spawn_terminal_minimal() {
+    // The minimum SPAWN_TERMINAL: request_id, default collection, every
+    // optional field absent. Reads as "spawn the server's default shell
+    // in its default cwd, inheriting its env."
+    let frame = FrameKind::SpawnTerminal {
+        request_id: 0x0000_0001,
+        collection: CollectionId::new(1),
+        command: None,
+        cwd: None,
+        env: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_spawn_terminal_full() {
+    // All optional fields populated; exercises the env-pair encoding and
+    // length-prefixed command list.
+    let frame = FrameKind::SpawnTerminal {
+        request_id: 0x0000_0002,
+        collection: CollectionId::new(1),
+        command: Some(vec!["zsh".to_owned(), "-i".to_owned()]),
+        cwd: Some("/home/u/src".to_owned()),
+        env: Some(vec![
+            ("TERM".to_owned(), "xterm-256color".to_owned()),
+            ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
+        ]),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_spawned_ok() {
+    let frame = FrameKind::TerminalSpawned {
+        request_id: 0x0000_0001,
+        result: SpawnResult::Ok(TerminalId::local(0x0000_002A)),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_spawned_err_collection_not_found() {
+    let frame = FrameKind::TerminalSpawned {
+        request_id: 0x0000_0007,
+        result: SpawnResult::Err(SpawnError::CollectionNotFound),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_spawned_err_spawn_failed() {
+    let frame = FrameKind::TerminalSpawned {
+        request_id: 0x0000_0008,
+        result: SpawnResult::Err(SpawnError::SpawnFailed("no pty available".to_owned())),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_closed_with_exit_code() {
+    let frame = FrameKind::TerminalClosed {
+        terminal_id: TerminalId::local(0x0000_002A),
+        exit_status: Some(0),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_closed_signal_unknown() {
+    // `exit_status = None` covers "killed by signal / unknown cause".
+    let frame = FrameKind::TerminalClosed {
+        terminal_id: TerminalId::local(0x0000_002A),
+        exit_status: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_terminal_resize_standard() {
+    let frame = FrameKind::TerminalResize {
+        terminal_id: TerminalId::local(0x0000_002A),
+        cols: 80,
+        rows: 24,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
