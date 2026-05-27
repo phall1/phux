@@ -64,7 +64,7 @@ fn arb_split_dir() -> impl Strategy<Value = SplitDir> {
 /// Bounded recursion: at most depth 4 keeps prop-test work tractable while
 /// still exercising recursive split-tree encoding/decoding.
 fn arb_layout_node() -> impl Strategy<Value = LayoutNode> {
-    let leaf = any::<u32>().prop_map(|id| LayoutNode::Leaf(TerminalId::new(id)));
+    let leaf = any::<u32>().prop_map(|id| LayoutNode::Leaf(TerminalId::local(id)));
     leaf.prop_recursive(4, 32, 2, |inner| {
         (arb_split_dir(), 0.0001f32..0.9999f32, inner.clone(), inner).prop_map(
             |(dir, ratio, left, right)| LayoutNode::Split {
@@ -116,7 +116,7 @@ fn arb_window_info() -> impl Strategy<Value = WindowInfo> {
         .prop_map(|(id, session_id, index, name, active_pane, layout)| {
             WindowInfo::new(WindowId::new(id), SessionId::new(session_id), name)
                 .with_index(index)
-                .with_active_pane(active_pane.map(TerminalId::new))
+                .with_active_pane(active_pane.map(TerminalId::local))
                 .with_layout(layout)
         })
 }
@@ -131,7 +131,7 @@ fn arb_pane_info() -> impl Strategy<Value = TerminalInfo> {
         proptest::option::of(".{0,32}"),
     )
         .prop_map(|(id, window_id, cols, rows, title, cwd)| {
-            TerminalInfo::new(TerminalId::new(id), WindowId::new(window_id), cols, rows)
+            TerminalInfo::new(TerminalId::local(id), WindowId::new(window_id), cols, rows)
                 .with_title(title)
                 .with_cwd(cwd)
         })
@@ -170,7 +170,18 @@ fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
         any::<u64>().prop_map(|nonce| FrameKind::Ping { nonce }),
         Just(FrameKind::Detach),
         Just(FrameKind::Detached),
-        any::<u32>().prop_map(|terminal_id| FrameKind::Bell { terminal_id }),
+        arb_terminal_id().prop_map(|terminal_id| FrameKind::Bell { terminal_id }),
+    ]
+}
+
+/// Strategy producing both `Local` and `Satellite` variants of [`TerminalId`].
+/// v0.1 servers only emit `Local`, but v0.1 decoders MUST round-trip both
+/// shapes (the dispatch layer is what rejects `Satellite` ids with
+/// `UnsupportedSatelliteRoute`).
+fn arb_terminal_id() -> impl Strategy<Value = TerminalId> {
+    prop_oneof![
+        any::<u32>().prop_map(TerminalId::local),
+        (".{0,32}", any::<u32>()).prop_map(|(host, id)| TerminalId::satellite(host, id)),
     ]
 }
 
@@ -275,6 +286,7 @@ fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
         Just(ErrorCode::WindowNotFound),
         Just(ErrorCode::TerminalNotFound),
         Just(ErrorCode::ClientNotFound),
+        Just(ErrorCode::UnsupportedSatelliteRoute),
         Just(ErrorCode::InvalidCommand),
         Just(ErrorCode::PermissionDenied),
         Just(ErrorCode::ResourceExhausted),
@@ -318,7 +330,7 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_output(
-        terminal_id in any::<u32>(),
+        terminal_id in arb_terminal_id(),
         seq in any::<u64>(),
         bytes in arb_vt_bytes(),
     ) {
@@ -332,14 +344,14 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_snapshot(
-        terminal_id in any::<u32>(),
+        terminal_id in arb_terminal_id(),
         cols in any::<u16>(),
         rows in any::<u16>(),
         vt_replay_bytes in arb_vt_bytes(),
         scrollback_bytes in proptest::option::of(arb_vt_bytes()),
     ) {
         let frame = FrameKind::TerminalSnapshot {
-            terminal_id: TerminalId::new(terminal_id),
+            terminal_id,
             cols,
             rows,
             vt_replay_bytes,
@@ -382,7 +394,7 @@ fn ping_round_trip() {
 #[test]
 fn pane_output_round_trip_hello_world() {
     let frame = FrameKind::TerminalOutput {
-        terminal_id: 1,
+        terminal_id: TerminalId::local(1),
         seq: 0,
         bytes: b"hello world\r\n".to_vec(),
     };
@@ -562,7 +574,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_key(terminal_id in any::<u32>(), event in arb_key_event()) {
+    fn roundtrip_input_key(terminal_id in arb_terminal_id(), event in arb_key_event()) {
         let frame = FrameKind::InputKey { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -572,7 +584,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_mouse(terminal_id in any::<u32>(), event in arb_mouse_event()) {
+    fn roundtrip_input_mouse(terminal_id in arb_terminal_id(), event in arb_mouse_event()) {
         let frame = FrameKind::InputMouse { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -582,7 +594,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_focus(terminal_id in any::<u32>(), event in arb_focus_event()) {
+    fn roundtrip_input_focus(terminal_id in arb_terminal_id(), event in arb_focus_event()) {
         let frame = FrameKind::InputFocus { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -592,7 +604,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_input_paste(terminal_id in any::<u32>(), event in arb_paste_event()) {
+    fn roundtrip_input_paste(terminal_id in arb_terminal_id(), event in arb_paste_event()) {
         let frame = FrameKind::InputPaste { terminal_id, event };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -627,7 +639,7 @@ proptest! {
 
     #[test]
     fn roundtrip_pane_info(info in arb_pane_info()) {
-        let snap = SessionSnapshot::new(SessionId::new(0), info.window_id, info.id)
+        let snap = SessionSnapshot::new(SessionId::new(0), info.window_id, info.id.clone())
             .with_panes(vec![info]);
         let frame = FrameKind::Attached { snapshot: snap, initial_client_id: ClientId::new(0) };
         let mut buf = BytesMut::new();
@@ -668,7 +680,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_bell(terminal_id in any::<u32>()) {
+    fn roundtrip_bell(terminal_id in arb_terminal_id()) {
         let frame = FrameKind::Bell { terminal_id };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -702,7 +714,7 @@ proptest! {
     }
 
     #[test]
-    fn roundtrip_frame_ack(terminal_id in any::<u32>(), seq in any::<u64>()) {
+    fn roundtrip_frame_ack(terminal_id in arb_terminal_id(), seq in any::<u64>()) {
         let frame = FrameKind::FrameAck { terminal_id, seq };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -752,6 +764,8 @@ fn attach_unknown_target_tag_is_rejected() {
 #[test]
 fn input_focus_unknown_kind_is_rejected() {
     let mut body = vec![0x14u8];
+    // TerminalId::Local { id: 0 } — tag byte 0x00 followed by the u32 id.
+    body.push(0x00);
     body.extend_from_slice(&0u32.to_be_bytes());
     body.push(0xAB);
 
@@ -837,6 +851,7 @@ fn error_code_wire_values_match_spec() {
     assert_eq!(ErrorCode::WindowNotFound.as_wire(), 103);
     assert_eq!(ErrorCode::TerminalNotFound.as_wire(), 104);
     assert_eq!(ErrorCode::ClientNotFound.as_wire(), 105);
+    assert_eq!(ErrorCode::UnsupportedSatelliteRoute.as_wire(), 106);
     assert_eq!(ErrorCode::InvalidCommand.as_wire(), 200);
     assert_eq!(ErrorCode::PermissionDenied.as_wire(), 201);
     assert_eq!(ErrorCode::ResourceExhausted.as_wire(), 202);
@@ -846,7 +861,7 @@ fn error_code_wire_values_match_spec() {
 #[test]
 fn bell_round_trip() {
     let frame = FrameKind::Bell {
-        terminal_id: 0x1234_5678,
+        terminal_id: TerminalId::local(0x1234_5678),
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -861,31 +876,45 @@ fn bell_round_trip() {
 // -----------------------------------------------------------------------------
 
 fn encode_split_with_ratio(ratio: f32) -> Vec<u8> {
-    let mut body = vec![0x81u8];
+    // Hand-roll an ATTACHED frame whose single WindowInfo carries a Split
+    // node with `ratio`. The shape mirrors `info::encode_session_snapshot`
+    // exactly — keep this in sync when the wire shape changes.
+    let mut body = vec![0x81u8]; // TYPE_ATTACHED
 
+    // sessions: empty list
     body.extend_from_slice(&0u32.to_be_bytes());
+    // windows: one item
     body.extend_from_slice(&1u32.to_be_bytes());
 
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.extend_from_slice(&0u16.to_be_bytes());
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.push(b'w');
-    body.push(0);
-    body.push(1);
-    body.push(1);
-    body.push(0);
+    // WindowInfo
+    body.extend_from_slice(&1u32.to_be_bytes()); // id
+    body.extend_from_slice(&1u32.to_be_bytes()); // session_id
+    body.extend_from_slice(&0u16.to_be_bytes()); // index
+    body.extend_from_slice(&1u32.to_be_bytes()); // name length
+    body.push(b'w'); // name bytes
+    body.push(0); // active_pane: None
+    body.push(1); // layout: Some
+    body.push(1); // LayoutNode::Split
+    body.push(0); // SplitDir::Horizontal
     body.extend_from_slice(&ratio.to_be_bytes());
+    // Left leaf: LAYOUT_TAG_LEAF=0, then TerminalId::Local { id: 1 }
     body.push(0);
+    body.push(0); // TERMINAL_ID_TAG_LOCAL
     body.extend_from_slice(&1u32.to_be_bytes());
+    // Right leaf: LAYOUT_TAG_LEAF=0, then TerminalId::Local { id: 2 }
     body.push(0);
+    body.push(0); // TERMINAL_ID_TAG_LOCAL
     body.extend_from_slice(&2u32.to_be_bytes());
 
+    // panes: empty list
     body.extend_from_slice(&0u32.to_be_bytes());
-    body.extend_from_slice(&0u32.to_be_bytes());
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.extend_from_slice(&0u32.to_be_bytes());
+    // focused_session, focused_window, focused_pane (tagged TerminalId)
+    body.extend_from_slice(&0u32.to_be_bytes()); // focused_session
+    body.extend_from_slice(&0u32.to_be_bytes()); // focused_window
+    body.push(0); // TERMINAL_ID_TAG_LOCAL
+    body.extend_from_slice(&1u32.to_be_bytes()); // focused_pane id
 
+    // initial_client_id
     body.extend_from_slice(&0u32.to_be_bytes());
 
     let mut bytes = vec![];

@@ -60,6 +60,10 @@ fn drain<T>(rx: &mut mpsc::Receiver<T>) -> Vec<T> {
 }
 
 /// Walk an `Outbound` slice and pull out the `TerminalOutput` frames.
+///
+/// The `terminal_id` is flattened to its `Local` `u32` for the tests'
+/// convenience; v0.1 servers only emit `Local` ids so the unwrap is
+/// safe under these scenarios.
 fn terminal_outputs(items: &[Outbound]) -> Vec<(u32, u64, &[u8])> {
     items
         .iter()
@@ -68,7 +72,11 @@ fn terminal_outputs(items: &[Outbound]) -> Vec<(u32, u64, &[u8])> {
                 terminal_id,
                 seq,
                 bytes,
-            }) => Some((*terminal_id, *seq, bytes.as_slice())),
+            }) => Some((
+                terminal_id.local_id().expect("v0.1 local id"),
+                *seq,
+                bytes.as_slice(),
+            )),
             _ => None,
         })
         .collect()

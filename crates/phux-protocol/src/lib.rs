@@ -37,12 +37,17 @@ pub mod caps;
 pub mod ids;
 
 pub use caps::ColorSupport;
-pub use ids::{ClientId, FrameId, SessionId, TerminalId, WindowId};
+pub use ids::{ClientId, FrameId, SatelliteHost, SessionId, TerminalId, WindowId};
 
 /// Protocol version this crate implements.
+///
+/// Bumped from `0.1.0` to `0.2.0` in phux-vp0.4: [`TerminalId`] becomes a
+/// tagged union (`Local` / `Satellite`) per ADR-0016, which prepends a
+/// 1-byte tag to every `TerminalId` field on the wire. Pre-1.0 wire-
+/// breaking changes bump the minor.
 pub const PROTOCOL_VERSION: Version = Version {
     major: 0,
-    minor: 1,
+    minor: 2,
     patch: 0,
 };
 
