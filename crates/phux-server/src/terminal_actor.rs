@@ -32,12 +32,18 @@
 //! would also work but at the cost of a full clone per subscriber.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use bytes::Bytes;
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{
+    RenderState, Terminal, TerminalOptions,
+    render::{CursorVisualStyle, Dirty, RowIterator, Snapshot},
+    terminal::Mode,
+};
+use phux_protocol::ClientId;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -50,6 +56,154 @@ use crate::input::{
     PerTerminalPasteEncoder,
 };
 use crate::state::TerminalInput;
+
+/// Snapshot of the live `Terminal`'s cursor + DEC mode bits captured at
+/// the moment a consumer is brought up-to-date.
+///
+/// Captured via ATTACH today; via `FRAME_ACK` in phux-q0e.4. The
+/// state-sync tick driver (phux-q0e.3) compares this against the live
+/// terminal's current state to decide whether the per-tick incremental
+/// synthesis must re-emit the cursor placement + DEC modes that
+/// `SnapshotSynthesizer::synthesize` would emit at the tail of a
+/// from-empty snapshot.
+///
+/// The set tracked here mirrors the modes that today's
+/// `SnapshotSynthesizer::synthesize` re-emits at the end of a snapshot
+/// (`BRACKETED_PASTE`, `FOCUS_EVENT`, `ALT_SCREEN_LEGACY`) plus the
+/// cursor placement/visibility/style read off the `RenderState::Snapshot`.
+/// New mode bits that synthesize starts re-emitting should be added here
+/// in lock-step.
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "DEC mode bits are independent flags; collapsing them into a bitfield obscures the per-flag mapping to `Mode::*` constants"
+)]
+pub struct LastAckedCursorMode {
+    /// Cursor column (zero-based viewport coords). `None` when the
+    /// cursor is not viewport-resident (off-screen due to scrollback).
+    pub cursor_x: Option<u16>,
+    /// Cursor row (zero-based viewport coords).
+    pub cursor_y: Option<u16>,
+    /// `DECTCEM` (DEC private mode 25): cursor visibility.
+    pub cursor_visible: bool,
+    /// `DECSCUSR` shape.
+    pub cursor_visual_style: CursorVisualStyle,
+    /// `DECSCUSR` blink flag.
+    pub cursor_blinking: bool,
+    /// `BRACKETED_PASTE` (DEC private mode 2004).
+    pub bracketed_paste: bool,
+    /// `FOCUS_EVENT` (DEC private mode 1004).
+    pub focus_event: bool,
+    /// `ALT_SCREEN_LEGACY` (DEC private mode 47).
+    pub alt_screen_legacy: bool,
+}
+
+impl LastAckedCursorMode {
+    /// Capture the live terminal's cursor + DEC mode state into a fresh
+    /// `LastAckedCursorMode`. Querying every field; libghostty FFI errors
+    /// degrade to safe defaults (cursor invisible, modes off) so a
+    /// transient FFI failure doesn't kill the actor.
+    fn capture(terminal: &Terminal<'_, '_>, snapshot: &Snapshot<'_, '_>) -> Self {
+        let (cursor_x, cursor_y) = match snapshot.cursor_viewport() {
+            Ok(Some(v)) => (Some(v.x), Some(v.y)),
+            Ok(None) | Err(_) => (None, None),
+        };
+        Self {
+            cursor_x,
+            cursor_y,
+            cursor_visible: snapshot.cursor_visible().unwrap_or(false),
+            cursor_visual_style: snapshot
+                .cursor_visual_style()
+                .unwrap_or(CursorVisualStyle::Block),
+            cursor_blinking: snapshot.cursor_blinking().unwrap_or(false),
+            bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false),
+            focus_event: terminal.mode(Mode::FOCUS_EVENT).unwrap_or(false),
+            alt_screen_legacy: terminal.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false),
+        }
+    }
+}
+
+/// Per-consumer cached reference state for ADR-0018 lazy state
+/// synchronization. One per `(TerminalActor, attached ClientId)`.
+///
+/// Holds the libghostty `RenderState` that tracks "what cells this
+/// consumer has already seen" (so the tick driver in phux-q0e.3 can
+/// walk only the rows that changed since the last per-consumer
+/// snapshot), the `seq` of the last frame this consumer `ACK`ed (driven
+/// by phux-q0e.4's `FRAME_ACK` handler), and the cursor/mode state
+/// captured at the same instant.
+///
+/// `Drop` runs the libghostty `ghostty_render_state_free` via
+/// `RenderState`'s own destructor — no explicit cleanup needed in
+/// DETACH beyond removing the entry from the actor's map.
+///
+/// `!Send + !Sync` because `RenderState` is `!Send + !Sync` (per the
+/// `libghostty-send-sync` bd memory). Lives only inside the actor,
+/// which runs on the `LocalSet` thread that owns the `Terminal`.
+pub struct ConsumerSyncState {
+    /// Per-consumer dirty cache. Drives the diff walk in phux-q0e.3.
+    pub render_state: RenderState<'static>,
+    /// `FrameId` of the most recent `TERMINAL_OUTPUT` this consumer has
+    /// `ACK`ed. `0` means "no acks yet — the next emission is the only
+    /// thing this consumer has seen" (matches `FrameId::ZERO`'s "empty
+    /// initial frame" semantics).
+    pub last_acked_seq: u64,
+    /// Cursor + DEC mode bits captured at the last sync point. Used by
+    /// the tick driver to decide whether to re-emit cursor placement /
+    /// mode toggles in the incremental synthesis path. See
+    /// [`LastAckedCursorMode`] for the field set rationale.
+    pub last_cursor_mode: LastAckedCursorMode,
+}
+
+impl std::fmt::Debug for ConsumerSyncState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsumerSyncState")
+            .field("last_acked_seq", &self.last_acked_seq)
+            .field("last_cursor_mode", &self.last_cursor_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Request to register a new consumer with the actor.
+///
+/// Drives the ADR-0018 per-consumer state lifecycle. The caller is the
+/// runtime's ATTACH path, which has just installed the client in
+/// `ServerState`.
+///
+/// The actor allocates a fresh `RenderState`, primes it against the
+/// live `Terminal` (so the next incremental synthesis emits only
+/// deltas *from now*), captures the cursor + mode state, and stores
+/// the resulting [`ConsumerSyncState`] keyed by `client_id`. The reply
+/// fires once the entry is in place; the caller can then proceed to
+/// emit `TERMINAL_SNAPSHOT` (which brings the consumer to the same
+/// reference point this `RenderState` was primed against).
+#[derive(Debug)]
+pub struct ConsumerAttachRequest {
+    /// Identifier the actor will key the per-consumer state by. Must
+    /// match the `ClientId` the caller uses in subsequent
+    /// `ConsumerDetachRequest`s and `FRAME_ACK` routing.
+    pub client_id: ClientId,
+    /// Channel the actor uses to acknowledge the lifecycle insertion.
+    /// `Ok(())` on success; `Err(...)` if the per-consumer `RenderState`
+    /// could not be allocated. Dropping the receiver on the caller
+    /// side is benign — the actor uses `send().ok()`.
+    pub reply: oneshot::Sender<Result<(), libghostty_vt::Error>>,
+}
+
+/// Request to drop the per-consumer state for `client_id`.
+///
+/// Sent by the runtime's DETACH path (and the EOF cleanup path). Silent
+/// no-op if the consumer is not currently registered, matching
+/// `ServerState::detach`'s idempotent contract.
+#[derive(Debug)]
+pub struct ConsumerDetachRequest {
+    /// Identifier whose [`ConsumerSyncState`] entry to remove.
+    pub client_id: ClientId,
+    /// Fired once the entry has been removed (or was already absent).
+    /// The caller can use this to sequence later operations against
+    /// the actor; dropping the receiver is benign.
+    pub reply: oneshot::Sender<()>,
+}
 
 /// Default depth of the per-pane input mailbox.
 ///
@@ -105,6 +259,18 @@ pub struct TerminalHandle {
     /// `phux-4hp`. The actor honours messages it receives (libghostty
     /// `Terminal::set_size`, PTY winsize ioctl).
     pub resize: mpsc::Sender<(u16, u16)>,
+    /// ADR-0018 per-consumer state-sync lifecycle (phux-q0e.2). The
+    /// runtime sends a [`ConsumerAttachRequest`] on each successful
+    /// ATTACH so the actor allocates the per-consumer `RenderState`
+    /// before the `TERMINAL_SNAPSHOT` goes out. Future state-sync work
+    /// (phux-q0e.3 tick driver, phux-q0e.4 `FRAME_ACK`) reads from the
+    /// resulting per-consumer state map.
+    pub consumer_attach: mpsc::Sender<ConsumerAttachRequest>,
+    /// Counterpart to [`Self::consumer_attach`]. The runtime sends
+    /// this on DETACH (and on the EOF cleanup path) to free the
+    /// per-consumer `RenderState`. Silent no-op if the consumer was
+    /// never attached.
+    pub consumer_detach: mpsc::Sender<ConsumerDetachRequest>,
     /// Pane viewport width in cells at construction time.
     pub cols: u16,
     /// Pane viewport height in cells at construction time.
@@ -133,6 +299,15 @@ pub struct TerminalActor {
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
     resize_rx: mpsc::Receiver<(u16, u16)>,
+    consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
+    consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
+    /// Per-consumer state-sync cache (ADR-0018, phux-q0e.2). Keyed by
+    /// the [`ClientId`] the runtime uses for subscription tracking in
+    /// [`crate::state::ServerState`]; entries are inserted by the
+    /// ATTACH handler and removed by DETACH. `!Send` because
+    /// `RenderState` is `!Send` — fine; the whole actor lives on the
+    /// `LocalSet` thread (ADR-0014).
+    consumer_states: HashMap<ClientId, ConsumerSyncState>,
     /// Bytes streaming in from the PTY reader thread. `None` when this
     /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
     /// branch becomes a no-op via `Option::as_mut`.
@@ -390,6 +565,10 @@ impl TerminalActor {
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (consumer_attach_tx, consumer_attach_rx) =
+            mpsc::channel::<ConsumerAttachRequest>(DEFAULT_INPUT_MAILBOX);
+        let (consumer_detach_tx, consumer_detach_rx) =
+            mpsc::channel::<ConsumerDetachRequest>(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
         let (exit_tx, exit_rx) = oneshot::channel::<()>();
         let bundle_token = token.clone();
@@ -411,6 +590,9 @@ impl TerminalActor {
             input_rx,
             snapshot_rx,
             resize_rx,
+            consumer_attach_rx,
+            consumer_detach_rx,
+            consumer_states: HashMap::new(),
             pty_rx,
             pty_tx,
             pty,
@@ -425,6 +607,8 @@ impl TerminalActor {
             snapshot: snapshot_tx,
             output: output_tx,
             resize: resize_tx,
+            consumer_attach: consumer_attach_tx,
+            consumer_detach: consumer_detach_tx,
             cols,
             rows,
         };
@@ -449,6 +633,76 @@ impl TerminalActor {
         let bundle = Self::new(cols, rows)?;
         bundle.actor.terminal.borrow_mut().vt_write(bytes);
         Ok(bundle)
+    }
+
+    /// Register `client_id` as an attached consumer (phux-q0e.2).
+    ///
+    /// Allocates a fresh `RenderState`, primes it against the live
+    /// terminal (`update` + manual `set_dirty(Clean)` walk), and stores
+    /// the resulting [`ConsumerSyncState`] in `consumer_states`.
+    ///
+    /// Why prime + clear: the runtime's ATTACH path emits a
+    /// `TERMINAL_SNAPSHOT` immediately after this call returns, which
+    /// brings the consumer's mirror Terminal up to the current
+    /// canonical state. The per-consumer `RenderState` must reflect
+    /// that same reference point — otherwise the first incremental
+    /// emission would treat every row as dirty and re-paint the screen
+    /// the snapshot just installed.
+    ///
+    /// Idempotent: re-attaching the same `client_id` (e.g. on a
+    /// runtime bug) overwrites the prior entry. The old `RenderState`
+    /// is dropped by `HashMap::insert`'s return-value drop, freeing
+    /// the underlying libghostty allocation.
+    fn register_consumer(&mut self, client_id: ClientId) -> Result<(), libghostty_vt::Error> {
+        let terminal = self.terminal.borrow();
+        let mut render_state = RenderState::new()?;
+        let last_cursor_mode = {
+            let snapshot = render_state.update(&terminal)?;
+            // Walk and clear per-row dirty bits, then clear the global
+            // bit, so the next incremental synthesis (phux-q0e.3)
+            // emits only deltas from *now*. We swallow the per-row
+            // set_dirty errors on the same rationale as
+            // `phux-client/src/attach/render.rs` (phux-l0t): the FFI
+            // dirty surface is best-effort; the row-set is enumerated
+            // unconditionally by the tick driver.
+            let mut row_iter_storage = RowIterator::new()?;
+            let mut row_iter = row_iter_storage.update(&snapshot)?;
+            while let Some(row) = row_iter.next() {
+                let _ = row.set_dirty(false);
+            }
+            let _ = snapshot.set_dirty(Dirty::Clean);
+            LastAckedCursorMode::capture(&terminal, &snapshot)
+        };
+        self.consumer_states.insert(
+            client_id,
+            ConsumerSyncState {
+                render_state,
+                last_acked_seq: 0,
+                last_cursor_mode,
+            },
+        );
+        Ok(())
+    }
+
+    /// Drop the per-consumer state for `client_id` if present
+    /// (phux-q0e.2). Silent no-op if absent — matches the idempotency
+    /// of `ServerState::detach`.
+    fn unregister_consumer(&mut self, client_id: ClientId) {
+        // `HashMap::remove` returns the entry; dropping it frees the
+        // libghostty `RenderState` via its `Drop` impl.
+        let _ = self.consumer_states.remove(&client_id);
+    }
+
+    /// Test-only: number of consumers currently registered.
+    #[cfg(test)]
+    pub fn consumer_count(&self) -> usize {
+        self.consumer_states.len()
+    }
+
+    /// Test-only: borrow the per-consumer state for `client_id`.
+    #[cfg(test)]
+    pub fn consumer_state(&self, client_id: ClientId) -> Option<&ConsumerSyncState> {
+        self.consumer_states.get(&client_id)
     }
 
     /// Synthesize a snapshot of the current `Terminal` state. Exposed
@@ -614,6 +868,10 @@ impl TerminalActor {
         clippy::too_many_lines,
         reason = "single select! loop; arms are short and inlined for locality"
     )]
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "select! macro expansion inflates the score; arms are individually small and locality wins over decomposition"
+    )]
     pub async fn run(mut self) {
         debug!(
             cols = self.cols,
@@ -722,6 +980,28 @@ impl TerminalActor {
 
                 Some((cols, rows)) = self.resize_rx.recv() => {
                     self.handle_resize(cols, rows);
+                }
+
+                Some(req) = self.consumer_attach_rx.recv() => {
+                    let ConsumerAttachRequest { client_id, reply } = req;
+                    let result = self.register_consumer(client_id);
+                    if let Err(err) = &result {
+                        warn!(
+                            ?client_id,
+                            error = %err,
+                            "consumer attach: RenderState allocation failed",
+                        );
+                    } else {
+                        trace!(?client_id, "consumer attached: per-consumer RenderState primed");
+                    }
+                    let _ = reply.send(result);
+                }
+
+                Some(req) = self.consumer_detach_rx.recv() => {
+                    let ConsumerDetachRequest { client_id, reply } = req;
+                    self.unregister_consumer(client_id);
+                    trace!(?client_id, "consumer detached: per-consumer RenderState freed");
+                    let _ = reply.send(());
                 }
 
                 else => break,
@@ -950,6 +1230,108 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
                     .await
                     .expect("actor did not exit within 500ms of parent cancel")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// phux-q0e.2: ATTACH allocates a per-consumer `RenderState` and
+    /// `register_consumer` stores it keyed by `ClientId`. Two attaches
+    /// land two entries; one detach removes only that entry; a second
+    /// detach of the same id is a no-op.
+    #[test]
+    fn register_unregister_consumer_drives_lifecycle_map() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        assert_eq!(actor.consumer_count(), 0, "starts empty");
+
+        let a = ClientId(1);
+        let b = ClientId(2);
+        actor.register_consumer(a).expect("register a");
+        assert_eq!(actor.consumer_count(), 1);
+        actor.register_consumer(b).expect("register b");
+        assert_eq!(actor.consumer_count(), 2);
+
+        actor.unregister_consumer(a);
+        assert_eq!(actor.consumer_count(), 1, "one entry after first detach");
+        assert!(actor.consumer_state(a).is_none(), "a removed");
+        assert!(actor.consumer_state(b).is_some(), "b retained");
+
+        // Idempotent detach: re-detaching `a` is a no-op.
+        actor.unregister_consumer(a);
+        assert_eq!(actor.consumer_count(), 1);
+
+        actor.unregister_consumer(b);
+        assert_eq!(actor.consumer_count(), 0, "both removed");
+    }
+
+    /// phux-q0e.2: right after `register_consumer` returns, the
+    /// per-consumer state has `last_acked_seq == 0` (no `FRAME_ACK`s yet
+    /// — wired by phux-q0e.4) and the cursor/mode capture matches the
+    /// live terminal. The dirty-bit reset is a best-effort FFI call
+    /// (phux-l0t notes the libghostty surface is unreliable on
+    /// repeated updates); we assert the observable contract — the
+    /// `ConsumerSyncState` is in place and primed against the live
+    /// terminal — rather than the post-reset dirty value itself, which
+    /// the tick driver (phux-q0e.3) will re-read on its first tick.
+    #[test]
+    fn register_consumer_initial_state_matches_terminal() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        let client = ClientId(7);
+        actor.register_consumer(client).expect("register");
+
+        let state = actor.consumer_state(client).expect("state present");
+        assert_eq!(state.last_acked_seq, 0, "no acks yet");
+        // Seeded "hello" advances the cursor to (5, 0). The capture
+        // must reflect that — proves the RenderState was actually
+        // updated against the live terminal, not left blank.
+        assert_eq!(state.last_cursor_mode.cursor_x, Some(5));
+        assert_eq!(state.last_cursor_mode.cursor_y, Some(0));
+    }
+
+    /// phux-q0e.2: end-to-end across the actor's `select!` loop —
+    /// ATTACH then DETACH over the channels handle the lifecycle on
+    /// the same `LocalSet` thread the `Terminal` lives on. Drives the
+    /// actor through `spawn_local`, so the `!Send` `RenderState`
+    /// stays on its owning thread.
+    #[tokio::test(flavor = "current_thread")]
+    async fn consumer_attach_detach_round_trip_over_channels() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new(20, 5).expect("new");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                let client = ClientId(42);
+                let (tx_a, rx_a) = oneshot::channel();
+                handle
+                    .consumer_attach
+                    .send(ConsumerAttachRequest {
+                        client_id: client,
+                        reply: tx_a,
+                    })
+                    .await
+                    .expect("send attach");
+                rx_a.await.expect("attach reply").expect("attach succeeded");
+
+                let (tx_d, rx_d) = oneshot::channel();
+                handle
+                    .consumer_detach
+                    .send(ConsumerDetachRequest {
+                        client_id: client,
+                        reply: tx_d,
+                    })
+                    .await
+                    .expect("send detach");
+                rx_d.await.expect("detach reply");
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
                     .expect("actor task panicked");
             })
             .await;

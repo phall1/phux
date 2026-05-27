@@ -1350,11 +1350,15 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
+        let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
+        let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
             output: output_tx,
             resize: resize_tx,
+            consumer_attach: consumer_attach_tx,
+            consumer_detach: consumer_detach_tx,
             cols: 80,
             rows: 24,
         };
@@ -1448,11 +1452,15 @@ mod tests {
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
                     let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
                     let (resize_tx, _resize_rx) = mpsc::channel::<(u16, u16)>(8);
+                    let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
+                    let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
                         output: output_tx,
                         resize: resize_tx,
+                        consumer_attach: consumer_attach_tx,
+                        consumer_detach: consumer_detach_tx,
                         cols: 80,
                         rows: 24,
                     };
