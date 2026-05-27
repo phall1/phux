@@ -28,6 +28,8 @@ Nygard's template][nygard].
 | [0016](./0016-terminal-id-as-wire-primary.md) | `TerminalId` is the wire identity for a managed terminal; `PaneId` is removed | Accepted |
 | [0017](./0017-tui-not-protocol-privileged.md) | The reference TUI is one consumer among several, with no protocol-level privileges | Accepted (refines [0010](./0010-frontend-agnostic-tmux-cc-reserved.md)) |
 | [0018](./0018-lazy-state-synchronization.md) | The wire is lazy state synchronization of libghostty Terminal state; ADR-0013's pass-through bytes is the degenerate case | Accepted (builds on [0013](./0013-libghostty-bytes-on-wire.md)) |
+| [0019](./0019-tui-multi-pane-rendering.md) | Multi-pane TUI rendering: layout persistence, wire shape, and chrome | Accepted |
+| [0020](./0020-layered-render.md) | Layered render: ratatui chrome over libghostty pane interiors | Accepted |
 
 ## When to write an ADR
 
