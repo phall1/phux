@@ -16,8 +16,8 @@ use std::time::SystemTime;
 use phux_protocol::ids::TerminalId;
 
 use super::driver::PaneSlot;
-use super::status_bar::{StatusBarPainter, make_context};
 use crate::layout::LayoutState;
+use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 
 /// Render one pane into its outer-viewport sub-Rect.
 ///

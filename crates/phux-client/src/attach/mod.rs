@@ -41,8 +41,12 @@ pub mod paint;
 pub mod reflow;
 pub mod render;
 pub mod server_frame;
-pub mod status_bar;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
 pub use input::DETACH_CHORD_DESCRIPTION;
-pub use status_bar::{Position, StatusBarPainter, make_context};
+// Status bar lives under `crate::render::chrome::status_bar` post
+// phux-5ke.2 (ADR-0020). Re-exported here so external callers (the
+// `phux-client::attach::status_bar::*` integration test path included)
+// keep working without changing their imports.
+pub use crate::render::chrome::status_bar;
+pub use crate::render::chrome::status_bar::{Position, StatusBarPainter, make_context};

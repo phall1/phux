@@ -43,9 +43,9 @@ use super::input_dispatch::{DispatchCtx, dispatch_input_events, encode_layout_or
 use super::paint::{paint_bar_after_pane, paint_full_frame, pane_viewport};
 use super::render::{TerminalRenderer, write_reset};
 use super::server_frame::handle_server_frame;
-use super::status_bar::{Position, StatusBarPainter};
 use crate::layout::LayoutState;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
+use crate::render::chrome::status_bar::{Position, StatusBarPainter};
 
 /// One pane's mirror: the libghostty Terminal that ingests
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
