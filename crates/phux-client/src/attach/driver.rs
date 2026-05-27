@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -986,6 +987,13 @@ impl RawModeGuard {
         // confuse cleanup.
         ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
 
+        // Park a clone of the original Termios in process-global storage
+        // so the signal-handler arms and the panic hook (which can't
+        // reach the instance field) can perform a true restore rather
+        // than a best-effort re-cook. The instance field remains the
+        // Drop-path source of truth; the global is a snapshot.
+        save_termios_snapshot(original.clone());
+
         Ok(Self {
             original_termios: original,
         })
@@ -997,6 +1005,13 @@ impl Drop for RawModeGuard {
         // Best-effort restore. We deliberately swallow errors — the
         // process is on its way out and a panic in Drop is worse than
         // a slightly-wedged terminal.
+        //
+        // Clear the global snapshot before restoring from the instance
+        // field. Either source restores the same Termios (the global is
+        // a clone of `original_termios`); the clear prevents a later
+        // install from inheriting a stale snapshot if the next
+        // `install_with_stdout` errors out before reaching the save.
+        let _ = take_termios_snapshot();
         let stdin = io::stdin();
         let _ =
             rustix::termios::tcsetattr(stdin.as_fd(), OptionalActions::Now, &self.original_termios);
@@ -1014,7 +1029,55 @@ impl Drop for RawModeGuard {
 /// during the pre-handshake stage (no alt-screen, no raw mode) does NOT
 /// emit a spurious leave sequence that the cooked terminal would print
 /// as garbage.
+///
+/// Kept deliberately separate from [`SAVED_TERMIOS`]: alt-screen ENTER
+/// and the termios flip happen at different points in
+/// [`RawModeGuard::install_with_stdout`] (termios first, then alt
+/// screen). Tying the two together via a single state variable would
+/// couple two independent concerns and risks leaving the alt screen
+/// when we should restore termios (or vice versa) on a half-failed
+/// install. Two cheap flags is the right factoring.
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Snapshot of the outer terminal's pre-raw Termios, parked here so
+/// the signal-handler arms in `main_loop` and the panic hook installed
+/// by [`install_panic_hook_once`] can perform a true `tcsetattr`
+/// restore — rather than a best-effort "force ICANON|ECHO|ISIG re-cook"
+/// — when [`RawModeGuard::drop`] is unreachable (process exits via
+/// `std::process::exit`, which skips Drop).
+///
+/// Signal-safety: the signal arms in `main_loop` are tokio
+/// `signal::unix::Signal::recv()` futures, which deliver on the tokio
+/// runtime thread — NOT inside a POSIX async-signal-handler context.
+/// The panic hook runs on the panicking thread after unwind has begun,
+/// also normal Rust context. So acquiring this `Mutex` is safe in both
+/// callers; we are explicitly NOT in a context that would deadlock on
+/// re-entrant lock acquisition.
+///
+/// Written by [`RawModeGuard::install_with_stdout`] (clone of the
+/// instance's `original_termios`) and cleared by [`RawModeGuard::drop`]
+/// and the signal-restore path. The instance field on `RawModeGuard`
+/// remains the Drop-path source of truth; this global is a snapshot
+/// for the paths that can't reach the instance.
+static SAVED_TERMIOS: Mutex<Option<Termios>> = Mutex::new(None);
+
+/// Park a Termios snapshot in [`SAVED_TERMIOS`]. Errors on lock
+/// poisoning are swallowed: a poisoned lock means another thread
+/// panicked while holding it, in which case we still want subsequent
+/// installs to succeed and the most we lose is the signal-arm's true
+/// restore (fall-back path covers it).
+fn save_termios_snapshot(t: Termios) {
+    if let Ok(mut slot) = SAVED_TERMIOS.lock() {
+        *slot = Some(t);
+    }
+}
+
+/// Take the Termios snapshot out of [`SAVED_TERMIOS`], leaving `None`.
+/// Returns `None` if the lock is poisoned (signal-arm falls back to
+/// the re-cook path; Drop falls back to the instance field).
+fn take_termios_snapshot() -> Option<Termios> {
+    SAVED_TERMIOS.lock().ok().and_then(|mut slot| slot.take())
+}
 
 /// Whether [`install_panic_hook_once`] has already run. The panic hook
 /// is global to the process; we don't want a re-entrant install to
@@ -1048,18 +1111,32 @@ pub fn write_terminal_reset<W: Write>(out: &mut W) -> io::Result<()> {
 
 /// Best-effort terminal reset from inside a signal handler arm. This
 /// is the SIGINT/SIGTERM/SIGHUP path: termios goes back to the saved
-/// state (recovered from the live stdin tty), and the alt-screen
-/// sequence is left if we entered one. Errors are swallowed — the
-/// process is on its way out.
+/// state (recovered from [`SAVED_TERMIOS`] when populated; otherwise a
+/// re-cook fall-back), and the alt-screen sequence is left if we
+/// entered one. Errors are swallowed — the process is on its way out.
+///
+/// Behaviour change for phux-2r7 (was best-effort re-cook only,
+/// committed in 63dc6ff): when [`RawModeGuard`] has parked a snapshot,
+/// we now do a true `tcsetattr` restore to the user's pre-attach
+/// flags, preserving customisations like IUTF8 / VEOF that the re-cook
+/// would clobber. The manual SIGINT-during-attach repro that motivated
+/// the original fix still passes; verifying the precise-restore
+/// behaviour requires a live PTY and is not unit-testable from here.
 fn terminal_reset_on_signal() {
-    // Restore termios. We can't reach the `RawModeGuard`'s captured
-    // `original_termios` from here without a global; instead we ask
-    // the kernel to re-cook the tty by setting ICANON|ECHO|ISIG back.
-    // That's not a perfect restore (it ignores user-customised flags
-    // like IUTF8 / IUCLC / VEOF), but it's close enough that the user
-    // can type `reset` if they want a precise restore. The important
-    // bit is that the alt-screen + cursor-hide is undone.
-    if let Ok(mut termios) = rustix::termios::tcgetattr(io::stdin().as_fd()) {
+    let stdin = io::stdin();
+    let fd = stdin.as_fd();
+    if let Some(saved) = take_termios_snapshot() {
+        // True restore: the snapshot is exactly what `tcgetattr`
+        // returned before we flipped into raw mode.
+        let _ = rustix::termios::tcsetattr(fd, OptionalActions::Now, &saved);
+    } else if let Ok(mut termios) = rustix::termios::tcgetattr(fd) {
+        // Fall-back re-cook for the (rare) case where the snapshot is
+        // missing — e.g. signal fired before `install_with_stdout`
+        // reached the save, or the lock was poisoned. We force the
+        // canonical-mode flags back on so the cooked shell at least
+        // shows what the user types; non-default flags are NOT
+        // preserved on this path and the user may want to run `reset`
+        // after.
         termios.local_modes.insert(
             LocalModes::ECHO
                 | LocalModes::ECHONL
@@ -1075,7 +1152,7 @@ fn terminal_reset_on_signal() {
         termios
             .output_modes
             .insert(rustix::termios::OutputModes::OPOST);
-        let _ = rustix::termios::tcsetattr(io::stdin().as_fd(), OptionalActions::Now, &termios);
+        let _ = rustix::termios::tcsetattr(fd, OptionalActions::Now, &termios);
     }
     let mut out = io::stdout().lock();
     let _ = write_terminal_reset(&mut out);
@@ -1148,5 +1225,70 @@ mod tests {
         let vp = current_viewport_or_default();
         // Cell dims fit in u16 by construction; just exercise the path.
         let _ = (vp.cols, vp.rows);
+    }
+
+    /// Borrow a real `Termios` from `/dev/tty` so tests that need to
+    /// exercise [`save_termios_snapshot`] / [`take_termios_snapshot`]
+    /// can run with a plausible value. Returns `None` when the test
+    /// process has no controlling TTY (e.g. some CI sandboxes); the
+    /// caller skips in that case.
+    fn try_borrow_real_termios() -> Option<Termios> {
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")
+            .ok()?;
+        rustix::termios::tcgetattr(tty.as_fd()).ok()
+    }
+
+    /// The save/take helpers behind [`SAVED_TERMIOS`] round-trip a
+    /// snapshot exactly once: after a save, the next take returns
+    /// `Some(_)`; subsequent takes return `None`. This is the unit
+    /// surface that backs the signal-arm true-restore path
+    /// (phux-2r7). The signal arm itself is exercised by a manual
+    /// SIGINT during an attach session — see the comment on
+    /// [`terminal_reset_on_signal`].
+    ///
+    /// `SAVED_TERMIOS` is a process-global; we clear at both ends to
+    /// be hygienic across the in-test serial execution model.
+    #[test]
+    fn saved_termios_round_trip() {
+        let Some(t) = try_borrow_real_termios() else {
+            // No controlling TTY in this test process; nothing to
+            // assert. The save/take helpers are still type-checked.
+            return;
+        };
+        // Pre-clean: another test (or a panic) may have left state.
+        let _ = take_termios_snapshot();
+        assert!(take_termios_snapshot().is_none());
+
+        save_termios_snapshot(t);
+        assert!(
+            take_termios_snapshot().is_some(),
+            "save then take must return the snapshot"
+        );
+        assert!(
+            take_termios_snapshot().is_none(),
+            "second take must be empty"
+        );
+    }
+
+    /// Documents the manual SIGINT repro that backs phux-2r7. The
+    /// signal-arm path can't be unit-tested without forking and
+    /// driving a real PTY; this `#[ignore]`-stub keeps the procedure
+    /// next to the code and surfaces in `cargo test -- --ignored` if
+    /// someone wires up an integration harness later.
+    #[test]
+    #[ignore = "manual: requires a live PTY and a SIGINT during attach"]
+    fn signal_arm_true_restore_manual_repro() {
+        // 1. `stty -a` in an outer shell; note `iutf8` / VEOF / etc.
+        // 2. `phux attach <session>` — driver enters raw mode + alt
+        //    screen; `RawModeGuard::install_with_stdout` parks the
+        //    pre-attach Termios in `SAVED_TERMIOS`.
+        // 3. In a sibling shell: `kill -INT <phux-pid>` (or hit Ctrl-C
+        //    if your outer shell forwards it without phux eating it).
+        // 4. `stty -a` again; ALL flags should match step (1). Before
+        //    phux-2r7, only ICANON|ECHO|ISIG round-tripped and custom
+        //    flags like `iutf8` were lost.
     }
 }
