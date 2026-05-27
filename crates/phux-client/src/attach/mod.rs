@@ -35,6 +35,7 @@ pub mod connection;
 pub mod driver;
 pub mod input;
 pub mod multi_pane;
+pub mod reflow;
 pub mod render;
 pub mod status_bar;
 
