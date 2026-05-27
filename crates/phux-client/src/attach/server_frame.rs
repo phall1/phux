@@ -14,9 +14,9 @@ use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
 use super::actions::{self, PendingSplit, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
-use super::status_bar::StatusBarPainter;
 use crate::layout::{self, LayoutState};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
+use crate::render::chrome::status_bar::StatusBarPainter;
 
 /// Outcome of processing a single server-to-client frame.
 ///
