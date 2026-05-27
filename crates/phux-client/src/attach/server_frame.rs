@@ -74,6 +74,12 @@ pub(super) fn handle_server_frame(
     overlay: &Overlay,
     pending_layout_request: Option<u32>,
     pending_splits: &mut HashMap<u32, PendingSplit>,
+    // phux-5ke.4: when `true` an overlay is on top; pane libghostty
+    // mirrors keep ingesting `vt_write` (per ADR-0013) but stdout
+    // flushes (render_at, bar paint, predict-overlay paint) are
+    // suppressed so the modal doesn't get scribbled over. The driver
+    // triggers a full repaint on overlay dismiss.
+    overlay_active: bool,
 ) -> Result<FrameOutcome, AttachError> {
     match frame {
         FrameKind::Attached {
@@ -156,27 +162,37 @@ pub(super) fn handle_server_frame(
                 // A fresh snapshot replaces the world — drop any
                 // outstanding predictions and resize the predict layer.
                 predict.set_viewport(cols, rows);
-                let mut stdout = io::stdout().lock();
-                let _ = slot.renderer.render_at(&slot.terminal, &mut stdout, origin);
-                if let Some((row, col)) = slot.renderer.last_cursor() {
-                    predict.set_cursor(row, col);
+                // phux-5ke.4: when an overlay is up, suppress the
+                // stdout flush. The libghostty mirror was already
+                // updated above via `vt_write`; this branch is just
+                // the outbound emit, which would scribble over the
+                // modal. On dismiss the driver triggers a full
+                // repaint and the user sees the latest content.
+                if overlay_active {
+                    let _ = overlay;
+                } else {
+                    let mut stdout = io::stdout().lock();
+                    let _ = slot.renderer.render_at(&slot.terminal, &mut stdout, origin);
+                    if let Some((row, col)) = slot.renderer.last_cursor() {
+                        predict.set_cursor(row, col);
+                    }
+                    // Snapshot is authoritative — predict-overlay only
+                    // repaints if new keystrokes arrived after the
+                    // snapshot was issued and before reconcile cleared
+                    // the queue. In v0 we simply leave the queue empty.
+                    let _ = overlay;
+                    // phux-nz4.5: the pane renderer just wrote to the
+                    // bottom row of its own grid; force a status-bar
+                    // repaint over it.
+                    let focused_cursor = slot.renderer.last_cursor();
+                    paint_bar_after_pane(
+                        status_bar,
+                        &mut stdout,
+                        viewport_dims,
+                        session_name,
+                        focused_cursor,
+                    );
                 }
-                // Snapshot is authoritative — overlay only repaints if
-                // new keystrokes arrived after the snapshot was issued
-                // and before reconcile cleared the queue. In v0 we
-                // simply leave the queue empty.
-                let _ = overlay;
-                // phux-nz4.5: the pane renderer just wrote to the
-                // bottom row of its own grid; force a status-bar
-                // repaint over it.
-                let focused_cursor = slot.renderer.last_cursor();
-                paint_bar_after_pane(
-                    status_bar,
-                    &mut stdout,
-                    viewport_dims,
-                    session_name,
-                    focused_cursor,
-                );
             }
             Ok(FrameOutcome::default())
         }
@@ -200,7 +216,10 @@ pub(super) fn handle_server_frame(
                 };
                 slot.terminal.vt_write(&bytes);
             }
-            if is_focused && let Some(fid) = focused_pane.as_ref() {
+            if is_focused
+                && !overlay_active
+                && let Some(fid) = focused_pane.as_ref()
+            {
                 let mut stdout = io::stdout().lock();
                 let has_bar = status_bar.is_some();
                 let focused_cursor = paint_focused_pane(

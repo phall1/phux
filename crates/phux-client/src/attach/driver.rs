@@ -46,6 +46,7 @@ use super::server_frame::handle_server_frame;
 use crate::layout::LayoutState;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::status_bar::{Position, StatusBarPainter};
+use crate::render::overlay::OverlayState;
 
 /// One pane's mirror: the libghostty Terminal that ingests
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
@@ -393,6 +394,19 @@ async fn main_loop(
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
     let mut status_bar = build_status_bar_painter();
+    // phux-5ke.4: keybindings snapshot for the help overlay. Cached so
+    // pressing the help binding doesn't trigger a synchronous config
+    // reload (which could surface IO errors under user fingers); on
+    // load failure the help modal still works, just showing "no
+    // bindings configured".
+    let keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
+        phux_config::loader::load().ok().map(|c| c.keybindings);
+    // phux-5ke.4: overlay state — initially empty. Pushed onto by the
+    // `show-help` action; drained by `OverlayState::handle_key` when
+    // the active overlay returns `Dismiss`. While active, key events
+    // route to the overlay (no pane forwarding) and pane stdout flushes
+    // are suppressed (ADR-0020 §Decision invariant 5).
+    let mut overlays = OverlayState::new();
     // Track the current outer-terminal viewport so the painter knows
     // which row is "bottom". Initialized to a sensible default and
     // updated by SIGWINCH; the server doesn't drive client-side
@@ -433,6 +447,7 @@ async fn main_loop(
         &overlay,
         layout_get_request_id,
         &mut pending_splits,
+        overlays.is_active(),
     )?;
     if outcome.exit {
         return Ok(());
@@ -503,6 +518,7 @@ async fn main_loop(
                             &overlay,
                             layout_get_request_id,
                             &mut pending_splits,
+                            overlays.is_active(),
                         )?;
                         if outcome.exit {
                             return Ok(());
@@ -530,14 +546,20 @@ async fn main_loop(
                             // (either the GET reply or a peer's broadcast).
                             // Trigger a full repaint: clear screen + paint
                             // dividers + re-render every pane.
-                            paint_full_frame(
-                                &layout_state,
-                                &mut panes,
-                                focused_pane.as_ref(),
-                                viewport_dims,
-                                status_bar.as_mut(),
-                                &session_name,
-                            );
+                            // phux-5ke.4: while an overlay is up, defer
+                            // the repaint — the dismiss path always
+                            // triggers paint_full_frame, and the
+                            // libghostty mirror is already updated.
+                            if !overlays.is_active() {
+                                paint_full_frame(
+                                    &layout_state,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    &session_name,
+                                );
+                            }
                             // The GET reply is single-use; clear the
                             // pending request id so a stray late
                             // MetadataValue can't trample state.
@@ -573,6 +595,8 @@ async fn main_loop(
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
+                    overlays: &mut overlays,
+                    keybindings: keybindings_snapshot.as_ref(),
                 };
                 let layout_changed = dispatch_input_events(
                     conn,
@@ -586,14 +610,27 @@ async fn main_loop(
                 )
                 .await?;
                 if layout_changed {
-                    paint_full_frame(
-                        &layout_state,
-                        &mut panes,
-                        focused_pane.as_ref(),
-                        viewport_dims,
-                        status_bar.as_mut(),
-                        &session_name,
-                    );
+                    // phux-5ke.4: on overlay dismiss the dispatcher
+                    // sets layout_changed=true; the full-frame repaint
+                    // below restores pane content under the now-gone
+                    // modal. When the overlay is still active (e.g.
+                    // a push happened in the same batch) we skip the
+                    // pane repaint and go straight to overlay paint.
+                    if !overlays.is_active() {
+                        paint_full_frame(
+                            &layout_state,
+                            &mut panes,
+                            focused_pane.as_ref(),
+                            viewport_dims,
+                            status_bar.as_mut(),
+                            &session_name,
+                        );
+                    }
+                }
+                if overlays.is_active() {
+                    let mut stdout = io::stdout().lock();
+                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(&mut stdout, viewport_dims);
                 }
             }
 
@@ -608,6 +645,8 @@ async fn main_loop(
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
+                    overlays: &mut overlays,
+                    keybindings: keybindings_snapshot.as_ref(),
                 };
                 let layout_changed = dispatch_input_events(
                     conn,
@@ -620,7 +659,7 @@ async fn main_loop(
                     &mut ctx,
                 )
                 .await?;
-                if layout_changed {
+                if layout_changed && !overlays.is_active() {
                     paint_full_frame(
                         &layout_state,
                         &mut panes,
@@ -629,6 +668,11 @@ async fn main_loop(
                         status_bar.as_mut(),
                         &session_name,
                     );
+                }
+                if overlays.is_active() {
+                    let mut stdout = io::stdout().lock();
+                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(&mut stdout, viewport_dims);
                 }
             }
 
@@ -676,14 +720,25 @@ async fn main_loop(
                         .await?;
                     }
                 }
-                paint_full_frame(
-                    &layout_state,
-                    &mut panes,
-                    focused_pane.as_ref(),
-                    viewport_dims,
-                    status_bar.as_mut(),
-                    &session_name,
-                );
+                // phux-5ke.4: SIGWINCH while overlay is up: redraw the
+                // overlay at the new size instead of repainting panes
+                // (which would scribble over the modal). On dismiss the
+                // dispatch path triggers a full-frame repaint and the
+                // user sees the resized layout.
+                if overlays.is_active() {
+                    let mut stdout = io::stdout().lock();
+                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(&mut stdout, viewport_dims);
+                } else {
+                    paint_full_frame(
+                        &layout_state,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
+                }
             }
 
             // phux-nz4.5: periodic status-bar repaint (e.g. for the
@@ -691,19 +746,24 @@ async fn main_loop(
             // `poll_interval`. Paints in place — no pane re-render, no
             // full-screen redraw.
             () = status_tick => {
-                let mut stdout = io::stdout().lock();
-                // Restore the cursor to wherever the focused pane left it
-                // so an idle tick doesn't strand the cursor in the bar.
-                let focused_cursor = focused_pane.as_ref()
-                    .and_then(|fid| panes.get(fid))
-                    .and_then(|slot| slot.renderer.last_cursor());
-                paint_bar_after_pane(
-                    status_bar.as_mut(),
-                    &mut stdout,
-                    viewport_dims,
-                    &session_name,
-                    focused_cursor,
-                );
+                // phux-5ke.4: an overlay above the bar would get
+                // partially overwritten by the bar paint; skip ticks
+                // while a modal is up.
+                if !overlays.is_active() {
+                    let mut stdout = io::stdout().lock();
+                    // Restore the cursor to wherever the focused pane left it
+                    // so an idle tick doesn't strand the cursor in the bar.
+                    let focused_cursor = focused_pane.as_ref()
+                        .and_then(|fid| panes.get(fid))
+                        .and_then(|slot| slot.renderer.last_cursor());
+                    paint_bar_after_pane(
+                        status_bar.as_mut(),
+                        &mut stdout,
+                        viewport_dims,
+                        &session_name,
+                        focused_cursor,
+                    );
+                }
             }
 
             // SIGINT — restore the terminal explicitly (Drop wouldn't

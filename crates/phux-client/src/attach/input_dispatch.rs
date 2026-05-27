@@ -18,6 +18,7 @@ use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::input::InputEvent;
 use crate::layout::{Direction, LayoutState, SplitDir};
 use crate::predict::{Overlay, PredictionState};
+use crate::render::overlay::{HelpOverlay, OverlayState};
 
 /// Mutable context the input-dispatch path needs to update on a chord
 /// that resolves to a layout action (phux-4li.5). Bundles the items
@@ -44,6 +45,15 @@ pub(super) struct DispatchCtx<'a> {
     /// `TERMINAL_SPAWNED` reply. `run_action` inserts;
     /// `handle_server_frame` removes.
     pub pending_splits: &'a mut HashMap<u32, PendingSplit>,
+    /// phux-5ke.4: overlay stack. When non-empty the dispatcher routes
+    /// key events to the active overlay (no resolver, no predict, no
+    /// pane forwarding) and the `show-help` action pushes onto it.
+    pub overlays: &'a mut OverlayState,
+    /// phux-5ke.4: snapshot of the on-disk keybindings, captured at
+    /// driver start. The help overlay reads this to render the modal
+    /// body. `None` when config load failed (overlay still pushes but
+    /// shows "no bindings configured").
+    pub keybindings: Option<&'a phux_config::KeybindingsCfg>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -90,6 +100,24 @@ pub(super) async fn dispatch_input_events(
             if !*detach_pending {
                 conn.send(&FrameKind::Detach).await?;
                 *detach_pending = true;
+            }
+            continue;
+        }
+        // phux-5ke.4: while an overlay is active it captures all input.
+        // Key events flow to `OverlayState::handle_key` (which may
+        // dismiss); mouse / paste / focus events are dropped so they
+        // don't reach the pane underneath. Detach is the one bypass
+        // above — the user must still be able to bail out cleanly.
+        if ctx.overlays.is_active() {
+            if let InputEvent::Key(ref key_event) = ev {
+                let was_active = ctx.overlays.is_active();
+                ctx.overlays.handle_key(key_event);
+                // On dismiss, repaint everything: the overlay scribbled
+                // over pane cells and we need a coherent base for the
+                // next TERMINAL_OUTPUT.
+                if was_active && !ctx.overlays.is_active() {
+                    layout_changed = true;
+                }
             }
             continue;
         }
@@ -331,6 +359,10 @@ struct ActionEffects {
 /// is sync: it never touches the connection — frame I/O happens in the
 /// caller (`dispatch_input_events`) so a hypothetical async wire-send
 /// failure doesn't leave layout state half-mutated.
+#[allow(
+    clippy::too_many_lines,
+    reason = "per-action arms accrete one-by-one; splitting into per-action helpers would obscure the central dispatch table"
+)]
 fn run_action(
     resolved: &phux_config::keybind::ResolvedAction,
     ctx: &mut DispatchCtx<'_>,
@@ -440,6 +472,19 @@ fn run_action(
                 tracing::warn!(args = ?resolved.args, "resize-pane missing args");
                 effects.bell = true;
             }
+        }
+        "show-help" => {
+            // phux-5ke.4: push the help overlay. The chord is consumed —
+            // the bound key never reaches the pane (and it wouldn't make
+            // sense to: F1 / `?` are typically reserved for the active
+            // application, but the resolver matched, so the user's
+            // intent was "open phux help"). Idempotent: pushing while
+            // already active just replaces (debug-logged).
+            let overlay = ctx.keybindings.map_or_else(
+                || HelpOverlay::from_config(&phux_config::KeybindingsCfg::default()),
+                HelpOverlay::from_config,
+            );
+            ctx.overlays.push(Box::new(overlay));
         }
         "next-pane" => {
             if let Some(new_state) = actions::apply_next_pane(ctx.layout_state) {

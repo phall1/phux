@@ -53,7 +53,11 @@ prefix = "C-a"
 "L" = { action = "resize-pane", direction = "right", amount = 5 }
 
 [keybindings.global]
-# No global bindings shipped by default. Add yours here, e.g.:
+# Show the help overlay (centered modal listing all keybindings). F1 is
+# a named-key chord and works as a global (no prefix needed) so it's
+# discoverable from a cold start. Esc or F1 again dismisses.
+"F1" = "show-help"
+# No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"
 
 [status]
