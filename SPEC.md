@@ -469,22 +469,74 @@ limits. A recommended convention is CBOR-encoded structured data
 with a versioned key (`phux.tui.layout/v1`,
 `phux.tui.window_order/v1`); see §17 for the reference-TUI schema.
 
-L3 messages, **reserved** by ADR-0015 but not yet wire-allocated:
+L3 messages, allocated by phux-4li.2:
 
-| Direction | Name                | Reference | Status |
-|-----------|---------------------|-----------|--------|
-| C → S (cmd) | `GET_METADATA`    | §11.L3    | TBD    |
-| C → S (cmd) | `SET_METADATA`    | §11.L3    | TBD    |
-| C → S (cmd) | `DELETE_METADATA` | §11.L3    | TBD    |
-| C → S (cmd) | `LIST_METADATA`   | §11.L3    | TBD    |
-| C → S     | `SUBSCRIBE_METADATA`| §11.L3    | TBD    |
-| S → C     | `METADATA_CHANGED`  | §7.L3     | TBD    |
+| ID    | Direction | Name                | Reference | Status  |
+|-------|-----------|---------------------|-----------|---------|
+| 0x50  | C → S (cmd) | `GET_METADATA`    | §11.L3    | partial |
+| 0x51  | C → S (cmd) | `SET_METADATA`    | §11.L3    | partial |
+| 0x52  | C → S (cmd) | `DELETE_METADATA` | §11.L3    | partial |
+| 0x53  | C → S (cmd) | `LIST_METADATA`   | §11.L3    | partial |
+| 0x54  | C → S     | `SUBSCRIBE_METADATA`| §11.L3    | partial |
+| 0xD0  | S → C     | `METADATA_CHANGED`  | §7.L3     | partial |
 
-Discriminant bytes are allocated when L3 lands (target: v0.2). A
-client subscribing to `METADATA_CHANGED` for a scope MUST receive an
-event when any key in that scope is written or deleted; the value
-itself is not carried in the event (consumers `GET_METADATA` after
-the change-notification).
+Wire bodies (positional, per Appendix A primitives):
+
+```
+GET_METADATA       { request_id: u32, scope: Scope, key: str }
+SET_METADATA       { request_id: u32, scope: Scope, key: str, value: bytes }
+DELETE_METADATA    { request_id: u32, scope: Scope, key: str }
+LIST_METADATA      { request_id: u32, scope: Scope }
+SUBSCRIBE_METADATA { scope: Scope, key: str }
+METADATA_CHANGED   { scope: Scope, key: str, value: optional<bytes> }
+
+Scope = tagged_union {
+    TERMINAL   (TerminalId),     // tag 0x00
+    COLLECTION (CollectionId),   // tag 0x01; u32 wire body (L2 may grow
+                                 //   this to a Local/Satellite tag, same
+                                 //   as TerminalId under ADR-0016)
+    GLOBAL,                      // tag 0x02; empty body
+}
+```
+
+A client subscribing via `SUBSCRIBE_METADATA { scope, key }` MUST
+receive `METADATA_CHANGED` when that specific `(scope, key)` is
+written or deleted. The matching value is carried inline: `value:
+Some(bytes)` on a `SET`, `value: None` (tombstone) on a `DELETE`.
+The earlier "consumers `GET_METADATA` after the change-notification"
+shape is dropped; phux-4li.2 lifts the value into the event because
+the ADR-0019 layout-coordination use case is a read-on-every-change
+pattern and the round trip is wasteful.
+
+Reply paths for `GET_METADATA` and `LIST_METADATA` are deferred to
+the generic `COMMAND_RESULT` envelope (§11). v0.1 servers expose
+GET / LIST as in-process Rust function returns; the wire reply
+ships when `COMMAND` lands. `request_id` is carried so the future
+reply correlates.
+
+The `Status: partial` row reflects this split — wire encode/decode
+is shipped (snapshot- and proptest-locked) plus server-side K/V plus
+SUBSCRIBE fanout. The COMMAND reply path remains the residual gap.
+
+Subscription scope: subscriptions are connection-scoped. A
+client's subscriptions are dropped automatically on `DETACH` (SPEC
+§7.3) and on transport close. There is no explicit
+`UNSUBSCRIBE_METADATA` in v0.1.
+
+L3 conformance gating: the server MUST NOT emit `METADATA_CHANGED`
+to a consumer whose `HELLO.client_caps.layers` does not include
+`L3` (per SPEC §16.4). The server MAY silently drop
+`SUBSCRIBE_METADATA` from such a consumer or reply with `ERROR
+{ code: OUT_OF_TIER }` once that error code is allocated.
+
+L2 dependency: `Scope::Collection` references a `CollectionId` that
+L2 has not yet wire-allocated. Until L2 ships, v0.1 servers expose
+a single default Collection at `CollectionId(1)` so the reference
+TUI's `phux.tui.layout/v1` key (ADR-0019) has a Collection to
+write into. The wire shape of `CollectionId` is a bare `u32` in
+v0.1; L2 may grow it into a `Local`/`Satellite` tagged union the
+same way `TerminalId` did under ADR-0016, but that growth is a
+v0.2 wire bump and out of scope for phux-4li.2.
 
 ### 7.proto.1 DETACH / DETACHED
 
@@ -1841,3 +1893,4 @@ longer exists as a wire concept.)
 | 0.1.0-draft.6 | 2026-05-26 | Editorial: §7.1 / §7.2 message catalogs grow a `Tier` column mapping each message to its [ADR-0015](./ADR/0015-protocol-layering.md) layer (`proto` / `L1` / `L2` / `tui→L3` / `cmd`); legend and tier-notes added. Previews the layered restructure that will rename `PANE_*` → `TERMINAL_*` ([ADR-0016](./ADR/0016-terminal-id-as-wire-primary.md)) and demote `WINDOW_*` / `LAYOUT_CHANGED` / `FOCUS_CHANGED` out of the wire ([ADR-0017](./ADR/0017-tui-not-protocol-privileged.md)). No bytes changed. |
 | 0.2.0-draft | 2026-05-27 | phux-vp0.4: `TerminalId` becomes a tagged union (`LOCAL { id: u32 }` tag=0, `SATELLITE { host: str, id: u32 }` tag=1) per ADR-0016. Every `TerminalId` field on the wire gains a 1-byte tag prefix; the reference snapshot fixtures (§16) re-baseline accordingly. `ErrorCode::UnsupportedSatelliteRoute = 106` is added (was already SPEC-reserved). v0.1 servers only construct `LOCAL`; v0.1 decoders MUST accept `SATELLITE` and, if not a federation hub, reply `ERROR { UnsupportedSatelliteRoute }`. PROTOCOL_VERSION bumped 0.1.0 → 0.2.0 (pre-1.0 wire break). |
 | 0.1.0-draft.7 | 2026-05-26 | L1 vocabulary cascade Wave C (phux-vp0.2). §7 catalog reorganized by tier (proto / L1 / L2 / L3); §7.L1 messages renamed `PANE_*` → `TERMINAL_*` and `pane_id` → `terminal_id` per ADR-0016 (wire bytes unchanged). §7.3/§7.4 declare L2 (Collections) and L3 (Metadata) as reserved tiers with TBD discriminants. §6.1 HELLO gains `layers: bitset<Layer>` inside `ClientCapabilities` / `ServerCapabilities` (Appendix A field-tag extensibility keeps the wire compatible). §10 collapses Sessions/Windows/Panes/Layout/Focus into §10.1 Terminal lifecycle and §10.2 Viewport resize; the demoted TUI vocabulary lands non-normative in new §17. §6.2 reclaims the `CC_FRONTEND` capability slot per ADR-0017. §14 renames `PANE_NOT_FOUND` → `TERMINAL_NOT_FOUND` (numeric discriminant 104 preserved). §16 conformance restructured per-tier (16.0 common, 16.1 L1, 16.2 L1+L3, 16.3 L1+L2+L3). No wire bytes changed; no version bump. |
+| 0.2.0-draft.1 | 2026-05-27 | phux-4li.2: L3 metadata frames wire-allocated. C→S discriminants `GET_METADATA = 0x50`, `SET_METADATA = 0x51`, `DELETE_METADATA = 0x52`, `LIST_METADATA = 0x53`, `SUBSCRIBE_METADATA = 0x54`; S→C `METADATA_CHANGED = 0xD0`. `Scope` tagged union allocated (`Terminal` tag 0x00, `Collection` tag 0x01, `Global` tag 0x02). `METADATA_CHANGED` carries the new value inline (`optional<bytes>`) — supersedes the earlier "consumers re-GET after notification" sketch. `ClientCapabilities.layers` now wire-encoded as a trailing `u8` after `color_support` (additive trailing field per SPEC §6, no version bump beyond the L3 allocation). `CollectionId(u32)` allocated; L2 (which defines its full tagged-union shape) is still TBD. Reply path for GET/LIST defers to the `COMMAND_RESULT` envelope (§11). |

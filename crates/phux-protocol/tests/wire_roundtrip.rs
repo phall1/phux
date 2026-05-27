@@ -11,13 +11,13 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::caps::{ClientCapabilities, ColorSupport};
-use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
+use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
+use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, ErrorCode, ViewportInfo};
+use phux_protocol::wire::frame::{AttachTarget, ErrorCode, Scope, ViewportInfo};
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
@@ -1088,3 +1088,208 @@ fn layout_ratio_one_is_accepted() {
 
 #[allow(dead_code)]
 const _SPLIT_DIR_TYPE_CHECK: fn() -> SplitDir = || SplitDir::Horizontal;
+
+// -----------------------------------------------------------------------------
+// L3 metadata frames — SPEC §7.4 / §11.L3 (phux-4li.2).
+// -----------------------------------------------------------------------------
+
+fn arb_scope() -> impl Strategy<Value = Scope> {
+    prop_oneof![
+        arb_terminal_id().prop_map(Scope::Terminal),
+        any::<u32>().prop_map(|id| Scope::Collection(CollectionId::new(id))),
+        Just(Scope::Global),
+    ]
+}
+
+fn arb_metadata_value() -> impl Strategy<Value = Vec<u8>> {
+    proptest::collection::vec(any::<u8>(), 0..512)
+}
+
+fn arb_layer_set() -> impl Strategy<Value = LayerSet> {
+    prop_oneof![
+        Just(LayerSet::new()),
+        Just(LayerSet::with(&[Layer::L2])),
+        Just(LayerSet::with(&[Layer::L3])),
+        Just(LayerSet::all()),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn roundtrip_get_metadata(
+        request_id in any::<u32>(),
+        scope in arb_scope(),
+        key in ".{0,64}",
+    ) {
+        let frame = FrameKind::GetMetadata { request_id, scope, key };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_set_metadata(
+        request_id in any::<u32>(),
+        scope in arb_scope(),
+        key in ".{0,64}",
+        value in arb_metadata_value(),
+    ) {
+        let frame = FrameKind::SetMetadata { request_id, scope, key, value };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_delete_metadata(
+        request_id in any::<u32>(),
+        scope in arb_scope(),
+        key in ".{0,64}",
+    ) {
+        let frame = FrameKind::DeleteMetadata { request_id, scope, key };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_list_metadata(
+        request_id in any::<u32>(),
+        scope in arb_scope(),
+    ) {
+        let frame = FrameKind::ListMetadata { request_id, scope };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_subscribe_metadata(
+        scope in arb_scope(),
+        key in ".{0,64}",
+    ) {
+        let frame = FrameKind::SubscribeMetadata { scope, key };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_metadata_changed(
+        scope in arb_scope(),
+        key in ".{0,64}",
+        value in proptest::option::of(arb_metadata_value()),
+    ) {
+        let frame = FrameKind::MetadataChanged { scope, key, value };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    /// HELLO carries `client_caps.layers` as a trailing byte (phux-4li.2).
+    /// The encoder always emits it; the decoder accepts every prefix shape
+    /// per SPEC §6.
+    #[test]
+    fn roundtrip_hello_layers(
+        layers in arb_layer_set(),
+    ) {
+        let frame = FrameKind::Hello {
+            client_name: "phux-client/test".to_owned(),
+            protocol_major: 0,
+            protocol_minor: 2,
+            protocol_patch: 0,
+            client_caps: ClientCapabilities::new()
+                .with_color_support(ColorSupport::TrueColor)
+                .with_layers(layers),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn hello_decoder_accepts_legacy_body_with_color_but_no_layers() {
+    // A 7lf-era HELLO ends right after the ColorSupport byte; a 4li.2+
+    // decoder must accept it and substitute the default LayerSet.
+    let mut framed = BytesMut::new();
+    framed.extend_from_slice(&13u32.to_be_bytes()); // length: 1 (type) + 11 (body) + 1 (color tag)
+    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
+    framed.extend_from_slice(&1u32.to_be_bytes());
+    framed.extend_from_slice(b"x");
+    framed.extend_from_slice(&0u16.to_be_bytes());
+    framed.extend_from_slice(&2u16.to_be_bytes());
+    framed.extend_from_slice(&0u16.to_be_bytes());
+    framed.extend_from_slice(&[0x00]); // ColorSupport::TrueColor; no layers byte
+    let (decoded, tail) = FrameKind::decode(&framed).unwrap();
+    assert!(tail.is_empty());
+    match decoded {
+        FrameKind::Hello { client_caps, .. } => {
+            // L1 always implied even when the byte is missing.
+            assert!(client_caps.layers.contains(Layer::L1));
+            assert!(!client_caps.layers.contains(Layer::L3));
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn layer_set_wire_round_trips() {
+    for ls in [
+        LayerSet::new(),
+        LayerSet::with(&[Layer::L2]),
+        LayerSet::with(&[Layer::L3]),
+        LayerSet::all(),
+    ] {
+        let wire = ls.as_wire();
+        let back = LayerSet::from_wire(wire);
+        assert_eq!(back, ls);
+        // L1 invariant: always set after round-trip.
+        assert!(back.contains(Layer::L1));
+    }
+}
+
+#[test]
+fn layer_set_unknown_bits_are_dropped_but_l1_forced_on() {
+    // A future encoder sets a yet-unknown bit (0x80) plus L3.
+    let ls = LayerSet::from_wire(0x80 | 0x04);
+    assert!(ls.contains(Layer::L1));
+    assert!(ls.contains(Layer::L3));
+    assert!(!ls.contains(Layer::L2));
+}
+
+#[test]
+fn scope_unknown_tag_is_rejected() {
+    // A wire SET_METADATA carrying an unknown Scope tag must surface as
+    // UnknownEnumValue, not silently coerce.
+    let mut body = vec![phux_protocol::wire::frame::TYPE_SET_METADATA];
+    body.extend_from_slice(&0u32.to_be_bytes()); // request_id
+    body.push(0xFE); // unknown Scope tag
+    // No further bytes — the decoder fails on the tag itself.
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let err = FrameKind::decode(&bytes).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeError::UnknownEnumValue {
+            field: "Scope",
+            value: 0xFE,
+        }
+    );
+}

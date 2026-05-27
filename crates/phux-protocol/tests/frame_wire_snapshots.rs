@@ -10,13 +10,13 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::caps::{ClientCapabilities, ColorSupport};
-use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
+use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
+use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, ViewportInfo};
+use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, Scope, ViewportInfo};
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
@@ -528,4 +528,142 @@ fn snap_hello_color_indexed16() {
 #[test]
 fn snap_hello_color_mono() {
     insta::assert_snapshot!(dump_frame(&hello_with_color(ColorSupport::Mono)));
+}
+
+#[test]
+fn snap_hello_layers_l1_only() {
+    // Default LayerSet — agent / recorder consumer (SPEC §16.1).
+    let frame = FrameKind::Hello {
+        client_name: "phux-agent/test".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new()
+            .with_color_support(ColorSupport::TrueColor)
+            .with_layers(LayerSet::new()),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_hello_layers_l1_l3() {
+    // GUI / shared-TUI consumer (SPEC §16.2).
+    let frame = FrameKind::Hello {
+        client_name: "phux-gui/test".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new()
+            .with_color_support(ColorSupport::TrueColor)
+            .with_layers(LayerSet::with(&[Layer::L3])),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_hello_layers_all() {
+    // Reference TUI — L1 + L2 + L3 (SPEC §16.3).
+    let frame = FrameKind::Hello {
+        client_name: "phux-tui/test".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new()
+            .with_color_support(ColorSupport::TrueColor)
+            .with_layers(LayerSet::all()),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// L3 metadata frames — SPEC §7.4 / §11.L3 (phux-4li.2).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_get_metadata_global() {
+    let frame = FrameKind::GetMetadata {
+        request_id: 0x0000_0001,
+        scope: Scope::Global,
+        key: "phux.example/v1".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_get_metadata_collection() {
+    let frame = FrameKind::GetMetadata {
+        request_id: 0x0000_0007,
+        scope: Scope::Collection(CollectionId::new(1)),
+        key: "phux.tui.layout/v1".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_get_metadata_terminal() {
+    let frame = FrameKind::GetMetadata {
+        request_id: 0x0000_0042,
+        scope: Scope::Terminal(TerminalId::local(0x0000_0009)),
+        key: "phux.tui.title-override/v1".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_set_metadata_collection_layout() {
+    let frame = FrameKind::SetMetadata {
+        request_id: 0x0000_0010,
+        scope: Scope::Collection(CollectionId::new(1)),
+        key: "phux.tui.layout/v1".to_owned(),
+        value: b"\xa2\x01\x01\x02\x82\x00\x01".to_vec(), // arbitrary CBOR-looking bytes
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_delete_metadata_global() {
+    let frame = FrameKind::DeleteMetadata {
+        request_id: 0x0000_0011,
+        scope: Scope::Global,
+        key: "phux.example/v1".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_list_metadata_collection() {
+    let frame = FrameKind::ListMetadata {
+        request_id: 0x0000_0012,
+        scope: Scope::Collection(CollectionId::new(1)),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_subscribe_metadata_collection_layout() {
+    let frame = FrameKind::SubscribeMetadata {
+        scope: Scope::Collection(CollectionId::new(1)),
+        key: "phux.tui.layout/v1".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_metadata_changed_set_collection() {
+    let frame = FrameKind::MetadataChanged {
+        scope: Scope::Collection(CollectionId::new(1)),
+        key: "phux.tui.layout/v1".to_owned(),
+        value: Some(b"\xa2\x01\x01\x02\x82\x00\x01".to_vec()),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_metadata_changed_tombstone() {
+    let frame = FrameKind::MetadataChanged {
+        scope: Scope::Global,
+        key: "phux.example/v1".to_owned(),
+        value: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
 }

@@ -2,5 +2,6 @@
 source: crates/phux-protocol/tests/frame_wire_snapshots.rs
 expression: "dump_frame(&hello_with_color(ColorSupport::Mono))"
 ---
-00000000 | 00 00 00 1c 01 00 00 00  10 70 68 75 78 2d 63 6c |.........phux-cl
+00000000 | 00 00 00 1d 01 00 00 00  10 70 68 75 78 2d 63 6c |.........phux-cl
 00000010 | 69 65 6e 74 2f 74 65 73  74 00 00 00 02 00 00 03 |ient/test.......
+00000020 | 01                                               |.

@@ -684,6 +684,11 @@ async fn handle_client(
                 negotiated_color_support = client_caps.color_support;
                 state.with_mut(|s| {
                     s.set_client_color_support(client_id, client_caps.color_support);
+                    // SPEC §6.2: cache the negotiated layer set. The L3
+                    // dispatch arms (METADATA_*) gate emission of
+                    // `METADATA_CHANGED` on `client_speaks_l3` so non-L3
+                    // consumers never see L3 frames (SPEC §16.4).
+                    s.set_client_layers(client_id, client_caps.layers);
                 });
                 // SPEC §6.1: server replies with HELLO_OK. The
                 // `HELLO_OK` `FrameKind` variant is not yet populated
@@ -776,11 +781,146 @@ async fn handle_client(
             FrameKind::FrameAck { terminal_id, seq } => {
                 handle_frame_ack(&state, client_id, &terminal_id, seq);
             }
+            FrameKind::GetMetadata {
+                request_id,
+                scope,
+                key,
+            } => {
+                handle_get_metadata(&state, client_id, request_id, &scope, &key);
+            }
+            FrameKind::SetMetadata {
+                request_id,
+                scope,
+                key,
+                value,
+            } => {
+                handle_set_metadata(&state, client_id, request_id, &scope, &key, value);
+            }
+            FrameKind::DeleteMetadata {
+                request_id,
+                scope,
+                key,
+            } => {
+                handle_delete_metadata(&state, client_id, request_id, &scope, &key);
+            }
+            FrameKind::ListMetadata { request_id, scope } => {
+                handle_list_metadata(&state, client_id, request_id, &scope);
+            }
+            FrameKind::SubscribeMetadata { scope, key } => {
+                handle_subscribe_metadata(&state, client_id, scope, key);
+            }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
             }
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// L3 metadata dispatch — SPEC §7.4 / §11.L3 (phux-4li.2).
+//
+// Wire-side replies for GET / LIST are deferred to the `COMMAND_RESULT`
+// envelope (SPEC §11) which is not yet wire-allocated; the dispatch arms
+// below execute the K/V operations against `ServerState::metadata`, log
+// the outcome, and fan METADATA_CHANGED out to L3-capable subscribers.
+// -----------------------------------------------------------------------------
+
+fn handle_get_metadata(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    scope: &phux_protocol::wire::frame::Scope,
+    key: &str,
+) {
+    let value = state.with(|s| s.metadata().get(scope, key));
+    debug!(
+        ?client_id,
+        request_id,
+        ?scope,
+        %key,
+        present = value.is_some(),
+        "GET_METADATA",
+    );
+    // COMMAND_RESULT wire path is deferred; the value is currently
+    // observable only via in-process test helpers
+    // (`ServerState::metadata`). When `COMMAND` lands, this reply
+    // ships through it.
+    let _ = value;
+}
+
+fn handle_set_metadata(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    scope: &phux_protocol::wire::frame::Scope,
+    key: &str,
+    value: Vec<u8>,
+) {
+    debug!(?client_id, request_id, ?scope, %key, "SET_METADATA");
+    let delivered = state.with_mut(|s| s.metadata_set(scope, key, value));
+    trace!(
+        ?client_id,
+        request_id,
+        subscriber_count = delivered.len(),
+        "SET_METADATA delivered"
+    );
+}
+
+fn handle_delete_metadata(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    scope: &phux_protocol::wire::frame::Scope,
+    key: &str,
+) {
+    debug!(?client_id, request_id, ?scope, %key, "DELETE_METADATA");
+    let delivered = state.with_mut(|s| s.metadata_delete(scope, key));
+    trace!(
+        ?client_id,
+        request_id,
+        subscriber_count = delivered.len(),
+        "DELETE_METADATA delivered"
+    );
+}
+
+fn handle_list_metadata(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    scope: &phux_protocol::wire::frame::Scope,
+) {
+    let keys = state.with(|s| s.metadata().list(scope));
+    debug!(
+        ?client_id,
+        request_id,
+        ?scope,
+        key_count = keys.len(),
+        "LIST_METADATA",
+    );
+    let _ = keys;
+}
+
+fn handle_subscribe_metadata(
+    state: &SharedState,
+    client_id: ClientId,
+    scope: phux_protocol::wire::frame::Scope,
+    key: String,
+) {
+    state.with_mut(|s| {
+        if !s.client_speaks_l3(client_id) {
+            // SPEC §16.4: out-of-tier traffic from a non-L3 consumer.
+            // The L3 dispatch is best-effort: we drop the subscribe
+            // rather than tear the connection down, on the theory that
+            // a misbehaving client should learn from silence faster
+            // than from a protocol error. A future ticket may swap
+            // this for an explicit `ERROR { OUT_OF_TIER }` once the
+            // error code lands.
+            debug!(?client_id, ?scope, %key, "SUBSCRIBE_METADATA refused (non-L3)");
+            return;
+        }
+        debug!(?client_id, ?scope, %key, "SUBSCRIBE_METADATA");
+        s.metadata_subscribe(client_id, scope, key);
+    });
 }
 
 /// Writer task: drain the per-client outbound channel and write each

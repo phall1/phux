@@ -6,11 +6,13 @@
 
 use super::error::DecodeError;
 use super::frame::{
-    ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
-    TYPE_DETACHED, TYPE_ERROR, TYPE_FRAME_ACK, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY,
-    TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_PING, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
-    TYPE_VIEWPORT_RESIZE, decode_attach_target, decode_focus_event, decode_key_event,
-    decode_mouse_event, decode_optional_bytes, decode_optional_u32, decode_paste_event,
+    ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL,
+    TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_FRAME_ACK,
+    TYPE_GET_METADATA, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
+    TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED, TYPE_PING, TYPE_SET_METADATA,
+    TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT, TYPE_VIEWPORT_RESIZE,
+    decode_attach_target, decode_focus_event, decode_key_event, decode_mouse_event,
+    decode_optional_bytes, decode_optional_u32, decode_paste_event, decode_scope,
     decode_terminal_id, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
@@ -162,21 +164,23 @@ impl<'a> Decoder<'a> {
                 let protocol_major = self.read_u16_be()?;
                 let protocol_minor = self.read_u16_be()?;
                 let protocol_patch = self.read_u16_be()?;
-                // Backward-compat trailing field (SPEC §6.2). A pre-7lf
-                // HELLO ends right after `protocol_patch` and the
-                // remaining-byte check below sees zero bytes — substitute
-                // the default ColorSupport. Newer HELLOs carry one extra
-                // tag byte; an unknown tag from a still-newer client maps
-                // back to the default rather than rejecting the frame
-                // (`ColorSupport` is `#[non_exhaustive]`).
-                let client_caps = if self.pos < body_end {
+                // Backward-compat trailing fields (SPEC §6.2). A pre-7lf
+                // HELLO ends right after `protocol_patch`; a 7lf-era HELLO
+                // adds one byte for ColorSupport; a 4li.2-era HELLO adds
+                // a further byte for the Layer bitset. The decoder
+                // tolerates every prefix per SPEC §6 ("skip them by
+                // length") and applies defaults for missing bytes.
+                let mut client_caps = crate::caps::ClientCapabilities::default();
+                if self.pos < body_end {
                     let tag = self.read_u8()?;
                     let color_support =
                         crate::caps::ColorSupport::from_wire(tag).unwrap_or_default();
-                    crate::caps::ClientCapabilities::new().with_color_support(color_support)
-                } else {
-                    crate::caps::ClientCapabilities::default()
-                };
+                    client_caps = client_caps.with_color_support(color_support);
+                }
+                if self.pos < body_end {
+                    let layers = crate::caps::LayerSet::from_wire(self.read_u8()?);
+                    client_caps = client_caps.with_layers(layers);
+                }
                 FrameKind::Hello {
                     client_name,
                     protocol_major,
@@ -283,6 +287,54 @@ impl<'a> Decoder<'a> {
                     code,
                     message,
                 }
+            }
+            TYPE_GET_METADATA => {
+                let request_id = self.read_u32_be()?;
+                let scope = decode_scope(self)?;
+                let key = self.read_str()?.to_owned();
+                FrameKind::GetMetadata {
+                    request_id,
+                    scope,
+                    key,
+                }
+            }
+            TYPE_SET_METADATA => {
+                let request_id = self.read_u32_be()?;
+                let scope = decode_scope(self)?;
+                let key = self.read_str()?.to_owned();
+                let value = self.read_bytes()?.to_vec();
+                FrameKind::SetMetadata {
+                    request_id,
+                    scope,
+                    key,
+                    value,
+                }
+            }
+            TYPE_DELETE_METADATA => {
+                let request_id = self.read_u32_be()?;
+                let scope = decode_scope(self)?;
+                let key = self.read_str()?.to_owned();
+                FrameKind::DeleteMetadata {
+                    request_id,
+                    scope,
+                    key,
+                }
+            }
+            TYPE_LIST_METADATA => {
+                let request_id = self.read_u32_be()?;
+                let scope = decode_scope(self)?;
+                FrameKind::ListMetadata { request_id, scope }
+            }
+            TYPE_SUBSCRIBE_METADATA => {
+                let scope = decode_scope(self)?;
+                let key = self.read_str()?.to_owned();
+                FrameKind::SubscribeMetadata { scope, key }
+            }
+            TYPE_METADATA_CHANGED => {
+                let scope = decode_scope(self)?;
+                let key = self.read_str()?.to_owned();
+                let value = decode_optional_bytes(self)?;
+                FrameKind::MetadataChanged { scope, key, value }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
             // (`TerminalEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.)

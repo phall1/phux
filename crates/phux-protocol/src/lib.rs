@@ -36,8 +36,8 @@ pub mod wire;
 pub mod caps;
 pub mod ids;
 
-pub use caps::{ClientCapabilities, ColorSupport};
-pub use ids::{ClientId, FrameId, SatelliteHost, SessionId, TerminalId, WindowId};
+pub use caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
+pub use ids::{ClientId, CollectionId, FrameId, SatelliteHost, SessionId, TerminalId, WindowId};
 
 /// Protocol version this crate implements.
 ///

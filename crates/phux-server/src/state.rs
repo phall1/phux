@@ -33,7 +33,7 @@
 //! every section in this module is sync and finite — we never `.await`
 //! while holding it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -44,12 +44,13 @@ use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
-use phux_protocol::caps::ColorSupport;
-use phux_protocol::ids::{TerminalId as WireTerminalId, WindowId as WireWindowId};
+use phux_protocol::caps::{ColorSupport, Layer, LayerSet};
+use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId, WindowId as WireWindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
 use phux_protocol::input::paste::PasteEvent;
+use phux_protocol::wire::frame::{FrameKind, Scope};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -240,6 +241,171 @@ pub struct ServerState {
     /// memory (e.g. carried on the per-client task's stack) without
     /// changing the wire surface.
     last_attached_session: Option<SessionId>,
+    /// Per-scope K/V store backing SPEC §7.4 / §11.L3 metadata.
+    ///
+    /// Three independently-keyed maps mirror the three `Scope` variants
+    /// on the wire. Values are opaque `Vec<u8>`; the server enforces
+    /// nothing beyond per-key size limits (currently un-enforced; the
+    /// SPEC §11.L3 recommended 256 KiB cap is a follow-up).
+    metadata: MetadataStore,
+    /// Per-client cache of the negotiated [`LayerSet`] from HELLO (SPEC
+    /// §6.2). The dispatcher consults this before emitting any L3
+    /// frame; non-L3 consumers MUST NOT see `METADATA_CHANGED` (SPEC
+    /// §16.4). Default for a client that never sent HELLO (test
+    /// scaffolding) is [`LayerSet::all`] — the most-permissive default
+    /// keeps test setups simple; production clients always advertise.
+    client_layers: HashMap<ClientId, LayerSet>,
+}
+
+/// Default Collection identifier exposed by v0.1 servers.
+///
+/// L2 (Collection lifecycle, SPEC §7.3) is not yet wire-allocated; until
+/// it ships, the server exposes a single static Collection that every
+/// L3 metadata operation targeting `Scope::Collection` lands in. This is
+/// load-bearing for the reference TUI's `phux.tui.layout/v1` key —
+/// ADR-0019 ties layout persistence to a Collection scope and the TUI
+/// needs a Collection to write into before L2 ships.
+pub const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
+
+/// Per-scope K/V store for L3 metadata (SPEC §7.4 / §11.L3) plus the
+/// matching subscription registry.
+///
+/// Held inside [`ServerState`] but lifted into its own type so the
+/// subscribe / set / delete / list operations live in a focused
+/// surface — easier to test, easier to reason about ordering invariants,
+/// and a natural home for the per-key size cap once that lands.
+#[derive(Debug, Default)]
+pub struct MetadataStore {
+    /// Per-Terminal key → value. Cleared when the Terminal closes (the
+    /// L1 lifecycle that owns the Terminal).
+    terminal: HashMap<phux_protocol::ids::TerminalId, HashMap<String, Vec<u8>>>,
+    /// Per-Collection key → value.
+    collection: HashMap<CollectionId, HashMap<String, Vec<u8>>>,
+    /// Global key → value.
+    global: HashMap<String, Vec<u8>>,
+    /// Active subscriptions: a flat set of `(client, scope, key)` tuples.
+    /// Lookup on broadcast is linear in the number of subscriptions; that
+    /// is acceptable while subscriptions are sparse (handful per client).
+    /// A future ticket may switch this to a `HashMap<(scope, key), Vec<ClientId>>`
+    /// if the dispatch path shows up in flame graphs.
+    subscriptions: HashSet<(ClientId, Scope, String)>,
+}
+
+/// Outcome of a `SET_METADATA` call.
+///
+/// `Unchanged` means the key already held an identical value, so the
+/// server SHOULD suppress the `METADATA_CHANGED` broadcast (it's a noop
+/// from every subscriber's perspective).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataSetOutcome {
+    /// Key did not exist or held a different value; value was written.
+    Changed,
+    /// Key already held the identical value; no broadcast needed.
+    Unchanged,
+}
+
+impl MetadataStore {
+    /// Get the value at `(scope, key)`, if any.
+    #[must_use]
+    pub fn get(&self, scope: &Scope, key: &str) -> Option<Vec<u8>> {
+        match scope {
+            Scope::Terminal(tid) => self.terminal.get(tid).and_then(|m| m.get(key)).cloned(),
+            Scope::Collection(cid) => self.collection.get(cid).and_then(|m| m.get(key)).cloned(),
+            Scope::Global => self.global.get(key).cloned(),
+            // `Scope` is `#[non_exhaustive]`: a forward-compat variant we
+            // don't know about returns None. The cleanest default for an
+            // unknown scope is "no value present" — the caller's contract
+            // is preserved without trapping on unknown bytes.
+            _ => None,
+        }
+    }
+
+    /// Set the value at `(scope, key)`. Returns whether the value
+    /// actually changed (so the caller can suppress an unnecessary
+    /// broadcast).
+    pub fn set(&mut self, scope: &Scope, key: &str, value: Vec<u8>) -> MetadataSetOutcome {
+        let bucket: &mut HashMap<String, Vec<u8>> = match scope {
+            Scope::Terminal(tid) => self.terminal.entry(tid.clone()).or_default(),
+            Scope::Collection(cid) => self.collection.entry(*cid).or_default(),
+            Scope::Global => &mut self.global,
+            // Unknown forward-compat variant: silently drop the write.
+            // SPEC §6 lets newer encoders ship trailing field shapes;
+            // here the surface area is "unknown scope, no bucket".
+            _ => return MetadataSetOutcome::Unchanged,
+        };
+        if let Some(prev) = bucket.get(key)
+            && prev == &value
+        {
+            return MetadataSetOutcome::Unchanged;
+        }
+        bucket.insert(key.to_owned(), value);
+        MetadataSetOutcome::Changed
+    }
+
+    /// Delete `(scope, key)`. Returns whether the key existed (so the
+    /// caller can suppress the broadcast on a true noop).
+    pub fn delete(&mut self, scope: &Scope, key: &str) -> bool {
+        match scope {
+            Scope::Terminal(tid) => self
+                .terminal
+                .get_mut(tid)
+                .and_then(|m| m.remove(key))
+                .is_some(),
+            Scope::Collection(cid) => self
+                .collection
+                .get_mut(cid)
+                .and_then(|m| m.remove(key))
+                .is_some(),
+            Scope::Global => self.global.remove(key).is_some(),
+            // Unknown forward-compat variant: nothing to delete.
+            _ => false,
+        }
+    }
+
+    /// List every key in `scope` (no values, sorted for determinism).
+    #[must_use]
+    pub fn list(&self, scope: &Scope) -> Vec<String> {
+        let mut keys: Vec<String> = match scope {
+            Scope::Terminal(tid) => self
+                .terminal
+                .get(tid)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default(),
+            Scope::Collection(cid) => self
+                .collection
+                .get(cid)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default(),
+            Scope::Global => self.global.keys().cloned().collect(),
+            // Unknown forward-compat variant: empty listing.
+            _ => Vec::new(),
+        };
+        keys.sort();
+        keys
+    }
+
+    /// Register `(client, scope, key)` as an active subscription. The
+    /// underlying set is idempotent: re-subscribing the same triple is
+    /// a noop.
+    pub fn subscribe(&mut self, client: ClientId, scope: Scope, key: String) {
+        self.subscriptions.insert((client, scope, key));
+    }
+
+    /// Drop every subscription owned by `client`. Called on detach.
+    pub fn drop_client(&mut self, client: ClientId) {
+        self.subscriptions.retain(|(c, _, _)| *c != client);
+    }
+
+    /// Collect every client subscribed to `(scope, key)`. Order is
+    /// unspecified — callers MUST NOT rely on subscriber iteration order.
+    #[must_use]
+    pub fn subscribers_for(&self, scope: &Scope, key: &str) -> Vec<ClientId> {
+        self.subscriptions
+            .iter()
+            .filter(|(_, s, k)| s == scope && k == key)
+            .map(|(c, _, _)| *c)
+            .collect()
+    }
 }
 
 impl Default for ServerState {
@@ -269,7 +435,133 @@ impl ServerState {
             next_window_wire_id: 1,
             next_client_id: 1,
             last_attached_session: None,
+            metadata: MetadataStore::default(),
+            client_layers: HashMap::new(),
         }
+    }
+
+    /// Borrow the L3 metadata store.
+    #[must_use]
+    pub const fn metadata(&self) -> &MetadataStore {
+        &self.metadata
+    }
+
+    /// Mutably borrow the L3 metadata store. Use the higher-level
+    /// [`Self::metadata_set`] / [`Self::metadata_delete`] /
+    /// [`Self::metadata_subscribe`] helpers when you also want the
+    /// subscriber-fanout side effects.
+    pub const fn metadata_mut(&mut self) -> &mut MetadataStore {
+        &mut self.metadata
+    }
+
+    /// Record the layer set advertised by `client_id` in HELLO. Called
+    /// from the runtime's HELLO handler. Re-set is idempotent (the
+    /// most recent HELLO wins, matching `ColorSupport`).
+    pub fn set_client_layers(&mut self, client_id: ClientId, layers: LayerSet) {
+        self.client_layers.insert(client_id, layers);
+    }
+
+    /// Look up the layer set advertised by `client_id`. Defaults to
+    /// [`LayerSet::all`] for clients we never saw a HELLO from — the
+    /// permissive default matches test scaffolding that skips HELLO.
+    #[must_use]
+    pub fn client_layers(&self, client_id: ClientId) -> LayerSet {
+        self.client_layers
+            .get(&client_id)
+            .copied()
+            .unwrap_or_else(LayerSet::all)
+    }
+
+    /// `true` iff `client_id` has L3 in its negotiated `HELLO.layers`.
+    /// Gates emission of `METADATA_CHANGED` per SPEC §16.4.
+    #[must_use]
+    pub fn client_speaks_l3(&self, client_id: ClientId) -> bool {
+        self.client_layers(client_id).contains(Layer::L3)
+    }
+
+    /// Atomic SET + broadcast: store `value` at `(scope, key)`, then
+    /// enqueue a `MetadataChanged` to every L3-capable subscriber
+    /// whose subscription matches `(scope, key)`. Silently skips
+    /// subscribers that have been detached or whose mailbox is full
+    /// (`try_send` semantics — backpressure is a flow-control concern
+    /// SPEC §12 doesn't yet cover for L3).
+    ///
+    /// Returns the set of clients the broadcast was attempted against
+    /// (after L3-capability filtering) so callers can assert fanout
+    /// shape in tests.
+    pub fn metadata_set(&mut self, scope: &Scope, key: &str, value: Vec<u8>) -> Vec<ClientId> {
+        // Broadcast first so the borrow of `value` is finished by the time
+        // the K/V store consumes it on `set`. The "set before broadcast"
+        // ordering is preserved by checking the prior value: if the new
+        // bytes equal what's already stored we return early *before*
+        // mutating, so subscribers never observe a fake notification.
+        let unchanged = self
+            .metadata
+            .get(scope, key)
+            .is_some_and(|prev| prev == value);
+        if unchanged {
+            return Vec::new();
+        }
+        let subscribers = self.metadata.subscribers_for(scope, key);
+        let delivered = self.broadcast_metadata_changed(&subscribers, scope, key, Some(&value));
+        // Commit the write last; `MetadataSetOutcome` is now redundant
+        // here but kept on the lower-level API for direct callers.
+        let _ = self.metadata.set(scope, key, value);
+        delivered
+    }
+
+    /// Atomic DELETE + tombstone broadcast. Idempotent: deleting a
+    /// missing key returns an empty broadcast set.
+    pub fn metadata_delete(&mut self, scope: &Scope, key: &str) -> Vec<ClientId> {
+        let existed = self.metadata.delete(scope, key);
+        if !existed {
+            return Vec::new();
+        }
+        let subscribers = self.metadata.subscribers_for(scope, key);
+        self.broadcast_metadata_changed(&subscribers, scope, key, None)
+    }
+
+    /// Register a subscription for `client_id`. The client MUST be
+    /// L3-capable (call sites in the runtime gate on
+    /// [`Self::client_speaks_l3`] before invoking this).
+    pub fn metadata_subscribe(&mut self, client_id: ClientId, scope: Scope, key: String) {
+        self.metadata.subscribe(client_id, scope, key);
+    }
+
+    /// Helper: fan a `MetadataChanged` frame out to every subscriber in
+    /// `subscribers` that is (a) still attached, (b) L3-capable, and
+    /// (c) drainable (mailbox not closed). Returns the actually-targeted
+    /// client list.
+    fn broadcast_metadata_changed(
+        &self,
+        subscribers: &[ClientId],
+        scope: &Scope,
+        key: &str,
+        value: Option<&[u8]>,
+    ) -> Vec<ClientId> {
+        let mut delivered = Vec::with_capacity(subscribers.len());
+        for client_id in subscribers {
+            if !self.client_speaks_l3(*client_id) {
+                continue;
+            }
+            let Some(client) = self.attached.get(client_id) else {
+                continue;
+            };
+            let frame = FrameKind::MetadataChanged {
+                scope: scope.clone(),
+                key: key.to_owned(),
+                value: value.map(<[u8]>::to_vec),
+            };
+            // `try_send`: the mailbox is bounded (DEFAULT_CLIENT_MAILBOX)
+            // and we hold the state mutex synchronously; awaiting on a
+            // full mailbox would deadlock the per-client read loop. A
+            // dropped notification is acceptable per SPEC §7.4 — the
+            // subscriber can re-`GET_METADATA` on next attach.
+            if client.tx.try_send(Outbound::Frame(frame)).is_ok() {
+                delivered.push(*client_id);
+            }
+        }
+        delivered
     }
 
     /// Most-recently-attached session, if any. Resolves
@@ -393,6 +685,11 @@ impl ServerState {
         // Drop entries that became empty so the map doesn't grow unboundedly
         // across attach/detach churn.
         self.terminal_subscribers.retain(|_, subs| !subs.is_empty());
+        // Drop any L3 metadata subscriptions this client owned (SPEC §7.4
+        // says subscriptions are connection-scoped) plus its cached layer
+        // negotiation. Keeps the maps bounded across attach churn.
+        self.metadata.drop_client(client_id);
+        self.client_layers.remove(&client_id);
     }
 
     /// Subscribers (snapshot) for `pane`. Returns an empty slice if no
@@ -939,5 +1236,229 @@ mod tests {
         let (_sid, _wid, pid) = shared.with_mut(|s| s.seed_session("default"));
         let count = shared.with(|s| s.subscribers_for_terminal(pid).len());
         assert_eq!(count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // L3 metadata tests — SPEC §7.4 / §11.L3 (phux-4li.2).
+    //
+    // Cover: SUBSCRIBE → SET → broadcast fanout, scope isolation (Terminal
+    // vs Collection vs Global), non-L3 consumer filtering (§16.4), DELETE
+    // tombstone semantics, and the `Unchanged` SET shortcut.
+    // -------------------------------------------------------------------------
+
+    fn attach_l3_client(s: &mut ServerState) -> (ClientId, mpsc::Receiver<Outbound>) {
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        let (tx, rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
+        s.attach_default_caps(cid, "default", tx).unwrap();
+        s.set_client_layers(cid, LayerSet::all());
+        (cid, rx)
+    }
+
+    fn attach_l1_only_client(s: &mut ServerState) -> (ClientId, mpsc::Receiver<Outbound>) {
+        let cid = s.new_client_id();
+        let (tx, rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
+        s.attach_default_caps(cid, "default", tx).unwrap();
+        s.set_client_layers(cid, LayerSet::new());
+        (cid, rx)
+    }
+
+    /// Pull every queued frame off `rx`. Returns the inner frames; raw
+    /// PONG bytes (if any) are surfaced as `None` and skipped.
+    fn drain_frames(rx: &mut mpsc::Receiver<Outbound>) -> Vec<FrameKind> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Outbound::Frame(f) = msg {
+                out.push(f);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn metadata_subscribe_then_set_broadcasts_matching_key() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.tui.layout/v1".to_owned());
+        let delivered = s.metadata_set(&scope, "phux.tui.layout/v1", b"value-1".to_vec());
+
+        assert_eq!(delivered, vec![cid]);
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged {
+                scope: s2,
+                key,
+                value,
+            } => {
+                assert_eq!(s2, &scope);
+                assert_eq!(key, "phux.tui.layout/v1");
+                assert_eq!(value.as_deref(), Some(b"value-1".as_slice()));
+            }
+            other => panic!("expected MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_set_on_different_key_does_not_fan_to_subscriber() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.a/v1".to_owned());
+        let delivered = s.metadata_set(&scope, "phux.b/v1", b"x".to_vec());
+
+        assert!(delivered.is_empty(), "no subscriber for the b/v1 key");
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn metadata_scope_isolation_terminal_vs_collection_vs_global() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let key = "phux.same/v1";
+        let t_scope = Scope::Terminal(phux_protocol::ids::TerminalId::local(7));
+        let c_scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let g_scope = Scope::Global;
+
+        // Only subscribe to Collection.
+        s.metadata_subscribe(cid, c_scope.clone(), key.to_owned());
+
+        // Writes to Terminal and Global must NOT fire the subscriber.
+        assert!(s.metadata_set(&t_scope, key, b"t".to_vec()).is_empty());
+        assert!(s.metadata_set(&g_scope, key, b"g".to_vec()).is_empty());
+
+        // Write to Collection MUST fire it.
+        let delivered = s.metadata_set(&c_scope, key, b"c".to_vec());
+        assert_eq!(delivered, vec![cid]);
+
+        // And the receiver MUST see exactly one frame (for Collection).
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged { scope, value, .. } => {
+                assert_eq!(scope, &c_scope);
+                assert_eq!(value.as_deref(), Some(b"c".as_slice()));
+            }
+            other => panic!("expected MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_delete_emits_tombstone_only_if_key_existed() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        // Deleting a missing key is idempotent and silent.
+        let delivered = s.metadata_delete(&scope, "phux.k/v1");
+        assert!(delivered.is_empty());
+        assert!(drain_frames(&mut rx).is_empty());
+
+        // After a SET, DELETE fires the tombstone.
+        s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        drain_frames(&mut rx); // consume the SET broadcast
+
+        let delivered = s.metadata_delete(&scope, "phux.k/v1");
+        assert_eq!(delivered, vec![cid]);
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged {
+                value: None,
+                key,
+                scope: s2,
+            } => {
+                assert_eq!(key, "phux.k/v1");
+                assert_eq!(s2, &scope);
+            }
+            other => panic!("expected tombstone MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_set_unchanged_value_does_not_broadcast() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        let first = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert_eq!(first, vec![cid]);
+        drain_frames(&mut rx);
+
+        let second = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert!(second.is_empty(), "no broadcast on identical write");
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn non_l3_consumer_does_not_receive_metadata_changed() {
+        // SPEC §16.4: a non-L3 client (agent / recorder) MUST NOT see any
+        // L3 frames. The fanout layer filters by `client_speaks_l3`.
+        let mut s = ServerState::new();
+        let (l3_cid, mut l3_rx) = attach_l3_client(&mut s);
+        let (l1_cid, mut l1_rx) = attach_l1_only_client(&mut s);
+        let scope = Scope::Global;
+
+        s.metadata_subscribe(l3_cid, scope.clone(), "phux.k/v1".to_owned());
+        // L1-only consumer might still TRY to subscribe via misbehaving
+        // client; the dispatch in runtime.rs refuses it. Simulate that by
+        // not subscribing through the gated path.
+        s.metadata_subscribe(l1_cid, scope.clone(), "phux.k/v1".to_owned());
+
+        let delivered = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        // Only the L3 client makes it through.
+        assert_eq!(delivered, vec![l3_cid]);
+        assert_eq!(drain_frames(&mut l3_rx).len(), 1);
+        assert!(drain_frames(&mut l1_rx).is_empty());
+    }
+
+    #[test]
+    fn detach_drops_metadata_subscriptions() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        s.detach(cid);
+
+        let delivered = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert!(delivered.is_empty());
+        // Channel returns Err(Disconnected) eventually; just confirm no
+        // frame arrived before detach cleanup.
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn metadata_list_returns_keys_sorted_and_scope_isolated() {
+        let mut s = ServerState::new();
+        let scope_a = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope_b = Scope::Global;
+
+        s.metadata_set(&scope_a, "zeta", b"z".to_vec());
+        s.metadata_set(&scope_a, "alpha", b"a".to_vec());
+        s.metadata_set(&scope_a, "mu", b"m".to_vec());
+        s.metadata_set(&scope_b, "global-only", b"g".to_vec());
+
+        let keys_a = s.metadata().list(&scope_a);
+        assert_eq!(keys_a, vec!["alpha", "mu", "zeta"]);
+        let keys_b = s.metadata().list(&scope_b);
+        assert_eq!(keys_b, vec!["global-only"]);
+    }
+
+    #[test]
+    fn metadata_get_returns_stored_value_or_none() {
+        let mut s = ServerState::new();
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        s.metadata_set(&scope, "k", b"v".to_vec());
+        assert_eq!(s.metadata().get(&scope, "k"), Some(b"v".to_vec()));
+        assert_eq!(s.metadata().get(&scope, "missing"), None);
+        // Wrong scope: same key returns None.
+        assert_eq!(s.metadata().get(&Scope::Global, "k"), None);
     }
 }

@@ -27,8 +27,8 @@ use bytes::BytesMut;
 
 use crate::caps::ClientCapabilities;
 use crate::ids::{
-    ClientId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL, TERMINAL_ID_TAG_SATELLITE,
-    TerminalId,
+    ClientId, CollectionId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL,
+    TERMINAL_ID_TAG_SATELLITE, TerminalId,
 };
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
@@ -120,6 +120,39 @@ pub const TYPE_TERMINAL_OUTPUT: u8 = 0x90;
 /// `scrollback_bytes`; the client `vt_write`s them into a fresh Terminal
 /// of the declared `cols × rows`.
 pub const TYPE_TERMINAL_SNAPSHOT: u8 = 0x91;
+
+// -----------------------------------------------------------------------------
+// L3 metadata frame discriminants — SPEC §7.4 (phux-4li.2).
+//
+// Contiguous block 0x50..=0x54 for C→S commands; 0xD0 for the single S→C
+// notification. Sits between the L1 hot-path C→S range (0x10..=0x21) and
+// the proto SUBSCRIBE slot (0x40), leaving 0x55..=0x5F open for the L2
+// command allocation that follows. The S→C side uses 0xD0..=0xDF as a
+// matching unallocated block, with `BELL` (0xB0) / `ALERT` (0xB2) and
+// `ERROR` (0xC1) already on lower discriminants.
+// -----------------------------------------------------------------------------
+
+/// Discriminant for `GET_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+pub const TYPE_GET_METADATA: u8 = 0x50;
+/// Discriminant for `SET_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+pub const TYPE_SET_METADATA: u8 = 0x51;
+/// Discriminant for `DELETE_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+pub const TYPE_DELETE_METADATA: u8 = 0x52;
+/// Discriminant for `LIST_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+pub const TYPE_LIST_METADATA: u8 = 0x53;
+/// Discriminant for `SUBSCRIBE_METADATA` (client to server, `SPEC.md` §7.4).
+pub const TYPE_SUBSCRIBE_METADATA: u8 = 0x54;
+
+/// Discriminant for `METADATA_CHANGED` (server to client, `SPEC.md` §7.4).
+pub const TYPE_METADATA_CHANGED: u8 = 0xD0;
+
+// Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
+/// Wire tag for [`Scope::Terminal`].
+pub(crate) const SCOPE_TAG_TERMINAL: u8 = 0;
+/// Wire tag for [`Scope::Collection`].
+pub(crate) const SCOPE_TAG_COLLECTION: u8 = 1;
+/// Wire tag for [`Scope::Global`].
+pub(crate) const SCOPE_TAG_GLOBAL: u8 = 2;
 
 // -----------------------------------------------------------------------------
 // ErrorCode enum — SPEC §14.
@@ -294,6 +327,37 @@ impl ViewportInfo {
         self.pixel_h = pixel_h;
         self
     }
+}
+
+// -----------------------------------------------------------------------------
+// Scope — SPEC §7.4 / §11.L3 (phux-4li.2). The "where does this key live?"
+// tagged union shared by every L3 metadata frame.
+// -----------------------------------------------------------------------------
+
+/// Scope of an L3 metadata key (SPEC §7.4 / §11.L3).
+///
+/// Tagged union:
+/// - `Terminal { terminal_id }` — keys scoped to a single Terminal. Killed
+///   with the Terminal.
+/// - `Collection { collection_id }` — keys scoped to an L2 Collection.
+///   L2 is not yet wire-allocated; until it ships, v0.1 servers expose a
+///   single default Collection that satisfies the reference TUI's
+///   `phux.tui.layout/v1` use case (see ADR-0019).
+/// - `Global` — keys scoped to the server (e.g. cross-Collection prefs).
+///
+/// Wire encoding: 1-byte tag + per-variant body.
+/// - tag `0x00` → `Terminal`, body = tagged `TerminalId`.
+/// - tag `0x01` → `Collection`, body = `u32` (the inner `CollectionId`).
+/// - tag `0x02` → `Global`, body = empty.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Scope {
+    /// Keys scoped to a single Terminal. Cleared when the Terminal closes.
+    Terminal(TerminalId),
+    /// Keys scoped to an L2 Collection.
+    Collection(CollectionId),
+    /// Server-wide keys.
+    Global,
 }
 
 /// Decoded wire frame.
@@ -548,6 +612,122 @@ pub enum FrameKind {
         /// SHOULD keep this short enough to log inline.
         message: String,
     },
+
+    // -------------------------------------------------------------------------
+    // L3 metadata frames — SPEC §7.4 / §11.L3 (phux-4li.2). Reserved for
+    // consumers that declare `Layer::L3` in `HELLO.client_caps.layers`; the
+    // server MUST NOT emit `MetadataChanged` to a non-L3 consumer (SPEC
+    // §16.4). The server's K/V store treats values as opaque bytes.
+    //
+    // Reply paths (GET → value, LIST → keys) are intentionally NOT yet
+    // wire-encoded as dedicated frames in v0.1 of L3: SPEC §11 already
+    // defines the generic `COMMAND` / `COMMAND_RESULT` envelope for that
+    // pattern, and lighting up `COMMAND` is a sibling ticket. v0.1 servers
+    // expose the GET / LIST functions as server-side Rust APIs (see
+    // `phux_server::state::ServerState`); the wire reply path lands when
+    // `COMMAND` does. `MetadataChanged` is independently load-bearing for
+    // the ADR-0019 layout-coordination story and ships here.
+    // -------------------------------------------------------------------------
+    /// `GET_METADATA` — client requests the value at `(scope, key)`
+    /// (`SPEC.md` §7.4 / §11.L3).
+    ///
+    /// The reply is currently a server-side function return; the wire
+    /// reply path will ride the generic `COMMAND_RESULT` envelope when
+    /// it lands. `request_id` is carried so the future reply correlates.
+    GetMetadata {
+        /// Correlates this request with the eventual `COMMAND_RESULT`.
+        request_id: u32,
+        /// Where to look the key up.
+        scope: Scope,
+        /// UTF-8 key name. Convention: `phux.<consumer>.<name>/<version>`
+        /// per SPEC §17 (non-normative).
+        key: String,
+    },
+
+    /// `SET_METADATA` — client writes `value` at `(scope, key)`
+    /// (`SPEC.md` §7.4 / §11.L3).
+    ///
+    /// Atomic write: the server stores `value` and broadcasts
+    /// `MetadataChanged { scope, key, value: Some(value) }` to every
+    /// subscriber matching `(scope, key)`. Implementations MAY enforce a
+    /// per-key size limit (recommended: 256 KiB) and reply with
+    /// [`ErrorCode::ResourceExhausted`] if exceeded.
+    SetMetadata {
+        /// Correlates this request with the eventual `COMMAND_RESULT`.
+        request_id: u32,
+        /// Where to write the key.
+        scope: Scope,
+        /// UTF-8 key name.
+        key: String,
+        /// Opaque value bytes. The server MUST NOT interpret them.
+        value: Vec<u8>,
+    },
+
+    /// `DELETE_METADATA` — client removes `key` from `scope`
+    /// (`SPEC.md` §7.4 / §11.L3).
+    ///
+    /// Idempotent: deleting a missing key is not an error. The server
+    /// broadcasts `MetadataChanged { scope, key, value: None }` (a
+    /// tombstone) to subscribers iff the key existed before the call.
+    DeleteMetadata {
+        /// Correlates this request with the eventual `COMMAND_RESULT`.
+        request_id: u32,
+        /// Where to delete the key.
+        scope: Scope,
+        /// UTF-8 key name.
+        key: String,
+    },
+
+    /// `LIST_METADATA` — client requests the set of key names in `scope`
+    /// (`SPEC.md` §7.4 / §11.L3).
+    ///
+    /// Returns key names only — values are not part of the listing. As
+    /// with `GET_METADATA`, the wire reply path is deferred to the
+    /// `COMMAND_RESULT` envelope; v0.1 servers expose LIST as a Rust
+    /// function return.
+    ListMetadata {
+        /// Correlates this request with the eventual `COMMAND_RESULT`.
+        request_id: u32,
+        /// Where to list keys from.
+        scope: Scope,
+    },
+
+    /// `SUBSCRIBE_METADATA` — client opts into `MetadataChanged` events
+    /// matching `(scope, key)` (`SPEC.md` §7.4).
+    ///
+    /// A single subscribe per `(scope, key)` is enough; the server keys
+    /// subscribers by `(client, scope, key)` so re-subscribes are
+    /// idempotent. Unsubscription is implicit on detach (see
+    /// `phux_server::state::ServerState::detach`); a future
+    /// `UNSUBSCRIBE_METADATA` ticket may add explicit teardown.
+    SubscribeMetadata {
+        /// Scope to watch.
+        scope: Scope,
+        /// Specific key to watch. The subscriber receives
+        /// `MetadataChanged` iff the event's `(scope, key)` matches.
+        key: String,
+    },
+
+    /// `METADATA_CHANGED` — server notifies a subscriber that
+    /// `(scope, key)` was written or deleted (`SPEC.md` §7.4).
+    ///
+    /// `value` is `Some(new_bytes)` on a SET and `None` on a DELETE
+    /// (the tombstone case). Subscribers MAY re-issue `GET_METADATA`
+    /// after receiving the notification; the value is also carried
+    /// inline for the common-case path where the subscriber just
+    /// wants the new bytes (SPEC §7.4 leaves this latitude — "the
+    /// value itself is not carried" was the v0.1 sketch; phux-4li.2
+    /// lifts it because the layout coordination use case
+    /// (ADR-0019) is a read-on-every-change pattern and the round
+    /// trip is wasteful).
+    MetadataChanged {
+        /// Scope the change happened in.
+        scope: Scope,
+        /// Key that changed.
+        key: String,
+        /// New value, or `None` for a deletion (tombstone).
+        value: Option<Vec<u8>>,
+    },
 }
 
 impl FrameKind {
@@ -571,6 +751,12 @@ impl FrameKind {
             Self::TerminalSnapshot { .. } => TYPE_TERMINAL_SNAPSHOT,
             Self::Bell { .. } => TYPE_BELL,
             Self::Error { .. } => TYPE_ERROR,
+            Self::GetMetadata { .. } => TYPE_GET_METADATA,
+            Self::SetMetadata { .. } => TYPE_SET_METADATA,
+            Self::DeleteMetadata { .. } => TYPE_DELETE_METADATA,
+            Self::ListMetadata { .. } => TYPE_LIST_METADATA,
+            Self::SubscribeMetadata { .. } => TYPE_SUBSCRIBE_METADATA,
+            Self::MetadataChanged { .. } => TYPE_METADATA_CHANGED,
         }
     }
 
@@ -604,10 +790,12 @@ impl FrameKind {
                 enc.write_u16_be(*protocol_major);
                 enc.write_u16_be(*protocol_minor);
                 enc.write_u16_be(*protocol_patch);
-                // Trailing field — older decoders skip it via the length
+                // Trailing fields — older decoders skip them via the length
                 // header per SPEC §6 ("skip them by length"). The encoder
-                // ALWAYS emits the byte; the wire shape grows monotonically.
+                // ALWAYS emits all bytes; the wire shape grows monotonically.
+                // Order: color_support (phux-7lf), layers (phux-4li.2).
                 enc.write_u8(client_caps.color_support.as_wire());
+                enc.write_u8(client_caps.layers.as_wire());
             }
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);
@@ -689,6 +877,48 @@ impl FrameKind {
                 encode_optional_u32(*request_id, &mut enc);
                 enc.write_u16_be(code.as_wire());
                 enc.write_str(message);
+            }
+            // GET / DELETE share `{request_id, scope, key}`; merged to
+            // satisfy `clippy::match_same_arms`. The wire bodies are
+            // intentionally identical — the discriminating type byte is
+            // emitted before this match arm runs.
+            Self::GetMetadata {
+                request_id,
+                scope,
+                key,
+            }
+            | Self::DeleteMetadata {
+                request_id,
+                scope,
+                key,
+            } => {
+                enc.write_u32_be(*request_id);
+                encode_scope(scope, &mut enc);
+                enc.write_str(key);
+            }
+            Self::SetMetadata {
+                request_id,
+                scope,
+                key,
+                value,
+            } => {
+                enc.write_u32_be(*request_id);
+                encode_scope(scope, &mut enc);
+                enc.write_str(key);
+                enc.write_bytes(value);
+            }
+            Self::ListMetadata { request_id, scope } => {
+                enc.write_u32_be(*request_id);
+                encode_scope(scope, &mut enc);
+            }
+            Self::SubscribeMetadata { scope, key } => {
+                encode_scope(scope, &mut enc);
+                enc.write_str(key);
+            }
+            Self::MetadataChanged { scope, key, value } => {
+                encode_scope(scope, &mut enc);
+                enc.write_str(key);
+                encode_optional_bytes(value.as_deref(), &mut enc);
             }
         }
 
@@ -1072,6 +1302,46 @@ pub(super) fn decode_optional_bytes(dec: &mut Decoder<'_>) -> Result<Option<Vec<
         1 => Ok(Some(dec.read_bytes()?.to_vec())),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Option<bytes> tag",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Scope codec — SPEC §7.4 (phux-4li.2).
+//
+// Layout: 1-byte tag + variant body.
+//   0x00 Terminal   → tagged TerminalId (re-uses the L1 codec)
+//   0x01 Collection → u32 (the inner CollectionId; once L2 ships a
+//                     Local/Satellite tag will prefix this, mirroring the
+//                     ADR-0016 TerminalId shape)
+//   0x02 Global     → no body
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_scope(scope: &Scope, enc: &mut Encoder<'_>) {
+    match scope {
+        Scope::Terminal(terminal_id) => {
+            enc.write_u8(SCOPE_TAG_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
+        Scope::Collection(collection_id) => {
+            enc.write_u8(SCOPE_TAG_COLLECTION);
+            enc.write_u32_be(collection_id.get());
+        }
+        Scope::Global => {
+            enc.write_u8(SCOPE_TAG_GLOBAL);
+        }
+    }
+}
+
+pub(super) fn decode_scope(dec: &mut Decoder<'_>) -> Result<Scope, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        SCOPE_TAG_TERMINAL => Ok(Scope::Terminal(decode_terminal_id(dec)?)),
+        SCOPE_TAG_COLLECTION => Ok(Scope::Collection(CollectionId::new(dec.read_u32_be()?))),
+        SCOPE_TAG_GLOBAL => Ok(Scope::Global),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Scope",
             value: u32::from(other),
         }),
     }

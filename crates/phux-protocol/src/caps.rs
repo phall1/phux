@@ -78,14 +78,113 @@ impl ColorSupport {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Layer / LayerSet — SPEC §6.2 conformance-tier bitset (ADR-0015).
+// -----------------------------------------------------------------------------
+
+/// A single conformance tier from SPEC §6.2 / §16.
+///
+/// L1 (Terminal substrate) is always implied and always implemented; L2
+/// (Collection lifecycle) and L3 (Metadata storage) are optional services
+/// negotiated via [`LayerSet`] in HELLO / `HELLO_OK`.
+///
+/// Per ADR-0015 the **negotiated tier set** is the intersection of the
+/// client's and server's advertised layers. Out-of-tier messages MUST
+/// surface as protocol errors (SPEC §16.4).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Layer {
+    /// Terminal substrate. Always implemented; always implied.
+    L1 = 0x01,
+    /// Collection lifecycle (OPTIONAL). SPEC §7.3 / §11.L2.
+    L2 = 0x02,
+    /// Metadata storage (OPTIONAL). SPEC §7.4 / §11.L3.
+    L3 = 0x04,
+}
+
+/// A bit-field of [`Layer`]s. Wire encoding: a single `u8` carrying the
+/// OR of the variants' raw discriminants.
+///
+/// Construction goes through [`Self::new`] / [`Self::with`] / [`Self::insert`]
+/// so the L1-always-on invariant is preserved. Direct field-literal
+/// construction is intentionally NOT supported — `Layer` may grow with
+/// future tiers and the bitset must remain forward-compat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LayerSet(u8);
+
+impl LayerSet {
+    /// The L1-only set. Equivalent to `LayerSet::default()`.
+    ///
+    /// L1 is always implied per SPEC §6.2; the bit is always present in
+    /// the wire encoding regardless of construction path.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(Layer::L1 as u8)
+    }
+
+    /// Build a set containing all listed layers (plus the always-on L1).
+    #[must_use]
+    pub const fn with(layers: &[Layer]) -> Self {
+        let mut bits = Layer::L1 as u8;
+        let mut i = 0;
+        while i < layers.len() {
+            bits |= layers[i] as u8;
+            i += 1;
+        }
+        Self(bits)
+    }
+
+    /// The full set: L1 + L2 + L3. Used by the reference TUI which
+    /// advertises every tier it speaks (SPEC §16.3).
+    #[must_use]
+    pub const fn all() -> Self {
+        Self((Layer::L1 as u8) | (Layer::L2 as u8) | (Layer::L3 as u8))
+    }
+
+    /// Insert `layer` into the set. L1 cannot be removed.
+    pub const fn insert(&mut self, layer: Layer) {
+        self.0 |= layer as u8;
+    }
+
+    /// Test whether `layer` is in the set.
+    #[must_use]
+    pub const fn contains(self, layer: Layer) -> bool {
+        self.0 & (layer as u8) != 0
+    }
+
+    /// Raw wire byte. The encoder writes this directly; the decoder
+    /// passes the byte to [`Self::from_wire`]. L1 is always forced on
+    /// so peers can rely on the invariant.
+    #[must_use]
+    pub const fn as_wire(self) -> u8 {
+        self.0 | (Layer::L1 as u8)
+    }
+
+    /// Inverse of [`Self::as_wire`]. Unknown bits beyond L1/L2/L3 are
+    /// silently dropped (forward-compat per Appendix A) but L1 is
+    /// always forced on.
+    #[must_use]
+    pub const fn from_wire(byte: u8) -> Self {
+        let known = (Layer::L1 as u8) | (Layer::L2 as u8) | (Layer::L3 as u8);
+        Self((byte & known) | (Layer::L1 as u8))
+    }
+}
+
+impl Default for LayerSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The client's advertised capability set, per SPEC §6.2.
 ///
 /// SPEC §6.2 enumerates `kbd_protocols`, `mouse_protocols`, `color`,
 /// `images`, `hyperlinks`, `unicode_version`, the deprecated `rendering`
-/// mode, and the `layers` bitset. Only [`Self::color_support`] is
-/// populated in this revision; sibling tickets add the remaining fields
-/// behind their own wire bumps. The struct is `#[non_exhaustive]` so
-/// additive fields don't break downstream literal construction.
+/// mode, and the `layers` bitset. As of phux-4li.2 [`Self::color_support`]
+/// and [`Self::layers`] are populated; sibling tickets add the remaining
+/// fields behind their own wire bumps. The struct is `#[non_exhaustive]`
+/// so additive fields don't break downstream literal construction.
 ///
 /// Construct via [`Self::new`] (defaults across the board) plus the
 /// builder setters; that's the path that survives field-set growth.
@@ -94,17 +193,23 @@ impl ColorSupport {
 pub struct ClientCapabilities {
     /// The client's color tier (SPEC §6.2). See [`ColorSupport`].
     pub color_support: ColorSupport,
+    /// The set of conformance tiers (SPEC §6.2 / §16) the client speaks.
+    /// L1 is always implied; clients add L2 / L3 to opt in to the
+    /// respective optional services. The reference TUI advertises
+    /// [`LayerSet::all`]; an agent / recorder advertises [`LayerSet::new`]
+    /// (L1-only).
+    pub layers: LayerSet,
 }
 
 impl ClientCapabilities {
-    /// Build a default capability set. Currently equivalent to
-    /// `ClientCapabilities { color_support: ColorSupport::TrueColor }`,
-    /// but future fields default in this constructor — call sites that
-    /// want to override one field call `.with_color_support(...)`.
+    /// Build a default capability set: `ColorSupport::TrueColor` plus the
+    /// L1-only layer set. Call sites that want to override one field call
+    /// the matching `.with_*` setter.
     #[must_use]
     pub const fn new() -> Self {
         Self {
             color_support: ColorSupport::TrueColor,
+            layers: LayerSet::new(),
         }
     }
 
@@ -112,6 +217,13 @@ impl ClientCapabilities {
     #[must_use]
     pub const fn with_color_support(mut self, color_support: ColorSupport) -> Self {
         self.color_support = color_support;
+        self
+    }
+
+    /// Builder setter for [`Self::layers`].
+    #[must_use]
+    pub const fn with_layers(mut self, layers: LayerSet) -> Self {
+        self.layers = layers;
         self
     }
 }

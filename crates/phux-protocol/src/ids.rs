@@ -52,6 +52,24 @@ id_type!(
     /// Identifier for a currently-connected client.
     ClientId
 );
+id_type!(
+    /// Identifier for a Collection (L2), the named lifecycle bundle of
+    /// Terminals described in SPEC §7.3.
+    ///
+    /// L2 is not yet wire-allocated (`SPEC.md` §7.3 discriminants are TBD)
+    /// but the L3 metadata wire frames (`SPEC.md` §7.4) reference
+    /// `CollectionId` in the `Scope::Collection` variant, so the type is
+    /// allocated here as part of phux-4li.2. Until L2 ships, v0.1 servers
+    /// use a single static default `CollectionId(1)` and accept it in
+    /// L3 metadata operations.
+    ///
+    /// The wire encoding is a u32 (the inner `id`). Once L2 lands, this
+    /// type will likely grow into a tagged union (`Local`/`Satellite`) the
+    /// same way `TerminalId` did under ADR-0016; the u32-only shape today
+    /// keeps the wire bytes minimal while leaving room for that growth via
+    /// a versioned `Scope::Collection` encoding.
+    CollectionId
+);
 
 /// Federation-routing host identifier for a [`TerminalId::Satellite`].
 ///
