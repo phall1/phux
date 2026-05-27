@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use phux_client::attach::{self, AttachError, DETACH_CHORD_DESCRIPTION};
+use phux_client::predict::PredictiveConfig;
+use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::AttachTarget;
 use phux_server::runtime::default_socket_path;
 use phux_server::{ServerConfig, ServerRuntime};
@@ -178,7 +180,24 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    let result = rt.block_on(attach::run(&socket_path, target));
+    // Load user config to discover experimental opt-ins. Failures here
+    // are non-fatal — we log and fall back to defaults so a syntax
+    // error in config.toml doesn't lock the user out of their server.
+    let predict_cfg = match config_loader::load() {
+        Ok(cfg) => PredictiveConfig {
+            enabled: cfg.experimental.predictive_echo,
+        },
+        Err(err) => {
+            eprintln!("phux: config load failed ({err}); using defaults");
+            PredictiveConfig::disabled()
+        }
+    };
+
+    let result = if predict_cfg.enabled {
+        rt.block_on(attach::run_with_predict(&socket_path, target, predict_cfg))
+    } else {
+        rt.block_on(attach::run(&socket_path, target))
+    };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

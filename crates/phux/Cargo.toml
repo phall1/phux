@@ -21,6 +21,7 @@ phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
 phux-server.workspace = true
 phux-client.workspace = true
+phux-config.workspace = true
 clap.workspace = true
 dhat = { workspace = true, optional = true }
 tokio.workspace = true

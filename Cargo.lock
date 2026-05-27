@@ -1221,6 +1221,7 @@ dependencies = [
  "clap",
  "dhat",
  "phux-client",
+ "phux-config",
  "phux-core",
  "phux-protocol",
  "phux-server",

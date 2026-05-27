@@ -42,6 +42,13 @@ pub struct Config {
     /// Color slots (theme). Free-form key/value of color strings.
     #[serde(default)]
     pub theme: ThemeCfg,
+
+    /// Experimental knobs gated behind `[experimental]`.
+    ///
+    /// Everything under this section is subject to change without notice.
+    /// See `DESIGN.md` §4.2 for the user-facing caveat.
+    #[serde(default)]
+    pub experimental: ExperimentalCfg,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +236,28 @@ pub struct HookEntry {
     pub when: BTreeMap<String, toml::Value>,
     /// Action to fire on match — same shape as a keybind action.
     pub action: Action,
+}
+
+// ---------------------------------------------------------------------------
+// [experimental]
+// ---------------------------------------------------------------------------
+
+/// `[experimental]` table — opt-in flags for unstable features.
+///
+/// Anything here may be renamed, repurposed, or removed without a
+/// `SemVer` bump. Set explicitly only if you accept that contract.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentalCfg {
+    /// Engage Mosh-class predictive local echo in `phux attach`.
+    ///
+    /// When `true`, the attach loop dispatches to
+    /// `phux_client::attach::run_with_predict` with a
+    /// `PredictiveConfig { enabled: true, .. }`. See `phux-9gw.1` for
+    /// the algorithm and `crates/phux-client/src/predict/` for the
+    /// implementation.
+    #[serde(default, rename = "predictive-echo")]
+    pub predictive_echo: bool,
 }
 
 // ---------------------------------------------------------------------------

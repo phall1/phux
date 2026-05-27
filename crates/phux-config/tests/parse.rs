@@ -171,6 +171,57 @@ fn malformed_input_reports_line_col_and_snapshots() {
     insta::assert_snapshot!("malformed_parse_error", normalized);
 }
 
+// ---------------------------------------------------------------------------
+// [experimental] predictive-echo  (phux-9gw.1.2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn experimental_predictive_echo_true_parses() {
+    let input = r"
+[experimental]
+predictive-echo = true
+";
+    let cfg = parse_str(input, &path()).expect("[experimental] section parses");
+    assert!(
+        cfg.experimental.predictive_echo,
+        "predictive-echo = true should land as true in the typed view"
+    );
+}
+
+#[test]
+fn experimental_predictive_echo_defaults_false_when_absent() {
+    // No [experimental] section at all: the field must default to false.
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert!(
+        !cfg.experimental.predictive_echo,
+        "absent [experimental] section must leave predictive-echo at its false default"
+    );
+
+    // Empty [experimental] table is also valid and yields the same default.
+    let cfg2 = parse_str("[experimental]\n", &path()).expect("empty section parses");
+    assert!(!cfg2.experimental.predictive_echo);
+}
+
+#[test]
+fn experimental_predictive_echo_malformed_value_reports_key() {
+    // Bool field given an integer: the error must reach the user with
+    // enough context to find the key.
+    let input = r"
+[experimental]
+predictive-echo = 1
+";
+    let err = parse_str(input, &path()).expect_err("integer is not a bool");
+    let ConfigError::Parse { message, line, .. } = err else {
+        panic!("expected ConfigError::Parse for malformed value");
+    };
+    assert!(
+        message.contains("bool") || message.contains("boolean"),
+        "error should mention the expected type; got: {message}"
+    );
+    // The offending value sits on line 3 (leading newline + section line + value line).
+    assert_eq!(line, 3, "error should point at the broken value line");
+}
+
 /// Replace the `:COL:` in `path:LINE:COL: message` with `:<col>:` so
 /// the snapshot is stable across `toml` crate minor versions.
 fn normalize_col(s: &str) -> String {
