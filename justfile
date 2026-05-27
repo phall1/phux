@@ -40,16 +40,16 @@ test-cargo:
 deny:
     cargo deny check
 
-# Build rustdoc.
+# Build rustdoc with warnings denied — mirrors the CI `doc` gate.
 doc:
-    cargo doc --workspace --no-deps --all-features
+    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps --all-features
 
 # Watch loop — re-check + test on every save.
 watch:
     cargo watch -x check -x 'nextest run --workspace'
 
 # Everything CI must pass.
-ci: fmt-check lint test deny
+ci: fmt-check lint test deny doc
     @echo "ok"
 
 # Print the toolchain we are pinned to.
