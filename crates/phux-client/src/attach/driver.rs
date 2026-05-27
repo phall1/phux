@@ -588,35 +588,54 @@ async fn main_loop(
             // sane default (logged) rather than skip the frame — the
             // server still benefits from knowing a resize happened.
             _ = sigwinch.recv() => {
+                let prev_dims = viewport_dims;
                 let viewport = current_viewport_or_default();
                 viewport_dims = (viewport.cols.max(1), viewport.rows.max(1));
-                // Resize clears the prediction queue (anchored to the
-                // previous viewport); the next render reseeds the
-                // cursor from authoritative state.
                 predict.set_viewport(viewport.cols, viewport.rows);
                 conn.send(&viewport_resize_frame(viewport)).await?;
-                // phux-4li.4: re-render the focused pane after a resize.
-                // Per-pane reflow (resizing each leaf's libghostty
-                // Terminal to its new Rect, recomputing dividers) is
-                // sibling-ticket .7's `attach::reflow` integration; this
-                // branch keeps the single-pane behaviour from wave A
-                // pending that wire-up.
-                let mut stdout = io::stdout().lock();
-                if let Some(fid) = focused_pane.as_ref()
-                    && let Some(slot) = panes.get_mut(fid)
-                {
-                    let _ = slot.renderer.render(&slot.terminal, &mut stdout);
-                }
-                // phux-nz4.5: viewport dims changed — force a fresh
-                // status-bar paint so the bar lands on the new bottom row.
-                if let Some(p) = status_bar.as_mut() {
-                    p.invalidate();
-                    let _ = p.paint(
-                        &mut stdout,
-                        viewport_dims.0,
-                        viewport_dims.1,
-                        &make_context(&session_name, SystemTime::now()),
+
+                if layout_state.tree.is_some() {
+                    // phux-4li.9: multi-pane reflow. Diff prev vs new
+                    // pane_rects to detect under-viable viewport; libghostty
+                    // resize for each pane happens inside repaint_multi_pane.
+                    // Per-Terminal RESIZE wire emission is gated on the L1
+                    // Terminal-lifecycle wire family — see phux-4li.10.
+                    let prev_rects = super::multi_pane::compute_layout(
+                        &layout_state, prev_dims,
+                    ).rects;
+                    let diff = super::reflow::compute_reflow(
+                        &layout_state, &prev_rects, viewport_dims,
                     );
+                    if diff.too_small {
+                        tracing::warn!(
+                            cols = viewport_dims.0,
+                            rows = viewport_dims.1,
+                            "viewport too small for current layout; rendering may be garbled",
+                        );
+                    }
+                    repaint_multi_pane(
+                        &layout_state,
+                        &mut panes,
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
+                } else {
+                    let mut stdout = io::stdout().lock();
+                    if let Some(fid) = focused_pane.as_ref()
+                        && let Some(slot) = panes.get_mut(fid)
+                    {
+                        let _ = slot.renderer.render(&slot.terminal, &mut stdout);
+                    }
+                    if let Some(p) = status_bar.as_mut() {
+                        p.invalidate();
+                        let _ = p.paint(
+                            &mut stdout,
+                            viewport_dims.0,
+                            viewport_dims.1,
+                            &make_context(&session_name, SystemTime::now()),
+                        );
+                    }
                 }
             }
 
