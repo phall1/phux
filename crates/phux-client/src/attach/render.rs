@@ -46,6 +46,11 @@ pub struct TerminalRenderer<'alloc> {
     state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
+    /// Last-seen authoritative cursor position (viewport coords). Updated
+    /// at the end of [`Self::render`] so the predictive-echo layer
+    /// (`phux-9gw.1`) can re-anchor its cursor estimate without doing a
+    /// second snapshot pass. `None` while the cursor is hidden.
+    last_cursor: Option<(u16, u16)>,
 }
 
 impl<'alloc> TerminalRenderer<'alloc> {
@@ -56,7 +61,17 @@ impl<'alloc> TerminalRenderer<'alloc> {
             state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
+            last_cursor: None,
         })
+    }
+
+    /// Cursor (row, col) as of the most recent [`Self::render`] call.
+    /// Returns `None` if the cursor was hidden or no render has yet
+    /// occurred. The predictive-echo layer reads this to re-anchor its
+    /// cursor estimate after a server frame.
+    #[must_use]
+    pub const fn last_cursor(&self) -> Option<(u16, u16)> {
+        self.last_cursor
     }
 
     /// Render dirty rows of `terminal` to `out`. Returns the dirty
@@ -142,10 +157,14 @@ impl<'alloc> TerminalRenderer<'alloc> {
         // Reset SGR before the final cursor placement so the visual
         // cursor isn't tainted by the last cell's attributes.
         out.write_all(b"\x1b[0m")?;
-        // Final cursor placement + visibility.
-        if let Some(viewport) = snapshot.cursor_viewport()? {
+        // Final cursor placement + visibility. Cache the (row, col) for
+        // the predictive-echo layer to read via [`Self::last_cursor`].
+        self.last_cursor = if let Some(viewport) = snapshot.cursor_viewport()? {
             write_cup(out, viewport.y, viewport.x)?;
-        }
+            Some((viewport.y, viewport.x))
+        } else {
+            None
+        };
         if snapshot.cursor_visible()? {
             out.write_all(b"\x1b[?25h")?;
         }

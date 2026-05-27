@@ -38,6 +38,7 @@ use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
 use super::status_bar::{Position, StatusBarPainter, make_context};
+use crate::predict::{Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output};
 
 /// Idle window before a parser-pending bare ESC is interpreted as the
 /// Escape key. Chosen to be long enough to absorb same-burst arrival of
@@ -134,6 +135,28 @@ pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError>
     run_with_stdout(socket, target, &mut io::stdout()).await
 }
 
+/// Like [`run`], with predictive local echo configurable per call.
+///
+/// `predict.enabled = false` is identical to [`run`]; `predict.enabled =
+/// true` engages the Mosh-class prediction layer documented in
+/// [`crate::predict`] (`phux-9gw.1`).
+///
+/// Kept as a separate entry point (rather than a new parameter on
+/// [`run`]) so existing callers — and the integration tests in
+/// `phux-server` that exercise the attach loop — continue to compile
+/// without churn.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+pub async fn run_with_predict(
+    socket: &Path,
+    target: AttachTarget,
+    predict: PredictiveConfig,
+) -> Result<(), AttachError> {
+    run_with_stdout_predict(socket, target, &mut io::stdout(), predict).await
+}
+
 /// Same as [`run`], but writes any terminal-control bytes (alt-screen
 /// enter, cursor hide, the renderer's per-row CUP/SGR, cleanup) to a
 /// caller-supplied `Write`.
@@ -159,6 +182,22 @@ pub async fn run_with_stdout<W: Write>(
     target: AttachTarget,
     out: &mut W,
 ) -> Result<(), AttachError> {
+    run_with_stdout_predict(socket, target, out, PredictiveConfig::disabled()).await
+}
+
+/// As [`run_with_stdout`], but with an explicit predictive-echo config.
+/// Production callers should reach for [`run_with_predict`]; this is the
+/// test-injectable variant.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+pub async fn run_with_stdout_predict<W: Write>(
+    socket: &Path,
+    target: AttachTarget,
+    out: &mut W,
+    predict: PredictiveConfig,
+) -> Result<(), AttachError> {
     // STAGE 1 — pre-handshake, on the cooked outer terminal.
     //
     // We deliberately do NOT install RawModeGuard here. If anything in
@@ -182,7 +221,7 @@ pub async fn run_with_stdout<W: Write>(
     // is global, so we only register it once per process.
     install_panic_hook_once();
 
-    main_loop(&mut conn, attached).await
+    main_loop(&mut conn, attached, predict).await
 }
 
 /// Send `HELLO` and (when the server starts sending it) wait for
@@ -255,7 +294,11 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
     clippy::too_many_lines,
     reason = "tokio::select! arms inflate function length; splitting would require carrying ~10 mutable locals through helpers"
 )]
-async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result<(), AttachError> {
+async fn main_loop(
+    conn: &mut Connection,
+    initial_attached: FrameKind,
+    predict_cfg: PredictiveConfig,
+) -> Result<(), AttachError> {
     // Client-side Terminal + renderer for the focused pane. Dimensions
     // get replaced on the first TERMINAL_SNAPSHOT; sizing to (80, 24) is the
     // safest no-content default for a Terminal that may receive
@@ -279,6 +322,12 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
         current_viewport().map_or((80, 24), |v| (v.cols.max(1), v.rows.max(1)));
     let mut session_name = String::new();
     let mut parser = StdinParser::new();
+    // Predictive local echo (phux-9gw.1). State is updated alongside
+    // every keystroke and drained on every TERMINAL_OUTPUT; when
+    // `predict_cfg.enabled == false` every `predict_key` returns
+    // `Disabled` so the overlay never paints.
+    let mut predict = PredictionState::new(predict_cfg, 80, 24);
+    let overlay = Overlay;
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
     let mut sigwinch = signal(SignalKind::window_change()).map_err(AttachError::Io)?;
@@ -301,6 +350,8 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
         &mut session_name,
         status_bar.as_mut(),
         viewport_dims,
+        &mut predict,
+        &overlay,
     )?;
     if exit {
         return Ok(());
@@ -346,6 +397,8 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
                             &mut session_name,
                             status_bar.as_mut(),
                             viewport_dims,
+                            &mut predict,
+                            &overlay,
                         )?;
                         if exit {
                             return Ok(());
@@ -379,6 +432,8 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
                     events,
                     focused_pane,
                     &mut detach_pending,
+                    &mut predict,
+                    &overlay,
                 )
                 .await?;
             }
@@ -393,6 +448,8 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
                     events,
                     focused_pane,
                     &mut detach_pending,
+                    &mut predict,
+                    &overlay,
                 )
                 .await?;
             }
@@ -406,6 +463,10 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
             _ = sigwinch.recv() => {
                 let viewport = current_viewport_or_default();
                 viewport_dims = (viewport.cols.max(1), viewport.rows.max(1));
+                // Resize clears the prediction queue (anchored to the
+                // previous viewport); the next render reseeds the
+                // cursor from authoritative state.
+                predict.set_viewport(viewport.cols, viewport.rows);
                 conn.send(&viewport_resize_frame(viewport)).await?;
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(&terminal, &mut stdout);
@@ -481,7 +542,10 @@ async fn dispatch_input_events(
     events: Vec<InputEvent>,
     focused_pane: Option<TerminalId>,
     detach_pending: &mut bool,
+    predict: &mut PredictionState,
+    overlay: &Overlay,
 ) -> Result<(), AttachError> {
+    let mut predicted_any = false;
     for ev in events {
         if matches!(ev, InputEvent::DetachRequested) {
             if !*detach_pending {
@@ -490,6 +554,19 @@ async fn dispatch_input_events(
             }
             continue;
         }
+        // Predictive echo only fires for key events; mouse / paste / focus
+        // intentionally bypass the prediction layer (they target the
+        // server's input model, not the visual grid). The branch is
+        // skipped entirely when the config flag is off — `predict_key`
+        // returns `Disabled` and no overlay paint is scheduled.
+        if let InputEvent::Key(ref key_event) = ev
+            && predict.is_enabled()
+        {
+            use crate::predict::PredictionOutcome;
+            if matches!(predict.predict_key(key_event), PredictionOutcome::Predicted) {
+                predicted_any = true;
+            }
+        }
         let Some(pane) = focused_pane else {
             tracing::debug!("dropping input received before ATTACHED");
             continue;
@@ -497,6 +574,13 @@ async fn dispatch_input_events(
         if let Some(frame) = ev.into_frame(pane.get()) {
             conn.send(&frame).await?;
         }
+    }
+    // Paint the prediction overlay once per dispatch batch so a burst of
+    // keystrokes produces a single positioned write run, not one per
+    // event. The overlay is a no-op on an empty queue.
+    if predicted_any {
+        let mut stdout = io::stdout().lock();
+        let _ = overlay.render(predict, &mut stdout);
     }
     Ok(())
 }
@@ -516,6 +600,8 @@ fn handle_server_frame(
     session_name: &mut String,
     status_bar: Option<&mut StatusBarPainter>,
     viewport_dims: (u16, u16),
+    predict: &mut PredictionState,
+    overlay: &Overlay,
 ) -> Result<bool, AttachError> {
     match frame {
         FrameKind::Attached {
@@ -554,8 +640,19 @@ fn handle_server_frame(
                     terminal.vt_write(&sb);
                 }
                 terminal.vt_write(&vt_replay_bytes);
+                // A fresh snapshot replaces the world — drop any
+                // outstanding predictions and resize the predict layer.
+                predict.set_viewport(cols, rows);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);
+                if let Some((row, col)) = renderer.last_cursor() {
+                    predict.set_cursor(row, col);
+                }
+                // Snapshot is authoritative — overlay only repaints if
+                // new keystrokes arrived after the snapshot was issued
+                // and before reconcile cleared the queue. In v0 we
+                // simply leave the queue empty.
+                let _ = overlay;
                 // phux-nz4.5: the pane renderer just wrote to the
                 // bottom row of its own grid; force a status-bar
                 // repaint over it.
@@ -572,6 +669,19 @@ fn handle_server_frame(
                 terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);
+                // Reconcile: drop predictions, resync cursor from the
+                // freshly-rendered authoritative state. See
+                // [`crate::predict`] for the policy rationale.
+                if let Some((row, col)) = renderer.last_cursor() {
+                    reconcile_terminal_output(predict, row, col);
+                } else {
+                    predict.clear();
+                }
+                // Overlay typically has nothing to paint here (we just
+                // drained), but call it for defensive symmetry — a
+                // future per-cell match game would emit residual
+                // confirmed predictions here.
+                let _ = overlay.render(predict, &mut stdout);
                 paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
             Ok(false)

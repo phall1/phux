@@ -13,3 +13,4 @@
 #![warn(missing_docs)]
 
 pub mod attach;
+pub mod predict;
