@@ -30,6 +30,20 @@
 //!   1006). Emitted as [`InputEvent::Mouse`] with terminal-local cell
 //!   coordinates expressed as integer-valued `f64` pixels (per SPEC §9.2.1
 //!   the encoder downstream re-quantises for cell-format mouse protocols).
+//! - **Legacy X10 mouse** (`CSI M Cb Cx Cy`) — three raw bytes after the
+//!   `M` final encode button + position (`Cb = btn + 32`,
+//!   `Cx = col + 32`, `Cy = row + 32`). This form cannot be parameterised
+//!   as a normal CSI numeric sequence, so the parser drops into a
+//!   dedicated 3-byte consumer state (`State::X10Mouse`) when a bare
+//!   `CSI M` (empty params) is observed. X10 has no separate release
+//!   final byte; releases are signalled by `(Cb & 3) == 3`, which maps
+//!   to [`MouseAction::Release`] with [`MouseButton::Unknown`] (matching
+//!   the legacy protocol's inability to identify which button was
+//!   released).
+//! - **urxvt-1015 decimal mouse** (`CSI <btn> ; <col> ; <row> M`). Same
+//!   button bitfield as X10 (offset by 32) but with decimal parameters
+//!   instead of raw bytes, and always terminated by `M`. Distinguished
+//!   from SGR (DEC 1006) by the absence of the leading `<` private-marker.
 //! - **Focus reports** (`CSI I` / `CSI O`, DEC mode 1004). Emitted as
 //!   [`InputEvent::Focus`].
 //! - **Bracketed paste** (`CSI 200~` … `CSI 201~`, DEC mode 2004). The
@@ -39,11 +53,6 @@
 //!
 //! Not handled (yet):
 //!
-//! - Legacy X10 mouse (`CSI M Cb Cx Cy`) — three raw bytes after the
-//!   `M` final encode button + position. Filed as a follow-up; SGR mode
-//!   covers every modern terminal the user is likely to attach with.
-//! - urxvt-1015 decimal mouse format (`CSI <btn> ; <col> ; <row> M`).
-//!   Niche and easy to add later — same dispatcher, no `<` prefix.
 //! - The full kitty keyboard protocol `CSI u` form — for now the kitty
 //!   CSI-u sequences are absorbed by the CSI parser as best-effort and
 //!   dropped (with a trace log) if they cannot be mapped to a
@@ -177,6 +186,18 @@ enum State {
     /// completes the `CSI 201~` close marker, or anything else, in which
     /// case the accumulated bytes are flushed back into the paste payload.
     PasteCsi,
+    /// Consuming the 3 trailing bytes (`Cb`, `Cx`, `Cy`) of a legacy X10
+    /// mouse report (`CSI M Cb Cx Cy`). The X10 mouse format is *not* a
+    /// numeric-parameterised CSI sequence — the three bytes after the
+    /// `M` final are raw single-byte values, including bytes that would
+    /// otherwise be invalid CSI parameter bytes. We therefore enter a
+    /// dedicated consumer state when bare `CSI M` (empty params) is
+    /// observed.
+    ///
+    /// `bytes_seen` counts how many of the three payload bytes have been
+    /// stored in [`StdinParser::buf`]. The report completes — and emits
+    /// an event — when the third byte arrives.
+    X10Mouse { bytes_seen: u8 },
 }
 
 /// Stateful parser for stdin bytes.
@@ -277,6 +298,7 @@ impl StdinParser {
             State::Paste => self.feed_paste(b),
             State::PasteEscape => self.feed_paste_escape(b),
             State::PasteCsi => self.feed_paste_csi(b, out),
+            State::X10Mouse { bytes_seen } => self.feed_x10_mouse(b, bytes_seen, out),
         }
     }
 
@@ -374,6 +396,18 @@ impl StdinParser {
             if final_byte == b'~' && params == b"200" {
                 self.paste_buf.clear();
                 self.state = State::Paste;
+                return;
+            }
+            // Legacy X10 mouse (`CSI M Cb Cx Cy`): bare `CSI M` with no
+            // parameter bytes. The next 3 bytes are raw button + position
+            // and must be consumed in a dedicated state — they are not
+            // valid CSI parameter bytes (they can be anything in `0x20..`).
+            // urxvt-1015 also terminates with `M`, but always carries
+            // semicolon-separated numeric params, so it falls through to
+            // `dispatch_csi` below.
+            if final_byte == b'M' && params.is_empty() {
+                self.buf.clear();
+                self.state = State::X10Mouse { bytes_seen: 0 };
                 return;
             }
             dispatch_csi(&params, final_byte, out);
@@ -567,6 +601,30 @@ impl StdinParser {
         // tmux semantics: `Ctrl-b x` drops the prefix and delivers `x`.
         self.feed_byte(b, out);
     }
+
+    /// Consume one of the three payload bytes of a legacy X10 mouse
+    /// report. The three bytes are `Cb`, `Cx`, `Cy` — each is a raw
+    /// single byte (NOT a numeric param), where the encoded value is
+    /// `byte - 32` (clamped at zero for the rare under-32 byte). When
+    /// the third byte arrives, decode and emit a [`MouseEvent`].
+    fn feed_x10_mouse(&mut self, b: u8, bytes_seen: u8, out: &mut Vec<InputEvent>) {
+        self.buf.push(b);
+        let next = bytes_seen + 1;
+        if next < 3 {
+            self.state = State::X10Mouse { bytes_seen: next };
+            return;
+        }
+        // We have all three bytes. Decode + emit, then return to ground.
+        // Clone the three bytes out before clearing buf; the caller of
+        // `feed_byte` holds a mutable borrow of `self.state`, but `buf`
+        // is fine to move from.
+        let cb = self.buf[0];
+        let cx = self.buf[1];
+        let cy = self.buf[2];
+        self.buf.clear();
+        self.state = State::Ground;
+        dispatch_x10_mouse(cb, cx, cy, out);
+    }
 }
 
 /// Map a single byte to a [`KeyEvent`] for the printable / C0 region.
@@ -742,6 +800,27 @@ fn dispatch_csi(params: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
         return;
     }
 
+    // urxvt-1015 decimal mouse: `CSI <btn> ; <col> ; <row> M`. Same
+    // button bitfield as X10 (offset by 32) but transmitted as decimal
+    // CSI parameters. Distinguished from SGR by the absence of the
+    // leading `<` private-marker, and from `CSI 1;<mod>P..S` modifier-
+    // bearing arrow / F-key forms (which have a letter final, not `M`).
+    // Only triggers when there are no private-marker / intermediate
+    // bytes — anything with a leading `?` / `=` / `>` is some other
+    // private CSI we don't recognise.
+    if final_byte == b'M'
+        && !matches!(params.first(), Some(&b'?' | &b'<' | &b'=' | &b'>'))
+        && params
+            .iter()
+            .all(|&b| matches!(b, b'0'..=b'9' | b';' | b':'))
+    {
+        let parsed = parse_csi_params(params);
+        if parsed.len() == 3 {
+            dispatch_urxvt1015_mouse(parsed[0], parsed[1], parsed[2], out);
+            return;
+        }
+    }
+
     // Strip a leading private-marker `?`, `<`, `=`, `>` for now — we
     // don't differentiate, the modifier-bearing variant alone matters.
     let body = if let Some(first) = params.first()
@@ -913,6 +992,102 @@ const fn sgr_mouse_button(raw: u32) -> MouseButton {
         // correct PTY bytes from the action + position.
         _ => MouseButton::Unknown,
     }
+}
+
+/// Decode an X10 legacy mouse report (`CSI M Cb Cx Cy`) and push a
+/// [`MouseEvent`].
+///
+/// X10 encodes:
+///
+/// * `Cb = (button | mods | motion) + 0x20` — so `Cb - 32` is the same
+///   bitfield used by SGR mode (see [`sgr_mouse_button`] /
+///   [`sgr_mouse_mods`]).
+/// * `Cx = col + 0x20` — 1-indexed column, +32. `Cx = 0x21` is column 1.
+/// * `Cy = row + 0x20` — 1-indexed row, +32.
+///
+/// Unlike SGR, X10 has no separate release final byte: a release is
+/// reported with the low 2 button bits set to `3` (no button). We map
+/// that to [`MouseAction::Release`] + [`MouseButton::Unknown`], matching
+/// the legacy protocol's lack of per-button release tracking.
+///
+/// Coordinates are converted to 0-indexed `f64` pixels per SPEC §9.2.1
+/// (the server's encoder re-quantises for cell-format protocols). A
+/// `Cx` or `Cy` byte below `0x20` (illegal per the protocol but
+/// observed in malformed streams) saturates at column / row 0.
+fn dispatch_x10_mouse(cb: u8, cx: u8, cy: u8, out: &mut Vec<InputEvent>) {
+    let raw_btn = u32::from(cb.saturating_sub(0x20));
+    let col = u32::from(cx.saturating_sub(0x20));
+    let row = u32::from(cy.saturating_sub(0x20));
+
+    let mods = sgr_mouse_mods(raw_btn);
+    let motion = (raw_btn & 0x20) != 0;
+    // Bit 6 set = wheel report (treated as a press; releases for the
+    // wheel aren't a thing in X10). Bit 7 set = extra buttons (also
+    // press). Low 2 bits = 3 with no wheel / extra bit = release.
+    let is_wheel_or_extra = (raw_btn & 0x40) != 0 || (raw_btn & 0x80) != 0;
+    let action = if motion {
+        MouseAction::Motion
+    } else if !is_wheel_or_extra && (raw_btn & 0x03) == 0x03 {
+        MouseAction::Release
+    } else {
+        MouseAction::Press
+    };
+    let button = sgr_mouse_button(raw_btn);
+
+    // 1-indexed → 0-indexed; saturating to keep "col 1 → 0.0".
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let x = (col.saturating_sub(1)) as f64;
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let y = (row.saturating_sub(1)) as f64;
+
+    out.push(InputEvent::Mouse(MouseEvent {
+        action,
+        button,
+        mods,
+        x,
+        y,
+    }));
+}
+
+/// Decode a urxvt-1015 decimal mouse report (`CSI <btn> ; <col> ; <row> M`)
+/// and push a [`MouseEvent`].
+///
+/// urxvt-1015 uses the same button bitfield as X10 (offset by `0x20`)
+/// but transmits all three values as decimal CSI parameters and always
+/// terminates with `M`. Release is encoded the same way as X10: low 2
+/// button bits = `3`, mapped to [`MouseAction::Release`] +
+/// [`MouseButton::Unknown`].
+///
+/// We accept `btn` values in the X10 wire range (i.e. already offset by
+/// 32). Values below 32 saturate at button code 0 — this matches the
+/// behaviour of [`dispatch_x10_mouse`] for under-`0x20` `Cb` bytes.
+fn dispatch_urxvt1015_mouse(btn: u32, col: u32, row: u32, out: &mut Vec<InputEvent>) {
+    let raw_btn = btn.saturating_sub(0x20);
+
+    let mods = sgr_mouse_mods(raw_btn);
+    let motion = (raw_btn & 0x20) != 0;
+    let is_wheel_or_extra = (raw_btn & 0x40) != 0 || (raw_btn & 0x80) != 0;
+    let action = if motion {
+        MouseAction::Motion
+    } else if !is_wheel_or_extra && (raw_btn & 0x03) == 0x03 {
+        MouseAction::Release
+    } else {
+        MouseAction::Press
+    };
+    let button = sgr_mouse_button(raw_btn);
+
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let x = (col.saturating_sub(1)) as f64;
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let y = (row.saturating_sub(1)) as f64;
+
+    out.push(InputEvent::Mouse(MouseEvent {
+        action,
+        button,
+        mods,
+        x,
+        y,
+    }));
 }
 
 /// Parse semicolon-separated unsigned integers out of CSI parameter bytes.
@@ -1384,13 +1559,12 @@ mod tests {
     #[test]
     fn unknown_csi_final_is_dropped_silently() {
         let mut p = StdinParser::new();
-        // CSI M is mouse — not supported yet, must not crash. The mouse
-        // payload bytes that follow leak through as ground-state "key
-        // events" today because we don't yet recognise mouse final bytes;
-        // mouse parsing is the explicit follow-up to this ticket. The
-        // contract here is just that the parser doesn't panic and returns
-        // to the ground state cleanly.
-        let _ = p.feed(b"\x1b[M\x20\x20\x20");
+        // Pick a CSI sequence with a final byte we genuinely don't
+        // recognise (lowercase `z`) — the original `CSI M ...` form
+        // is now consumed by the X10 mouse parser. The contract here
+        // is just that the parser doesn't panic and returns to the
+        // ground state cleanly.
+        let _ = p.feed(b"\x1b[1;2z");
         assert!(!p.has_pending());
     }
 
@@ -1607,6 +1781,139 @@ mod tests {
             }
             other => panic!("expected InputMouse, got {other:?}"),
         }
+    }
+
+    // ---- Legacy X10 mouse (CSI M Cb Cx Cy) -----------------------------
+
+    #[test]
+    fn x10_left_press() {
+        let mut p = StdinParser::new();
+        // Cb = 0 + 32 = 0x20 (Left press, no mods, no motion).
+        // Cx = 1 + 32 = 0x21 (column 1).
+        // Cy = 1 + 32 = 0x21 (row 1).
+        let evs = p.feed(b"\x1b[M\x20\x21\x21");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(m[0].mods.is_empty());
+        assert!((m[0].x - 0.0).abs() < f64::EPSILON);
+        assert!((m[0].y - 0.0).abs() < f64::EPSILON);
+        assert!(!p.has_pending());
+    }
+
+    #[test]
+    fn x10_release_maps_to_release_action() {
+        let mut p = StdinParser::new();
+        // Cb = 3 + 32 = 0x23 (no-button = release in X10).
+        // Cx, Cy = col 5, row 3 → bytes 0x25, 0x23.
+        let evs = p.feed(b"\x1b[M\x23\x25\x23");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Release);
+        // X10 release does not identify which button was released.
+        assert_eq!(m[0].button, MouseButton::Unknown);
+        // col 5 → 4.0, row 3 → 2.0.
+        assert!((m[0].x - 4.0).abs() < f64::EPSILON);
+        assert!((m[0].y - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn x10_left_press_with_shift_modifier() {
+        let mut p = StdinParser::new();
+        // Cb = (0 | 4) + 32 = 0x24 (Left press, Shift held).
+        let evs = p.feed(b"\x1b[M\x24\x21\x21");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(m[0].mods.contains(ModSet::SHIFT));
+        assert!(!m[0].mods.contains(ModSet::ALT));
+        assert!(!m[0].mods.contains(ModSet::CTRL));
+    }
+
+    #[test]
+    fn x10_payload_bytes_with_high_bit_do_not_break_parser() {
+        // X10 payload bytes can be anything in `0x20..` — in particular
+        // they can exceed printable ASCII for large terminals. The
+        // dedicated consumer state must not interpret them as new
+        // sequences (e.g. as a stray ESC). Use a row byte of 0xFF and
+        // verify the parser returns cleanly to ground.
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[M\x20\x21\xff");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert!(!p.has_pending());
+    }
+
+    #[test]
+    fn x10_mouse_split_across_feeds() {
+        let mut parser = StdinParser::new();
+        // Feed the CSI M intro and the three payload bytes one at a time.
+        assert!(mouse_only(&parser.feed(b"\x1b[")).is_empty());
+        assert!(mouse_only(&parser.feed(b"M")).is_empty());
+        assert!(parser.has_pending());
+        assert!(mouse_only(&parser.feed(b"\x20")).is_empty());
+        assert!(mouse_only(&parser.feed(b"\x21")).is_empty());
+        let last = parser.feed(b"\x21");
+        let m = mouse_only(&last);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(!parser.has_pending());
+    }
+
+    // ---- urxvt-1015 decimal mouse (CSI <btn>;<col>;<row> M) ------------
+
+    #[test]
+    fn urxvt1015_left_press() {
+        let mut p = StdinParser::new();
+        // urxvt-1015 button is the X10 byte value: Left press = 0 + 32 = 32.
+        let evs = p.feed(b"\x1b[32;5;3M");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(m[0].mods.is_empty());
+        assert!((m[0].x - 4.0).abs() < f64::EPSILON);
+        assert!((m[0].y - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn urxvt1015_release() {
+        let mut p = StdinParser::new();
+        // Release: low 2 bits = 3, so btn = 3 + 32 = 35.
+        let evs = p.feed(b"\x1b[35;5;3M");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Release);
+        assert_eq!(m[0].button, MouseButton::Unknown);
+    }
+
+    #[test]
+    fn urxvt1015_wheel_up_is_a_press() {
+        let mut p = StdinParser::new();
+        // Wheel up: bit 6 set, low bits 0. raw = 64, wire = 64 + 32 = 96.
+        let evs = p.feed(b"\x1b[96;1;1M");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Four);
+    }
+
+    #[test]
+    fn urxvt1015_does_not_collide_with_sgr() {
+        // SGR carries a leading `<`. The urxvt-1015 branch must NOT
+        // dispatch when the marker is present.
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[<0;5;3M");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        // The body of this test is identical to sgr_left_press_and_release;
+        // its purpose is to assert the dispatch order — adding the
+        // urxvt-1015 branch must not steal SGR reports.
     }
 
     // ---- Bracketed paste (DEC mode 2004) -------------------------------
