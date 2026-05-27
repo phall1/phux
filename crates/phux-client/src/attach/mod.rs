@@ -35,6 +35,8 @@ pub mod connection;
 pub mod driver;
 pub mod input;
 pub mod render;
+pub mod status_bar;
 
 pub use driver::{AttachError, run, run_with_stdout, write_terminal_reset};
 pub use input::DETACH_CHORD_DESCRIPTION;
+pub use status_bar::{Position, StatusBarPainter, make_context};

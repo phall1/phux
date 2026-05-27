@@ -24,8 +24,8 @@ pub use schema::{
     Action, Config, DefaultsCfg, HookEntry, KeybindingsCfg, StatusCfg, ThemeCfg, Widget, WidgetSpec,
 };
 pub use widget::{
-    SessionNameWidget, StatusWidget, TimeWidget, WidgetCells, WidgetContext, WidgetError,
-    WidgetFactory, WidgetRegistry,
+    SessionNameWidget, StatusBar, StatusWidget, TimeWidget, WidgetCells, WidgetContext,
+    WidgetError, WidgetFactory, WidgetRegistry, row_to_string,
 };
 
 use std::path::Path;

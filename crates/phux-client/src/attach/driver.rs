@@ -24,7 +24,7 @@ use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
@@ -37,6 +37,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
+use super::status_bar::{Position, StatusBarPainter, make_context};
 
 /// Idle window before a parser-pending bare ESC is interpreted as the
 /// Escape key. Chosen to be long enough to absorb same-burst arrival of
@@ -266,6 +267,17 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
     })?;
     let mut renderer = TerminalRenderer::new()?;
     let mut focused_pane: Option<TerminalId> = None;
+    // phux-nz4.5: status-bar painter, built from the on-disk config.
+    // Load failures fall back to an empty bar so a malformed config
+    // never blocks attach — the user still gets a working pane mirror.
+    let mut status_bar = build_status_bar_painter();
+    // Track the current outer-terminal viewport so the painter knows
+    // which row is "bottom". Initialized to a sensible default and
+    // updated by SIGWINCH; the server doesn't drive client-side
+    // viewport (clients own their chrome per DESIGN §8.5).
+    let mut viewport_dims: (u16, u16) =
+        current_viewport().map_or((80, 24), |v| (v.cols.max(1), v.rows.max(1)));
+    let mut session_name = String::new();
     let mut parser = StdinParser::new();
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
@@ -286,6 +298,9 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
         &mut terminal,
         &mut renderer,
         &mut focused_pane,
+        &mut session_name,
+        status_bar.as_mut(),
+        viewport_dims,
     )?;
     if exit {
         return Ok(());
@@ -303,6 +318,18 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
             Box::pin(std::future::pending::<()>())
         };
 
+        // phux-nz4.5: per-bar repaint cadence. Driven by the slowest
+        // widget that wants periodic refresh (currently floor-1s via the
+        // `time` widget). Empty bar ⇒ `Pending` forever so this select!
+        // arm never fires.
+        let status_tick: std::pin::Pin<Box<dyn Future<Output = ()>>> = match status_bar
+            .as_ref()
+            .and_then(StatusBarPainter::min_poll_interval)
+        {
+            Some(interval) => Box::pin(tokio::time::sleep(interval)),
+            None => Box::pin(std::future::pending::<()>()),
+        };
+
         tokio::select! {
             biased;
 
@@ -316,6 +343,9 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
                             &mut terminal,
                             &mut renderer,
                             &mut focused_pane,
+                            &mut session_name,
+                            status_bar.as_mut(),
+                            viewport_dims,
                         )?;
                         if exit {
                             return Ok(());
@@ -375,9 +405,37 @@ async fn main_loop(conn: &mut Connection, initial_attached: FrameKind) -> Result
             // server still benefits from knowing a resize happened.
             _ = sigwinch.recv() => {
                 let viewport = current_viewport_or_default();
+                viewport_dims = (viewport.cols.max(1), viewport.rows.max(1));
                 conn.send(&viewport_resize_frame(viewport)).await?;
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(&terminal, &mut stdout);
+                // phux-nz4.5: viewport dims changed — force a fresh
+                // status-bar paint so the bar lands on the new bottom row.
+                if let Some(p) = status_bar.as_mut() {
+                    p.invalidate();
+                    let _ = p.paint(
+                        &mut stdout,
+                        viewport_dims.0,
+                        viewport_dims.1,
+                        &make_context(&session_name, SystemTime::now()),
+                    );
+                }
+            }
+
+            // phux-nz4.5: periodic status-bar repaint (e.g. for the
+            // `time` widget). Only fires when at least one widget has a
+            // `poll_interval`. Paints in place — no pane re-render, no
+            // full-screen redraw.
+            () = status_tick => {
+                if let Some(p) = status_bar.as_mut() {
+                    let mut stdout = io::stdout().lock();
+                    let _ = p.paint(
+                        &mut stdout,
+                        viewport_dims.0,
+                        viewport_dims.1,
+                        &make_context(&session_name, SystemTime::now()),
+                    );
+                }
             }
 
             // SIGINT — restore the terminal explicitly (Drop wouldn't
@@ -445,11 +503,19 @@ async fn dispatch_input_events(
 
 /// Process one server-to-client frame. Returns `true` if the loop should
 /// exit cleanly (i.e. the server sent `DETACHED`).
+///
+/// `status_bar` is `Option<&mut StatusBarPainter>` so an attach with no
+/// configured widgets pays nothing for the chrome path. `viewport_dims`
+/// is `(cols, rows)` of the outer terminal — used by the painter to
+/// pick the bottom row.
 fn handle_server_frame(
     frame: FrameKind,
     terminal: &mut Terminal<'static, 'static>,
     renderer: &mut TerminalRenderer<'static>,
     focused_pane: &mut Option<TerminalId>,
+    session_name: &mut String,
+    status_bar: Option<&mut StatusBarPainter>,
+    viewport_dims: (u16, u16),
 ) -> Result<bool, AttachError> {
     match frame {
         FrameKind::Attached {
@@ -459,6 +525,12 @@ fn handle_server_frame(
             // Capture the initial focused pane so subsequent INPUT_* frames
             // know where to route.
             *focused_pane = Some(snapshot.focused_pane);
+            // phux-nz4.5: stash the session name for the status-bar
+            // `WidgetContext`. The Snapshot type names the session via
+            // its window graph; for v0 the session-name widget reads
+            // from a string slot we maintain here, defaulting to the
+            // empty string until a session-graph carrier lands.
+            *session_name = String::new();
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
             // TERMINAL_SNAPSHOT.
@@ -484,6 +556,10 @@ fn handle_server_frame(
                 terminal.vt_write(&vt_replay_bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);
+                // phux-nz4.5: the pane renderer just wrote to the
+                // bottom row of its own grid; force a status-bar
+                // repaint over it.
+                paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
             Ok(false)
         }
@@ -496,6 +572,7 @@ fn handle_server_frame(
                 terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);
+                paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
             Ok(false)
         }
@@ -518,6 +595,52 @@ fn handle_server_frame(
             Ok(false)
         }
     }
+}
+
+/// phux-nz4.5: load the on-disk config and build a [`StatusBarPainter`]
+/// from `[status]`. Errors fall back to no bar (logged) so a malformed
+/// config never blocks attach. Returns `None` when the bar would be
+/// empty (no widgets configured) — callers can short-circuit on that.
+fn build_status_bar_painter() -> Option<StatusBarPainter> {
+    let cfg = match phux_config::loader::load() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "phux-config load failed; status bar disabled");
+            return None;
+        }
+    };
+    let registry = phux_config::WidgetRegistry::with_builtins();
+    match phux_config::widget::StatusBar::build(&cfg.status, &registry) {
+        Ok(bar) if bar.is_empty() => None,
+        Ok(bar) => Some(StatusBarPainter::new(bar, Position::default())),
+        Err(err) => {
+            tracing::warn!(error = %err, "status-bar build failed; status bar disabled");
+            None
+        }
+    }
+}
+
+/// phux-nz4.5: shared helper invoked after every pane render so the
+/// status row is restored on top of whatever VT the pane renderer just
+/// wrote. No-op when there is no painter or no live viewport.
+fn paint_bar_after_pane<W: Write>(
+    status_bar: Option<&mut StatusBarPainter>,
+    out: &mut W,
+    viewport_dims: (u16, u16),
+    session_name: &str,
+) {
+    let Some(painter) = status_bar else {
+        return;
+    };
+    // The pane renderer wrote into the bottom row — invalidate so the
+    // painter unconditionally re-emits.
+    painter.invalidate();
+    let _ = painter.paint(
+        out,
+        viewport_dims.0,
+        viewport_dims.1,
+        &make_context(session_name, SystemTime::now()),
+    );
 }
 
 /// Build a `VIEWPORT_RESIZE` frame from a [`ViewportInfo`].
