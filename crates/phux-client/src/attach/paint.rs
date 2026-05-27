@@ -76,9 +76,12 @@ pub(super) fn paint_full_frame(
     let mut stdout = io::stdout().lock();
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
     let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-    // Non-focused panes first; focused last so its render_at is the
-    // final cursor-positioning emit and `last_cursor` reflects where
-    // the user is typing.
+    // Non-focused panes first; chrome (dividers + status bar) next; the
+    // focused pane's render_at is intentionally the LAST cursor-touching
+    // emit in the frame so it owns final cursor position + DECTCEM. This
+    // matters on fresh attach where libghostty's snapshot may not yet
+    // expose a `cursor_viewport`, so a "restore cursor after the bar"
+    // strategy strands the cursor invisible.
     for (id, rect) in &multi.rects {
         if Some(id) == focused_pane {
             continue;
@@ -90,7 +93,9 @@ pub(super) fn paint_full_frame(
                 .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
         }
     }
-    let focused_cursor = focused_pane.and_then(|fid| {
+    let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
+    paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name, None);
+    let _ = focused_pane.and_then(|fid| {
         paint_focused_pane(
             &mut stdout,
             layout_state,
@@ -100,14 +105,6 @@ pub(super) fn paint_full_frame(
             has_bar,
         )
     });
-    let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
-    paint_bar_after_pane(
-        status_bar,
-        &mut stdout,
-        viewport_dims,
-        session_name,
-        focused_cursor,
-    );
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -132,11 +129,11 @@ pub(super) fn paint_bar_after_pane<W: Write>(
         viewport_dims.1,
         &make_context(session_name, SystemTime::now()),
     );
-    // `write_row` hides the cursor while painting and does not restore
-    // it; without this branch the cursor stays invisible until the next
-    // pane render. Restore at the focused pane's known cursor position
-    // when one is available (None ⇒ cursor was hidden by the pane itself,
-    // e.g. a TUI inside it — leave it hidden).
+    // After the bar repaints, the cursor sits on the bar row. Put it
+    // back at the focused pane's known position when we have one;
+    // otherwise leave it — `paint_full_frame` paints the focused pane
+    // AFTER the bar so its render_at owns final cursor placement, and
+    // the incremental path callers (server_frame) always pass Some.
     if let Some((row, col)) = restore_cursor {
         let one_based_row = row.saturating_add(1);
         let one_based_col = col.saturating_add(1);

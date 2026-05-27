@@ -174,9 +174,14 @@ fn write_buffer<W: Write>(
     cols: u16,
 ) -> io::Result<()> {
     let one_based_row = row_index.saturating_add(1);
-    // Hide cursor + CUP + SGR reset. Hiding here avoids the visible
-    // cursor flickering across the bar as it lays cells.
-    write!(out, "\x1b[?25l\x1b[{one_based_row};1H\x1b[0m")?;
+    // CUP to the bar row + SGR reset. We deliberately do NOT hide the
+    // cursor here: the bar paint completes in sub-ms on a modern
+    // terminal, and the old `?25l`-without-guaranteed-`?25h` pattern
+    // stranded the cursor invisible when the caller had no last_cursor
+    // to restore (fresh attach, libghostty snapshot before first PTY
+    // output). Caller still positions the cursor at the focused pane
+    // after this returns.
+    write!(out, "\x1b[{one_based_row};1H\x1b[0m")?;
     for x in 0..cols {
         let cell = &buffer[(x, 0)];
         let sym = cell.symbol();
@@ -186,8 +191,7 @@ fn write_buffer<W: Write>(
             out.write_all(sym.as_bytes())?;
         }
     }
-    // SGR reset on exit so the next paint inherits no attributes from
-    // us. Cursor stays hidden — caller restores at the focused pane.
+    // SGR reset on exit so the next paint inherits no attributes from us.
     out.write_all(b"\x1b[0m")?;
     out.flush()
 }
