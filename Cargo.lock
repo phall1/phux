@@ -1236,6 +1236,7 @@ dependencies = [
  "bytes",
  "insta",
  "libghostty-vt",
+ "phux-config",
  "phux-core",
  "phux-protocol",
  "phux-server",
@@ -1243,6 +1244,7 @@ dependencies = [
  "rustix 0.38.44",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
  "tracing",
 ]
 

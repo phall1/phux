@@ -15,6 +15,13 @@ workspace = true
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
+# phux-nz4.5: status-bar composer (`StatusBar`) + widget contract live
+# in phux-config; the client owns rendering the composed bar to VT.
+phux-config.workspace = true
+# phux-nz4.5: TOML values reach the status-bar painter's tests via
+# `WidgetSpec::opts`; dev-only use, declared here for `toml::Value`
+# constructor access.
+toml = { workspace = true }
 # Under ADR-0013 the client runs its own libghostty Terminal per attached
 # pane. Pulled in as a direct dep (was transitive via phux-protocol's
 # server feature) so the client can construct and drive a Terminal +

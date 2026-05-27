@@ -23,8 +23,10 @@ use smallvec::SmallVec;
 
 use crate::schema::WidgetSpec;
 
+mod status_bar;
 mod widgets;
 
+pub use status_bar::{StatusBar, row_to_string};
 pub use widgets::session_name::SessionNameWidget;
 pub use widgets::time::TimeWidget;
 
