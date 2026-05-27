@@ -531,9 +531,10 @@ async fn main_loop(
                             // (either the GET reply or a peer's broadcast).
                             // Trigger a full repaint: clear screen + paint
                             // dividers + re-render every pane.
-                            repaint_multi_pane(
+                            paint_full_frame(
                                 &layout_state,
                                 &mut panes,
+                                focused_pane.as_ref(),
                                 viewport_dims,
                                 status_bar.as_mut(),
                                 &session_name,
@@ -574,7 +575,7 @@ async fn main_loop(
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
                 };
-                dispatch_input_events(
+                let layout_changed = dispatch_input_events(
                     conn,
                     events,
                     &mut focused_pane,
@@ -585,6 +586,16 @@ async fn main_loop(
                     &mut ctx,
                 )
                 .await?;
+                if layout_changed {
+                    paint_full_frame(
+                        &layout_state,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
+                }
             }
 
             // Bare-ESC idle timeout. Only armed when the parser has
@@ -599,7 +610,7 @@ async fn main_loop(
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
                 };
-                dispatch_input_events(
+                let layout_changed = dispatch_input_events(
                     conn,
                     events,
                     &mut focused_pane,
@@ -610,6 +621,16 @@ async fn main_loop(
                     &mut ctx,
                 )
                 .await?;
+                if layout_changed {
+                    paint_full_frame(
+                        &layout_state,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
+                }
             }
 
             // SIGWINCH — terminal was resized. Read the new viewport
@@ -625,14 +646,11 @@ async fn main_loop(
                 predict.set_viewport(viewport.cols, viewport.rows);
                 conn.send(&viewport_resize_frame(viewport)).await?;
 
+                // Multi-pane: emit one TERMINAL_RESIZE per leaf whose
+                // (w, h) actually changed so the server ioctls TIOCSWINSZ
+                // on each PTY. Single-pane: skip the reflow math entirely
+                // (no per-leaf wire emissions to make).
                 if layout_state.tree.is_some() {
-                    // phux-4li.9 / phux-4li.12: multi-pane reflow.
-                    // Diff prev vs new pane_rects to detect under-viable
-                    // viewport; libghostty resize for each pane happens
-                    // inside repaint_multi_pane. Per-Terminal RESIZE
-                    // wire emission (one frame per pane whose dims
-                    // actually changed) keeps the server-side PTYs in
-                    // step with the client's freshly resolved layout.
                     let has_bar = status_bar.is_some();
                     let prev_pane_dims = pane_viewport(prev_dims, has_bar);
                     let new_pane_dims = pane_viewport(viewport_dims, has_bar);
@@ -650,10 +668,6 @@ async fn main_loop(
                             "viewport too small for current layout; rendering may be garbled",
                         );
                     }
-                    // phux-4li.12: emit a TERMINAL_RESIZE per leaf
-                    // whose (w, h) actually changed. The server ioctls
-                    // TIOCSWINSZ on the matching PTY + resizes its
-                    // libghostty Terminal; no reply is expected.
                     for (terminal_id, new_rect) in &diff.changed {
                         conn.send(&FrameKind::TerminalResize {
                             terminal_id: terminal_id.clone(),
@@ -662,31 +676,15 @@ async fn main_loop(
                         })
                         .await?;
                     }
-                    repaint_multi_pane(
-                        &layout_state,
-                        &mut panes,
-                        viewport_dims,
-                        status_bar.as_mut(),
-                        &session_name,
-                    );
-                } else {
-                    let mut stdout = io::stdout().lock();
-                    let focused_cursor = if let Some(fid) = focused_pane.as_ref()
-                        && let Some(slot) = panes.get_mut(fid)
-                    {
-                        let _ = slot.renderer.render(&slot.terminal, &mut stdout);
-                        slot.renderer.last_cursor()
-                    } else {
-                        None
-                    };
-                    paint_bar_after_pane(
-                        status_bar.as_mut(),
-                        &mut stdout,
-                        viewport_dims,
-                        &session_name,
-                        focused_cursor,
-                    );
                 }
+                paint_full_frame(
+                    &layout_state,
+                    &mut panes,
+                    focused_pane.as_ref(),
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    &session_name,
+                );
             }
 
             // phux-nz4.5: periodic status-bar repaint (e.g. for the
@@ -804,7 +802,7 @@ async fn dispatch_input_events(
     overlay: &Overlay,
     panes: &mut HashMap<TerminalId, PaneSlot>,
     ctx: &mut DispatchCtx<'_>,
-) -> Result<(), AttachError> {
+) -> Result<bool, AttachError> {
     let mut predicted_any = false;
     let mut layout_changed = false;
     for ev in events {
@@ -978,13 +976,10 @@ async fn dispatch_input_events(
         let mut stdout = io::stdout().lock();
         let _ = overlay.render(predict, &mut stdout);
     }
-    if layout_changed {
-        // Repaint dividers + every leaf. Driver-side repaint is the
-        // single point that decides what reaches stdout after an action
-        // mutates the tree; the action helpers themselves never paint.
-        repaint_multi_pane(ctx.layout_state, panes, ctx.viewport, None, "");
-    }
-    Ok(())
+    // Hand the layout-mutation signal back to `main_loop`, which holds
+    // the status-bar painter and session name needed for a proper full
+    // frame. We never paint from here.
+    Ok(layout_changed)
 }
 
 /// Result of feeding a key event through the resolver.
@@ -1373,16 +1368,53 @@ fn soft_kill_input_frames(target: &TerminalId) -> Vec<FrameKind> {
         .collect()
 }
 
-/// Repaint the multi-pane composition after a layout mutation or a
-/// reconcile. Clears the viewport, then asks each pane's `TerminalRenderer`
-/// to paint into its own `Rect`, then writes dividers and the status bar.
+/// Render one pane into its outer-viewport sub-Rect.
 ///
-/// `status_bar` and `session_name` are threaded only so the bar can be
-/// repainted in the same pass; callers that already paint the bar (e.g.
-/// the status-tick branch) pass `None`/`""`.
-fn repaint_multi_pane(
+/// Looks up the pane's Rect in the layout, resizes its libghostty
+/// Terminal to match (so the renderer's CUP math lines up), and calls
+/// `render_at` with the Rect's origin. Falls back to `(0,0)` + full
+/// pane viewport when the layout has no entry (single-pane bootstrap).
+///
+/// Returns the renderer's cached `last_cursor` (outer-viewport coords),
+/// or `None` if the pane has no slot or its libghostty cursor is hidden.
+/// Callers use this to restore the cursor after a status-bar paint.
+fn paint_focused_pane<W: Write>(
+    out: &mut W,
     layout_state: &LayoutState,
     panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused: &TerminalId,
+    viewport_dims: (u16, u16),
+    has_bar: bool,
+) -> Option<(u16, u16)> {
+    let pane_dims = pane_viewport(viewport_dims, has_bar);
+    let rect = super::multi_pane::compute_layout(layout_state, pane_dims)
+        .rects
+        .get(focused)
+        .copied()
+        .unwrap_or(crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: pane_dims.0,
+            h: pane_dims.1,
+        });
+    let slot = panes.get_mut(focused)?;
+    let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+    let _ = slot
+        .renderer
+        .render_at(&slot.terminal, out, (rect.x, rect.y));
+    slot.renderer.last_cursor()
+}
+
+/// Clear the viewport and paint every pane + dividers + bar from
+/// scratch. Use after layout mutations, viewport resize, or initial
+/// attach — anything where the previous frame may not be a coherent
+/// base for an incremental repaint. For "focused pane got output"
+/// situations call [`paint_focused_pane`] + [`paint_bar_after_pane`]
+/// instead.
+fn paint_full_frame(
+    layout_state: &LayoutState,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
     session_name: &str,
@@ -1393,37 +1425,30 @@ fn repaint_multi_pane(
     let mut stdout = io::stdout().lock();
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
     let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-    // Render non-focused panes first, then focused last — this way the
-    // focused pane's `render_at` is the final cursor-positioning call
-    // and `last_cursor` reflects where the user is typing.
-    let focused = layout_state.focus.as_ref();
+    // Non-focused panes first; focused last so its render_at is the
+    // final cursor-positioning emit and `last_cursor` reflects where
+    // the user is typing.
     for (id, rect) in &multi.rects {
-        if Some(id) == focused {
+        if Some(id) == focused_pane {
             continue;
         }
         if let Some(slot) = panes.get_mut(id) {
-            // Resize the libghostty Terminal to match its new Rect so
-            // the renderer's CUP math lines up with the destination
-            // sub-region. Best-effort: a libghostty resize failure
-            // means the pane redraws stale; not fatal.
             let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
             let _ = slot
                 .renderer
                 .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
         }
     }
-    let focused_cursor = if let Some(fid) = focused
-        && let Some(rect) = multi.rects.get(fid)
-        && let Some(slot) = panes.get_mut(fid)
-    {
-        let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
-        let _ = slot
-            .renderer
-            .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
-        slot.renderer.last_cursor()
-    } else {
-        None
-    };
+    let focused_cursor = focused_pane.and_then(|fid| {
+        paint_focused_pane(
+            &mut stdout,
+            layout_state,
+            panes,
+            fid,
+            viewport_dims,
+            has_bar,
+        )
+    });
     let _ = super::multi_pane::paint_dividers(&mut stdout, &multi);
     paint_bar_after_pane(
         status_bar,
@@ -1606,61 +1631,40 @@ fn handle_server_frame(
             // mirror stays warm for when the user focuses it. Render +
             // predict-reconcile only fire for the focused pane.
             let is_focused = Some(&terminal_id) == focused_pane.as_ref();
-            // Resolve the focused pane's outer-viewport Rect BEFORE we
-            // take a mut borrow on `panes`. Multi-pane: ask the layout.
-            // Single-pane / no layout: full viewport minus the status row.
-            let has_bar = status_bar.is_some();
-            let pane_dims = pane_viewport(viewport_dims, has_bar);
-            let pane_rect: crate::layout::Rect = if layout_state.tree.is_some() {
-                super::multi_pane::compute_layout(layout_state, pane_dims)
-                    .rects
-                    .get(&terminal_id)
-                    .copied()
-                    .unwrap_or(crate::layout::Rect {
-                        x: 0,
-                        y: 0,
-                        w: pane_dims.0,
-                        h: pane_dims.1,
-                    })
-            } else {
-                crate::layout::Rect {
-                    x: 0,
-                    y: 0,
-                    w: pane_dims.0,
-                    h: pane_dims.1,
-                }
-            };
-            let slot = match panes.entry(terminal_id) {
-                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
-            };
-            slot.terminal.vt_write(&bytes);
-            if is_focused {
+            // Drop bytes into the slot's libghostty Terminal. Scoped so
+            // the mut borrow on `panes` releases before the focused-pane
+            // render path re-borrows it via `paint_focused_pane`.
+            {
+                let slot = match panes.entry(terminal_id) {
+                    std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
+                };
+                slot.terminal.vt_write(&bytes);
+            }
+            if is_focused && let Some(fid) = focused_pane.as_ref() {
                 let mut stdout = io::stdout().lock();
-                // Resize the libghostty Terminal to match the pane's
-                // Rect so the renderer's CUP math lines up; then paint
-                // into the sub-rectangle (not the full viewport — that
-                // would clobber sibling panes, dividers, and the bar).
-                let _ = slot
-                    .terminal
-                    .resize(pane_rect.w.max(1), pane_rect.h.max(1), 0, 0);
-                let _ = slot.renderer.render_at(
-                    &slot.terminal,
+                let has_bar = status_bar.is_some();
+                let focused_cursor = paint_focused_pane(
                     &mut stdout,
-                    (pane_rect.x, pane_rect.y),
+                    layout_state,
+                    panes,
+                    fid,
+                    viewport_dims,
+                    has_bar,
                 );
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;
                 // confirmed predictions drop, contradictions drop their
                 // suffix, predictions still ahead of confirmed state
-                // stay alive. See [`crate::predict`] for the truth
-                // table.
-                if let Some((row, col)) = slot.renderer.last_cursor() {
+                // stay alive. See [`crate::predict`] for the truth table.
+                if let Some((row, col)) = focused_cursor {
                     let _stats = reconcile_terminal_output_per_cell(predict, row, col, |r, c| {
-                        slot.renderer
-                            .read_grapheme_at(&slot.terminal, r, c)
-                            .ok()
-                            .flatten()
+                        panes.get_mut(fid).and_then(|s| {
+                            s.renderer
+                                .read_grapheme_at(&s.terminal, r, c)
+                                .ok()
+                                .flatten()
+                        })
                     });
                 } else {
                     // Cursor hidden — we can't anchor reliably; fall
@@ -1672,7 +1676,6 @@ fn handle_server_frame(
                 // of a partial confirmation). On a fully-drained queue
                 // this is a no-op.
                 let _ = overlay.render(predict, &mut stdout);
-                let focused_cursor = slot.renderer.last_cursor();
                 paint_bar_after_pane(
                     status_bar,
                     &mut stdout,
