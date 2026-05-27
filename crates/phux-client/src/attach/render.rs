@@ -123,11 +123,40 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// After this returns, every dirty bit (global + per-row) is reset,
     /// per the libghostty contract documented in
     /// `research/2026-05-25-libghostty-renderstate.md` §3.
+    ///
+    /// This is the single-pane entry point — equivalent to
+    /// [`Self::render_at`] with origin `(0, 0)`. Multi-pane callers
+    /// (see `attach::multi_pane`, phux-4li.4) use [`Self::render_at`] to
+    /// position the terminal's content inside a sub-rectangle of the
+    /// outer viewport.
     pub fn render(
         &mut self,
         terminal: &Terminal<'alloc, '_>,
         out: &mut impl Write,
     ) -> Result<Dirty, RenderError> {
+        self.render_at(terminal, out, (0, 0))
+    }
+
+    /// Render `terminal` into the outer viewport with its top-left at
+    /// `origin = (x, y)` in outer-viewport cell coordinates.
+    ///
+    /// The terminal's own `(cols, rows)` define the painted extent; the
+    /// caller is responsible for sizing the terminal to its pane's
+    /// `Rect` before calling. Every row CUP is shifted by `origin.1` and
+    /// every column by `origin.0`; the final cursor placement (cached in
+    /// [`Self::last_cursor`]) is reported in **outer-viewport**
+    /// coordinates, not pane-local — that's what the predictive-echo
+    /// overlay needs for direct stdout writes.
+    ///
+    /// Multi-pane drivers call this once per visible pane; dividers are
+    /// painted separately via [`super::multi_pane::paint_dividers`].
+    pub fn render_at(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        out: &mut impl Write,
+        origin: (u16, u16),
+    ) -> Result<Dirty, RenderError> {
+        let (ox, oy) = origin;
         let snapshot = self.state.update(terminal)?;
         // phux-l0t: upstream FFI bug in `libghostty-vt` (rev `31d1f70`).
         // Any `Snapshot::set_dirty(_)` call poisons the next `dirty()`
@@ -159,7 +188,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
             }
             let must_draw = true;
             if must_draw {
-                write_cup(out, row_index, 0)?;
+                write_cup(out, row_index.saturating_add(oy), ox)?;
                 // Force a reset at row start so the previous row's tail
                 // style can't leak into the current row.
                 out.write_all(b"\x1b[0m")?;
@@ -202,8 +231,10 @@ impl<'alloc> TerminalRenderer<'alloc> {
         // Final cursor placement + visibility. Cache the (row, col) for
         // the predictive-echo layer to read via [`Self::last_cursor`].
         self.last_cursor = if let Some(viewport) = snapshot.cursor_viewport()? {
-            write_cup(out, viewport.y, viewport.x)?;
-            Some((viewport.y, viewport.x))
+            let abs_y = viewport.y.saturating_add(oy);
+            let abs_x = viewport.x.saturating_add(ox);
+            write_cup(out, abs_y, abs_x)?;
+            Some((abs_y, abs_x))
         } else {
             None
         };

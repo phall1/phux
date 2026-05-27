@@ -20,6 +20,7 @@
     reason = "AttachError carries an io::Error which is naturally large; the variants are mutually exclusive and we never carry the result in a hot loop."
 )]
 
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -39,9 +40,46 @@ use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
 use super::status_bar::{Position, StatusBarPainter, make_context};
+use crate::layout::LayoutState;
 use crate::predict::{
     Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output_per_cell,
 };
+
+/// One pane's mirror: the libghostty Terminal that ingests
+/// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
+/// terminal. Grown from "one of these per attach" (single-pane v0) to
+/// "one of these per leaf in the layout tree" by phux-4li.4. The driver
+/// keeps a [`PaneMap`] of these keyed by [`TerminalId`].
+pub(super) struct PaneSlot {
+    /// libghostty mirror for this pane.
+    pub terminal: Terminal<'static, 'static>,
+    /// Cached render scaffolding. One per pane so libghostty's iterators
+    /// stay warm across frames (the renderer's `last_cursor` is also
+    /// per-pane, so each pane's predictive-echo anchor is independent).
+    pub renderer: TerminalRenderer<'static>,
+}
+
+impl std::fmt::Debug for PaneSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaneSlot").finish_non_exhaustive()
+    }
+}
+
+impl PaneSlot {
+    /// Allocate a fresh slot with a default-sized libghostty Terminal.
+    /// Dimensions get replaced on the first `TERMINAL_SNAPSHOT` for this
+    /// pane; 80x24 is the safest no-content placeholder.
+    fn new() -> Result<Self, AttachError> {
+        Ok(Self {
+            terminal: Terminal::new(TerminalOptions {
+                cols: 80,
+                rows: 24,
+                max_scrollback: 10_000,
+            })?,
+            renderer: TerminalRenderer::new()?,
+        })
+    }
+}
 
 /// Idle window before a parser-pending bare ESC is interpreted as the
 /// Escape key. Chosen to be long enough to absorb same-burst arrival of
@@ -307,16 +345,21 @@ async fn main_loop(
     initial_attached: FrameKind,
     predict_cfg: PredictiveConfig,
 ) -> Result<(), AttachError> {
-    // Client-side Terminal + renderer for the focused pane. Dimensions
-    // get replaced on the first TERMINAL_SNAPSHOT; sizing to (80, 24) is the
-    // safest no-content default for a Terminal that may receive
-    // TERMINAL_OUTPUT before its snapshot for any reason.
-    let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
-        cols: 80,
-        rows: 24,
-        max_scrollback: 10_000,
-    })?;
-    let mut renderer = TerminalRenderer::new()?;
+    // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
+    // not the single Terminal of the wave-A driver. Each pane's slot is
+    // allocated lazily — the first `TERMINAL_SNAPSHOT` or
+    // `TERMINAL_OUTPUT` carrying a given id seeds it via
+    // `panes.entry(id).or_insert_with(PaneSlot::new)`. The
+    // `LayoutState` mirror (initialized as a single-pane fallback when
+    // `ATTACHED` lands; see `handle_server_frame`) is the source of
+    // truth for which leaves should be live and where they sit in the
+    // outer viewport. Sibling-ticket .7's SIGWINCH reflow will use
+    // `layout_state` + `attach::multi_pane::compute_layout` to recompute
+    // every pane's Rect on resize; .5's action dispatch will mutate it
+    // on split/kill. v0.1 only ever sees the single bootstrap leaf, so
+    // the existing single-pane render path keeps working unchanged.
+    let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+    let mut layout_state = LayoutState::default();
     let mut focused_pane: Option<TerminalId> = None;
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
@@ -352,8 +395,8 @@ async fn main_loop(
     // `handle_server_frame` runs exactly once, in one place.
     let exit = handle_server_frame(
         initial_attached,
-        &mut terminal,
-        &mut renderer,
+        &mut panes,
+        &mut layout_state,
         &mut focused_pane,
         &mut session_name,
         status_bar.as_mut(),
@@ -399,8 +442,8 @@ async fn main_loop(
                     Ok(f) => {
                         let exit = handle_server_frame(
                             f,
-                            &mut terminal,
-                            &mut renderer,
+                            &mut panes,
+                            &mut layout_state,
                             &mut focused_pane,
                             &mut session_name,
                             status_bar.as_mut(),
@@ -442,8 +485,7 @@ async fn main_loop(
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
-                    &terminal,
-                    &mut renderer,
+                    &mut panes,
                 )
                 .await?;
             }
@@ -460,8 +502,7 @@ async fn main_loop(
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
-                    &terminal,
-                    &mut renderer,
+                    &mut panes,
                 )
                 .await?;
             }
@@ -480,8 +521,18 @@ async fn main_loop(
                 // cursor from authoritative state.
                 predict.set_viewport(viewport.cols, viewport.rows);
                 conn.send(&viewport_resize_frame(viewport)).await?;
+                // phux-4li.4: re-render the focused pane after a resize.
+                // Per-pane reflow (resizing each leaf's libghostty
+                // Terminal to its new Rect, recomputing dividers) is
+                // sibling-ticket .7's `attach::reflow` integration; this
+                // branch keeps the single-pane behaviour from wave A
+                // pending that wire-up.
                 let mut stdout = io::stdout().lock();
-                let _ = renderer.render(&terminal, &mut stdout);
+                if let Some(fid) = focused_pane.as_ref()
+                    && let Some(slot) = panes.get_mut(fid)
+                {
+                    let _ = slot.renderer.render(&slot.terminal, &mut stdout);
+                }
                 // phux-nz4.5: viewport dims changed — force a fresh
                 // status-bar paint so the bar lands on the new bottom row.
                 if let Some(p) = status_bar.as_mut() {
@@ -563,8 +614,7 @@ async fn dispatch_input_events(
     detach_pending: &mut bool,
     predict: &mut PredictionState,
     overlay: &Overlay,
-    terminal: &Terminal<'static, 'static>,
-    renderer: &mut TerminalRenderer<'static>,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
 ) -> Result<(), AttachError> {
     let mut predicted_any = false;
     for ev in events {
@@ -585,12 +635,21 @@ async fn dispatch_input_events(
         // need a grid peek to know the width of the grapheme they step
         // over; we hand `read_grapheme_at` to the predict layer so it
         // can refuse the prediction when the cell is blank.
+        //
+        // phux-4li.4: peek the focused pane's grid, not "the" grid.
+        // Multi-pane v0.1 routes input to the client's focused leaf
+        // (per ADR-0019 decision 6); the predict layer follows.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
+            && let Some(fid) = focused_pane
+            && let Some(slot) = panes.get_mut(fid)
         {
             use crate::predict::PredictionOutcome;
             let outcome = predict.predict_key_with_grid(key_event, |r, c| {
-                renderer.read_grapheme_at(terminal, r, c).ok().flatten()
+                slot.renderer
+                    .read_grapheme_at(&slot.terminal, r, c)
+                    .ok()
+                    .flatten()
             });
             if matches!(outcome, PredictionOutcome::Predicted) {
                 predicted_any = true;
@@ -624,8 +683,8 @@ async fn dispatch_input_events(
 #[allow(clippy::too_many_arguments)] // arg list bundles status-bar + predict state; follow-up to refactor into a context struct
 fn handle_server_frame(
     frame: FrameKind,
-    terminal: &mut Terminal<'static, 'static>,
-    renderer: &mut TerminalRenderer<'static>,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    layout_state: &mut LayoutState,
     focused_pane: &mut Option<TerminalId>,
     session_name: &mut String,
     status_bar: Option<&mut StatusBarPainter>,
@@ -640,7 +699,21 @@ fn handle_server_frame(
         } => {
             // Capture the initial focused pane so subsequent INPUT_* frames
             // know where to route.
-            *focused_pane = Some(snapshot.focused_pane);
+            let bootstrap = snapshot.focused_pane;
+            *focused_pane = Some(bootstrap.clone());
+            // phux-4li.4: seed the layout mirror with a single leaf so
+            // the existing single-pane render path keeps working. The
+            // L3 metadata-fetch path (.2/.3) replaces this with the
+            // server-stored tree when present; until that ticket lands
+            // every attach is single-pane.
+            *layout_state = LayoutState::single(bootstrap.clone());
+            // Ensure the focused pane has a slot ready for output
+            // frames; output may race ahead of the snapshot. If
+            // libghostty refuses to allocate a Terminal we surface
+            // the failure rather than silently dropping the bootstrap.
+            if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
+                v.insert(PaneSlot::new()?);
+            }
             // phux-nz4.5: stash the session name for the status-bar
             // `WidgetContext`. The Snapshot type names the session via
             // its window graph; for v0 the session-name widget reads
@@ -659,23 +732,28 @@ fn handle_server_frame(
             vt_replay_bytes,
             scrollback_bytes,
         } => {
-            // For v0 only the focused pane's snapshot drives our local
-            // Terminal — multi-pane composition is downstream of phux-9gw.3
-            // (the windowing / layout work).
-            if Some(&terminal_id) == focused_pane.as_ref() {
-                terminal.resize(cols, rows, 0, 0)?;
-                // Apply scrollback first (if any), then the visible-state
-                // replay — order per SPEC §8.4 / §13.
-                if let Some(sb) = scrollback_bytes {
-                    terminal.vt_write(&sb);
-                }
-                terminal.vt_write(&vt_replay_bytes);
+            // phux-4li.4: route per-pane snapshots into per-pane slots.
+            // Allocate a fresh slot on first sight so output frames for
+            // pre-split panes don't drop on the floor.
+            let is_focused = Some(&terminal_id) == focused_pane.as_ref();
+            let slot = match panes.entry(terminal_id) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
+            };
+            slot.terminal.resize(cols, rows, 0, 0)?;
+            // Apply scrollback first (if any), then the visible-state
+            // replay — order per SPEC §8.4 / §13.
+            if let Some(sb) = scrollback_bytes {
+                slot.terminal.vt_write(&sb);
+            }
+            slot.terminal.vt_write(&vt_replay_bytes);
+            if is_focused {
                 // A fresh snapshot replaces the world — drop any
                 // outstanding predictions and resize the predict layer.
                 predict.set_viewport(cols, rows);
                 let mut stdout = io::stdout().lock();
-                let _ = renderer.render(terminal, &mut stdout);
-                if let Some((row, col)) = renderer.last_cursor() {
+                let _ = slot.renderer.render(&slot.terminal, &mut stdout);
+                if let Some((row, col)) = slot.renderer.last_cursor() {
                     predict.set_cursor(row, col);
                 }
                 // Snapshot is authoritative — overlay only repaints if
@@ -695,19 +773,31 @@ fn handle_server_frame(
             seq: _,
             bytes,
         } => {
-            if Some(&terminal_id) == focused_pane.as_ref() {
-                terminal.vt_write(&bytes);
+            // phux-4li.4: ingest output into the matching pane's
+            // libghostty Terminal even when it's not focused, so the
+            // mirror stays warm for when the user focuses it. Render +
+            // predict-reconcile only fire for the focused pane.
+            let is_focused = Some(&terminal_id) == focused_pane.as_ref();
+            let slot = match panes.entry(terminal_id) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
+            };
+            slot.terminal.vt_write(&bytes);
+            if is_focused {
                 let mut stdout = io::stdout().lock();
-                let _ = renderer.render(terminal, &mut stdout);
+                let _ = slot.renderer.render(&slot.terminal, &mut stdout);
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;
                 // confirmed predictions drop, contradictions drop their
                 // suffix, predictions still ahead of confirmed state
                 // stay alive. See [`crate::predict`] for the truth
                 // table.
-                if let Some((row, col)) = renderer.last_cursor() {
+                if let Some((row, col)) = slot.renderer.last_cursor() {
                     let _stats = reconcile_terminal_output_per_cell(predict, row, col, |r, c| {
-                        renderer.read_grapheme_at(terminal, r, c).ok().flatten()
+                        slot.renderer
+                            .read_grapheme_at(&slot.terminal, r, c)
+                            .ok()
+                            .flatten()
                     });
                 } else {
                     // Cursor hidden — we can't anchor reliably; fall
