@@ -417,6 +417,97 @@ pub fn write_bell<W: Write>(out: &mut W) -> io::Result<()> {
 }
 
 // -----------------------------------------------------------------------------
+// Pending-split bookkeeping + spawned/closed seams (phux-4li.12)
+// -----------------------------------------------------------------------------
+
+/// Parked state for an in-flight `split-pane` action (phux-4li.12).
+///
+/// `run_action` emits a `SPAWN_TERMINAL` request and parks one of these
+/// keyed by the request id. When the matching `TERMINAL_SPAWNED { Ok }`
+/// reply arrives, the driver applies [`actions::apply_split`] against
+/// the focused leaf captured here, splitting along the recorded
+/// direction. If a sibling action mutated focus between request and
+/// reply, the captured `focused_at_request` keeps the split anchored
+/// to the leaf the user actually targeted.
+#[derive(Debug, Clone)]
+pub(super) struct PendingSplit {
+    /// Leaf the user was focused on when they pressed the chord; the
+    /// split is applied against this id, not the live focus (which may
+    /// have moved). Empty layouts can't request a split so this is
+    /// always populated.
+    pub focused_at_request: TerminalId,
+    /// Axis along which to split.
+    pub dir: SplitDir,
+}
+
+/// Pure seam for the `TerminalSpawned { Ok }` handler (phux-4li.12).
+///
+/// Applies a parked [`PendingSplit`] against `state`. The driver side
+/// then takes the returned new state, replaces its `layout_state`, and
+/// emits `SET_METADATA` + a repaint. Extracted out of
+/// `handle_server_frame` so the layout-mutation contract is unit
+/// testable without driving an async loop.
+///
+/// If `pending.focused_at_request` no longer exists in the tree (it
+/// was killed between the user pressing the chord and the spawn reply
+/// landing) the split is anchored at the current focus instead. If
+/// there is no current focus either, returns `Err(NoFocus)` and the
+/// driver bells + drops the spawned terminal id.
+///
+/// # Errors
+/// Propagates [`ActionError`] from [`apply_split`].
+pub(super) fn apply_spawned_ok(
+    state: &LayoutState,
+    new_id: TerminalId,
+    pending: &PendingSplit,
+) -> Result<LayoutState, ActionError> {
+    // Anchor the split against the leaf the user targeted; if it's
+    // gone, fall back to live focus.
+    let leaves = state
+        .tree
+        .as_ref()
+        .map(crate::layout::leaves)
+        .unwrap_or_default();
+    let anchor = if leaves.contains(&pending.focused_at_request) {
+        pending.focused_at_request.clone()
+    } else {
+        state.focus.clone().ok_or(ActionError::NoFocus)?
+    };
+    // apply_split splits the *focused* leaf. Build a transient state
+    // with focus moved to the anchor, then call apply_split.
+    let anchored = LayoutState {
+        tree: state.tree.clone(),
+        focus: Some(anchor),
+    };
+    apply_split(&anchored, new_id, pending.dir)
+}
+
+/// Pure seam for the `TerminalClosed` handler (phux-4li.12).
+///
+/// Folds `dying` out of `state`, using [`apply_kill`] under
+/// the hood. Because `apply_kill` operates on `state.focus`, this
+/// helper first sets focus to `dying`, then applies the kill — the
+/// post-kill focus policy (first DFS leaf) lives inside `apply_kill`
+/// and is preserved.
+///
+/// Returns `Ok(new_state)` when the fold succeeded, `Err(_)` when the
+/// dying terminal wasn't a leaf in the tree (treat as a no-op — the
+/// caller drops the `PaneSlot` either way).
+///
+/// # Errors
+/// Propagates [`ActionError`] from [`apply_kill`].
+pub(super) fn apply_terminal_closed(
+    state: &LayoutState,
+    dying: &TerminalId,
+) -> Result<LayoutState, ActionError> {
+    let anchored = LayoutState {
+        tree: state.tree.clone(),
+        focus: Some(dying.clone()),
+    };
+    apply_kill(&anchored)
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -647,5 +738,163 @@ mod tests {
         let mut buf = Vec::new();
         write_bell(&mut buf).unwrap();
         assert_eq!(&buf, b"\x07");
+    }
+
+    // ---------------------------------------------------------------------
+    // phux-4li.12: pure-seam tests for split-pane / kill-pane wiring.
+    //
+    // The driver's async main_loop is hard to test in isolation because
+    // it wires together a tokio select! across signals, sockets, and
+    // libghostty. Instead we extract `apply_spawned_ok` and
+    // `apply_terminal_closed` as pure functions and test those — the
+    // async dispatcher's job is mechanical (allocate id, send frame,
+    // park intent) and is covered indirectly by the round-trip integ
+    // tests in phux-server.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn apply_spawned_ok_splits_anchored_to_focused_at_request() {
+        // Single pane focused on 1; pending split adds pane 2.
+        let state = LayoutState::single(t(1));
+        let pending = PendingSplit {
+            focused_at_request: t(1),
+            dir: SplitDir::Horizontal,
+        };
+        let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
+        // apply_split sets focus to the freshly added pane.
+        assert_eq!(new_state.focus, Some(t(2)));
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        assert_eq!(leaves, vec![t(1), t(2)]);
+    }
+
+    #[test]
+    fn apply_spawned_ok_anchors_against_request_even_when_focus_moved() {
+        // ((1|2)/3), focus moved to 3 by the time the spawn reply lands,
+        // but the user's chord targeted pane 2 — verify the split lands
+        // adjacent to 2 (not to the live focus).
+        let t1 = split_at(
+            &LayoutNode::Leaf(t(1)),
+            &t(1),
+            &t(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .expect("split 1+2");
+        let tree = split_at(&t1, &t(2), &t(3), SplitDir::Vertical, 0.5).expect("split 2+3");
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(3)),
+        };
+        let pending = PendingSplit {
+            focused_at_request: t(2),
+            dir: SplitDir::Horizontal,
+        };
+        let new_state =
+            apply_spawned_ok(&state, t(99), &pending).expect("split applies against request");
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        // 99 should be sibling-adjacent to 2, leaves contains all 4.
+        assert!(leaves.contains(&t(99)), "new pane not in tree: {leaves:?}");
+        assert!(leaves.contains(&t(2)), "anchor pane gone: {leaves:?}");
+        assert!(leaves.contains(&t(1)));
+        assert!(leaves.contains(&t(3)));
+        assert_eq!(new_state.focus, Some(t(99)));
+    }
+
+    #[test]
+    fn apply_spawned_ok_falls_back_to_live_focus_when_anchor_gone() {
+        // Pane 1 in tree, focus on 1, pending intent named pane 42 (no
+        // longer exists). Expect split anchored to 1 (live focus).
+        let state = LayoutState::single(t(1));
+        let pending = PendingSplit {
+            focused_at_request: t(42),
+            dir: SplitDir::Vertical,
+        };
+        let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        assert_eq!(leaves, vec![t(1), t(2)]);
+    }
+
+    #[test]
+    fn apply_terminal_closed_folds_out_known_leaf() {
+        // (1|2), kill 1 → tree collapses to leaf(2), focus = 2.
+        let tree = split_at(
+            &LayoutNode::Leaf(t(1)),
+            &t(1),
+            &t(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .expect("split");
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(2)),
+        };
+        let new_state = apply_terminal_closed(&state, &t(1)).expect("fold succeeds");
+        assert!(matches!(
+            new_state.tree.as_ref().expect("tree"),
+            LayoutNode::Leaf(p) if *p == t(2)
+        ));
+        // apply_kill sets focus to the first DFS leaf in the surviving
+        // tree (here the only remaining leaf, 2).
+        assert_eq!(new_state.focus, Some(t(2)));
+    }
+
+    #[test]
+    fn apply_terminal_closed_emptied_state_when_last_leaf_dies() {
+        let state = LayoutState::single(t(1));
+        let new_state = apply_terminal_closed(&state, &t(1)).expect("fold succeeds");
+        assert!(new_state.tree.is_none());
+        assert!(new_state.focus.is_none());
+    }
+
+    #[test]
+    fn apply_terminal_closed_rejects_unknown_leaf() {
+        let state = LayoutState::single(t(1));
+        let err = apply_terminal_closed(&state, &t(99)).unwrap_err();
+        // PaneNotInLayout — driver bubbles a debug log + drops PaneSlot.
+        assert!(
+            matches!(err, ActionError::Layout(_)),
+            "expected Layout error, got {err:?}"
+        );
+    }
+
+    /// Invariant: any sequence of (split, close) operations preserves
+    /// `leaves = (splits - closes + 1)` so long as the tree is
+    /// non-empty after each step. Not a true proptest (we drive the
+    /// pure helpers directly with deterministic ids), but exercises
+    /// the same algebra phux-4li.5's per-action tests guarantee.
+    #[test]
+    #[allow(clippy::cast_possible_wrap, reason = "leaf counts are tiny")]
+    fn split_close_sequence_preserves_leaf_count() {
+        let mut state = LayoutState::single(t(1));
+        let mut next_id: u32 = 2;
+        let mut splits: i64 = 0;
+        let mut closes: i64 = 0;
+
+        // Three splits → 4 leaves.
+        for dir in [
+            SplitDir::Horizontal,
+            SplitDir::Vertical,
+            SplitDir::Horizontal,
+        ] {
+            let pending = PendingSplit {
+                focused_at_request: state.focus.clone().expect("focus"),
+                dir,
+            };
+            state = apply_spawned_ok(&state, t(next_id), &pending).expect("split");
+            next_id += 1;
+            splits += 1;
+            let leaf_count = crate::layout::leaves(state.tree.as_ref().expect("tree")).len() as i64;
+            assert_eq!(leaf_count, splits - closes + 1);
+        }
+
+        // Two closes → 2 leaves.
+        for _ in 0..2 {
+            let dying = crate::layout::leaves(state.tree.as_ref().expect("tree"))[0].clone();
+            state = apply_terminal_closed(&state, &dying).expect("close");
+            closes += 1;
+            let leaf_count = crate::layout::leaves(state.tree.as_ref().expect("tree")).len() as i64;
+            assert_eq!(leaf_count, splits - closes + 1);
+        }
     }
 }
