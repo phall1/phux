@@ -352,6 +352,13 @@ gives pane #1 the left third of the bottom half.)
 
 Tabbed layout nodes are reserved for `SPEC.md` v0.2.
 
+The client-side rendering surface for this tree — multi-pane tiling,
+borders, focus chrome, input routing to the focused pane, layout
+persistence in L3 metadata under `phux.tui.layout/v1`, and the
+keybind-action wiring — is settled by
+[ADR-0019](./ADR/0019-tui-multi-pane-rendering.md) and tracked under
+the `phux-4li` epic.
+
 ### 6.2 Resize behavior
 
 > **Status:** Design intent. Not yet implemented as of 2026-05-25.
