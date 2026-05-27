@@ -51,6 +51,15 @@ smallvec = "1.15"
 proptest = "1"
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
+# East Asian Width + Emoji presentation width lookup for the predict
+# layer (phux-9gw.1.4). The predictive-echo state needs to know how many
+# terminal cells a Unicode scalar consumes before queueing a prediction —
+# width-2 CJK / emoji must advance the predict cursor by 2 cells and
+# refuse to predict at `cursor_col + 2 > cols`. `unicode-width` is the
+# canonical zero-dep crate for this (Unicode 16, single small table),
+# used by `ratatui`, `crossterm`, and `tui-rs`. No alternative ships
+# both EAW and emoji presentation tables in a single lookup.
+unicode-width = "0.2"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }

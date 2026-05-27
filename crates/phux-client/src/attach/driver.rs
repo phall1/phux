@@ -442,6 +442,8 @@ async fn main_loop(
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
+                    &terminal,
+                    &mut renderer,
                 )
                 .await?;
             }
@@ -458,6 +460,8 @@ async fn main_loop(
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
+                    &terminal,
+                    &mut renderer,
                 )
                 .await?;
             }
@@ -545,6 +549,13 @@ async fn main_loop(
 /// flip `detach_pending`. Pre-attach events (no `focused_pane` yet) are
 /// dropped with a debug log — the wire spec has no "pre-attach buffer"
 /// notion.
+// arg list bundles transport + render + predict context; follow-up to
+// refactor into a context struct.
+#[allow(clippy::too_many_arguments, reason = "see comment above")]
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
 async fn dispatch_input_events(
     conn: &mut Connection,
     events: Vec<InputEvent>,
@@ -552,6 +563,8 @@ async fn dispatch_input_events(
     detach_pending: &mut bool,
     predict: &mut PredictionState,
     overlay: &Overlay,
+    terminal: &Terminal<'static, 'static>,
+    renderer: &mut TerminalRenderer<'static>,
 ) -> Result<(), AttachError> {
     let mut predicted_any = false;
     for ev in events {
@@ -567,11 +580,19 @@ async fn dispatch_input_events(
         // server's input model, not the visual grid). The branch is
         // skipped entirely when the config flag is off — `predict_key`
         // returns `Disabled` and no overlay paint is scheduled.
+        //
+        // Arrows over a known cell on the current line (phux-9gw.1.3)
+        // need a grid peek to know the width of the grapheme they step
+        // over; we hand `read_grapheme_at` to the predict layer so it
+        // can refuse the prediction when the cell is blank.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
         {
             use crate::predict::PredictionOutcome;
-            if matches!(predict.predict_key(key_event), PredictionOutcome::Predicted) {
+            let outcome = predict.predict_key_with_grid(key_event, |r, c| {
+                renderer.read_grapheme_at(terminal, r, c).ok().flatten()
+            });
+            if matches!(outcome, PredictionOutcome::Predicted) {
                 predicted_any = true;
             }
         }
