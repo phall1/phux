@@ -2,46 +2,167 @@
 //!
 //! Under ADR-0013 the server forwards raw PTY bytes to each subscribed
 //! client as `TERMINAL_OUTPUT` frames. Per SPEC §6.2 those bytes MUST be
-//! adapted to the client's advertised
-//! [`ColorSupport`] before forwarding —
-//! truecolor SGR sequences `CSI 38;2;R;G;B m` and `CSI 48;2;R;G;B m`
-//! become their indexed-palette equivalents.
+//! adapted to the client's advertised capability set before forwarding:
 //!
-//! This module owns that transformation. The rewriter is a partial VT
-//! parser: it recognises CSI introducers, captures the parameter list,
-//! and on an `m` (SGR) terminator rewrites any embedded truecolor
-//! sub-sequence. Every other escape (CSI for non-SGR finals, OSC, DCS,
-//! APC, SOS/PM, two-byte escapes) is passed through verbatim — phux is
-//! a multiplexer, not a sanitiser, and unknown sequences must reach the
-//! client byte-for-byte.
+//! - Truecolor SGR (`CSI 38;2;R;G;B m` / `CSI 48;2;R;G;B m`) is quantised
+//!   to the client's [`ColorSupport`] tier. ITU-style colon-separated
+//!   form (`CSI 38:2::R:G:B m` per ECMA-48 §8.3.117) is recognised
+//!   equivalently.
+//! - Image-protocol escapes (sixel `DCS ... q ... ST`, kitty graphics
+//!   `APC G ... ST`, iTerm2 `OSC 1337 ; ... ST`) are dropped when the
+//!   client did not advertise the matching [`ImageProtocol`] bit.
+//! - Kitty keyboard-protocol replies (`APC` without a leading `G`) are
+//!   stripped when the client did not negotiate `kbd_protocols`. The
+//!   server's canonical Terminal still processes them locally; this is
+//!   wire-side filtering only.
+//! - OSC 8 hyperlinks (`OSC 8 ; params ; URI ST`) are stripped when the
+//!   client did not advertise `hyperlinks`. The intervening text between
+//!   open and close hyperlinks is preserved — only the OSC bracketing
+//!   bytes go.
 //!
-//! ## Scope (v0)
+//! Every other escape (CSI for non-SGR finals, other OSCs, DCS, SOS/PM,
+//! two-byte escapes) is passed through verbatim — phux is a multiplexer,
+//! not a sanitiser, and unknown sequences must reach the client
+//! byte-for-byte.
 //!
-//! - Truecolor → 256 / 16: implemented.
-//! - Image protocols (sixel `DCS Pi; q`, kitty graphics `APC G`, iTerm2
-//!   `OSC 1337`): out of scope for this commit; the OSC/DCS/APC
-//!   passthrough is intentionally permissive. Follow-up:
-//!   "`phux-server::downsample`: handle image protocols + keyboard
-//!   protocol gating".
-//! - Kitty keyboard protocol APC replies: same follow-up.
-//! - OSC 8 hyperlinks stripping: same follow-up.
-//! - ITU-style colon separators (`CSI 38:2::R:G:B m`): not handled —
-//!   the rewriter only recognises `;`. tmux's implementation handles
-//!   both; the follow-up ticket covers parity.
+//! `ClientCapabilities` in `phux-protocol` does not yet carry the image /
+//! keyboard / hyperlink fields (they are TBD per SPEC §6.2 and tracked by
+//! sibling wire-bump tickets). The rewriter therefore takes a local
+//! [`DownsampleCaps`] view that the fanout layer assembles from whatever
+//! the client advertised plus permissive defaults; once the wire fields
+//! land we collapse the two.
 //!
 //! [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 
 use phux_protocol::caps::ColorSupport;
 
-/// Rewrite an outbound VT byte stream to fit `support`.
+/// One image-transport protocol the client may advertise (SPEC §6.2).
 ///
-/// Returns a new buffer with truecolor SGR sequences quantised to the
-/// target palette. Non-SGR escapes and non-color SGR parameters pass
-/// through unchanged. The fast path for [`ColorSupport::TrueColor`] is
-/// a single allocation+copy; the rewriter's hot loop never runs.
+/// Defined locally because `phux-protocol` does not yet expose the
+/// `bitset<ImageProtocol>` field on `ClientCapabilities`; the wire bump
+/// will replace this with a re-export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ImageProtocol {
+    /// VT340 sixel graphics, transported via DCS (`ESC P ... q ... ESC \`).
+    Sixel,
+    /// Kitty graphics protocol, transported via APC with a leading `G`
+    /// payload byte (`ESC _ G ... ESC \`).
+    KittyGraphics,
+    /// iTerm2 inline images, transported via OSC 1337 (`ESC ] 1337 ; ... ST`).
+    Iterm2,
+}
+
+/// The subset of `ClientCapabilities` that the byte-stream rewriter
+/// consults (SPEC §6.2). Constructed by the fanout layer per-client.
+///
+/// All flags default to "most permissive" so that tests and call sites
+/// that have not yet plumbed capability detection do not silently drop
+/// sequences they used to forward. The flag bits are packed into a
+/// single `u8` so the struct stays `Copy` and trivially passes by value.
+#[derive(Debug, Clone, Copy)]
+pub struct DownsampleCaps {
+    /// Color tier — drives SGR truecolor quantisation.
+    pub color: ColorSupport,
+    /// Image / hyperlink / kbd-protocol gates, packed into one bitset.
+    /// The `Flag::*` constants name individual bits; toggle via
+    /// [`Self::with_flag`].
+    flags: u8,
+}
+
+/// A single capability bit consulted by the rewriter.
+///
+/// Toggle via [`DownsampleCaps::with_flag`]; query via
+/// [`DownsampleCaps::has`]. The wire layer that builds caps from HELLO
+/// sets these; the rewriter only reads them.
+#[derive(Debug, Clone, Copy)]
+pub enum Flag {
+    /// Forward sixel DCS (`ESC P ... q ... ST`) instead of dropping.
+    Sixel = 1 << 0,
+    /// Forward kitty graphics APC (`ESC _ G ... ST`) instead of dropping.
+    KittyGraphics = 1 << 1,
+    /// Forward iTerm2 inline images (`OSC 1337 ; ... ST`).
+    Iterm2Images = 1 << 2,
+    /// Forward kitty keyboard-protocol APC replies (`ESC _` without a
+    /// leading `G` byte) instead of dropping.
+    KbdProtocols = 1 << 3,
+    /// Forward OSC 8 hyperlink framing instead of stripping it.
+    Hyperlinks = 1 << 4,
+}
+
+impl Default for DownsampleCaps {
+    fn default() -> Self {
+        Self::permissive()
+    }
+}
+
+impl DownsampleCaps {
+    const ALL_FLAGS: u8 = (Flag::Sixel as u8)
+        | (Flag::KittyGraphics as u8)
+        | (Flag::Iterm2Images as u8)
+        | (Flag::KbdProtocols as u8)
+        | (Flag::Hyperlinks as u8);
+
+    /// Everything-allowed defaults. Used by the legacy
+    /// `rewrite_bytes(input, ColorSupport)` shim so existing call sites
+    /// keep their byte-for-byte semantics.
+    #[must_use]
+    pub const fn permissive() -> Self {
+        Self {
+            color: ColorSupport::TrueColor,
+            flags: Self::ALL_FLAGS,
+        }
+    }
+
+    /// Builder: set the color tier.
+    #[must_use]
+    pub const fn with_color(mut self, color: ColorSupport) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Builder: set or clear a single capability flag.
+    #[must_use]
+    pub const fn with_flag(mut self, flag: Flag, on: bool) -> Self {
+        let bit = flag as u8;
+        if on {
+            self.flags |= bit;
+        } else {
+            self.flags &= !bit;
+        }
+        self
+    }
+
+    /// True iff `flag`'s bit is set.
+    #[must_use]
+    pub const fn has(self, flag: Flag) -> bool {
+        self.flags & (flag as u8) != 0
+    }
+
+    const fn all_flags_on(self) -> bool {
+        self.flags == Self::ALL_FLAGS
+    }
+}
+
+/// Rewrite an outbound VT byte stream to fit the client's color tier.
+///
+/// Thin wrapper over [`rewrite_bytes_with_caps`] preserved for existing
+/// call sites that only care about color downsampling. Image, keyboard
+/// and hyperlink escapes pass through unchanged.
 #[must_use]
 pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
-    if matches!(support, ColorSupport::TrueColor) {
+    rewrite_bytes_with_caps(input, DownsampleCaps::permissive().with_color(support))
+}
+
+/// Rewrite an outbound VT byte stream to fit the full client capability
+/// set per SPEC §6.2.
+///
+/// The hot loop reuses a single output `Vec`; dropped sequences cost
+/// nothing beyond the scan. Truecolor-only clients with everything
+/// permissive get the fast path (single allocation + copy).
+#[must_use]
+pub fn rewrite_bytes_with_caps(input: &[u8], caps: DownsampleCaps) -> Vec<u8> {
+    // Fast path: nothing to rewrite or drop. Hot path on capable clients.
+    if matches!(caps.color, ColorSupport::TrueColor) && caps.all_flags_on() {
         return input.to_vec();
     }
 
@@ -61,13 +182,23 @@ pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
         }
         match input[i + 1] {
             b'[' => {
-                i = handle_csi(input, i, support, &mut out);
+                i = handle_csi(input, i, caps.color, &mut out);
             }
-            b']' | b'P' | b'_' | b'^' | b'X' => {
+            b']' => {
+                i = handle_osc(input, i, caps, &mut out);
+            }
+            b'P' => {
+                i = handle_dcs(input, i, caps, &mut out);
+            }
+            b'_' => {
+                i = handle_apc(input, i, caps, &mut out);
+            }
+            b'^' | b'X' => {
+                // SOS / PM — pass through verbatim.
                 i = passthrough_string_terminated(input, i, &mut out);
             }
             _ => {
-                // Two-byte escape: ESC X. Pass through and advance.
+                // Two-byte escape: ESC X.
                 out.push(ESC);
                 out.push(input[i + 1]);
                 i += 2;
@@ -96,8 +227,6 @@ fn handle_csi(input: &[u8], start: usize, support: ColorSupport, out: &mut Vec<u
     let mut j = csi_body_start;
     while j < input.len() {
         let b = input[j];
-        // Parameter bytes (0x30..=0x3F) and intermediates (0x20..=0x2F)
-        // belong to the sequence body; anything else is the final byte.
         if (0x30..=0x3F).contains(&b) || (0x20..=0x2F).contains(&b) {
             j += 1;
             continue;
@@ -113,86 +242,238 @@ fn handle_csi(input: &[u8], start: usize, support: ColorSupport, out: &mut Vec<u
     if final_byte == b'm' {
         rewrite_sgr(&input[csi_body_start..j], support, out);
     } else {
-        // Non-SGR CSI — passthrough including the final byte.
         out.extend_from_slice(&input[start..=j]);
     }
     j + 1
 }
 
-/// Passthrough an OSC/DCS/APC/SOS/PM sequence starting at `input[start]`
-/// (`ESC` followed by `]`/`P`/`_`/`^`/`X`). Returns the new position past
-/// the string terminator (`BEL` or `ESC \\`).
-fn passthrough_string_terminated(input: &[u8], start: usize, out: &mut Vec<u8>) -> usize {
+/// Locate the string terminator (`BEL` or `ESC \\`) for the
+/// OSC/DCS/APC/SOS/PM sequence starting at `input[start]`. Returns the
+/// position one past the terminator. If no terminator is found the
+/// sequence runs to EOF.
+fn scan_string_terminated(input: &[u8], start: usize) -> usize {
     let mut j = start + 2;
     while j < input.len() {
         if input[j] == BEL {
-            j += 1;
-            break;
+            return j + 1;
         }
         if input[j] == ESC && j + 1 < input.len() && input[j + 1] == b'\\' {
-            j += 2;
-            break;
+            return j + 2;
         }
         j += 1;
     }
-    out.extend_from_slice(&input[start..j]);
-    j
+    input.len()
+}
+
+/// Pass an OSC/DCS/APC/SOS/PM sequence through verbatim. Returns the
+/// new position past the string terminator.
+fn passthrough_string_terminated(input: &[u8], start: usize, out: &mut Vec<u8>) -> usize {
+    let end = scan_string_terminated(input, start);
+    out.extend_from_slice(&input[start..end]);
+    end
+}
+
+/// Handle `ESC ]` (OSC). Detects OSC 8 hyperlinks and OSC 1337 iTerm2
+/// images; everything else passes through.
+fn handle_osc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+    let end = scan_string_terminated(input, start);
+    // Body lies between ESC ] and the terminator. Identify the OSC
+    // command code (digits up to the first `;`).
+    let body_start = start + 2;
+    let mut p = body_start;
+    while p < end && input[p].is_ascii_digit() {
+        p += 1;
+    }
+    let code = &input[body_start..p];
+    // OSC 8 hyperlinks. Strip framing only; the text between open and
+    // close OSC 8 lives outside this sequence and is preserved by the
+    // outer loop.
+    if !caps.has(Flag::Hyperlinks) && code == b"8" {
+        return end;
+    }
+    // OSC 1337 iTerm2 inline image. The protocol overloads OSC 1337
+    // for non-image messages (e.g. shell integration) but per SPEC §6.2
+    // the gating is on the OSC code, not the payload subkey — that
+    // matches what tmux ships.
+    if !caps.has(Flag::Iterm2Images) && code == b"1337" {
+        return end;
+    }
+    out.extend_from_slice(&input[start..end]);
+    end
+}
+
+/// Handle `ESC P` (DCS). The sixel introducer is `DCS Pi ; Pa ; Ph q ...
+/// ST` — the final `q` of the introducer is what marks it as sixel.
+/// Other DCS strings (DECRQSS, tmux passthrough, etc.) pass through.
+fn handle_dcs(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+    let end = scan_string_terminated(input, start);
+    if !caps.has(Flag::Sixel) && is_sixel_dcs(&input[start + 2..end]) {
+        return end;
+    }
+    out.extend_from_slice(&input[start..end]);
+    end
+}
+
+/// True when a DCS body (bytes past `ESC P`) is a sixel introducer.
+///
+/// Sixel uses `DCS Pa ; Pb ; Pc q ...` — parameter bytes only, no
+/// intermediates, final `q`. DECRQSS also has `q` as final but with
+/// `$` as an intermediate (`DCS $ q ... ST`); excluding intermediates
+/// keeps DECRQSS, tmux passthrough, and other DCS payloads intact.
+fn is_sixel_dcs(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i < body.len() && (0x30..=0x3F).contains(&body[i]) {
+        i += 1;
+    }
+    body.get(i).is_some_and(|b| *b == b'q')
+}
+
+/// Handle `ESC _` (APC). Kitty splits APC on the first payload byte:
+/// `G` = graphics, otherwise it's a kitty keyboard protocol reply
+/// (digits-and-semicolons-and-other-codes). Gate each independently.
+fn handle_apc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+    let end = scan_string_terminated(input, start);
+    let payload_start = start + 2;
+    let first = input.get(payload_start).copied();
+    let is_graphics = first == Some(b'G');
+    if is_graphics {
+        if !caps.has(Flag::KittyGraphics) {
+            return end;
+        }
+    } else if !caps.has(Flag::KbdProtocols) {
+        return end;
+    }
+    out.extend_from_slice(&input[start..end]);
+    end
 }
 
 /// Rewrite the parameter bytes of an SGR sequence (everything between
 /// `CSI` and the terminating `m`), emitting `CSI <rewritten> m` into `out`.
 ///
-/// The grammar handled here is a `;`-separated list of decimal parameters;
-/// embedded `38;2;R;G;B` (fg truecolor) and `48;2;R;G;B` (bg truecolor)
-/// sub-sequences are quantised to `38;5;N` / `48;5;N` (Indexed256) or
-/// `3N` / `4N` (Indexed16). All other parameters pass through verbatim.
-///
-/// Empty parameter strings (`CSI m` ≡ `CSI 0 m`) survive: the resulting
-/// SGR is emitted with the same empty parameter list, which terminals
-/// treat as a reset.
+/// Handles both the classic `;`-separated form (`CSI 38;2;R;G;B m`) and
+/// the ITU/ECMA-48 §8.3.117 colon form (`CSI 38:2::R:G:B m`). The ITU
+/// form reserves the field after the colour-space tag (`2`) for the
+/// colour-space identifier; it is conventionally left empty and we
+/// tolerate any value there.
 fn rewrite_sgr(params: &[u8], support: ColorSupport, out: &mut Vec<u8>) {
     out.extend_from_slice(b"\x1b[");
-    let parts = split_sgr_params(params);
+    let groups: Vec<&[u8]> = params.split(|b| *b == b';').collect();
 
     let mut first = true;
     let mut i = 0;
-    while i < parts.len() {
-        let p = parts[i];
-        // Truecolor fg: 38; 2; R; G; B
-        if i + 4 < parts.len()
-            && p == Some(38)
-            && parts[i + 1] == Some(2)
-            && let (Some(r), Some(g), Some(b)) = (parts[i + 2], parts[i + 3], parts[i + 4])
+    while i < groups.len() {
+        let raw = groups[i];
+
+        // ITU colon form: the entire truecolor spec lives in one group.
+        if let Some(rgb) = parse_itu_truecolor(raw, 38) {
+            emit_color_params(rgb, true, support, out, &mut first);
+            i += 1;
+            continue;
+        }
+        if let Some(rgb) = parse_itu_truecolor(raw, 48) {
+            emit_color_params(rgb, false, support, out, &mut first);
+            i += 1;
+            continue;
+        }
+
+        // Classic semicolon form: 38 ; 2 ; R ; G ; B spans five groups.
+        // Only matches when the group contains no `:` (otherwise the
+        // ITU branch above would have either matched or this is some
+        // unrelated extension we must not eat).
+        if !raw.contains(&b':')
+            && parse_single_param(raw) == Some(38)
+            && i + 4 < groups.len()
+            && parse_single_param(groups[i + 1]) == Some(2)
+            && let (Some(r), Some(g), Some(b)) = (
+                parse_single_param(groups[i + 2]),
+                parse_single_param(groups[i + 3]),
+                parse_single_param(groups[i + 4]),
+            )
         {
             let rgb = [clamp_u8(r), clamp_u8(g), clamp_u8(b)];
             emit_color_params(rgb, true, support, out, &mut first);
             i += 5;
             continue;
         }
-        // Truecolor bg: 48; 2; R; G; B
-        if i + 4 < parts.len()
-            && p == Some(48)
-            && parts[i + 1] == Some(2)
-            && let (Some(r), Some(g), Some(b)) = (parts[i + 2], parts[i + 3], parts[i + 4])
+        if !raw.contains(&b':')
+            && parse_single_param(raw) == Some(48)
+            && i + 4 < groups.len()
+            && parse_single_param(groups[i + 1]) == Some(2)
+            && let (Some(r), Some(g), Some(b)) = (
+                parse_single_param(groups[i + 2]),
+                parse_single_param(groups[i + 3]),
+                parse_single_param(groups[i + 4]),
+            )
         {
             let rgb = [clamp_u8(r), clamp_u8(g), clamp_u8(b)];
             emit_color_params(rgb, false, support, out, &mut first);
             i += 5;
             continue;
         }
-        // Anything else (including `Some(n)` and `None` empty parameters)
-        // passes through.
+
+        // Anything else passes through verbatim. The group's original
+        // bytes (including any `:` sub-separators, e.g. `4:3` curly
+        // underline) survive intact.
         if !first {
             out.push(b';');
         }
         first = false;
-        if let Some(n) = p {
-            // Write decimal without allocating an intermediate string.
-            write_decimal(n, out);
-        }
+        out.extend_from_slice(raw);
         i += 1;
     }
     out.push(b'm');
+}
+
+/// Parse a single colon-free SGR parameter group. Empty → `Some(0)`
+/// per ECMA-48 default. Non-decimal → `None`.
+fn parse_single_param(raw: &[u8]) -> Option<u32> {
+    if raw.is_empty() {
+        // ECMA-48: empty parameter defaults to 0. We surface that as 0
+        // for matching purposes; emit-side path still respects the
+        // original byte form so passthrough cases preserve emptiness.
+        return Some(0);
+    }
+    let mut n: u32 = 0;
+    for &b in raw {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        n = n.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+    }
+    Some(n)
+}
+
+/// Try to parse a single SGR group as an ITU colon-form truecolor spec
+/// for `selector` (38 for fg, 48 for bg). Accepts:
+///
+/// - 5 fields: `selector:2:R:G:B` (some implementations skip the
+///   colourspace slot).
+/// - 6 fields: `selector:2:<colourspace>:R:G:B`. The colourspace field
+///   is conventionally empty per ECMA-48 §8.3.117 but any value is
+///   tolerated.
+///
+/// Returns `None` if the group lacks `:` (classic form lives at a
+/// higher level), or if the selector / type-tag don't match.
+fn parse_itu_truecolor(raw: &[u8], selector: u32) -> Option<[u8; 3]> {
+    if !raw.contains(&b':') {
+        return None;
+    }
+    let fields: Vec<&[u8]> = raw.split(|b| *b == b':').collect();
+    if parse_single_param(fields[0]) != Some(selector) {
+        return None;
+    }
+    if fields.len() < 2 || parse_single_param(fields[1]) != Some(2) {
+        return None;
+    }
+    let (ri, gi, bi) = match fields.len() {
+        5 => (2, 3, 4),
+        6 => (3, 4, 5),
+        _ => return None,
+    };
+    let r = parse_single_param(fields[ri])?;
+    let g = parse_single_param(fields[gi])?;
+    let b = parse_single_param(fields[bi])?;
+    Some([clamp_u8(r), clamp_u8(g), clamp_u8(b)])
 }
 
 /// Emit either `38;5;N` / `48;5;N` (Indexed256) or `3N` / `9N` /
@@ -211,8 +492,6 @@ fn emit_color_params(
     *first = false;
     match support {
         ColorSupport::TrueColor => {
-            // Caller's fast path skips this function for TrueColor; emit
-            // verbatim so accidental routing here is at least correct.
             if foreground {
                 out.extend_from_slice(b"38;2;");
             } else {
@@ -245,8 +524,6 @@ fn emit_color_params(
 
 fn emit_indexed16(rgb: [u8; 3], foreground: bool, out: &mut Vec<u8>) {
     let idx = nearest_xterm_16(rgb);
-    // ANSI 16: 0..=7 are the base; 8..=15 are bright. fg base is 30..=37,
-    // bright fg is 90..=97; bg base is 40..=47, bright bg is 100..=107.
     let base: u32 = if foreground {
         if idx < 8 { 30 } else { 90 }
     } else if idx < 8 {
@@ -258,41 +535,8 @@ fn emit_indexed16(rgb: [u8; 3], foreground: bool, out: &mut Vec<u8>) {
     write_decimal(base + off, out);
 }
 
-/// Split an SGR parameter list (the bytes between `CSI` and the trailing
-/// `m`) into integer parameters.
-///
-/// `;`-separated. Empty fields decode to `None` (the standard says
-/// they default to `0`, which is how terminals treat them, but
-/// `rewrite_sgr` re-emits empties as empties for byte-for-byte
-/// passthrough on the no-color-touch path). Non-decimal bytes inside a
-/// field are rejected: the whole field becomes `None` and is emitted
-/// empty — terminals treat that as `0` too.
-fn split_sgr_params(params: &[u8]) -> Vec<Option<u32>> {
-    let mut out = Vec::new();
-    for field in params.split(|b| *b == b';') {
-        if field.is_empty() {
-            out.push(None);
-            continue;
-        }
-        let mut n: u32 = 0;
-        let mut ok = true;
-        for &b in field {
-            if !b.is_ascii_digit() {
-                ok = false;
-                break;
-            }
-            // Saturating semantics for absurd parameters; real SGR
-            // values fit in `u32` with billions of headroom.
-            n = n.saturating_mul(10).saturating_add(u32::from(b - b'0'));
-        }
-        out.push(if ok { Some(n) } else { None });
-    }
-    out
-}
-
 /// Best-effort decimal writer that doesn't allocate.
 fn write_decimal(n: u32, out: &mut Vec<u8>) {
-    // u32::MAX is 10 digits; 12-byte stack buffer is plenty.
     let mut buf = [0u8; 12];
     let mut i = buf.len();
     if n == 0 {
@@ -424,6 +668,17 @@ const fn nearest_xterm_16(rgb: [u8; 3]) -> u8 {
 mod tests {
     use super::*;
 
+    fn caps_color(c: ColorSupport) -> DownsampleCaps {
+        DownsampleCaps::permissive().with_color(c)
+    }
+
+    fn caps_strip_images() -> DownsampleCaps {
+        DownsampleCaps::permissive()
+            .with_flag(Flag::Sixel, false)
+            .with_flag(Flag::KittyGraphics, false)
+            .with_flag(Flag::Iterm2Images, false)
+    }
+
     #[test]
     fn truecolor_path_is_byte_identical() {
         let input = b"\x1b[38;2;255;0;0mhello\x1b[0m world";
@@ -445,7 +700,6 @@ mod tests {
 
     #[test]
     fn truecolor_fg_to_256_red() {
-        // CSI 38;2;255;0;0 m  →  CSI 38;5;196 m
         let input = b"\x1b[38;2;255;0;0mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed256);
         assert_eq!(out, b"\x1b[38;5;196mX");
@@ -460,7 +714,6 @@ mod tests {
 
     #[test]
     fn truecolor_fg_to_16_red_is_bright_red() {
-        // nearest_xterm_16([255,0,0]) == 9; foreground bright is 90+9-8 = 91.
         let input = b"\x1b[38;2;255;0;0mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
         assert_eq!(out, b"\x1b[91mX");
@@ -468,7 +721,6 @@ mod tests {
 
     #[test]
     fn truecolor_bg_to_16_red_is_bright_red_bg() {
-        // Bright bg: 100..=107. idx=9 → 100 + (9-8) = 101.
         let input = b"\x1b[48;2;255;0;0mY";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
         assert_eq!(out, b"\x1b[101mY");
@@ -476,7 +728,6 @@ mod tests {
 
     #[test]
     fn truecolor_fg_to_16_dark_red_is_dark_red() {
-        // nearest_xterm_16([0x80,0,0]) == 1; non-bright fg is 30+1 = 31.
         let input = b"\x1b[38;2;128;0;0mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
         assert_eq!(out, b"\x1b[31mX");
@@ -484,8 +735,6 @@ mod tests {
 
     #[test]
     fn mixed_sgr_parameters_partial_rewrite() {
-        // Bold + truecolor fg + underline; only the fg sub-sequence is
-        // rewritten.
         let input = b"\x1b[1;38;2;255;0;0;4mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed256);
         assert_eq!(out, b"\x1b[1;38;5;196;4mX");
@@ -495,14 +744,11 @@ mod tests {
     fn non_sgr_csi_passes_through() {
         let input = b"\x1b[2J\x1b[Hhello\x1b[31m!";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
-        // Only the SGR `\x1b[31m` is candidate for rewrite, but it's already
-        // indexed-16 (red) — passes through.
         assert_eq!(out, input);
     }
 
     #[test]
     fn osc_sequences_pass_through() {
-        // OSC 0; set window title; ST = ESC backslash.
         let input = b"\x1b]0;hello world\x1b\\rest";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
         assert_eq!(out, input);
@@ -517,7 +763,6 @@ mod tests {
 
     #[test]
     fn empty_sgr_is_preserved() {
-        // CSI m == CSI 0 m == reset. We re-emit as CSI m to stay byte-tight.
         let input = b"\x1b[mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed256);
         assert_eq!(out, b"\x1b[mX");
@@ -539,9 +784,213 @@ mod tests {
 
     #[test]
     fn two_byte_escape_passes_through() {
-        // ESC = / DECPNM. Two-byte escape, no params.
         let input = b"\x1b=foo";
         let out = rewrite_bytes(input, ColorSupport::Indexed256);
         assert_eq!(out, input);
+    }
+
+    // --- ITU colon SGR (phux-9gz) -----------------------------------------
+
+    #[test]
+    fn itu_colon_truecolor_fg_downgrades_to_256() {
+        // CSI 38:2::255:0:0 m → indexed256 red 196.
+        // The empty middle field is the ECMA-48 colourspace slot.
+        let input = b"\x1b[38:2::255:0:0mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed256);
+        assert_eq!(out, b"\x1b[38;5;196mX");
+    }
+
+    #[test]
+    fn itu_colon_truecolor_bg_downgrades_to_16() {
+        let input = b"\x1b[48:2::255:0:0mY";
+        let out = rewrite_bytes(input, ColorSupport::Indexed16);
+        assert_eq!(out, b"\x1b[101mY");
+    }
+
+    #[test]
+    fn itu_colon_truecolor_with_explicit_colourspace_is_tolerated() {
+        // Some emitters fill the colourspace slot with `0` rather than
+        // leaving it empty. Tolerate per ECMA-48 §8.3.117.
+        let input = b"\x1b[38:2:0:255:0:0mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed256);
+        assert_eq!(out, b"\x1b[38;5;196mX");
+    }
+
+    #[test]
+    fn itu_colon_5field_form_also_works() {
+        // Some implementations emit 38:2:R:G:B (no colourspace slot).
+        let input = b"\x1b[38:2:255:0:0mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed256);
+        assert_eq!(out, b"\x1b[38;5;196mX");
+    }
+
+    #[test]
+    fn itu_colon_truecolor_passthrough_under_truecolor_client() {
+        // Under TrueColor + everything-permissive, the fast path returns
+        // the input bytewise — including the ITU form intact.
+        let input = b"\x1b[38:2::255:0:0mX";
+        let out = rewrite_bytes(input, ColorSupport::TrueColor);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn non_color_colon_sgr_passes_through_verbatim() {
+        // `4:3` is the curly-underline SGR. Must survive verbatim — the
+        // rewriter only recognises color sub-sequences.
+        let input = b"\x1b[4:3mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed256);
+        assert_eq!(out, input);
+    }
+
+    // --- OSC 8 hyperlinks (phux-9gz) --------------------------------------
+
+    #[test]
+    fn osc8_open_close_passthrough_when_hyperlinks_allowed() {
+        // OSC 8 ; ; https://example.com ST  hello  OSC 8 ; ; ST
+        let input = b"\x1b]8;;https://example.com\x1b\\hello\x1b]8;;\x1b\\";
+        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn osc8_stripped_when_hyperlinks_disabled() {
+        let input = b"\x1b]8;;https://example.com\x1b\\hello\x1b]8;;\x1b\\";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        // Only the inner `hello` survives.
+        assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn osc8_with_bel_terminator_also_stripped() {
+        // Some emitters use BEL instead of ST.
+        let input = b"\x1b]8;;https://x.example\x07link text\x1b]8;;\x07trailing";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, b"link texttrailing");
+    }
+
+    #[test]
+    fn osc_non_8_unaffected_by_hyperlink_strip() {
+        // Window title (OSC 0) must NOT be stripped when hyperlinks=false.
+        let input = b"\x1b]0;window title\x1b\\rest";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, input);
+    }
+
+    // --- Image protocols (phux-9gz) ---------------------------------------
+
+    #[test]
+    fn sixel_passthrough_when_bit_set() {
+        // DCS 0 ; 0 ; 0 q ... ST — minimal sixel body.
+        let input = b"prefix\x1bP0;0;0q#0;2;100;0;0~~~\x1b\\suffix";
+        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn sixel_dropped_when_bit_unset() {
+        let input = b"prefix\x1bP0;0;0q#0;2;100;0;0~~~\x1b\\suffix";
+        let out = rewrite_bytes_with_caps(input, caps_strip_images());
+        assert_eq!(out, b"prefixsuffix");
+    }
+
+    #[test]
+    fn non_sixel_dcs_survives_image_strip() {
+        // DECRQSS-style DCS (final `|`, not `q`) must not be dropped
+        // when only sixel is disabled.
+        let input = b"\x1bP$q\"p\x1b\\";
+        let out = rewrite_bytes_with_caps(input, caps_strip_images());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn kitty_graphics_passthrough_when_bit_set() {
+        // APC G a=T,f=24;<payload> ST
+        let input = b"start\x1b_Ga=T,f=24;payload\x1b\\end";
+        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn kitty_graphics_dropped_when_bit_unset() {
+        let input = b"start\x1b_Ga=T,f=24;payload\x1b\\end";
+        let out = rewrite_bytes_with_caps(input, caps_strip_images());
+        assert_eq!(out, b"startend");
+    }
+
+    #[test]
+    fn iterm2_image_dropped_when_bit_unset() {
+        // OSC 1337 ; File=name=...:base64 ST
+        let input = b"a\x1b]1337;File=name=test:AAAA\x1b\\b";
+        let out = rewrite_bytes_with_caps(input, caps_strip_images());
+        assert_eq!(out, b"ab");
+    }
+
+    #[test]
+    fn iterm2_image_passthrough_when_bit_set() {
+        let input = b"a\x1b]1337;File=name=test:AAAA\x1b\\b";
+        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        assert_eq!(out, input);
+    }
+
+    // --- Kitty keyboard protocol APC (phux-9gz) ---------------------------
+
+    #[test]
+    fn kitty_kbd_reply_stripped_when_disabled() {
+        // APC without leading `G` — kitty kbd protocol payload.
+        let input = b"head\x1b_13;2u\x1b\\tail";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::KbdProtocols, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, b"headtail");
+    }
+
+    #[test]
+    fn kitty_kbd_reply_survives_when_enabled() {
+        let input = b"head\x1b_13;2u\x1b\\tail";
+        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn kitty_graphics_not_stripped_by_kbd_disable() {
+        // Disabling kbd_protocols must not affect APC `G` graphics
+        // payloads (they are gated independently).
+        let input = b"x\x1b_Ga=T;abc\x1b\\y";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::KbdProtocols, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn kitty_kbd_not_stripped_by_graphics_disable() {
+        // Conversely, disabling kitty_graphics must not eat kbd replies.
+        let input = b"x\x1b_13;2u\x1b\\y";
+        let caps = DownsampleCaps::permissive().with_flag(Flag::KittyGraphics, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, input);
+    }
+
+    // --- Composition ------------------------------------------------------
+
+    #[test]
+    fn caps_with_color_downgrade_and_image_strip_compose() {
+        // Truecolor SGR + sixel inside the same stream; client wants
+        // Indexed256 and refuses sixel.
+        let input = b"\x1b[38;2;255;0;0mhi\x1bP0;0;0qsixel\x1b\\done";
+        let caps = caps_color(ColorSupport::Indexed256).with_flag(Flag::Sixel, false);
+        let out = rewrite_bytes_with_caps(input, caps);
+        assert_eq!(out, b"\x1b[38;5;196mhidone");
+    }
+
+    #[test]
+    fn caps_color_function_smoke() {
+        // Smoke-check that the convenience helper produces a permissive
+        // base with just color toggled.
+        let c = caps_color(ColorSupport::Indexed16);
+        assert!(c.has(Flag::Sixel));
+        assert!(c.has(Flag::Hyperlinks));
+        assert!(matches!(c.color, ColorSupport::Indexed16));
     }
 }
