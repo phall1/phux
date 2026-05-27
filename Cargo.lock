@@ -1235,6 +1235,7 @@ name = "phux-client"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "ciborium",
  "insta",
  "libghostty-vt",
  "phux-config",
@@ -1243,6 +1244,7 @@ dependencies = [
  "phux-server",
  "proptest",
  "rustix 0.38.44",
+ "serde",
  "thiserror 2.0.18",
  "tokio",
  "toml",

@@ -52,6 +52,26 @@ rustix = { version = "0.38", default-features = false, features = ["std", "termi
 # this (Unicode 16, single small table); no alternative ships both
 # EAW and emoji presentation tables.
 unicode-width = { workspace = true }
+# phux-4li.3: the client-side layout mirror persists itself server-side
+# via the L3 metadata key `phux.tui.layout/v1` (ADR-0019 decision 1).
+# SPEC §7.4 recommends CBOR for metadata values, and the layout
+# envelope is `{version, root: LayoutNode, focus: TerminalId}`.
+# `ciborium` is already transitively in Cargo.lock (criterion pulls it
+# in for dev), it is pure-safe Rust with no C deps, serde-native, and
+# under active maintenance — unlike `serde_cbor`, which has been
+# unmaintained since 2021 and is not in the lock file. `ciborium`'s
+# direct deps (`ciborium-io`, `ciborium-ll`, `half`) are all small and
+# already present in our tree, so adding it as a direct dep costs no
+# new compiled crates.
+ciborium = "0.2"
+# phux-4li.3: serde-derive shims for the CBOR envelope (`CborEnvelope`,
+# `CborLayoutNode`, `CborTerminalId`). The wire-side `LayoutNode` and
+# `TerminalId` don't derive Serialize/Deserialize (phux-protocol
+# avoids the serde dependency to keep its near-empty-shell publish
+# profile per ADR-0011), so the layout module mirrors the shapes
+# locally with serde derives and converts via `From`. Already a
+# workspace dep (used by phux-config, phux-server, etc.).
+serde = { workspace = true }
 
 [dev-dependencies]
 phux-server.workspace = true
