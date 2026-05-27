@@ -507,6 +507,70 @@ const fn rgb_distance_sq(a: [u8; 3], b: [u8; 3]) -> u32 {
     dr * dr + dg * dg + db * db
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LabColor {
+    l: f64,
+    a: f64,
+    b: f64,
+}
+
+fn srgb_channel_to_linear(c: u8) -> f64 {
+    let v = f64::from(c) / 255.0;
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn lab_pivot(t: f64) -> f64 {
+    const EPSILON: f64 = 216.0 / 24_389.0;
+    const KAPPA: f64 = 24_389.0 / 27.0;
+
+    if t > EPSILON {
+        t.cbrt()
+    } else {
+        KAPPA.mul_add(t, 16.0) / 116.0
+    }
+}
+
+fn rgb_to_lab(rgb: [u8; 3]) -> LabColor {
+    let linear_red = srgb_channel_to_linear(rgb[0]);
+    let linear_green = srgb_channel_to_linear(rgb[1]);
+    let linear_blue = srgb_channel_to_linear(rgb[2]);
+
+    // sRGB D65 conversion, normalized by the D65 reference white.
+    let cie_x = 0.180_437_5_f64.mul_add(
+        linear_blue,
+        0.357_576_1_f64.mul_add(linear_green, 0.412_456_4 * linear_red),
+    ) / 0.950_47;
+    let cie_y = 0.072_175_f64.mul_add(
+        linear_blue,
+        0.715_152_2_f64.mul_add(linear_green, 0.212_672_9 * linear_red),
+    );
+    let cie_z = 0.950_304_1_f64.mul_add(
+        linear_blue,
+        0.119_192_f64.mul_add(linear_green, 0.019_333_9 * linear_red),
+    ) / 1.088_83;
+
+    let lab_x = lab_pivot(cie_x);
+    let lab_y = lab_pivot(cie_y);
+    let lab_z = lab_pivot(cie_z);
+
+    LabColor {
+        l: 116.0_f64.mul_add(lab_y, -16.0),
+        a: 500.0 * (lab_x - lab_y),
+        b: 200.0 * (lab_y - lab_z),
+    }
+}
+
+fn lab_distance_sq(a: LabColor, b: LabColor) -> f64 {
+    let dl = a.l - b.l;
+    let da = a.a - b.a;
+    let db = a.b - b.b;
+    db.mul_add(db, dl.mul_add(dl, da * da))
+}
+
 fn nearest_xterm_256(rgb: [u8; 3]) -> u8 {
     let [r, g, b] = rgb;
     let cr = channel_to_cube_index(r);
@@ -540,12 +604,13 @@ fn nearest_xterm_256(rgb: [u8; 3]) -> u8 {
     if gray_d < cube_d { gray_idx } else { cube_idx }
 }
 
-const fn nearest_xterm_16(rgb: [u8; 3]) -> u8 {
+fn nearest_xterm_16(rgb: [u8; 3]) -> u8 {
+    let target = rgb_to_lab(rgb);
     let mut best_idx: u8 = 0;
-    let mut best_d = u32::MAX;
+    let mut best_d = f64::INFINITY;
     let mut i = 0u8;
     while i < 16 {
-        let d = rgb_distance_sq(rgb, XTERM_16_PALETTE[i as usize]);
+        let d = lab_distance_sq(target, rgb_to_lab(XTERM_16_PALETTE[usize::from(i)]));
         if d < best_d {
             best_d = d;
             best_idx = i;
@@ -620,6 +685,22 @@ mod tests {
         let input = b"\x1b[38;2;128;0;0mX";
         let out = rewrite_bytes(input, ColorSupport::Indexed16);
         assert_eq!(out, b"\x1b[31mX");
+    }
+
+    #[test]
+    fn indexed16_uses_lab_for_dark_cyan_instead_of_black() {
+        // RGB squared distance ties this with black; Lab keeps the visible hue.
+        let input = b"\x1b[38;2;0;64;64mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed16);
+        assert_eq!(out, b"\x1b[36mX");
+    }
+
+    #[test]
+    fn indexed16_uses_lab_lightness_for_dim_blue() {
+        // RGB squared distance prefers bright blue; Lab picks the dim ANSI blue.
+        let input = b"\x1b[48;2;0;40;192mX";
+        let out = rewrite_bytes(input, ColorSupport::Indexed16);
+        assert_eq!(out, b"\x1b[44mX");
     }
 
     #[test]
