@@ -592,6 +592,7 @@ async fn dispatch_input_events(
 /// configured widgets pays nothing for the chrome path. `viewport_dims`
 /// is `(cols, rows)` of the outer terminal — used by the painter to
 /// pick the bottom row.
+#[allow(clippy::too_many_arguments)] // arg list bundles status-bar + predict state; follow-up to refactor into a context struct
 fn handle_server_frame(
     frame: FrameKind,
     terminal: &mut Terminal<'static, 'static>,
