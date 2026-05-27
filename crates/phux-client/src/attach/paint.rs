@@ -100,7 +100,7 @@ pub(super) fn paint_full_frame(
             has_bar,
         )
     });
-    let _ = super::multi_pane::paint_dividers(&mut stdout, &multi);
+    let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
     paint_bar_after_pane(
         status_bar,
         &mut stdout,
