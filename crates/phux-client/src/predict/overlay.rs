@@ -22,7 +22,7 @@
 
 use std::io::{self, Write};
 
-use super::state::PredictionState;
+use super::state::{PredictionKind, PredictionState};
 
 /// Stateless overlay writer. Owns no buffers; callers pass the
 /// prediction state and a writer.
@@ -48,6 +48,12 @@ impl Overlay {
     pub fn render(&self, state: &PredictionState, out: &mut impl Write) -> io::Result<usize> {
         let mut count = 0;
         for p in state.pending() {
+            // Newline predictions are pure cursor-motion guesses; the
+            // overlay paints no cell for them. Reconcile will still
+            // consume the prediction when the server's cursor advances.
+            if matches!(p.kind, PredictionKind::Newline) {
+                continue;
+            }
             write_cup(out, p.row, p.col)?;
             // Reset → underline. We don't merge with the renderer's SGR
             // because we paint after it; what we emit here is a fresh

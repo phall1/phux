@@ -58,15 +58,25 @@ pub struct Prediction {
     pub kind: PredictionKind,
 }
 
-/// What the prediction was modelling. Carried for diagnostics; the
-/// reconcile path is class-agnostic in v0 (it drops everything on any
-/// server output).
+/// What the prediction was modelling. The per-cell reconcile path branches
+/// on this to decide what counts as "confirmed" vs "contradicted" — see
+/// [`super::reconcile`] for the match table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredictionKind {
-    /// A printable ASCII byte: forward cursor, paint the char.
+    /// A printable byte: forward cursor, paint the char. Reconcile
+    /// confirms when the authoritative cell at `(row, col)` has `ch` as
+    /// its base grapheme.
     Insert,
     /// A backspace at end-of-line: cursor back one column, blank the cell.
+    /// Reconcile confirms when the authoritative cell at `(row, col)` is
+    /// blank (no grapheme or a single space).
     BackspaceEol,
+    /// An Enter keystroke after the user typed onto the current row:
+    /// cursor jumps to `(row+1, 0)`. Paints no overlay cell — the
+    /// prediction is purely a cursor-motion estimate so subsequent
+    /// inserts on the next row anchor correctly. Reconcile confirms
+    /// when the authoritative cursor has advanced past `pred.row`.
+    Newline,
 }
 
 /// What [`PredictionState::predict_key`] decided about a key event.
@@ -187,6 +197,18 @@ impl PredictionState {
         self.pending.clear();
     }
 
+    /// Drop the prediction at the front of the queue. Used by the
+    /// per-cell reconcile to consume confirmed predictions one at a
+    /// time. Returns the dropped prediction so callers can log.
+    pub(crate) fn pop_front(&mut self) -> Option<Prediction> {
+        self.pending.pop_front()
+    }
+
+    /// Peek at the prediction at the front of the queue.
+    pub(crate) fn front(&self) -> Option<&Prediction> {
+        self.pending.front()
+    }
+
     /// Try to predict the visual effect of `event`. Returns the outcome
     /// so the caller can record it (and, in tests, assert on the
     /// classification decision).
@@ -217,6 +239,9 @@ impl PredictionState {
         if event.key == PhysicalKey::Backspace {
             return self.predict_backspace_eol();
         }
+        if event.key == PhysicalKey::Enter {
+            return self.predict_enter();
+        }
 
         // Printable single-char insert.
         let Some(text) = event.text.as_deref() else {
@@ -230,6 +255,41 @@ impl PredictionState {
             return PredictionOutcome::Skipped;
         }
         self.predict_insert(ch)
+    }
+
+    /// Predict an Enter keystroke as a cursor jump to `(row+1, 0)`.
+    ///
+    /// Conservative gate: only predict when (a) the cursor is past
+    /// column 0 *and* there is already an `Insert` prediction queued on
+    /// the current row, or (b) the cursor is past column 0 outright.
+    /// Condition (a) is a strong proxy for "the user just typed text on
+    /// this line, so the next Enter is line submission" — the bulk of
+    /// the latency-hiding win. Without (a) we still predict, because
+    /// the cell-match reconcile will drop the Newline cheaply on
+    /// contradiction.
+    ///
+    /// Refuses to predict at the last row (would need to model scroll)
+    /// or at column 0 (would need to know whether the shell discards a
+    /// bare Enter or echoes a fresh prompt).
+    fn predict_enter(&mut self) -> PredictionOutcome {
+        if self.cursor_col == 0 {
+            return PredictionOutcome::Skipped;
+        }
+        if self.rows == 0 || self.cursor_row.saturating_add(1) >= self.rows {
+            return PredictionOutcome::Skipped;
+        }
+        let pred_row = self.cursor_row;
+        self.pending.push_back(Prediction {
+            row: pred_row,
+            col: self.cursor_col,
+            ch: '\n',
+            kind: PredictionKind::Newline,
+        });
+        // Advance the cursor estimate so subsequent inserts queue on the
+        // next row at column 0.
+        self.cursor_row = self.cursor_row.saturating_add(1);
+        self.cursor_col = 0;
+        PredictionOutcome::Predicted
     }
 
     fn predict_insert(&mut self, ch: char) -> PredictionOutcome {
@@ -376,10 +436,37 @@ mod tests {
     }
 
     #[test]
-    fn enter_is_not_predicted() {
+    fn enter_at_col_zero_is_not_predicted() {
         let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let ev = key_named(PhysicalKey::Enter, ModSet::empty());
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn enter_after_insert_predicts_newline_and_advances_row() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for ch in ["h", "i"] {
+            assert_eq!(s.predict_key(&key_text(ch)), PredictionOutcome::Predicted);
+        }
+        assert_eq!(s.cursor(), (0, 2));
+        let enter = key_named(PhysicalKey::Enter, ModSet::empty());
+        assert_eq!(s.predict_key(&enter), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (1, 0));
+        assert_eq!(s.pending_len(), 3);
+        let last = s.pending().last().expect("three predictions");
+        assert_eq!(last.kind, PredictionKind::Newline);
+        assert_eq!(last.row, 0);
+        assert_eq!(last.col, 2);
+    }
+
+    #[test]
+    fn enter_on_last_row_is_not_predicted() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        // Park the cursor on the last row, past col 0.
+        s.set_cursor(23, 5);
+        let enter = key_named(PhysicalKey::Enter, ModSet::empty());
+        assert_eq!(s.predict_key(&enter), PredictionOutcome::Skipped);
     }
 
     #[test]
