@@ -633,11 +633,15 @@ async fn main_loop(
                     // wire emission (one frame per pane whose dims
                     // actually changed) keeps the server-side PTYs in
                     // step with the client's freshly resolved layout.
-                    let prev_rects = super::multi_pane::compute_layout(
-                        &layout_state, prev_dims,
-                    ).rects;
+                    let has_bar = status_bar.is_some();
+                    let prev_pane_dims = pane_viewport(prev_dims, has_bar);
+                    let new_pane_dims = pane_viewport(viewport_dims, has_bar);
+                    let prev_rects =
+                        super::multi_pane::compute_layout(&layout_state, prev_pane_dims).rects;
                     let diff = super::reflow::compute_reflow(
-                        &layout_state, &prev_rects, viewport_dims,
+                        &layout_state,
+                        &prev_rects,
+                        new_pane_dims,
                     );
                     if diff.too_small {
                         tracing::warn!(
@@ -667,20 +671,21 @@ async fn main_loop(
                     );
                 } else {
                     let mut stdout = io::stdout().lock();
-                    if let Some(fid) = focused_pane.as_ref()
+                    let focused_cursor = if let Some(fid) = focused_pane.as_ref()
                         && let Some(slot) = panes.get_mut(fid)
                     {
                         let _ = slot.renderer.render(&slot.terminal, &mut stdout);
-                    }
-                    if let Some(p) = status_bar.as_mut() {
-                        p.invalidate();
-                        let _ = p.paint(
-                            &mut stdout,
-                            viewport_dims.0,
-                            viewport_dims.1,
-                            &make_context(&session_name, SystemTime::now()),
-                        );
-                    }
+                        slot.renderer.last_cursor()
+                    } else {
+                        None
+                    };
+                    paint_bar_after_pane(
+                        status_bar.as_mut(),
+                        &mut stdout,
+                        viewport_dims,
+                        &session_name,
+                        focused_cursor,
+                    );
                 }
             }
 
@@ -689,15 +694,19 @@ async fn main_loop(
             // `poll_interval`. Paints in place — no pane re-render, no
             // full-screen redraw.
             () = status_tick => {
-                if let Some(p) = status_bar.as_mut() {
-                    let mut stdout = io::stdout().lock();
-                    let _ = p.paint(
-                        &mut stdout,
-                        viewport_dims.0,
-                        viewport_dims.1,
-                        &make_context(&session_name, SystemTime::now()),
-                    );
-                }
+                let mut stdout = io::stdout().lock();
+                // Restore the cursor to wherever the focused pane left it
+                // so an idle tick doesn't strand the cursor in the bar.
+                let focused_cursor = focused_pane.as_ref()
+                    .and_then(|fid| panes.get(fid))
+                    .and_then(|slot| slot.renderer.last_cursor());
+                paint_bar_after_pane(
+                    status_bar.as_mut(),
+                    &mut stdout,
+                    viewport_dims,
+                    &session_name,
+                    focused_cursor,
+                );
             }
 
             // SIGINT — restore the terminal explicitly (Drop wouldn't
@@ -1378,13 +1387,20 @@ fn repaint_multi_pane(
     status_bar: Option<&mut StatusBarPainter>,
     session_name: &str,
 ) {
-    let multi = super::multi_pane::compute_layout(layout_state, viewport_dims);
+    let has_bar = status_bar.is_some();
+    let pane_dims = pane_viewport(viewport_dims, has_bar);
+    let multi = super::multi_pane::compute_layout(layout_state, pane_dims);
     let mut stdout = io::stdout().lock();
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
     let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-    // Render each pane at its allocated origin. `render_at` writes into
-    // the per-pane sub-rectangle without touching pixels outside it.
+    // Render non-focused panes first, then focused last — this way the
+    // focused pane's `render_at` is the final cursor-positioning call
+    // and `last_cursor` reflects where the user is typing.
+    let focused = layout_state.focus.as_ref();
     for (id, rect) in &multi.rects {
+        if Some(id) == focused {
+            continue;
+        }
         if let Some(slot) = panes.get_mut(id) {
             // Resize the libghostty Terminal to match its new Rect so
             // the renderer's CUP math lines up with the destination
@@ -1396,8 +1412,26 @@ fn repaint_multi_pane(
                 .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
         }
     }
+    let focused_cursor = if let Some(fid) = focused
+        && let Some(rect) = multi.rects.get(fid)
+        && let Some(slot) = panes.get_mut(fid)
+    {
+        let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+        let _ = slot
+            .renderer
+            .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
+        slot.renderer.last_cursor()
+    } else {
+        None
+    };
     let _ = super::multi_pane::paint_dividers(&mut stdout, &multi);
-    paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
+    paint_bar_after_pane(
+        status_bar,
+        &mut stdout,
+        viewport_dims,
+        session_name,
+        focused_cursor,
+    );
 }
 
 /// Outcome of processing a single server-to-client frame.
@@ -1510,6 +1544,19 @@ fn handle_server_frame(
             // Allocate a fresh slot on first sight so output frames for
             // pre-split panes don't drop on the floor.
             let is_focused = Some(&terminal_id) == focused_pane.as_ref();
+            // Resolve the pane's outer-viewport Rect BEFORE the
+            // `panes.entry(terminal_id)` move. Multi-pane: ask the
+            // layout. Single-pane / no layout: anchor at (0,0).
+            let has_bar = status_bar.is_some();
+            let pane_dims = pane_viewport(viewport_dims, has_bar);
+            let origin = if layout_state.tree.is_some() {
+                super::multi_pane::compute_layout(layout_state, pane_dims)
+                    .rects
+                    .get(&terminal_id)
+                    .map_or((0, 0), |r| (r.x, r.y))
+            } else {
+                (0, 0)
+            };
             let slot = match panes.entry(terminal_id) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
@@ -1526,7 +1573,7 @@ fn handle_server_frame(
                 // outstanding predictions and resize the predict layer.
                 predict.set_viewport(cols, rows);
                 let mut stdout = io::stdout().lock();
-                let _ = slot.renderer.render(&slot.terminal, &mut stdout);
+                let _ = slot.renderer.render_at(&slot.terminal, &mut stdout, origin);
                 if let Some((row, col)) = slot.renderer.last_cursor() {
                     predict.set_cursor(row, col);
                 }
@@ -1538,7 +1585,14 @@ fn handle_server_frame(
                 // phux-nz4.5: the pane renderer just wrote to the
                 // bottom row of its own grid; force a status-bar
                 // repaint over it.
-                paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
+                let focused_cursor = slot.renderer.last_cursor();
+                paint_bar_after_pane(
+                    status_bar,
+                    &mut stdout,
+                    viewport_dims,
+                    session_name,
+                    focused_cursor,
+                );
             }
             Ok(FrameOutcome::default())
         }
@@ -1552,6 +1606,30 @@ fn handle_server_frame(
             // mirror stays warm for when the user focuses it. Render +
             // predict-reconcile only fire for the focused pane.
             let is_focused = Some(&terminal_id) == focused_pane.as_ref();
+            // Resolve the focused pane's outer-viewport Rect BEFORE we
+            // take a mut borrow on `panes`. Multi-pane: ask the layout.
+            // Single-pane / no layout: full viewport minus the status row.
+            let has_bar = status_bar.is_some();
+            let pane_dims = pane_viewport(viewport_dims, has_bar);
+            let pane_rect: crate::layout::Rect = if layout_state.tree.is_some() {
+                super::multi_pane::compute_layout(layout_state, pane_dims)
+                    .rects
+                    .get(&terminal_id)
+                    .copied()
+                    .unwrap_or(crate::layout::Rect {
+                        x: 0,
+                        y: 0,
+                        w: pane_dims.0,
+                        h: pane_dims.1,
+                    })
+            } else {
+                crate::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    w: pane_dims.0,
+                    h: pane_dims.1,
+                }
+            };
             let slot = match panes.entry(terminal_id) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
@@ -1559,7 +1637,18 @@ fn handle_server_frame(
             slot.terminal.vt_write(&bytes);
             if is_focused {
                 let mut stdout = io::stdout().lock();
-                let _ = slot.renderer.render(&slot.terminal, &mut stdout);
+                // Resize the libghostty Terminal to match the pane's
+                // Rect so the renderer's CUP math lines up; then paint
+                // into the sub-rectangle (not the full viewport — that
+                // would clobber sibling panes, dividers, and the bar).
+                let _ = slot
+                    .terminal
+                    .resize(pane_rect.w.max(1), pane_rect.h.max(1), 0, 0);
+                let _ = slot.renderer.render_at(
+                    &slot.terminal,
+                    &mut stdout,
+                    (pane_rect.x, pane_rect.y),
+                );
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;
                 // confirmed predictions drop, contradictions drop their
@@ -1583,7 +1672,14 @@ fn handle_server_frame(
                 // of a partial confirmation). On a fully-drained queue
                 // this is a no-op.
                 let _ = overlay.render(predict, &mut stdout);
-                paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
+                let focused_cursor = slot.renderer.last_cursor();
+                paint_bar_after_pane(
+                    status_bar,
+                    &mut stdout,
+                    viewport_dims,
+                    session_name,
+                    focused_cursor,
+                );
             }
             Ok(FrameOutcome::default())
         }
@@ -1939,6 +2035,7 @@ fn paint_bar_after_pane<W: Write>(
     out: &mut W,
     viewport_dims: (u16, u16),
     session_name: &str,
+    restore_cursor: Option<(u16, u16)>,
 ) {
     let Some(painter) = status_bar else {
         return;
@@ -1952,6 +2049,28 @@ fn paint_bar_after_pane<W: Write>(
         viewport_dims.1,
         &make_context(session_name, SystemTime::now()),
     );
+    // `write_row` hides the cursor while painting and does not restore
+    // it; without this branch the cursor stays invisible until the next
+    // pane render. Restore at the focused pane's known cursor position
+    // when one is available (None ⇒ cursor was hidden by the pane itself,
+    // e.g. a TUI inside it — leave it hidden).
+    if let Some((row, col)) = restore_cursor {
+        let one_based_row = row.saturating_add(1);
+        let one_based_col = col.saturating_add(1);
+        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
+    }
+}
+
+/// Effective viewport available to pane rendering: outer dims with the
+/// status-bar row reserved when a bar is present. Used at every
+/// `multi_pane::compute_layout` call site so pane Rects never spill
+/// into the status row.
+const fn pane_viewport(outer: (u16, u16), has_status_bar: bool) -> (u16, u16) {
+    if has_status_bar {
+        (outer.0, outer.1.saturating_sub(1))
+    } else {
+        outer
+    }
 }
 
 /// Build a `VIEWPORT_RESIZE` frame from a [`ViewportInfo`].
