@@ -111,9 +111,11 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeybindingsCfg {
-    /// Prefix key chord (e.g. `"ctrl+a"`). Defaults to `ctrl+a` —
-    /// chosen for portability across host terminals (some emulators
-    /// silently swallow `ctrl+space` before it reaches the client).
+    /// Prefix key chord (e.g. `"C-a"`). Defaults to `C-a` — chosen for
+    /// portability across host terminals (some emulators silently
+    /// swallow `C-Space` before it reaches the client). Chord syntax
+    /// per `crate::keybind`: modifier letters (`C` / `M` / `A` / `S`)
+    /// joined to the key by `-`.
     #[serde(default = "default_prefix")]
     pub prefix: String,
 
@@ -137,7 +139,7 @@ impl Default for KeybindingsCfg {
 }
 
 fn default_prefix() -> String {
-    "ctrl+a".to_owned()
+    "C-a".to_owned()
 }
 
 /// An action attached to a binding, hook, or status slot.

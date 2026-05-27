@@ -45,7 +45,7 @@ use std::path::Path;
 ///     phux_config::DEFAULT_CONFIG_TOML,
 ///     std::path::Path::new("default.toml"),
 /// ).expect("embedded defaults must parse");
-/// assert_eq!(cfg.keybindings.prefix, "ctrl+a");
+/// assert_eq!(cfg.keybindings.prefix, "C-a");
 /// ```
 pub const DEFAULT_CONFIG_TOML: &str = include_str!("default.toml");
 

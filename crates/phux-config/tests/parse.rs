@@ -99,7 +99,7 @@ shell = "/bin/bash"
         ..DefaultsCfg::default()
     };
     assert_eq!(cfg.defaults, want_defaults);
-    assert_eq!(cfg.keybindings.prefix, "ctrl+a"); // schema default
+    assert_eq!(cfg.keybindings.prefix, "C-a"); // schema default
     assert!(cfg.keybindings.prefix_table.is_empty());
     assert!(cfg.status.left.is_empty());
     assert!(cfg.hooks.is_empty());

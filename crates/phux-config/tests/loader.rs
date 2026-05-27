@@ -75,7 +75,7 @@ fn missing_file_returns_default() {
     // Missing file ⇒ shipped defaults are applied. The embedded
     // `default.toml` populates a real prefix-table + a status bar so
     // out-of-the-box phux is usable without user config.
-    assert_eq!(cfg.keybindings.prefix, "ctrl+a");
+    assert_eq!(cfg.keybindings.prefix, "C-a");
     assert!(
         !cfg.keybindings.prefix_table.is_empty(),
         "embedded defaults must populate prefix-table"
@@ -104,7 +104,7 @@ history-limit = 1234
     assert_eq!(cfg.defaults.shell.as_deref(), Some("/bin/zsh"));
     assert_eq!(cfg.defaults.history_limit, 1234);
     // Untouched section uses default.
-    assert_eq!(cfg.keybindings.prefix, "ctrl+a");
+    assert_eq!(cfg.keybindings.prefix, "C-a");
 }
 
 #[test]
