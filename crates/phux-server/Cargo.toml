@@ -55,7 +55,12 @@ libghostty-vt.workspace = true
 insta.workspace = true
 criterion.workspace = true
 dhat.workspace = true
-tokio.workspace = true
+# `test-util` enables `tokio::time::pause`/`advance` and the
+# `#[tokio::test(start_paused = true)]` macro arg. Required by the
+# `phux-q0e.3` tick-scheduler tests, which advance virtual time
+# deterministically to exercise the 33 Hz interval without wall-clock
+# sleeps.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
 [[example]]
