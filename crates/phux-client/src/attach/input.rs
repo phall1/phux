@@ -24,15 +24,26 @@
 //! - **SS3** sequences (`ESC O <P|Q|R|S>`) for the older F1..F4 + numeric
 //!   keypad encoding most BSD `termcap` entries still use.
 //!
+//! Also handled:
+//!
+//! - **SGR mouse reports** (`CSI < <btn> ; <col> ; <row> M/m`, DEC mode
+//!   1006). Emitted as [`InputEvent::Mouse`] with terminal-local cell
+//!   coordinates expressed as integer-valued `f64` pixels (per SPEC §9.2.1
+//!   the encoder downstream re-quantises for cell-format mouse protocols).
+//! - **Focus reports** (`CSI I` / `CSI O`, DEC mode 1004). Emitted as
+//!   [`InputEvent::Focus`].
+//! - **Bracketed paste** (`CSI 200~` … `CSI 201~`, DEC mode 2004). The
+//!   parser buffers payload bytes between the begin / end markers and
+//!   emits a single [`InputEvent::Paste`] at the end-marker. Payload
+//!   bytes are passed through verbatim — no nested escape parsing.
+//!
 //! Not handled (yet):
 //!
-//! - Mouse reports (`CSI M …` / `CSI < … M`) — deferred to a follow-up
-//!   ticket. They arrive on stdin when the inner program has enabled
-//!   mouse reporting on the *outer* terminal, which `phux attach` does
-//!   not do today; the inner program's mouse-mode lives server-side.
-//! - Bracketed paste (`ESC [ 200~ … ESC [ 201~`) — same story; bracketed
-//!   paste is a server-side concept under SPEC §9.4 and the attach loop
-//!   does not enable it on the outer terminal.
+//! - Legacy X10 mouse (`CSI M Cb Cx Cy`) — three raw bytes after the
+//!   `M` final encode button + position. Filed as a follow-up; SGR mode
+//!   covers every modern terminal the user is likely to attach with.
+//! - urxvt-1015 decimal mouse format (`CSI <btn> ; <col> ; <row> M`).
+//!   Niche and easy to add later — same dispatcher, no `<` prefix.
 //! - The full kitty keyboard protocol `CSI u` form — for now the kitty
 //!   CSI-u sequences are absorbed by the CSI parser as best-effort and
 //!   dropped (with a trace log) if they cannot be mapped to a
@@ -40,6 +51,18 @@
 //! - DCS / OSC / SOS / PM / APC sequences inbound — these come from the
 //!   inner program, not from a keyboard, and have no representation as a
 //!   `KeyEvent`. They are absorbed and dropped.
+//!
+//! # libghostty surface check
+//!
+//! libghostty-vt exposes input *encoders* (`key::Encoder`,
+//! `mouse::Encoder`, `focus::Event::encode`, `paste::encode`) but no
+//! parser in the reverse direction — there is no `Decoder`, no
+//! `parse_bytes`, no public state machine equivalent to xterm's VT input
+//! lexer. Confirmed by grepping the `libghostty-vt` crate at the pinned
+//! rev (`31d1f70`); only the `terminal::Terminal::vt_write` parser
+//! exists, and that is for output bytes from a child process, not input
+//! bytes from a host terminal. This module therefore hand-rolls the
+//! CSI / SS3 lexer required for inbound input parsing.
 //!
 //! # Timing ambiguity (bare ESC)
 //!
@@ -64,8 +87,8 @@
 
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-use phux_protocol::input::mouse::MouseEvent;
-use phux_protocol::input::paste::PasteEvent;
+use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
+use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::FrameKind;
 
 /// Human-readable description of the v0 detach chord. Surfaced through
@@ -140,6 +163,19 @@ enum State {
     Utf8 { expected: u8 },
     /// Waiting on the second byte of the detach chord.
     DetachPending,
+    /// Inside a bracketed-paste payload; bytes accumulate in `paste_buf`
+    /// until the closing `ESC [ 201 ~` marker is seen.
+    Paste,
+    /// Inside a paste payload, just saw an ESC. The next bytes might be
+    /// the closing `[ 201 ~` marker, or they might be part of the paste
+    /// payload (e.g. a nested ANSI sequence the user pasted). We parse
+    /// minimally enough to spot the end marker.
+    PasteEscape,
+    /// Inside a paste payload, saw `ESC [`. Accumulating the (numeric)
+    /// parameter bytes in `buf` until either a final byte arrives that
+    /// completes the `CSI 201~` close marker, or anything else, in which
+    /// case the accumulated bytes are flushed back into the paste payload.
+    PasteCsi,
 }
 
 /// Stateful parser for stdin bytes.
@@ -155,6 +191,8 @@ pub struct StdinParser {
     buf: Vec<u8>,
     /// Pending UTF-8 lead byte (when `state == Utf8`).
     utf8_lead: u8,
+    /// Accumulated bytes of an in-progress bracketed-paste payload.
+    paste_buf: Vec<u8>,
 }
 
 impl Default for StdinParser {
@@ -171,6 +209,7 @@ impl StdinParser {
             state: State::Ground,
             buf: Vec::new(),
             utf8_lead: 0,
+            paste_buf: Vec::new(),
         }
     }
 
@@ -234,6 +273,9 @@ impl StdinParser {
             State::StringTerm => self.feed_string_term(b),
             State::Utf8 { expected } => self.feed_utf8(b, expected, out),
             State::DetachPending => self.feed_detach_pending(b, out),
+            State::Paste => self.feed_paste(b),
+            State::PasteEscape => self.feed_paste_escape(b),
+            State::PasteCsi => self.feed_paste_csi(b, out),
         }
     }
 
@@ -325,6 +367,14 @@ impl StdinParser {
             // Move buf out so dispatch_csi can borrow self immutably.
             let params = std::mem::take(&mut self.buf);
             self.state = State::Ground;
+            // Bracketed-paste begin (`CSI 200~`) puts us into Paste state
+            // instead of emitting an event; everything else goes through
+            // the normal CSI dispatch.
+            if final_byte == b'~' && params == b"200" {
+                self.paste_buf.clear();
+                self.state = State::Paste;
+                return;
+            }
             dispatch_csi(&params, final_byte, out);
             return;
         }
@@ -422,6 +472,88 @@ impl StdinParser {
                 expected: remaining,
             };
         }
+    }
+
+    /// Inside a bracketed-paste payload. We pass everything through into
+    /// `paste_buf` verbatim until an ESC arrives — that *might* be the
+    /// closing `ESC [ 201 ~`, or it might be part of the payload (a
+    /// pasted ANSI escape is valid). We don't decide until we see the
+    /// next bytes.
+    fn feed_paste(&mut self, b: u8) {
+        if b == 0x1B {
+            self.state = State::PasteEscape;
+            return;
+        }
+        self.paste_buf.push(b);
+    }
+
+    /// In a paste payload, just saw an ESC. If the next byte is `[` we
+    /// might be looking at the close marker; otherwise the ESC was part
+    /// of the payload and we restore it before the new byte.
+    fn feed_paste_escape(&mut self, b: u8) {
+        if b == b'[' {
+            self.buf.clear();
+            self.state = State::PasteCsi;
+            return;
+        }
+        // Not the close marker — keep the ESC and the new byte in the
+        // payload.
+        self.paste_buf.push(0x1B);
+        self.paste_buf.push(b);
+        self.state = State::Paste;
+    }
+
+    /// In a paste payload, saw `ESC [`. We accumulate parameter bytes
+    /// in `buf` until either:
+    /// - the `~` final arrives and `buf == "201"` — emit the paste; or
+    /// - any other final / unexpected byte arrives — the `ESC [` was
+    ///   part of the payload, so we flush `ESC [` + `buf` + this byte
+    ///   back into the paste payload and return to Paste mode.
+    fn feed_paste_csi(&mut self, b: u8, out: &mut Vec<InputEvent>) {
+        // Parameter / intermediate region.
+        if (0x30..=0x3F).contains(&b) || (0x20..=0x2F).contains(&b) {
+            self.buf.push(b);
+            if self.buf.len() > 16 {
+                // Way too many param bytes for our close marker; treat
+                // the whole accumulation as payload bytes.
+                self.flush_pending_paste_escape();
+            }
+            return;
+        }
+        if (0x40..=0x7E).contains(&b) {
+            // Closing `CSI 201 ~`?
+            if b == b'~' && self.buf == b"201" {
+                self.buf.clear();
+                let data = std::mem::take(&mut self.paste_buf);
+                out.push(InputEvent::Paste(PasteEvent {
+                    trust: PasteTrust::Untrusted,
+                    data,
+                }));
+                self.state = State::Ground;
+                return;
+            }
+            // Some other CSI inside the paste payload. Flush the buffered
+            // CSI prefix back into the paste payload, including the final.
+            self.flush_pending_paste_escape();
+            self.paste_buf.push(b);
+            return;
+        }
+        // Unexpected byte inside the CSI window — flush and restart paste
+        // ingestion with the new byte processed under Paste rules.
+        self.flush_pending_paste_escape();
+        self.feed_paste(b);
+    }
+
+    /// Flush a buffered `ESC [` + parameter bytes back into the paste
+    /// payload — used when the accumulated bytes turn out not to be a
+    /// close marker, so they were part of the user's paste after all.
+    /// Restores the parser to [`State::Paste`].
+    fn flush_pending_paste_escape(&mut self) {
+        self.paste_buf.push(0x1B);
+        self.paste_buf.push(b'[');
+        self.paste_buf.extend_from_slice(&self.buf);
+        self.buf.clear();
+        self.state = State::Paste;
     }
 
     fn feed_detach_pending(&mut self, b: u8, out: &mut Vec<InputEvent>) {
@@ -599,6 +731,16 @@ const fn utf8_continuation_count(b: u8) -> Option<u8> {
 /// `ESC [` and the final byte); `final_byte` is the final byte
 /// (`0x40..=0x7E`).
 fn dispatch_csi(params: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
+    // SGR mouse reports (DEC mode 1006) carry a leading `<` private-
+    // marker byte and end in `M` (press / motion) or `m` (release).
+    // Form: `CSI < <btn> ; <col> ; <row> M|m`. We dispatch them before
+    // stripping the marker because the marker is what distinguishes
+    // them from a bare `CSI M` (legacy X10 mouse, not supported).
+    if matches!(params.first(), Some(&b'<')) && (final_byte == b'M' || final_byte == b'm') {
+        dispatch_sgr_mouse(&params[1..], final_byte, out);
+        return;
+    }
+
     // Strip a leading private-marker `?`, `<`, `=`, `>` for now — we
     // don't differentiate, the modifier-bearing variant alone matters.
     let body = if let Some(first) = params.first()
@@ -613,6 +755,20 @@ fn dispatch_csi(params: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
     // are treated as 0 (xterm convention; the final byte's interpretation
     // tells us what "missing" means in context).
     let parsed = parse_csi_params(body);
+
+    // Focus reports (DEC mode 1004): `CSI I` = gained, `CSI O` = lost.
+    // Recognised only when the parameter buffer is empty (bare CSI).
+    // With parameters the same final bytes have other meanings.
+    if body.is_empty() {
+        if final_byte == b'I' {
+            out.push(InputEvent::Focus(FocusEvent::Gained));
+            return;
+        }
+        if final_byte == b'O' {
+            out.push(InputEvent::Focus(FocusEvent::Lost));
+            return;
+        }
+    }
 
     // The `CSI <n> ~` form encodes function keys and the navigation keys
     // (Insert, Delete, Home, End, PgUp/PgDn, F5..F12). The optional second
@@ -647,6 +803,115 @@ fn dispatch_csi(params: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
     }
 
     tracing::trace!(final_byte, ?parsed, "unknown CSI sequence");
+}
+
+/// Decode an SGR-format mouse report's parameter region (the part after
+/// the leading `<` and before the `M`/`m` final byte) and push a
+/// [`MouseEvent`] into `out`. Silently drops malformed reports.
+///
+/// Format: `<btn> ; <col> ; <row>` where `<btn>` is a bitfield
+/// (xterm SGR encoding, DEC mode 1006):
+///
+/// * bits 0-1: low button bits (0=L, 1=M, 2=R, 3=none/release-for-X10).
+/// * bit 2:    Shift modifier.
+/// * bit 3:    Alt (Meta) modifier.
+/// * bit 4:    Ctrl modifier.
+/// * bit 5:    motion (the report describes a drag / hover).
+/// * bit 6:    wheel — buttons 4 (up) / 5 (down). High bit is the wheel
+///   axis indicator in some terminals; we treat 64/65/66/67 as
+///   the four wheel directions and pass them through as
+///   libghostty `Button::Four` / `Five` / `Six` / `Seven`.
+/// * bit 7:    extra buttons — 128..=131 → `Button::Eight..Eleven`.
+///
+/// `<col>` and `<row>` are 1-indexed cell coordinates. We convert to
+/// 0-indexed `f64` pixels (treating "1 cell = 1 pixel" since the client
+/// does not know cell-size here; per SPEC §9.2.1 the server's encoder
+/// re-quantises for cell-format protocols).
+fn dispatch_sgr_mouse(body: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
+    let parsed = parse_csi_params(body);
+    if parsed.len() < 3 {
+        tracing::trace!(?parsed, "malformed SGR mouse report (too few params)");
+        return;
+    }
+    let raw_btn = parsed[0];
+    let col = parsed[1];
+    let row = parsed[2];
+
+    let mods = sgr_mouse_mods(raw_btn);
+    let button = sgr_mouse_button(raw_btn);
+    let motion = (raw_btn & 0x20) != 0;
+    let action = if motion {
+        MouseAction::Motion
+    } else if final_byte == b'm' {
+        MouseAction::Release
+    } else {
+        MouseAction::Press
+    };
+
+    // 1-indexed → 0-indexed; coordinates are pane-local pixels per
+    // SPEC §9.2.1 (integer-valued f64 from a cell-quantising client).
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let x = (col.saturating_sub(1)) as f64;
+    #[allow(clippy::cast_lossless, reason = "u32 → f64 is exact for our range")]
+    let y = (row.saturating_sub(1)) as f64;
+
+    out.push(InputEvent::Mouse(MouseEvent {
+        action,
+        button,
+        mods,
+        x,
+        y,
+    }));
+}
+
+/// Modifier bits in an SGR mouse button code.
+fn sgr_mouse_mods(raw: u32) -> ModSet {
+    let mut mods = ModSet::empty();
+    if raw & 0x04 != 0 {
+        mods |= ModSet::SHIFT;
+    }
+    if raw & 0x08 != 0 {
+        mods |= ModSet::ALT;
+    }
+    if raw & 0x10 != 0 {
+        mods |= ModSet::CTRL;
+    }
+    mods
+}
+
+/// Map the low / high button bits of an SGR mouse code to a
+/// [`MouseButton`]. Returns `Button::Unknown` for the "no button"
+/// motion case (`raw & 3 == 3`, motion bit set without a button).
+const fn sgr_mouse_button(raw: u32) -> MouseButton {
+    // Wheel reports: bit 6 set, low bits select axis/direction.
+    if raw & 0x40 != 0 {
+        return match raw & 0x03 {
+            0 => MouseButton::Four,  // wheel up
+            1 => MouseButton::Five,  // wheel down
+            2 => MouseButton::Six,   // wheel left
+            _ => MouseButton::Seven, // wheel right
+        };
+    }
+    // Extra buttons: bit 7 set. xterm's "additional buttons" 8..=11.
+    if raw & 0x80 != 0 {
+        return match raw & 0x03 {
+            0 => MouseButton::Eight,
+            1 => MouseButton::Nine,
+            2 => MouseButton::Ten,
+            _ => MouseButton::Eleven,
+        };
+    }
+    match raw & 0x03 {
+        0 => MouseButton::Left,
+        1 => MouseButton::Middle,
+        2 => MouseButton::Right,
+        // Low 2 bits = 3 means "no button" (motion-without-button, or
+        // explicit release in the legacy X10 form). SGR mode disambiguates
+        // press vs. release via the `M`/`m` final byte; in either case
+        // we report Unknown so the server-side encoder reconstructs the
+        // correct PTY bytes from the action + position.
+        _ => MouseButton::Unknown,
+    }
 }
 
 /// Parse semicolon-separated unsigned integers out of CSI parameter bytes.
@@ -1159,6 +1424,267 @@ mod tests {
     fn detach_requested_has_no_frame() {
         assert!(InputEvent::DetachRequested.into_frame(1).is_none());
     }
+
+    // ---- Focus reports (DEC mode 1004) ---------------------------------
+
+    fn focus_only(evs: &[InputEvent]) -> Vec<FocusEvent> {
+        evs.iter()
+            .filter_map(|e| {
+                if let InputEvent::Focus(f) = e {
+                    Some(*f)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn csi_capital_i_is_focus_gained() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[I");
+        let f = focus_only(&evs);
+        assert_eq!(f, vec![FocusEvent::Gained]);
+    }
+
+    #[test]
+    fn csi_capital_o_is_focus_lost() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[O");
+        let f = focus_only(&evs);
+        assert_eq!(f, vec![FocusEvent::Lost]);
+    }
+
+    #[test]
+    fn focus_event_into_frame_carries_terminal_id() {
+        let frame = InputEvent::Focus(FocusEvent::Gained)
+            .into_frame(7)
+            .expect("frame");
+        match frame {
+            FrameKind::InputFocus { terminal_id, event } => {
+                assert_eq!(terminal_id, 7);
+                assert_eq!(event, FocusEvent::Gained);
+            }
+            other => panic!("expected InputFocus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ss3_capital_o_still_routes_via_ss3_not_focus() {
+        // ESC O P is SS3 F1, not focus. Ensures the new focus dispatch
+        // didn't accidentally consume the SS3 path.
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1bOP");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::F1);
+        assert!(focus_only(&evs).is_empty());
+    }
+
+    // ---- SGR mouse reports (DEC mode 1006) ------------------------------
+
+    fn mouse_only(evs: &[InputEvent]) -> Vec<MouseEvent> {
+        evs.iter()
+            .filter_map(|e| {
+                if let InputEvent::Mouse(m) = e {
+                    Some(*m)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sgr_left_press_and_release() {
+        let mut p = StdinParser::new();
+        let press = p.feed(b"\x1b[<0;5;3M");
+        let m = mouse_only(&press);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Press);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(m[0].mods.is_empty());
+        // 1-indexed → 0-indexed: col 5 → 4.0, row 3 → 2.0.
+        assert!((m[0].x - 4.0).abs() < f64::EPSILON);
+        assert!((m[0].y - 2.0).abs() < f64::EPSILON);
+
+        let release = p.feed(b"\x1b[<0;5;3m");
+        let m2 = mouse_only(&release);
+        assert_eq!(m2.len(), 1);
+        assert_eq!(m2[0].action, MouseAction::Release);
+        assert_eq!(m2[0].button, MouseButton::Left);
+    }
+
+    #[test]
+    fn sgr_right_middle_buttons() {
+        let mut p = StdinParser::new();
+        let right = p.feed(b"\x1b[<2;1;1M");
+        assert_eq!(mouse_only(&right)[0].button, MouseButton::Right);
+        let middle = p.feed(b"\x1b[<1;1;1M");
+        assert_eq!(mouse_only(&middle)[0].button, MouseButton::Middle);
+    }
+
+    #[test]
+    fn sgr_motion_with_button() {
+        let mut p = StdinParser::new();
+        // bit 5 (0x20) is motion. 0x20 | 0 = 32 → Left button drag.
+        let evs = p.feed(b"\x1b[<32;10;5M");
+        let m = mouse_only(&evs);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].action, MouseAction::Motion);
+        assert_eq!(m[0].button, MouseButton::Left);
+    }
+
+    #[test]
+    fn sgr_motion_no_button() {
+        let mut p = StdinParser::new();
+        // 0x20 (motion) | 0x03 (no-button) = 35.
+        let evs = p.feed(b"\x1b[<35;1;1M");
+        let m = mouse_only(&evs);
+        assert_eq!(m[0].action, MouseAction::Motion);
+        assert_eq!(m[0].button, MouseButton::Unknown);
+    }
+
+    #[test]
+    fn sgr_wheel_up_down() {
+        let mut p = StdinParser::new();
+        // 64 = wheel up, 65 = wheel down.
+        let up = p.feed(b"\x1b[<64;1;1M");
+        assert_eq!(mouse_only(&up)[0].button, MouseButton::Four);
+        let down = p.feed(b"\x1b[<65;1;1M");
+        assert_eq!(mouse_only(&down)[0].button, MouseButton::Five);
+    }
+
+    #[test]
+    fn sgr_with_modifiers() {
+        let mut p = StdinParser::new();
+        // 0 (Left) | 4 (Shift) | 8 (Alt) | 16 (Ctrl) = 28.
+        let evs = p.feed(b"\x1b[<28;1;1M");
+        let m = mouse_only(&evs);
+        assert_eq!(m[0].button, MouseButton::Left);
+        assert!(m[0].mods.contains(ModSet::SHIFT));
+        assert!(m[0].mods.contains(ModSet::ALT));
+        assert!(m[0].mods.contains(ModSet::CTRL));
+    }
+
+    #[test]
+    fn sgr_mouse_split_across_feeds() {
+        let mut parser = StdinParser::new();
+        let first = parser.feed(b"\x1b[<0");
+        assert!(mouse_only(&first).is_empty());
+        let middle = parser.feed(b";5;3");
+        assert!(mouse_only(&middle).is_empty());
+        let last = parser.feed(b"M");
+        let evs = mouse_only(&last);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].action, MouseAction::Press);
+    }
+
+    #[test]
+    fn sgr_mouse_into_frame_carries_terminal_id() {
+        let ev = MouseEvent {
+            action: MouseAction::Press,
+            button: MouseButton::Left,
+            mods: ModSet::empty(),
+            x: 1.0,
+            y: 2.0,
+        };
+        let frame = InputEvent::Mouse(ev).into_frame(99).expect("frame");
+        match frame {
+            FrameKind::InputMouse { terminal_id, .. } => assert_eq!(terminal_id, 99),
+            other => panic!("expected InputMouse, got {other:?}"),
+        }
+    }
+
+    // ---- Bracketed paste (DEC mode 2004) -------------------------------
+
+    fn paste_only(evs: &[InputEvent]) -> Vec<PasteEvent> {
+        evs.iter()
+            .filter_map(|e| {
+                if let InputEvent::Paste(p) = e {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bracketed_paste_basic_round_trip() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[200~hello world\x1b[201~");
+        let pastes = paste_only(&evs);
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(pastes[0].data, b"hello world");
+        assert_eq!(pastes[0].trust, PasteTrust::Untrusted);
+        // No key events leaked from inside the brackets.
+        assert!(key_only(&evs).is_empty());
+        assert!(!p.has_pending());
+    }
+
+    #[test]
+    fn bracketed_paste_split_across_feeds() {
+        let mut p = StdinParser::new();
+        let a = p.feed(b"\x1b[200~");
+        assert!(a.is_empty());
+        assert!(p.has_pending());
+        let b = p.feed(b"abc");
+        assert!(b.is_empty());
+        let c = p.feed(b"\x1b[201~");
+        let pastes = paste_only(&c);
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(pastes[0].data, b"abc");
+    }
+
+    #[test]
+    fn bracketed_paste_payload_with_inner_csi() {
+        let mut p = StdinParser::new();
+        // User pastes a string that contains an ANSI color escape — the
+        // ESC + CSI inside the payload must be preserved, not consumed
+        // as a close marker.
+        let payload = b"red\x1b[31mthing\x1b[0mend";
+        let mut s = Vec::from(b"\x1b[200~".as_slice());
+        s.extend_from_slice(payload);
+        s.extend_from_slice(b"\x1b[201~");
+        let evs = p.feed(&s);
+        let pastes = paste_only(&evs);
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(pastes[0].data, payload);
+        assert!(!p.has_pending());
+    }
+
+    #[test]
+    fn bracketed_paste_with_bare_esc_in_payload() {
+        // A bare ESC inside the paste should remain in the payload.
+        let mut p = StdinParser::new();
+        let mut s = Vec::from(b"\x1b[200~".as_slice());
+        s.extend_from_slice(b"a\x1bb");
+        s.extend_from_slice(b"\x1b[201~");
+        let evs = p.feed(&s);
+        let pastes = paste_only(&evs);
+        assert_eq!(pastes.len(), 1);
+        assert_eq!(pastes[0].data, b"a\x1bb");
+    }
+
+    #[test]
+    fn bracketed_paste_into_frame_carries_terminal_id() {
+        let frame = InputEvent::Paste(PasteEvent {
+            trust: PasteTrust::Untrusted,
+            data: b"x".to_vec(),
+        })
+        .into_frame(11)
+        .expect("frame");
+        match frame {
+            FrameKind::InputPaste { terminal_id, event } => {
+                assert_eq!(terminal_id, 11);
+                assert_eq!(event.data, b"x");
+            }
+            other => panic!("expected InputPaste, got {other:?}"),
+        }
+    }
+
+    // ---- Sanity: existing "unknown CSI" path still recovers -------------
 
     #[test]
     fn xterm_modifier_code_table() {
