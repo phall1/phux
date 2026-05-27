@@ -60,6 +60,20 @@ pub const TYPE_INPUT_PASTE: u8 = 0x11;
 pub const TYPE_INPUT_MOUSE: u8 = 0x12;
 /// Discriminant for `INPUT_FOCUS` (client to server, `SPEC.md` §9.3).
 pub const TYPE_INPUT_FOCUS: u8 = 0x14;
+/// Discriminant for `FRAME_ACK` (client to server, `SPEC.md` §7.proto.1 / §12.2).
+///
+/// Per-Terminal cumulative acknowledgement of `TERMINAL_OUTPUT` (§8.1) frames
+/// the client has applied to its local `libghostty_vt::Terminal`. The server
+/// uses these acks to evict per-consumer cached reference state under ADR-0018
+/// lazy state synchronization — calling `mark_synced` on the per-consumer
+/// `SnapshotSynthesizer` so the next tick re-diffs against the just-acked
+/// reference rather than the prior one.
+///
+/// Loss tolerance falls out: a dropped ack leaves the dirty bits set on the
+/// per-consumer `RenderState`, so the next tick re-emits a larger diff against
+/// the same older reference. No retransmit machinery; the ack is a hint, not a
+/// guarantee.
+pub const TYPE_FRAME_ACK: u8 = 0x21;
 /// Discriminant for `VIEWPORT_RESIZE` (client to server, `SPEC.md` §7.1 / §10.5).
 ///
 /// The client emits this when its outer terminal changes size (SIGWINCH on
@@ -395,6 +409,26 @@ pub enum FrameKind {
         event: PasteEvent,
     },
 
+    /// `FRAME_ACK` — client acknowledges a `TERMINAL_OUTPUT` it has applied
+    /// (`SPEC.md` §7.proto.1 / §12.2).
+    ///
+    /// Cumulative ack: acknowledging `seq = N` implies all prior emissions
+    /// for `terminal_id` up to and including `N` have been applied to the
+    /// client's local `libghostty_vt::Terminal`.
+    ///
+    /// Under ADR-0018 the server uses this to drive per-consumer cached
+    /// reference state eviction — the per-consumer `SnapshotSynthesizer`'s
+    /// `mark_synced` clears the dirty bits that produced the acked frame.
+    /// Loss tolerance: a dropped ack just means the next tick re-emits a
+    /// larger diff against the same older reference; no retransmit.
+    FrameAck {
+        /// Acked terminal (wire id, per SPEC §13).
+        terminal_id: u32,
+        /// Cumulative ack sequence — the highest `seq` from
+        /// `TERMINAL_OUTPUT` for this `terminal_id` the client has applied.
+        seq: u64,
+    },
+
     /// `VIEWPORT_RESIZE` — the attached client's outer terminal changed
     /// size (`SPEC.md` §7.1 / §10.5).
     ///
@@ -510,6 +544,7 @@ impl FrameKind {
             Self::InputMouse { .. } => TYPE_INPUT_MOUSE,
             Self::InputFocus { .. } => TYPE_INPUT_FOCUS,
             Self::InputPaste { .. } => TYPE_INPUT_PASTE,
+            Self::FrameAck { .. } => TYPE_FRAME_ACK,
             Self::ViewportResize { .. } => TYPE_VIEWPORT_RESIZE,
             Self::Attached { .. } => TYPE_ATTACHED,
             Self::Detached => TYPE_DETACHED,
@@ -523,6 +558,10 @@ impl FrameKind {
     ///
     /// Writes the four-byte big-endian length header, the type byte, and the
     /// payload. The caller owns the `BytesMut` lifecycle.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single match over the SPEC §7 catalog; splitting would scatter the encoder/decoder symmetry"
+    )]
     pub fn encode(&self, out: &mut BytesMut) {
         // Reserve four bytes for the length header; backfill once we know how
         // many bytes the type + payload consumed.
@@ -586,6 +625,10 @@ impl FrameKind {
             Self::InputPaste { terminal_id, event } => {
                 enc.write_u32_be(*terminal_id);
                 encode_paste_event(event, &mut enc);
+            }
+            Self::FrameAck { terminal_id, seq } => {
+                enc.write_u32_be(*terminal_id);
+                enc.write_u64_be(*seq);
             }
             Self::ViewportResize { viewport } => {
                 encode_viewport_info(viewport, &mut enc);

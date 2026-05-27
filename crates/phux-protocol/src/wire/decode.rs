@@ -9,8 +9,8 @@ use crate::ids::TerminalId;
 use super::error::DecodeError;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
-    TYPE_DETACHED, TYPE_ERROR, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
-    TYPE_INPUT_PASTE, TYPE_PING, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+    TYPE_DETACHED, TYPE_ERROR, TYPE_FRAME_ACK, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY,
+    TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_PING, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
     TYPE_VIEWPORT_RESIZE, decode_attach_target, decode_focus_event, decode_key_event,
     decode_mouse_event, decode_optional_bytes, decode_optional_u32, decode_paste_event,
     decode_viewport_info,
@@ -217,6 +217,11 @@ impl<'a> Decoder<'a> {
                 let terminal_id = self.read_u32_be()?;
                 let event = decode_paste_event(self)?;
                 FrameKind::InputPaste { terminal_id, event }
+            }
+            TYPE_FRAME_ACK => {
+                let terminal_id = self.read_u32_be()?;
+                let seq = self.read_u64_be()?;
+                FrameKind::FrameAck { terminal_id, seq }
             }
             TYPE_VIEWPORT_RESIZE => {
                 let viewport = decode_viewport_info(self)?;

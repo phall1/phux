@@ -252,6 +252,29 @@ pub struct ConsumerDetachRequest {
     pub reply: oneshot::Sender<()>,
 }
 
+/// Inbound `FRAME_ACK` request for the per-consumer state-sync loop
+/// (phux-q0e.4 / ADR-0018 addendum).
+///
+/// Routed by `runtime.rs::handle_frame_ack` after it has resolved the
+/// `wire_terminal_id` to a `TerminalActor`. The runtime is the only
+/// thing that knows the `(client_id, wire_terminal_id) -> actor` mapping,
+/// so it strips `terminal_id` before forwarding — the actor already
+/// knows which terminal it is.
+///
+/// Silent no-op if `client_id` is not currently registered (matches the
+/// idempotency of the rest of the consumer lifecycle). No reply: the
+/// actor does the work in-process and the runtime fires-and-forgets.
+#[derive(Debug)]
+pub struct ConsumerAckRequest {
+    /// Identifier whose [`ConsumerSyncState`]'s dirty cache to evict.
+    pub client_id: ClientId,
+    /// Cumulative ack sequence (per SPEC §12.2): the highest `seq` from
+    /// `TERMINAL_OUTPUT` this consumer has applied. Strictly-monotonic
+    /// against the per-consumer `last_acked_seq` — older/duplicate acks
+    /// are silently dropped.
+    pub seq: u64,
+}
+
 /// Default depth of the per-pane input mailbox.
 ///
 /// Small on purpose: keystrokes are tiny and the server drains them in
@@ -325,6 +348,13 @@ pub struct TerminalHandle {
     /// per-consumer `RenderState`. Silent no-op if the consumer was
     /// never attached.
     pub consumer_detach: mpsc::Sender<ConsumerDetachRequest>,
+    /// ADR-0018 inbound `FRAME_ACK` channel (phux-q0e.4). The runtime
+    /// sends one [`ConsumerAckRequest`] per decoded `FRAME_ACK` whose
+    /// `terminal_id` resolved to this actor; the actor evicts the
+    /// per-consumer dirty cache so the next tick re-diffs against the
+    /// freshly-acked reference. Silent no-op if the consumer is not
+    /// currently registered.
+    pub consumer_ack: mpsc::Sender<ConsumerAckRequest>,
     /// Pane viewport width in cells at construction time.
     pub cols: u16,
     /// Pane viewport height in cells at construction time.
@@ -355,6 +385,10 @@ pub struct TerminalActor {
     resize_rx: mpsc::Receiver<(u16, u16)>,
     consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
     consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
+    /// Per-consumer state-sync `FRAME_ACK` channel (phux-q0e.4). Drained
+    /// by a select! arm that walks `consumer_states[client_id]` and
+    /// clears the dirty cache via `SnapshotSynthesizer::mark_synced`.
+    consumer_ack_rx: mpsc::Receiver<ConsumerAckRequest>,
     /// Per-consumer state-sync cache (ADR-0018, phux-q0e.2). Keyed by
     /// the [`ClientId`] the runtime uses for subscription tracking in
     /// [`crate::state::ServerState`]; entries are inserted by the
@@ -623,6 +657,8 @@ impl TerminalActor {
             mpsc::channel::<ConsumerAttachRequest>(DEFAULT_INPUT_MAILBOX);
         let (consumer_detach_tx, consumer_detach_rx) =
             mpsc::channel::<ConsumerDetachRequest>(DEFAULT_INPUT_MAILBOX);
+        let (consumer_ack_tx, consumer_ack_rx) =
+            mpsc::channel::<ConsumerAckRequest>(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
         let (exit_tx, exit_rx) = oneshot::channel::<()>();
         let bundle_token = token.clone();
@@ -646,6 +682,7 @@ impl TerminalActor {
             resize_rx,
             consumer_attach_rx,
             consumer_detach_rx,
+            consumer_ack_rx,
             consumer_states: HashMap::new(),
             pty_rx,
             pty_tx,
@@ -663,6 +700,7 @@ impl TerminalActor {
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
             consumer_detach: consumer_detach_tx,
+            consumer_ack: consumer_ack_tx,
             cols,
             rows,
         };
@@ -763,6 +801,123 @@ impl TerminalActor {
         // `HashMap::remove` returns the entry; dropping it frees the
         // libghostty `RenderState` via its `Drop` impl.
         let _ = self.consumer_states.remove(&client_id);
+    }
+
+    /// Handle an inbound `FRAME_ACK` from `client_id` carrying cumulative
+    /// `seq` (phux-q0e.4, ADR-0018 addendum).
+    ///
+    /// Closes the lazy state-synchronization loop:
+    ///
+    /// 1. tick driver emits `TERMINAL_OUTPUT { seq = N }` against the
+    ///    per-consumer reference state,
+    /// 2. consumer applies the bytes, sends `FRAME_ACK { seq = N }`,
+    /// 3. this method calls `SnapshotSynthesizer::mark_synced` so the
+    ///    consumer's per-consumer dirty cache reflects "everything up to
+    ///    `N` is on the consumer's mirror,"
+    /// 4. the next tick re-diffs against the just-acked reference rather
+    ///    than re-emitting the same bytes.
+    ///
+    /// Per SPEC §12.2 acks are cumulative: an ack for `seq = N` implies
+    /// all prior emissions up to `N`. Older / duplicate / out-of-order
+    /// acks (`seq <= last_acked_seq`) are silently dropped — they carry
+    /// no new information about which state the consumer has, and
+    /// applying them would just re-walk the same dirty bits for no
+    /// progress.
+    ///
+    /// Silent no-op if `client_id` is not currently registered. This
+    /// races cleanly against detach: the runtime may dispatch an
+    /// in-flight ack just as the consumer is being torn down, and the
+    /// ack should evaporate rather than recreate a dropped entry.
+    ///
+    /// # Known degradation
+    ///
+    /// `SnapshotSynthesizer::mark_synced` calls `Snapshot::set_dirty`,
+    /// which under the libghostty FFI bug tracked in `phux-l0t` poisons
+    /// the next `dirty()` read with `Error::InvalidValue`. The defensive
+    /// `.unwrap_or(Dirty::Full)` in `synthesize_incremental` (phux-q0e.1)
+    /// turns that error into a strict-over-emission full redraw. The ack
+    /// loop is correct — the consumer never sees stale state — but
+    /// bandwidth degrades to "every post-ack tick is effectively a full
+    /// repaint" until upstream libghostty is fixed. Correctness over
+    /// bytes-on-wire by ADR-0018 design; this is the right trade until
+    /// the upstream fix lands.
+    fn on_frame_ack(&mut self, client_id: ClientId, seq: u64) {
+        let Some(consumer) = self.consumer_states.get_mut(&client_id) else {
+            // Race against detach (or an ack for an unknown client). No
+            // bookkeeping; no warning — this is a steady-state event,
+            // not a misuse.
+            trace!(
+                ?client_id,
+                seq, "FRAME_ACK for unregistered consumer; dropping"
+            );
+            return;
+        };
+        if seq <= consumer.last_acked_seq {
+            // Older or duplicate ack — SPEC §12.2 makes acks cumulative,
+            // so `seq <= last_acked_seq` strictly carries no new
+            // information. Drop without touching `mark_synced` — that
+            // would re-walk the dirty bits for no progress.
+            trace!(
+                ?client_id,
+                seq,
+                last_acked_seq = consumer.last_acked_seq,
+                "FRAME_ACK older/duplicate; dropping",
+            );
+            return;
+        }
+        consumer.last_acked_seq = seq;
+
+        // Clear the per-consumer dirty cache so the next tick re-diffs
+        // against the just-acked reference. Per ADR-0018 this is the
+        // ONLY place `mark_synced` is allowed to fire — the tick driver
+        // (phux-q0e.3) deliberately does not, so unacked diffs stay
+        // re-emittable for loss tolerance.
+        let terminal = self.terminal.borrow();
+        if let Err(err) = consumer.synthesizer.mark_synced(&terminal) {
+            warn!(
+                ?client_id,
+                seq,
+                error = %err,
+                "FRAME_ACK: SnapshotSynthesizer::mark_synced failed; per-consumer dirty cache not cleared",
+            );
+        }
+
+        // Refresh the per-consumer cursor/mode capture so the tick
+        // driver doesn't redundantly re-emit cursor placement / DEC mode
+        // toggles that the just-acked frame already delivered. Use the
+        // same one-shot RenderState pattern as `register_consumer` so we
+        // don't conflict with the synthesizer's internal state above.
+        let cursor_mode = match RenderState::new() {
+            Ok(mut rs) => match rs.update(&terminal) {
+                Ok(snapshot) => Some(LastAckedCursorMode::capture(&terminal, &snapshot)),
+                Err(err) => {
+                    warn!(
+                        ?client_id,
+                        seq,
+                        error = %err,
+                        "FRAME_ACK: cursor/mode capture update failed; keeping prior capture",
+                    );
+                    None
+                }
+            },
+            Err(err) => {
+                warn!(
+                    ?client_id,
+                    seq,
+                    error = %err,
+                    "FRAME_ACK: cursor/mode RenderState alloc failed; keeping prior capture",
+                );
+                None
+            }
+        };
+        if let Some(cm) = cursor_mode {
+            consumer.last_cursor_mode = cm;
+        }
+
+        trace!(
+            ?client_id,
+            seq, "FRAME_ACK applied: per-consumer dirty cache cleared"
+        );
     }
 
     /// Test-only: number of consumers currently registered.
@@ -1098,6 +1253,17 @@ impl TerminalActor {
                     self.unregister_consumer(client_id);
                     trace!(?client_id, "consumer detached: per-consumer RenderState freed");
                     let _ = reply.send(());
+                }
+
+                // ADR-0018 / phux-q0e.4: inbound FRAME_ACK. Clears the
+                // per-consumer dirty cache so the next tick re-diffs
+                // against the just-acked reference. Loss tolerance: a
+                // dropped ack just means the next tick re-emits a larger
+                // diff against the same older reference — no
+                // retransmit machinery here.
+                Some(req) = self.consumer_ack_rx.recv() => {
+                    let ConsumerAckRequest { client_id, seq } = req;
+                    self.on_frame_ack(client_id, seq);
                 }
 
                 // State-sync tick driver (phux-q0e.3, ADR-0018).
@@ -1543,6 +1709,98 @@ mod tests {
                     .expect("actor task panicked");
             })
             .await;
+    }
+
+    /// phux-q0e.4: `on_frame_ack` advances `last_acked_seq` monotonically
+    /// for in-order acks. Three acks (1, 2, 3) walk the field forward.
+    #[test]
+    fn on_frame_ack_advances_last_acked_seq_in_order() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, _rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        for seq in 1..=3 {
+            actor.on_frame_ack(client, seq);
+            assert_eq!(
+                actor.consumer_state(client).expect("state").last_acked_seq,
+                seq,
+                "in-order ack must advance last_acked_seq",
+            );
+        }
+    }
+
+    /// phux-q0e.4: older or duplicate acks (`seq <= last_acked_seq`) MUST
+    /// be silently dropped — they carry no new state information under
+    /// SPEC §12.2's cumulative-ack semantics. After ack=5 then ack=3, the
+    /// field must stay at 5.
+    #[test]
+    fn on_frame_ack_older_or_duplicate_is_dropped() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, _rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        actor.on_frame_ack(client, 5);
+        assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 5);
+
+        // Older ack.
+        actor.on_frame_ack(client, 3);
+        assert_eq!(
+            actor.consumer_state(client).unwrap().last_acked_seq,
+            5,
+            "older ack must NOT regress last_acked_seq",
+        );
+
+        // Duplicate ack.
+        actor.on_frame_ack(client, 5);
+        assert_eq!(
+            actor.consumer_state(client).unwrap().last_acked_seq,
+            5,
+            "duplicate ack must NOT touch last_acked_seq",
+        );
+
+        // Higher ack still progresses.
+        actor.on_frame_ack(client, 6);
+        assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 6);
+    }
+
+    /// phux-q0e.4: `on_frame_ack` for an unregistered client is a silent
+    /// no-op — no panic, no entry created. Mirrors the rest of the
+    /// consumer lifecycle's idempotency.
+    #[test]
+    fn on_frame_ack_for_unregistered_consumer_is_noop() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+
+        let stranger = ClientId(999);
+        assert_eq!(actor.consumer_count(), 0);
+        actor.on_frame_ack(stranger, 42);
+        assert_eq!(actor.consumer_count(), 0, "no entry created by stray ack");
+        assert!(actor.consumer_state(stranger).is_none());
+    }
+
+    /// phux-q0e.4: register, ack, then detach, then re-ack — the re-ack
+    /// after detach is a no-op (no panic, no resurrection of the entry).
+    #[test]
+    fn on_frame_ack_after_detach_is_noop() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        let client = ClientId(7);
+        let (tx, _rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+        actor.on_frame_ack(client, 2);
+        assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 2);
+
+        actor.unregister_consumer(client);
+        assert!(actor.consumer_state(client).is_none());
+
+        // Late ack after detach: must not resurrect the entry.
+        actor.on_frame_ack(client, 9);
+        assert!(actor.consumer_state(client).is_none());
+        assert_eq!(actor.consumer_count(), 0);
     }
 
     /// Resize updates both the libghostty `Terminal` and (when present)

@@ -700,6 +700,16 @@ proptest! {
         prop_assert_eq!(decoded, frame);
         prop_assert!(tail.is_empty());
     }
+
+    #[test]
+    fn roundtrip_frame_ack(terminal_id in any::<u32>(), seq in any::<u64>()) {
+        let frame = FrameKind::FrameAck { terminal_id, seq };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
 }
 
 #[test]
