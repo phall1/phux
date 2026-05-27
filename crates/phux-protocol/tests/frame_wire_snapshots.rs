@@ -667,3 +667,46 @@ fn snap_metadata_changed_tombstone() {
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
+
+// -----------------------------------------------------------------------------
+// L3 metadata reply frames — SPEC §7.4 / §11.L3 (phux-4li.8).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_metadata_value_present() {
+    let frame = FrameKind::MetadataValue {
+        request_id: 0x0000_0007,
+        value: Some(b"\xa2\x01\x01\x02\x82\x00\x01".to_vec()),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_metadata_value_absent() {
+    let frame = FrameKind::MetadataValue {
+        request_id: 0x0000_0042,
+        value: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_metadata_keys_empty() {
+    let frame = FrameKind::MetadataKeys {
+        request_id: 0x0000_0012,
+        keys: Vec::new(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_metadata_keys_populated() {
+    let frame = FrameKind::MetadataKeys {
+        request_id: 0x0000_0012,
+        keys: vec![
+            "phux.tui.layout/v1".to_owned(),
+            "phux.tui.window_order/v1".to_owned(),
+        ],
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}

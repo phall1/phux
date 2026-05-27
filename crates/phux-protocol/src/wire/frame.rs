@@ -146,6 +146,21 @@ pub const TYPE_SUBSCRIBE_METADATA: u8 = 0x54;
 /// Discriminant for `METADATA_CHANGED` (server to client, `SPEC.md` §7.4).
 pub const TYPE_METADATA_CHANGED: u8 = 0xD0;
 
+/// Discriminant for `METADATA_VALUE` (server to client, `SPEC.md` §7.4).
+///
+/// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries
+/// `Option<bytes>` — `Some(bytes)` when the key holds a value,
+/// `None` when the key is absent. Allocated by phux-4li.8.
+pub const TYPE_METADATA_VALUE: u8 = 0xD1;
+
+/// Discriminant for `METADATA_KEYS` (server to client, `SPEC.md` §7.4).
+///
+/// Reply frame for `LIST_METADATA`; correlated by `request_id`. Carries
+/// the lexicographically sorted list of key names present in the
+/// requested scope (values are not included; LIST is by-key-name only).
+/// Allocated by phux-4li.8.
+pub const TYPE_METADATA_KEYS: u8 = 0xD2;
+
 // Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
 /// Wire tag for [`Scope::Terminal`].
 pub(crate) const SCOPE_TAG_TERMINAL: u8 = 0;
@@ -728,6 +743,45 @@ pub enum FrameKind {
         /// New value, or `None` for a deletion (tombstone).
         value: Option<Vec<u8>>,
     },
+
+    /// `METADATA_VALUE` — server reply to a prior `GET_METADATA`
+    /// (`SPEC.md` §7.4 / §11.L3). Allocated by phux-4li.8.
+    ///
+    /// Correlated to the originating request by `request_id`. `value` is
+    /// `Some(bytes)` when the key was present at the time of the lookup
+    /// and `None` when the key was absent (no tombstone distinction —
+    /// "absent" subsumes "never written" and "explicitly deleted").
+    ///
+    /// Design choice (phux-4li.8): a dedicated reply frame rather than
+    /// the generic `COMMAND_RESULT` envelope sketched in SPEC §11. The
+    /// envelope would have forced design closure on every L1/L2 COMMAND
+    /// payload before any L3 consumer needs the reply path; for v0.1 the
+    /// metadata family is already opinionated (`METADATA_CHANGED` carries
+    /// value inline, departing from the §7.4 sketch) so an ad-hoc
+    /// dedicated reply is consistent. The generic envelope ships when
+    /// `COMMAND` does, and does not need to subsume `METADATA_VALUE`.
+    MetadataValue {
+        /// Correlates this reply with a prior `GET_METADATA.request_id`.
+        request_id: u32,
+        /// `Some(bytes)` when the key was present, `None` when absent.
+        value: Option<Vec<u8>>,
+    },
+
+    /// `METADATA_KEYS` — server reply to a prior `LIST_METADATA`
+    /// (`SPEC.md` §7.4 / §11.L3). Allocated by phux-4li.8.
+    ///
+    /// Correlated to the originating request by `request_id`. Carries
+    /// the set of key names present in the requested scope. Server
+    /// implementations SHOULD return keys in lexicographic order so
+    /// snapshots and tests round-trip stably; clients MUST NOT rely on
+    /// any particular ordering for correctness.
+    MetadataKeys {
+        /// Correlates this reply with a prior `LIST_METADATA.request_id`.
+        request_id: u32,
+        /// Keys present in the requested scope; values are NOT included
+        /// (clients fetch them separately via `GET_METADATA`).
+        keys: Vec<String>,
+    },
 }
 
 impl FrameKind {
@@ -757,6 +811,8 @@ impl FrameKind {
             Self::ListMetadata { .. } => TYPE_LIST_METADATA,
             Self::SubscribeMetadata { .. } => TYPE_SUBSCRIBE_METADATA,
             Self::MetadataChanged { .. } => TYPE_METADATA_CHANGED,
+            Self::MetadataValue { .. } => TYPE_METADATA_VALUE,
+            Self::MetadataKeys { .. } => TYPE_METADATA_KEYS,
         }
     }
 
@@ -919,6 +975,26 @@ impl FrameKind {
                 encode_scope(scope, &mut enc);
                 enc.write_str(key);
                 encode_optional_bytes(value.as_deref(), &mut enc);
+            }
+            Self::MetadataValue { request_id, value } => {
+                enc.write_u32_be(*request_id);
+                encode_optional_bytes(value.as_deref(), &mut enc);
+            }
+            Self::MetadataKeys { request_id, keys } => {
+                enc.write_u32_be(*request_id);
+                // Length-prefixed list of UTF-8 strings: u32 count + N strs.
+                // Mirrors the encoder shape used by `encode_optional_string_list`
+                // for the `Some` arm, minus the optional tag (the keys list
+                // is always present even when empty).
+                debug_assert!(
+                    u32::try_from(keys.len()).is_ok(),
+                    "metadata keys list length exceeds u32",
+                );
+                let len = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+                enc.write_u32_be(len);
+                for k in keys {
+                    enc.write_str(k);
+                }
             }
         }
 

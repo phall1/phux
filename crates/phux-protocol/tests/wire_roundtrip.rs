@@ -1198,6 +1198,36 @@ proptest! {
         prop_assert!(tail.is_empty());
     }
 
+    /// METADATA_VALUE — reply to GET_METADATA (phux-4li.8). Carries the
+    /// request_id verbatim and an optional value (None = key absent).
+    #[test]
+    fn roundtrip_metadata_value(
+        request_id in any::<u32>(),
+        value in proptest::option::of(arb_metadata_value()),
+    ) {
+        let frame = FrameKind::MetadataValue { request_id, value };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    /// METADATA_KEYS — reply to LIST_METADATA (phux-4li.8). Carries the
+    /// request_id verbatim and a (possibly empty) list of key names.
+    #[test]
+    fn roundtrip_metadata_keys(
+        request_id in any::<u32>(),
+        keys in proptest::collection::vec(".{0,32}", 0..8),
+    ) {
+        let frame = FrameKind::MetadataKeys { request_id, keys };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
     /// HELLO carries `client_caps.layers` as a trailing byte (phux-4li.2).
     /// The encoder always emits it; the decoder accepts every prefix shape
     /// per SPEC §6.

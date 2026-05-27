@@ -469,16 +469,19 @@ limits. A recommended convention is CBOR-encoded structured data
 with a versioned key (`phux.tui.layout/v1`,
 `phux.tui.window_order/v1`); see §17 for the reference-TUI schema.
 
-L3 messages, allocated by phux-4li.2:
+L3 messages, allocated by phux-4li.2 (commands + push) and phux-4li.8
+(GET/LIST replies):
 
-| ID    | Direction | Name                | Reference | Status  |
-|-------|-----------|---------------------|-----------|---------|
-| 0x50  | C → S (cmd) | `GET_METADATA`    | §11.L3    | partial |
-| 0x51  | C → S (cmd) | `SET_METADATA`    | §11.L3    | partial |
-| 0x52  | C → S (cmd) | `DELETE_METADATA` | §11.L3    | partial |
-| 0x53  | C → S (cmd) | `LIST_METADATA`   | §11.L3    | partial |
-| 0x54  | C → S     | `SUBSCRIBE_METADATA`| §11.L3    | partial |
-| 0xD0  | S → C     | `METADATA_CHANGED`  | §7.L3     | partial |
+| ID    | Direction | Name                | Reference | Status   |
+|-------|-----------|---------------------|-----------|----------|
+| 0x50  | C → S (cmd) | `GET_METADATA`    | §11.L3    | shipped  |
+| 0x51  | C → S (cmd) | `SET_METADATA`    | §11.L3    | shipped  |
+| 0x52  | C → S (cmd) | `DELETE_METADATA` | §11.L3    | shipped  |
+| 0x53  | C → S (cmd) | `LIST_METADATA`   | §11.L3    | shipped  |
+| 0x54  | C → S     | `SUBSCRIBE_METADATA`| §11.L3    | shipped  |
+| 0xD0  | S → C     | `METADATA_CHANGED`  | §7.L3     | shipped  |
+| 0xD1  | S → C     | `METADATA_VALUE`    | §7.L3     | shipped  |
+| 0xD2  | S → C     | `METADATA_KEYS`     | §7.L3     | shipped  |
 
 Wire bodies (positional, per Appendix A primitives):
 
@@ -489,6 +492,8 @@ DELETE_METADATA    { request_id: u32, scope: Scope, key: str }
 LIST_METADATA      { request_id: u32, scope: Scope }
 SUBSCRIBE_METADATA { scope: Scope, key: str }
 METADATA_CHANGED   { scope: Scope, key: str, value: optional<bytes> }
+METADATA_VALUE     { request_id: u32, value: optional<bytes> }
+METADATA_KEYS      { request_id: u32, keys: list<str> }
 
 Scope = tagged_union {
     TERMINAL   (TerminalId),     // tag 0x00
@@ -508,15 +513,30 @@ shape is dropped; phux-4li.2 lifts the value into the event because
 the ADR-0019 layout-coordination use case is a read-on-every-change
 pattern and the round trip is wasteful.
 
-Reply paths for `GET_METADATA` and `LIST_METADATA` are deferred to
-the generic `COMMAND_RESULT` envelope (§11). v0.1 servers expose
-GET / LIST as in-process Rust function returns; the wire reply
-ships when `COMMAND` lands. `request_id` is carried so the future
-reply correlates.
+Reply paths for `GET_METADATA` and `LIST_METADATA` ride dedicated S→C
+frames (phux-4li.8): `METADATA_VALUE { request_id, value: optional<bytes> }`
+correlates to a prior `GET_METADATA.request_id` (with `value: None`
+when the key is absent), and `METADATA_KEYS { request_id, keys }`
+correlates to a prior `LIST_METADATA.request_id` (lexicographically
+sorted; values are NOT included, clients fetch them separately via
+`GET_METADATA`).
 
-The `Status: partial` row reflects this split — wire encode/decode
-is shipped (snapshot- and proptest-locked) plus server-side K/V plus
-SUBSCRIBE fanout. The COMMAND reply path remains the residual gap.
+The earlier draft routed these through a generic `COMMAND_RESULT`
+envelope (§11). Dedicated frames are simpler and consistent with the
+phux-4li.2 precedent of `METADATA_CHANGED` carrying value inline
+(also a departure from the original §7.4 sketch): the L3 metadata
+family is opinionated against the generic envelope where it would
+cost a round-trip the consumer always pays. `COMMAND_RESULT` remains
+reserved in §11 for L1/L2 commands that genuinely need its tagged
+union (e.g. `SPAWN` returning a `TerminalId`); it does NOT subsume
+the L3 reply frames.
+
+The reply frames, like `METADATA_CHANGED`, MUST NOT be emitted to a
+consumer whose `HELLO.client_caps.layers` does not include `L3`
+(SPEC §16.4). A server that receives an L3 request from a non-L3
+consumer MAY drop the request silently (matching the
+`SUBSCRIBE_METADATA` precedent) or reply with `ERROR { OUT_OF_TIER }`
+once that code is allocated.
 
 Subscription scope: subscriptions are connection-scoped. A
 client's subscriptions are dropped automatically on `DETACH` (SPEC

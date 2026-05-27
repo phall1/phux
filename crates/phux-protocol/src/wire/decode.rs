@@ -9,11 +9,12 @@ use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL,
     TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_FRAME_ACK,
     TYPE_GET_METADATA, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY, TYPE_INPUT_MOUSE,
-    TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED, TYPE_PING, TYPE_SET_METADATA,
-    TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT, TYPE_VIEWPORT_RESIZE,
-    decode_attach_target, decode_focus_event, decode_key_event, decode_mouse_event,
-    decode_optional_bytes, decode_optional_u32, decode_paste_event, decode_scope,
-    decode_terminal_id, decode_viewport_info,
+    TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED, TYPE_METADATA_KEYS,
+    TYPE_METADATA_VALUE, TYPE_PING, TYPE_SET_METADATA, TYPE_SUBSCRIBE_METADATA,
+    TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT, TYPE_VIEWPORT_RESIZE, decode_attach_target,
+    decode_focus_event, decode_key_event, decode_mouse_event, decode_optional_bytes,
+    decode_optional_u32, decode_paste_event, decode_scope, decode_terminal_id,
+    decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 
@@ -335,6 +336,22 @@ impl<'a> Decoder<'a> {
                 let key = self.read_str()?.to_owned();
                 let value = decode_optional_bytes(self)?;
                 FrameKind::MetadataChanged { scope, key, value }
+            }
+            TYPE_METADATA_VALUE => {
+                let request_id = self.read_u32_be()?;
+                let value = decode_optional_bytes(self)?;
+                FrameKind::MetadataValue { request_id, value }
+            }
+            TYPE_METADATA_KEYS => {
+                let request_id = self.read_u32_be()?;
+                let count = self.read_u32_be()?;
+                let count_usize =
+                    usize::try_from(count).map_err(|_| DecodeError::LengthOverflow)?;
+                let mut keys = Vec::with_capacity(count_usize);
+                for _ in 0..count_usize {
+                    keys.push(self.read_str()?.to_owned());
+                }
+                FrameKind::MetadataKeys { request_id, keys }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
             // (`TerminalEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.)

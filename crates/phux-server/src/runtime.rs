@@ -786,7 +786,7 @@ async fn handle_client(
                 scope,
                 key,
             } => {
-                handle_get_metadata(&state, client_id, request_id, &scope, &key);
+                handle_get_metadata(&state, client_id, request_id, &scope, &key, &out_tx).await;
             }
             FrameKind::SetMetadata {
                 request_id,
@@ -804,7 +804,7 @@ async fn handle_client(
                 handle_delete_metadata(&state, client_id, request_id, &scope, &key);
             }
             FrameKind::ListMetadata { request_id, scope } => {
-                handle_list_metadata(&state, client_id, request_id, &scope);
+                handle_list_metadata(&state, client_id, request_id, &scope, &out_tx).await;
             }
             FrameKind::SubscribeMetadata { scope, key } => {
                 handle_subscribe_metadata(&state, client_id, scope, key);
@@ -817,35 +817,54 @@ async fn handle_client(
 }
 
 // -----------------------------------------------------------------------------
-// L3 metadata dispatch — SPEC §7.4 / §11.L3 (phux-4li.2).
+// L3 metadata dispatch — SPEC §7.4 / §11.L3 (phux-4li.2 / phux-4li.8).
 //
-// Wire-side replies for GET / LIST are deferred to the `COMMAND_RESULT`
-// envelope (SPEC §11) which is not yet wire-allocated; the dispatch arms
-// below execute the K/V operations against `ServerState::metadata`, log
-// the outcome, and fan METADATA_CHANGED out to L3-capable subscribers.
+// GET / LIST replies ride dedicated `METADATA_VALUE` / `METADATA_KEYS`
+// S→C frames (allocated by phux-4li.8) correlated to the originating
+// request by `request_id`. Reply emission, like `METADATA_CHANGED`
+// fan-out, is gated on `client_speaks_l3` (SPEC §16.4): a non-L3
+// consumer that nevertheless ships an L3 request gets silence.
 // -----------------------------------------------------------------------------
 
-fn handle_get_metadata(
+async fn handle_get_metadata(
     state: &SharedState,
     client_id: ClientId,
     request_id: u32,
     scope: &phux_protocol::wire::frame::Scope,
     key: &str,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
-    let value = state.with(|s| s.metadata().get(scope, key));
+    let (value, speaks_l3) =
+        state.with(|s| (s.metadata().get(scope, key), s.client_speaks_l3(client_id)));
     debug!(
         ?client_id,
         request_id,
         ?scope,
         %key,
         present = value.is_some(),
+        speaks_l3,
         "GET_METADATA",
     );
-    // COMMAND_RESULT wire path is deferred; the value is currently
-    // observable only via in-process test helpers
-    // (`ServerState::metadata`). When `COMMAND` lands, this reply
-    // ships through it.
-    let _ = value;
+    if !speaks_l3 {
+        // SPEC §16.4: out-of-tier traffic from a non-L3 consumer is
+        // dropped silently, matching the SUBSCRIBE_METADATA arm above.
+        // A future ticket may switch to ERROR { OUT_OF_TIER } once the
+        // error code lands.
+        return;
+    }
+    if out_tx
+        .send(Outbound::Frame(FrameKind::MetadataValue {
+            request_id,
+            value,
+        }))
+        .await
+        .is_err()
+    {
+        trace!(
+            ?client_id,
+            request_id, "METADATA_VALUE send dropped: writer gone"
+        );
+    }
 }
 
 fn handle_set_metadata(
@@ -883,21 +902,40 @@ fn handle_delete_metadata(
     );
 }
 
-fn handle_list_metadata(
+async fn handle_list_metadata(
     state: &SharedState,
     client_id: ClientId,
     request_id: u32,
     scope: &phux_protocol::wire::frame::Scope,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
-    let keys = state.with(|s| s.metadata().list(scope));
+    let (keys, speaks_l3) =
+        state.with(|s| (s.metadata().list(scope), s.client_speaks_l3(client_id)));
     debug!(
         ?client_id,
         request_id,
         ?scope,
         key_count = keys.len(),
+        speaks_l3,
         "LIST_METADATA",
     );
-    let _ = keys;
+    if !speaks_l3 {
+        // SPEC §16.4: same out-of-tier gating as `handle_get_metadata`.
+        return;
+    }
+    if out_tx
+        .send(Outbound::Frame(FrameKind::MetadataKeys {
+            request_id,
+            keys,
+        }))
+        .await
+        .is_err()
+    {
+        trace!(
+            ?client_id,
+            request_id, "METADATA_KEYS send dropped: writer gone"
+        );
+    }
 }
 
 fn handle_subscribe_metadata(
