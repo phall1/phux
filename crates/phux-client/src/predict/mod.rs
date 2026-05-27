@@ -22,10 +22,14 @@
 //! - [`overlay::Overlay`] — writes the prediction layer to the outer
 //!   terminal as VT escapes (positioned writes with an
 //!   underline SGR attribute).
-//! - [`reconcile::reconcile_terminal_output`] — drops predictions once a
-//!   `TerminalOutput` frame has arrived. Cumulative semantics match
-//!   `FRAME_ACK` (SPEC §12.2): one server output drains *all* predictions
-//!   issued before it.
+//! - [`reconcile::reconcile_terminal_output_per_cell`] — the v1.1
+//!   match game (phux-9gw.1.1). On each `TerminalOutput`, walks the
+//!   prediction queue against the freshly painted authoritative cells
+//!   and the new cursor position; drops confirmed predictions, drops
+//!   the suffix from any contradiction, and keeps predictions still
+//!   ahead of confirmed state. The older wholesale-drain
+//!   [`reconcile::reconcile_terminal_output`] is retained for
+//!   `TERMINAL_SNAPSHOT` replays where the entire viewport is stomped.
 //!
 //! # Visual decoration: underline
 //!
@@ -44,9 +48,9 @@
 //!    because we paint the overlay *after* the renderer flushes, so the
 //!    next renderer pass cleanly stomps it on reconciliation.
 //!
-//! # Safety classes (v0)
+//! # Safety classes (v1.1)
 //!
-//! Only two key classes are predicted today:
+//! Three key classes are predicted today:
 //!
 //! - Printable ASCII (`0x20..=0x7E`). The server's terminal will echo
 //!   exactly one cell of advance for each — the prediction is a
@@ -58,14 +62,20 @@
 //!   visibly. End-of-line is the conservative subset that covers the
 //!   "typing then immediately deleting" case which is the bulk of why
 //!   users notice latency.
+//! - Enter (`PhysicalKey::Enter`) **past column 0**, on any row except
+//!   the last. Models a pure cursor jump to `(row+1, 0)` — no cell
+//!   paint, just a forward anchor so subsequent inserts queue on the
+//!   correct row. The per-cell reconcile confirms the prediction once
+//!   the authoritative cursor advances past the original row;
+//!   contradicts (drop) if the server stayed put (program intercepted
+//!   the keystroke, e.g. password prompt swallow).
 //!
 //! Everything else — arrow keys, control chords, function keys, Tab,
-//! Enter, Alt-chords, IME composition — is not predicted. They are still
-//! sent upstream as normal; only the local echo is skipped. A future
-//! ticket can widen the safe set (Enter at EOL → newline + carriage-
-//! return + cursor-to-col-0; cursor-motion arrows over a known line;
-//! full-line backspace given a known prompt) once we have a real
-//! reconciliation strategy for divergence.
+//! Alt-chords, IME composition, UTF-8 multi-byte, full-line backspace
+//! from a known prompt — is not predicted. They are still sent upstream
+//! as normal; only the local echo is skipped. Follow-up tickets
+//! (phux-9gw.1.1 deferrals) widen the safe set further once the
+//! reconcile path has miles on it.
 //!
 //! # Off by default
 //!
@@ -77,27 +87,25 @@
 //!
 //! # Reconciliation policy
 //!
-//! `reconcile_terminal_output` drops the entire pending queue when *any*
-//! `TerminalOutput` arrives for the active terminal. Three reasons:
+//! `reconcile_terminal_output_per_cell` is the production path for
+//! `TERMINAL_OUTPUT`. It reads each prediction's target cell from the
+//! freshly rendered authoritative grid and classifies it as
+//! **confirmed** (drop, the server already painted it), **pending**
+//! (keep, server hasn't caught up — overlay stays alive), or
+//! **contradicted** (drop the prediction *and* every prediction behind
+//! it — the server diverged so the suffix is suspect). See
+//! [`reconcile`] for the per-`PredictionKind` truth table.
 //!
-//! 1. The renderer is about to overwrite the affected rows wholesale —
-//!    `TerminalRenderer::render` does dirty-row redraws and our overlay
-//!    sits on top of stdout, not inside the libghostty Terminal. The
-//!    next paint correctly shows server truth.
-//! 2. Cumulative ack semantics — `FRAME_ACK seq = N` says "I have
-//!    applied everything up to N". When the server sends N, by that
-//!    semantics it has also "covered" all earlier predictions.
-//! 3. Simpler invariant: zero predictions outstanding after every server
-//!    frame. A per-character match game would correctly preserve
-//!    *some* predictions (the ones still ahead of what the server has
-//!    confirmed), but the bookkeeping is fragile under SGR changes,
-//!    scrollback, and resize. We trade a tiny bit of flicker (the
-//!    underline disappears) for a state machine we can reason about.
+//! The wholesale-drain `reconcile_terminal_output` is retained for
+//! `TERMINAL_SNAPSHOT` replays, where the entire viewport is stomped
+//! and per-cell match would be redundant.
 
 mod overlay;
 mod reconcile;
 mod state;
 
 pub use overlay::Overlay;
-pub use reconcile::reconcile_terminal_output;
-pub use state::{Prediction, PredictionOutcome, PredictionState, PredictiveConfig};
+pub use reconcile::{
+    ReconcileStats, reconcile_terminal_output, reconcile_terminal_output_per_cell,
+};
+pub use state::{Prediction, PredictionKind, PredictionOutcome, PredictionState, PredictiveConfig};

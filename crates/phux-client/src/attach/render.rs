@@ -74,6 +74,48 @@ impl<'alloc> TerminalRenderer<'alloc> {
         self.last_cursor
     }
 
+    /// Read the base grapheme of the cell at `(row, col)` in `terminal`.
+    ///
+    /// Returns `Some(ch)` if the cell has a base grapheme, `None` if it
+    /// is blank (no grapheme, wide-tail placeholder, or out of range).
+    /// A `' '` (space) cell yields `Some(' ')` so callers can distinguish
+    /// "explicitly blanked" from "out of range" — the predict-layer
+    /// reconcile treats `' '` and `None` as the same "blank" verdict.
+    ///
+    /// This takes a fresh snapshot of `terminal` — it must not be called
+    /// concurrently with [`Self::render`] (the `&mut self` receiver
+    /// guarantees that statically). Used by the per-cell reconcile in
+    /// the predict layer (phux-9gw.1.1) to confirm or contradict
+    /// predictions against the authoritative cell grid.
+    pub fn read_grapheme_at(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        row: u16,
+        col: u16,
+    ) -> Result<Option<char>, RenderError> {
+        let snapshot = self.state.update(terminal)?;
+        let rows_total = snapshot.rows()?;
+        let cols_total = snapshot.cols()?;
+        if row >= rows_total || col >= cols_total {
+            return Ok(None);
+        }
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(this_row) = row_iter.next() {
+            if row_index == row {
+                let mut cell_iter = self.cells.update(this_row)?;
+                cell_iter.select(col)?;
+                let graphemes = cell_iter.graphemes()?;
+                return Ok(graphemes.first().copied());
+            }
+            row_index = row_index.saturating_add(1);
+            if row_index >= rows_total {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
     /// Render dirty rows of `terminal` to `out`. Returns the dirty
     /// classification observed; the caller can use it to decide whether
     /// to flush.

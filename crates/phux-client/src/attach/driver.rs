@@ -38,7 +38,9 @@ use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
 use super::status_bar::{Position, StatusBarPainter, make_context};
-use crate::predict::{Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output};
+use crate::predict::{
+    Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output_per_cell,
+};
 
 /// Idle window before a parser-pending bare ESC is interpreted as the
 /// Escape key. Chosen to be long enough to absorb same-burst arrival of
@@ -670,18 +672,25 @@ fn handle_server_frame(
                 terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);
-                // Reconcile: drop predictions, resync cursor from the
-                // freshly-rendered authoritative state. See
-                // [`crate::predict`] for the policy rationale.
+                // Per-cell match reconcile (phux-9gw.1.1): walk pending
+                // predictions against the freshly painted cell grid;
+                // confirmed predictions drop, contradictions drop their
+                // suffix, predictions still ahead of confirmed state
+                // stay alive. See [`crate::predict`] for the truth
+                // table.
                 if let Some((row, col)) = renderer.last_cursor() {
-                    reconcile_terminal_output(predict, row, col);
+                    let _stats = reconcile_terminal_output_per_cell(predict, row, col, |r, c| {
+                        renderer.read_grapheme_at(terminal, r, c).ok().flatten()
+                    });
                 } else {
+                    // Cursor hidden — we can't anchor reliably; fall
+                    // back to the wholesale drain. Rare path (programs
+                    // that hide the cursor before a redraw).
                     predict.clear();
                 }
-                // Overlay typically has nothing to paint here (we just
-                // drained), but call it for defensive symmetry — a
-                // future per-cell match game would emit residual
-                // confirmed predictions here.
+                // Overlay paints any predictions still alive (the tail
+                // of a partial confirmation). On a fully-drained queue
+                // this is a no-op.
                 let _ = overlay.render(predict, &mut stdout);
                 paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name);
             }
