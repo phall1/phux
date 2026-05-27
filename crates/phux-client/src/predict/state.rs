@@ -60,7 +60,7 @@ pub struct Prediction {
 
 /// What the prediction was modelling. The per-cell reconcile path branches
 /// on this to decide what counts as "confirmed" vs "contradicted" — see
-/// [`super::reconcile`] for the match table.
+/// the sibling `reconcile` module for the match table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredictionKind {
     /// A printable byte: forward cursor, paint the char. Reconcile

@@ -93,8 +93,8 @@
 //! **confirmed** (drop, the server already painted it), **pending**
 //! (keep, server hasn't caught up — overlay stays alive), or
 //! **contradicted** (drop the prediction *and* every prediction behind
-//! it — the server diverged so the suffix is suspect). See
-//! [`reconcile`] for the per-`PredictionKind` truth table.
+//! it — the server diverged so the suffix is suspect). See the
+//! `reconcile` module for the per-`PredictionKind` truth table.
 //!
 //! The wholesale-drain `reconcile_terminal_output` is retained for
 //! `TERMINAL_SNAPSHOT` replays, where the entire viewport is stomped
