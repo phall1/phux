@@ -43,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
-use crate::terminal_actor::{SnapshotRequest, TerminalActor, TerminalHandle};
+use crate::terminal_actor::{ConsumerAckRequest, SnapshotRequest, TerminalActor, TerminalHandle};
 
 /// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -731,6 +731,9 @@ async fn handle_client(
                     "INPUT_FOCUS",
                 );
             }
+            FrameKind::FrameAck { terminal_id, seq } => {
+                handle_frame_ack(&state, client_id, terminal_id, seq);
+            }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
             }
@@ -1245,6 +1248,99 @@ fn handle_terminal_input(
     });
 }
 
+/// Route an inbound `FRAME_ACK` (SPEC §7.proto.1 / §12.2) to the
+/// owning `TerminalActor` so it can evict the per-consumer dirty cache
+/// under ADR-0018 lazy state synchronization (phux-q0e.4).
+///
+/// Validation:
+///   * Unknown wire pane id → drop (warn). The client is acking a
+///     terminal the server has no mapping for; this is observable
+///     misbehavior worth surfacing.
+///   * Client not attached → drop (warn). Acks make no sense without
+///     an attachment.
+///   * Client not subscribed to this pane → drop (warn). Same gate as
+///     `handle_terminal_input`: a client cannot ack a pane it does not
+///     observe.
+///   * No `TerminalHandle` (actor evicted) → drop (debug — race against
+///     teardown).
+///
+/// `try_send` is non-blocking by the same `with_mut` locking rationale
+/// as `handle_terminal_input`: awaiting inside `with_mut` would
+/// deadlock the single-threaded runtime, and `FRAME_ACK` is hint-shaped
+/// per ADR-0018 — dropping under backpressure is correct (the next
+/// ack the client sends will catch up the per-consumer reference,
+/// and unacked diffs stay re-emittable in the meantime).
+fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: u32, seq: u64) {
+    use phux_protocol::ids::TerminalId as WireTerminalId;
+    state.with_mut(|s| {
+        let wire = WireTerminalId(wire_terminal_id);
+        let Some(pane) = s.terminal_from_wire(wire) else {
+            warn!(
+                ?client_id,
+                wire_terminal_id, seq, "FRAME_ACK for unknown pane; dropping",
+            );
+            return;
+        };
+        let Some(attached) = s.attached.get(&client_id) else {
+            warn!(
+                ?client_id,
+                wire_terminal_id, seq, "FRAME_ACK from non-attached client; dropping",
+            );
+            return;
+        };
+        let session = attached.session;
+        let is_subscribed = s.subscribers_for_terminal(pane).contains(&client_id);
+        if !is_subscribed {
+            warn!(
+                ?client_id,
+                wire_terminal_id,
+                ?session,
+                seq,
+                "FRAME_ACK from client not subscribed to pane; dropping",
+            );
+            return;
+        }
+        let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
+            warn!(
+                ?client_id,
+                wire_terminal_id, seq, "FRAME_ACK with no TerminalHandle for pane; dropping",
+            );
+            return;
+        };
+        // Bridge `state::ClientId` (u64 newtype) → `phux_protocol::ClientId`
+        // (u32), matching the conversion `handle_attach` already does for
+        // the per-consumer state map keys. The wire ClientId space caps at
+        // u32::MAX; widening would require a protocol bump.
+        let wire_client_id =
+            phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
+        match handle.consumer_ack.try_send(ConsumerAckRequest {
+            client_id: wire_client_id,
+            seq,
+        }) {
+            Ok(()) => {
+                trace!(
+                    ?client_id,
+                    wire_terminal_id, seq, "FRAME_ACK routed to TerminalActor"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                trace!(
+                    ?client_id,
+                    wire_terminal_id,
+                    seq,
+                    "FRAME_ACK mailbox full; dropping (ADR-0018: next ack catches up)",
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                debug!(
+                    ?client_id,
+                    wire_terminal_id, seq, "FRAME_ACK: pane actor gone; dropping",
+                );
+            }
+        }
+    });
+}
+
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
 async fn send_error(out_tx: &tokio::sync::mpsc::Sender<Outbound>, code: ErrorCode, message: &str) {
     if out_tx
@@ -1352,6 +1448,7 @@ mod tests {
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
         let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
+        let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
@@ -1359,6 +1456,7 @@ mod tests {
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
             consumer_detach: consumer_detach_tx,
+            consumer_ack: consumer_ack_tx,
             cols: 80,
             rows: 24,
         };
@@ -1454,6 +1552,7 @@ mod tests {
                     let (resize_tx, _resize_rx) = mpsc::channel::<(u16, u16)>(8);
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
                     let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
+                    let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
@@ -1461,6 +1560,7 @@ mod tests {
                         resize: resize_tx,
                         consumer_attach: consumer_attach_tx,
                         consumer_detach: consumer_detach_tx,
+                        consumer_ack: consumer_ack_tx,
                         cols: 80,
                         rows: 24,
                     };

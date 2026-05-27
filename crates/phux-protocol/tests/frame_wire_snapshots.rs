@@ -412,6 +412,30 @@ fn snap_bell() {
 // VIEWPORT_RESIZE — SPEC §10.5. Cell-only and pixel-augmented viewports.
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// FRAME_ACK — SPEC §7.proto.1 / §12.2. Per-Terminal cumulative ack from the
+// client; used by the server's per-consumer SnapshotSynthesizer eviction
+// (ADR-0018 / phux-q0e.4).
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_frame_ack_zero() {
+    let frame = FrameKind::FrameAck {
+        terminal_id: 0x0000_0001,
+        seq: 0,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_frame_ack_nonzero() {
+    let frame = FrameKind::FrameAck {
+        terminal_id: 0x0000_002A,
+        seq: 0x0000_0000_0000_0F42,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
 #[test]
 fn snap_viewport_resize_cells_only() {
     let frame = FrameKind::ViewportResize {

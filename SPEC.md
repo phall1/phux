@@ -378,7 +378,7 @@ this repository as of 2026-05-26. It is informative, not normative.
 | 0x01  | C → S     | `HELLO`           | §6.1      | shipped   |
 | 0x02  | C → S     | `ATTACH`          | §13       | shipped   |
 | 0x03  | C → S     | `DETACH`          | §7.proto.1| shipped   |
-| 0x21  | C → S     | `FRAME_ACK`       | §12       | spec-only |
+| 0x21  | C → S     | `FRAME_ACK`       | §12       | shipped   |
 | 0x40  | C → S     | `SUBSCRIBE`       | §7.proto.2| spec-only |
 | 0x7F  | C → S     | `PING`            | §7.proto.3| shipped   |
 | 0x80  | S → C     | `HELLO_OK`        | §6.1      | spec-only |
