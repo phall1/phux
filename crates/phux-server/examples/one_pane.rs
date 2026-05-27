@@ -165,7 +165,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut total_frames: u64 = 0;
     let mut pending: Vec<u8> = Vec::new();
     let mut seq: u64 = 0;
-    let terminal_id: u32 = 1;
+    let terminal_id = phux_protocol::ids::TerminalId::local(1);
     let started = Instant::now();
     let mut child_exit_status: Option<portable_pty::ExitStatus> = None;
     let mut saw_eof = false;
@@ -192,7 +192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !pending.is_empty() {
                     let rewritten = downsample::rewrite_bytes(&pending, client_caps);
                     let frame = FrameKind::TerminalOutput {
-                        terminal_id,
+                        terminal_id: terminal_id.clone(),
                         seq,
                         bytes: rewritten,
                     };
@@ -227,7 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !pending.is_empty() {
         let rewritten = downsample::rewrite_bytes(&pending, client_caps);
         let frame = FrameKind::TerminalOutput {
-            terminal_id,
+            terminal_id: terminal_id.clone(),
             seq,
             bytes: rewritten,
         };

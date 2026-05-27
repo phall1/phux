@@ -174,7 +174,7 @@ fn snap_detached() {
 #[test]
 fn snap_input_key_letter_a_press() {
     let frame = FrameKind::InputKey {
-        terminal_id: 0x0000_0007,
+        terminal_id: TerminalId::local(0x0000_0007),
         event: KeyEvent {
             action: KeyAction::Press,
             key: PhysicalKey::A,
@@ -191,7 +191,7 @@ fn snap_input_key_letter_a_press() {
 #[test]
 fn snap_input_key_no_text() {
     let frame = FrameKind::InputKey {
-        terminal_id: 0x0000_0001,
+        terminal_id: TerminalId::local(0x0000_0001),
         event: KeyEvent {
             action: KeyAction::Release,
             key: PhysicalKey::Escape,
@@ -208,7 +208,7 @@ fn snap_input_key_no_text() {
 #[test]
 fn snap_input_mouse_left_click() {
     let frame = FrameKind::InputMouse {
-        terminal_id: 0x0000_0042,
+        terminal_id: TerminalId::local(0x0000_0042),
         event: MouseEvent {
             action: MouseAction::Press,
             button: MouseButton::Left,
@@ -223,7 +223,7 @@ fn snap_input_mouse_left_click() {
 #[test]
 fn snap_input_focus_gained() {
     let frame = FrameKind::InputFocus {
-        terminal_id: 0x0000_0003,
+        terminal_id: TerminalId::local(0x0000_0003),
         event: FocusEvent::Gained,
     };
     insta::assert_snapshot!(dump_frame(&frame));
@@ -232,7 +232,7 @@ fn snap_input_focus_gained() {
 #[test]
 fn snap_input_focus_lost() {
     let frame = FrameKind::InputFocus {
-        terminal_id: 0x0000_0003,
+        terminal_id: TerminalId::local(0x0000_0003),
         event: FocusEvent::Lost,
     };
     insta::assert_snapshot!(dump_frame(&frame));
@@ -241,7 +241,7 @@ fn snap_input_focus_lost() {
 #[test]
 fn snap_input_paste_trusted_ascii() {
     let frame = FrameKind::InputPaste {
-        terminal_id: 0x0000_0005,
+        terminal_id: TerminalId::local(0x0000_0005),
         event: PasteEvent {
             trust: PasteTrust::Trusted,
             data: b"hello world".to_vec(),
@@ -256,7 +256,7 @@ fn snap_input_paste_trusted_ascii() {
 
 #[test]
 fn snap_attached_empty_graph() {
-    let snapshot = SessionSnapshot::new(SessionId::new(1), WindowId::new(0), TerminalId::new(0))
+    let snapshot = SessionSnapshot::new(SessionId::new(1), WindowId::new(0), TerminalId::local(0))
         .with_sessions(vec![
             SessionInfo::new(SessionId::new(1), "default")
                 .with_created_at_unix_secs(1_700_000_000)
@@ -285,37 +285,38 @@ fn snap_attached_realistic_graph() {
 
     let windows = vec![
         WindowInfo::new(WindowId::new(10), SessionId::new(1), "code")
-            .with_active_pane(Some(TerminalId::new(100)))
+            .with_active_pane(Some(TerminalId::local(100)))
             .with_layout(Some(LayoutNode::Split {
                 dir: SplitDir::Horizontal,
                 ratio: 0.5,
-                left: Box::new(LayoutNode::Leaf(TerminalId::new(100))),
-                right: Box::new(LayoutNode::Leaf(TerminalId::new(101))),
+                left: Box::new(LayoutNode::Leaf(TerminalId::local(100))),
+                right: Box::new(LayoutNode::Leaf(TerminalId::local(101))),
             })),
         WindowInfo::new(WindowId::new(20), SessionId::new(1), "logs")
             .with_index(1)
-            .with_active_pane(Some(TerminalId::new(102)))
-            .with_layout(Some(LayoutNode::Leaf(TerminalId::new(102)))),
+            .with_active_pane(Some(TerminalId::local(102)))
+            .with_layout(Some(LayoutNode::Leaf(TerminalId::local(102)))),
         WindowInfo::new(WindowId::new(30), SessionId::new(2), "scratch")
-            .with_active_pane(Some(TerminalId::new(103)))
-            .with_layout(Some(LayoutNode::Leaf(TerminalId::new(103)))),
+            .with_active_pane(Some(TerminalId::local(103)))
+            .with_layout(Some(LayoutNode::Leaf(TerminalId::local(103)))),
     ];
 
     let panes = vec![
-        TerminalInfo::new(TerminalId::new(100), WindowId::new(10), 80, 24)
+        TerminalInfo::new(TerminalId::local(100), WindowId::new(10), 80, 24)
             .with_title(Some("editor".to_owned()))
             .with_cwd(Some("/home/u/src".to_owned())),
-        TerminalInfo::new(TerminalId::new(101), WindowId::new(10), 80, 24)
+        TerminalInfo::new(TerminalId::local(101), WindowId::new(10), 80, 24)
             .with_cwd(Some("/home/u/src".to_owned())),
-        TerminalInfo::new(TerminalId::new(102), WindowId::new(20), 160, 48),
-        TerminalInfo::new(TerminalId::new(103), WindowId::new(30), 80, 24)
+        TerminalInfo::new(TerminalId::local(102), WindowId::new(20), 160, 48),
+        TerminalInfo::new(TerminalId::local(103), WindowId::new(30), 80, 24)
             .with_cwd(Some("/home/u".to_owned())),
     ];
 
-    let snapshot = SessionSnapshot::new(SessionId::new(1), WindowId::new(10), TerminalId::new(100))
-        .with_sessions(sessions)
-        .with_windows(windows)
-        .with_panes(panes);
+    let snapshot =
+        SessionSnapshot::new(SessionId::new(1), WindowId::new(10), TerminalId::local(100))
+            .with_sessions(sessions)
+            .with_windows(windows)
+            .with_panes(panes);
     let frame = FrameKind::Attached {
         snapshot,
         initial_client_id: ClientId::new(1),
@@ -331,7 +332,7 @@ fn snap_attached_realistic_graph() {
 fn snap_terminal_output_hello_world() {
     // A representative TERMINAL_OUTPUT carrying ASCII bytes: "hello world\r\n".
     let frame = FrameKind::TerminalOutput {
-        terminal_id: 1,
+        terminal_id: TerminalId::local(1),
         seq: 0,
         bytes: b"hello world\r\n".to_vec(),
     };
@@ -341,7 +342,7 @@ fn snap_terminal_output_hello_world() {
 #[test]
 fn snap_terminal_output_empty_bytes() {
     let frame = FrameKind::TerminalOutput {
-        terminal_id: 0x0000_002A,
+        terminal_id: TerminalId::local(0x0000_002A),
         seq: 1,
         bytes: Vec::new(),
     };
@@ -353,7 +354,7 @@ fn snap_terminal_output_with_sgr() {
     // A short bold-red sequence: validates the wire envelope is bytes-
     // transparent — the SGR is opaque to the protocol.
     let frame = FrameKind::TerminalOutput {
-        terminal_id: 7,
+        terminal_id: TerminalId::local(7),
         seq: 42,
         bytes: b"\x1b[1;31mERR\x1b[0m".to_vec(),
     };
@@ -367,7 +368,7 @@ fn snap_terminal_output_with_sgr() {
 #[test]
 fn snap_terminal_snapshot_empty_vt() {
     let frame = FrameKind::TerminalSnapshot {
-        terminal_id: TerminalId::new(100),
+        terminal_id: TerminalId::local(100),
         cols: 80,
         rows: 24,
         vt_replay_bytes: Vec::new(),
@@ -380,7 +381,7 @@ fn snap_terminal_snapshot_empty_vt() {
 fn snap_terminal_snapshot_minimal_replay() {
     // Reset + CUP home + a single ASCII char + cursor placement.
     let frame = FrameKind::TerminalSnapshot {
-        terminal_id: TerminalId::new(100),
+        terminal_id: TerminalId::local(100),
         cols: 80,
         rows: 24,
         vt_replay_bytes: b"\x1b[!p\x1b[2J\x1b[HH\x1b[1;2H".to_vec(),
@@ -392,7 +393,7 @@ fn snap_terminal_snapshot_minimal_replay() {
 #[test]
 fn snap_terminal_snapshot_with_scrollback() {
     let frame = FrameKind::TerminalSnapshot {
-        terminal_id: TerminalId::new(100),
+        terminal_id: TerminalId::local(100),
         cols: 80,
         rows: 24,
         vt_replay_bytes: b"\x1b[!p\x1b[2J\x1b[H".to_vec(),
@@ -404,7 +405,7 @@ fn snap_terminal_snapshot_with_scrollback() {
 #[test]
 fn snap_bell() {
     insta::assert_snapshot!(dump_frame(&FrameKind::Bell {
-        terminal_id: 0x0000_00BE,
+        terminal_id: TerminalId::local(0x0000_00BE),
     }));
 }
 
@@ -421,7 +422,7 @@ fn snap_bell() {
 #[test]
 fn snap_frame_ack_zero() {
     let frame = FrameKind::FrameAck {
-        terminal_id: 0x0000_0001,
+        terminal_id: TerminalId::local(0x0000_0001),
         seq: 0,
     };
     insta::assert_snapshot!(dump_frame(&frame));
@@ -430,7 +431,7 @@ fn snap_frame_ack_zero() {
 #[test]
 fn snap_frame_ack_nonzero() {
     let frame = FrameKind::FrameAck {
-        terminal_id: 0x0000_002A,
+        terminal_id: TerminalId::local(0x0000_002A),
         seq: 0x0000_0000_0000_0F42,
     };
     insta::assert_snapshot!(dump_frame(&frame));

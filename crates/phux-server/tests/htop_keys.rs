@@ -143,7 +143,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         let wire_pane_id = match attached {
             FrameKind::Attached { snapshot, .. } => {
                 assert_eq!(snapshot.panes.len(), 1);
-                snapshot.panes[0].id.0
+                snapshot.panes[0].id.clone()
             }
             other => panic!("expected ATTACHED, got {other:?}"),
         };
@@ -154,7 +154,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: ascii_key('q', PhysicalKey::Q),
             },
         )
@@ -162,7 +162,7 @@ fn plain_q_press_round_trips_as_legacy_ascii_byte() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: KeyEvent {
                     action: KeyAction::Press,
                     key: PhysicalKey::Enter,
@@ -238,7 +238,7 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
         let (type_byte, attached) = recv_typed(&mut stream).await;
         assert_eq!(type_byte, TYPE_ATTACHED);
         let wire_pane_id = match attached {
-            FrameKind::Attached { snapshot, .. } => snapshot.panes[0].id.0,
+            FrameKind::Attached { snapshot, .. } => snapshot.panes[0].id.clone(),
             other => panic!("expected ATTACHED, got {other:?}"),
         };
         let (type_byte, _snap) = recv_typed(&mut stream).await;
@@ -247,7 +247,7 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: ctrl_c_key(),
             },
         )

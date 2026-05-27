@@ -133,7 +133,7 @@ fn input_key_dispatch_routes_to_pane_actor_pty() {
         let wire_pane_id = match attached {
             FrameKind::Attached { snapshot, .. } => {
                 assert_eq!(snapshot.panes.len(), 1, "exactly one pane");
-                snapshot.panes[0].id.0
+                snapshot.panes[0].id.clone()
             }
             other => panic!("expected ATTACHED, got {other:?}"),
         };
@@ -149,7 +149,7 @@ fn input_key_dispatch_routes_to_pane_actor_pty() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: ascii_key('a', PhysicalKey::A),
             },
         )
@@ -159,7 +159,7 @@ fn input_key_dispatch_routes_to_pane_actor_pty() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: enter_key(),
             },
         )

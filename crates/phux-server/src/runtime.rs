@@ -708,7 +708,7 @@ async fn handle_client(
                 handle_terminal_input(
                     &state,
                     client_id,
-                    terminal_id,
+                    &terminal_id,
                     TerminalInput::Key(event),
                     "INPUT_KEY",
                 );
@@ -717,7 +717,7 @@ async fn handle_client(
                 handle_terminal_input(
                     &state,
                     client_id,
-                    terminal_id,
+                    &terminal_id,
                     TerminalInput::Mouse(event),
                     "INPUT_MOUSE",
                 );
@@ -726,13 +726,13 @@ async fn handle_client(
                 handle_terminal_input(
                     &state,
                     client_id,
-                    terminal_id,
+                    &terminal_id,
                     TerminalInput::Focus(event),
                     "INPUT_FOCUS",
                 );
             }
             FrameKind::FrameAck { terminal_id, seq } => {
-                handle_frame_ack(&state, client_id, terminal_id, seq);
+                handle_frame_ack(&state, client_id, &terminal_id, seq);
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -990,7 +990,7 @@ async fn handle_attach(
         // delta" rather than racing against it.
         let mut output_rx = handle.output.subscribe();
         let pump_out_tx = out_tx.clone();
-        let pump_wire_terminal_id = wire_terminal_id.get();
+        let pump_wire_terminal_id = wire_terminal_id.clone();
         tokio::task::spawn_local(async move {
             let mut seq: u64 = 0;
             loop {
@@ -999,7 +999,7 @@ async fn handle_attach(
                         seq = seq.wrapping_add(1);
                         if pump_out_tx
                             .send(Outbound::Frame(FrameKind::TerminalOutput {
-                                terminal_id: pump_wire_terminal_id,
+                                terminal_id: pump_wire_terminal_id.clone(),
                                 seq,
                                 bytes: bytes.to_vec(),
                             }))
@@ -1012,7 +1012,7 @@ async fn handle_attach(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
-                            terminal_id = pump_wire_terminal_id,
+                            terminal_id = ?pump_wire_terminal_id,
                             dropped = n,
                             "TerminalOutput pump lagged; consider larger broadcast capacity",
                         );
@@ -1178,24 +1178,40 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
 fn handle_terminal_input(
     state: &SharedState,
     client_id: ClientId,
-    wire_terminal_id: u32,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
     input: TerminalInput,
     frame_label: &'static str,
 ) {
-    use phux_protocol::ids::TerminalId as WireTerminalId;
+    // v0.1 non-federation-hub servers reject SATELLITE-routed input frames
+    // (per ADR-0016 / SPEC §10.1). The protocol-level response is `ERROR
+    // { UnsupportedSatelliteRoute }`; this dispatch helper just drops the
+    // frame with a warn — the surrounding read loop will surface the
+    // error response in a follow-up tied to phux-byc.9.
+    if !wire_terminal_id.is_local() {
+        warn!(
+            ?client_id,
+            ?wire_terminal_id,
+            frame_label,
+            "input frame carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+        );
+        return;
+    }
     state.with_mut(|s| {
-        let wire = WireTerminalId(wire_terminal_id);
-        let Some(pane) = s.terminal_from_wire(wire) else {
+        let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, frame_label, "input frame for unknown pane; dropping",
+                ?wire_terminal_id,
+                frame_label,
+                "input frame for unknown pane; dropping",
             );
             return;
         };
         let Some(attached) = s.attached.get(&client_id) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, frame_label, "input frame from non-attached client; dropping",
+                ?wire_terminal_id,
+                frame_label,
+                "input frame from non-attached client; dropping",
             );
             return;
         };
@@ -1209,7 +1225,7 @@ fn handle_terminal_input(
         if !is_subscribed {
             warn!(
                 ?client_id,
-                wire_terminal_id,
+                ?wire_terminal_id,
                 ?session,
                 frame_label,
                 "client not subscribed to pane; dropping input",
@@ -1219,7 +1235,9 @@ fn handle_terminal_input(
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, frame_label, "no TerminalHandle for pane; dropping input",
+                ?wire_terminal_id,
+                frame_label,
+                "no TerminalHandle for pane; dropping input",
             );
             return;
         };
@@ -1227,13 +1245,15 @@ fn handle_terminal_input(
             Ok(()) => {
                 trace!(
                     ?client_id,
-                    wire_terminal_id, frame_label, "input routed to TerminalActor"
+                    ?wire_terminal_id,
+                    frame_label,
+                    "input routed to TerminalActor"
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
                     ?client_id,
-                    wire_terminal_id,
+                    ?wire_terminal_id,
                     frame_label,
                     "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
                 );
@@ -1241,7 +1261,9 @@ fn handle_terminal_input(
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 debug!(
                     ?client_id,
-                    wire_terminal_id, frame_label, "pane actor gone; dropping input",
+                    ?wire_terminal_id,
+                    frame_label,
+                    "pane actor gone; dropping input",
                 );
             }
         }
@@ -1270,21 +1292,39 @@ fn handle_terminal_input(
 /// per ADR-0018 — dropping under backpressure is correct (the next
 /// ack the client sends will catch up the per-consumer reference,
 /// and unacked diffs stay re-emittable in the meantime).
-fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: u32, seq: u64) {
-    use phux_protocol::ids::TerminalId as WireTerminalId;
+fn handle_frame_ack(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    seq: u64,
+) {
+    // v0.1 servers reject SATELLITE-routed acks for the same reason input
+    // frames are dropped above: this server is not a federation hub.
+    if !wire_terminal_id.is_local() {
+        warn!(
+            ?client_id,
+            ?wire_terminal_id,
+            seq,
+            "FRAME_ACK carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+        );
+        return;
+    }
     state.with_mut(|s| {
-        let wire = WireTerminalId(wire_terminal_id);
-        let Some(pane) = s.terminal_from_wire(wire) else {
+        let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, seq, "FRAME_ACK for unknown pane; dropping",
+                ?wire_terminal_id,
+                seq,
+                "FRAME_ACK for unknown pane; dropping",
             );
             return;
         };
         let Some(attached) = s.attached.get(&client_id) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, seq, "FRAME_ACK from non-attached client; dropping",
+                ?wire_terminal_id,
+                seq,
+                "FRAME_ACK from non-attached client; dropping",
             );
             return;
         };
@@ -1293,7 +1333,7 @@ fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: 
         if !is_subscribed {
             warn!(
                 ?client_id,
-                wire_terminal_id,
+                ?wire_terminal_id,
                 ?session,
                 seq,
                 "FRAME_ACK from client not subscribed to pane; dropping",
@@ -1303,7 +1343,9 @@ fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: 
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
             warn!(
                 ?client_id,
-                wire_terminal_id, seq, "FRAME_ACK with no TerminalHandle for pane; dropping",
+                ?wire_terminal_id,
+                seq,
+                "FRAME_ACK with no TerminalHandle for pane; dropping",
             );
             return;
         };
@@ -1320,13 +1362,15 @@ fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: 
             Ok(()) => {
                 trace!(
                     ?client_id,
-                    wire_terminal_id, seq, "FRAME_ACK routed to TerminalActor"
+                    ?wire_terminal_id,
+                    seq,
+                    "FRAME_ACK routed to TerminalActor"
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 trace!(
                     ?client_id,
-                    wire_terminal_id,
+                    ?wire_terminal_id,
                     seq,
                     "FRAME_ACK mailbox full; dropping (ADR-0018: next ack catches up)",
                 );
@@ -1334,7 +1378,9 @@ fn handle_frame_ack(state: &SharedState, client_id: ClientId, wire_terminal_id: 
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 debug!(
                     ?client_id,
-                    wire_terminal_id, seq, "FRAME_ACK: pane actor gone; dropping",
+                    ?wire_terminal_id,
+                    seq,
+                    "FRAME_ACK: pane actor gone; dropping",
                 );
             }
         }

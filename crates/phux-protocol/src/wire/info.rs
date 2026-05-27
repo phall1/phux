@@ -17,6 +17,7 @@ use crate::ids::{ClientId, SessionId, TerminalId, WindowId};
 use super::decode::Decoder;
 use super::encode::Encoder;
 use super::error::DecodeError;
+use super::frame::{decode_terminal_id, encode_terminal_id};
 
 // -----------------------------------------------------------------------------
 // Tagged-union tags. `pub(crate)` so the codec and tests can spell them
@@ -227,7 +228,7 @@ impl WindowInfo {
 
     /// Builder setter for [`Self::active_pane`].
     #[must_use]
-    pub const fn with_active_pane(mut self, active_pane: Option<TerminalId>) -> Self {
+    pub fn with_active_pane(mut self, active_pane: Option<TerminalId>) -> Self {
         self.active_pane = active_pane;
         self
     }
@@ -250,7 +251,7 @@ impl WindowInfo {
 /// process tracking.
 ///
 /// `#[non_exhaustive]`; construct via [`Self::new`] plus `with_*` setters.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct TerminalInfo {
     /// Stable terminal identifier.
@@ -422,7 +423,7 @@ pub(super) fn encode_layout_node(node: &LayoutNode, enc: &mut Encoder<'_>) {
     match node {
         LayoutNode::Leaf(pane) => {
             enc.write_u8(LAYOUT_TAG_LEAF);
-            enc.write_u32_be(pane.get());
+            encode_terminal_id(pane, enc);
         }
         LayoutNode::Split {
             dir,
@@ -445,7 +446,7 @@ pub(super) fn decode_layout_node(dec: &mut Decoder<'_>) -> Result<LayoutNode, De
     let tag = dec.read_u8()?;
     match tag {
         LAYOUT_TAG_LEAF => {
-            let pane = TerminalId::new(dec.read_u32_be()?);
+            let pane = decode_terminal_id(dec)?;
             Ok(LayoutNode::Leaf(pane))
         }
         LAYOUT_TAG_SPLIT => {
@@ -525,7 +526,7 @@ pub(super) fn encode_window_info(info: &WindowInfo, enc: &mut Encoder<'_>) {
     enc.write_u32_be(info.session_id.get());
     enc.write_u16_be(info.index);
     enc.write_str(&info.name);
-    encode_option_terminal_id(info.active_pane, enc);
+    encode_option_terminal_id(info.active_pane.as_ref(), enc);
     encode_option_layout_node(info.layout.as_ref(), enc);
 }
 
@@ -547,7 +548,7 @@ pub(super) fn decode_window_info(dec: &mut Decoder<'_>) -> Result<WindowInfo, De
 }
 
 pub(super) fn encode_terminal_info(info: &TerminalInfo, enc: &mut Encoder<'_>) {
-    enc.write_u32_be(info.id.get());
+    encode_terminal_id(&info.id, enc);
     enc.write_u32_be(info.window_id.get());
     enc.write_u16_be(info.cols);
     enc.write_u16_be(info.rows);
@@ -556,7 +557,7 @@ pub(super) fn encode_terminal_info(info: &TerminalInfo, enc: &mut Encoder<'_>) {
 }
 
 pub(super) fn decode_terminal_info(dec: &mut Decoder<'_>) -> Result<TerminalInfo, DecodeError> {
-    let id = TerminalId::new(dec.read_u32_be()?);
+    let id = decode_terminal_id(dec)?;
     let window_id = WindowId::new(dec.read_u32_be()?);
     let cols = dec.read_u16_be()?;
     let rows = dec.read_u16_be()?;
@@ -587,7 +588,7 @@ pub(super) fn encode_session_snapshot(snap: &SessionSnapshot, enc: &mut Encoder<
     }
     enc.write_u32_be(snap.focused_session.get());
     enc.write_u32_be(snap.focused_window.get());
-    enc.write_u32_be(snap.focused_pane.get());
+    encode_terminal_id(&snap.focused_pane, enc);
 }
 
 pub(super) fn decode_session_snapshot(
@@ -610,7 +611,7 @@ pub(super) fn decode_session_snapshot(
     }
     let focused_session = SessionId::new(dec.read_u32_be()?);
     let focused_window = WindowId::new(dec.read_u32_be()?);
-    let focused_pane = TerminalId::new(dec.read_u32_be()?);
+    let focused_pane = decode_terminal_id(dec)?;
     Ok(SessionSnapshot {
         sessions,
         windows,
@@ -650,12 +651,12 @@ pub(super) fn decode_option_window_id(
     }
 }
 
-pub(super) fn encode_option_terminal_id(value: Option<TerminalId>, enc: &mut Encoder<'_>) {
+pub(super) fn encode_option_terminal_id(value: Option<&TerminalId>, enc: &mut Encoder<'_>) {
     match value {
         None => enc.write_u8(0),
         Some(id) => {
             enc.write_u8(1);
-            enc.write_u32_be(id.get());
+            encode_terminal_id(id, enc);
         }
     }
 }
@@ -666,7 +667,7 @@ pub(super) fn decode_option_terminal_id(
     let tag = dec.read_u8()?;
     match tag {
         0 => Ok(None),
-        1 => Ok(Some(TerminalId::new(dec.read_u32_be()?))),
+        1 => Ok(Some(decode_terminal_id(dec)?)),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Option<TerminalId> tag",
             value: u32::from(other),

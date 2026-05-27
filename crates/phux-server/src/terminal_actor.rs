@@ -1329,7 +1329,7 @@ impl TerminalActor {
             // uses the same idiom and we match it.
             state.next_seq = state.next_seq.wrapping_add(1);
             let frame = FrameKind::TerminalOutput {
-                terminal_id: state.wire_terminal_id,
+                terminal_id: phux_protocol::ids::TerminalId::local(state.wire_terminal_id),
                 seq,
                 bytes,
             };

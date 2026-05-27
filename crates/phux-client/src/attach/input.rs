@@ -85,6 +85,7 @@
 //! parameter buffer) in the [`StdinParser`] struct and resumes on the
 //! next [`StdinParser::feed`] call.
 
+use phux_protocol::ids::TerminalId;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -130,7 +131,7 @@ impl InputEvent {
     /// driver issues a [`FrameKind::Detach`] directly, since `DETACH`
     /// is session-level and pane-id-agnostic.
     #[must_use]
-    pub fn into_frame(self, terminal_id: u32) -> Option<FrameKind> {
+    pub fn into_frame(self, terminal_id: TerminalId) -> Option<FrameKind> {
         match self {
             Self::Key(event) => Some(FrameKind::InputKey { terminal_id, event }),
             Self::Mouse(event) => Some(FrameKind::InputMouse { terminal_id, event }),
@@ -1413,16 +1414,24 @@ mod tests {
             text: Some("a".to_owned()),
             unshifted_codepoint: Some(u32::from('a')),
         };
-        let frame = InputEvent::Key(key).into_frame(42).expect("frame");
+        let frame = InputEvent::Key(key)
+            .into_frame(TerminalId::local(42))
+            .expect("frame");
         match frame {
-            FrameKind::InputKey { terminal_id, .. } => assert_eq!(terminal_id, 42),
+            FrameKind::InputKey { terminal_id, .. } => {
+                assert_eq!(terminal_id, TerminalId::local(42));
+            }
             other => panic!("expected InputKey, got {other:?}"),
         }
     }
 
     #[test]
     fn detach_requested_has_no_frame() {
-        assert!(InputEvent::DetachRequested.into_frame(1).is_none());
+        assert!(
+            InputEvent::DetachRequested
+                .into_frame(TerminalId::local(1))
+                .is_none()
+        );
     }
 
     // ---- Focus reports (DEC mode 1004) ---------------------------------
@@ -1458,11 +1467,11 @@ mod tests {
     #[test]
     fn focus_event_into_frame_carries_terminal_id() {
         let frame = InputEvent::Focus(FocusEvent::Gained)
-            .into_frame(7)
+            .into_frame(TerminalId::new(7))
             .expect("frame");
         match frame {
             FrameKind::InputFocus { terminal_id, event } => {
-                assert_eq!(terminal_id, 7);
+                assert_eq!(terminal_id, TerminalId::new(7));
                 assert_eq!(event, FocusEvent::Gained);
             }
             other => panic!("expected InputFocus, got {other:?}"),
@@ -1589,9 +1598,13 @@ mod tests {
             x: 1.0,
             y: 2.0,
         };
-        let frame = InputEvent::Mouse(ev).into_frame(99).expect("frame");
+        let frame = InputEvent::Mouse(ev)
+            .into_frame(TerminalId::new(99))
+            .expect("frame");
         match frame {
-            FrameKind::InputMouse { terminal_id, .. } => assert_eq!(terminal_id, 99),
+            FrameKind::InputMouse { terminal_id, .. } => {
+                assert_eq!(terminal_id, TerminalId::new(99));
+            }
             other => panic!("expected InputMouse, got {other:?}"),
         }
     }
@@ -1673,11 +1686,11 @@ mod tests {
             trust: PasteTrust::Untrusted,
             data: b"x".to_vec(),
         })
-        .into_frame(11)
+        .into_frame(TerminalId::new(11))
         .expect("frame");
         match frame {
             FrameKind::InputPaste { terminal_id, event } => {
-                assert_eq!(terminal_id, 11);
+                assert_eq!(terminal_id, TerminalId::new(11));
                 assert_eq!(event.data, b"x");
             }
             other => panic!("expected InputPaste, got {other:?}"),

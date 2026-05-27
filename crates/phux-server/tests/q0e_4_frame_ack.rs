@@ -77,7 +77,11 @@ fn terminal_outputs(items: &[Outbound]) -> Vec<(u32, u64, usize)> {
                 terminal_id,
                 seq,
                 bytes,
-            }) => Some((*terminal_id, *seq, bytes.len())),
+            }) => Some((
+                terminal_id.local_id().expect("v0.1 local id"),
+                *seq,
+                bytes.len(),
+            )),
             _ => None,
         })
         .collect()

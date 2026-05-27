@@ -111,7 +111,7 @@ fn screen_helper_observes_pty_echo_through_wire() {
         let (type_byte, attached) = recv_typed(&mut stream).await;
         assert_eq!(type_byte, TYPE_ATTACHED, "first frame must be ATTACHED");
         let wire_pane_id = match attached {
-            FrameKind::Attached { snapshot, .. } => snapshot.panes[0].id.0,
+            FrameKind::Attached { snapshot, .. } => snapshot.panes[0].id.clone(),
             other => panic!("expected ATTACHED, got {other:?}"),
         };
         let (type_byte, _snap) = recv_typed(&mut stream).await;
@@ -128,7 +128,7 @@ fn screen_helper_observes_pty_echo_through_wire() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: ascii_key('a', PhysicalKey::A),
             },
         )
@@ -136,7 +136,7 @@ fn screen_helper_observes_pty_echo_through_wire() {
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
-                terminal_id: wire_pane_id,
+                terminal_id: wire_pane_id.clone(),
                 event: enter_key(),
             },
         )

@@ -430,7 +430,7 @@ async fn main_loop(
                 dispatch_input_events(
                     conn,
                     events,
-                    focused_pane,
+                    focused_pane.as_ref(),
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
@@ -446,7 +446,7 @@ async fn main_loop(
                 dispatch_input_events(
                     conn,
                     events,
-                    focused_pane,
+                    focused_pane.as_ref(),
                     &mut detach_pending,
                     &mut predict,
                     &overlay,
@@ -540,7 +540,7 @@ async fn main_loop(
 async fn dispatch_input_events(
     conn: &mut Connection,
     events: Vec<InputEvent>,
-    focused_pane: Option<TerminalId>,
+    focused_pane: Option<&TerminalId>,
     detach_pending: &mut bool,
     predict: &mut PredictionState,
     overlay: &Overlay,
@@ -571,7 +571,7 @@ async fn dispatch_input_events(
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
-        if let Some(frame) = ev.into_frame(pane.get()) {
+        if let Some(frame) = ev.into_frame((*pane).clone()) {
             conn.send(&frame).await?;
         }
     }
@@ -633,7 +633,7 @@ fn handle_server_frame(
             // For v0 only the focused pane's snapshot drives our local
             // Terminal — multi-pane composition is downstream of phux-9gw.3
             // (the windowing / layout work).
-            if Some(terminal_id) == *focused_pane {
+            if Some(&terminal_id) == focused_pane.as_ref() {
                 terminal.resize(cols, rows, 0, 0)?;
                 // Apply scrollback first (if any), then the visible-state
                 // replay — order per SPEC §8.4 / §13.
@@ -666,7 +666,7 @@ fn handle_server_frame(
             seq: _,
             bytes,
         } => {
-            if Some(TerminalId::new(terminal_id)) == *focused_pane {
+            if Some(&terminal_id) == focused_pane.as_ref() {
                 terminal.vt_write(&bytes);
                 let mut stdout = io::stdout().lock();
                 let _ = renderer.render(terminal, &mut stdout);

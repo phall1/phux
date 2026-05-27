@@ -1,8 +1,16 @@
 //! Stable identifiers used across the protocol.
 //!
-//! All IDs are opaque `u32` values, monotonically allocated by the server.
+//! Most IDs are opaque `u32` values, monotonically allocated by the server.
 //! IDs are stable for the server's lifetime and are not reused after the
 //! entity is destroyed.
+//!
+//! [`TerminalId`] is the exception: per [ADR-0016] it is a tagged union that
+//! also records the host that owns the terminal. v0.1 servers only ever
+//! construct [`TerminalId::Local`]; the [`TerminalId::Satellite`] variant is
+//! the federation-forward-compat reservation required by [ADR-0007].
+//!
+//! [ADR-0007]: https://github.com/phall1/phux/blob/main/ADR/0007-mosh-class-transport-and-satellites.md
+//! [ADR-0016]: https://github.com/phall1/phux/blob/main/ADR/0016-terminal-id-as-wire-primary.md
 
 macro_rules! id_type {
     ($(#[$meta:meta])* $name:ident) => {
@@ -41,13 +49,180 @@ id_type!(
     WindowId
 );
 id_type!(
-    /// Identifier for a terminal within a server.
-    TerminalId
-);
-id_type!(
     /// Identifier for a currently-connected client.
     ClientId
 );
+
+/// Federation-routing host identifier for a [`TerminalId::Satellite`].
+///
+/// Per [ADR-0007] the satellite link is an opaque host token negotiated at
+/// federation-handshake time. v0 keeps the shape minimal: a length-prefixed
+/// UTF-8 string. Concrete host syntax (hostnames, ULIDs, mosh-keys) is the
+/// federation layer's concern; the wire treats it as bytes.
+///
+/// [ADR-0007]: https://github.com/phall1/phux/blob/main/ADR/0007-mosh-class-transport-and-satellites.md
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SatelliteHost(String);
+
+impl SatelliteHost {
+    /// Wrap a host token. The string is taken verbatim; no validation is
+    /// performed here — the federation handshake validates upstream.
+    #[must_use]
+    pub fn new(host: impl Into<String>) -> Self {
+        Self(host.into())
+    }
+
+    /// Borrow the underlying host token.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consume and return the underlying host token.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl core::fmt::Display for SatelliteHost {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<String> for SatelliteHost {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SatelliteHost {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+/// Wire tag byte for [`TerminalId::Local`].
+pub const TERMINAL_ID_TAG_LOCAL: u8 = 0;
+/// Wire tag byte for [`TerminalId::Satellite`].
+pub const TERMINAL_ID_TAG_SATELLITE: u8 = 1;
+
+/// Wire identifier for a managed terminal, per [ADR-0016].
+///
+/// `TerminalId` is a tagged union: [`Local`](Self::Local) names a terminal
+/// owned by this server; [`Satellite`](Self::Satellite) names a terminal
+/// reachable through a federation peer. v0.1 servers only ever construct
+/// `Local`; v0.1 decoders MUST accept the `Satellite` tag and respond with
+/// [`UnsupportedSatelliteRoute`] (per SPEC §14) if not configured as a
+/// federation hub.
+///
+/// The numeric `id` inside each variant is stable for the life of the
+/// owning server and is not reused after the terminal closes.
+///
+/// [ADR-0016]: https://github.com/phall1/phux/blob/main/ADR/0016-terminal-id-as-wire-primary.md
+/// [`UnsupportedSatelliteRoute`]: crate::wire::frame::ErrorCode::UnsupportedSatelliteRoute
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TerminalId {
+    /// A terminal owned by the receiving server (wire tag = 0).
+    Local {
+        /// Monotonic per-server identifier.
+        id: u32,
+    },
+    /// A terminal owned by a federation peer (wire tag = 1).
+    ///
+    /// Reserved for v0.2+ federation work. v0.1 servers construct this only
+    /// when negotiated as a federation hub; v0.1 decoders MUST accept the
+    /// shape but MAY respond with [`UnsupportedSatelliteRoute`].
+    ///
+    /// [`UnsupportedSatelliteRoute`]: crate::wire::frame::ErrorCode::UnsupportedSatelliteRoute
+    Satellite {
+        /// Federation peer that owns the terminal.
+        host: SatelliteHost,
+        /// Peer-local identifier (scope: `host`).
+        id: u32,
+    },
+}
+
+impl TerminalId {
+    /// Construct a `Local` terminal id from a raw `u32`.
+    ///
+    /// This is the v0.1 hot path — every terminal allocated by a v0.1
+    /// server flows through this constructor.
+    #[must_use]
+    pub const fn local(id: u32) -> Self {
+        Self::Local { id }
+    }
+
+    /// Construct a `Satellite` terminal id.
+    ///
+    /// Reserved for federation-hub servers. v0.1 single-attach servers
+    /// MUST NOT emit `Satellite` ids.
+    #[must_use]
+    pub fn satellite(host: impl Into<SatelliteHost>, id: u32) -> Self {
+        Self::Satellite {
+            host: host.into(),
+            id,
+        }
+    }
+
+    /// Construct from a raw `u32`, defaulting to the `Local` variant.
+    ///
+    /// Compatibility shim for call sites that historically held a bare
+    /// `u32` from the wire — equivalent to `TerminalId::local(raw)`.
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self::local(raw)
+    }
+
+    /// Returns `Some(id)` for [`Local`](Self::Local) terminals, `None` for
+    /// [`Satellite`](Self::Satellite).
+    ///
+    /// Use this at boundaries that have no satellite story yet (server
+    /// dispatch tables keyed by `u32`, logging, etc.). A `None` is a
+    /// signal to respond with [`UnsupportedSatelliteRoute`] or drop the
+    /// frame with a warn, per SPEC §10.1.
+    ///
+    /// [`UnsupportedSatelliteRoute`]: crate::wire::frame::ErrorCode::UnsupportedSatelliteRoute
+    #[must_use]
+    pub const fn local_id(&self) -> Option<u32> {
+        match self {
+            Self::Local { id } => Some(*id),
+            Self::Satellite { .. } => None,
+        }
+    }
+
+    /// The federation host that owns this terminal, or `None` for
+    /// [`Local`](Self::Local).
+    #[must_use]
+    pub const fn host(&self) -> Option<&SatelliteHost> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Satellite { host, .. } => Some(host),
+        }
+    }
+
+    /// `true` iff this is a [`Local`](Self::Local) terminal id.
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        matches!(self, Self::Local { .. })
+    }
+}
+
+impl Default for TerminalId {
+    fn default() -> Self {
+        Self::local(0)
+    }
+}
+
+impl core::fmt::Display for TerminalId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Local { id } => write!(f, "TerminalId({id})"),
+            Self::Satellite { host, id } => write!(f, "TerminalId({host}/{id})"),
+        }
+    }
+}
 
 /// Identifier for a terminal frame. Monotonically increasing per terminal; `0`
 /// is the empty initial frame.

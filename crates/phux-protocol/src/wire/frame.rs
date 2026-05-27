@@ -25,7 +25,10 @@
 
 use bytes::BytesMut;
 
-use crate::ids::{ClientId, SessionId, TerminalId};
+use crate::ids::{
+    ClientId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL, TERMINAL_ID_TAG_SATELLITE,
+    TerminalId,
+};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
@@ -161,6 +164,10 @@ pub enum ErrorCode {
     TerminalNotFound = 104,
     /// The requested client id does not exist.
     ClientNotFound = 105,
+    /// SPEC §10.1 / ADR-0016: the frame carried a `TerminalId::Satellite`
+    /// but this server is not configured as a federation hub. v0.1 servers
+    /// always respond with this code when handed a `Satellite` id.
+    UnsupportedSatelliteRoute = 106,
 
     /// SPEC §11: the requested COMMAND payload was structurally invalid.
     InvalidCommand = 200,
@@ -197,6 +204,7 @@ impl ErrorCode {
             103 => Self::WindowNotFound,
             104 => Self::TerminalNotFound,
             105 => Self::ClientNotFound,
+            106 => Self::UnsupportedSatelliteRoute,
             200 => Self::InvalidCommand,
             201 => Self::PermissionDenied,
             202 => Self::ResourceExhausted,
@@ -342,7 +350,7 @@ pub enum FrameKind {
     /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
     TerminalOutput {
         /// Target terminal.
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Monotonic per-terminal sequence id (`SPEC.md` §12).
         seq: u64,
         /// VT bytes from the PTY (possibly downsampled per
@@ -376,10 +384,10 @@ pub enum FrameKind {
 
     /// `INPUT_KEY` — client forwards a structured key event (`SPEC.md` §9.1).
     ///
-    /// Wire shape: `u32` terminal id followed by the encoded [`KeyEvent`].
+    /// Wire shape: tagged [`TerminalId`] followed by the encoded [`KeyEvent`].
     InputKey {
         /// Target terminal.
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Structured key event; libghostty atoms inside.
         event: KeyEvent,
     },
@@ -387,7 +395,7 @@ pub enum FrameKind {
     /// `INPUT_MOUSE` — client forwards a mouse event (`SPEC.md` §9.2).
     InputMouse {
         /// Target terminal.
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Structured mouse event; coordinates are terminal-local pixels.
         event: MouseEvent,
     },
@@ -396,7 +404,7 @@ pub enum FrameKind {
     /// (`SPEC.md` §9.3).
     InputFocus {
         /// Target terminal.
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Whether the client window gained or lost focus.
         event: FocusEvent,
     },
@@ -404,7 +412,7 @@ pub enum FrameKind {
     /// `INPUT_PASTE` — client forwards a paste payload (`SPEC.md` §9.4).
     InputPaste {
         /// Target terminal.
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Paste payload plus trust classification.
         event: PasteEvent,
     },
@@ -423,7 +431,7 @@ pub enum FrameKind {
     /// larger diff against the same older reference; no retransmit.
     FrameAck {
         /// Acked terminal (wire id, per SPEC §13).
-        terminal_id: u32,
+        terminal_id: TerminalId,
         /// Cumulative ack sequence — the highest `seq` from
         /// `TERMINAL_OUTPUT` for this `terminal_id` the client has applied.
         seq: u64,
@@ -506,7 +514,7 @@ pub enum FrameKind {
     /// `BELL` — terminal received a bell character (`SPEC.md` §7.6).
     Bell {
         /// Terminal that bell'd.
-        terminal_id: u32,
+        terminal_id: TerminalId,
     },
 
     /// `ERROR` — server-to-client structured error (`SPEC.md` §14).
@@ -592,7 +600,7 @@ impl FrameKind {
                 seq,
                 bytes,
             } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 enc.write_u64_be(*seq);
                 enc.write_bytes(bytes);
             }
@@ -611,23 +619,23 @@ impl FrameKind {
             // no payload. Merged to satisfy `clippy::match_same_arms`.
             Self::Detach | Self::Detached => {}
             Self::InputKey { terminal_id, event } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 encode_key_event(event, &mut enc);
             }
             Self::InputMouse { terminal_id, event } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 encode_mouse_event(event, &mut enc);
             }
             Self::InputFocus { terminal_id, event } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 enc.write_u8(encode_focus_event(*event));
             }
             Self::InputPaste { terminal_id, event } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 encode_paste_event(event, &mut enc);
             }
             Self::FrameAck { terminal_id, seq } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
                 enc.write_u64_be(*seq);
             }
             Self::ViewportResize { viewport } => {
@@ -647,14 +655,14 @@ impl FrameKind {
                 vt_replay_bytes,
                 scrollback_bytes,
             } => {
-                enc.write_u32_be(terminal_id.get());
+                encode_terminal_id(terminal_id, &mut enc);
                 enc.write_u16_be(*cols);
                 enc.write_u16_be(*rows);
                 enc.write_bytes(vt_replay_bytes);
                 encode_optional_bytes(scrollback_bytes.as_deref(), &mut enc);
             }
             Self::Bell { terminal_id } => {
-                enc.write_u32_be(*terminal_id);
+                encode_terminal_id(terminal_id, &mut enc);
             }
             Self::Error {
                 request_id,
@@ -866,6 +874,59 @@ pub(super) fn decode_paste_event(dec: &mut Decoder<'_>) -> Result<PasteEvent, De
     };
     let data = dec.read_bytes()?.to_vec();
     Ok(PasteEvent { trust, data })
+}
+
+// -----------------------------------------------------------------------------
+// `TerminalId` tagged-union codec — ADR-0016 §Decision (phux-vp0.4).
+//
+// Every `TerminalId` on the wire is prefixed with a 1-byte tag:
+//
+//   tag = 0  → Local      { id: u32 }
+//   tag = 1  → Satellite  { host: str, id: u32 }
+//
+// v0.1 encoders only produce tag=0. v0.1 decoders MUST accept tag=1; the
+// dispatch layer (in `phux-server`) responds with `ERROR
+// { UnsupportedSatelliteRoute }` (SPEC §14) when the server is not a
+// federation hub. Unknown tags surface as `DecodeError::UnknownEnumValue`.
+// -----------------------------------------------------------------------------
+
+/// Encode a [`TerminalId`] including its discriminant byte.
+pub(super) fn encode_terminal_id(id: &TerminalId, enc: &mut Encoder<'_>) {
+    match id {
+        TerminalId::Local { id } => {
+            enc.write_u8(TERMINAL_ID_TAG_LOCAL);
+            enc.write_u32_be(*id);
+        }
+        TerminalId::Satellite { host, id } => {
+            enc.write_u8(TERMINAL_ID_TAG_SATELLITE);
+            enc.write_str(host.as_str());
+            enc.write_u32_be(*id);
+        }
+    }
+}
+
+/// Decode a [`TerminalId`] previously written by [`encode_terminal_id`].
+///
+/// v0.1 decoders MUST accept the `Satellite` tag and surface it to the
+/// dispatcher; the dispatcher responds with `ERROR
+/// { UnsupportedSatelliteRoute }` when the server is not a federation hub.
+pub(super) fn decode_terminal_id(dec: &mut Decoder<'_>) -> Result<TerminalId, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        TERMINAL_ID_TAG_LOCAL => {
+            let id = dec.read_u32_be()?;
+            Ok(TerminalId::Local { id })
+        }
+        TERMINAL_ID_TAG_SATELLITE => {
+            let host = SatelliteHost::new(dec.read_str()?);
+            let id = dec.read_u32_be()?;
+            Ok(TerminalId::Satellite { host, id })
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "TerminalId",
+            value: u32::from(other),
+        }),
+    }
 }
 
 // -----------------------------------------------------------------------------

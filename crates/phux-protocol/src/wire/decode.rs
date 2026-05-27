@@ -4,8 +4,6 @@
 //! (primitives). Every decode method returns `Result` and refuses to read
 //! past the end of the borrowed slice.
 
-use crate::ids::TerminalId;
-
 use super::error::DecodeError;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_DETACH,
@@ -13,7 +11,7 @@ use super::frame::{
     TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_PING, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
     TYPE_VIEWPORT_RESIZE, decode_attach_target, decode_focus_event, decode_key_event,
     decode_mouse_event, decode_optional_bytes, decode_optional_u32, decode_paste_event,
-    decode_viewport_info,
+    decode_terminal_id, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 
@@ -176,7 +174,7 @@ impl<'a> Decoder<'a> {
                 FrameKind::Ping { nonce }
             }
             TYPE_TERMINAL_OUTPUT => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let seq = self.read_u64_be()?;
                 let bytes = self.read_bytes()?.to_vec();
                 FrameKind::TerminalOutput {
@@ -199,27 +197,27 @@ impl<'a> Decoder<'a> {
             }
             TYPE_DETACH => FrameKind::Detach,
             TYPE_INPUT_KEY => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let event = decode_key_event(self)?;
                 FrameKind::InputKey { terminal_id, event }
             }
             TYPE_INPUT_MOUSE => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let event = decode_mouse_event(self)?;
                 FrameKind::InputMouse { terminal_id, event }
             }
             TYPE_INPUT_FOCUS => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let event = decode_focus_event(self.read_u8()?)?;
                 FrameKind::InputFocus { terminal_id, event }
             }
             TYPE_INPUT_PASTE => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let event = decode_paste_event(self)?;
                 FrameKind::InputPaste { terminal_id, event }
             }
             TYPE_FRAME_ACK => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 let seq = self.read_u64_be()?;
                 FrameKind::FrameAck { terminal_id, seq }
             }
@@ -236,7 +234,7 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_TERMINAL_SNAPSHOT => {
-                let terminal_id = TerminalId::new(self.read_u32_be()?);
+                let terminal_id = decode_terminal_id(self)?;
                 let cols = self.read_u16_be()?;
                 let rows = self.read_u16_be()?;
                 let vt_replay_bytes = self.read_bytes()?.to_vec();
@@ -251,7 +249,7 @@ impl<'a> Decoder<'a> {
             }
             TYPE_DETACHED => FrameKind::Detached,
             TYPE_BELL => {
-                let terminal_id = self.read_u32_be()?;
+                let terminal_id = decode_terminal_id(self)?;
                 FrameKind::Bell { terminal_id }
             }
             TYPE_ERROR => {

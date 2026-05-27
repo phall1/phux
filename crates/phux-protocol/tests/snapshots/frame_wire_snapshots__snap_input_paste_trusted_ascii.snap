@@ -2,5 +2,5 @@
 source: crates/phux-protocol/tests/frame_wire_snapshots.rs
 expression: dump_frame(&frame)
 ---
-00000000 | 00 00 00 15 11 00 00 00  05 00 00 00 00 0b 68 65 |..............he
-00000010 | 6c 6c 6f 20 77 6f 72 6c  64                      |llo world
+00000000 | 00 00 00 16 11 00 00 00  00 05 00 00 00 00 0b 68 |...............h
+00000010 | 65 6c 6c 6f 20 77 6f 72  6c 64                   |ello world

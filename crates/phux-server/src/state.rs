@@ -521,21 +521,21 @@ impl ServerState {
     /// general-purpose `IdBridge` is deferred.
     pub fn intern_terminal_wire(&mut self, terminal: TerminalId) -> WireTerminalId {
         if let Some(w) = self.terminal_wire_forward.get(&terminal) {
-            return *w;
+            return w.clone();
         }
         let raw = self.next_terminal_wire_id;
         self.next_terminal_wire_id = self.next_terminal_wire_id.saturating_add(1);
-        let wire = WireTerminalId(raw);
-        self.terminal_wire_forward.insert(terminal, wire);
-        self.terminal_wire_reverse.insert(wire, terminal);
+        let wire = WireTerminalId::local(raw);
+        self.terminal_wire_forward.insert(terminal, wire.clone());
+        self.terminal_wire_reverse.insert(wire.clone(), terminal);
         wire
     }
 
     /// Reverse lookup: which core pane id (if any) does `wire`
     /// resolve to?
     #[must_use]
-    pub fn terminal_from_wire(&self, wire: WireTerminalId) -> Option<TerminalId> {
-        self.terminal_wire_reverse.get(&wire).copied()
+    pub fn terminal_from_wire(&self, wire: &WireTerminalId) -> Option<TerminalId> {
+        self.terminal_wire_reverse.get(wire).copied()
     }
 
     /// Wire window id for `window`, allocating one if needed.
