@@ -40,10 +40,11 @@ use std::thread::JoinHandle;
 use bytes::Bytes;
 use libghostty_vt::{
     RenderState, Terminal, TerminalOptions,
-    render::{CursorVisualStyle, Dirty, RowIterator, Snapshot},
+    render::{CursorVisualStyle, Snapshot},
     terminal::Mode,
 };
 use phux_protocol::ClientId;
+use phux_protocol::wire::frame::FrameKind;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -55,7 +56,7 @@ use crate::input::{
     PerTerminalFocusEncoder, PerTerminalKeyEncoder, PerTerminalMouseEncoder,
     PerTerminalPasteEncoder,
 };
-use crate::state::TerminalInput;
+use crate::state::{Outbound, TerminalInput};
 
 /// Snapshot of the live `Terminal`'s cursor + DEC mode bits captured at
 /// the moment a consumer is brought up-to-date.
@@ -141,8 +142,27 @@ impl LastAckedCursorMode {
 /// `libghostty-send-sync` bd memory). Lives only inside the actor,
 /// which runs on the `LocalSet` thread that owns the `Terminal`.
 pub struct ConsumerSyncState {
-    /// Per-consumer dirty cache. Drives the diff walk in phux-q0e.3.
-    pub render_state: RenderState<'static>,
+    /// Per-consumer incremental synthesizer (phux-q0e.3). Owns the
+    /// per-consumer `RenderState` — the dirty cache that drives the
+    /// per-tick diff walk. Each consumer gets its own synthesizer so the
+    /// dirty bookkeeping is isolated; `RowIterator`/`CellIterator`
+    /// allocations are cheap.
+    pub synthesizer: SnapshotSynthesizer<'static>,
+    /// Per-consumer outbound mailbox the tick driver pushes
+    /// `TERMINAL_OUTPUT` frames into. Cloned from the
+    /// [`crate::state::AttachedClient`]'s `tx` at ATTACH time.
+    pub outbound: mpsc::Sender<Outbound>,
+    /// Wire-level terminal id for the `TerminalOutput` frame
+    /// (`SPEC.md` §8.1). Carried per-consumer because the runtime owns
+    /// the mapping `(TerminalActor, WireTerminalId)` and may differ
+    /// across consumers in future tier topologies.
+    pub wire_terminal_id: u32,
+    /// Per-consumer monotonic sequence id for `TERMINAL_OUTPUT`
+    /// (`SPEC.md` §8.1, §12). Starts at `1` and increments on each
+    /// emitted frame. Per-consumer (not shared) so each consumer can
+    /// `FRAME_ACK` against its own stream — this matches the existing
+    /// per-pump scheme in `runtime.rs::handle_attach`.
+    pub next_seq: u64,
     /// `FrameId` of the most recent `TERMINAL_OUTPUT` this consumer has
     /// `ACK`ed. `0` means "no acks yet — the next emission is the only
     /// thing this consumer has seen" (matches `FrameId::ZERO`'s "empty
@@ -158,6 +178,8 @@ pub struct ConsumerSyncState {
 impl std::fmt::Debug for ConsumerSyncState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConsumerSyncState")
+            .field("wire_terminal_id", &self.wire_terminal_id)
+            .field("next_seq", &self.next_seq)
             .field("last_acked_seq", &self.last_acked_seq)
             .field("last_cursor_mode", &self.last_cursor_mode)
             .finish_non_exhaustive()
@@ -183,11 +205,36 @@ pub struct ConsumerAttachRequest {
     /// match the `ClientId` the caller uses in subsequent
     /// `ConsumerDetachRequest`s and `FRAME_ACK` routing.
     pub client_id: ClientId,
+    /// Per-consumer outbound mailbox. The actor stores a clone in the
+    /// per-consumer [`ConsumerSyncState`] and uses it on every tick
+    /// (phux-q0e.3) to push a `TerminalOutput` frame carrying the
+    /// incremental synthesis bytes.
+    pub outbound: mpsc::Sender<Outbound>,
+    /// Wire-level terminal id (`u32`). The actor stamps it on every
+    /// emitted `TerminalOutput` frame. The runtime owns the mapping
+    /// from the actor's [`phux_core::ids::TerminalId`] to this wire id and
+    /// passes the resolved value here at ATTACH time.
+    pub wire_terminal_id: u32,
     /// Channel the actor uses to acknowledge the lifecycle insertion.
-    /// `Ok(())` on success; `Err(...)` if the per-consumer `RenderState`
-    /// could not be allocated. Dropping the receiver on the caller
-    /// side is benign — the actor uses `send().ok()`.
-    pub reply: oneshot::Sender<Result<(), libghostty_vt::Error>>,
+    /// `Ok(())` on success; `Err(...)` if the per-consumer
+    /// `SnapshotSynthesizer` or its priming pass could not be allocated.
+    /// Dropping the receiver on the caller side is benign — the actor
+    /// uses `send().ok()`.
+    pub reply: oneshot::Sender<Result<(), ConsumerAttachError>>,
+}
+
+/// Errors surfaced by [`TerminalActor::register_consumer`] in response to a
+/// [`ConsumerAttachRequest`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConsumerAttachError {
+    /// libghostty refused to allocate the per-consumer `RenderState` /
+    /// iterators backing the `SnapshotSynthesizer`.
+    #[error("libghostty allocation failed: {0}")]
+    Ghostty(#[from] libghostty_vt::Error),
+    /// `SnapshotSynthesizer::new` (or its priming `mark_synced` call)
+    /// failed.
+    #[error("synthesizer setup failed: {0}")]
+    Synth(#[from] crate::grid::SynthesisError),
 }
 
 /// Request to drop the per-consumer state for `client_id`.
@@ -223,6 +270,13 @@ pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
 /// above the typical libghostty escape-sequence span so a single read
 /// rarely splits a sequence boundary.
 const PTY_READ_CHUNK: usize = 4096;
+
+/// Tick interval for the state-sync emission driver (phux-q0e.3).
+///
+/// 30 ms ≈ 33 Hz; per ADR-0018 / `research/2026-05-26-state-sync-algorithm.md`
+/// §"tick scheduler" first-cut. An RTT-adaptive cadence is the follow-up
+/// `phux-q0e.5` and lives outside this ticket's scope.
+pub const DEFAULT_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// Request for the pane's current `vt_replay_bytes` snapshot.
 ///
@@ -621,10 +675,13 @@ impl TerminalActor {
     }
 
     /// Test-only constructor: write `bytes` into the actor's `Terminal`
-    /// before the actor starts running. Useful for unit tests that want
-    /// the snapshot path to return non-trivial content without wiring
-    /// up a PTY pump.
-    #[cfg(test)]
+    /// before the actor starts running. Useful for unit and integration
+    /// tests that want the snapshot/incremental synthesis path to
+    /// return non-trivial content without wiring up a PTY pump.
+    ///
+    /// Public (rather than `#[cfg(test)]`) so integration tests under
+    /// `crates/phux-server/tests/` can call it. Not exercised by
+    /// production code; the name + doc make the intent clear.
     pub fn new_with_seed(
         cols: u16,
         rows: u16,
@@ -653,30 +710,45 @@ impl TerminalActor {
     /// runtime bug) overwrites the prior entry. The old `RenderState`
     /// is dropped by `HashMap::insert`'s return-value drop, freeing
     /// the underlying libghostty allocation.
-    fn register_consumer(&mut self, client_id: ClientId) -> Result<(), libghostty_vt::Error> {
+    fn register_consumer(
+        &mut self,
+        client_id: ClientId,
+        outbound: mpsc::Sender<Outbound>,
+        wire_terminal_id: u32,
+    ) -> Result<(), ConsumerAttachError> {
         let terminal = self.terminal.borrow();
-        let mut render_state = RenderState::new()?;
+        // Cursor + DEC mode capture happens against a one-shot
+        // `RenderState` rather than the synthesizer's internal one, so
+        // we don't conflict with the priming `mark_synced` borrow below.
+        // Allocation cost is one libghostty handle; freed at end of
+        // scope.
         let last_cursor_mode = {
+            let mut render_state = RenderState::new()?;
             let snapshot = render_state.update(&terminal)?;
-            // Walk and clear per-row dirty bits, then clear the global
-            // bit, so the next incremental synthesis (phux-q0e.3)
-            // emits only deltas from *now*. We swallow the per-row
-            // set_dirty errors on the same rationale as
-            // `phux-client/src/attach/render.rs` (phux-l0t): the FFI
-            // dirty surface is best-effort; the row-set is enumerated
-            // unconditionally by the tick driver.
-            let mut row_iter_storage = RowIterator::new()?;
-            let mut row_iter = row_iter_storage.update(&snapshot)?;
-            while let Some(row) = row_iter.next() {
-                let _ = row.set_dirty(false);
-            }
-            let _ = snapshot.set_dirty(Dirty::Clean);
             LastAckedCursorMode::capture(&terminal, &snapshot)
         };
+        // Allocate the per-consumer synthesizer and prime it against
+        // the live terminal so the next incremental synthesis emits
+        // only deltas from *now*. `mark_synced` is the q0e.1 primitive
+        // that does the walk-and-clear pass (it `update`s, walks rows
+        // clearing each dirty bit, then clears the snapshot-level bit).
+        // The phux-l0t FFI bug means subsequent `dirty()` reads degrade
+        // to `Dirty::Full` defensively, so the first post-prime tick
+        // re-emits a full reset+paint; that is correct per ADR-0018
+        // (loss-tolerance over byte-minimality) and out-of-scope to fix
+        // here.
+        let mut synthesizer = SnapshotSynthesizer::new()?;
+        synthesizer.mark_synced(&terminal)?;
         self.consumer_states.insert(
             client_id,
             ConsumerSyncState {
-                render_state,
+                synthesizer,
+                outbound,
+                wire_terminal_id,
+                // First emission gets `seq == 1`. `0` is reserved for
+                // the "empty initial frame" sentinel matching
+                // `FrameId::ZERO` in [`LastAckedCursorMode`]'s doc.
+                next_seq: 1,
                 last_acked_seq: 0,
                 last_cursor_mode,
             },
@@ -880,6 +952,20 @@ impl TerminalActor {
             "TerminalActor started",
         );
 
+        // State-sync tick driver (phux-q0e.3). Fixed 33 Hz first cut;
+        // the RTT-adaptive cadence is `phux-q0e.5`. `MissedTickBehavior::Delay`
+        // — if the actor falls behind under heavy PTY traffic we want
+        // subsequent ticks spaced by the interval from when they ran,
+        // not bunched up to "catch up" (which would defeat the rate
+        // limit's purpose). `Burst` (the default) would spam emissions
+        // when a long PTY chunk delays us past several tick boundaries.
+        let mut tick = tokio::time::interval(DEFAULT_TICK_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Eat the first immediate tick (Interval fires synchronously on
+        // first poll). Without this, the very first iteration would
+        // tick before any other branch has a chance to react.
+        let _ = tick.tick().await;
+
         loop {
             // For panes without a PTY, the `pty_rx` branch needs an
             // always-pending future. We construct that with
@@ -983,16 +1069,26 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.consumer_attach_rx.recv() => {
-                    let ConsumerAttachRequest { client_id, reply } = req;
-                    let result = self.register_consumer(client_id);
+                    let ConsumerAttachRequest {
+                        client_id,
+                        outbound,
+                        wire_terminal_id,
+                        reply,
+                    } = req;
+                    let result = self.register_consumer(client_id, outbound, wire_terminal_id);
                     if let Err(err) = &result {
                         warn!(
                             ?client_id,
+                            wire_terminal_id,
                             error = %err,
-                            "consumer attach: RenderState allocation failed",
+                            "consumer attach: per-consumer synthesizer setup failed",
                         );
                     } else {
-                        trace!(?client_id, "consumer attached: per-consumer RenderState primed");
+                        trace!(
+                            ?client_id,
+                            wire_terminal_id,
+                            "consumer attached: per-consumer synthesizer primed"
+                        );
                     }
                     let _ = reply.send(result);
                 }
@@ -1004,7 +1100,100 @@ impl TerminalActor {
                     let _ = reply.send(());
                 }
 
+                // State-sync tick driver (phux-q0e.3, ADR-0018).
+                // Iterates each attached consumer, walks the per-consumer
+                // incremental synthesizer, and pushes a `TerminalOutput`
+                // frame onto that consumer's outbound mailbox whenever
+                // `synthesize_incremental` returns non-empty bytes.
+                _ = tick.tick() => {
+                    self.tick_emit();
+                }
+
                 else => break,
+            }
+        }
+    }
+
+    /// One tick of the state-sync emission driver (phux-q0e.3).
+    ///
+    /// Walks every attached consumer in turn. For each:
+    ///
+    /// 1. Call [`SnapshotSynthesizer::synthesize_incremental`] against
+    ///    the live `Terminal`. Synthesis errors are logged and that
+    ///    consumer is skipped for this tick (no kill: a transient FFI
+    ///    error on one consumer must not poison the others).
+    /// 2. If the body is empty, skip — there is nothing to send. This
+    ///    branch fires only in the brief window before the first
+    ///    `mark_synced` (phux-q0e.4); after that, the phux-l0t FFI bug
+    ///    structurally degrades `dirty()` to `Full`, which always
+    ///    produces a non-empty body.
+    /// 3. Stamp the per-consumer monotonic `seq` (starting at `1`,
+    ///    incrementing per emission) and ship a `TerminalOutput` frame
+    ///    via the per-consumer outbound mailbox.
+    ///
+    /// Per ADR-0018: this method **does not** call `mark_synced`. The
+    /// loss-tolerance invariant requires unacked diffs to stay re-
+    /// emittable; `FRAME_ACK` (phux-q0e.4) is the only thing allowed to
+    /// clear dirty bits.
+    fn tick_emit(&mut self) {
+        // Borrow the terminal once per tick. The `synthesize_incremental`
+        // call only reads from it.
+        let terminal = self.terminal.borrow();
+        for (client_id, state) in &mut self.consumer_states {
+            let bytes = match state.synthesizer.synthesize_incremental(&terminal) {
+                Ok(snap) => snap.bytes,
+                Err(err) => {
+                    warn!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        error = %err,
+                        "state-sync tick: synthesize_incremental failed; skipping consumer",
+                    );
+                    continue;
+                }
+            };
+            if bytes.is_empty() {
+                // Clean (or post-mark_synced fast path); nothing to do
+                // for this consumer this tick.
+                continue;
+            }
+            let seq = state.next_seq;
+            // Wrapping_add for paranoia; `u64` will not realistically
+            // roll over at 33 Hz, but the existing `runtime.rs` pump
+            // uses the same idiom and we match it.
+            state.next_seq = state.next_seq.wrapping_add(1);
+            let frame = FrameKind::TerminalOutput {
+                terminal_id: state.wire_terminal_id,
+                seq,
+                bytes,
+            };
+            // `try_send` (non-blocking) preserves the actor's single-
+            // poll-budget invariant: the tick arm must not yield the
+            // loop, otherwise a slow consumer's full mailbox would
+            // hold up every other consumer's emission this tick. A
+            // `Full` error means the consumer is wedged — the
+            // per-client backpressure / disconnect machinery
+            // (`SPEC.md` §12.3) lives in the runtime; we just drop and
+            // continue, and the next tick re-diffs against the same
+            // unacked reference so the consumer catches up naturally.
+            match state.outbound.try_send(Outbound::Frame(frame)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    trace!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        seq,
+                        "state-sync tick: consumer mailbox full; dropping (will retry next tick)",
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    trace!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        seq,
+                        "state-sync tick: consumer mailbox closed; entry will be reaped on detach",
+                    );
+                }
             }
         }
     }
@@ -1235,6 +1424,14 @@ mod tests {
             .await;
     }
 
+    /// Test helper: build a throwaway outbound mailbox + receiver pair
+    /// shaped like the production [`crate::state::AttachedClient::tx`].
+    /// The receiver is returned so callers can hold it open (otherwise
+    /// the actor's `try_send` would see a closed channel).
+    fn dummy_outbound() -> (mpsc::Sender<Outbound>, mpsc::Receiver<Outbound>) {
+        mpsc::channel(16)
+    }
+
     /// phux-q0e.2: ATTACH allocates a per-consumer `RenderState` and
     /// `register_consumer` stores it keyed by `ClientId`. Two attaches
     /// land two entries; one detach removes only that entry; a second
@@ -1247,9 +1444,11 @@ mod tests {
 
         let a = ClientId(1);
         let b = ClientId(2);
-        actor.register_consumer(a).expect("register a");
+        let (tx_a, _rx_a) = dummy_outbound();
+        let (tx_b, _rx_b) = dummy_outbound();
+        actor.register_consumer(a, tx_a, 1).expect("register a");
         assert_eq!(actor.consumer_count(), 1);
-        actor.register_consumer(b).expect("register b");
+        actor.register_consumer(b, tx_b, 2).expect("register b");
         assert_eq!(actor.consumer_count(), 2);
 
         actor.unregister_consumer(a);
@@ -1279,10 +1478,16 @@ mod tests {
         let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
         let mut actor = bundle.actor;
         let client = ClientId(7);
-        actor.register_consumer(client).expect("register");
+        let (tx, _rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
 
         let state = actor.consumer_state(client).expect("state present");
         assert_eq!(state.last_acked_seq, 0, "no acks yet");
+        assert_eq!(state.next_seq, 1, "first emission gets seq=1");
+        assert_eq!(
+            state.wire_terminal_id, 11,
+            "wire id stored on the per-consumer entry"
+        );
         // Seeded "hello" advances the cursor to (5, 0). The capture
         // must reflect that — proves the RenderState was actually
         // updated against the live terminal, not left blank.
@@ -1306,11 +1511,14 @@ mod tests {
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
                 let client = ClientId(42);
+                let (out_tx, _out_rx) = dummy_outbound();
                 let (tx_a, rx_a) = oneshot::channel();
                 handle
                     .consumer_attach
                     .send(ConsumerAttachRequest {
                         client_id: client,
+                        outbound: out_tx,
+                        wire_terminal_id: 99,
                         reply: tx_a,
                     })
                     .await
