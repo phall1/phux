@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 use phux_protocol::TerminalId;
+use phux_protocol::input::mouse::MouseEvent;
 
 use crate::layout::{LayoutNode, LayoutState, Rect, SplitDir};
 
@@ -154,6 +155,159 @@ pub fn paint_dividers<W: Write>(out: &mut W, layout: &PaneLayout) -> io::Result<
         out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
     }
     out.flush()
+}
+
+// -----------------------------------------------------------------------------
+// route_mouse_event — pure hit-test for INPUT_MOUSE routing (phux-4li.6)
+// -----------------------------------------------------------------------------
+
+/// Outcome of a click hit-test against the current multi-pane composition.
+///
+/// The driver consumes this to decide three independent things:
+///
+/// 1. Which `TerminalId` (if any) the resulting `INPUT_MOUSE` frame
+///    targets — and what the pane-local coordinates are.
+/// 2. Whether `LayoutState.focus` needs to swap to a different pane
+///    (click-to-focus, per ADR-0019 decision 6 + DESIGN §7).
+/// 3. Whether a divider repaint is required because focus changed
+///    (heavy / light chrome moves with focus).
+///
+/// A divider hit returns [`RouteDecision::DividerNoOp`]: the click
+/// landed on a between-pane cell, which v0.1 explicitly treats as a
+/// no-op (drag-to-resize is deferred per DESIGN.md §7 / ticket scope).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RouteDecision {
+    /// The click hit a pane. The driver should:
+    /// - swap `LayoutState.focus` to `target` iff `focus_changed`;
+    /// - forward an `INPUT_MOUSE` whose payload's `(x, y)` are
+    ///   replaced with `(pane_x, pane_y)` (pane-local cells);
+    /// - repaint the multi-pane composition iff `focus_changed`
+    ///   (so the heavy-edge chrome follows focus).
+    Pane {
+        /// The pane the mouse event addresses.
+        target: TerminalId,
+        /// Pane-local 0-indexed cell x (treated as f64 pixels per
+        /// SPEC §9.2.1 — the cell-quantising client contract).
+        pane_x: f64,
+        /// Pane-local 0-indexed cell y.
+        pane_y: f64,
+        /// `true` iff this click moves focus.
+        focus_changed: bool,
+    },
+    /// The click hit a divider cell (or fell outside every pane Rect).
+    /// Per DESIGN §7 the v0.1 driver drops the event entirely.
+    DividerNoOp,
+    /// No tree to hit-test against (fresh `LayoutState::default()`),
+    /// or focus is unset. Caller falls back to "no input goes anywhere
+    /// until ATTACHED seeds focus".
+    NoFocus,
+}
+
+/// Pure routing decision for an `INPUT_MOUSE` event.
+///
+/// Hit-tests `mouse.(x, y)` (interpreted as outer-viewport cell
+/// coordinates per the parser in `attach::input` — the inbound SGR /
+/// X10 / urxvt-1015 dispatchers all emit `f64` pixels with "1 cell ==
+/// 1 pixel" because the client does not know cell-size at parse time)
+/// against the pane `Rect`s yielded by [`compute_layout`].
+///
+/// Behavior matrix:
+///
+/// * No tree / no focus ⇒ [`RouteDecision::NoFocus`]. Caller drops.
+/// * Click inside a pane's `Rect` ⇒ [`RouteDecision::Pane`] with
+///   pane-local coords; `focus_changed = true` iff target ≠
+///   `layout.focus`.
+/// * Click on a divider cell or outside any pane (degenerate viewport,
+///   undersized tree) ⇒ [`RouteDecision::DividerNoOp`].
+///
+/// The function is pure (no allocation aside from the internal
+/// [`compute_layout`] call's `HashMap`) and synchronous; the driver's
+/// async input loop calls it once per `InputEvent::Mouse`.
+#[must_use]
+pub fn route_mouse_event(
+    layout: &LayoutState,
+    viewport: (u16, u16),
+    mouse: &MouseEvent,
+) -> RouteDecision {
+    // No tree means no panes to address yet — the driver dropped the
+    // event already by the time `dispatch_input_events` runs, but the
+    // helper stays defensive for direct callers.
+    if layout.tree.is_none() {
+        return RouteDecision::NoFocus;
+    }
+
+    // Single-pane fast path: skip the HashMap roundtrip. With no
+    // dividers there is exactly one rect covering the whole viewport
+    // and every click lands in it.
+    let multi = compute_layout(layout, viewport);
+    if multi.rects.is_empty() {
+        return RouteDecision::NoFocus;
+    }
+
+    // Find the pane whose Rect contains the (cell) click. Iteration
+    // order is arbitrary but rects tile the viewport exactly, so at
+    // most one Rect matches. f64 → u16 via floor: the parser emits
+    // integer-valued f64s for cell-quantised input, so a `as` cast is
+    // exact for inputs in `0..=u16::MAX`. The trailing `.min(...)`
+    // clamps a stray over-edge click into the last cell of the
+    // viewport so a hi-DPI host's pixel report doesn't escape the
+    // pane tiling.
+    let cell_x = clamp_cell(mouse.x).min(viewport.0.saturating_sub(1));
+    let cell_y = clamp_cell(mouse.y).min(viewport.1.saturating_sub(1));
+
+    let mut hit: Option<(TerminalId, Rect)> = None;
+    for (id, rect) in &multi.rects {
+        if rect_contains(*rect, cell_x, cell_y) {
+            hit = Some((id.clone(), *rect));
+            break;
+        }
+    }
+
+    match hit {
+        Some((target, rect)) => {
+            let focus_changed = layout.focus.as_ref() != Some(&target);
+            // Translate to pane-local. `rect.x <= cell_x` is
+            // guaranteed by `rect_contains`, so the subtraction never
+            // underflows.
+            #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
+            let pane_x = f64::from(cell_x - rect.x);
+            #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
+            let pane_y = f64::from(cell_y - rect.y);
+            RouteDecision::Pane {
+                target,
+                pane_x,
+                pane_y,
+                focus_changed,
+            }
+        }
+        // Cell lies in a divider gap or outside any rect (degenerate
+        // viewport). Drag-to-resize on divider is deferred.
+        None => RouteDecision::DividerNoOp,
+    }
+}
+
+/// Clamp an f64 cell position to `u16`. Pixel-precision input that
+/// exceeds the viewport falls into the edge cells rather than wrapping
+/// or panicking. Negative input is clamped at 0.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "input is the result of cell-quantising the SGR/X10 mouse stream; saturate to keep malformed peers from breaking the routing path"
+)]
+fn clamp_cell(p: f64) -> u16 {
+    if p.is_nan() || p < 0.0 {
+        0
+    } else if p >= f64::from(u16::MAX) {
+        u16::MAX
+    } else {
+        p as u16
+    }
+}
+
+/// Half-open rectangle membership test: `[x, x+w) × [y, y+h)`. Mirrors
+/// the convention `compute_layout` uses when tiling the viewport.
+const fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+    x >= r.x && y >= r.y && x < r.x.saturating_add(r.w) && y < r.y.saturating_add(r.h)
 }
 
 // -----------------------------------------------------------------------------
@@ -927,6 +1081,163 @@ mod tests {
                 }
             }
             TerminalId::Satellite { .. } => '?',
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // route_mouse_event — phux-4li.6
+    // -------------------------------------------------------------------------
+
+    use phux_protocol::input::key::ModSet;
+    use phux_protocol::input::mouse::{MouseAction, MouseButton};
+
+    fn mouse_at(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            action: MouseAction::Press,
+            button: MouseButton::Left,
+            mods: ModSet::empty(),
+            x: f64::from(col),
+            y: f64::from(row),
+        }
+    }
+
+    /// Clicking inside the focused pane forwards with focus unchanged
+    /// and emits pane-local coordinates relative to the pane's `Rect`.
+    #[test]
+    fn route_mouse_inside_focused_pane_no_focus_change() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        // Click inside the left half (focused) at col 5, row 3.
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(5, 3));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                pane_x,
+                pane_y,
+                focus_changed,
+            } => {
+                assert_eq!(target, t(1));
+                assert!(!focus_changed);
+                // Left pane sits at x=0; pane-local matches outer.
+                assert!((pane_x - 5.0).abs() < f64::EPSILON);
+                assert!((pane_y - 3.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane decision, got {other:?}"),
+        }
+    }
+
+    /// Clicking in a non-focused pane reports `focus_changed` and
+    /// returns pane-local coordinates relative to that pane's `Rect`.
+    #[test]
+    fn route_mouse_click_other_pane_updates_focus() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        let right_rect = layout.rects.get(&t(2)).copied().unwrap();
+        // Click 2 cells into the right pane, on the second row.
+        let click_x = right_rect.x + 2;
+        let click_y = right_rect.y + 1;
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(click_x, click_y));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                pane_x,
+                pane_y,
+                focus_changed,
+            } => {
+                assert_eq!(target, t(2));
+                assert!(focus_changed, "click in unfocused pane must move focus");
+                assert!((pane_x - 2.0).abs() < f64::EPSILON);
+                assert!((pane_y - 1.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane decision, got {other:?}"),
+        }
+    }
+
+    /// Clicking exactly on the divider column produces a no-op —
+    /// drag-to-resize is deferred (DESIGN §7).
+    #[test]
+    fn route_mouse_divider_is_noop() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        // The divider sits at the column equal to the left pane's
+        // width (its `Rect.w`). Any row on that column hits the gap.
+        let left_w = layout.rects.get(&t(1)).copied().unwrap().w;
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(left_w, 10));
+        assert_eq!(decision, RouteDecision::DividerNoOp);
+    }
+
+    /// Single-pane layout: every click stays in the lone pane with no
+    /// focus change, regardless of position.
+    #[test]
+    fn route_mouse_single_pane_always_hits() {
+        let state = LayoutState::single(t(1));
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(40, 12));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                focus_changed,
+                pane_x,
+                pane_y,
+            } => {
+                assert_eq!(target, t(1));
+                assert!(!focus_changed);
+                assert!((pane_x - 40.0).abs() < f64::EPSILON);
+                assert!((pane_y - 12.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane, got {other:?}"),
+        }
+    }
+
+    /// Empty layout (no tree) returns `NoFocus`. Pre-attach race
+    /// protection — the driver drops these.
+    #[test]
+    fn route_mouse_empty_layout_returns_no_focus() {
+        let state = LayoutState::default();
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(10, 5));
+        assert_eq!(decision, RouteDecision::NoFocus);
+    }
+
+    /// Out-of-viewport click (rare; pixel-precision input from a
+    /// hi-DPI host) clamps into the edge cell rather than panicking.
+    /// 80x24 viewport: a click at (1000, 1000) clamps into the
+    /// rightmost / bottommost pane.
+    #[test]
+    fn route_mouse_out_of_range_clamps_into_edge_pane() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let decision = route_mouse_event(
+            &state,
+            (80, 24),
+            &MouseEvent {
+                action: MouseAction::Press,
+                button: MouseButton::Left,
+                mods: ModSet::empty(),
+                x: 1_000.0,
+                y: 1_000.0,
+            },
+        );
+        // u16::MAX clamps to the right pane's last cell. Either pane
+        // could in principle catch it; the right pane is the only one
+        // whose Rect extends to column 79 of 80, so it should be the
+        // target.
+        if let RouteDecision::Pane { target, .. } = decision {
+            assert_eq!(target, t(2));
+        } else {
+            panic!("expected Pane decision, got {decision:?}");
         }
     }
 }

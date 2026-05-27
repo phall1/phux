@@ -729,6 +729,14 @@ struct DispatchCtx<'a> {
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "phux-4li.6 added the mouse-routing branch alongside resolver + predict + key forwarding; splitting would require carrying the connection + many mut locals through helpers"
+)]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "branch density rises with each input-event kind we route; same shape as the action-dispatch arm"
+)]
 async fn dispatch_input_events(
     conn: &mut Connection,
     events: Vec<InputEvent>,
@@ -794,6 +802,56 @@ async fn dispatch_input_events(
                 }
             }
         }
+        // phux-4li.6: INPUT_MOUSE routing + click-to-focus. The parser
+        // emits mouse coordinates in outer-viewport cells (treated as
+        // 1-px-per-cell f64 per SPEC §9.2.1); we hit-test against the
+        // multi-pane composition's `Rect`s. A click on a divider cell
+        // is dropped (drag-to-resize is deferred per DESIGN.md §7); a
+        // click in a non-focused pane updates focus AND forwards the
+        // event with pane-local coordinates substituted.
+        if let InputEvent::Mouse(ref mouse) = ev {
+            use super::multi_pane::{RouteDecision, route_mouse_event};
+            match route_mouse_event(ctx.layout_state, ctx.viewport, mouse) {
+                RouteDecision::Pane {
+                    target,
+                    pane_x,
+                    pane_y,
+                    focus_changed,
+                } => {
+                    if focus_changed {
+                        ctx.layout_state.focus = Some(target.clone());
+                        *focused_pane = Some(target.clone());
+                        // The predict overlay is anchored to the old
+                        // pane's cursor; dropping the queue avoids a
+                        // stale ghost echo painting into the new pane
+                        // before the next TERMINAL_OUTPUT reconciles.
+                        predict.clear();
+                        // Heavy-edge chrome moves with focus; repaint
+                        // dividers + all leaves so the focused pane's
+                        // surrounding edges render heavy.
+                        layout_changed = true;
+                    }
+                    let mut routed = *mouse;
+                    routed.x = pane_x;
+                    routed.y = pane_y;
+                    conn.send(&FrameKind::InputMouse {
+                        terminal_id: target,
+                        event: routed,
+                    })
+                    .await?;
+                    continue;
+                }
+                RouteDecision::DividerNoOp => {
+                    tracing::trace!(x = mouse.x, y = mouse.y, "dropping mouse on divider");
+                    continue;
+                }
+                RouteDecision::NoFocus => {
+                    tracing::debug!("dropping mouse event before ATTACHED");
+                    continue;
+                }
+            }
+        }
+
         // Predictive echo only fires for key events; mouse / paste / focus
         // intentionally bypass the prediction layer (they target the
         // server's input model, not the visual grid). The branch is
@@ -805,12 +863,13 @@ async fn dispatch_input_events(
         // over; we hand `read_grapheme_at` to the predict layer so it
         // can refuse the prediction when the cell is blank.
         //
-        // phux-4li.4: peek the focused pane's grid, not "the" grid.
-        // Multi-pane v0.1 routes input to the client's focused leaf
-        // (per ADR-0019 decision 6); the predict layer follows.
+        // phux-4li.6: peek the focused pane's grid via
+        // `layout_state.focus`. The driver also mirrors that id into
+        // its `focused_pane` local (server-frame handlers rely on it);
+        // either reads the same TerminalId here.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
-            && let Some(fid) = focused_pane.as_ref()
+            && let Some(fid) = ctx.layout_state.focus.as_ref()
             && let Some(slot) = panes.get_mut(fid)
         {
             use crate::predict::PredictionOutcome;
@@ -824,11 +883,20 @@ async fn dispatch_input_events(
                 predicted_any = true;
             }
         }
-        let Some(pane) = focused_pane.as_ref() else {
+        // phux-4li.6: INPUT_KEY / INPUT_FOCUS / INPUT_PASTE all target
+        // the client's focused pane (per ADR-0019 decision 6). Focus
+        // is canonically `layout_state.focus`; the driver-side
+        // `focused_pane` mirror stays in sync for the render path.
+        // When focus is unset (pre-ATTACHED), drop the event with a
+        // debug log instead of panicking — wave-A's "always Some
+        // post-ATTACHED" invariant is enforced by the seed in
+        // `handle_server_frame`, but a stray input race during
+        // bootstrap shouldn't take the loop down.
+        let Some(pane) = ctx.layout_state.focus.as_ref() else {
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
-        if let Some(frame) = ev.into_frame((*pane).clone()) {
+        if let Some(frame) = ev.into_frame(pane.clone()) {
             conn.send(&frame).await?;
         }
     }
