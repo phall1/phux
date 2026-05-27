@@ -31,7 +31,7 @@ use std::io::Write as _;
 
 use libghostty_vt::{
     RenderState, Terminal,
-    render::{CellIterator, CursorVisualStyle, RowIterator},
+    render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
     screen::CellWide,
     style::{RgbColor, Style},
     terminal::Mode,
@@ -92,7 +92,10 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // 1. Reset target: DECSTR (soft reset) + ED 2 (clear screen) + CUP home.
         out.extend_from_slice(b"\x1b[!p\x1b[2J\x1b[H");
 
-        // 2. Walk rows + cells, emitting SGR deltas and graphemes.
+        // 2. Walk rows + cells, emitting SGR deltas and graphemes. The
+        //    full-snapshot path paints every row unconditionally; the
+        //    incremental path consults `Row::dirty()`. The inner cell loop
+        //    is shared via [`emit_cell`].
         let mut prev_style: Option<Style> = None;
         let mut row_iter = self.rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
@@ -104,81 +107,184 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             write_cup(&mut out, row_index, 0);
             let mut cell_iter = self.cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
-                // Discriminate wide-cell tails (the right half of a
-                // double-width glyph) from genuinely-blank cells. The base
-                // grapheme on the wide cell already advanced the cursor
-                // across both columns, so the tail must NOT emit a space
-                // (which would clobber the right half of the wide glyph).
-                // See libghostty's `CellWide`: `SpacerTail` is documented
-                // as "do not render".
-                let wide = cell.raw_cell()?.wide()?;
-                if matches!(wide, CellWide::SpacerTail) {
-                    continue;
-                }
-
-                let graphemes = cell.graphemes()?;
-                if graphemes.is_empty() {
-                    // Genuinely blank cell — emit a space so the column
-                    // advances. (Wide-tail case was handled above.)
-                    out.push(b' ');
-                    continue;
-                }
-
-                let style = cell.style()?;
-                let fg = cell.fg_color()?;
-                let bg = cell.bg_color()?;
-                emit_sgr_delta(&mut out, prev_style.as_ref(), &style, fg, bg);
-                prev_style = Some(style);
-
-                for ch in &graphemes {
-                    let mut buf = [0u8; 4];
-                    out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                }
+                emit_cell(cell, &mut out, &mut prev_style)?;
             }
             row_index += 1;
         }
 
-        // 3. Reset SGR before cursor placement so the cursor's visual
-        // style isn't tainted by the last cell's attributes.
-        out.extend_from_slice(b"\x1b[0m");
-
-        // 4. Cursor position.
-        if let Some(viewport) = snapshot.cursor_viewport()? {
-            write_cup(&mut out, viewport.y, viewport.x);
-        } else {
-            // No viewport-resident cursor; leave at home.
-            out.extend_from_slice(b"\x1b[H");
-        }
-
-        // 5. Cursor visibility + visual style.
-        if snapshot.cursor_visible()? {
-            out.extend_from_slice(b"\x1b[?25h");
-        } else {
-            out.extend_from_slice(b"\x1b[?25l");
-        }
-        emit_cursor_style(
-            &mut out,
-            snapshot.cursor_visual_style()?,
-            snapshot.cursor_blinking()?,
-        );
-
-        // 6. A small set of mode bits queried from the canonical Terminal.
-        // ALT_SCREEN is the load-bearing one — a snapshot taken while the
-        // alt screen is active must put the receiving Terminal back into
-        // alt-screen mode so subsequent live bytes apply to the right
-        // surface. Bracketed paste and a handful of mouse modes are nice
-        // for fidelity. More modes can land here as needed.
-        emit_mode(&mut out, terminal, Mode::BRACKETED_PASTE, b"2004")?;
-        emit_mode(&mut out, terminal, Mode::FOCUS_EVENT, b"1004")?;
-        // Both legacy and modern alt-screen toggles map to libghostty's
-        // ALT_SCREEN_LEGACY (47) and the standard pair lives at 1049.
-        emit_mode(&mut out, terminal, Mode::ALT_SCREEN_LEGACY, b"47")?;
+        emit_epilogue(&mut out, &snapshot, terminal)?;
 
         Ok(SnapshotBytes {
             cols,
             rows: rows_n,
             bytes: out,
         })
+    }
+
+    /// Mark this consumer's `RenderState` as fully in sync with the
+    /// canonical [`Terminal`] — clears the snapshot-level dirty state and
+    /// every per-row dirty bit.
+    ///
+    /// Per ADR-0018 (Lazy state synchronization), this is the operation
+    /// the tick driver (phux-q0e.3) invokes when a `FRAME_ACK` for the
+    /// matching `seq` arrives from the consumer. It is deliberately
+    /// **not** called inside [`Self::synthesize_incremental`]: an unacked
+    /// diff must remain re-emittable so a lost packet causes the next
+    /// tick to re-diff against the same older reference rather than
+    /// returning a Clean-but-incorrect empty body.
+    pub fn mark_synced(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<(), SynthesisError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let rows_n = snapshot.rows()?;
+        // Walk rows and clear each dirty bit. The row-level clear is
+        // separate from the snapshot-level clear — see render.h's "Dirty
+        // Tracking" section: both must be reset to bring this consumer
+        // back to Clean on the next `update`.
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_n {
+                break;
+            }
+            row.set_dirty(false)?;
+            row_index += 1;
+        }
+        snapshot.set_dirty(Dirty::Clean)?;
+        Ok(())
+    }
+
+    /// Synthesize the **incremental** VT diff: the bytes that, applied via
+    /// `vt_write` to a mirror that's in sync with the per-consumer
+    /// `RenderState`'s last-acked reference, advance the mirror to match
+    /// the canonical [`Terminal`] now.
+    ///
+    /// Per ADR-0018 (Lazy state synchronization) and its 2026-05-26
+    /// Addendum, this is the per-tick emission primitive. It follows the
+    /// 5-step algorithm from `research/2026-05-26-state-sync-algorithm.md`
+    /// Dependencies §2:
+    ///
+    /// 1. `render_state.update(terminal)` to refresh dirty state.
+    /// 2. Consult [`Snapshot::dirty`]:
+    ///    - `Dirty::Clean` → empty `replay_bytes`.
+    ///    - `Dirty::Full` → identical output to [`Self::synthesize`] (fall
+    ///      back to the full reset + paint path).
+    ///    - `Dirty::Partial` → walk rows, skip those with
+    ///      `Row::dirty() == false`, CUP to each dirty row and emit the
+    ///      same per-cell loop the full path uses.
+    /// 3. Re-emit cursor position + visibility + visual style + mode bits.
+    /// 4. **Do not clear dirty bits.** The tick driver (phux-q0e.3)
+    ///    clears bits only when a `FRAME_ACK` arrives (phux-q0e.4). An
+    ///    unacked diff must remain re-emittable; that is the loss-tolerance
+    ///    invariant ADR-0018 rests on.
+    pub fn synthesize_incremental(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+    ) -> Result<SnapshotBytes, SynthesisError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let cols = snapshot.cols()?;
+        let rows_n = snapshot.rows()?;
+
+        // phux-l0t: `Snapshot::dirty()` returns `Err(InvalidValue)` on
+        // every `update` after the first against a re-used `RenderState`
+        // (libghostty FFI bug; see `phux-client/src/attach/render.rs`
+        // for the same workaround). Until phux-l0t lands, fall back to
+        // `Dirty::Full` whenever the FFI surfaces the error — that is
+        // strictly correct (re-emits a full reset + paint, which is the
+        // worst case bounded by the from-empty cost) and preserves the
+        // loss-tolerance invariant by structurally always emitting a
+        // body that brings any consumer to the canonical state. The
+        // first-call success path is preserved as a fast path: when
+        // `dirty()` happens to succeed and report `Clean`, we still
+        // emit an empty body.
+        let dirty = snapshot.dirty().unwrap_or(Dirty::Full);
+        match dirty {
+            Dirty::Clean => Ok(SnapshotBytes {
+                cols,
+                rows: rows_n,
+                bytes: Vec::new(),
+            }),
+            Dirty::Full => {
+                // Full reset + paint everything. Identical bytes to the
+                // existing [`Self::synthesize`] path; replicate the prologue
+                // here rather than re-entering `synthesize` so we keep
+                // `render_state` borrowed by `snapshot` for the row walk.
+                let mut out: Vec<u8> =
+                    Vec::with_capacity(usize::from(cols) * usize::from(rows_n) * 2);
+                out.extend_from_slice(b"\x1b[!p\x1b[2J\x1b[H");
+
+                let mut prev_style: Option<Style> = None;
+                let mut row_iter = self.rows.update(&snapshot)?;
+                let mut row_index: u16 = 0;
+                while let Some(row) = row_iter.next() {
+                    if row_index >= rows_n {
+                        break;
+                    }
+                    write_cup(&mut out, row_index, 0);
+                    let mut cell_iter = self.cells.update(row)?;
+                    while let Some(cell) = cell_iter.next() {
+                        emit_cell(cell, &mut out, &mut prev_style)?;
+                    }
+                    row_index += 1;
+                }
+
+                emit_epilogue(&mut out, &snapshot, terminal)?;
+                Ok(SnapshotBytes {
+                    cols,
+                    rows: rows_n,
+                    bytes: out,
+                })
+            }
+            Dirty::Partial => {
+                // Walk rows; emit only those whose `Row::dirty() == true`.
+                // No reset preamble — the mirror's state outside the dirty
+                // rows is unchanged.
+                let mut out: Vec<u8> = Vec::with_capacity(usize::from(cols) * usize::from(rows_n));
+                let mut prev_style: Option<Style> = None;
+                let mut row_iter = self.rows.update(&snapshot)?;
+                let mut row_index: u16 = 0;
+                while let Some(row) = row_iter.next() {
+                    if row_index >= rows_n {
+                        break;
+                    }
+                    // phux-l0t: `Row::dirty()` shares the same broken FFI
+                    // surface as `Snapshot::dirty()` on subsequent
+                    // updates. Treat an `Err` as "assume dirty" so we
+                    // strictly over-emit rather than under-emit. The
+                    // contract is preserved: on the success path we skip
+                    // genuinely-clean rows; on the failure path we repaint.
+                    if !row.dirty().unwrap_or(true) {
+                        row_index += 1;
+                        continue;
+                    }
+                    write_cup(&mut out, row_index, 0);
+                    let mut cell_iter = self.cells.update(row)?;
+                    while let Some(cell) = cell_iter.next() {
+                        emit_cell(cell, &mut out, &mut prev_style)?;
+                    }
+                    row_index += 1;
+                }
+
+                // Always re-emit the cursor + mode epilogue. Cursor
+                // position can change without any row being marked dirty
+                // (e.g. a bare CUP into a position whose cell is
+                // unchanged), and mode bits are diffed flat against the
+                // mirror's state, so we re-emit them on every non-empty
+                // tick to keep the algorithm simple. This matches the
+                // research note's step 3 + 4.
+                emit_epilogue(&mut out, &snapshot, terminal)?;
+
+                // CRITICAL: do not call `snapshot.set_dirty(Clean)` or
+                // `row.set_dirty(false)` here. The tick driver clears
+                // bits only when FRAME_ACK arrives; an unacked diff must
+                // stay re-emittable so the next tick can re-diff against
+                // the same older reference if this packet is lost.
+
+                Ok(SnapshotBytes {
+                    cols,
+                    rows: rows_n,
+                    bytes: out,
+                })
+            }
+        }
     }
 }
 
@@ -198,6 +304,98 @@ pub struct SnapshotBytes {
     pub rows: u16,
     /// VT byte sequence; opaque, mosh-style, fed to the client's `Terminal`.
     pub bytes: Vec<u8>,
+}
+
+/// Per-cell emission shared by the full ([`SnapshotSynthesizer::synthesize`])
+/// and incremental ([`SnapshotSynthesizer::synthesize_incremental`]) paths.
+///
+/// Tracks the active SGR pen via `prev_style`, skips wide-cell tails
+/// (`CellWide::SpacerTail`, see the comment in the body), and emits the
+/// cell's grapheme cluster (or a space for genuinely-blank cells).
+fn emit_cell(
+    cell: &CellIteration<'_, '_>,
+    out: &mut Vec<u8>,
+    prev_style: &mut Option<Style>,
+) -> Result<(), SynthesisError> {
+    // Discriminate wide-cell tails (the right half of a double-width
+    // glyph) from genuinely-blank cells. The base grapheme on the wide
+    // cell already advanced the cursor across both columns, so the tail
+    // must NOT emit a space (which would clobber the right half of the
+    // wide glyph). See libghostty's `CellWide`: `SpacerTail` is
+    // documented as "do not render".
+    let wide = cell.raw_cell()?.wide()?;
+    if matches!(wide, CellWide::SpacerTail) {
+        return Ok(());
+    }
+
+    let graphemes = cell.graphemes()?;
+    if graphemes.is_empty() {
+        // Genuinely blank cell — emit a space so the column advances.
+        // (Wide-tail case was handled above.)
+        out.push(b' ');
+        return Ok(());
+    }
+
+    let style = cell.style()?;
+    let fg = cell.fg_color()?;
+    let bg = cell.bg_color()?;
+    emit_sgr_delta(out, prev_style.as_ref(), &style, fg, bg);
+    *prev_style = Some(style);
+
+    for ch in &graphemes {
+        let mut buf = [0u8; 4];
+        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+    }
+    Ok(())
+}
+
+/// Post-row-walk epilogue shared by both synthesis paths: reset SGR,
+/// re-establish cursor position + visibility + visual style, and replay
+/// the load-bearing mode bits queried from the canonical [`Terminal`].
+///
+/// Identical to the tail of `synthesize` from before the
+/// full/incremental split was introduced.
+fn emit_epilogue(
+    out: &mut Vec<u8>,
+    snapshot: &Snapshot<'_, '_>,
+    terminal: &Terminal<'_, '_>,
+) -> Result<(), SynthesisError> {
+    // Reset SGR before cursor placement so the cursor's visual style
+    // isn't tainted by the last cell's attributes.
+    out.extend_from_slice(b"\x1b[0m");
+
+    // Cursor position.
+    if let Some(viewport) = snapshot.cursor_viewport()? {
+        write_cup(out, viewport.y, viewport.x);
+    } else {
+        // No viewport-resident cursor; leave at home.
+        out.extend_from_slice(b"\x1b[H");
+    }
+
+    // Cursor visibility + visual style.
+    if snapshot.cursor_visible()? {
+        out.extend_from_slice(b"\x1b[?25h");
+    } else {
+        out.extend_from_slice(b"\x1b[?25l");
+    }
+    emit_cursor_style(
+        out,
+        snapshot.cursor_visual_style()?,
+        snapshot.cursor_blinking()?,
+    );
+
+    // A small set of mode bits queried from the canonical Terminal.
+    // ALT_SCREEN is the load-bearing one — a snapshot taken while the
+    // alt screen is active must put the receiving Terminal back into
+    // alt-screen mode so subsequent live bytes apply to the right
+    // surface. Bracketed paste and a handful of mouse modes are nice
+    // for fidelity. More modes can land here as needed.
+    emit_mode(out, terminal, Mode::BRACKETED_PASTE, b"2004")?;
+    emit_mode(out, terminal, Mode::FOCUS_EVENT, b"1004")?;
+    // Both legacy and modern alt-screen toggles map to libghostty's
+    // ALT_SCREEN_LEGACY (47) and the standard pair lives at 1049.
+    emit_mode(out, terminal, Mode::ALT_SCREEN_LEGACY, b"47")?;
+    Ok(())
 }
 
 /// 1-based CUP (`CSI <r+1>;<c+1> H`). Inputs are zero-based.
