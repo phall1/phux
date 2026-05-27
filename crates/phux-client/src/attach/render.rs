@@ -72,12 +72,16 @@ impl<'alloc> TerminalRenderer<'alloc> {
         out: &mut impl Write,
     ) -> Result<Dirty, RenderError> {
         let snapshot = self.state.update(terminal)?;
-        // phux-l0t: libghostty's `snapshot.dirty()` returns `InvalidValue`
-        // on every other update in our usage pattern (Snapshot dropped +
-        // re-update), so we cannot trust dirty tracking. Treat every render
-        // as a full redraw until the underlying FFI behavior is understood.
-        // The first-call success path is preserved as a fallback: if dirty()
-        // happens to succeed and reports Clean, we can still skip.
+        // phux-l0t: upstream FFI bug in `libghostty-vt` (rev `31d1f70`).
+        // Any `Snapshot::set_dirty(_)` call poisons the next `dirty()`
+        // read with `Error::InvalidValue` (value-agnostic; root cause is
+        // `Snapshot::set` taking `*const *const T` where it wants
+        // `*const T`). See
+        // `crates/phux-server/tests/phux_l0t_dirty_diagnosis.rs` for the
+        // pinned repro. We `set_dirty(Clean)` at the end of this render
+        // (see below), so subsequent calls inevitably hit InvalidValue.
+        // The `.unwrap_or(Dirty::Full)` keeps us correct (full redraw,
+        // strictly safe) until upstream lands the one-character fix.
         let dirty = snapshot.dirty().unwrap_or(Dirty::Full);
 
         match dirty {

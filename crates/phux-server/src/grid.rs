@@ -132,6 +132,27 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// diff must remain re-emittable so a lost packet causes the next
     /// tick to re-diff against the same older reference rather than
     /// returning a Clean-but-incorrect empty body.
+    ///
+    /// # phux-l0t: load-bearing FFI bug
+    ///
+    /// Calling [`Snapshot::set_dirty`] (any value: Clean, Partial, or Full)
+    /// poisons the next `update`'s `Snapshot::dirty()` read with
+    /// `Error::InvalidValue` — an upstream FFI bug in `libghostty-vt`
+    /// (rev `31d1f70`) where `Snapshot::set` takes a pointer to the
+    /// reference instead of to the value. See
+    /// `crates/phux-server/tests/phux_l0t_dirty_diagnosis.rs` for the
+    /// pinned repro.
+    ///
+    /// Consequence: as long as q0e.3 invokes `mark_synced` on `FRAME_ACK`,
+    /// every subsequent `synthesize_incremental` call falls back to
+    /// `Dirty::Full` (because `snapshot.dirty()` returns `InvalidValue`
+    /// and the `.unwrap_or(Dirty::Full)` workaround kicks in). The
+    /// `Dirty::Clean` fast path is effectively dead until upstream lands
+    /// the one-character fix (`from_ref(&value)` -> `from_ref(value)`).
+    /// Functionally correct (over-emission, not under-emission), but
+    /// q0e.3's design must accept that `mark_synced` and the
+    /// `synthesize_incremental` Clean fast path are mutually exclusive
+    /// at present.
     pub fn mark_synced(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<(), SynthesisError> {
         let snapshot = self.render_state.update(terminal)?;
         let rows_n = snapshot.rows()?;
@@ -184,17 +205,16 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         let rows_n = snapshot.rows()?;
 
         // phux-l0t: `Snapshot::dirty()` returns `Err(InvalidValue)` on
-        // every `update` after the first against a re-used `RenderState`
-        // (libghostty FFI bug; see `phux-client/src/attach/render.rs`
-        // for the same workaround). Until phux-l0t lands, fall back to
-        // `Dirty::Full` whenever the FFI surfaces the error — that is
-        // strictly correct (re-emits a full reset + paint, which is the
-        // worst case bounded by the from-empty cost) and preserves the
-        // loss-tolerance invariant by structurally always emitting a
-        // body that brings any consumer to the canonical state. The
-        // first-call success path is preserved as a fast path: when
-        // `dirty()` happens to succeed and report `Clean`, we still
-        // emit an empty body.
+        // every `update` that follows a [`Snapshot::set_dirty`] call
+        // (e.g. inside [`Self::mark_synced`]) — upstream FFI bug in
+        // `libghostty-vt` (rev `31d1f70`). See
+        // `crates/phux-server/tests/phux_l0t_dirty_diagnosis.rs` for the
+        // pinned repro. Fall back to `Dirty::Full` whenever the FFI
+        // surfaces the error — strictly correct (re-emits a full reset +
+        // paint, the worst case bounded by the from-empty cost) and
+        // preserves the loss-tolerance invariant. The `Dirty::Clean`
+        // fast path below is effectively dead in any pipeline that calls
+        // `mark_synced` (FRAME_ACK path) until upstream fixes the bug.
         let dirty = snapshot.dirty().unwrap_or(Dirty::Full);
         match dirty {
             Dirty::Clean => Ok(SnapshotBytes {
@@ -245,12 +265,15 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                     if row_index >= rows_n {
                         break;
                     }
-                    // phux-l0t: `Row::dirty()` shares the same broken FFI
-                    // surface as `Snapshot::dirty()` on subsequent
-                    // updates. Treat an `Err` as "assume dirty" so we
-                    // strictly over-emit rather than under-emit. The
-                    // contract is preserved: on the success path we skip
-                    // genuinely-clean rows; on the failure path we repaint.
+                    // phux-l0t: `Row::dirty()` itself does not error,
+                    // but per the diagnostic in
+                    // `crates/phux-server/tests/phux_l0t_dirty_diagnosis.rs`
+                    // it reports `true` for every row on every update
+                    // once `mark_synced` (or any `Snapshot::set_dirty`
+                    // call) has poisoned the per-consumer `RenderState`.
+                    // Treat any `Err` as "assume dirty" defensively;
+                    // either way we strictly over-emit rather than
+                    // under-emit, so the loss-tolerance invariant holds.
                     if !row.dirty().unwrap_or(true) {
                         row_index += 1;
                         continue;
