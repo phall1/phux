@@ -680,4 +680,42 @@ mod tests {
             "synthesized bytes must not insert a space between wide glyphs (wide-tail bug)"
         );
     }
+
+    /// Companion to `synthesizer_skips_wide_cell_tails`: exercise the
+    /// wide-tail discriminator across a heterogeneous mix of CJK,
+    /// emoji, and ASCII on multiple rows. Each emoji codepoint
+    /// (e.g. `😀`, U+1F600) is double-width and produces a
+    /// `CellWide::SpacerTail` neighbor in libghostty's grid, the same
+    /// way CJK does. The round-trip must reproduce the source grid
+    /// cell-for-cell.
+    #[test]
+    fn synthesizer_round_trips_cjk_and_emoji() {
+        let mut a = fresh(20, 4);
+        // Row 0: CJK + ASCII. Row 1: pure emoji. Row 2: mixed
+        // emoji/ASCII. The CRLF sequences keep row layout deterministic.
+        a.vt_write("東 hello\r\n".as_bytes());
+        a.vt_write("😀😀😀\r\n".as_bytes());
+        a.vt_write("a😀b".as_bytes());
+
+        let src_grid = render_grid(&a);
+
+        let synth = synthesize(&a).expect("synth");
+        let mut b = fresh(synth.cols, synth.rows);
+        b.vt_write(&synth.bytes);
+
+        let dst_grid = render_grid(&b);
+        assert_eq!(
+            src_grid, dst_grid,
+            "CJK + emoji content must round-trip through the synthesizer"
+        );
+
+        // The source row containing `東` must carry the literal glyph,
+        // not a leading space that would indicate the wide tail leaked
+        // into the leading position.
+        assert!(
+            src_grid[0].starts_with('東'),
+            "source row 0 should start with 東, got {:?}",
+            src_grid[0]
+        );
+    }
 }
