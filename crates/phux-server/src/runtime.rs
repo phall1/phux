@@ -1142,14 +1142,14 @@ async fn resolve_attach_target(
             resolved
         }
         AttachTarget::Last => {
-            // Resolve against the global per-server "last attached
-            // session" slot (see ServerState::last_attached_session).
-            // If a prior attach exists and that session is still live
-            // in the registry, return its name; otherwise treat as
-            // "not found" — matches SPEC §13's allowance that
-            // "implementations without prior-attach memory MAY return
-            // SESSION_NOT_FOUND". We follow the same code path when
-            // the prior session has been killed since the last attach.
+            // Resolve against the global per-server "last touched
+            // session" order (see ServerState::touch_session). If a
+            // prior touch exists and that session is still live in the
+            // registry, return its name; otherwise treat as "not found"
+            // — matches SPEC §13's allowance that "implementations
+            // without prior-attach memory MAY return SESSION_NOT_FOUND".
+            // We follow the same code path when the prior session has
+            // been killed since the last touch.
             //
             // TODO(error-codes): introduce ErrorCode::NoLastSession
             // (and a sibling variant for "last session killed") so
@@ -1157,14 +1157,14 @@ async fn resolve_attach_target(
             // stale" without parsing the message string. Additive
             // ErrorCode work is intentionally out of scope here.
             let resolved = state.with(|s| {
-                s.last_attached_session()
+                s.most_recently_touched_session()
                     .and_then(|sid| s.registry.session(sid).map(|sess| sess.name.clone()))
             });
             if resolved.is_none() {
                 send_error(
                     out_tx,
                     ErrorCode::SessionNotFound,
-                    "no prior-attach memory: AttachTarget::Last has nothing to resolve",
+                    "no prior session activity: AttachTarget::Last has nothing to resolve",
                 )
                 .await;
             }
@@ -1643,13 +1643,13 @@ fn prepare_attach(
 ) -> Result<AttachPrepared, crate::state::AttachError> {
     state.with_mut(|s| {
         let sid = s.attach(client_id, session_name, out_tx.clone(), color_support)?;
-        // Record success into the global "last attached" slot before
-        // we build the snapshot. The order doesn't matter for
+        // Record successful attach as session activity before we build
+        // the snapshot. The order doesn't matter for
         // correctness (we're still inside the with_mut critical
         // section), but doing it here keeps the recording adjacent to
         // the attach call that justified it — easier to reason about
         // when reading the code.
-        s.set_last_attached_session(sid);
+        s.touch_session(sid);
         let snapshot = s
             .build_session_snapshot(sid)
             .ok_or_else(|| crate::state::AttachError::UnknownSession(session_name.to_owned()))?;
@@ -2081,6 +2081,7 @@ fn handle_terminal_input(
             );
             return;
         }
+        s.touch_session(session);
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
             warn!(
                 ?client_id,

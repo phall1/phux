@@ -224,24 +224,14 @@ pub struct ServerState {
     window_wire_reverse: HashMap<WireWindowId, WindowId>,
     next_window_wire_id: u32,
     next_client_id: u64,
-    /// The most-recently-attached session, used to resolve
+    /// Per-session last-touch order used to resolve
     /// [`phux_protocol::wire::frame::AttachTarget::Last`].
     ///
-    /// Recorded by the runtime ATTACH handler after a successful
-    /// `attach()` (any variant — `ByName`, `ById`, eventually `Last`
-    /// itself once chained re-attach exists). Stays `None` until the
-    /// first successful attach.
-    ///
-    /// **Memory model: global, per-server.** A single slot, shared
-    /// across all clients. Rationale: phux is single-user — the
-    /// canonical workflow is "attach → detach → attach again later"
-    /// from the same human. A global slot captures that intent with
-    /// minimum state. A per-client model would be more accurate when
-    /// multiple humans drive distinct connections, but that's not the
-    /// shipping workload; the field can be migrated to a per-connection
-    /// memory (e.g. carried on the per-client task's stack) without
-    /// changing the wire surface.
-    last_attached_session: Option<SessionId>,
+    /// Updated by the runtime after successful attach and after valid
+    /// input/focus dispatch. The value is a server-local monotonic
+    /// timestamp: ordering is the only observable contract.
+    session_last_touched: HashMap<SessionId, u64>,
+    next_touch_timestamp: u64,
     /// Per-scope K/V store backing SPEC §7.4 / §11.L3 metadata.
     ///
     /// Three independently-keyed maps mirror the three `Scope` variants
@@ -452,7 +442,8 @@ impl ServerState {
             window_wire_reverse: HashMap::new(),
             next_window_wire_id: 1,
             next_client_id: 1,
-            last_attached_session: None,
+            session_last_touched: HashMap::new(),
+            next_touch_timestamp: 1,
             metadata: MetadataStore::default(),
             client_layers: HashMap::new(),
             attach_create_seeds_pty: false,
@@ -619,23 +610,22 @@ impl ServerState {
         delivered
     }
 
-    /// Most-recently-attached session, if any. Resolves
-    /// `AttachTarget::Last`. Returns the raw [`SessionId`] without
-    /// validating that the session is still live — callers must
-    /// re-check against the registry (a session may have been killed
-    /// between the prior attach and this lookup).
+    /// Most-recently-touched live session, if any. Resolves
+    /// `AttachTarget::Last`.
     #[must_use]
-    pub const fn last_attached_session(&self) -> Option<SessionId> {
-        self.last_attached_session
+    pub fn most_recently_touched_session(&self) -> Option<SessionId> {
+        self.session_last_touched
+            .iter()
+            .filter(|(sid, _)| self.registry.session(**sid).is_some())
+            .max_by_key(|(_, touched_at)| *touched_at)
+            .map(|(sid, _)| *sid)
     }
 
-    /// Record `session` as the most-recently-attached session. Called
-    /// by the runtime ATTACH handler after a successful attach.
-    ///
-    /// Overwrites unconditionally — the contract is "last", not
-    /// "first" or "most-popular".
-    pub const fn set_last_attached_session(&mut self, session: SessionId) {
-        self.last_attached_session = Some(session);
+    /// Mark `session` as touched by attach/input/focus activity.
+    pub fn touch_session(&mut self, session: SessionId) {
+        let touched_at = self.next_touch_timestamp;
+        self.next_touch_timestamp = self.next_touch_timestamp.saturating_add(1);
+        self.session_last_touched.insert(session, touched_at);
     }
 
     /// Allocate the next monotonic [`ClientId`].
@@ -1269,20 +1259,22 @@ mod tests {
     }
 
     #[test]
-    fn last_attached_session_starts_none_and_round_trips() {
+    fn most_recently_touched_session_starts_none_and_tracks_touch_order() {
         let mut s = ServerState::new();
         assert!(
-            s.last_attached_session().is_none(),
-            "fresh state has no prior-attach memory",
+            s.most_recently_touched_session().is_none(),
+            "fresh state has no prior activity memory",
         );
         let (sid, _wid, _pid) = s.seed_session("default");
-        s.set_last_attached_session(sid);
-        assert_eq!(s.last_attached_session(), Some(sid));
+        s.touch_session(sid);
+        assert_eq!(s.most_recently_touched_session(), Some(sid));
 
-        // Overwrite semantics: setting again replaces the previous slot.
+        // Later touches win, regardless of attach order.
         let (sid2, _w, _p) = s.seed_session("other");
-        s.set_last_attached_session(sid2);
-        assert_eq!(s.last_attached_session(), Some(sid2));
+        s.touch_session(sid2);
+        assert_eq!(s.most_recently_touched_session(), Some(sid2));
+        s.touch_session(sid);
+        assert_eq!(s.most_recently_touched_session(), Some(sid));
     }
 
     #[test]

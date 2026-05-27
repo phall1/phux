@@ -1,6 +1,6 @@
 //! Wire-level integration tests for `AttachTarget::Last`.
 //!
-//! These tests exercise the SPEC §13 "most-recently-attached session"
+//! These tests exercise the SPEC §13 "most-recently-focused session"
 //! resolution end-to-end:
 //!
 //! 1. `last_resolves_to_prior_attach`: ATTACH by name → success;
@@ -22,8 +22,9 @@
 
 mod common;
 
+use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, ViewportInfo,
+    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, TYPE_PONG, ViewportInfo,
 };
 use tempfile::TempDir;
 
@@ -43,30 +44,56 @@ const fn attach_last() -> FrameKind {
     }
 }
 
+fn attach_create_if_missing(name: &str) -> FrameKind {
+    FrameKind::Attach {
+        target: AttachTarget::CreateIfMissing {
+            name: name.to_owned(),
+            command: None,
+            cwd: None,
+        },
+        viewport: ViewportInfo::new(80, 24),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
+    }
+}
+
 /// Drain the per-attach response sequence: ATTACHED then one
 /// `TERMINAL_SNAPSHOT` per pane in the focused window. The server pre-seeds
 /// exactly one pane, so we read both frames and assert types.
-async fn drain_successful_attach(stream: &mut tokio::net::UnixStream, expected_name: &str) {
+async fn drain_successful_attach(
+    stream: &mut tokio::net::UnixStream,
+    expected_name: &str,
+) -> phux_protocol::ids::TerminalId {
     let (type_byte, frame) = recv_typed(stream).await;
     assert_eq!(
         type_byte, TYPE_ATTACHED,
         "first server-to-client frame must be ATTACHED (got 0x{type_byte:02x})",
     );
-    match frame {
+    let focused_pane = match frame {
         FrameKind::Attached { snapshot, .. } => {
-            assert_eq!(snapshot.sessions.len(), 1, "exactly one session");
-            assert_eq!(
-                snapshot.sessions[0].name, expected_name,
-                "ATTACHED.snapshot.sessions[0].name",
-            );
+            let focused = snapshot
+                .sessions
+                .iter()
+                .find(|session| session.id == snapshot.focused_session)
+                .expect("focused session must be listed in snapshot");
+            assert_eq!(focused.name, expected_name, "focused session name");
+            snapshot.focused_pane
         }
         other => panic!("expected FrameKind::Attached, got {other:?}"),
-    }
+    };
 
     // One TERMINAL_SNAPSHOT follows. We don't inspect its body; the
     // round-trip / dim assertions live in byc_6_1. Just consume it so
     // subsequent reads see a clean stream boundary.
     let (_type_byte, _snap_frame) = recv_typed(stream).await;
+    focused_pane
+}
+
+async fn round_trip_ping(stream: &mut tokio::net::UnixStream, nonce: u64) {
+    send_frame(stream, &FrameKind::Ping { nonce }).await;
+    let framed = common::recv_framed(stream).await;
+    assert_eq!(framed[4], TYPE_PONG, "PING must receive PONG");
+    assert_eq!(&framed[5..13], &nonce.to_be_bytes());
 }
 
 #[test]
@@ -77,7 +104,7 @@ fn last_resolves_to_prior_attach() {
         let (shutdown_tx, server_handle) = spawn_server(socket_path.clone(), Some("default"));
 
         // First connection: ATTACH by name. This populates the
-        // server-side `last_attached_session` slot.
+        // server-side last-touched session order.
         {
             let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
             send_frame(&mut stream, &attach_by_name("default")).await;
@@ -92,6 +119,43 @@ fn last_resolves_to_prior_attach() {
         drain_successful_attach(&mut stream, "default").await;
 
         drop(stream);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn last_resolves_to_most_recently_focused_not_last_attached() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone(), Some("default"));
+
+        let mut default_stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut default_stream, &attach_by_name("default")).await;
+        let default_pane = drain_successful_attach(&mut default_stream, "default").await;
+
+        let mut other_stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut other_stream, &attach_create_if_missing("other")).await;
+        drain_successful_attach(&mut other_stream, "other").await;
+
+        send_frame(
+            &mut default_stream,
+            &FrameKind::InputFocus {
+                terminal_id: default_pane,
+                event: FocusEvent::Gained,
+            },
+        )
+        .await;
+        round_trip_ping(&mut default_stream, 0xA11C_E5ED).await;
+
+        let mut last_stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut last_stream, &attach_last()).await;
+        drain_successful_attach(&mut last_stream, "default").await;
+
+        drop(last_stream);
+        drop(other_stream);
+        drop(default_stream);
         shutdown_tx.send(()).ok();
         server_handle.await.unwrap().unwrap();
     });

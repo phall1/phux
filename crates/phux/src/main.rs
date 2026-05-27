@@ -71,7 +71,7 @@ enum Command {
     Attach {
         /// Session name (matches the name used at creation time).
         ///
-        /// Omit to attach to the most-recently-attached session.
+        /// Omit to attach to the most-recently-focused session.
         session: Option<String>,
 
         /// Override the UDS path. Defaults to `$XDG_RUNTIME_DIR/phux/phux.sock`
@@ -137,8 +137,8 @@ fn main() -> ExitCode {
 /// 1. If the socket is missing, fork-exec ourselves as `phux server`
 ///    (which pre-seeds the [`DEFAULT_SESSION_NAME`] session) and wait
 ///    for the socket to bind. Reuses [`maybe_auto_spawn_server`].
-/// 2. Attempt `ATTACH { target: Last }`. On a server with prior-attach
-///    memory this resolves to the most-recently-attached session,
+/// 2. Attempt `ATTACH { target: Last }`. On a server with prior session
+///    activity this resolves to the most-recently-focused session,
 ///    matching DESIGN.md §1's "attach to default session" intent.
 /// 3. If `Last` is refused with no prior-attach memory (which is the
 ///    case on a freshly spawned server, or one whose only prior client
@@ -184,8 +184,8 @@ fn run_naked() -> ExitCode {
     };
 
     // Step 1: try Last. The server resolves this to the most-recently-
-    // attached session and falls back to SessionNotFound when prior-
-    // attach memory is empty.
+    // focused session and falls back to SessionNotFound when prior
+    // activity memory is empty.
     let last_result = rt.block_on(run_attach_once(
         &socket_path,
         AttachTarget::Last,
