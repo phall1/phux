@@ -35,9 +35,12 @@ pub mod actions;
 pub mod connection;
 pub mod driver;
 pub mod input;
+pub mod input_dispatch;
 pub mod multi_pane;
+pub mod paint;
 pub mod reflow;
 pub mod render;
+pub mod server_frame;
 pub mod status_bar;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
