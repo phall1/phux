@@ -48,13 +48,17 @@
 //!    because we paint the overlay *after* the renderer flushes, so the
 //!    next renderer pass cleanly stomps it on reconciliation.
 //!
-//! # Safety classes (v1.1)
+//! # Safety classes (v1.3+1.4)
 //!
-//! Three key classes are predicted today:
+//! Five key classes are predicted today:
 //!
-//! - Printable ASCII (`0x20..=0x7E`). The server's terminal will echo
-//!   exactly one cell of advance for each — the prediction is a
-//!   one-character forward step at the cursor.
+//! - Single-Unicode-scalar `text` payload (width 1 or 2 per
+//!   `unicode-width`), no Ctrl / Alt / Super modifier. The server's
+//!   terminal will echo exactly one grapheme of advance for each — the
+//!   prediction is a forward step by the grapheme's cell width
+//!   (phux-9gw.1.4). Width 0 (combining marks) and multi-scalar
+//!   graphemes (ZWJ sequences) are still rejected; they need cluster
+//!   awareness which is a separate follow-up.
 //! - Backspace (`PhysicalKey::Backspace`) **at end-of-line**, defined as
 //!   "the cell to the left of the cursor is non-empty and the cursor is
 //!   not at column 0". A naïve backspace prediction over a wrapped line,
@@ -69,13 +73,20 @@
 //!   the authoritative cursor advances past the original row;
 //!   contradicts (drop) if the server stayed put (program intercepted
 //!   the keystroke, e.g. password prompt swallow).
+//! - `ArrowLeft` / `ArrowRight` **over a known cell on the current line**
+//!   (phux-9gw.1.3). The predict layer peeks at the cell grid via
+//!   `read_grapheme_at` and advances/retreats the predict cursor by the
+//!   stepped-over grapheme's cell width. Skipped if the cell is blank
+//!   (no anchor) or if the motion would cross the viewport edge. No
+//!   overlay paint — reconcile confirms when the authoritative cursor
+//!   matches the predicted target column.
 //!
-//! Everything else — arrow keys, control chords, function keys, Tab,
-//! Alt-chords, IME composition, UTF-8 multi-byte, full-line backspace
+//! Everything else — arrow keys at line boundaries, control chords,
+//! function keys, Tab, Alt-chords, IME composition, multi-codepoint
+//! graphemes (ZWJ sequences, combining marks), full-line backspace
 //! from a known prompt — is not predicted. They are still sent upstream
-//! as normal; only the local echo is skipped. Follow-up tickets
-//! (phux-9gw.1.1 deferrals) widen the safe set further once the
-//! reconcile path has miles on it.
+//! as normal; only the local echo is skipped. Follow-up tickets widen
+//! the safe set further once the reconcile path has miles on it.
 //!
 //! # Off by default
 //!

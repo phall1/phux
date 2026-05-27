@@ -48,10 +48,14 @@ impl Overlay {
     pub fn render(&self, state: &PredictionState, out: &mut impl Write) -> io::Result<usize> {
         let mut count = 0;
         for p in state.pending() {
-            // Newline predictions are pure cursor-motion guesses; the
-            // overlay paints no cell for them. Reconcile will still
-            // consume the prediction when the server's cursor advances.
-            if matches!(p.kind, PredictionKind::Newline) {
+            // Pure cursor-motion predictions paint no cell. Reconcile
+            // consumes them when the authoritative cursor catches up.
+            // (Newline = Enter at EOL; CursorLeft/Right = arrow over a
+            // known cell on the current line, phux-9gw.1.3.)
+            if matches!(
+                p.kind,
+                PredictionKind::Newline | PredictionKind::CursorLeft | PredictionKind::CursorRight
+            ) {
                 continue;
             }
             write_cup(out, p.row, p.col)?;

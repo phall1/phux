@@ -14,6 +14,7 @@
 use std::collections::VecDeque;
 
 use phux_protocol::input::key::{KeyEvent, ModSet, PhysicalKey};
+use unicode_width::UnicodeWidthChar;
 
 /// Per-client knob for predictive echo.
 ///
@@ -48,12 +49,22 @@ impl PredictiveConfig {
 pub struct Prediction {
     /// Row of the cell, 0-indexed from the top of the viewport.
     pub row: u16,
-    /// Column of the cell, 0-indexed.
+    /// Column of the cell, 0-indexed. For cursor-motion predictions
+    /// ([`PredictionKind::CursorLeft`] / [`PredictionKind::CursorRight`])
+    /// this is the *target* column after the motion — the predict-side
+    /// cursor has been moved there already and reconcile confirms when
+    /// the authoritative cursor catches up to it.
     pub col: u16,
     /// What the prediction wants the cell to display. For backspace
     /// predictions this is a single space (`' '`) — visually "erase".
+    /// For cursor-motion predictions this is a placeholder space; the
+    /// overlay paints no cell for them.
     pub ch: char,
-    /// Kind of prediction, for reconciliation diagnostics + the future
+    /// Cell width of [`Self::ch`], in columns. `1` for ASCII and most
+    /// scripts, `2` for CJK / wide emoji (phux-9gw.1.4). Cursor-motion
+    /// and `Newline` predictions store `0` — they paint no cell.
+    pub width: u8,
+    /// Kind of prediction, for reconciliation diagnostics + the
     /// per-class confirm/contradict bookkeeping.
     pub kind: PredictionKind,
 }
@@ -77,6 +88,14 @@ pub enum PredictionKind {
     /// inserts on the next row anchor correctly. Reconcile confirms
     /// when the authoritative cursor has advanced past `pred.row`.
     Newline,
+    /// Left arrow over a known cell on the current line (phux-9gw.1.3).
+    /// Paints no overlay; reconcile confirms when the authoritative
+    /// cursor matches `(pred.row, pred.col)`.
+    CursorLeft,
+    /// Right arrow over a known cell on the current line (phux-9gw.1.3).
+    /// Paints no overlay; reconcile confirms when the authoritative
+    /// cursor matches `(pred.row, pred.col)`.
+    CursorRight,
 }
 
 /// What [`PredictionState::predict_key`] decided about a key event.
@@ -215,12 +234,40 @@ impl PredictionState {
     ///
     /// Safe classes (see module docs):
     ///
-    /// - Printable ASCII single-character `text` payload, no Ctrl / Alt /
+    /// - Single-Unicode-scalar `text` payload (any printable code point
+    ///   with cell width 1 or 2 per `unicode-width`), no Ctrl / Alt /
     ///   Super modifier active. SHIFT is fine (it's part of producing the
     ///   character).
     /// - `PhysicalKey::Backspace`, no modifier, when the cursor is past
     ///   column 0 and below the last column.
+    /// - `PhysicalKey::Enter`, no modifier, past column 0 and on a row
+    ///   that is not the last viewport row.
+    ///
+    /// Cursor-motion arrow predictions ([`PhysicalKey::ArrowLeft`] /
+    /// [`PhysicalKey::ArrowRight`]) require a peek at the cell grid so
+    /// the predict layer knows the width of the grapheme being stepped
+    /// over; they are routed through [`Self::predict_key_with_grid`].
+    /// This entry point skips arrows.
     pub fn predict_key(&mut self, event: &KeyEvent) -> PredictionOutcome {
+        self.predict_key_with_grid(event, |_, _| None)
+    }
+
+    /// Same as [`Self::predict_key`] but with a read closure into the
+    /// authoritative cell grid. Used by the attach driver, which has
+    /// the libghostty `Terminal` + `TerminalRenderer` on hand and can
+    /// supply a per-cell grapheme lookup via `read_grapheme_at`.
+    ///
+    /// The closure is invoked at most once per call, only when a
+    /// cursor-motion arrow needs to know the width of the grapheme it
+    /// would step over.
+    pub fn predict_key_with_grid<F>(
+        &mut self,
+        event: &KeyEvent,
+        mut read_cell: F,
+    ) -> PredictionOutcome
+    where
+        F: FnMut(u16, u16) -> Option<char>,
+    {
         if !self.cfg.enabled {
             return PredictionOutcome::Disabled;
         }
@@ -242,6 +289,12 @@ impl PredictionState {
         if event.key == PhysicalKey::Enter {
             return self.predict_enter();
         }
+        if event.key == PhysicalKey::ArrowLeft {
+            return self.predict_arrow_left(&mut read_cell);
+        }
+        if event.key == PhysicalKey::ArrowRight {
+            return self.predict_arrow_right(&mut read_cell);
+        }
 
         // Printable single-char insert.
         let Some(text) = event.text.as_deref() else {
@@ -249,12 +302,17 @@ impl PredictionState {
         };
         let mut chars = text.chars();
         let (Some(ch), None) = (chars.next(), chars.next()) else {
+            // Multi-codepoint grapheme (ZWJ sequence, combining marks).
+            // Deferred — phux-9gw.1.4 ships single-scalar only.
             return PredictionOutcome::Skipped;
         };
-        if !is_safe_printable(ch) {
+        if !is_safe_predictable(ch) {
             return PredictionOutcome::Skipped;
         }
-        self.predict_insert(ch)
+        let Some(width) = grapheme_width(ch) else {
+            return PredictionOutcome::Skipped;
+        };
+        self.predict_insert(ch, width)
     }
 
     /// Predict an Enter keystroke as a cursor jump to `(row+1, 0)`.
@@ -283,6 +341,7 @@ impl PredictionState {
             row: pred_row,
             col: self.cursor_col,
             ch: '\n',
+            width: 0,
             kind: PredictionKind::Newline,
         });
         // Advance the cursor estimate so subsequent inserts queue on the
@@ -292,23 +351,30 @@ impl PredictionState {
         PredictionOutcome::Predicted
     }
 
-    fn predict_insert(&mut self, ch: char) -> PredictionOutcome {
-        // Conservative: refuse to predict at the rightmost column. The
-        // server may wrap, may scroll, may stay (DECAWM off) — we don't
-        // know which from here. The next reconcile will resync.
-        if self.cols == 0 || self.cursor_col + 1 >= self.cols {
+    fn predict_insert(&mut self, ch: char, width: u8) -> PredictionOutcome {
+        if self.cols == 0 || self.rows == 0 || self.cursor_row >= self.rows {
             return PredictionOutcome::Skipped;
         }
-        if self.rows == 0 || self.cursor_row >= self.rows {
+        // Conservative: refuse to predict at or past the rightmost column.
+        // The server may wrap, may scroll, may stay (DECAWM off) — we
+        // don't know which from here. For width-2 graphemes we also need
+        // the *next* column to fit. The next reconcile will resync.
+        let advance = u16::from(width);
+        if advance == 0 {
+            return PredictionOutcome::Skipped;
+        }
+        let end_col = self.cursor_col.saturating_add(advance);
+        if end_col >= self.cols {
             return PredictionOutcome::Skipped;
         }
         self.pending.push_back(Prediction {
             row: self.cursor_row,
             col: self.cursor_col,
             ch,
+            width,
             kind: PredictionKind::Insert,
         });
-        self.cursor_col = self.cursor_col.saturating_add(1);
+        self.cursor_col = end_col;
         PredictionOutcome::Predicted
     }
 
@@ -326,18 +392,139 @@ impl PredictionState {
             row: self.cursor_row,
             col: new_col,
             ch: ' ',
+            width: 1,
             kind: PredictionKind::BackspaceEol,
+        });
+        self.cursor_col = new_col;
+        PredictionOutcome::Predicted
+    }
+
+    /// Predict a left-arrow keystroke (phux-9gw.1.3).
+    ///
+    /// Reads the cell immediately to the left of the predict cursor via
+    /// `read_cell`. If that cell has a known grapheme we retreat by its
+    /// cell width; if the cell is blank we refuse to predict — we have
+    /// no anchor to know whether the cursor would land on the prompt,
+    /// on a wide grapheme's tail, or on blank text. Refuses at column 0.
+    fn predict_arrow_left<F>(&mut self, read_cell: &mut F) -> PredictionOutcome
+    where
+        F: FnMut(u16, u16) -> Option<char>,
+    {
+        if self.cursor_col == 0 {
+            return PredictionOutcome::Skipped;
+        }
+        if self.rows == 0 || self.cursor_row >= self.rows {
+            return PredictionOutcome::Skipped;
+        }
+        let probe_col = self.cursor_col - 1;
+        let Some(ch) = read_cell(self.cursor_row, probe_col) else {
+            return PredictionOutcome::Skipped;
+        };
+        let Some(width) = grapheme_width(ch) else {
+            return PredictionOutcome::Skipped;
+        };
+        let advance = u16::from(width);
+        if advance == 0 {
+            return PredictionOutcome::Skipped;
+        }
+        // Width-2 case: the grapheme's base cell is at `probe_col - 1`
+        // and the tail occupies `probe_col`. We want to land the cursor
+        // on the base. Refuse if that would go below 0.
+        let new_col = if advance == 1 {
+            probe_col
+        } else if self.cursor_col >= advance {
+            self.cursor_col - advance
+        } else {
+            return PredictionOutcome::Skipped;
+        };
+        self.pending.push_back(Prediction {
+            row: self.cursor_row,
+            col: new_col,
+            ch: ' ',
+            width: 0,
+            kind: PredictionKind::CursorLeft,
+        });
+        self.cursor_col = new_col;
+        PredictionOutcome::Predicted
+    }
+
+    /// Predict a right-arrow keystroke (phux-9gw.1.3).
+    ///
+    /// Reads the cell at the predict cursor. If that cell has a known
+    /// grapheme we advance by its cell width; blank → refuse. Refuses
+    /// past the right edge.
+    fn predict_arrow_right<F>(&mut self, read_cell: &mut F) -> PredictionOutcome
+    where
+        F: FnMut(u16, u16) -> Option<char>,
+    {
+        if self.cols == 0 || self.cursor_col >= self.cols {
+            return PredictionOutcome::Skipped;
+        }
+        if self.rows == 0 || self.cursor_row >= self.rows {
+            return PredictionOutcome::Skipped;
+        }
+        let Some(ch) = read_cell(self.cursor_row, self.cursor_col) else {
+            return PredictionOutcome::Skipped;
+        };
+        let Some(width) = grapheme_width(ch) else {
+            return PredictionOutcome::Skipped;
+        };
+        let advance = u16::from(width);
+        if advance == 0 {
+            return PredictionOutcome::Skipped;
+        }
+        let new_col = self.cursor_col.saturating_add(advance);
+        // Refuse to land at or past the rightmost column — same
+        // wrap-conservatism as `predict_insert`.
+        if new_col >= self.cols {
+            return PredictionOutcome::Skipped;
+        }
+        self.pending.push_back(Prediction {
+            row: self.cursor_row,
+            col: new_col,
+            ch: ' ',
+            width: 0,
+            kind: PredictionKind::CursorRight,
         });
         self.cursor_col = new_col;
         PredictionOutcome::Predicted
     }
 }
 
-/// Printable ASCII (excluding DEL and space-as-control). Space (`0x20`)
-/// is included — predicting "user typed a space" is a common case.
-const fn is_safe_printable(ch: char) -> bool {
+/// Reject control codes (anything below 0x20 except space, plus DEL).
+/// Everything above U+007E is delegated to [`grapheme_width`] — the
+/// `unicode-width` lookup correctly classifies combining marks as
+/// width 0 (skipped) and CJK / wide emoji as width 2.
+const fn is_safe_predictable(ch: char) -> bool {
     let c = ch as u32;
-    c >= 0x20 && c <= 0x7E
+    // ASCII control range (0x00..=0x1F) and DEL (0x7F) are not safe to
+    // predict; the shell may or may not echo them depending on stty
+    // settings, and even space-as-character is fine because c == 0x20.
+    if c < 0x20 {
+        return false;
+    }
+    if c == 0x7F {
+        return false;
+    }
+    true
+}
+
+/// Cell width of a single Unicode scalar value, in terminal columns.
+/// Returns `None` for non-printable code points (`UnicodeWidthChar`
+/// returns `None` for control codes).
+///
+/// Width is capped at 2 — `unicode-width` never returns more than 2
+/// for a single scalar, but the explicit cap defends against a future
+/// crate-rev change.
+fn grapheme_width(ch: char) -> Option<u8> {
+    let w = UnicodeWidthChar::width(ch)?;
+    if w == 0 {
+        // Combining marks, zero-width joiners, variation selectors —
+        // these need a base grapheme cluster, which is a multi-scalar
+        // case we defer (phux-9gw.1.4 ships single-scalar only).
+        return None;
+    }
+    Some(u8::try_from(w.min(2)).unwrap_or(1))
 }
 
 #[cfg(test)]
@@ -539,11 +726,168 @@ mod tests {
     }
 
     #[test]
-    fn multibyte_text_is_not_predicted_v0() {
-        // U+00E9 — single codepoint but we conservatively only predict
-        // ASCII for v0. Widen later.
+    fn single_scalar_latin1_is_predicted_width_one() {
+        // U+00E9 — single Unicode scalar, cell width 1 per
+        // `unicode-width`. phux-9gw.1.4: predict it as a single-cell insert.
         let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let ev = key_text("é");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.ch, 'é');
+        assert_eq!(p.width, 1);
+        assert_eq!(s.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn cjk_codepoint_is_predicted_width_two() {
+        // U+4E2D 中 — CJK Unified Ideograph, cell width 2.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_text("中");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.ch, '中');
+        assert_eq!(p.width, 2);
+        // Width-2 grapheme advances the cursor by two columns.
+        assert_eq!(s.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn cjk_at_right_edge_minus_one_is_not_predicted() {
+        // Width-2 needs two free cells. Park the predict cursor one
+        // before the last column on a 10-wide viewport: cols 0..9, last
+        // col is 9; cursor at 8 → end_col would be 10, which is past
+        // the rightmost column we permit (insert refuses at `>= cols`).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 10, 24);
+        s.set_cursor(0, 8);
+        let ev = key_text("中");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn combining_mark_alone_is_not_predicted() {
+        // U+0301 COMBINING ACUTE ACCENT — width 0, no base grapheme on
+        // its own. We defer multi-scalar graphemes; reject this case.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_text("\u{0301}");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn multi_scalar_grapheme_is_not_predicted() {
+        // "👨\u{200D}💻" — ZWJ-joined emoji sequence. Two scalars in
+        // `text` → we reject (single-scalar only for now).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_text("e\u{0301}");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn arrow_left_over_known_cell_advances_predict_cursor() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        // Cell at (0, 4) is 'a' (width 1).
+        let ev = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        let outcome =
+            s.predict_key_with_grid(&ev, |r, c| if (r, c) == (0, 4) { Some('a') } else { None });
+        assert_eq!(outcome, PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 4));
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.kind, PredictionKind::CursorLeft);
+        assert_eq!(p.col, 4);
+        assert_eq!(p.row, 0);
+    }
+
+    #[test]
+    fn arrow_left_over_blank_cell_is_not_predicted() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        let ev = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        let outcome = s.predict_key_with_grid(&ev, |_, _| None);
+        assert_eq!(outcome, PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn arrow_left_at_col_zero_is_not_predicted() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        let outcome = s.predict_key_with_grid(&ev, |_, _| Some('a'));
+        assert_eq!(outcome, PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn arrow_right_over_known_cell_advances_predict_cursor() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        let outcome =
+            s.predict_key_with_grid(&ev, |r, c| if (r, c) == (0, 3) { Some('x') } else { None });
+        assert_eq!(outcome, PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 4));
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.kind, PredictionKind::CursorRight);
+        assert_eq!(p.col, 4);
+    }
+
+    #[test]
+    fn arrow_right_over_blank_cell_is_not_predicted() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        let outcome = s.predict_key_with_grid(&ev, |_, _| None);
+        assert_eq!(outcome, PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn arrow_right_at_right_edge_is_not_predicted() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 10, 24);
+        s.set_cursor(0, 9);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        // Cursor at col 9 (== cols-1) with cells 0..9 valid; advancing
+        // by 1 would land at 10 (past the right edge) — refuse.
+        let outcome = s.predict_key_with_grid(&ev, |_, _| Some('x'));
+        assert_eq!(outcome, PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn arrow_right_over_wide_at_right_edge_minus_one_is_not_predicted() {
+        // Width-2 advance needs two cells to the right. Cursor at col 7
+        // with cols=10: end_col would be 9 (allowed for plain insert
+        // but the wide-tail would land at col 8 — that's still within
+        // bounds). The real refusal case is cursor at col 8: end_col
+        // would be 10 (past the right edge for a width-2 grapheme).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 10, 24);
+        s.set_cursor(0, 8);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        let outcome = s.predict_key_with_grid(&ev, |_, _| Some('中'));
+        assert_eq!(outcome, PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn arrow_right_over_wide_grapheme_advances_by_two() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        let outcome =
+            s.predict_key_with_grid(&ev, |r, c| if (r, c) == (0, 3) { Some('中') } else { None });
+        assert_eq!(outcome, PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 5));
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.col, 5);
+    }
+
+    #[test]
+    fn arrow_via_predict_key_default_grid_is_skipped() {
+        // The plain `predict_key` entry point routes arrows through a
+        // grid closure that always returns `None` — arrows are only
+        // useful when the driver passes the live grid via
+        // `predict_key_with_grid`. Verify the conservative default
+        // even when the cursor is past col 0.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        let ev = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+        let ev = key_named(PhysicalKey::ArrowRight, ModSet::empty());
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
     }
 

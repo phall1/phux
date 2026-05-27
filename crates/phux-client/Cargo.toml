@@ -44,6 +44,14 @@ bytes.workspace = true
 # pulls its own event loop we don't use). Only the `termios` feature group
 # is enabled; rustix's default crate-feature set is opt-in beyond that.
 rustix = { version = "0.38", default-features = false, features = ["std", "termios"] }
+# phux-9gw.1.4: width-aware UTF-8 prediction. The predict layer must
+# know how many terminal cells a Unicode scalar consumes before
+# queueing a prediction — width 0 (combining) is skipped, width 1
+# advances the cursor by one column, width 2 (CJK / wide emoji)
+# advances by two. `unicode-width` is the canonical zero-dep crate for
+# this (Unicode 16, single small table); no alternative ships both
+# EAW and emoji presentation tables.
+unicode-width = { workspace = true }
 
 [dev-dependencies]
 phux-server.workspace = true

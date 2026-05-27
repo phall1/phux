@@ -34,6 +34,7 @@
 //! | `Insert` | cell base grapheme == `ch` | cell is blank (no grapheme or `' '`) | cell has any other grapheme |
 //! | `BackspaceEol` | cell is blank | cell is blank | cell has any grapheme |
 //! | `Newline` | `cursor.row > pred.row` | never (instantaneous) | `cursor.row <= pred.row` |
+//! | `CursorLeft` / `CursorRight` | `cursor == (pred.row, pred.col)` | cursor is still on `pred.row` and (Left: `cursor.col > pred.col`, Right: `cursor.col < pred.col`) — server hasn't caught up | otherwise |
 //!
 //! `BackspaceEol`'s "blank or blank" collapse is intentional: a backspace
 //! prediction predicts that the cell becomes blank, so a blank cell post-
@@ -117,6 +118,8 @@ where
                 classify_backspace(actual)
             }
             PredictionKind::Newline => classify_newline(row, cursor_row),
+            PredictionKind::CursorLeft => classify_cursor_left(row, col, cursor_row, cursor_col),
+            PredictionKind::CursorRight => classify_cursor_right(row, col, cursor_row, cursor_col),
         };
 
         match verdict {
@@ -172,6 +175,43 @@ const fn classify_backspace(actual: Option<char>) -> Verdict {
 const fn classify_newline(pred_row: u16, cursor_row: u16) -> Verdict {
     if cursor_row > pred_row {
         Verdict::Confirmed
+    } else {
+        Verdict::Contradicted
+    }
+}
+
+/// Reconcile a [`PredictionKind::CursorLeft`] prediction. Confirmed when the authoritative
+/// cursor matches the predicted target. Pending when the cursor is
+/// still on the same row and to the *right* of the predicted target
+/// (server has not yet processed the motion). Otherwise contradicted.
+const fn classify_cursor_left(
+    pred_row: u16,
+    pred_col: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+) -> Verdict {
+    if cursor_row == pred_row && cursor_col == pred_col {
+        Verdict::Confirmed
+    } else if cursor_row == pred_row && cursor_col > pred_col {
+        Verdict::Pending
+    } else {
+        Verdict::Contradicted
+    }
+}
+
+/// Reconcile a [`PredictionKind::CursorRight`] prediction. Symmetric to
+/// [`classify_cursor_left`] — pending when the authoritative cursor is
+/// still left of where we predicted on the same row.
+const fn classify_cursor_right(
+    pred_row: u16,
+    pred_col: u16,
+    cursor_row: u16,
+    cursor_col: u16,
+) -> Verdict {
+    if cursor_row == pred_row && cursor_col == pred_col {
+        Verdict::Confirmed
+    } else if cursor_row == pred_row && cursor_col < pred_col {
+        Verdict::Pending
     } else {
         Verdict::Contradicted
     }
@@ -462,4 +502,95 @@ mod tests {
     }
 
     use crate::predict::state::PredictionOutcome;
+
+    // -- cursor-motion arrows (phux-9gw.1.3) ----------------------------
+
+    #[test]
+    fn per_cell_cursor_left_confirmed_when_cursor_matches() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        let arrow = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        let outcome =
+            s.predict_key_with_grid(
+                &arrow,
+                |r, c| {
+                    if (r, c) == (0, 4) { Some('a') } else { None }
+                },
+            );
+        assert_eq!(outcome, PredictionOutcome::Predicted);
+        // Server catches up: cursor now at (0, 4).
+        let summary = reconcile_terminal_output_per_cell(&mut s, 0, 4, row_reader(&[]));
+        assert_eq!(summary.confirmed, 1);
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(s.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn per_cell_cursor_left_pending_when_server_lags() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        let arrow = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        s.predict_key_with_grid(
+            &arrow,
+            |r, c| {
+                if (r, c) == (0, 4) { Some('a') } else { None }
+            },
+        );
+        // Server hasn't applied the motion yet — cursor still at (0, 5).
+        let summary = reconcile_terminal_output_per_cell(&mut s, 0, 5, row_reader(&[]));
+        assert_eq!(summary.pending, 1);
+        assert_eq!(s.pending_len(), 1);
+        // Predict-side cursor stays at the predicted target.
+        assert_eq!(s.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn per_cell_cursor_left_contradicted_when_cursor_diverges() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        let arrow = key_named(PhysicalKey::ArrowLeft, ModSet::empty());
+        s.predict_key_with_grid(
+            &arrow,
+            |r, c| {
+                if (r, c) == (0, 4) { Some('a') } else { None }
+            },
+        );
+        // Server jumped to a different row (e.g. shell repainted prompt).
+        let summary = reconcile_terminal_output_per_cell(&mut s, 1, 0, row_reader(&[]));
+        assert_eq!(summary.contradicted, 1);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn per_cell_cursor_right_confirmed_when_cursor_matches() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        let arrow = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        s.predict_key_with_grid(
+            &arrow,
+            |r, c| {
+                if (r, c) == (0, 3) { Some('x') } else { None }
+            },
+        );
+        let summary = reconcile_terminal_output_per_cell(&mut s, 0, 4, row_reader(&[]));
+        assert_eq!(summary.confirmed, 1);
+        assert_eq!(s.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn per_cell_cursor_right_pending_when_server_lags() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        let arrow = key_named(PhysicalKey::ArrowRight, ModSet::empty());
+        s.predict_key_with_grid(
+            &arrow,
+            |r, c| {
+                if (r, c) == (0, 3) { Some('x') } else { None }
+            },
+        );
+        // Server hasn't seen the arrow yet — cursor still at (0, 3).
+        let summary = reconcile_terminal_output_per_cell(&mut s, 0, 3, row_reader(&[]));
+        assert_eq!(summary.pending, 1);
+        assert_eq!(s.cursor(), (0, 4));
+    }
 }
