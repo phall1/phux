@@ -11,6 +11,7 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
+use phux_protocol::caps::{ClientCapabilities, ColorSupport};
 use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -157,16 +158,33 @@ fn arb_session_snapshot() -> impl Strategy<Value = SessionSnapshot> {
 /// Strategy producing one of the simple-payload `FrameKind` variants. The
 /// structured variants (`ATTACH`, `ATTACHED`, `TERMINAL_SNAPSHOT`, `TERMINAL_OUTPUT`,
 /// input frames) have dedicated proptests below.
+fn arb_color_support() -> impl Strategy<Value = ColorSupport> {
+    prop_oneof![
+        Just(ColorSupport::TrueColor),
+        Just(ColorSupport::Indexed256),
+        Just(ColorSupport::Indexed16),
+        Just(ColorSupport::Mono),
+    ]
+}
+
 fn arb_frame_kind() -> impl Strategy<Value = FrameKind> {
     prop_oneof![
-        (".{0,128}", any::<u16>(), any::<u16>(), any::<u16>(),).prop_map(
-            |(client_name, major, minor, patch)| FrameKind::Hello {
-                client_name,
-                protocol_major: major,
-                protocol_minor: minor,
-                protocol_patch: patch,
-            },
-        ),
+        (
+            ".{0,128}",
+            any::<u16>(),
+            any::<u16>(),
+            any::<u16>(),
+            arb_color_support(),
+        )
+            .prop_map(|(client_name, major, minor, patch, color_support)| {
+                FrameKind::Hello {
+                    client_name,
+                    protocol_major: major,
+                    protocol_minor: minor,
+                    protocol_patch: patch,
+                    client_caps: ClientCapabilities::new().with_color_support(color_support),
+                }
+            },),
         any::<u64>().prop_map(|nonce| FrameKind::Ping { nonce }),
         Just(FrameKind::Detach),
         Just(FrameKind::Detached),
@@ -372,12 +390,89 @@ fn hello_round_trip_minimal() {
         protocol_major: 0,
         protocol_minor: 1,
         protocol_patch: 0,
+        client_caps: ClientCapabilities::default(),
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
+}
+
+#[test]
+fn hello_round_trip_each_color_support() {
+    for color in [
+        ColorSupport::TrueColor,
+        ColorSupport::Indexed256,
+        ColorSupport::Indexed16,
+        ColorSupport::Mono,
+    ] {
+        let frame = FrameKind::Hello {
+            client_name: "phux-client".to_owned(),
+            protocol_major: 0,
+            protocol_minor: 2,
+            protocol_patch: 0,
+            client_caps: ClientCapabilities::new().with_color_support(color),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn hello_decoder_accepts_legacy_body_without_caps() {
+    // Hand-built HELLO body matching the pre-7lf shape:
+    //   client_name="x" + (u16, u16, u16) = 4 + 1 + 2 + 2 + 2 = 11 bytes
+    // Plus the 1-byte type tag = 12 bytes. The length header excludes
+    // itself but includes the type byte (SPEC §5), so length = 12.
+    let mut framed = BytesMut::new();
+    framed.extend_from_slice(&12u32.to_be_bytes()); // length
+    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
+    framed.extend_from_slice(&1u32.to_be_bytes()); // client_name length
+    framed.extend_from_slice(b"x");
+    framed.extend_from_slice(&0u16.to_be_bytes()); // major
+    framed.extend_from_slice(&1u16.to_be_bytes()); // minor
+    framed.extend_from_slice(&0u16.to_be_bytes()); // patch
+    let (decoded, tail) = FrameKind::decode(&framed).unwrap();
+    assert!(tail.is_empty());
+    match decoded {
+        FrameKind::Hello {
+            client_caps,
+            client_name,
+            ..
+        } => {
+            assert_eq!(client_name, "x");
+            // Missing trailing field defaults to TrueColor.
+            assert_eq!(client_caps.color_support, ColorSupport::TrueColor);
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
+}
+
+#[test]
+fn hello_decoder_treats_unknown_color_support_tag_as_truecolor() {
+    // Same as `hello_round_trip_minimal`, but inject an unknown tag
+    // (0xFF) for the trailing color_support byte. Per the `#[non_exhaustive]`
+    // contract the decoder maps unknown → TrueColor.
+    let mut framed = BytesMut::new();
+    framed.extend_from_slice(&13u32.to_be_bytes()); // length
+    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
+    framed.extend_from_slice(&1u32.to_be_bytes()); // client_name length
+    framed.extend_from_slice(b"x");
+    framed.extend_from_slice(&0u16.to_be_bytes());
+    framed.extend_from_slice(&1u16.to_be_bytes());
+    framed.extend_from_slice(&0u16.to_be_bytes());
+    framed.extend_from_slice(&[0xFF]); // unknown color_support tag
+    let (decoded, _) = FrameKind::decode(&framed).unwrap();
+    match decoded {
+        FrameKind::Hello { client_caps, .. } => {
+            assert_eq!(client_caps.color_support, ColorSupport::TrueColor);
+        }
+        other => panic!("expected Hello, got {other:?}"),
+    }
 }
 
 #[test]

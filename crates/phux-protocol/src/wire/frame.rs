@@ -25,6 +25,7 @@
 
 use bytes::BytesMut;
 
+use crate::caps::ClientCapabilities;
 use crate::ids::{
     ClientId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL, TERMINAL_ID_TAG_SATELLITE,
     TerminalId,
@@ -312,11 +313,19 @@ impl ViewportInfo {
 pub enum FrameKind {
     /// `HELLO` — client to server handshake (`SPEC.md` §6.1).
     ///
-    /// The full message carries `versions: list<VersionRange>` and
-    /// `client_caps`. This scaffold keeps the on-wire encoding minimal: a
-    /// length-prefixed UTF-8 `client_name` string plus a `(major, minor,
-    /// patch)` triple, sufficient to exercise the codec end-to-end. Sibling
-    /// work fleshes out the real field set.
+    /// Carries the client's free-form identifier, the highest protocol
+    /// version triple it supports, and a [`ClientCapabilities`] envelope
+    /// (SPEC §6.2). The `client_caps` field is appended to the v0.1 body;
+    /// per Appendix A field-tag extensibility, a HELLO without it MUST
+    /// still decode — older encoders that emit only the version triple
+    /// stay forward-compatible. Decoders that see no trailing bytes
+    /// substitute [`ClientCapabilities::default`] (most-permissive
+    /// [`crate::caps::ColorSupport::TrueColor`]).
+    ///
+    /// Sibling tickets grow `ClientCapabilities` with the rest of
+    /// SPEC §6.2 (keyboard / mouse / image protocols, layers bitset).
+    /// Additional capability fields append after `color_support` using
+    /// the same trailing-byte forward-compat trick.
     Hello {
         /// Free-form client identifier (e.g. `"phux-client 0.1.0"`).
         client_name: String,
@@ -326,6 +335,9 @@ pub enum FrameKind {
         protocol_minor: u16,
         /// Highest protocol patch version the client supports.
         protocol_patch: u16,
+        /// Client capability advertisement (SPEC §6.2). Drives server-side
+        /// VT byte-stream downsampling via [`crate::caps::ColorSupport`].
+        client_caps: ClientCapabilities,
     },
 
     /// `PING` — liveness probe (`SPEC.md` §7.5). The peer MUST echo `nonce`
@@ -586,11 +598,16 @@ impl FrameKind {
                 protocol_major,
                 protocol_minor,
                 protocol_patch,
+                client_caps,
             } => {
                 enc.write_str(client_name);
                 enc.write_u16_be(*protocol_major);
                 enc.write_u16_be(*protocol_minor);
                 enc.write_u16_be(*protocol_patch);
+                // Trailing field — older decoders skip it via the length
+                // header per SPEC §6 ("skip them by length"). The encoder
+                // ALWAYS emits the byte; the wire shape grows monotonically.
+                enc.write_u8(client_caps.color_support.as_wire());
             }
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);

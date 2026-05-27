@@ -598,6 +598,14 @@ async fn handle_client(
     let mut payload = BytesMut::new();
     let mut framed = BytesMut::new();
 
+    // Per-connection cache of the most-recently-advertised
+    // [`ColorSupport`] (SPEC §6.2). HELLO populates this; ATTACH consumes
+    // it when constructing the `AttachedClient`. Pre-HELLO it defaults to
+    // [`ColorSupport::default`] (most-permissive) so a client that skips
+    // HELLO (out of spec, but tolerated for forward-compat) still
+    // attaches with sensible bytes-on-wire behavior.
+    let mut negotiated_color_support = phux_protocol::caps::ColorSupport::default();
+
     loop {
         // Read the length prefix. EOF cleanly ends the session; a partial read
         // is treated as a malformed frame and also ends the session.
@@ -650,6 +658,39 @@ async fn handle_client(
         };
 
         match frame {
+            FrameKind::Hello {
+                client_name,
+                protocol_major,
+                protocol_minor,
+                protocol_patch,
+                client_caps,
+            } => {
+                debug!(
+                    ?client_id,
+                    %client_name,
+                    protocol_major,
+                    protocol_minor,
+                    protocol_patch,
+                    color_support = ?client_caps.color_support,
+                    "HELLO",
+                );
+                // SPEC §6.1: HELLO arrives before ATTACH. Cache the
+                // advertised tier on the per-task stack; the ATTACH
+                // branch consumes it when building the `AttachedClient`.
+                // If a client (mis-)sends HELLO post-ATTACH we also
+                // patch the live `AttachedClient` so downsample picks
+                // up the change — the alternative (protocol error
+                // close) gives the operator nothing to debug.
+                negotiated_color_support = client_caps.color_support;
+                state.with_mut(|s| {
+                    s.set_client_color_support(client_id, client_caps.color_support);
+                });
+                // SPEC §6.1: server replies with HELLO_OK. The
+                // `HELLO_OK` `FrameKind` variant is not yet populated
+                // (reserved type byte `0x80`); sibling work lifts it
+                // in. Today the client proceeds optimistically without
+                // waiting for HELLO_OK — see `phux-client::attach::driver::handshake`.
+            }
             FrameKind::Ping { nonce } => {
                 // PONG isn't a `FrameKind` variant yet (the type byte
                 // `0xFF` is reserved). Ship the pre-encoded bytes
@@ -678,6 +719,7 @@ async fn handle_client(
                     request_scrollback,
                     scrollback_limit_lines,
                     &out_tx,
+                    negotiated_color_support,
                 )
                 .await;
             }
@@ -877,9 +919,10 @@ fn prepare_attach(
     client_id: ClientId,
     session_name: &str,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    color_support: phux_protocol::caps::ColorSupport,
 ) -> Result<AttachPrepared, crate::state::AttachError> {
     state.with_mut(|s| {
-        let sid = s.attach(client_id, session_name, out_tx.clone())?;
+        let sid = s.attach(client_id, session_name, out_tx.clone(), color_support)?;
         // Record success into the global "last attached" slot before
         // we build the snapshot. The order doesn't matter for
         // correctness (we're still inside the with_mut critical
@@ -927,6 +970,10 @@ fn prepare_attach(
     clippy::too_many_lines,
     reason = "linear attach orchestration: resolve target -> prepare -> spawn per-pane output pumps -> fan out snapshot requests via FuturesUnordered -> drain; splitting it would scatter context"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the ATTACH branch in handle_client pre-decomposes the FrameKind::Attach payload (target/viewport/request_scrollback/scrollback_limit_lines) and threads the negotiated ColorSupport alongside the SharedState + client_id + out_tx; rebundling into a struct would just move the arity from the call site to a builder"
+)]
 async fn handle_attach(
     state: &SharedState,
     client_id: ClientId,
@@ -935,13 +982,14 @@ async fn handle_attach(
     _request_scrollback: bool,
     _scrollback_limit_lines: u32,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    color_support: phux_protocol::caps::ColorSupport,
 ) {
     let Some(session_name) = resolve_attach_target(state, target, out_tx).await else {
         return;
     };
 
     let (snapshot, initial_client_id, panes_to_snapshot) =
-        match prepare_attach(state, client_id, &session_name, out_tx) {
+        match prepare_attach(state, client_id, &session_name, out_tx, color_support) {
             Ok(t) => t,
             Err(crate::state::AttachError::UnknownSession(name)) => {
                 send_error(
@@ -1446,7 +1494,7 @@ mod tests {
         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         state
-            .with_mut(|s| s.attach(client_id, "test-session", tx))
+            .with_mut(|s| s.attach_default_caps(client_id, "test-session", tx))
             .expect("attach");
 
         // Sanity: starts at 80x24 (default core::Pane::dims).
@@ -1517,7 +1565,7 @@ mod tests {
         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         state
-            .with_mut(|s| s.attach(client_id, "test-session", tx))
+            .with_mut(|s| s.attach_default_caps(client_id, "test-session", tx))
             .expect("attach");
 
         let viewport = ViewportInfo::new(132, 50);
@@ -1635,6 +1683,7 @@ mod tests {
                         false,
                         0,
                         &out_tx,
+                        phux_protocol::caps::ColorSupport::default(),
                     )
                     .await;
                 });

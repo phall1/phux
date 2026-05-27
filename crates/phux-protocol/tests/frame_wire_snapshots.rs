@@ -10,6 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
+use phux_protocol::caps::{ClientCapabilities, ColorSupport};
 use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -491,4 +492,40 @@ fn snap_error_internal_max_code() {
         message: String::new(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// HELLO — SPEC §6.1 / §6.2. One fixture per `ColorSupport` variant. The
+// wire body is `client_name + (major, minor, patch) + color_support_tag`;
+// the only byte that changes across the four snapshots is the final tag.
+// -----------------------------------------------------------------------------
+
+fn hello_with_color(color: ColorSupport) -> FrameKind {
+    FrameKind::Hello {
+        client_name: "phux-client/test".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new().with_color_support(color),
+    }
+}
+
+#[test]
+fn snap_hello_color_truecolor() {
+    insta::assert_snapshot!(dump_frame(&hello_with_color(ColorSupport::TrueColor)));
+}
+
+#[test]
+fn snap_hello_color_indexed256() {
+    insta::assert_snapshot!(dump_frame(&hello_with_color(ColorSupport::Indexed256)));
+}
+
+#[test]
+fn snap_hello_color_indexed16() {
+    insta::assert_snapshot!(dump_frame(&hello_with_color(ColorSupport::Indexed16)));
+}
+
+#[test]
+fn snap_hello_color_mono() {
+    insta::assert_snapshot!(dump_frame(&hello_with_color(ColorSupport::Mono)));
 }

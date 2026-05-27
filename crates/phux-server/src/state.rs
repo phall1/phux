@@ -125,14 +125,15 @@ pub struct AttachedClient {
     pub tx: mpsc::Sender<Outbound>,
     /// The client's advertised color tier (SPEC §6.2). The server MUST
     /// downsample outbound color values to this tier before fanout —
-    /// see [`crate::downsample`] for the helper byc.5's fanout layer
-    /// will plug into.
+    /// see [`crate::downsample::rewrite_bytes`] for the helper the
+    /// fanout layer plugs into.
     ///
-    /// Defaults to [`ColorSupport::TrueColor`] (most-permissive) for
-    /// clients that have not yet advertised caps; this never silently
-    /// downgrades. The HELLO/ClientCapabilities handshake (SPEC §6.1)
-    /// is NOT wired through yet — see follow-up ticket "Wire
-    /// `ColorSupport` through HELLO/ClientCapabilities per SPEC §6.1/§6.2".
+    /// Populated from the [`phux_protocol::caps::ClientCapabilities`] the
+    /// client advertised in HELLO (SPEC §6.1) and forwarded into
+    /// [`ServerState::attach`]. Test scaffolding that never observed a
+    /// HELLO calls [`ServerState::attach_default_caps`] which falls back
+    /// to [`ColorSupport::default`] (most-permissive — never silently
+    /// downgrades).
     pub color_support: ColorSupport,
 }
 
@@ -305,11 +306,17 @@ impl ServerState {
     /// On success the client is recorded in `attached` and subscribed to the
     /// session's currently active pane (if any). Returns a borrow of the
     /// [`Session`] for callers that want to build an `ATTACHED` snapshot.
+    ///
+    /// `color_support` is the tier the client advertised in HELLO (SPEC §6.1/§6.2).
+    /// Callers that never observed a HELLO (test scaffolding) MAY pass
+    /// [`ColorSupport::default`]; the convenience wrapper
+    /// [`Self::attach_default_caps`] does that for them.
     pub fn attach(
         &mut self,
         client_id: ClientId,
         session_name: &str,
         tx: mpsc::Sender<Outbound>,
+        color_support: ColorSupport,
     ) -> Result<SessionId, AttachError> {
         if self.attached.contains_key(&client_id) {
             return Err(AttachError::AlreadyAttached(client_id));
@@ -324,9 +331,7 @@ impl ServerState {
                 id: client_id,
                 session: session_id,
                 tx,
-                // Default tier until HELLO wiring (SPEC §6.1) lands;
-                // most-permissive so we never silently downgrade.
-                color_support: ColorSupport::default(),
+                color_support,
             },
         );
 
@@ -341,6 +346,38 @@ impl ServerState {
                 .push(client_id);
         }
         Ok(session_id)
+    }
+
+    /// Convenience wrapper around [`Self::attach`] that passes
+    /// [`ColorSupport::default`] for the client tier. Intended for test
+    /// scaffolding and in-tree call sites that don't carry a HELLO-derived
+    /// capability value.
+    pub fn attach_default_caps(
+        &mut self,
+        client_id: ClientId,
+        session_name: &str,
+        tx: mpsc::Sender<Outbound>,
+    ) -> Result<SessionId, AttachError> {
+        self.attach(client_id, session_name, tx, ColorSupport::default())
+    }
+
+    /// Update the recorded [`ColorSupport`] for an already-attached
+    /// client. Returns `false` if the client is not in [`Self::attached`].
+    ///
+    /// Used by the HELLO handler if a HELLO arrives after ATTACH (out of
+    /// spec, but tolerated for forward-compat — the alternative is a
+    /// protocol-error close that gives the operator no breadcrumbs).
+    pub fn set_client_color_support(
+        &mut self,
+        client_id: ClientId,
+        color_support: ColorSupport,
+    ) -> bool {
+        self.attached
+            .get_mut(&client_id)
+            .map(|c| {
+                c.color_support = color_support;
+            })
+            .is_some()
     }
 
     /// Detach `client_id`, removing it from `attached` and from every
@@ -739,7 +776,7 @@ mod tests {
     fn attach_unknown_session_returns_error() {
         let mut s = ServerState::new();
         let cid = s.new_client_id();
-        let err = s.attach(cid, "ghost", mk_tx()).unwrap_err();
+        let err = s.attach_default_caps(cid, "ghost", mk_tx()).unwrap_err();
         assert_eq!(err, AttachError::UnknownSession("ghost".to_owned()));
     }
 
@@ -748,7 +785,7 @@ mod tests {
         let mut s = ServerState::new();
         let (sid, _wid, pid) = s.seed_session("default");
         let cid = s.new_client_id();
-        let returned_sid = s.attach(cid, "default", mk_tx()).unwrap();
+        let returned_sid = s.attach_default_caps(cid, "default", mk_tx()).unwrap();
         assert_eq!(returned_sid, sid);
         assert!(s.attached.contains_key(&cid));
         assert_eq!(s.subscribers_for_terminal(pid), &[cid]);
@@ -759,8 +796,8 @@ mod tests {
         let mut s = ServerState::new();
         let _ = s.seed_session("default");
         let cid = s.new_client_id();
-        s.attach(cid, "default", mk_tx()).unwrap();
-        let err = s.attach(cid, "default", mk_tx()).unwrap_err();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        let err = s.attach_default_caps(cid, "default", mk_tx()).unwrap_err();
         assert_eq!(err, AttachError::AlreadyAttached(cid));
     }
 
@@ -770,8 +807,8 @@ mod tests {
         let (_sid, _wid, pid) = s.seed_session("default");
         let a = s.new_client_id();
         let b = s.new_client_id();
-        s.attach(a, "default", mk_tx()).unwrap();
-        s.attach(b, "default", mk_tx()).unwrap();
+        s.attach_default_caps(a, "default", mk_tx()).unwrap();
+        s.attach_default_caps(b, "default", mk_tx()).unwrap();
         let subs = s.subscribers_for_terminal(pid);
         assert!(subs.contains(&a) && subs.contains(&b));
         assert_eq!(subs.len(), 2);
@@ -782,7 +819,7 @@ mod tests {
         let mut s = ServerState::new();
         let (_sid, _wid, pid) = s.seed_session("default");
         let cid = s.new_client_id();
-        s.attach(cid, "default", mk_tx()).unwrap();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
         assert!(!s.subscribers_for_terminal(pid).is_empty());
         s.detach(cid);
         assert!(!s.attached.contains_key(&cid));
@@ -836,15 +873,47 @@ mod tests {
 
     #[test]
     fn attached_client_color_support_defaults_to_truecolor() {
-        // Default tier until HELLO wiring lands. If this assertion ever
-        // needs to change, also update the comment in `attach()` and
-        // the deferral note on `AttachedClient::color_support`.
+        // `attach_default_caps` keeps the most-permissive tier — used by
+        // tests and any call site that doesn't have HELLO-derived caps
+        // in hand.
         let mut s = ServerState::new();
         let _ = s.seed_session("default");
         let cid = s.new_client_id();
-        s.attach(cid, "default", mk_tx()).unwrap();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
         let client = s.attached.get(&cid).unwrap();
         assert_eq!(client.color_support, ColorSupport::TrueColor);
+    }
+
+    #[test]
+    fn attach_records_advertised_color_support() {
+        // Production path: HELLO advertised a tier, ATTACH consumes it.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach(cid, "default", mk_tx(), ColorSupport::Indexed16)
+            .unwrap();
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.color_support, ColorSupport::Indexed16);
+    }
+
+    #[test]
+    fn set_client_color_support_updates_live_attached_client() {
+        // Out-of-order HELLO after ATTACH (out of spec, but tolerated):
+        // the setter patches the live record so downsample picks up the
+        // newer tier.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert!(s.set_client_color_support(cid, ColorSupport::Indexed256));
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.color_support, ColorSupport::Indexed256);
+    }
+
+    #[test]
+    fn set_client_color_support_returns_false_for_unknown_client() {
+        let mut s = ServerState::new();
+        assert!(!s.set_client_color_support(ClientId(999), ColorSupport::Indexed16));
     }
 
     #[test]
