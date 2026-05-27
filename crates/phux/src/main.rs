@@ -32,7 +32,7 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-use phux_client::attach::{self, AttachError, DETACH_CHORD_DESCRIPTION};
+use phux_client::attach::{self, AttachError};
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::AttachTarget;
@@ -123,12 +123,125 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Attach { session, socket }) => run_attach(session, socket),
         Some(Command::Server { session, socket }) => run_server(&session, socket),
-        None => {
-            eprintln!(
-                "no subcommand provided. Try `phux attach <session>` (detach with {DETACH_CHORD_DESCRIPTION})."
-            );
-            ExitCode::from(2)
+        None => run_naked(),
+    }
+}
+
+/// Naked `phux` invocation (phux-k61.1).
+///
+/// Per DESIGN.md §1, `phux` with no arguments is the common case: attach
+/// to the user's server, lazily spawning it if it isn't running.
+///
+/// Resolution cascade:
+///
+/// 1. If the socket is missing, fork-exec ourselves as `phux server`
+///    (which pre-seeds the [`DEFAULT_SESSION_NAME`] session) and wait
+///    for the socket to bind. Reuses [`maybe_auto_spawn_server`].
+/// 2. Attempt `ATTACH { target: Last }`. On a server with prior-attach
+///    memory this resolves to the most-recently-attached session,
+///    matching DESIGN.md §1's "attach to default session" intent.
+/// 3. If `Last` is refused with no prior-attach memory (which is the
+///    case on a freshly spawned server, or one whose only prior client
+///    detached and the slot was never repopulated), fall back to
+///    `ATTACH { target: ByName(DEFAULT_SESSION_NAME) }`. The auto-spawn
+///    path pre-seeds that name, so this is always wired up immediately
+///    after step 1.
+///
+/// We avoid introducing a new `ListSessions` / `CreateIfMissing` wire
+/// frame here: the existing `AttachTarget::Last` + `AttachTarget::ByName`
+/// pair covers the "server is alive with sessions" and "server is fresh
+/// with default" cases without expanding the protocol. The "server is
+/// alive but all sessions were killed" edge case still surfaces a clean
+/// error — see follow-up phux-k61.2 (server-side `CreateIfMissing`).
+fn run_naked() -> ExitCode {
+    let socket_path = default_socket_path();
+
+    if !socket_path.exists()
+        && let Err(err) = maybe_auto_spawn_server(&socket_path, DEFAULT_SESSION_NAME)
+    {
+        eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
+    }
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to build runtime: {err}");
+            return ExitCode::FAILURE;
         }
+    };
+
+    let predict_cfg = match config_loader::load() {
+        Ok(cfg) => PredictiveConfig {
+            enabled: cfg.experimental.predictive_echo,
+        },
+        Err(err) => {
+            eprintln!("phux: config load failed ({err}); using defaults");
+            PredictiveConfig::disabled()
+        }
+    };
+
+    // Step 1: try Last. The server resolves this to the most-recently-
+    // attached session and falls back to SessionNotFound when prior-
+    // attach memory is empty.
+    let last_result = rt.block_on(run_attach_once(
+        &socket_path,
+        AttachTarget::Last,
+        predict_cfg,
+    ));
+
+    match last_result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(AttachError::Refused(message)) => {
+            // The server told us no — most commonly because there is no
+            // prior-attach memory yet. Step 2: ask for the default
+            // session by name. If the server was auto-spawned we just
+            // pre-seeded it; if the user spun up the server manually
+            // they likely used the default `--session default` and the
+            // name is still right.
+            eprintln!(
+                "phux: no prior-attach session (server said: {message}); trying `{DEFAULT_SESSION_NAME}`"
+            );
+            let by_name_result = rt.block_on(run_attach_once(
+                &socket_path,
+                AttachTarget::ByName(DEFAULT_SESSION_NAME.to_owned()),
+                predict_cfg,
+            ));
+            match by_name_result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    print_attach_error(&err, &socket_path, DEFAULT_SESSION_NAME);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Err(err) => {
+            print_attach_error(&err, &socket_path, DEFAULT_SESSION_NAME);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Drive one attach attempt against `socket_path` with `target`, picking
+/// the predict-enabled entry point iff the user opted in. Pulled out
+/// because [`run_naked`] needs to call attach twice (once for `Last`,
+/// once for `ByName` fallback) and the predict/no-predict split would
+/// otherwise duplicate four lines twice.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn run_attach_once(
+    socket_path: &Path,
+    target: AttachTarget,
+    predict_cfg: PredictiveConfig,
+) -> Result<(), AttachError> {
+    if predict_cfg.enabled {
+        attach::run_with_predict(socket_path, target, predict_cfg).await
+    } else {
+        attach::run(socket_path, target).await
     }
 }
 

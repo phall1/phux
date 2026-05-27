@@ -45,15 +45,18 @@ phux is a single binary with subcommands. The naked invocation —
 `phux` — is the common case: attach to the user's server, lazily
 spawning it if it isn't running.
 
-> **Status (2026-05-26):** today's binary ships only `attach` and
-> `server`. The naked `phux` invocation errors with a usage hint
-> instead of attaching to the last session. Auto-spawn from `attach`
-> works (the client forks itself as `phux server` if the socket is
-> missing, polls 25 ms / 2 s). The rest of the table below is design
-> intent.
+> **Status (2026-05-27):** today's binary ships `attach`, `server`,
+> and the naked `phux` invocation (phux-k61.1) — `phux` with no
+> arguments auto-spawns a server if the socket is missing, then
+> attaches via `AttachTarget::Last` with a fallback to
+> `AttachTarget::ByName("default")` when the server has no
+> prior-attach memory. Auto-spawn (client forks itself as `phux
+> server` if the socket is missing, polls 25 ms / 2 s) covers both
+> the naked and explicit-attach paths. The rest of the table below
+> is design intent.
 
 ```
-phux                          # attach to default session, autostart server
+phux                          # attach to default session, autostart server shipped
 phux attach [session]         # attach explicitly; session optional      shipped
 phux server  [--session N]    # run server in foreground (incl. for SSH) shipped (no --stdio yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
