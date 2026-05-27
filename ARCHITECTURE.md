@@ -479,9 +479,6 @@ src/
                         each pane owns its own PerPane{Key,Mouse,Focus,Paste}
                         encoder, refreshed from Terminal state per encode
     key.rs, mouse.rs, focus.rs, paste.rs, mod.rs
-examples/
-  one_pane.rs         — end-to-end PTY → Terminal → bytes-on-wire smoke test
-                        under ADR-0013 (logs encoded PANE_OUTPUT to stderr)
 ```
 
 No `pty/`, `journal/`, `command.rs`, or `hooks.rs` yet — these are
@@ -495,15 +492,6 @@ Under ADR-0013 the client owns a `libghostty_vt::Terminal` per
 attached pane and uses `RenderState` to drive redraw. The hand-rolled
 `mirror/` module from earlier drafts has been deleted.
 
-> **Implementation note (2026-05-26):** the intended per-row dirty
-> path is currently bypassed because `libghostty_vt::RenderState::
-> dirty()` returns a value outside the modeled `{Clean, Partial, Full}`
-> enum, which surfaced as a frozen alt-screen after the first
-> `PANE_SNAPSHOT`. The workaround in `attach/render.rs` defaults to
-> `Dirty::Full` and unconditionally marks every row as `must_draw`,
-> costing a full-screen redraw per frame. Correct visually, off the
-> hot path until libghostty is fixed. Tracked as `phux-l0t`.
-
 ```
 src/
   lib.rs              — re-exports of attach::run
@@ -515,9 +503,8 @@ src/
                         on any exit)
     render.rs         — PaneRenderer: feeds PANE_OUTPUT bytes into the local
                         Terminal and walks RenderState rows to emit cursor
-                        positioning + per-cell SGR deltas + graphemes. Per-row
-                        dirty currently bypassed (full redraw per frame);
-                        see implementation note above and ticket phux-l0t.
+                        positioning + per-cell SGR deltas + graphemes. Uses
+                        per-row dirty bits to skip unchanged rows.
     input.rs          — StdinParser: keyboard + UTF-8 + escape sequences;
                         hardcoded Ctrl-B D detach chord
 ```

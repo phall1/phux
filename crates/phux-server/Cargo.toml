@@ -63,10 +63,6 @@ dhat.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
-[[example]]
-name = "one_pane"
-path = "examples/one_pane.rs"
-
 [[bench]]
 name = "capture"
 harness = false

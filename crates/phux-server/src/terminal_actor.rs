@@ -18,11 +18,11 @@
 //! `Box<dyn Read + Send>` and `Box<dyn Write + Send>` — both **blocking**
 //! I/O handles. We bridge them to async with two dedicated `std::thread`s
 //! (one for reads, one for writes) that talk to the actor over
-//! `tokio::sync::mpsc` channels. This mirrors the pattern in
-//! `examples/one_pane.rs` and avoids OS-specific `AsyncFd` plumbing for
-//! a feature whose value (a few PTY fds, not hundreds) doesn't justify
-//! the complexity. At typical phux pane counts (1–20) the per-pane thread
-//! cost is invisible against everything else the server does.
+//! `tokio::sync::mpsc` channels. This avoids OS-specific `AsyncFd`
+//! plumbing for a feature whose value (a few PTY fds, not hundreds)
+//! doesn't justify the complexity. At typical phux pane counts (1–20)
+//! the per-pane thread cost is invisible against everything else the
+//! server does.
 //!
 //! # Why `bytes::Bytes` for the output broadcast
 //!
@@ -805,11 +805,6 @@ impl TerminalActor {
         // only deltas from *now*. `mark_synced` is the q0e.1 primitive
         // that does the walk-and-clear pass (it `update`s, walks rows
         // clearing each dirty bit, then clears the snapshot-level bit).
-        // The phux-l0t FFI bug means subsequent `dirty()` reads degrade
-        // to `Dirty::Full` defensively, so the first post-prime tick
-        // re-emits a full reset+paint; that is correct per ADR-0018
-        // (loss-tolerance over byte-minimality) and out-of-scope to fix
-        // here.
         let mut synthesizer = SnapshotSynthesizer::new()?;
         synthesizer.mark_synced(&terminal)?;
         self.consumer_states.insert(
@@ -863,19 +858,6 @@ impl TerminalActor {
     /// races cleanly against detach: the runtime may dispatch an
     /// in-flight ack just as the consumer is being torn down, and the
     /// ack should evaporate rather than recreate a dropped entry.
-    ///
-    /// # Known degradation
-    ///
-    /// `SnapshotSynthesizer::mark_synced` calls `Snapshot::set_dirty`,
-    /// which under the libghostty FFI bug tracked in `phux-l0t` poisons
-    /// the next `dirty()` read with `Error::InvalidValue`. The defensive
-    /// `.unwrap_or(Dirty::Full)` in `synthesize_incremental` (phux-q0e.1)
-    /// turns that error into a strict-over-emission full redraw. The ack
-    /// loop is correct — the consumer never sees stale state — but
-    /// bandwidth degrades to "every post-ack tick is effectively a full
-    /// repaint" until upstream libghostty is fixed. Correctness over
-    /// bytes-on-wire by ADR-0018 design; this is the right trade until
-    /// the upstream fix lands.
     fn on_frame_ack(&mut self, client_id: ClientId, seq: u64) {
         let Some(consumer) = self.consumer_states.get_mut(&client_id) else {
             // Race against detach (or an ack for an unknown client). No
@@ -1339,10 +1321,10 @@ impl TerminalActor {
     ///    consumer is skipped for this tick (no kill: a transient FFI
     ///    error on one consumer must not poison the others).
     /// 2. If the body is empty, skip — there is nothing to send. This
-    ///    branch fires only in the brief window before the first
-    ///    `mark_synced` (phux-q0e.4); after that, the phux-l0t FFI bug
-    ///    structurally degrades `dirty()` to `Full`, which always
-    ///    produces a non-empty body.
+    ///    is the steady-state path between writes: once a consumer is
+    ///    primed (or just acked) and the terminal has not changed,
+    ///    `Snapshot::dirty()` reads `Clean` and synthesis returns an
+    ///    empty body.
     /// 3. Stamp the per-consumer monotonic `seq` (starting at `1`,
     ///    incrementing per emission) and ship a `TerminalOutput` frame
     ///    via the per-consumer outbound mailbox.

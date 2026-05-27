@@ -1141,7 +1141,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libghostty-vt"
 version = "0.1.1"
-source = "git+https://github.com/Uzaaft/libghostty-rs.git?rev=31d1f70004ff80727e36437cd540984f927333ce#31d1f70004ff80727e36437cd540984f927333ce"
+source = "git+https://github.com/Uzaaft/libghostty-rs.git?rev=acc4b8754d83aa8506960971787d68f84ddec869#acc4b8754d83aa8506960971787d68f84ddec869"
 dependencies = [
  "bitflags 2.11.1",
  "int-enum",
@@ -1151,7 +1151,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.1.1"
-source = "git+https://github.com/Uzaaft/libghostty-rs.git?rev=31d1f70004ff80727e36437cd540984f927333ce#31d1f70004ff80727e36437cd540984f927333ce"
+source = "git+https://github.com/Uzaaft/libghostty-rs.git?rev=acc4b8754d83aa8506960971787d68f84ddec869#acc4b8754d83aa8506960971787d68f84ddec869"
 
 [[package]]
 name = "linux-raw-sys"

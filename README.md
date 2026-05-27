@@ -93,10 +93,8 @@ L1/L2/L3 names is a follow-on cascade):
   capability rewriter for outbound bytes.
 - `phux-client` — UDS attach loop, raw-mode/altscreen guard, stdin
   keyboard parser, and a `libghostty_vt::Terminal` per attached
-  terminal driven by `RenderState` (ADR-0013). The intended per-row
-  dirty path is currently bypassed in favour of a full-screen redraw
-  per frame, pending the libghostty FFI investigation tracked as
-  `phux-l0t`.
+  terminal driven by `RenderState` (ADR-0013), with per-row dirty
+  tracking driving incremental redraw.
 - `phux-config` — TOML schema + loader with `line:col` errors,
   keybind parser/trie resolver, status `Widget` trait + time /
   session-name widgets.

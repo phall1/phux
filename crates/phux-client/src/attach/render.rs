@@ -159,17 +159,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     ) -> Result<Dirty, RenderError> {
         let (ox, oy) = origin;
         let snapshot = self.state.update(terminal)?;
-        // phux-l0t: upstream FFI bug in `libghostty-vt` (rev `31d1f70`).
-        // Any `Snapshot::set_dirty(_)` call poisons the next `dirty()`
-        // read with `Error::InvalidValue` (value-agnostic; root cause is
-        // `Snapshot::set` taking `*const *const T` where it wants
-        // `*const T`). See
-        // `crates/phux-server/tests/phux_l0t_dirty_diagnosis.rs` for the
-        // pinned repro. We `set_dirty(Clean)` at the end of this render
-        // (see below), so subsequent calls inevitably hit InvalidValue.
-        // The `.unwrap_or(Dirty::Full)` keeps us correct (full redraw,
-        // strictly safe) until upstream lands the one-character fix.
-        let dirty = snapshot.dirty().unwrap_or(Dirty::Full);
+        let dirty = snapshot.dirty()?;
 
         match dirty {
             Dirty::Clean => return Ok(dirty),
@@ -178,8 +168,8 @@ impl<'alloc> TerminalRenderer<'alloc> {
             }
         }
 
-        // Walk rows, redraw every row (phux-l0t: row.dirty() is on the
-        // same broken FFI surface — assume must_draw).
+        // Walk rows. Under `Dirty::Full` paint every row; under
+        // `Dirty::Partial` skip rows whose per-row dirty bit is clear.
         let mut row_iter = self.rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
         let rows_total = snapshot.rows()?;
@@ -187,7 +177,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
             if row_index >= rows_total {
                 break;
             }
-            let must_draw = true;
+            let must_draw = matches!(dirty, Dirty::Full) || row.dirty()?;
             if must_draw {
                 write_cup(out, row_index.saturating_add(oy), ox)?;
                 // Force a reset at row start so the previous row's tail
@@ -220,8 +210,8 @@ impl<'alloc> TerminalRenderer<'alloc> {
                     prev_style = Some(style);
                 }
                 // Reset per-row dirty bit after drawing, per the libghostty
-                // contract. phux-l0t: best-effort — same broken FFI surface.
-                let _ = row.set_dirty(false);
+                // contract.
+                row.set_dirty(false)?;
             }
             row_index += 1;
         }
@@ -250,8 +240,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
         )?;
 
         // Clear the global dirty bit. Per-row bits were cleared inline.
-        // phux-l0t: best-effort — same broken FFI surface.
-        let _ = snapshot.set_dirty(Dirty::Clean);
+        snapshot.set_dirty(Dirty::Clean)?;
 
         out.flush()?;
         Ok(dirty)

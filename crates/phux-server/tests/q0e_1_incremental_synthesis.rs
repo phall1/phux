@@ -86,18 +86,10 @@ fn render_grid(t: &Terminal<'_, '_>) -> Vec<String> {
 }
 
 #[test]
-fn incremental_clean_returns_empty_bytes_or_full_repaint() {
+fn incremental_clean_returns_empty_bytes() {
     // Contract: when the consumer's `RenderState` is fully in sync with
     // the canonical and nothing has changed, `synthesize_incremental`
     // emits empty `replay_bytes`. Dimensions are always reported.
-    //
-    // phux-l0t caveat: libghostty's `Snapshot::dirty()` FFI returns
-    // `Err(InvalidValue)` on every `update` after the first against a
-    // re-used `RenderState`. `synthesize_incremental` defensively falls
-    // back to `Dirty::Full` on that error path, which means today this
-    // test sees a full-reset blob instead of empty bytes. The
-    // *intended* behavior — empty bytes on a true Clean — is documented
-    // in the assertion below and will tighten once phux-l0t resolves.
     let mut canonical = fresh(20, 5);
     canonical.vt_write(b"hello world");
 
@@ -121,30 +113,12 @@ fn incremental_clean_returns_empty_bytes_or_full_repaint() {
         incremental.rows, baseline.rows,
         "incremental must report the same rows",
     );
-
-    // Either we observe the intended Clean fast-path (empty bytes), or
-    // we observe the phux-l0t fallback (full-reset blob that still
-    // round-trips correctly). Both are correct under the loss-tolerance
-    // invariant; under-emission would be the bug.
-    if incremental.bytes.is_empty() {
-        // Best case: phux-l0t fixed, or we got lucky.
-    } else {
-        assert!(
-            incremental.bytes.starts_with(b"\x1b[!p\x1b[2J\x1b[H"),
-            "phux-l0t fallback must take the Dirty::Full path (full \
-             reset + paint); got first 16 bytes: {:?}",
-            &incremental.bytes[..incremental.bytes.len().min(16)],
-        );
-        // And the full-reset blob round-trips correctly.
-        let mut mirror = fresh(incremental.cols, incremental.rows);
-        mirror.vt_write(&incremental.bytes);
-        assert_eq!(
-            render_grid(&canonical),
-            render_grid(&mirror),
-            "Dirty::Full fallback must produce a blob that reaches the \
-             canonical state",
-        );
-    }
+    assert!(
+        incremental.bytes.is_empty(),
+        "post-ack Clean must emit empty bytes; got {} bytes starting with {:?}",
+        incremental.bytes.len(),
+        &incremental.bytes[..incremental.bytes.len().min(16)],
+    );
 }
 
 #[test]

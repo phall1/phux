@@ -21,16 +21,16 @@
 //!
 //! Implementation notes:
 //!
-//! * `Snapshot::dirty()` is unreliable in our usage pattern (`phux-l0t`).
-//!   The `libghostty_vt` FFI surfaces `InvalidValue` on every other update
-//!   after a `Snapshot` is dropped + re-acquired. We never depend on it
-//!   here; we walk the grid unconditionally on every `row()` call.
+//! * The oracle deliberately ignores `Snapshot::dirty()` and walks the
+//!   grid unconditionally on every `row()` call — the harness contract is
+//!   "what does the grid look like right now," not "what changed since
+//!   the last read."
 //! * Wide-cell tails (`CellWide::SpacerTail`) must be skipped so we do not
 //!   double-count the half of a wide grapheme. Mirrors the existing fix in
-//!   `crates/phux-server/src/grid.rs:114-117`.
-//! * `cursor_viewport()` itself is on the same FFI surface; we treat its
-//!   `Err` and `Ok(None)` cases as "(0, 0)" so the harness degrades to a
-//!   safe default rather than panicking inside an assertion helper.
+//!   `crates/phux-server/src/grid.rs`.
+//! * `cursor_viewport()` is best-effort: we treat its `Err` and
+//!   `Ok(None)` cases as "(0, 0)" so the harness degrades to a safe
+//!   default rather than panicking inside an assertion helper.
 
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::{
@@ -112,8 +112,8 @@ impl Screen {
 
     /// Best-effort cursor position as `(col, row)`, 0-based. Returns
     /// `(0, 0)` when libghostty can't surface a viewport-resident
-    /// cursor (either because it lives in the scrollback or because
-    /// the FFI surface returned an error — `phux-l0t`).
+    /// cursor (e.g. because it lives in the scrollback, or because the
+    /// FFI returned an error).
     pub fn cursor(&mut self) -> (u16, u16) {
         let Ok(snapshot) = self.state.update(&self.terminal) else {
             return (0, 0);
@@ -147,7 +147,8 @@ impl Screen {
             return vec![String::new(); usize::from(self.n_rows)];
         };
 
-        // phux-l0t: we deliberately ignore snapshot.dirty() here.
+        // Oracle contract: always walk the full grid; we do not consult
+        // `snapshot.dirty()` (this is a state read, not a delta read).
         let total_rows = snapshot.rows().unwrap_or(self.n_rows);
         let mut out: Vec<String> = Vec::with_capacity(usize::from(total_rows));
 
@@ -248,9 +249,10 @@ mod tests {
         let mut s = Screen::new(20, 3).unwrap();
         s.write(b"abc");
         let (col, row) = s.cursor();
-        // `cursor_viewport()` may degrade to (0, 0) under phux-l0t;
-        // accept either the precise answer or the safe default. The
-        // important invariant for the harness is "doesn't panic".
+        // `cursor_viewport()` may degrade to (0, 0) when libghostty
+        // can't resolve the cursor; accept either the precise answer
+        // or the safe default. The important invariant for the harness
+        // is "doesn't panic".
         assert!(row <= 2);
         assert!(col <= 20);
     }
