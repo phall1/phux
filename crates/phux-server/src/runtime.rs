@@ -1698,7 +1698,7 @@ async fn handle_attach(
     state: &SharedState,
     client_id: ClientId,
     target: AttachTarget,
-    _viewport: phux_protocol::wire::frame::ViewportInfo,
+    viewport: phux_protocol::wire::frame::ViewportInfo,
     _request_scrollback: bool,
     _scrollback_limit_lines: u32,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
@@ -1731,6 +1731,20 @@ async fn handle_attach(
                 return;
             }
         };
+
+    // phux-2lj: apply the client's ATTACH viewport to every pane so
+    // freshly-spawned PTYs (currently built at hardcoded 80x24, see
+    // `seed_session_with_pty`) are resized to match the attaching
+    // client's host terminal. Without this, e.g. `vim` running in a
+    // 120x48 host terminal only fills the top 24 rows of the screen
+    // until SIGWINCH or an explicit VIEWPORT_RESIZE drives a resize.
+    //
+    // SPEC §10.5: ATTACH.viewport is the outer client viewport. Single-
+    // pane: the server applies it directly as the PTY's winsize (matches
+    // the existing `handle_viewport_resize` convention; the off-by-one
+    // for a host-side status bar is the client's concern via the
+    // post-attach `TERMINAL_RESIZE` reflow path used by multi-pane).
+    apply_attach_viewport(state, &panes_to_snapshot, viewport);
 
     if out_tx
         .send(Outbound::Frame(FrameKind::Attached {
@@ -1827,6 +1841,72 @@ async fn handle_attach(
             return;
         }
     }
+}
+
+/// phux-2lj: Apply the ATTACH viewport to every pane in the freshly-
+/// attached session.
+///
+/// Panes are spawned at a hardcoded 80x24 default ([`seed_session_with_pty`]
+/// / [`seed_session_with_actor`]) because the session may exist before any
+/// client attaches (e.g. `phux-server` pre-seeding). On the first attach
+/// we have to size the PTY to match the client's outer viewport, otherwise
+/// full-screen TUIs (vim, htop) think they're running in 24 rows and
+/// render into a fraction of the visible area. This mirrors what
+/// [`handle_viewport_resize`] does for a live `VIEWPORT_RESIZE` frame.
+///
+/// The resize is fire-and-forget on the per-actor mpsc channel — same
+/// primitive `handle_viewport_resize` and `handle_terminal_resize` use.
+/// We `try_send` rather than `.await` so we can stay in a sync helper
+/// (no impact on `handle_attach`'s lock ordering) and because the
+/// resize channel is sized at `DEFAULT_INPUT_MAILBOX = 64`, which is
+/// well above the worst-case number of panes per attach (1 today; would
+/// stay << 64 even with multi-window sessions).
+///
+/// The `pane.dims` update is wrapped in `with_mut` once so the registry
+/// stays consistent with what future `TERMINAL_SNAPSHOT` payloads will
+/// report; the resize sends are emitted while holding the same lock,
+/// matching `handle_viewport_resize`'s pattern (the actor's mailbox is
+/// independent of the state lock).
+fn apply_attach_viewport(
+    state: &SharedState,
+    panes_to_snapshot: &[(
+        phux_core::ids::TerminalId,
+        crate::terminal_actor::TerminalHandle,
+        phux_protocol::ids::TerminalId,
+    )],
+    viewport: phux_protocol::wire::frame::ViewportInfo,
+) {
+    let cols = viewport.cols;
+    let rows = viewport.rows;
+    if cols == 0 || rows == 0 {
+        // SPEC §10.5: zero-dimension viewports are treated as no-ops
+        // rather than kernel errors. Skip the resize entirely.
+        return;
+    }
+    state.with_mut(|s| {
+        for (terminal_id, handle, _wire_terminal_id) in panes_to_snapshot {
+            if let Some(pane) = s.registry.terminal_mut(*terminal_id) {
+                pane.dims = (cols, rows);
+            }
+            match handle.resize.try_send((cols, rows)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        ?terminal_id,
+                        cols,
+                        rows,
+                        "ATTACH viewport apply: pane resize mailbox full; dropping (next VIEWPORT_RESIZE will retry)",
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    debug!(
+                        ?terminal_id,
+                        "ATTACH viewport apply: pane actor gone; dropping resize",
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Handle a client's `VIEWPORT_RESIZE` (SPEC §7.1 / §10.5).
