@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use super::{OverlayCommand, RenderOverlay};
+use crate::attach::DETACH_CHORD_DESCRIPTION;
 
 /// One row in the help table: a chord (or chord sequence) and the
 /// action it resolves to. `chord_text` already includes the prefix
@@ -34,7 +35,15 @@ struct Entry {
 ///
 /// Built from a [`KeybindingsCfg`] snapshot via [`Self::from_config`].
 /// Rendering is a single centered [`Paragraph`] inside a bordered
-/// [`Block`]; bindings are grouped into prefix-table vs global sections.
+/// [`Block`]; bindings are grouped into prefix-table vs global vs
+/// hardcoded sections.
+///
+/// The hardcoded section surfaces chords that the driver wires up
+/// directly (not through the keybindings resolver) — currently just
+/// the `Ctrl-b d` detach chord (phux-631 tracks making it
+/// configurable). The chord string is read from
+/// [`crate::attach::DETACH_CHORD_DESCRIPTION`] so it stays in sync
+/// with the driver site that actually owns it.
 #[derive(Debug)]
 pub struct HelpOverlay {
     /// Pretty-printed prefix chord (e.g. `"C-a"`), or empty if no
@@ -44,6 +53,14 @@ pub struct HelpOverlay {
     prefix_entries: Vec<Entry>,
     /// Global entries — chord shown as-is.
     global_entries: Vec<Entry>,
+    /// Hardcoded driver-owned chords (detach, etc.). Authored at
+    /// construction time so the overlay stays `'static`.
+    hardcoded_entries: Vec<Entry>,
+    /// Chord (as authored in cfg) that opens this overlay. Used in
+    /// the footer hint so a user who rebound `show-help` to e.g. `?`
+    /// sees `Press ? or Esc to close` rather than a stale `F1`.
+    /// `None` when no global binding maps to `show-help`.
+    show_help_chord: Option<String>,
 }
 
 impl HelpOverlay {
@@ -68,6 +85,25 @@ impl HelpOverlay {
                 action: action_label(action),
             })
             .collect();
+        // Hardcoded driver-owned chords. Currently just the detach
+        // chord; if a user rebinds detach via config (post phux-631)
+        // this list should shrink.
+        let hardcoded_entries = vec![Entry {
+            chord: DETACH_CHORD_DESCRIPTION.to_owned(),
+            action: "detach".to_owned(),
+        }];
+        // Find the chord (if any) that the user bound to `show-help`
+        // for the footer hint. Scans `cfg.global` only — `show-help`
+        // is a global by default and surfacing a prefix-table entry
+        // would lie about how the dismiss path works (the prefix is
+        // captured by the resolver, but while the overlay is active
+        // the resolver is bypassed — only the overlay's own
+        // `handle_key` runs).
+        let show_help_chord = cfg
+            .global
+            .iter()
+            .find(|(_, action)| is_show_help(action))
+            .map(|(chord, _)| chord.clone());
         Self {
             prefix: if prefix_entries.is_empty() {
                 String::new()
@@ -76,6 +112,8 @@ impl HelpOverlay {
             },
             prefix_entries,
             global_entries,
+            hardcoded_entries,
+            show_help_chord,
         }
     }
 
@@ -95,10 +133,16 @@ impl HelpOverlay {
     /// Build the body lines: section headers + chord→action rows.
     fn body_lines(&self) -> Vec<Line<'_>> {
         let mut lines: Vec<Line<'_>> = Vec::new();
+        // Chord column is widened to the longest chord across ALL
+        // sections so the action column lines up vertically through
+        // section boundaries (prefix → global → hardcoded). Keeps
+        // long chords like `Ctrl-b d` from squashing the prefix
+        // section.
         let chord_width = self
             .prefix_entries
             .iter()
             .chain(self.global_entries.iter())
+            .chain(self.hardcoded_entries.iter())
             .map(|e| e.chord.len())
             .max()
             .unwrap_or(8);
@@ -127,6 +171,20 @@ impl HelpOverlay {
                 lines.push(entry_line(e, chord_width));
             }
         }
+        if !self.hardcoded_entries.is_empty() {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                "Hardcoded",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for e in &self.hardcoded_entries {
+                lines.push(entry_line(e, chord_width));
+            }
+        }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No keybindings configured.",
@@ -134,8 +192,12 @@ impl HelpOverlay {
             )));
         }
         lines.push(Line::from(""));
+        let footer = self.show_help_chord.as_deref().map_or_else(
+            || "Press Esc to close".to_owned(),
+            |chord| format!("Press {chord} or Esc to close"),
+        );
         lines.push(Line::from(Span::styled(
-            "Esc or F1 to close",
+            footer,
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
@@ -221,6 +283,15 @@ fn value_label(v: &toml::Value) -> String {
     }
 }
 
+/// `true` when `action` resolves to `show-help` (bare or parameterized).
+/// Used to find the user-bound chord for the dismiss footer hint.
+fn is_show_help(action: &Action) -> bool {
+    match action {
+        Action::Bare(name) => name == "show-help",
+        Action::Parameterized(p) => p.action == "show-help",
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
@@ -271,6 +342,42 @@ mod tests {
         assert_eq!(overlay.prefix, "C-a");
         assert_eq!(overlay.prefix_entries.len(), 2);
         assert_eq!(overlay.global_entries.len(), 1);
+        // Hardcoded section always carries at least the detach chord.
+        assert!(!overlay.hardcoded_entries.is_empty());
+        assert!(
+            overlay
+                .hardcoded_entries
+                .iter()
+                .any(|e| e.action == "detach")
+        );
+        // show-help is bound to F1 in the test cfg.
+        assert_eq!(overlay.show_help_chord.as_deref(), Some("F1"));
+    }
+
+    #[test]
+    fn no_show_help_binding_falls_back_to_esc_only_footer() {
+        let mut c = cfg();
+        c.global.clear();
+        let overlay = HelpOverlay::from_config(&c);
+        assert_eq!(overlay.show_help_chord, None);
+        let text = render_to_string(&overlay, 80, 24);
+        assert!(text.contains("Press Esc to close"), "text was:\n{text}");
+    }
+
+    #[test]
+    fn punctuation_chords_render_verbatim() {
+        // phux-9fu shipped `|` and `-` as default prefix-table keys.
+        // They must render as the literal glyph the user typed in
+        // TOML, not as escape sequences or raw bytes.
+        let mut c = cfg();
+        c.prefix_table
+            .insert("|".to_owned(), Action::Bare("split-pane".to_owned()));
+        c.prefix_table
+            .insert("-".to_owned(), Action::Bare("split-pane".to_owned()));
+        let overlay = HelpOverlay::from_config(&c);
+        let text = render_to_string(&overlay, 80, 24);
+        assert!(text.contains("C-a |"), "missing `C-a |` row:\n{text}");
+        assert!(text.contains("C-a -"), "missing `C-a -` row:\n{text}");
     }
 
     #[test]
@@ -322,25 +429,78 @@ mod tests {
         );
     }
 
-    #[test]
-    fn render_into_buffer_does_not_panic() {
-        let overlay = HelpOverlay::from_config(&cfg());
-        let area = Rect::new(0, 0, 80, 24);
+    /// Render `overlay` into a fresh `width × height` buffer and
+    /// flatten to a `\n`-separated string with trailing spaces
+    /// trimmed per row. Trimming keeps assertions terse but does
+    /// not change the visible cell content.
+    fn render_to_string(overlay: &HelpOverlay, width: u16, height: u16) -> String {
+        let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         overlay.render(area, &mut buf);
-        // Find the title somewhere in the buffer.
-        let mut found = false;
+        let mut out = String::new();
         for y in 0..area.height {
             let mut row = String::new();
             for x in 0..area.width {
                 row.push_str(buf[(x, y)].symbol());
             }
-            if row.contains("phux help") {
-                found = true;
-                break;
-            }
+            out.push_str(row.trim_end());
+            out.push('\n');
         }
-        assert!(found, "expected 'phux help' title in rendered buffer");
+        out
+    }
+
+    #[test]
+    fn render_into_buffer_does_not_panic() {
+        let overlay = HelpOverlay::from_config(&cfg());
+        let text = render_to_string(&overlay, 80, 24);
+        assert!(
+            text.contains("phux help"),
+            "expected 'phux help' title in rendered buffer:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_surfaces_all_three_sections() {
+        // Plain-string assertion (not `insta`) — keeps the test
+        // robust against width-driven padding while still proving
+        // that every section the overlay promises is actually
+        // painted. Covers the regression that motivated phux-i08:
+        // hardcoded chords were missing entirely.
+        let overlay = HelpOverlay::from_config(&cfg());
+        let text = render_to_string(&overlay, 80, 24);
+        // Section headers.
+        assert!(
+            text.contains("Prefix bindings (C-a)"),
+            "missing prefix header:\n{text}"
+        );
+        assert!(
+            text.contains("Global bindings"),
+            "missing global header:\n{text}"
+        );
+        assert!(
+            text.contains("Hardcoded"),
+            "missing hardcoded header:\n{text}"
+        );
+        // At least one row from each section.
+        assert!(text.contains("C-a x"), "missing prefix-table row:\n{text}");
+        assert!(
+            text.contains("C-a v"),
+            "missing parameterized prefix row:\n{text}"
+        );
+        assert!(text.contains("F1"), "missing global row:\n{text}");
+        // Hardcoded detach: chord text comes from
+        // `attach::DETACH_CHORD_DESCRIPTION`. We assert the action
+        // word ("detach") rather than the full chord string so a
+        // future phux-631 chord rename doesn't break this test.
+        assert!(
+            text.contains("detach"),
+            "missing hardcoded detach row:\n{text}"
+        );
+        // Footer reflects the bound chord, not a hardcoded "F1".
+        assert!(
+            text.contains("Press F1 or Esc to close"),
+            "missing dynamic footer:\n{text}"
+        );
     }
 
     #[test]
