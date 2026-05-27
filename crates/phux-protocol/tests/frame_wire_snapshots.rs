@@ -15,7 +15,7 @@ use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
+use phux_protocol::wire::frame::{AttachTarget, ErrorCode, FrameKind, ViewportInfo};
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
 };
@@ -449,6 +449,46 @@ fn snap_viewport_resize_cells_only() {
 fn snap_viewport_resize_with_pixels() {
     let frame = FrameKind::ViewportResize {
         viewport: ViewportInfo::new(120, 40).with_pixels(Some(1920), Some(1080)),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// ERROR — SPEC §14. Server-emitted structured error frames. The canonical
+// case from phux-byc.6.6 is ATTACH against an unknown session, which yields
+// ERROR { code: SessionNotFound (=102), request_id: None } — sibling refusal
+// paths use ErrorCode::{InvalidCommand, UnsupportedSatelliteRoute, …} with
+// the same wire shape.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_error_session_not_found() {
+    let frame = FrameKind::Error {
+        request_id: None,
+        code: ErrorCode::SessionNotFound,
+        message: "no such session: 'work'".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_error_with_request_id_invalid_command() {
+    let frame = FrameKind::Error {
+        request_id: Some(0x0000_002A),
+        code: ErrorCode::InvalidCommand,
+        message: "missing field: terminal_id".to_owned(),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_error_internal_max_code() {
+    // Exercise the u16::MAX (=65535) wire value to lock in the high end of
+    // the ErrorCode encoding alongside SPEC §14's `INTERNAL_ERROR = 65535`.
+    let frame = FrameKind::Error {
+        request_id: None,
+        code: ErrorCode::InternalError,
+        message: String::new(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

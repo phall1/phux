@@ -1,0 +1,7 @@
+---
+source: crates/phux-protocol/tests/frame_wire_snapshots.rs
+expression: dump_frame(&frame)
+---
+00000000 | 00 00 00 26 c1 01 00 00  00 2a 00 c8 00 00 00 1a |...&.....*......
+00000010 | 6d 69 73 73 69 6e 67 20  66 69 65 6c 64 3a 20 74 |missing field: t
+00000020 | 65 72 6d 69 6e 61 6c 5f  69 64                   |erminal_id
