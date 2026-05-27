@@ -53,10 +53,16 @@
 //!
 //! Not handled (yet):
 //!
-//! - The full kitty keyboard protocol `CSI u` form — for now the kitty
-//!   CSI-u sequences are absorbed by the CSI parser as best-effort and
-//!   dropped (with a trace log) if they cannot be mapped to a
-//!   [`PhysicalKey`]. Full KIP passthrough is a future ticket.
+//! - **Kitty keyboard protocol `CSI u`** sequences — disambiguate-escape
+//!   (KIP level 1) plus event-types (KIP level 2). Sequences of the form
+//!   `CSI keycode[:shifted_key:base_layout_key][;modifiers[:event_type[:text_codepoints]]] u`
+//!   decode into [`KeyEvent`]s. We target levels 1+2 because that round-trips
+//!   Ctrl-Tab, F-keys with modifiers, distinguishes Enter from Ctrl-J, and
+//!   surfaces key release for hold-detection — without committing to the
+//!   alternate-keys / text-codepoints reporting whose downstream encoder
+//!   integration is not yet wired up. Higher levels (3-5) are absorbed and
+//!   their extra sub-parameters dropped (best-effort) pending follow-up.
+//!   See <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>.
 //! - DCS / OSC / SOS / PM / APC sequences inbound — these come from the
 //!   inner program, not from a keyboard, and have no representation as a
 //!   `KeyEvent`. They are absorbed and dropped.
@@ -821,6 +827,15 @@ fn dispatch_csi(params: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
         }
     }
 
+    // Kitty keyboard protocol (KIP) `CSI u`. We target progressive-enhancement
+    // levels 1 (disambiguate) + 2 (event types); sub-parameter groups for
+    // higher levels (alternates, base-layout key, text codepoints) are parsed
+    // out of the way and dropped.
+    if final_byte == b'u' {
+        dispatch_kitty_csi_u(params, out);
+        return;
+    }
+
     // Strip a leading private-marker `?`, `<`, `=`, `>` for now — we
     // don't differentiate, the modifier-bearing variant alone matters.
     let body = if let Some(first) = params.first()
@@ -942,6 +957,279 @@ fn dispatch_sgr_mouse(body: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
         x,
         y,
     }));
+}
+
+/// Decode a kitty-protocol `CSI u` sequence.
+///
+/// Wire form (per <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>):
+///
+/// ```text
+/// CSI keycode[:shifted_key:base_layout_key][;modifiers[:event_type[:text_codepoints]]] u
+/// ```
+///
+/// `;` separates top-level parameter groups; `:` separates sub-parameters
+/// within a group. We extract:
+///
+/// * group 0, sub 0 → keycode (Unicode codepoint of the unshifted key, or a
+///   functional keycode in the PUA range — see `kitty_keycode_to_physical`).
+/// * group 1, sub 0 → modifier bitfield (KIP level 1 encoding;
+///   `1 + shift|alt|ctrl|super|hyper|meta|caps_lock|num_lock`).
+/// * group 1, sub 1 → event type (1=press, 2=repeat, 3=release).
+///
+/// All other sub-parameters (`shifted_key`, `base_layout_key`,
+/// `text_codepoints`) are deliberately ignored at level 1+2; they're reserved
+/// for the alternate-keys (level 3) and associated-text (level 5) features
+/// whose encoder integration is a follow-up.
+///
+/// Repeat events (`event_type=2`) are dropped — they would otherwise re-emit
+/// indistinguishably from a press, and downstream encoders that don't yet
+/// model repeat distinctly cannot use the signal. Filed as a follow-up.
+fn dispatch_kitty_csi_u(params: &[u8], out: &mut Vec<InputEvent>) {
+    let groups = parse_csi_param_groups(params);
+    let keycode = groups.first().and_then(|g| g.first().copied()).unwrap_or(0);
+    if keycode == 0 {
+        tracing::trace!("kitty CSI u with empty keycode, dropping");
+        return;
+    }
+
+    let mod_group = groups.get(1);
+    let raw_mod = mod_group.and_then(|g| g.first().copied()).unwrap_or(1);
+    let event_type = mod_group.and_then(|g| g.get(1).copied()).unwrap_or(1);
+
+    let mods = kitty_modifier_code(raw_mod);
+    let action = match event_type {
+        3 => KeyAction::Release,
+        2 => {
+            // Repeat — drop for now; see fn doc.
+            tracing::trace!(keycode, "dropping kitty CSI u repeat event");
+            return;
+        }
+        _ => KeyAction::Press,
+    };
+
+    let Some(key) = kitty_keycode_to_physical(keycode) else {
+        tracing::trace!(keycode, "kitty CSI u unmapped keycode");
+        return;
+    };
+
+    out.push(InputEvent::Key(KeyEvent {
+        action,
+        key,
+        mods,
+        consumed_mods: ModSet::empty(),
+        composing: false,
+        text: None,
+        unshifted_codepoint: Some(keycode),
+    }));
+}
+
+/// Parse CSI parameter bytes into nested groups: `;` opens a new top-level
+/// group, `:` adds a sub-parameter to the current group. Empty slots become
+/// `0`, matching xterm convention.
+fn parse_csi_param_groups(body: &[u8]) -> Vec<Vec<u32>> {
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    let mut current: Vec<u32> = Vec::new();
+    let mut acc: u32 = 0;
+    let mut started = false;
+    for &b in body {
+        match b {
+            b'0'..=b'9' => {
+                acc = acc.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+                started = true;
+            }
+            b':' => {
+                current.push(if started { acc } else { 0 });
+                acc = 0;
+                started = false;
+            }
+            b';' => {
+                current.push(if started { acc } else { 0 });
+                acc = 0;
+                started = false;
+                groups.push(std::mem::take(&mut current));
+            }
+            _ => {
+                // Private-marker / intermediate / unrecognised — treat as
+                // group separator for robustness.
+                current.push(if started { acc } else { 0 });
+                acc = 0;
+                started = false;
+                groups.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    current.push(if started { acc } else { 0 });
+    groups.push(current);
+    groups
+}
+
+/// Kitty modifier bitfield → [`ModSet`].
+///
+/// KIP encodes modifiers as `1 + bitfield` (so an unmodified key reports `1`).
+/// The bitfield is `shift=1, alt=2, ctrl=4, super=8, hyper=16, meta=32,
+/// caps_lock=64, num_lock=128`. libghostty's [`ModSet`] does not expose
+/// hyper / meta as distinct bits — those are dropped. Caps lock and num lock
+/// are passed through since libghostty's `Mods` carries them.
+fn kitty_modifier_code(code: u32) -> ModSet {
+    if code == 0 {
+        return ModSet::empty();
+    }
+    let bits = code.saturating_sub(1);
+    let mut mods = ModSet::empty();
+    if bits & 0b0000_0001 != 0 {
+        mods |= ModSet::SHIFT;
+    }
+    if bits & 0b0000_0010 != 0 {
+        mods |= ModSet::ALT;
+    }
+    if bits & 0b0000_0100 != 0 {
+        mods |= ModSet::CTRL;
+    }
+    if bits & 0b0000_1000 != 0 {
+        mods |= ModSet::SUPER;
+    }
+    // Hyper (0b0001_0000) and Meta (0b0010_0000) — libghostty's Mods has no
+    // distinct bits for these. Dropped at level 1+2; revisit if/when
+    // libghostty grows them.
+    if bits & 0b0100_0000 != 0 {
+        mods |= ModSet::CAPS_LOCK;
+    }
+    if bits & 0b1000_0000 != 0 {
+        mods |= ModSet::NUM_LOCK;
+    }
+    mods
+}
+
+/// Map a kitty keycode to a [`PhysicalKey`].
+///
+/// For printable Unicode codepoints (`U+0020..=U+007E` and beyond) we map the
+/// ASCII range to its physical key, and otherwise emit `Unidentified` — the
+/// codepoint travels in `unshifted_codepoint` so downstream consumers can
+/// still recover the intent.
+///
+/// Functional keys use the kitty-defined PUA codepoints listed in the
+/// protocol spec. Only the keys libghostty has a matching variant for are
+/// mapped; everything else returns `None`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "flat keycode table — the size IS the spec"
+)]
+const fn kitty_keycode_to_physical(cp: u32) -> Option<PhysicalKey> {
+    Some(match cp {
+        // Legacy / ASCII region — these are explicitly defined by the
+        // protocol for the keys that have a natural ASCII codepoint.
+        27 => PhysicalKey::Escape,
+        13 => PhysicalKey::Enter,
+        9 => PhysicalKey::Tab,
+        127 => PhysicalKey::Backspace,
+        // Printable ASCII letters / digits / space.
+        0x20 => PhysicalKey::Space,
+        c @ 0x61..=0x7A => {
+            // 'a'..='z'
+            #[allow(clippy::cast_possible_truncation, reason = "range-checked u32 → u8")]
+            let upper = (c as u8).to_ascii_uppercase();
+            ascii_letter_to_key_const(upper)
+        }
+        c @ 0x41..=0x5A => {
+            // 'A'..='Z'
+            #[allow(clippy::cast_possible_truncation, reason = "range-checked u32 → u8")]
+            let b = c as u8;
+            ascii_letter_to_key_const(b)
+        }
+        c @ 0x30..=0x39 => {
+            // '0'..='9'
+            #[allow(clippy::cast_possible_truncation, reason = "range-checked u32 → u8")]
+            let b = c as u8;
+            ascii_to_physical(b)
+        }
+        // Functional keys (kitty PUA range). Codepoint constants are taken
+        // verbatim from the kitty keyboard protocol "Functional key
+        // definitions" table.
+        57348 => PhysicalKey::Insert,
+        57349 => PhysicalKey::Delete,
+        57350 => PhysicalKey::ArrowLeft,
+        57351 => PhysicalKey::ArrowRight,
+        57352 => PhysicalKey::ArrowUp,
+        57353 => PhysicalKey::ArrowDown,
+        57354 => PhysicalKey::PageUp,
+        57355 => PhysicalKey::PageDown,
+        57356 => PhysicalKey::Home,
+        57357 => PhysicalKey::End,
+        57358 => PhysicalKey::CapsLock,
+        57359 => PhysicalKey::ScrollLock,
+        57360 => PhysicalKey::NumLock,
+        57361 => PhysicalKey::PrintScreen,
+        57362 => PhysicalKey::Pause,
+        57363 => PhysicalKey::ContextMenu,
+        57364 => PhysicalKey::F1,
+        57365 => PhysicalKey::F2,
+        57366 => PhysicalKey::F3,
+        57367 => PhysicalKey::F4,
+        57368 => PhysicalKey::F5,
+        57369 => PhysicalKey::F6,
+        57370 => PhysicalKey::F7,
+        57371 => PhysicalKey::F8,
+        57372 => PhysicalKey::F9,
+        57373 => PhysicalKey::F10,
+        57374 => PhysicalKey::F11,
+        57375 => PhysicalKey::F12,
+        57376 => PhysicalKey::F13,
+        57377 => PhysicalKey::F14,
+        57378 => PhysicalKey::F15,
+        57379 => PhysicalKey::F16,
+        57380 => PhysicalKey::F17,
+        57381 => PhysicalKey::F18,
+        57382 => PhysicalKey::F19,
+        57383 => PhysicalKey::F20,
+        57384 => PhysicalKey::F21,
+        57385 => PhysicalKey::F22,
+        57386 => PhysicalKey::F23,
+        57387 => PhysicalKey::F24,
+        57388 => PhysicalKey::F25,
+        // Numpad 0..9.
+        57399 => PhysicalKey::Numpad0,
+        57400 => PhysicalKey::Numpad1,
+        57401 => PhysicalKey::Numpad2,
+        57402 => PhysicalKey::Numpad3,
+        57403 => PhysicalKey::Numpad4,
+        57404 => PhysicalKey::Numpad5,
+        57405 => PhysicalKey::Numpad6,
+        57406 => PhysicalKey::Numpad7,
+        57407 => PhysicalKey::Numpad8,
+        57408 => PhysicalKey::Numpad9,
+        57409 => PhysicalKey::NumpadDecimal,
+        57410 => PhysicalKey::NumpadDivide,
+        57411 => PhysicalKey::NumpadMultiply,
+        57412 => PhysicalKey::NumpadSubtract,
+        57413 => PhysicalKey::NumpadAdd,
+        57414 => PhysicalKey::NumpadEnter,
+        57415 => PhysicalKey::NumpadEqual,
+        57416 => PhysicalKey::NumpadSeparator,
+        57417 => PhysicalKey::NumpadLeft,
+        57418 => PhysicalKey::NumpadRight,
+        57419 => PhysicalKey::NumpadUp,
+        57420 => PhysicalKey::NumpadDown,
+        57421 => PhysicalKey::NumpadPageUp,
+        57422 => PhysicalKey::NumpadPageDown,
+        57423 => PhysicalKey::NumpadHome,
+        57424 => PhysicalKey::NumpadEnd,
+        57425 => PhysicalKey::NumpadInsert,
+        57426 => PhysicalKey::NumpadDelete,
+        57427 => PhysicalKey::NumpadBegin,
+        // Modifier keys.
+        57441 => PhysicalKey::ShiftLeft,
+        57442 => PhysicalKey::ControlLeft,
+        57443 => PhysicalKey::AltLeft,
+        57444 => PhysicalKey::MetaLeft,
+        57447 => PhysicalKey::ShiftRight,
+        57448 => PhysicalKey::ControlRight,
+        57449 => PhysicalKey::AltRight,
+        57450 => PhysicalKey::MetaRight,
+        // Other printable Unicode — no specific PhysicalKey, but the
+        // codepoint survives in `unshifted_codepoint`.
+        _ if cp >= 0x20 => PhysicalKey::Unidentified,
+        _ => return None,
+    })
 }
 
 /// Modifier bits in an SGR mouse button code.
@@ -2002,6 +2290,147 @@ mod tests {
             }
             other => panic!("expected InputPaste, got {other:?}"),
         }
+    }
+
+    // ---- Kitty CSI u (KIP level 1 + 2) ---------------------------------
+
+    #[test]
+    fn kitty_csi_u_plain_lowercase_letter() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"\x1b[97u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert_eq!(keys[0].action, KeyAction::Press);
+        assert!(keys[0].mods.is_empty());
+        assert_eq!(keys[0].unshifted_codepoint, Some(97));
+    }
+
+    #[test]
+    fn kitty_csi_u_ctrl_a() {
+        let mut p = StdinParser::new();
+        // modifiers = 1 + ctrl(4) = 5
+        let evs = p.feed(b"\x1b[97;5u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert_eq!(keys[0].mods, ModSet::CTRL);
+        assert_eq!(keys[0].action, KeyAction::Press);
+    }
+
+    #[test]
+    fn kitty_csi_u_f_key_via_pua_codepoint() {
+        let mut p = StdinParser::new();
+        // F5 = 57368
+        let evs = p.feed(b"\x1b[57368u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::F5);
+        assert!(keys[0].mods.is_empty());
+    }
+
+    #[test]
+    fn kitty_csi_u_release_event_type() {
+        let mut p = StdinParser::new();
+        // CSI 97;1:3 u — press-modifier baseline (1 = no mods), release.
+        let evs = p.feed(b"\x1b[97;1:3u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert_eq!(keys[0].action, KeyAction::Release);
+    }
+
+    #[test]
+    fn kitty_csi_u_multiple_modifiers() {
+        let mut p = StdinParser::new();
+        // mods = 1 + shift(1) + alt(2) + ctrl(4) = 8
+        let evs = p.feed(b"\x1b[97;8u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert!(keys[0].mods.contains(ModSet::SHIFT));
+        assert!(keys[0].mods.contains(ModSet::ALT));
+        assert!(keys[0].mods.contains(ModSet::CTRL));
+    }
+
+    #[test]
+    fn kitty_csi_u_repeat_event_dropped() {
+        let mut p = StdinParser::new();
+        // event_type = 2 = repeat; should produce no event.
+        let evs = p.feed(b"\x1b[97;1:2u");
+        assert!(
+            key_only(&evs).is_empty(),
+            "repeat events are dropped at this level"
+        );
+    }
+
+    #[test]
+    fn kitty_csi_u_alternate_keys_subparams_ignored() {
+        let mut p = StdinParser::new();
+        // Level 3: keycode with shifted_key and base_layout_key sub-params.
+        // CSI 97:65:97 ; 2 u — 'a' shifted to 'A' (US layout). We absorb the
+        // shifted/base sub-params and treat the event as a plain Shift-A.
+        let evs = p.feed(b"\x1b[97:65:97;2u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert!(keys[0].mods.contains(ModSet::SHIFT));
+    }
+
+    #[test]
+    fn kitty_csi_u_escape_and_enter() {
+        let mut p = StdinParser::new();
+        let esc = p.feed(b"\x1b[27u");
+        assert_eq!(key_only(&esc)[0].key, PhysicalKey::Escape);
+        let enter = p.feed(b"\x1b[13u");
+        assert_eq!(key_only(&enter)[0].key, PhysicalKey::Enter);
+    }
+
+    #[test]
+    fn kitty_csi_u_arrow_pua_codepoint() {
+        let mut p = StdinParser::new();
+        // ArrowUp = 57352
+        let evs = p.feed(b"\x1b[57352u");
+        let keys = key_only(&evs);
+        assert_eq!(keys[0].key, PhysicalKey::ArrowUp);
+    }
+
+    #[test]
+    fn kitty_csi_u_super_modifier() {
+        let mut p = StdinParser::new();
+        // mods = 1 + super(8) = 9
+        let evs = p.feed(b"\x1b[97;9u");
+        let keys = key_only(&evs);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert!(keys[0].mods.contains(ModSet::SUPER));
+    }
+
+    #[test]
+    fn kitty_csi_u_empty_keycode_dropped() {
+        let mut p = StdinParser::new();
+        // CSI u with no params — keycode would be 0, must drop silently.
+        let evs = p.feed(b"\x1b[u");
+        assert!(key_only(&evs).is_empty());
+        assert!(!p.has_pending());
+    }
+
+    #[test]
+    fn kitty_modifier_code_table() {
+        assert_eq!(kitty_modifier_code(1), ModSet::empty());
+        assert_eq!(kitty_modifier_code(2), ModSet::SHIFT);
+        assert_eq!(kitty_modifier_code(3), ModSet::ALT);
+        assert_eq!(kitty_modifier_code(5), ModSet::CTRL);
+        assert_eq!(kitty_modifier_code(9), ModSet::SUPER);
+        assert_eq!(
+            kitty_modifier_code(8),
+            ModSet::SHIFT | ModSet::ALT | ModSet::CTRL
+        );
+        // Hyper/Meta bits silently dropped — verify they don't blow up.
+        assert_eq!(kitty_modifier_code(1 + 16), ModSet::empty());
+        assert_eq!(kitty_modifier_code(1 + 32), ModSet::empty());
+        // Caps lock + num lock pass through.
+        assert_eq!(kitty_modifier_code(1 + 64), ModSet::CAPS_LOCK);
+        assert_eq!(kitty_modifier_code(1 + 128), ModSet::NUM_LOCK);
     }
 
     // ---- Sanity: existing "unknown CSI" path still recovers -------------
