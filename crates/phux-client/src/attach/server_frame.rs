@@ -185,12 +185,19 @@ pub(super) fn handle_server_frame(
                     // bottom row of its own grid; force a status-bar
                     // repaint over it.
                     let focused_cursor = slot.renderer.last_cursor();
+                    // phux-9xn: when libghostty's snapshot can't tell
+                    // us a cursor position (fresh attach with no PTY
+                    // output, alt-screen transitions, hidden cursor),
+                    // fall back to the focused pane's origin so the
+                    // host terminal cursor doesn't strand at the end
+                    // of the bar row (bottom-right).
                     paint_bar_after_pane(
                         status_bar,
                         &mut stdout,
                         viewport_dims,
                         session_name,
                         focused_cursor,
+                        Some(origin),
                     );
                 }
             }
@@ -254,12 +261,24 @@ pub(super) fn handle_server_frame(
                 // of a partial confirmation). On a fully-drained queue
                 // this is a no-op.
                 let _ = overlay.render(predict, &mut stdout);
+                // phux-9xn: compute the focused pane's Rect origin so
+                // the bar paint can park the cursor there if
+                // `last_cursor` is None. Without this fallback the
+                // bar's final write leaves the host terminal cursor
+                // at bottom-right.
+                let pane_dims = pane_viewport(viewport_dims, has_bar);
+                let fallback_origin = super::multi_pane::compute_layout(layout_state, pane_dims)
+                    .rects
+                    .get(fid)
+                    .map(|r| (r.x, r.y))
+                    .or(Some((0, 0)));
                 paint_bar_after_pane(
                     status_bar,
                     &mut stdout,
                     viewport_dims,
                     session_name,
                     focused_cursor,
+                    fallback_origin,
                 );
             }
             Ok(FrameOutcome::default())

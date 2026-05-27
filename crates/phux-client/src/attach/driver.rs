@@ -757,12 +757,26 @@ async fn main_loop(
                     let focused_cursor = focused_pane.as_ref()
                         .and_then(|fid| panes.get(fid))
                         .and_then(|slot| slot.renderer.last_cursor());
+                    // phux-9xn: compute focused pane origin as a
+                    // fallback for the None-cursor case. Without this
+                    // a status tick before the focused pane has any
+                    // PTY output would strand the host cursor at the
+                    // end of the bar (bottom-right).
+                    let has_bar = status_bar.is_some();
+                    let pane_dims = pane_viewport(viewport_dims, has_bar);
+                    let fallback_origin = focused_pane.as_ref().map(|fid| {
+                        super::multi_pane::compute_layout(&layout_state, pane_dims)
+                            .rects
+                            .get(fid)
+                            .map_or((0, 0), |r| (r.x, r.y))
+                    });
                     paint_bar_after_pane(
                         status_bar.as_mut(),
                         &mut stdout,
                         viewport_dims,
                         &session_name,
                         focused_cursor,
+                        fallback_origin,
                     );
                 }
             }

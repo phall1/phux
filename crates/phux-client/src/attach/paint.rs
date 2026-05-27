@@ -94,7 +94,17 @@ pub(super) fn paint_full_frame(
         }
     }
     let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
-    paint_bar_after_pane(status_bar, &mut stdout, viewport_dims, session_name, None);
+    // `paint_full_frame` paints the focused pane AFTER the bar, so the
+    // focused pane's `render_at` owns final cursor placement. No
+    // fallback needed here.
+    paint_bar_after_pane(
+        status_bar,
+        &mut stdout,
+        viewport_dims,
+        session_name,
+        None,
+        None,
+    );
     let _ = focused_pane.and_then(|fid| {
         paint_focused_pane(
             &mut stdout,
@@ -110,12 +120,31 @@ pub(super) fn paint_full_frame(
 /// phux-nz4.5: shared helper invoked after every pane render so the
 /// status row is restored on top of whatever VT the pane renderer just
 /// wrote. No-op when there is no painter or no live viewport.
+///
+/// `restore_cursor` is the renderer's last authoritative cursor
+/// position (outer-viewport coords); when present we CUP+show there.
+///
+/// `fallback_origin` is the focused pane's `Rect` origin to use when
+/// `restore_cursor` is `None` (phux-9xn). Without this, the bar's
+/// final write strands the host terminal's cursor at the end of the
+/// bar row — i.e. bottom-right of the screen. The fallback emits a
+/// CUP into the pane area + `?25l` so the cursor sits in a sane
+/// location and is hidden until the next authoritative render
+/// places it. We hide rather than show because `last_cursor == None`
+/// means libghostty's snapshot either reported the cursor hidden or
+/// had no viewport position — in both cases showing the cursor at an
+/// arbitrary fallback position would lie to the user.
+///
+/// Pass `fallback_origin = None` at call sites where a subsequent
+/// pane render is guaranteed to own final cursor placement (e.g.
+/// `paint_full_frame`, which paints the focused pane LAST).
 pub(super) fn paint_bar_after_pane<W: Write>(
     status_bar: Option<&mut StatusBarPainter>,
     out: &mut W,
     viewport_dims: (u16, u16),
     session_name: &str,
     restore_cursor: Option<(u16, u16)>,
+    fallback_origin: Option<(u16, u16)>,
 ) {
     let Some(painter) = status_bar else {
         return;
@@ -131,13 +160,20 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     );
     // After the bar repaints, the cursor sits on the bar row. Put it
     // back at the focused pane's known position when we have one;
-    // otherwise leave it — `paint_full_frame` paints the focused pane
-    // AFTER the bar so its render_at owns final cursor placement, and
-    // the incremental path callers (server_frame) always pass Some.
+    // otherwise fall back to the focused pane's Rect origin (hidden)
+    // so the cursor doesn't remain stranded at the bar's tail —
+    // bottom-right of the host terminal. See phux-9xn.
     if let Some((row, col)) = restore_cursor {
         let one_based_row = row.saturating_add(1);
         let one_based_col = col.saturating_add(1);
         let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
+    } else if let Some((x, y)) = fallback_origin {
+        // No authoritative cursor: park inside the focused pane and
+        // hide. The next pane render that hits this slot will lift
+        // visibility back up via its own DECTCEM emit.
+        let one_based_row = y.saturating_add(1);
+        let one_based_col = x.saturating_add(1);
+        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
     }
 }
 
@@ -150,5 +186,107 @@ pub(super) const fn pane_viewport(outer: (u16, u16), has_status_bar: bool) -> (u
         (outer.0, outer.1.saturating_sub(1))
     } else {
         outer
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+    use crate::render::chrome::status_bar::Position;
+    use phux_config::widget::WidgetRegistry;
+    use phux_config::{StatusCfg, Widget};
+
+    fn build_painter() -> StatusBarPainter {
+        let cfg = StatusCfg {
+            left: vec![Widget::Bare("session-name".into())],
+            ..Default::default()
+        };
+        let reg = WidgetRegistry::with_builtins();
+        let bar = phux_config::widget::StatusBar::build(&cfg, &reg).expect("bar build");
+        StatusBarPainter::new(bar, Position::Bottom)
+    }
+
+    /// phux-9xn regression: when `restore_cursor` is None (e.g. fresh
+    /// attach before any PTY output, or hidden cursor) and a
+    /// `fallback_origin` is provided, the helper must emit a CUP into
+    /// the focused pane's rect origin plus `?25l` so the host
+    /// terminal's cursor doesn't strand at the end of the bar row.
+    #[test]
+    fn paint_bar_after_pane_falls_back_to_pane_origin_when_cursor_none() {
+        let mut painter = build_painter();
+        let mut out = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut out,
+            (80, 24),
+            "demo",
+            None,
+            Some((3, 5)),
+        );
+        let s = String::from_utf8_lossy(&out);
+        // Pane origin (3, 5) ⇒ 1-based CUP `\x1b[6;4H`.
+        assert!(s.contains("\x1b[6;4H"), "fallback CUP missing; out = {s:?}");
+        // Fallback hides the cursor — we don't know if it should be
+        // visible at this position.
+        assert!(
+            s.contains("\x1b[?25l"),
+            "fallback ?25l missing; out = {s:?}"
+        );
+        // And we must NOT have emitted ?25h via the restore branch.
+        let last_cup_idx = s.rfind("\x1b[6;4H").expect("cup present");
+        let after = &s[last_cup_idx..];
+        assert!(
+            !after.contains("\x1b[?25h"),
+            "fallback path must hide, not show cursor; trailing = {after:?}"
+        );
+    }
+
+    /// Cursor-known path must continue to emit `?25h` at the
+    /// authoritative position (phux-b9n regression guard).
+    #[test]
+    fn paint_bar_after_pane_restores_cursor_visible_when_known() {
+        let mut painter = build_painter();
+        let mut out = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut out,
+            (80, 24),
+            "demo",
+            Some((4, 7)),
+            Some((0, 0)),
+        );
+        let s = String::from_utf8_lossy(&out);
+        // (row, col) = (4, 7) ⇒ 1-based CUP `\x1b[5;8H`.
+        assert!(s.contains("\x1b[5;8H"), "restore CUP missing; out = {s:?}");
+        assert!(s.contains("\x1b[?25h"), "restore ?25h missing; out = {s:?}");
+        // Fallback CUP for origin (0, 0) must NOT appear.
+        assert!(
+            !s.contains("\x1b[1;1H"),
+            "fallback CUP leaked into restore path; out = {s:?}"
+        );
+    }
+
+    /// When `restore_cursor` is None AND `fallback_origin` is None,
+    /// the helper paints the bar but emits no CUP — the caller
+    /// (e.g. `paint_full_frame`) takes over cursor placement via a
+    /// follow-up pane render.
+    #[test]
+    fn paint_bar_after_pane_emits_no_cup_when_both_none() {
+        let mut painter = build_painter();
+        let mut out = Vec::new();
+        paint_bar_after_pane(Some(&mut painter), &mut out, (80, 24), "demo", None, None);
+        let s = String::from_utf8_lossy(&out);
+        // Bar CUP to row 24 must be present (the bar still paints).
+        assert!(s.contains("\x1b[24;1H"), "bar CUP missing; out = {s:?}");
+        // But no DECTCEM toggle from this helper.
+        assert!(
+            !s.contains("\x1b[?25l"),
+            "unexpected ?25l in both-none path; out = {s:?}"
+        );
+        assert!(
+            !s.contains("\x1b[?25h"),
+            "unexpected ?25h in both-none path; out = {s:?}"
+        );
     }
 }
