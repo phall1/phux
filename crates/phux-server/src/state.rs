@@ -51,6 +51,7 @@ use phux_protocol::input::key::KeyEvent;
 use phux_protocol::input::mouse::MouseEvent;
 use phux_protocol::input::paste::PasteEvent;
 use phux_protocol::wire::frame::{FrameKind, Scope};
+use portable_pty::CommandBuilder;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -255,6 +256,23 @@ pub struct ServerState {
     /// scaffolding) is [`LayerSet::all`] — the most-permissive default
     /// keeps test setups simple; production clients always advertise.
     client_layers: HashMap<ClientId, LayerSet>,
+    /// Whether `AttachTarget::CreateIfMissing` (phux-k61.3) should spawn
+    /// a real PTY-backed actor for the newly created session's seed
+    /// pane. Mirrors [`crate::runtime::ServerConfig::seed_with_pty`] so
+    /// the attach-time creation path matches the server's startup
+    /// configuration. Set by the runtime via
+    /// [`Self::set_attach_create_pty`] right after `SharedState::new`.
+    ///
+    /// Defaults to `false` so tests that never call the setter exercise
+    /// the cheaper no-PTY actor (matches every existing integration
+    /// test that uses `spawn_server`).
+    attach_create_seeds_pty: bool,
+    /// Optional pre-built `CommandBuilder` used when
+    /// [`Self::attach_create_seeds_pty`] is `true` and `CreateIfMissing`
+    /// fires. `None` falls back to
+    /// [`crate::terminal_actor::default_shell_command`] (the user's
+    /// `$SHELL`, or `/bin/sh`).
+    attach_create_seed_command: Option<CommandBuilder>,
 }
 
 /// Default Collection identifier exposed by v0.1 servers.
@@ -437,7 +455,44 @@ impl ServerState {
             last_attached_session: None,
             metadata: MetadataStore::default(),
             client_layers: HashMap::new(),
+            attach_create_seeds_pty: false,
+            attach_create_seed_command: None,
         }
+    }
+
+    /// Configure the PTY mode and seed command used by
+    /// `crate::runtime::handle_attach`'s
+    /// `AttachTarget::CreateIfMissing` branch (phux-k61.3).
+    ///
+    /// Called once at server startup to mirror
+    /// [`crate::runtime::ServerConfig::seed_with_pty`] /
+    /// [`crate::runtime::ServerConfig::seed_command`] into state, so the
+    /// attach-time creation path can read them without an extra channel
+    /// to the runtime.
+    ///
+    /// When `with_pty` is `false`, `cmd` is ignored — the create path
+    /// spawns a no-PTY actor instead. Setting `cmd = None` with
+    /// `with_pty = true` falls back to
+    /// [`crate::terminal_actor::default_shell_command`] at create time.
+    pub fn set_attach_create_pty(&mut self, with_pty: bool, cmd: Option<CommandBuilder>) {
+        self.attach_create_seeds_pty = with_pty;
+        self.attach_create_seed_command = cmd;
+    }
+
+    /// Read the PTY-mode flag set by [`Self::set_attach_create_pty`].
+    #[must_use]
+    pub const fn attach_create_seeds_pty(&self) -> bool {
+        self.attach_create_seeds_pty
+    }
+
+    /// Clone the optional pre-built seed command. Used by the create
+    /// path inside `handle_attach`: each `AttachTarget::CreateIfMissing`
+    /// that fires gets a fresh clone, so the slot stays populated for
+    /// future creates. `CommandBuilder` is `Clone` (per portable-pty
+    /// 0.8), so this is cheap.
+    #[must_use]
+    pub fn attach_create_seed_command(&self) -> Option<CommandBuilder> {
+        self.attach_create_seed_command.clone()
     }
 
     /// Borrow the L3 metadata store.

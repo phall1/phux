@@ -221,6 +221,16 @@ impl ServerRuntime {
         let pre_seeded = self.cfg.pre_seeded_session.clone();
         let seed_with_pty = self.cfg.seed_with_pty;
         let seed_command = self.cfg.seed_command.clone();
+        // Mirror the PTY / seed-command preferences into shared state so
+        // `handle_attach`'s `AttachTarget::CreateIfMissing` branch
+        // (phux-k61.3) can spawn the new session's seed pane in the
+        // same mode the server was configured with. We use `clone()`
+        // (not `take`) on the local so the pre-seed path below still
+        // gets its own copy.
+        {
+            let attach_create_cmd = seed_command.clone();
+            state.with_mut(|s| s.set_attach_create_pty(seed_with_pty, attach_create_cmd));
+        }
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -527,8 +537,9 @@ async fn accept_loop(
                         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
                         let task_state = state.clone();
                         let client_token = root_token.child_token();
+                        let task_root_token = root_token.clone();
                         clients.spawn_local(async move {
-                            if let Err(err) = handle_client(stream, task_state.clone(), client_id, client_token).await {
+                            if let Err(err) = handle_client(stream, task_state.clone(), client_id, client_token, task_root_token).await {
                                 warn!(error = %err, "client task ended with error");
                             }
                             // Implicit detach on EOF / error path — matches
@@ -575,6 +586,7 @@ async fn handle_client(
     state: SharedState,
     client_id: ClientId,
     token: CancellationToken,
+    root_token: CancellationToken,
 ) -> io::Result<()> {
     debug!(?client_id, "client task started");
     let (mut reader, writer) = stream.into_split();
@@ -725,6 +737,7 @@ async fn handle_client(
                     scrollback_limit_lines,
                     &out_tx,
                     negotiated_color_support,
+                    &root_token,
                 )
                 .await;
             }
@@ -1017,6 +1030,7 @@ async fn resolve_attach_target(
     state: &SharedState,
     target: AttachTarget,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    root_token: &CancellationToken,
 ) -> Option<String> {
     match target {
         AttachTarget::ByName(name) => Some(name),
@@ -1065,14 +1079,8 @@ async fn resolve_attach_target(
             }
             resolved
         }
-        AttachTarget::CreateIfMissing { .. } => {
-            send_error(
-                out_tx,
-                ErrorCode::SessionNotFound,
-                "AttachTarget::CreateIfMissing is not yet implemented",
-            )
-            .await;
-            None
+        AttachTarget::CreateIfMissing { name, command, cwd } => {
+            resolve_create_if_missing(state, name, command, cwd, out_tx, root_token).await
         }
         _ => {
             send_error(
@@ -1084,6 +1092,120 @@ async fn resolve_attach_target(
             None
         }
     }
+}
+
+/// Handle [`AttachTarget::CreateIfMissing`] (phux-k61.3, SPEC §13).
+///
+/// Behavior:
+///
+/// * If a session with `name` already exists in the registry, return
+///   its name unchanged — the caller's `prepare_attach` then runs the
+///   normal `ByName` attach path against it. No duplicate session is
+///   created.
+/// * Otherwise, seed a fresh `(session, window, pane)` triple, spawn
+///   the seed pane's actor in the mode the server was configured
+///   with (PTY-backed via [`seed_session_with_pty`] when
+///   [`crate::state::ServerState::attach_create_seeds_pty`] is `true`,
+///   or no-PTY via [`seed_session_with_actor`] otherwise), and return
+///   the name so the caller proceeds with the normal attach path.
+///
+/// `command` and `cwd` from the wire frame are honored only when the
+/// PTY mode is on AND no explicit
+/// [`crate::state::ServerState::attach_create_seed_command`] preempts
+/// them: an explicit per-server seed command always wins (it's how the
+/// `phux server` binary pins `default_shell_command()` for the user).
+/// The PTY path also currently ignores `cwd` — pre-seeded PTY launches
+/// land in the server's CWD today, and lifting that into a
+/// per-`CreateIfMissing` override is filed as a follow-up rather than
+/// snuck in here. The no-PTY path ignores both, matching the existing
+/// `seed_session_with_actor` shape.
+///
+/// On terminal-actor spawn failure (e.g. PTY allocation fails on a
+/// host with no remaining ptys), emits a `SessionNotFound` error
+/// frame (mirroring how the pre-seed path logs-and-continues at
+/// startup) and returns `None` so the attach fails atomically. We
+/// reuse `SessionNotFound` rather than introducing a new error code:
+/// the user-visible effect is "the requested session is not available
+/// to attach to", which is what `SessionNotFound` already means on
+/// the wire. A richer error code (e.g. `SessionCreateFailed`) is a
+/// SPEC-level follow-up.
+async fn resolve_create_if_missing(
+    state: &SharedState,
+    name: String,
+    command: Option<Vec<String>>,
+    _cwd: Option<String>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    root_token: &CancellationToken,
+) -> Option<String> {
+    // Fast path: a session with this name already exists. Fall through
+    // to the normal `ByName(name)` attach by returning `name` as-is.
+    // The lookup is read-only so we hold only an immutable borrow.
+    if state.with(|s| s.session_by_name(&name).is_some()) {
+        debug!(session = %name, "CreateIfMissing: session already exists, attaching");
+        return Some(name);
+    }
+
+    // Slow path: create the session + seed pane. Snapshot the server's
+    // configured PTY mode and (optional) override command before
+    // releasing the state borrow.
+    let (with_pty, override_cmd) =
+        state.with(|s| (s.attach_create_seeds_pty(), s.attach_create_seed_command()));
+
+    let seed_result = if with_pty {
+        // Resolve the command. Precedence:
+        //   1. The server-wide override stashed via
+        //      `set_attach_create_pty(_, Some(cmd))`. Set explicitly by
+        //      the runtime (or by tests that want a deterministic
+        //      child like `cat`).
+        //   2. The wire-level `command` from the CreateIfMissing
+        //      variant. This is the per-attach command knob clients
+        //      use to spawn (e.g.) `phux new -- vim foo.txt`.
+        //   3. `default_shell_command()` (the user's `$SHELL`, or
+        //      `/bin/sh`) — same fallback the pre-seed path uses.
+        let cmd = override_cmd.unwrap_or_else(|| match command {
+            Some(argv) if !argv.is_empty() => {
+                let mut head = argv.into_iter();
+                // Safe: argv is non-empty here.
+                let program = head.next().unwrap_or_default();
+                let mut builder = portable_pty::CommandBuilder::new(program);
+                for arg in head {
+                    builder.arg(arg);
+                }
+                builder.env("TERM", "xterm-256color");
+                builder
+            }
+            _ => crate::terminal_actor::default_shell_command(),
+        });
+        seed_session_with_pty(state, &name, cmd, root_token)
+    } else {
+        // No-PTY path: the wire `command` is meaningless without a
+        // child to exec it on. We still create the session+pane so
+        // the snapshot path has a target — this is the shape every
+        // existing `spawn_server` test uses.
+        seed_session_with_actor(state, &name, root_token)
+    };
+
+    if let Err(err) = seed_result {
+        warn!(
+            session = %name,
+            error = %err,
+            "CreateIfMissing: failed to spawn pane actor for newly-created session",
+        );
+        send_error(
+            out_tx,
+            ErrorCode::SessionNotFound,
+            &format!("CreateIfMissing: failed to create session {name:?}: {err}"),
+        )
+        .await;
+        return None;
+    }
+
+    debug!(
+        session = %name,
+        pty = with_pty,
+        "CreateIfMissing: created session and seeded pane"
+    );
+    Some(name)
 }
 
 /// Perform the attach mutation in one critical section: call
@@ -1161,8 +1283,9 @@ async fn handle_attach(
     _scrollback_limit_lines: u32,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     color_support: phux_protocol::caps::ColorSupport,
+    root_token: &CancellationToken,
 ) {
-    let Some(session_name) = resolve_attach_target(state, target, out_tx).await else {
+    let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
         return;
     };
 
@@ -1852,6 +1975,7 @@ mod tests {
                 // Spawn `handle_attach` on the LocalSet so the test
                 // body can interleave with it.
                 let state_for_task = state.clone();
+                let test_root_token = CancellationToken::new();
                 let attach_task = tokio::task::spawn_local(async move {
                     handle_attach(
                         &state_for_task,
@@ -1862,6 +1986,7 @@ mod tests {
                         0,
                         &out_tx,
                         phux_protocol::caps::ColorSupport::default(),
+                        &test_root_token,
                     )
                     .await;
                 });
