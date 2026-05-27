@@ -535,6 +535,22 @@ What this tree does NOT contain yet, deliberately:
 See `research/2026-05-25-libghostty-renderstate.md` for the renderer
 contract these modules implement.
 
+#### Render layering: ratatui chrome over libghostty pane interiors
+
+Under epic `phux-5ke` (and TBD `ADR-0020`) phux-client uses two
+renderers for disjoint screen regions. libghostty paints pane interiors
+on the hot path — kitty graphics, sixel, OSC 8 hyperlinks, and the
+Kitty key protocol all pass through unchanged. `ratatui` paints the
+chrome: status bar, pane dividers, borders, modals, future tab bar.
+The layers composite rather than interleave; chrome carves skip-cell
+rectangles for pane rects so libghostty owns those cells exclusively.
+
+The `ratatui` dependency is scoped to `crates/phux-client/src/render/`
+(submodules `chrome` and `overlay`). Attach loop, pane mirror, predict
+layer, and layout math stay ratatui-free. A CI grep guard,
+`scripts/check-ratatui-boundary.sh`, runs from `just ci` and fails the
+build if a `ratatui` import appears outside `render/`.
+
 ### `phux-config`
 
 ```

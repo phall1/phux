@@ -10,7 +10,13 @@ yanked = "deny"
 # by portable-pty (the canonical Rust PTY library; see phux-bc1.2). Not a
 # known vulnerability — just no upstream activity. Tracked; revisit if
 # portable-pty drops the dep or we move to a different PTY backend.
-ignore = ["RUSTSEC-2017-0008"]
+#
+# RUSTSEC-2024-0436: `paste` crate is unmaintained (author archived the
+# repo). Pulled in transitively by `ratatui` (chrome-layer dep, epic
+# phux-5ke). Not a known vulnerability — declarative macro helper, no
+# unsafe surface. Revisit when ratatui migrates to `pastey` or drops the
+# dep.
+ignore = ["RUSTSEC-2017-0008", "RUSTSEC-2024-0436"]
 
 [licenses]
 allow = [

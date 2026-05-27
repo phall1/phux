@@ -27,6 +27,11 @@ toml = { workspace = true }
 # server feature) so the client can construct and drive a Terminal +
 # RenderState without depending on protocol-internal modules.
 libghostty-vt.workspace = true
+# Chrome-layer TUI toolkit (status bar, dividers, overlays). Confined to
+# `src/render/` per epic phux-5ke; a CI grep guard
+# (`scripts/check-ratatui-boundary.sh`) fails the build if `ratatui`
+# imports leak outside that module.
+ratatui = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 # Async I/O + UDS transport for the attach loop (phux-9gw.3). The workspace

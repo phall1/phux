@@ -64,6 +64,12 @@ criterion = { version = "0.5", default-features = false, features = ["cargo_benc
 dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }
 portable-pty = "0.8"
+# Chrome-layer TUI toolkit for phux-client (status bar, dividers, overlays).
+# Confined to `crates/phux-client/src/render/` by a CI grep guard
+# (`scripts/check-ratatui-boundary.sh`); pane interiors stay on libghostty.
+# See epic phux-5ke. Default features only — no backend selection yet, the
+# render layer drives stdout directly alongside the libghostty pane painter.
+ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"

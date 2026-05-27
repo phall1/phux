@@ -48,8 +48,13 @@ doc:
 watch:
     cargo watch -x check -x 'nextest run --workspace'
 
+# Boundary guard: ratatui imports must stay under phux-client/src/render/.
+# See epic phux-5ke and ARCHITECTURE.md.
+check-ratatui-boundary:
+    bash scripts/check-ratatui-boundary.sh
+
 # Everything CI must pass.
-ci: fmt-check lint test deny doc
+ci: fmt-check lint check-ratatui-boundary test deny doc
     @echo "ok"
 
 # Print the toolchain we are pinned to.
