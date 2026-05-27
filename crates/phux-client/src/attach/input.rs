@@ -14,7 +14,6 @@
 //! - Printable ASCII and full UTF-8 multibyte sequences (Unicode keypresses)
 //! - C0 controls — CR/LF (Enter), HT (Tab), BS / DEL (Backspace), and the
 //!   Ctrl-A..Ctrl-Z encoding (`0x01..=0x1A` minus the dedicated mappings).
-//! - The Ctrl-b d detach chord (tmux-style).
 //! - **Bare ESC** as the Escape key (see "Timing ambiguity" below).
 //! - **ESC + char** as an Alt-modified key (Alt-letter chords).
 //! - **CSI** sequences (`ESC [` …) for arrow keys, Home/End/Insert/Delete,
@@ -109,23 +108,12 @@ use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::FrameKind;
 
-/// Human-readable description of the v0 detach chord. Surfaced through
-/// [`super::DETACH_CHORD_DESCRIPTION`] for help text.
-pub const DETACH_CHORD_DESCRIPTION: &str = "Ctrl-b d";
-
-/// The prefix byte of the detach chord. `Ctrl-b` is `0x02`.
-const DETACH_PREFIX: u8 = 0x02;
-
-/// The completion byte of the detach chord. ASCII lowercase `d`.
-const DETACH_FINISH: u8 = b'd';
-
 /// One client-to-server input event ready to be wrapped in a [`FrameKind`].
 ///
 /// Mouse / focus / paste variants are present so the enum reads true to
 /// the SPEC §9 input surface — but the v0 parser only ever yields
 /// [`InputEvent::Key`] from real input bytes, plus
-/// [`InputEvent::DetachRequested`] for the hardcoded chord. The richer
-/// variants are populated when mouse / paste parsing lands as a follow-up.
+/// the richer variants populated by mouse / focus / paste parsing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     /// A structured key event. Encodes to `INPUT_KEY` per SPEC §9.1.
@@ -137,16 +125,11 @@ pub enum InputEvent {
     Focus(FocusEvent),
     /// A paste payload. Encodes to `INPUT_PASTE` per SPEC §9.4.
     Paste(PasteEvent),
-    /// The user pressed the detach chord. The driver translates this to
-    /// a [`FrameKind::Detach`] and waits for `DETACHED`.
-    DetachRequested,
 }
 
 impl InputEvent {
     /// Wrap this event in the appropriate [`FrameKind`] addressed to
-    /// `terminal_id`. [`InputEvent::DetachRequested`] returns `None` — the
-    /// driver issues a [`FrameKind::Detach`] directly, since `DETACH`
-    /// is session-level and pane-id-agnostic.
+    /// `terminal_id`.
     #[must_use]
     pub fn into_frame(self, terminal_id: TerminalId) -> Option<FrameKind> {
         match self {
@@ -154,7 +137,6 @@ impl InputEvent {
             Self::Mouse(event) => Some(FrameKind::InputMouse { terminal_id, event }),
             Self::Focus(event) => Some(FrameKind::InputFocus { terminal_id, event }),
             Self::Paste(event) => Some(FrameKind::InputPaste { terminal_id, event }),
-            Self::DetachRequested => None,
         }
     }
 }
@@ -179,8 +161,6 @@ enum State {
     /// In a UTF-8 multibyte continuation; `expected` more continuation
     /// bytes remain.
     Utf8 { expected: u8 },
-    /// Waiting on the second byte of the detach chord.
-    DetachPending,
     /// Inside a bracketed-paste payload; bytes accumulate in `paste_buf`
     /// until the closing `ESC [ 201 ~` marker is seen.
     Paste,
@@ -258,9 +238,6 @@ impl StdinParser {
     /// bare ESC can no longer be the prefix of a sequence. Effects:
     ///
     /// - `State::Escape`: emit a single Escape key and return to ground.
-    /// - `State::DetachPending`: the chord aborted by timeout; drop the
-    ///   prefix per tmux semantics and return to ground. (Matches the
-    ///   in-stream "Ctrl-b x" branch.)
     /// - All other in-progress states are *kept* — a CSI half-sent over
     ///   the network is not "abandoned" just because of an idle gap; the
     ///   next read is still expected to complete it. (Real terminals
@@ -273,10 +250,6 @@ impl StdinParser {
                     PhysicalKey::Escape,
                     ModSet::empty(),
                 ))]
-            }
-            State::DetachPending => {
-                self.state = State::Ground;
-                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -302,7 +275,6 @@ impl StdinParser {
             State::Ss3 => self.feed_ss3(b, out),
             State::StringTerm => self.feed_string_term(b),
             State::Utf8 { expected } => self.feed_utf8(b, expected, out),
-            State::DetachPending => self.feed_detach_pending(b, out),
             State::Paste => self.feed_paste(b),
             State::PasteEscape => self.feed_paste_escape(b),
             State::PasteCsi => self.feed_paste_csi(b, out),
@@ -311,10 +283,6 @@ impl StdinParser {
     }
 
     fn feed_ground(&mut self, b: u8, out: &mut Vec<InputEvent>) {
-        if b == DETACH_PREFIX {
-            self.state = State::DetachPending;
-            return;
-        }
         if b == 0x1B {
             self.state = State::Escape;
             return;
@@ -599,17 +567,6 @@ impl StdinParser {
         self.state = State::Paste;
     }
 
-    fn feed_detach_pending(&mut self, b: u8, out: &mut Vec<InputEvent>) {
-        self.state = State::Ground;
-        if b == DETACH_FINISH {
-            out.push(InputEvent::DetachRequested);
-            return;
-        }
-        // Chord aborted — process `b` from ground state. Matches existing
-        // tmux semantics: `Ctrl-b x` drops the prefix and delivers `x`.
-        self.feed_byte(b, out);
-    }
-
     /// Consume one of the three payload bytes of a legacy X10 mouse
     /// report. The three bytes are `Cb`, `Cx`, `Cy` — each is a raw
     /// single byte (NOT a numeric param), where the encoded value is
@@ -636,8 +593,8 @@ impl StdinParser {
 }
 
 /// Map a single byte to a [`KeyEvent`] for the printable / C0 region.
-/// Returns `None` for bytes the parser handles elsewhere (ESC, the detach
-/// prefix, UTF-8 continuations, ...).
+/// Returns `None` for bytes the parser handles elsewhere (ESC, UTF-8
+/// continuations, ...).
 fn c0_or_ascii_to_key(b: u8) -> Option<KeyEvent> {
     match b {
         // Printable ASCII.
@@ -1668,32 +1625,17 @@ mod tests {
         assert_eq!(keys[0].text.as_deref(), Some("a"));
     }
 
-    // ---- Detach chord ---------------------------------------------------
+    // ---- Configurable detach key input ---------------------------------
 
     #[test]
-    fn detach_chord_emits_detach_requested() {
+    fn ctrl_b_is_regular_key_event_for_keybinding_resolver() {
         let mut p = StdinParser::new();
-        let evs = p.feed(&[DETACH_PREFIX, b'd']);
-        assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0], InputEvent::DetachRequested);
-    }
-
-    #[test]
-    fn detach_chord_across_two_feeds() {
-        let mut p = StdinParser::new();
-        let first = p.feed(&[DETACH_PREFIX]);
-        assert!(first.is_empty(), "prefix alone should not emit");
-        let second = p.feed(b"d");
-        assert_eq!(second, vec![InputEvent::DetachRequested]);
-    }
-
-    #[test]
-    fn ctrl_b_followed_by_non_d_drops_prefix() {
-        let mut p = StdinParser::new();
-        let evs = p.feed(&[DETACH_PREFIX, b'a']);
+        let evs = p.feed(&[0x02, b'd']);
         let keys = key_only(&evs);
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].text.as_deref(), Some("a"));
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].key, PhysicalKey::B);
+        assert_eq!(keys[0].mods, ModSet::CTRL);
+        assert_eq!(keys[1].text.as_deref(), Some("d"));
     }
 
     // ---- Bare ESC / Alt-chord (timing) ----------------------------------
@@ -1938,15 +1880,6 @@ mod tests {
             }
             other => panic!("expected InputKey, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn detach_requested_has_no_frame() {
-        assert!(
-            InputEvent::DetachRequested
-                .into_frame(TerminalId::local(1))
-                .is_none()
-        );
     }
 
     // ---- Focus reports (DEC mode 1004) ---------------------------------

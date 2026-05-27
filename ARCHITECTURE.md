@@ -506,7 +506,7 @@ src/
                         positioning + per-cell SGR deltas + graphemes. Uses
                         per-row dirty bits to skip unchanged rows.
     input.rs          — StdinParser: keyboard + UTF-8 + escape sequences;
-                        hardcoded Ctrl-B D detach chord
+                        configurable keybinding chords
 ```
 
 What this tree does NOT contain yet, deliberately:
@@ -516,8 +516,7 @@ What this tree does NOT contain yet, deliberately:
   design that lives on top of the mirror Terminal).
 - `VIEWPORT_RESIZE` routing end-to-end (frame exists; SIGWINCH handler
   not yet wired).
-- Client-side keybinding dispatch (only the hardcoded detach chord).
-- Config loading.
+- Full client-side command coverage for every DESIGN.md keybinding action.
 
 See `research/2026-05-25-libghostty-renderstate.md` for the renderer
 contract these modules implement.

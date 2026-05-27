@@ -47,6 +47,9 @@ prefix = "C-a"
 "n" = "next-pane"
 "p" = "previous-pane"
 
+# Detach this client from the session.
+"d" = "detach"
+
 # Resize the focused pane. Capital letters are equivalent to `S-<lower>`.
 "H" = { action = "resize-pane", direction = "left",  amount = 5 }
 "J" = { action = "resize-pane", direction = "down",  amount = 5 }

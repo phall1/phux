@@ -831,9 +831,8 @@ pub(super) const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
 /// phux-4li.5: build a [`phux_config::keybind::Resolver`] from the
 /// on-disk config. Failures log and return `None` — a malformed
 /// `[keybindings]` table degrades to "no actions are bound" rather
-/// than blocking attach. The existing `Ctrl-b d` detach chord is
-/// parsed by [`super::input::StdinParser`] and is independent of
-/// this resolver, so even with no resolver the user can still detach.
+/// than blocking attach. Detach is a normal keybinding action, so a
+/// disabled resolver also disables configured detach chords.
 fn build_resolver() -> Option<phux_config::keybind::Resolver> {
     let cfg = match phux_config::loader::load() {
         Ok(c) => c,

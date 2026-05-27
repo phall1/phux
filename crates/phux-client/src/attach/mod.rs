@@ -8,8 +8,8 @@
 //!   attach.
 //! * [`render`] — VT emission from a local `libghostty_vt::Terminal` /
 //!   `RenderState` pair per ADR-0013.
-//! * [`input`] — stdin bytes → structured input events plus the hardcoded
-//!   `Ctrl-b d` detach chord.
+//! * [`input`] — stdin bytes → structured input events for the keybinding
+//!   resolver and pane input forwarding.
 //!
 //! The public entry point is [`run`]. It expects to be called from a tokio
 //! current-thread runtime (matching ADR-0003); embedders are responsible for
@@ -24,8 +24,6 @@
 //! * Predictive local echo — that's phux-9gw.1 layered on top.
 //! * `VIEWPORT_RESIZE` — the wire frame doesn't exist yet; tracked under
 //!   phux-4hp.
-//! * Configurable detach key — `Ctrl-b d` is hardcoded for v0; tracked
-//!   under phux-631.
 //! * Mouse / bracketed-paste parsing — keyboard input (ASCII, UTF-8,
 //!   CSI / SS3 sequences, modifier-bearing chords, Alt-chords) is
 //!   handled by [`input::StdinParser`]; mouse reports and bracketed
@@ -43,7 +41,6 @@ pub mod render;
 pub mod server_frame;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
-pub use input::DETACH_CHORD_DESCRIPTION;
 // Status bar lives under `crate::render::chrome::status_bar` post
 // phux-5ke.2 (ADR-0020). Re-exported here so external callers (the
 // `phux-client::attach::status_bar::*` integration test path included)

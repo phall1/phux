@@ -80,6 +80,10 @@ fn missing_file_returns_default() {
         !cfg.keybindings.prefix_table.is_empty(),
         "embedded defaults must populate prefix-table"
     );
+    assert_eq!(
+        cfg.keybindings.prefix_table.get("d"),
+        Some(&phux_config::Action::Bare("detach".to_owned()))
+    );
     assert!(
         !cfg.status.left.is_empty() || !cfg.status.right.is_empty(),
         "embedded defaults must populate the status bar"

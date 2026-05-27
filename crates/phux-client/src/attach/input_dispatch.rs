@@ -58,7 +58,7 @@ pub(super) struct DispatchCtx<'a> {
 
 /// Translate a batch of parser events into wire frames and ship them.
 ///
-/// Detach requests short-circuit into a single `FrameKind::Detach` and
+/// Detach actions short-circuit into a single `FrameKind::Detach` and
 /// flip `detach_pending`. Pre-attach events (no `focused_pane` yet) are
 /// dropped with a debug log — the wire spec has no "pre-attach buffer"
 /// notion.
@@ -96,20 +96,26 @@ pub(super) async fn dispatch_input_events(
     let mut predicted_any = false;
     let mut layout_changed = false;
     for ev in events {
-        if matches!(ev, InputEvent::DetachRequested) {
-            if !*detach_pending {
-                conn.send(&FrameKind::Detach).await?;
-                *detach_pending = true;
-            }
-            continue;
-        }
         // phux-5ke.4: while an overlay is active it captures all input.
         // Key events flow to `OverlayState::handle_key` (which may
         // dismiss); mouse / paste / focus events are dropped so they
-        // don't reach the pane underneath. Detach is the one bypass
-        // above — the user must still be able to bail out cleanly.
+        // don't reach the pane underneath. Detach remains a resolver
+        // bypass so the user can always bail out cleanly.
         if ctx.overlays.is_active() {
             if let InputEvent::Key(ref key_event) = ev {
+                if let Some(outcome) = consume_chord(ctx, key_event) {
+                    match outcome {
+                        ChordOutcome::Partial => continue,
+                        ChordOutcome::Resolved(resolved) if resolved.action == "detach" => {
+                            if !*detach_pending {
+                                conn.send(&FrameKind::Detach).await?;
+                                *detach_pending = true;
+                            }
+                            continue;
+                        }
+                        ChordOutcome::Resolved(_) => {}
+                    }
+                }
                 let was_active = ctx.overlays.is_active();
                 ctx.overlays.handle_key(key_event);
                 // On dismiss, repaint everything: the overlay scribbled
@@ -161,6 +167,10 @@ pub(super) async fn dispatch_input_events(
                     if effects.bell {
                         let mut stdout = io::stdout().lock();
                         let _ = actions::write_bell(&mut stdout);
+                    }
+                    if effects.detach && !*detach_pending {
+                        conn.send(&FrameKind::Detach).await?;
+                        *detach_pending = true;
                     }
                     // phux-4li.12: parked split — send the SPAWN_TERMINAL
                     // and remember the intent for the reply handler.
@@ -340,6 +350,8 @@ struct ActionEffects {
     set_metadata: bool,
     /// `true` ⇒ emit a terminal bell (BEL `\x07`).
     bell: bool,
+    /// `true` ⇒ emit `DETACH` and wait for `DETACHED`.
+    detach: bool,
     /// phux-4li.12: a `split-pane` action emitted a `SPAWN_TERMINAL`
     /// and parked a [`PendingSplit`] keyed by `request_id`. The async
     /// caller sends the frame, then inserts the parked entry into the
@@ -486,6 +498,9 @@ fn run_action(
             );
             ctx.overlays.push(Box::new(overlay));
         }
+        "detach" => {
+            effects.detach = true;
+        }
         "next-pane" => {
             if let Some(new_state) = actions::apply_next_pane(ctx.layout_state) {
                 let new_focus = new_state.focus.clone();
@@ -610,6 +625,7 @@ fn soft_kill_input_frames(target: &TerminalId) -> Vec<FrameKind> {
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn tid(id: u32) -> TerminalId {
         TerminalId::local(id)
@@ -684,5 +700,31 @@ mod tests {
             toml::Value::String("diagonal".into()),
         );
         assert_eq!(split_dir_arg(&bogus), None);
+    }
+
+    #[test]
+    fn detach_action_requests_detach_effect() {
+        let mut layout_state = LayoutState::default();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            layout_state: &mut layout_state,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            overlays: &mut overlays,
+            keybindings: None,
+        };
+        let action = phux_config::keybind::ResolvedAction {
+            action: "detach".to_owned(),
+            args: BTreeMap::new(),
+        };
+
+        let effects = run_action(&action, &mut ctx, None);
+
+        assert!(effects.detach);
+        assert!(!effects.layout_mutated);
     }
 }
