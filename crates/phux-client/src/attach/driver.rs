@@ -28,6 +28,7 @@ use std::time::{Duration, SystemTime};
 
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
+use phux_protocol::caps::{ClientCapabilities, detect_color_support};
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
@@ -231,11 +232,16 @@ pub async fn run_with_stdout_predict<W: Write>(
 /// protocol crate does not yet define the variant; we proceed
 /// optimistically.
 async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
+    // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
+    // `detect_color_support`. The advertised tier feeds the server's
+    // per-client `downsample::rewrite_bytes` (SPEC §6.2).
+    let client_caps = ClientCapabilities::new().with_color_support(detect_color_support());
     conn.send(&FrameKind::Hello {
         client_name: format!("phux-client/{}", env!("CARGO_PKG_VERSION")),
         protocol_major: PROTOCOL_VERSION.major,
         protocol_minor: PROTOCOL_VERSION.minor,
         protocol_patch: PROTOCOL_VERSION.patch,
+        client_caps,
     })
     .await
 }

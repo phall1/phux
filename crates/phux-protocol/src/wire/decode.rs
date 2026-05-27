@@ -162,11 +162,27 @@ impl<'a> Decoder<'a> {
                 let protocol_major = self.read_u16_be()?;
                 let protocol_minor = self.read_u16_be()?;
                 let protocol_patch = self.read_u16_be()?;
+                // Backward-compat trailing field (SPEC §6.2). A pre-7lf
+                // HELLO ends right after `protocol_patch` and the
+                // remaining-byte check below sees zero bytes — substitute
+                // the default ColorSupport. Newer HELLOs carry one extra
+                // tag byte; an unknown tag from a still-newer client maps
+                // back to the default rather than rejecting the frame
+                // (`ColorSupport` is `#[non_exhaustive]`).
+                let client_caps = if self.pos < body_end {
+                    let tag = self.read_u8()?;
+                    let color_support =
+                        crate::caps::ColorSupport::from_wire(tag).unwrap_or_default();
+                    crate::caps::ClientCapabilities::new().with_color_support(color_support)
+                } else {
+                    crate::caps::ClientCapabilities::default()
+                };
                 FrameKind::Hello {
                     client_name,
                     protocol_major,
                     protocol_minor,
                     protocol_patch,
+                    client_caps,
                 }
             }
             TYPE_PING => {

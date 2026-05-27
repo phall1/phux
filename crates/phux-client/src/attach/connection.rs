@@ -184,6 +184,7 @@ mod tests {
             protocol_major: PROTOCOL_VERSION.major,
             protocol_minor: PROTOCOL_VERSION.minor,
             protocol_patch: PROTOCOL_VERSION.patch,
+            client_caps: phux_protocol::ClientCapabilities::default(),
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
