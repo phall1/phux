@@ -111,8 +111,9 @@ const fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeybindingsCfg {
-    /// Prefix key chord (e.g. `"ctrl+space"`). Defaults to
-    /// `ctrl+space` per `DESIGN.md` §5.3.
+    /// Prefix key chord (e.g. `"ctrl+a"`). Defaults to `ctrl+a` —
+    /// chosen for portability across host terminals (some emulators
+    /// silently swallow `ctrl+space` before it reaches the client).
     #[serde(default = "default_prefix")]
     pub prefix: String,
 
@@ -136,7 +137,7 @@ impl Default for KeybindingsCfg {
 }
 
 fn default_prefix() -> String {
-    "ctrl+space".to_owned()
+    "ctrl+a".to_owned()
 }
 
 /// An action attached to a binding, hook, or status slot.

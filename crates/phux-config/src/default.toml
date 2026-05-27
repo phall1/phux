@@ -1,0 +1,54 @@
+# phux default configuration.
+#
+# This file ships with the phux binary (embedded via include_str!) and
+# defines what phux looks and feels like out of the box. The loader
+# layers your ~/.config/phux/config.toml ON TOP of this file: any key
+# you set there overrides the matching default below; anything you omit
+# keeps the default.
+#
+# For the full schema, see crates/phux-config/src/schema.rs and DESIGN.md.
+
+[defaults]
+# shell = unset → honor $SHELL (fallback /bin/sh).
+history-limit = 50000
+refresh-rate = 60
+mouse = true
+
+[keybindings]
+# Prefix: chord captured by the TUI before everything else. After hitting
+# the prefix, your next keystroke is matched against `prefix-table`.
+prefix = "ctrl+a"
+
+[keybindings.prefix-table]
+# Pane splits.
+"|" = { action = "split-pane", direction = "vertical" }
+"-" = { action = "split-pane", direction = "horizontal" }
+
+# Kill the focused pane. Soft-kill via shell exit; see phux-4li.12.
+"x" = "kill-pane"
+
+# Move focus, vi-style.
+"h" = { action = "focus-direction", direction = "left" }
+"j" = { action = "focus-direction", direction = "down" }
+"k" = { action = "focus-direction", direction = "up" }
+"l" = { action = "focus-direction", direction = "right" }
+
+# Cycle through panes in DFS order.
+"n" = "next-pane"
+"p" = "previous-pane"
+
+# Resize the focused pane. Capital letters reuse the focus key with shift.
+"shift+h" = { action = "resize-pane", direction = "left",  amount = 5 }
+"shift+j" = { action = "resize-pane", direction = "down",  amount = 5 }
+"shift+k" = { action = "resize-pane", direction = "up",    amount = 5 }
+"shift+l" = { action = "resize-pane", direction = "right", amount = 5 }
+
+[keybindings.global]
+# No global bindings shipped by default. Add yours here, e.g.:
+#   "alt+enter" = "detach"
+
+[status]
+# Minimal status bar: session name on the left, clock on the right.
+left   = ["session-name"]
+center = []
+right  = [{ kind = "time", format = "%H:%M" }]

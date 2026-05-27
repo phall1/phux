@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use phux_config::{Config, ConfigError, loader};
+use phux_config::{ConfigError, loader};
 use tempfile::TempDir;
 
 /// Guards every test that mutates `XDG_CONFIG_HOME` / `HOME`. `env::set_var`
@@ -72,7 +72,18 @@ fn missing_file_returns_default() {
     assert!(!path.exists(), "precondition: file does not exist");
 
     let cfg = loader::load_from(&path).expect("missing file is not an error");
-    assert_eq!(cfg, Config::default(), "missing file → embedded defaults");
+    // Missing file ⇒ shipped defaults are applied. The embedded
+    // `default.toml` populates a real prefix-table + a status bar so
+    // out-of-the-box phux is usable without user config.
+    assert_eq!(cfg.keybindings.prefix, "ctrl+a");
+    assert!(
+        !cfg.keybindings.prefix_table.is_empty(),
+        "embedded defaults must populate prefix-table"
+    );
+    assert!(
+        !cfg.status.left.is_empty() || !cfg.status.right.is_empty(),
+        "embedded defaults must populate the status bar"
+    );
 }
 
 #[test]
@@ -93,7 +104,7 @@ history-limit = 1234
     assert_eq!(cfg.defaults.shell.as_deref(), Some("/bin/zsh"));
     assert_eq!(cfg.defaults.history_limit, 1234);
     // Untouched section uses default.
-    assert_eq!(cfg.keybindings.prefix, "ctrl+space");
+    assert_eq!(cfg.keybindings.prefix, "ctrl+a");
 }
 
 #[test]

@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
-use crate::{Config, ConfigError, parse_str};
+use crate::{Config, ConfigError, parse_with_defaults};
 
 /// Resolve the canonical config path: `$XDG_CONFIG_HOME/phux/config.toml`
 /// (with `~/.config/phux/config.toml` fallback when `XDG_CONFIG_HOME` is
@@ -65,13 +65,14 @@ pub fn load() -> Result<Config, ConfigError> {
 ///   against the schema.
 pub fn load_from(path: &Path) -> Result<Config, ConfigError> {
     match fs::read_to_string(path) {
-        Ok(contents) => parse_str(&contents, path),
+        Ok(contents) => parse_with_defaults(&contents, path),
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             tracing::debug!(
                 path = %path.display(),
                 "phux config not present; using embedded defaults"
             );
-            Ok(Config::default())
+            // Missing file ⇒ no user overrides, just the shipped defaults.
+            parse_with_defaults("", path)
         }
         Err(err) => Err(ConfigError::Io(err)),
     }

@@ -31,10 +31,33 @@ pub use widget::{
 
 use std::path::Path;
 
+/// Default phux configuration, shipped with the binary.
+///
+/// The loader layers the user's on-disk config on top of this — each
+/// leaf the user sets wins; everything else is inherited from here.
+/// Pure parsing via [`parse_str`] does NOT apply this; only
+/// [`parse_with_defaults`] (used by [`loader::load_from`]) does.
+///
+/// Embedded at compile time. The doctest below pins that it parses.
+///
+/// ```
+/// let cfg = phux_config::parse_str(
+///     phux_config::DEFAULT_CONFIG_TOML,
+///     std::path::Path::new("default.toml"),
+/// ).expect("embedded defaults must parse");
+/// assert_eq!(cfg.keybindings.prefix, "ctrl+a");
+/// ```
+pub const DEFAULT_CONFIG_TOML: &str = include_str!("default.toml");
+
 /// Parse a TOML config from a string.
 ///
 /// `path` is used only for error reporting — it is embedded in
 /// [`ConfigError::Parse`] so messages display the source file.
+///
+/// This does NOT apply [`DEFAULT_CONFIG_TOML`]; callers wanting the
+/// user-facing "shipped defaults + user overrides" behavior should use
+/// [`parse_with_defaults`] (or [`loader::load_from`], which routes
+/// through it).
 ///
 /// # Errors
 ///
@@ -56,4 +79,72 @@ pub fn parse_str(input: &str, path: &Path) -> Result<Config, ConfigError> {
             })
         }
     }
+}
+
+/// Parse `user_input` and layer it over [`DEFAULT_CONFIG_TOML`].
+///
+/// Merge semantics: every leaf the user sets wins. Tables merge
+/// recursively (so the user can add one binding without restating the
+/// whole `prefix-table`). Arrays do NOT merge element-wise — they
+/// overwrite, because there is no per-element identity for widget
+/// lists / hook lists.
+///
+/// `path` is used only for error reporting on the user input.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Parse`] if either the embedded defaults or
+/// the user input fail to parse as TOML, or if the merged document
+/// fails to deserialize into the schema.
+pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, ConfigError> {
+    let default_table: toml::Table = toml::from_str(DEFAULT_CONFIG_TOML).map_err(|e| {
+        let (line, col) = e.span().map_or((1, 1), |r| {
+            byte_offset_to_line_col(DEFAULT_CONFIG_TOML, r.start)
+        });
+        ConfigError::Parse {
+            path: Path::new("<embedded default.toml>").to_path_buf(),
+            line,
+            col,
+            message: e.message().to_owned(),
+        }
+    })?;
+    let user_table: toml::Table = toml::from_str(user_input).map_err(|e| {
+        let (line, col) = e
+            .span()
+            .map_or((1, 1), |r| byte_offset_to_line_col(user_input, r.start));
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            line,
+            col,
+            message: e.message().to_owned(),
+        }
+    })?;
+    let merged = merge_tables(default_table, user_table);
+    toml::Value::Table(merged).try_into().map_err(|e| {
+        let (line, col) = e
+            .span()
+            .map_or((1, 1), |r| byte_offset_to_line_col(user_input, r.start));
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            line,
+            col,
+            message: e.message().to_owned(),
+        }
+    })
+}
+
+/// Recursively merge `overlay` into `base`. Tables merge per-key;
+/// any other Value type (including arrays) replaces wholesale.
+fn merge_tables(mut base: toml::Table, overlay: toml::Table) -> toml::Table {
+    for (k, ov) in overlay {
+        match (base.remove(&k), ov) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => {
+                base.insert(k, toml::Value::Table(merge_tables(b, o)));
+            }
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+    base
 }
