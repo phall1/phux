@@ -417,7 +417,13 @@ pub struct TerminalActor {
     /// fire or if the bundle's receiver was never created (the test
     /// constructor [`TerminalActor::new_with_seed`] leaves it `Some` too,
     /// but no consumer subscribes; the `.ok()` swallow is benign).
-    exit_notify: Option<oneshot::Sender<()>>,
+    ///
+    /// Carries the child's exit status when known: `Some(code)` for a
+    /// normal `_exit(n)`, `None` for signal-killed children or
+    /// otherwise-unknown exits (phux-4li.11; the structured exit code
+    /// flows into the `TERMINAL_CLOSED` wire frame the runtime emits on
+    /// PTY EOF).
+    exit_notify: Option<oneshot::Sender<Option<i32>>>,
     /// Cancellation token watched by the actor's `select!`. Cancel to
     /// ask the actor to shut down cleanly (drains the PTY, reaps the
     /// child, and exits). A child token of the per-server root token
@@ -524,7 +530,12 @@ pub struct TerminalActorBundle {
     ///
     /// `Option` so callers can `take()` it out of the bundle;
     /// `None` after the first take.
-    pub exit_notify: Option<oneshot::Receiver<()>>,
+    ///
+    /// The payload is the child's exit status: `Some(code)` on a normal
+    /// `_exit(n)` (or where the kernel reports a code at all), `None`
+    /// for signal-killed children or unknown-cause exits. Mirrors the
+    /// `TERMINAL_CLOSED.exit_status` wire field exactly (phux-4li.11).
+    pub exit_notify: Option<oneshot::Receiver<Option<i32>>>,
 }
 
 impl std::fmt::Debug for TerminalActor {
@@ -544,6 +555,30 @@ impl std::fmt::Debug for TerminalActorBundle {
             .field("handle", &self.handle)
             .finish_non_exhaustive()
     }
+}
+
+/// Map a `portable_pty::ExitStatus` into the `TERMINAL_CLOSED.exit_status`
+/// wire shape (phux-4li.11).
+///
+/// `Some(code)` for `_exit(n)`, `None` for signal-killed or
+/// unknown-cause exits. `portable_pty::ExitStatus` keeps its
+/// `signal: Option<String>` field private; the only way through the
+/// public surface to distinguish a signal-driven death from `_exit(1)`
+/// is the `Display` impl, which formats signal kills as
+/// `"Terminated by <name>"` and exits as `"Exited with code N"` /
+/// `"Success"`. Parsing the prefix is the stable contract; if upstream
+/// ever exposes `signal()` we can swap this for a structured probe
+/// without touching call sites.
+fn exit_status_to_wire(status: &portable_pty::ExitStatus) -> Option<i32> {
+    let rendered = status.to_string();
+    if rendered.starts_with("Terminated by") {
+        return None;
+    }
+    // Both "Success" (success() == true) and "Exited with code N" hit
+    // this branch. `exit_code()` returns u32 — coerce into i32 saturating
+    // at i32::MAX, since `TERMINAL_CLOSED.exit_status` is `Option<i32>`
+    // on the wire and the practical exit-code range is 0..=255.
+    Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
 }
 
 /// Resolve the default shell. Reads `$SHELL`; falls back to `/bin/sh`
@@ -660,7 +695,7 @@ impl TerminalActor {
         let (consumer_ack_tx, consumer_ack_rx) =
             mpsc::channel::<ConsumerAckRequest>(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
-        let (exit_tx, exit_rx) = oneshot::channel::<()>();
+        let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
         let bundle_token = token.clone();
 
         let (pty_rx, pty_tx, pty) = if let Some(cmd) = cmd {
@@ -1009,14 +1044,29 @@ impl TerminalActor {
     /// `try_wait` first to avoid blocking; if it returns `None` we
     /// leave the child alone (it might still be alive doing something
     /// odd; the shutdown path will deal with it).
-    fn reap_child_if_any(&mut self) {
-        let Some(pty) = self.pty.as_mut() else {
-            return;
-        };
+    ///
+    /// Returns the exit status in the shape the `TERMINAL_CLOSED` wire
+    /// frame wants (phux-4li.11): `Some(code)` for a normal `_exit(n)`,
+    /// `None` for signal-killed children or otherwise-unknown exits.
+    /// `portable_pty::ExitStatus.signal` is the discriminator — a
+    /// non-`None` signal name means the kernel reports the death as
+    /// signal-driven, which collapses to `exit_status = None` on the
+    /// wire per the SPEC §10.1 compact-subset rule.
+    fn reap_child_if_any(&mut self) -> Option<i32> {
+        let pty = self.pty.as_mut()?;
         match pty.child.try_wait() {
-            Ok(Some(status)) => debug!(?status, "child reaped on PTY EOF"),
-            Ok(None) => trace!("PTY EOF but child still alive — leaving to shutdown path"),
-            Err(err) => debug!(?err, "child try_wait failed on PTY EOF"),
+            Ok(Some(status)) => {
+                debug!(?status, "child reaped on PTY EOF");
+                exit_status_to_wire(&status)
+            }
+            Ok(None) => {
+                trace!("PTY EOF but child still alive — leaving to shutdown path");
+                None
+            }
+            Err(err) => {
+                debug!(?err, "child try_wait failed on PTY EOF");
+                None
+            }
         }
     }
 
@@ -1176,9 +1226,9 @@ impl TerminalActor {
                             // "EOF → detach attached" model is
                             // correct.
                             self.pty_rx = None;
-                            self.reap_child_if_any();
+                            let exit_status = self.reap_child_if_any();
                             if let Some(tx) = self.exit_notify.take() {
-                                let _ = tx.send(());
+                                let _ = tx.send(exit_status);
                             }
                         }
                     }

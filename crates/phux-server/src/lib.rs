@@ -20,7 +20,8 @@ pub mod terminal_actor;
 pub use id_bridge::IdBridge;
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
 pub use state::{
-    AttachError, AttachedClient, ClientId, Outbound, ServerState, SharedState, TerminalInput,
+    AttachError, AttachedClient, ClientId, DEFAULT_COLLECTION_ID, Outbound, ServerState,
+    SharedState, TerminalInput,
 };
 pub use terminal_actor::{
     SnapshotRequest, TerminalActor, TerminalActorBundle, TerminalActorError, TerminalHandle,
