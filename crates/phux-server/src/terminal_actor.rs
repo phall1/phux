@@ -223,8 +223,8 @@ pub struct ConsumerAttachRequest {
     pub reply: oneshot::Sender<Result<(), ConsumerAttachError>>,
 }
 
-/// Errors surfaced by [`TerminalActor::register_consumer`] in response to a
-/// [`ConsumerAttachRequest`].
+/// Errors surfaced by the private `TerminalActor::register_consumer`
+/// path in response to a [`ConsumerAttachRequest`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConsumerAttachError {
     /// libghostty refused to allocate the per-consumer `RenderState` /
