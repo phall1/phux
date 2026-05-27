@@ -1277,6 +1277,19 @@ Reserved for cases not modelled by `INPUT_KEY` / `INPUT_PASTE` /
 interpolation from configs). Servers MUST NOT silently re-interpret
 `INPUT_RAW`; clients SHOULD avoid using it in normal operation.
 
+### 9.6 Input authority
+
+Input authority is governed by the caller's `TerminalRole` for the
+target Terminal (§13.1). A client whose role for a Terminal is `VIEWER`
+MUST NOT send `INPUT_KEY`, `INPUT_PASTE`, `INPUT_MOUSE`, `INPUT_FOCUS`,
+or `INPUT_RAW` for that Terminal. A server receiving such a message from
+a viewer MUST reject it with `ERROR { code: PERMISSION_DENIED }` and
+MUST NOT write bytes to the PTY.
+
+A client whose role for a Terminal is `PRIMARY` MAY send input for that
+Terminal. Transport authentication remains out of band (§15); roles are
+an in-protocol concurrency policy, not an authentication mechanism.
+
 ---
 
 ## 10. Terminal lifecycle and viewport (L1)
@@ -1334,10 +1347,10 @@ envelope, §11) is:
   — returns `TerminalId`. Asynchronously emits `TERMINAL_OPENED`.
   `parent_collection` is meaningful only when L2 is in the
   negotiated tier set.
-- `ATTACH_TERMINAL { terminal_id }` — wire the calling client to
-  receive `TERMINAL_OUTPUT` for that Terminal. A Terminal MAY be
-  attached by multiple clients simultaneously; the server
-  multicasts.
+- `ATTACH_TERMINAL { terminal_id, role_policy }` — wire the calling
+  client to receive `TERMINAL_OUTPUT` for that Terminal, with the role
+  and takeover semantics described in §13.1. A Terminal MAY be
+  attached by multiple clients simultaneously; the server multicasts.
 - `DETACH_TERMINAL { terminal_id }` — stop receiving output. The
   Terminal itself is not affected.
 - `KILL_TERMINAL { terminal_id }` — terminate the underlying PTY.
@@ -1346,6 +1359,15 @@ envelope, §11) is:
 `ATTACH_TERMINAL` / `DETACH_TERMINAL` are per-consumer subscription
 operations; they do not affect the Terminal's existence. `KILL_TERMINAL`
 is the only L1 command that destroys state.
+
+`KILL_TERMINAL` and `RESIZE_TERMINAL` require the caller to be
+`PRIMARY` for the target Terminal. A server receiving either command
+from a viewer MUST return
+`COMMAND_RESULT { result: ERROR(PERMISSION_DENIED, ...) }` and MUST NOT
+perform the operation. `DETACH_TERMINAL` and `GET_STATE` are allowed for
+viewers. `SPAWN` is not role-gated; the creating client becomes
+`PRIMARY` for the newly spawned Terminal unless a future protocol
+revision adds an explicit spawn role.
 
 ### 10.2 Viewport resize
 
@@ -1429,7 +1451,7 @@ Command_L1 = tagged_union {
     SPAWN            { cwd: optional<str>, command: optional<list<str>>,
                        initial_size: optional<{cols: u16, rows: u16}>,
                        parent_collection: optional<CollectionId> },  // L2 if set
-    ATTACH_TERMINAL  { terminal_id: TerminalId },
+    ATTACH_TERMINAL  { terminal_id: TerminalId, role_policy: RolePolicy },
     DETACH_TERMINAL  { terminal_id: TerminalId },
     KILL_TERMINAL    { terminal_id: TerminalId },
     RESIZE_TERMINAL  { terminal_id: TerminalId, cols: u16, rows: u16 },
@@ -1599,6 +1621,7 @@ ATTACH {
     viewport: { cols: u16, rows: u16, pixel_w: optional<u16>, pixel_h: optional<u16> },
     request_scrollback: bool,
     scrollback_limit_lines: u32,
+    role_policy: RolePolicy,
 }
 
 AttachTarget = tagged_union {
@@ -1626,6 +1649,75 @@ SubstrateSnapshot {
     metadata_keys: list<MetadataKey>,          // empty if L3 not negotiated
 }
 ```
+
+### 13.1 Terminal roles and takeover policy
+
+Every client-to-Terminal subscription has a `TerminalRole` chosen by
+`RolePolicy` on `ATTACH` and `ATTACH_TERMINAL`. Roles are per Terminal,
+not per transport and not per Collection. A client attached to multiple
+Terminals MAY be `PRIMARY` for one Terminal and `VIEWER` for another.
+
+```
+RolePolicy {
+    requested_role: TerminalRole,
+    takeover: TakeoverPolicy,
+}
+
+TerminalRole = enum {
+    PRIMARY = 0,
+    VIEWER  = 1,
+}
+
+TakeoverPolicy = enum {
+    NEVER      = 0,  // fail rather than displace an existing primary
+    DELIBERATE = 1,  // explicitly displace an existing primary
+}
+```
+
+The server MUST maintain at most one `PRIMARY` subscription per Terminal
+at a time. Any number of `VIEWER` subscriptions MAY coexist. Both roles
+receive the Terminal's output, snapshots, and terminal-originated events,
+subject to the usual tier and subscription rules. Only `PRIMARY` may
+send Terminal input or terminal-mutating commands (§9.6, §10.1).
+
+When `requested_role = VIEWER`, `takeover` MUST be `NEVER`; non-`NEVER`
+takeover on a viewer attach is invalid and MUST be rejected with
+`ERROR { code: MALFORMED_MESSAGE }` for `ATTACH` or
+`COMMAND_RESULT { result: ERROR(INVALID_COMMAND, ...) }` for
+`ATTACH_TERMINAL`.
+
+When `requested_role = PRIMARY` and no primary exists for a target
+Terminal, the server grants `PRIMARY`. When a primary already exists:
+
+- If `takeover = NEVER`, the server MUST reject the request with
+  `ERROR { code: ALREADY_ATTACHED }` for `ATTACH` or
+  `COMMAND_RESULT { result: ERROR(ALREADY_ATTACHED, ...) }` for
+  `ATTACH_TERMINAL`. No subscription role changes.
+- If `takeover = DELIBERATE`, the server MUST transfer primary status
+  to the requester. The displaced client remains attached as `VIEWER`
+  unless server policy requires exclusive-primary eviction; in that
+  case the server MUST send `DETACHED { reason: REPLACED }` before
+  closing that client's transport.
+
+Takeover is deliberately explicit: servers MUST NOT infer it from a
+second `PRIMARY` attach, repeated `ATTACH_TERMINAL`, terminal focus, or
+transport reconnect. Clients implementing a watch-only UI SHOULD request
+`VIEWER`; clients implementing an interactive handoff SHOULD request
+`PRIMARY` with `DELIBERATE` only in response to a user or operator action.
+
+For `ATTACH` targets that resolve to multiple Terminals (for example a
+Collection), the same `RolePolicy` applies independently to each
+Terminal. The server MUST apply the policy atomically for the attach: if
+any target Terminal would reject the requested role, the whole `ATTACH`
+fails and no Terminal role changes. `ATTACH_TERMINAL` is scoped to a
+single Terminal and fails or succeeds independently.
+
+`RolePolicy` is encoded as an additive field on both `ATTACH` and
+`ATTACH_TERMINAL`. If absent, decoders MUST behave as if
+`RolePolicy { requested_role: PRIMARY, takeover: NEVER }` had been
+sent. This preserves the existing default that an interactive attach is
+the input-capable client, while making watch-only and deliberate takeover
+semantics explicit for clients that need them.
 
 This is the protocol's killer feature: a client reconnecting after
 hours of detached work receives the **full state** of every Terminal
@@ -1993,3 +2085,4 @@ longer exists as a wire concept.)
 | 0.1.0-draft.7 | 2026-05-26 | L1 vocabulary cascade Wave C (phux-vp0.2). §7 catalog reorganized by tier (proto / L1 / L2 / L3); §7.L1 messages renamed `PANE_*` → `TERMINAL_*` and `pane_id` → `terminal_id` per ADR-0016 (wire bytes unchanged). §7.3/§7.4 declare L2 (Collections) and L3 (Metadata) as reserved tiers with TBD discriminants. §6.1 HELLO gains `layers: bitset<Layer>` inside `ClientCapabilities` / `ServerCapabilities` (Appendix A field-tag extensibility keeps the wire compatible). §10 collapses Sessions/Windows/Panes/Layout/Focus into §10.1 Terminal lifecycle and §10.2 Viewport resize; the demoted TUI vocabulary lands non-normative in new §17. §6.2 reclaims the `CC_FRONTEND` capability slot per ADR-0017. §14 renames `PANE_NOT_FOUND` → `TERMINAL_NOT_FOUND` (numeric discriminant 104 preserved). §16 conformance restructured per-tier (16.0 common, 16.1 L1, 16.2 L1+L3, 16.3 L1+L2+L3). No wire bytes changed; no version bump. |
 | 0.2.0-draft.1 | 2026-05-27 | phux-4li.2: L3 metadata frames wire-allocated. C→S discriminants `GET_METADATA = 0x50`, `SET_METADATA = 0x51`, `DELETE_METADATA = 0x52`, `LIST_METADATA = 0x53`, `SUBSCRIBE_METADATA = 0x54`; S→C `METADATA_CHANGED = 0xD0`. `Scope` tagged union allocated (`Terminal` tag 0x00, `Collection` tag 0x01, `Global` tag 0x02). `METADATA_CHANGED` carries the new value inline (`optional<bytes>`) — supersedes the earlier "consumers re-GET after notification" sketch. `ClientCapabilities.layers` now wire-encoded as a trailing `u8` after `color_support` (additive trailing field per SPEC §6, no version bump beyond the L3 allocation). `CollectionId(u32)` allocated; L2 (which defines its full tagged-union shape) is still TBD. Reply path for GET/LIST defers to the `COMMAND_RESULT` envelope (§11). |
 | 0.2.0-draft.2 | 2026-05-27 | phux-4li.10: L1 Terminal lifecycle frames wire-allocated (§7.2.1). C→S discriminants `SPAWN_TERMINAL = 0x22`, `TERMINAL_RESIZE = 0x23`; S→C `TERMINAL_CLOSED = 0xA1` (honours the spec-only reservation from §7.2), `TERMINAL_SPAWNED = 0xA2`. `SpawnResult` and `SpawnError` tagged unions allocated (`Ok = 0x00`/`Err = 0x01` for `SpawnResult` — the convention extends to future `Result<T, E>` reply frames; `CollectionNotFound = 0x00`/`SpawnFailed(str) = 0x01` for `SpawnError`, both `#[non_exhaustive]`). `TERMINAL_CLOSED.exit_status: optional<i32>` is a deliberately compact subset of §10.1's `ExitStatus` tagged union — `Some(n)` for `_exit(n)`, `None` for signal kills and unknown causes; the wider tagged union grows in a follow-up if needed. `TERMINAL_RESIZE` is per-Terminal PTY resize, sent in addition to `VIEWPORT_RESIZE`. Appendix B reserved-range guidance updated for `0x24..=0x2F` and `0xA3..=0xAF`. Server / client wire-up lands in follow-up tickets; the codec is wire-complete on this commit. |
+| 0.2.0-draft.3 | 2026-05-27 | phux-dmb: `RolePolicy` added to `ATTACH` and `ATTACH_TERMINAL` as an additive field. Terminal subscriptions now have `PRIMARY` / `VIEWER` roles; only the primary may send input or terminal-mutating commands. `TakeoverPolicy::DELIBERATE` is required to displace an existing primary; silent takeover is forbidden. |
