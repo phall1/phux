@@ -54,14 +54,16 @@
 //! Not handled (yet):
 //!
 //! - **Kitty keyboard protocol `CSI u`** sequences — disambiguate-escape
-//!   (KIP level 1) plus event-types (KIP level 2). Sequences of the form
+//!   (KIP level 1), event-types including repeat (KIP level 2), and partial
+//!   levels 3-5. Sequences of the form
 //!   `CSI keycode[:shifted_key:base_layout_key][;modifiers[:event_type[:text_codepoints]]] u`
-//!   decode into [`KeyEvent`]s. We target levels 1+2 because that round-trips
-//!   Ctrl-Tab, F-keys with modifiers, distinguishes Enter from Ctrl-J, and
-//!   surfaces key release for hold-detection — without committing to the
-//!   alternate-keys / text-codepoints reporting whose downstream encoder
-//!   integration is not yet wired up. Higher levels (3-5) are absorbed and
-//!   their extra sub-parameters dropped (best-effort) pending follow-up.
+//!   decode into [`KeyEvent`]s. We surface press / release / repeat as
+//!   distinct [`KeyAction`] variants; we drop the level-3 `shifted_key` /
+//!   `base_layout_key` sub-parameters (no encoder integration yet); we
+//!   decode the level-5 text codepoints into `KeyEvent.text` whenever
+//!   they're present. Hyper / meta modifier bits are collapsed into
+//!   `SUPER` / `ALT` respectively — libghostty's `Mods` lacks distinct
+//!   hyper / meta bits and a phux-side wrapper is out of scope for v0.
 //!   See <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>.
 //! - DCS / OSC / SOS / PM / APC sequences inbound — these come from the
 //!   inner program, not from a keyboard, and have no representation as a
@@ -972,24 +974,39 @@ fn dispatch_sgr_mouse(body: &[u8], final_byte: u8, out: &mut Vec<InputEvent>) {
 ///
 /// * group 0, sub 0 → keycode (Unicode codepoint of the unshifted key, or a
 ///   functional keycode in the PUA range — see `kitty_keycode_to_physical`).
-/// * group 1, sub 0 → modifier bitfield (KIP level 1 encoding;
-///   `1 + shift|alt|ctrl|super|hyper|meta|caps_lock|num_lock`).
-/// * group 1, sub 1 → event type (1=press, 2=repeat, 3=release).
+/// * group 0, sub 1.. → `shifted_key`, `base_layout_key` (level 3,
+///   `REPORT_ALTERNATES`). Parsed off the wire and **dropped** — no encoder
+///   integration exists. Filed as a follow-up.
+/// * group 1, sub 0 → modifier bitfield (`1 + shift|alt|ctrl|super|hyper|meta|caps_lock|num_lock`).
+/// * group 1, sub 1 → event type (1=press, 2=repeat, 3=release; KIP level 2).
+/// * group 1, sub 2.. → text codepoints (level 5, `REPORT_ASSOCIATED_TEXT`).
+///   Decoded into [`KeyEvent::text`] whenever present, regardless of the
+///   keycode mapping. Empty / zero sub-params are skipped.
 ///
-/// All other sub-parameters (`shifted_key`, `base_layout_key`,
-/// `text_codepoints`) are deliberately ignored at level 1+2; they're reserved
-/// for the alternate-keys (level 3) and associated-text (level 5) features
-/// whose encoder integration is a follow-up.
-///
-/// Repeat events (`event_type=2`) are dropped — they would otherwise re-emit
-/// indistinguishably from a press, and downstream encoders that don't yet
-/// model repeat distinctly cannot use the signal. Filed as a follow-up.
+/// Hyper / meta modifier bits are collapsed into [`ModSet::SUPER`] /
+/// [`ModSet::ALT`] respectively — libghostty's `Mods` lacks distinct bits.
+/// See [`kitty_modifier_code`].
 fn dispatch_kitty_csi_u(params: &[u8], out: &mut Vec<InputEvent>) {
     let groups = parse_csi_param_groups(params);
-    let keycode = groups.first().and_then(|g| g.first().copied()).unwrap_or(0);
+    let keycode_group = groups.first();
+    let keycode = keycode_group.and_then(|g| g.first().copied()).unwrap_or(0);
     if keycode == 0 {
         tracing::trace!("kitty CSI u with empty keycode, dropping");
         return;
+    }
+
+    // Level 3 (REPORT_ALTERNATES): shifted_key, base_layout_key sub-params.
+    // Parsed for completeness; dropped pending encoder integration. Tracing
+    // surfaces them so a future change can wire them through.
+    if let Some(g) = keycode_group
+        && g.len() > 1
+    {
+        tracing::trace!(
+            keycode,
+            shifted_key = ?g.get(1).copied(),
+            base_layout_key = ?g.get(2).copied(),
+            "kitty CSI u: dropping level-3 alternate sub-params",
+        );
     }
 
     let mod_group = groups.get(1);
@@ -999,11 +1016,7 @@ fn dispatch_kitty_csi_u(params: &[u8], out: &mut Vec<InputEvent>) {
     let mods = kitty_modifier_code(raw_mod);
     let action = match event_type {
         3 => KeyAction::Release,
-        2 => {
-            // Repeat — drop for now; see fn doc.
-            tracing::trace!(keycode, "dropping kitty CSI u repeat event");
-            return;
-        }
+        2 => KeyAction::Repeat,
         _ => KeyAction::Press,
     };
 
@@ -1012,13 +1025,36 @@ fn dispatch_kitty_csi_u(params: &[u8], out: &mut Vec<InputEvent>) {
         return;
     };
 
+    // Level 5 (REPORT_ASSOCIATED_TEXT): text codepoints in group-1 sub-params
+    // from index 2 onwards. Decode them into the `text` payload whenever
+    // present. Empty / zero entries are skipped — they're "no associated text"
+    // markers (KIP allows the terminal to emit modifier-only keys with an
+    // empty text sub-param when the encoder has nothing to attribute).
+    let text = mod_group.and_then(|g| {
+        if g.len() <= 2 {
+            return None;
+        }
+        let mut s = String::new();
+        for &cp in &g[2..] {
+            if cp == 0 {
+                continue;
+            }
+            if let Some(c) = char::from_u32(cp) {
+                s.push(c);
+            } else {
+                tracing::trace!(cp, "kitty CSI u: invalid text codepoint, skipping");
+            }
+        }
+        if s.is_empty() { None } else { Some(s) }
+    });
+
     out.push(InputEvent::Key(KeyEvent {
         action,
         key,
         mods,
         consumed_mods: ModSet::empty(),
         composing: false,
-        text: None,
+        text,
         unshifted_codepoint: Some(keycode),
     }));
 }
@@ -1068,8 +1104,19 @@ fn parse_csi_param_groups(body: &[u8]) -> Vec<Vec<u32>> {
 /// KIP encodes modifiers as `1 + bitfield` (so an unmodified key reports `1`).
 /// The bitfield is `shift=1, alt=2, ctrl=4, super=8, hyper=16, meta=32,
 /// caps_lock=64, num_lock=128`. libghostty's [`ModSet`] does not expose
-/// hyper / meta as distinct bits — those are dropped. Caps lock and num lock
-/// are passed through since libghostty's `Mods` carries them.
+/// hyper / meta as distinct bits. For v0 we collapse them into their nearest
+/// neighbours rather than drop:
+///
+/// * **hyper → `SUPER`.** Hyper is a less-common modifier that few
+///   keyboards expose physically; binding it distinctly is rare and the
+///   conventional X11 mapping treats Hyper and Super interchangeably.
+/// * **meta → `ALT`.** KIP's "meta" mirrors the historical X11 Meta key,
+///   which most modern keymaps fold into Alt/Option.
+///
+/// Caps lock and num lock pass through since libghostty's `Mods` carries them.
+/// If a real use case for distinct hyper / meta bits materialises, we'll
+/// either extend libghostty's `Mods` upstream or add a phux-side
+/// `extra_mods` field; tracked as a follow-up.
 fn kitty_modifier_code(code: u32) -> ModSet {
     if code == 0 {
         return ModSet::empty();
@@ -1088,9 +1135,15 @@ fn kitty_modifier_code(code: u32) -> ModSet {
     if bits & 0b0000_1000 != 0 {
         mods |= ModSet::SUPER;
     }
-    // Hyper (0b0001_0000) and Meta (0b0010_0000) — libghostty's Mods has no
-    // distinct bits for these. Dropped at level 1+2; revisit if/when
-    // libghostty grows them.
+    // Hyper → SUPER (v0 collapse; libghostty's Mods has no distinct bit).
+    if bits & 0b0001_0000 != 0 {
+        mods |= ModSet::SUPER;
+    }
+    // Meta → ALT (v0 collapse; KIP "meta" mirrors the historical Meta key
+    // which most modern keymaps fold into Alt/Option).
+    if bits & 0b0010_0000 != 0 {
+        mods |= ModSet::ALT;
+    }
     if bits & 0b0100_0000 != 0 {
         mods |= ModSet::CAPS_LOCK;
     }
@@ -2354,14 +2407,14 @@ mod tests {
     }
 
     #[test]
-    fn kitty_csi_u_repeat_event_dropped() {
+    fn kitty_csi_u_repeat_event_maps_to_repeat_action() {
         let mut p = StdinParser::new();
-        // event_type = 2 = repeat; should produce no event.
+        // event_type = 2 = repeat.
         let evs = p.feed(b"\x1b[97;1:2u");
-        assert!(
-            key_only(&evs).is_empty(),
-            "repeat events are dropped at this level"
-        );
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1, "repeat must emit a key event, not drop");
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert_eq!(keys[0].action, KeyAction::Repeat);
     }
 
     #[test]
@@ -2375,6 +2428,80 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key, PhysicalKey::A);
         assert!(keys[0].mods.contains(ModSet::SHIFT));
+    }
+
+    #[test]
+    fn kitty_csi_u_text_codepoints_populate_text() {
+        let mut p = StdinParser::new();
+        // Level 5: CSI 97 ; 1 : 1 : 97 u — 'a' press with explicit text 'a'.
+        let evs = p.feed(b"\x1b[97;1:1:97u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert_eq!(keys[0].action, KeyAction::Press);
+        assert_eq!(keys[0].text.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn kitty_csi_u_text_codepoints_multi_char() {
+        let mut p = StdinParser::new();
+        // KIP allows multiple text codepoints (e.g. combining marks).
+        // CSI 97 ; 1 : 1 : 97 : 769 u — 'a' + U+0301 combining acute.
+        let evs = p.feed(b"\x1b[97;1:1:97:769u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].text.as_deref(), Some("a\u{0301}"));
+    }
+
+    #[test]
+    fn kitty_csi_u_text_codepoints_skip_zero_entries() {
+        let mut p = StdinParser::new();
+        // Zero sub-params are "no associated text" markers — skip them.
+        let evs = p.feed(b"\x1b[97;1:1:0u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].text, None);
+    }
+
+    #[test]
+    fn kitty_csi_u_text_codepoints_for_non_printable_keycode() {
+        let mut p = StdinParser::new();
+        // F1 (PUA 57364) with associated text payload "x" (codepoint 120).
+        // Confirms text codepoints surface even when the keycode itself
+        // maps to a functional (non-printable) PhysicalKey.
+        let evs = p.feed(b"\x1b[57364;1:1:120u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::F1);
+        assert_eq!(keys[0].text.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn kitty_csi_u_hyper_collapses_into_super() {
+        let mut p = StdinParser::new();
+        // mods = 1 + hyper(16) = 17
+        let evs = p.feed(b"\x1b[97;17u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert!(
+            keys[0].mods.contains(ModSet::SUPER),
+            "hyper must collapse into SUPER"
+        );
+    }
+
+    #[test]
+    fn kitty_csi_u_meta_collapses_into_alt() {
+        let mut p = StdinParser::new();
+        // mods = 1 + meta(32) = 33
+        let evs = p.feed(b"\x1b[97;33u");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::A);
+        assert!(
+            keys[0].mods.contains(ModSet::ALT),
+            "meta must collapse into ALT"
+        );
     }
 
     #[test]
@@ -2425,9 +2552,10 @@ mod tests {
             kitty_modifier_code(8),
             ModSet::SHIFT | ModSet::ALT | ModSet::CTRL
         );
-        // Hyper/Meta bits silently dropped — verify they don't blow up.
-        assert_eq!(kitty_modifier_code(1 + 16), ModSet::empty());
-        assert_eq!(kitty_modifier_code(1 + 32), ModSet::empty());
+        // Hyper collapses into SUPER, Meta collapses into ALT (v0 fallback —
+        // see fn doc).
+        assert_eq!(kitty_modifier_code(1 + 16), ModSet::SUPER);
+        assert_eq!(kitty_modifier_code(1 + 32), ModSet::ALT);
         // Caps lock + num lock pass through.
         assert_eq!(kitty_modifier_code(1 + 64), ModSet::CAPS_LOCK);
         assert_eq!(kitty_modifier_code(1 + 128), ModSet::NUM_LOCK);
