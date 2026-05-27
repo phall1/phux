@@ -25,123 +25,9 @@
 //! not a sanitiser, and unknown sequences must reach the client
 //! byte-for-byte.
 //!
-//! `ClientCapabilities` in `phux-protocol` does not yet carry the image /
-//! keyboard / hyperlink fields (they are TBD per SPEC §6.2 and tracked by
-//! sibling wire-bump tickets). The rewriter therefore takes a local
-//! [`DownsampleCaps`] view that the fanout layer assembles from whatever
-//! the client advertised plus permissive defaults; once the wire fields
-//! land we collapse the two.
-//!
 //! [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 
-use phux_protocol::caps::ColorSupport;
-
-/// One image-transport protocol the client may advertise (SPEC §6.2).
-///
-/// Defined locally because `phux-protocol` does not yet expose the
-/// `bitset<ImageProtocol>` field on `ClientCapabilities`; the wire bump
-/// will replace this with a re-export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ImageProtocol {
-    /// VT340 sixel graphics, transported via DCS (`ESC P ... q ... ESC \`).
-    Sixel,
-    /// Kitty graphics protocol, transported via APC with a leading `G`
-    /// payload byte (`ESC _ G ... ESC \`).
-    KittyGraphics,
-    /// iTerm2 inline images, transported via OSC 1337 (`ESC ] 1337 ; ... ST`).
-    Iterm2,
-}
-
-/// The subset of `ClientCapabilities` that the byte-stream rewriter
-/// consults (SPEC §6.2). Constructed by the fanout layer per-client.
-///
-/// All flags default to "most permissive" so that tests and call sites
-/// that have not yet plumbed capability detection do not silently drop
-/// sequences they used to forward. The flag bits are packed into a
-/// single `u8` so the struct stays `Copy` and trivially passes by value.
-#[derive(Debug, Clone, Copy)]
-pub struct DownsampleCaps {
-    /// Color tier — drives SGR truecolor quantisation.
-    pub color: ColorSupport,
-    /// Image / hyperlink / kbd-protocol gates, packed into one bitset.
-    /// The `Flag::*` constants name individual bits; toggle via
-    /// [`Self::with_flag`].
-    flags: u8,
-}
-
-/// A single capability bit consulted by the rewriter.
-///
-/// Toggle via [`DownsampleCaps::with_flag`]; query via
-/// [`DownsampleCaps::has`]. The wire layer that builds caps from HELLO
-/// sets these; the rewriter only reads them.
-#[derive(Debug, Clone, Copy)]
-pub enum Flag {
-    /// Forward sixel DCS (`ESC P ... q ... ST`) instead of dropping.
-    Sixel = 1 << 0,
-    /// Forward kitty graphics APC (`ESC _ G ... ST`) instead of dropping.
-    KittyGraphics = 1 << 1,
-    /// Forward iTerm2 inline images (`OSC 1337 ; ... ST`).
-    Iterm2Images = 1 << 2,
-    /// Forward kitty keyboard-protocol APC replies (`ESC _` without a
-    /// leading `G` byte) instead of dropping.
-    KbdProtocols = 1 << 3,
-    /// Forward OSC 8 hyperlink framing instead of stripping it.
-    Hyperlinks = 1 << 4,
-}
-
-impl Default for DownsampleCaps {
-    fn default() -> Self {
-        Self::permissive()
-    }
-}
-
-impl DownsampleCaps {
-    const ALL_FLAGS: u8 = (Flag::Sixel as u8)
-        | (Flag::KittyGraphics as u8)
-        | (Flag::Iterm2Images as u8)
-        | (Flag::KbdProtocols as u8)
-        | (Flag::Hyperlinks as u8);
-
-    /// Everything-allowed defaults. Used by the legacy
-    /// `rewrite_bytes(input, ColorSupport)` shim so existing call sites
-    /// keep their byte-for-byte semantics.
-    #[must_use]
-    pub const fn permissive() -> Self {
-        Self {
-            color: ColorSupport::TrueColor,
-            flags: Self::ALL_FLAGS,
-        }
-    }
-
-    /// Builder: set the color tier.
-    #[must_use]
-    pub const fn with_color(mut self, color: ColorSupport) -> Self {
-        self.color = color;
-        self
-    }
-
-    /// Builder: set or clear a single capability flag.
-    #[must_use]
-    pub const fn with_flag(mut self, flag: Flag, on: bool) -> Self {
-        let bit = flag as u8;
-        if on {
-            self.flags |= bit;
-        } else {
-            self.flags &= !bit;
-        }
-        self
-    }
-
-    /// True iff `flag`'s bit is set.
-    #[must_use]
-    pub const fn has(self, flag: Flag) -> bool {
-        self.flags & (flag as u8) != 0
-    }
-
-    const fn all_flags_on(self) -> bool {
-        self.flags == Self::ALL_FLAGS
-    }
-}
+use phux_protocol::caps::{ClientCapabilities, ColorSupport, ImageProtocol, KeyboardProtocol};
 
 /// Rewrite an outbound VT byte stream to fit the client's color tier.
 ///
@@ -150,7 +36,7 @@ impl DownsampleCaps {
 /// and hyperlink escapes pass through unchanged.
 #[must_use]
 pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
-    rewrite_bytes_with_caps(input, DownsampleCaps::permissive().with_color(support))
+    rewrite_bytes_with_caps(input, ClientCapabilities::new().with_color_support(support))
 }
 
 /// Rewrite an outbound VT byte stream to fit the full client capability
@@ -160,9 +46,13 @@ pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
 /// nothing beyond the scan. Truecolor-only clients with everything
 /// permissive get the fast path (single allocation + copy).
 #[must_use]
-pub fn rewrite_bytes_with_caps(input: &[u8], caps: DownsampleCaps) -> Vec<u8> {
+pub fn rewrite_bytes_with_caps(input: &[u8], caps: ClientCapabilities) -> Vec<u8> {
     // Fast path: nothing to rewrite or drop. Hot path on capable clients.
-    if matches!(caps.color, ColorSupport::TrueColor) && caps.all_flags_on() {
+    if matches!(caps.color_support, ColorSupport::TrueColor)
+        && caps.image_protocols == phux_protocol::caps::ImageProtocolSet::all()
+        && caps.kbd_protocols == phux_protocol::caps::KeyboardProtocolSet::all()
+        && caps.hyperlinks
+    {
         return input.to_vec();
     }
 
@@ -182,7 +72,7 @@ pub fn rewrite_bytes_with_caps(input: &[u8], caps: DownsampleCaps) -> Vec<u8> {
         }
         match input[i + 1] {
             b'[' => {
-                i = handle_csi(input, i, caps.color, &mut out);
+                i = handle_csi(input, i, caps.color_support, &mut out);
             }
             b']' => {
                 i = handle_osc(input, i, caps, &mut out);
@@ -275,7 +165,7 @@ fn passthrough_string_terminated(input: &[u8], start: usize, out: &mut Vec<u8>) 
 
 /// Handle `ESC ]` (OSC). Detects OSC 8 hyperlinks and OSC 1337 iTerm2
 /// images; everything else passes through.
-fn handle_osc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+fn handle_osc(input: &[u8], start: usize, caps: ClientCapabilities, out: &mut Vec<u8>) -> usize {
     let end = scan_string_terminated(input, start);
     // Body lies between ESC ] and the terminator. Identify the OSC
     // command code (digits up to the first `;`).
@@ -288,14 +178,14 @@ fn handle_osc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8
     // OSC 8 hyperlinks. Strip framing only; the text between open and
     // close OSC 8 lives outside this sequence and is preserved by the
     // outer loop.
-    if !caps.has(Flag::Hyperlinks) && code == b"8" {
+    if !caps.hyperlinks && code == b"8" {
         return end;
     }
     // OSC 1337 iTerm2 inline image. The protocol overloads OSC 1337
     // for non-image messages (e.g. shell integration) but per SPEC §6.2
     // the gating is on the OSC code, not the payload subkey — that
     // matches what tmux ships.
-    if !caps.has(Flag::Iterm2Images) && code == b"1337" {
+    if !caps.image_protocols.contains(ImageProtocol::Iterm2) && code == b"1337" {
         return end;
     }
     out.extend_from_slice(&input[start..end]);
@@ -305,9 +195,10 @@ fn handle_osc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8
 /// Handle `ESC P` (DCS). The sixel introducer is `DCS Pi ; Pa ; Ph q ...
 /// ST` — the final `q` of the introducer is what marks it as sixel.
 /// Other DCS strings (DECRQSS, tmux passthrough, etc.) pass through.
-fn handle_dcs(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+fn handle_dcs(input: &[u8], start: usize, caps: ClientCapabilities, out: &mut Vec<u8>) -> usize {
     let end = scan_string_terminated(input, start);
-    if !caps.has(Flag::Sixel) && is_sixel_dcs(&input[start + 2..end]) {
+    if !caps.image_protocols.contains(ImageProtocol::Sixel) && is_sixel_dcs(&input[start + 2..end])
+    {
         return end;
     }
     out.extend_from_slice(&input[start..end]);
@@ -331,16 +222,16 @@ fn is_sixel_dcs(body: &[u8]) -> bool {
 /// Handle `ESC _` (APC). Kitty splits APC on the first payload byte:
 /// `G` = graphics, otherwise it's a kitty keyboard protocol reply
 /// (digits-and-semicolons-and-other-codes). Gate each independently.
-fn handle_apc(input: &[u8], start: usize, caps: DownsampleCaps, out: &mut Vec<u8>) -> usize {
+fn handle_apc(input: &[u8], start: usize, caps: ClientCapabilities, out: &mut Vec<u8>) -> usize {
     let end = scan_string_terminated(input, start);
     let payload_start = start + 2;
     let first = input.get(payload_start).copied();
     let is_graphics = first == Some(b'G');
     if is_graphics {
-        if !caps.has(Flag::KittyGraphics) {
+        if !caps.image_protocols.contains(ImageProtocol::KittyGraphics) {
             return end;
         }
-    } else if !caps.has(Flag::KbdProtocols) {
+    } else if !caps.kbd_protocols.contains(KeyboardProtocol::Kitty) {
         return end;
     }
     out.extend_from_slice(&input[start..end]);
@@ -667,16 +558,14 @@ const fn nearest_xterm_16(rgb: [u8; 3]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phux_protocol::caps::{ImageProtocolSet, KeyboardProtocolSet};
 
-    fn caps_color(c: ColorSupport) -> DownsampleCaps {
-        DownsampleCaps::permissive().with_color(c)
+    fn caps_color(c: ColorSupport) -> ClientCapabilities {
+        ClientCapabilities::new().with_color_support(c)
     }
 
-    fn caps_strip_images() -> DownsampleCaps {
-        DownsampleCaps::permissive()
-            .with_flag(Flag::Sixel, false)
-            .with_flag(Flag::KittyGraphics, false)
-            .with_flag(Flag::Iterm2Images, false)
+    fn caps_strip_images() -> ClientCapabilities {
+        ClientCapabilities::new().with_image_protocols(ImageProtocolSet::new())
     }
 
     #[test]
@@ -848,14 +737,14 @@ mod tests {
     fn osc8_open_close_passthrough_when_hyperlinks_allowed() {
         // OSC 8 ; ; https://example.com ST  hello  OSC 8 ; ; ST
         let input = b"\x1b]8;;https://example.com\x1b\\hello\x1b]8;;\x1b\\";
-        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        let out = rewrite_bytes_with_caps(input, ClientCapabilities::new());
         assert_eq!(out, input);
     }
 
     #[test]
     fn osc8_stripped_when_hyperlinks_disabled() {
         let input = b"\x1b]8;;https://example.com\x1b\\hello\x1b]8;;\x1b\\";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let caps = ClientCapabilities::new().with_hyperlinks(false);
         let out = rewrite_bytes_with_caps(input, caps);
         // Only the inner `hello` survives.
         assert_eq!(out, b"hello");
@@ -865,7 +754,7 @@ mod tests {
     fn osc8_with_bel_terminator_also_stripped() {
         // Some emitters use BEL instead of ST.
         let input = b"\x1b]8;;https://x.example\x07link text\x1b]8;;\x07trailing";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let caps = ClientCapabilities::new().with_hyperlinks(false);
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, b"link texttrailing");
     }
@@ -874,7 +763,7 @@ mod tests {
     fn osc_non_8_unaffected_by_hyperlink_strip() {
         // Window title (OSC 0) must NOT be stripped when hyperlinks=false.
         let input = b"\x1b]0;window title\x1b\\rest";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::Hyperlinks, false);
+        let caps = ClientCapabilities::new().with_hyperlinks(false);
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, input);
     }
@@ -885,7 +774,7 @@ mod tests {
     fn sixel_passthrough_when_bit_set() {
         // DCS 0 ; 0 ; 0 q ... ST — minimal sixel body.
         let input = b"prefix\x1bP0;0;0q#0;2;100;0;0~~~\x1b\\suffix";
-        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        let out = rewrite_bytes_with_caps(input, ClientCapabilities::new());
         assert_eq!(out, input);
     }
 
@@ -909,7 +798,7 @@ mod tests {
     fn kitty_graphics_passthrough_when_bit_set() {
         // APC G a=T,f=24;<payload> ST
         let input = b"start\x1b_Ga=T,f=24;payload\x1b\\end";
-        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        let out = rewrite_bytes_with_caps(input, ClientCapabilities::new());
         assert_eq!(out, input);
     }
 
@@ -931,7 +820,7 @@ mod tests {
     #[test]
     fn iterm2_image_passthrough_when_bit_set() {
         let input = b"a\x1b]1337;File=name=test:AAAA\x1b\\b";
-        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        let out = rewrite_bytes_with_caps(input, ClientCapabilities::new());
         assert_eq!(out, input);
     }
 
@@ -941,7 +830,7 @@ mod tests {
     fn kitty_kbd_reply_stripped_when_disabled() {
         // APC without leading `G` — kitty kbd protocol payload.
         let input = b"head\x1b_13;2u\x1b\\tail";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::KbdProtocols, false);
+        let caps = ClientCapabilities::new().with_kbd_protocols(KeyboardProtocolSet::new());
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, b"headtail");
     }
@@ -949,7 +838,7 @@ mod tests {
     #[test]
     fn kitty_kbd_reply_survives_when_enabled() {
         let input = b"head\x1b_13;2u\x1b\\tail";
-        let out = rewrite_bytes_with_caps(input, DownsampleCaps::permissive());
+        let out = rewrite_bytes_with_caps(input, ClientCapabilities::new());
         assert_eq!(out, input);
     }
 
@@ -958,7 +847,7 @@ mod tests {
         // Disabling kbd_protocols must not affect APC `G` graphics
         // payloads (they are gated independently).
         let input = b"x\x1b_Ga=T;abc\x1b\\y";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::KbdProtocols, false);
+        let caps = ClientCapabilities::new().with_kbd_protocols(KeyboardProtocolSet::new());
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, input);
     }
@@ -967,7 +856,10 @@ mod tests {
     fn kitty_kbd_not_stripped_by_graphics_disable() {
         // Conversely, disabling kitty_graphics must not eat kbd replies.
         let input = b"x\x1b_13;2u\x1b\\y";
-        let caps = DownsampleCaps::permissive().with_flag(Flag::KittyGraphics, false);
+        let caps = ClientCapabilities::new().with_image_protocols(ImageProtocolSet::with(&[
+            ImageProtocol::Sixel,
+            ImageProtocol::Iterm2,
+        ]));
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, input);
     }
@@ -979,7 +871,11 @@ mod tests {
         // Truecolor SGR + sixel inside the same stream; client wants
         // Indexed256 and refuses sixel.
         let input = b"\x1b[38;2;255;0;0mhi\x1bP0;0;0qsixel\x1b\\done";
-        let caps = caps_color(ColorSupport::Indexed256).with_flag(Flag::Sixel, false);
+        let caps =
+            caps_color(ColorSupport::Indexed256).with_image_protocols(ImageProtocolSet::with(&[
+                ImageProtocol::KittyGraphics,
+                ImageProtocol::Iterm2,
+            ]));
         let out = rewrite_bytes_with_caps(input, caps);
         assert_eq!(out, b"\x1b[38;5;196mhidone");
     }
@@ -989,8 +885,8 @@ mod tests {
         // Smoke-check that the convenience helper produces a permissive
         // base with just color toggled.
         let c = caps_color(ColorSupport::Indexed16);
-        assert!(c.has(Flag::Sixel));
-        assert!(c.has(Flag::Hyperlinks));
-        assert!(matches!(c.color, ColorSupport::Indexed16));
+        assert!(c.image_protocols.contains(ImageProtocol::Sixel));
+        assert!(c.hyperlinks);
+        assert!(matches!(c.color_support, ColorSupport::Indexed16));
     }
 }

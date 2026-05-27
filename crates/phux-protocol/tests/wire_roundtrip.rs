@@ -11,7 +11,10 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
+use phux_protocol::caps::{
+    ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
+    KeyboardProtocolSet, Layer, LayerSet,
+};
 use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -422,6 +425,26 @@ fn hello_round_trip_each_color_support() {
         assert_eq!(decoded, frame);
         assert!(tail.is_empty());
     }
+}
+
+#[test]
+fn hello_round_trip_image_kbd_and_hyperlink_caps() {
+    let caps = ClientCapabilities::new()
+        .with_image_protocols(ImageProtocolSet::with(&[ImageProtocol::Sixel]))
+        .with_kbd_protocols(KeyboardProtocolSet::with(&[KeyboardProtocol::Kitty]))
+        .with_hyperlinks(false);
+    let frame = FrameKind::Hello {
+        client_name: "phux-client".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: caps,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
 }
 
 #[test]

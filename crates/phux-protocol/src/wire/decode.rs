@@ -171,9 +171,10 @@ impl<'a> Decoder<'a> {
                 // Backward-compat trailing fields (SPEC §6.2). A pre-7lf
                 // HELLO ends right after `protocol_patch`; a 7lf-era HELLO
                 // adds one byte for ColorSupport; a 4li.2-era HELLO adds
-                // a further byte for the Layer bitset. The decoder
-                // tolerates every prefix per SPEC §6 ("skip them by
-                // length") and applies defaults for missing bytes.
+                // a further byte for the Layer bitset. phux-4rj appends
+                // image_protocols, kbd_protocols, and hyperlinks. The
+                // decoder tolerates every prefix per SPEC §6 ("skip them
+                // by length") and applies defaults for missing bytes.
                 let mut client_caps = crate::caps::ClientCapabilities::default();
                 if self.pos < body_end {
                     let tag = self.read_u8()?;
@@ -184,6 +185,18 @@ impl<'a> Decoder<'a> {
                 if self.pos < body_end {
                     let layers = crate::caps::LayerSet::from_wire(self.read_u8()?);
                     client_caps = client_caps.with_layers(layers);
+                }
+                if self.pos < body_end {
+                    let image_protocols = crate::caps::ImageProtocolSet::from_wire(self.read_u8()?);
+                    client_caps = client_caps.with_image_protocols(image_protocols);
+                }
+                if self.pos < body_end {
+                    let kbd_protocols =
+                        crate::caps::KeyboardProtocolSet::from_wire(self.read_u8()?);
+                    client_caps = client_caps.with_kbd_protocols(kbd_protocols);
+                }
+                if self.pos < body_end {
+                    client_caps = client_caps.with_hyperlinks(self.read_u8()? != 0);
                 }
                 FrameKind::Hello {
                     client_name,

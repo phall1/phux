@@ -177,14 +177,158 @@ impl Default for LayerSet {
     }
 }
 
+/// One image-transport protocol the client may advertise (SPEC §6.2).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ImageProtocol {
+    /// VT340 sixel graphics, transported via DCS.
+    Sixel = 1 << 0,
+    /// Kitty graphics protocol, transported via APC `G` payloads.
+    KittyGraphics = 1 << 1,
+    /// iTerm2 inline images, transported via OSC 1337.
+    Iterm2 = 1 << 2,
+}
+
+/// A bit-field of [`ImageProtocol`]s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageProtocolSet(u8);
+
+impl ImageProtocolSet {
+    const KNOWN: u8 = (ImageProtocol::Sixel as u8)
+        | (ImageProtocol::KittyGraphics as u8)
+        | (ImageProtocol::Iterm2 as u8);
+
+    /// Empty set: no image protocols supported.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// All currently-defined image protocols.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::KNOWN)
+    }
+
+    /// Build a set containing all listed protocols.
+    #[must_use]
+    pub const fn with(protocols: &[ImageProtocol]) -> Self {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < protocols.len() {
+            bits |= protocols[i] as u8;
+            i += 1;
+        }
+        Self(bits)
+    }
+
+    /// Test whether `protocol` is in the set.
+    #[must_use]
+    pub const fn contains(self, protocol: ImageProtocol) -> bool {
+        self.0 & (protocol as u8) != 0
+    }
+
+    /// Raw wire byte.
+    #[must_use]
+    pub const fn as_wire(self) -> u8 {
+        self.0 & Self::KNOWN
+    }
+
+    /// Inverse of [`Self::as_wire`]. Unknown bits are ignored.
+    #[must_use]
+    pub const fn from_wire(byte: u8) -> Self {
+        Self(byte & Self::KNOWN)
+    }
+}
+
+impl Default for ImageProtocolSet {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// One keyboard protocol the client may advertise (SPEC §6.2).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum KeyboardProtocol {
+    /// Kitty keyboard protocol APC replies.
+    Kitty = 1 << 0,
+    /// xterm modifyOtherKeys-style replies.
+    ModifyOtherKeys = 1 << 1,
+}
+
+/// A bit-field of [`KeyboardProtocol`]s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct KeyboardProtocolSet(u8);
+
+impl KeyboardProtocolSet {
+    const KNOWN: u8 = (KeyboardProtocol::Kitty as u8) | (KeyboardProtocol::ModifyOtherKeys as u8);
+
+    /// Empty set: no keyboard extension protocols supported.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    /// All currently-defined keyboard protocols.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::KNOWN)
+    }
+
+    /// Build a set containing all listed protocols.
+    #[must_use]
+    pub const fn with(protocols: &[KeyboardProtocol]) -> Self {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < protocols.len() {
+            bits |= protocols[i] as u8;
+            i += 1;
+        }
+        Self(bits)
+    }
+
+    /// Test whether `protocol` is in the set.
+    #[must_use]
+    pub const fn contains(self, protocol: KeyboardProtocol) -> bool {
+        self.0 & (protocol as u8) != 0
+    }
+
+    /// True when any keyboard protocol is advertised.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Raw wire byte.
+    #[must_use]
+    pub const fn as_wire(self) -> u8 {
+        self.0 & Self::KNOWN
+    }
+
+    /// Inverse of [`Self::as_wire`]. Unknown bits are ignored.
+    #[must_use]
+    pub const fn from_wire(byte: u8) -> Self {
+        Self(byte & Self::KNOWN)
+    }
+}
+
+impl Default for KeyboardProtocolSet {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
 /// The client's advertised capability set, per SPEC §6.2.
 ///
 /// SPEC §6.2 enumerates `kbd_protocols`, `mouse_protocols`, `color`,
 /// `images`, `hyperlinks`, `unicode_version`, the deprecated `rendering`
-/// mode, and the `layers` bitset. As of phux-4li.2 [`Self::color_support`]
-/// and [`Self::layers`] are populated; sibling tickets add the remaining
-/// fields behind their own wire bumps. The struct is `#[non_exhaustive]`
-/// so additive fields don't break downstream literal construction.
+/// mode, and the `layers` bitset. This struct carries the fields currently
+/// wired into HELLO; sibling tickets add the remaining fields behind their
+/// own wire bumps. The struct is `#[non_exhaustive]` so additive fields don't
+/// break downstream literal construction.
 ///
 /// Construct via [`Self::new`] (defaults across the board) plus the
 /// builder setters; that's the path that survives field-set growth.
@@ -199,6 +343,12 @@ pub struct ClientCapabilities {
     /// [`LayerSet::all`]; an agent / recorder advertises [`LayerSet::new`]
     /// (L1-only).
     pub layers: LayerSet,
+    /// Image protocols the client can render (SPEC §6.2).
+    pub image_protocols: ImageProtocolSet,
+    /// Keyboard extension protocols the client understands (SPEC §6.2).
+    pub kbd_protocols: KeyboardProtocolSet,
+    /// Whether OSC 8 hyperlink framing may be forwarded to the client.
+    pub hyperlinks: bool,
 }
 
 impl ClientCapabilities {
@@ -210,6 +360,9 @@ impl ClientCapabilities {
         Self {
             color_support: ColorSupport::TrueColor,
             layers: LayerSet::new(),
+            image_protocols: ImageProtocolSet::all(),
+            kbd_protocols: KeyboardProtocolSet::all(),
+            hyperlinks: true,
         }
     }
 
@@ -224,6 +377,27 @@ impl ClientCapabilities {
     #[must_use]
     pub const fn with_layers(mut self, layers: LayerSet) -> Self {
         self.layers = layers;
+        self
+    }
+
+    /// Builder setter for [`Self::image_protocols`].
+    #[must_use]
+    pub const fn with_image_protocols(mut self, image_protocols: ImageProtocolSet) -> Self {
+        self.image_protocols = image_protocols;
+        self
+    }
+
+    /// Builder setter for [`Self::kbd_protocols`].
+    #[must_use]
+    pub const fn with_kbd_protocols(mut self, kbd_protocols: KeyboardProtocolSet) -> Self {
+        self.kbd_protocols = kbd_protocols;
+        self
+    }
+
+    /// Builder setter for [`Self::hyperlinks`].
+    #[must_use]
+    pub const fn with_hyperlinks(mut self, hyperlinks: bool) -> Self {
+        self.hyperlinks = hyperlinks;
         self
     }
 }
@@ -339,6 +513,23 @@ mod tests {
     }
 
     #[test]
+    fn image_protocol_set_ignores_unknown_bits() {
+        let set = ImageProtocolSet::from_wire(0xFF);
+        assert!(set.contains(ImageProtocol::Sixel));
+        assert!(set.contains(ImageProtocol::KittyGraphics));
+        assert!(set.contains(ImageProtocol::Iterm2));
+        assert_eq!(set.as_wire(), ImageProtocolSet::all().as_wire());
+    }
+
+    #[test]
+    fn keyboard_protocol_set_ignores_unknown_bits() {
+        let set = KeyboardProtocolSet::from_wire(0xFF);
+        assert!(set.contains(KeyboardProtocol::Kitty));
+        assert!(set.contains(KeyboardProtocol::ModifyOtherKeys));
+        assert_eq!(set.as_wire(), KeyboardProtocolSet::all().as_wire());
+    }
+
+    #[test]
     fn colorterm_truecolor_wins() {
         let env = env_map(&[("COLORTERM", "truecolor"), ("TERM", "xterm-256color")]);
         assert_eq!(detect_from_env(env), ColorSupport::TrueColor);
@@ -396,6 +587,9 @@ mod tests {
     fn client_capabilities_default_is_truecolor() {
         let caps = ClientCapabilities::default();
         assert_eq!(caps.color_support, ColorSupport::TrueColor);
+        assert!(caps.image_protocols.contains(ImageProtocol::Sixel));
+        assert!(caps.kbd_protocols.contains(KeyboardProtocol::Kitty));
+        assert!(caps.hyperlinks);
     }
 
     #[test]

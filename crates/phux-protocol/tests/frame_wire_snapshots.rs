@@ -498,8 +498,9 @@ fn snap_error_internal_max_code() {
 
 // -----------------------------------------------------------------------------
 // HELLO — SPEC §6.1 / §6.2. One fixture per `ColorSupport` variant. The
-// wire body is `client_name + (major, minor, patch) + color_support_tag`;
-// the only byte that changes across the four snapshots is the final tag.
+// wire body is `client_name + (major, minor, patch) + color_support_tag +
+// layers + image_protocols + kbd_protocols + hyperlinks`; the only byte that
+// changes across the four color snapshots is the color tag.
 // -----------------------------------------------------------------------------
 
 fn hello_with_color(color: ColorSupport) -> FrameKind {

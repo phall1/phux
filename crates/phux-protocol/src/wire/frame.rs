@@ -519,10 +519,10 @@ pub enum FrameKind {
     /// substitute [`ClientCapabilities::default`] (most-permissive
     /// [`crate::caps::ColorSupport::TrueColor`]).
     ///
-    /// Sibling tickets grow `ClientCapabilities` with the rest of
-    /// SPEC §6.2 (keyboard / mouse / image protocols, layers bitset).
-    /// Additional capability fields append after `color_support` using
-    /// the same trailing-byte forward-compat trick.
+    /// Sibling tickets grow `ClientCapabilities` with the rest of SPEC §6.2
+    /// (mouse protocols, unicode version, deprecated rendering mode).
+    /// Additional capability fields append using the same trailing-byte
+    /// forward-compat trick.
     Hello {
         /// Free-form client identifier (e.g. `"phux-client 0.1.0"`).
         client_name: String,
@@ -1063,9 +1063,13 @@ impl FrameKind {
                 // Trailing fields — older decoders skip them via the length
                 // header per SPEC §6 ("skip them by length"). The encoder
                 // ALWAYS emits all bytes; the wire shape grows monotonically.
-                // Order: color_support (phux-7lf), layers (phux-4li.2).
+                // Order: color_support (phux-7lf), layers (phux-4li.2),
+                // image_protocols/kbd_protocols/hyperlinks (phux-4rj).
                 enc.write_u8(client_caps.color_support.as_wire());
                 enc.write_u8(client_caps.layers.as_wire());
+                enc.write_u8(client_caps.image_protocols.as_wire());
+                enc.write_u8(client_caps.kbd_protocols.as_wire());
+                enc.write_u8(u8::from(client_caps.hyperlinks));
             }
             Self::Ping { nonce } => {
                 enc.write_u64_be(*nonce);

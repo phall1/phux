@@ -276,10 +276,12 @@ ServerCapabilities {
 }
 ```
 
-The `layers` field is encoded as an additional field within
-`ClientCapabilities` / `ServerCapabilities`. Per Appendix A, payloads
-are self-delimiting field-id-tagged blobs; decoders that do not
-recognize the field MUST skip it. v0.1 wire bytes are unchanged.
+The reference HELLO codec encodes `ClientCapabilities` as additive
+trailing positional bytes after the original version tuple. The current
+order is `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`.
+Decoders MUST accept every prefix of this sequence and apply defaults for
+missing trailing bytes; future fields append after `hyperlinks` until the
+phux-i58 TLV migration replaces this legacy positional shape.
 
 The `CC_FRONTEND` bit on `features` is **reclaimed** per
 [ADR-0017](./ADR/0017-tui-not-protocol-privileged.md). Earlier drafts
@@ -2086,3 +2088,4 @@ longer exists as a wire concept.)
 | 0.2.0-draft.1 | 2026-05-27 | phux-4li.2: L3 metadata frames wire-allocated. C→S discriminants `GET_METADATA = 0x50`, `SET_METADATA = 0x51`, `DELETE_METADATA = 0x52`, `LIST_METADATA = 0x53`, `SUBSCRIBE_METADATA = 0x54`; S→C `METADATA_CHANGED = 0xD0`. `Scope` tagged union allocated (`Terminal` tag 0x00, `Collection` tag 0x01, `Global` tag 0x02). `METADATA_CHANGED` carries the new value inline (`optional<bytes>`) — supersedes the earlier "consumers re-GET after notification" sketch. `ClientCapabilities.layers` now wire-encoded as a trailing `u8` after `color_support` (additive trailing field per SPEC §6, no version bump beyond the L3 allocation). `CollectionId(u32)` allocated; L2 (which defines its full tagged-union shape) is still TBD. Reply path for GET/LIST defers to the `COMMAND_RESULT` envelope (§11). |
 | 0.2.0-draft.2 | 2026-05-27 | phux-4li.10: L1 Terminal lifecycle frames wire-allocated (§7.2.1). C→S discriminants `SPAWN_TERMINAL = 0x22`, `TERMINAL_RESIZE = 0x23`; S→C `TERMINAL_CLOSED = 0xA1` (honours the spec-only reservation from §7.2), `TERMINAL_SPAWNED = 0xA2`. `SpawnResult` and `SpawnError` tagged unions allocated (`Ok = 0x00`/`Err = 0x01` for `SpawnResult` — the convention extends to future `Result<T, E>` reply frames; `CollectionNotFound = 0x00`/`SpawnFailed(str) = 0x01` for `SpawnError`, both `#[non_exhaustive]`). `TERMINAL_CLOSED.exit_status: optional<i32>` is a deliberately compact subset of §10.1's `ExitStatus` tagged union — `Some(n)` for `_exit(n)`, `None` for signal kills and unknown causes; the wider tagged union grows in a follow-up if needed. `TERMINAL_RESIZE` is per-Terminal PTY resize, sent in addition to `VIEWPORT_RESIZE`. Appendix B reserved-range guidance updated for `0x24..=0x2F` and `0xA3..=0xAF`. Server / client wire-up lands in follow-up tickets; the codec is wire-complete on this commit. |
 | 0.2.0-draft.3 | 2026-05-27 | phux-dmb: `RolePolicy` added to `ATTACH` and `ATTACH_TERMINAL` as an additive field. Terminal subscriptions now have `PRIMARY` / `VIEWER` roles; only the primary may send input or terminal-mutating commands. `TakeoverPolicy::DELIBERATE` is required to displace an existing primary; silent takeover is forbidden. |
+| 0.2.0-draft.4 | 2026-05-27 | phux-4rj: `ClientCapabilities` HELLO payload appends `images: bitset<ImageProtocol>`, `kbd_protocols: bitset<KeyboardProtocol>`, and `hyperlinks: bool` after the existing `color` and `layers` bytes. Server downsampling now gates sixel/kitty/iTerm2 image escapes, kitty keyboard APC replies, and OSC 8 hyperlink framing directly from the negotiated `ClientCapabilities`. The phux-i58 TLV migration remains out of scope. |

@@ -31,6 +31,7 @@ use std::time::Duration;
 use bytes::BytesMut;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::wire::frame::{
     AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, SpawnError, SpawnResult, TYPE_PONG,
@@ -675,12 +676,12 @@ async fn handle_client(
     let mut framed = BytesMut::new();
 
     // Per-connection cache of the most-recently-advertised
-    // [`ColorSupport`] (SPEC §6.2). HELLO populates this; ATTACH consumes
-    // it when constructing the `AttachedClient`. Pre-HELLO it defaults to
-    // [`ColorSupport::default`] (most-permissive) so a client that skips
-    // HELLO (out of spec, but tolerated for forward-compat) still
-    // attaches with sensible bytes-on-wire behavior.
-    let mut negotiated_color_support = phux_protocol::caps::ColorSupport::default();
+    // [`ClientCapabilities`] (SPEC §6.2). HELLO populates this; ATTACH
+    // consumes it when constructing the `AttachedClient`. Pre-HELLO it
+    // defaults to [`ClientCapabilities::default`] (most-permissive) so a
+    // client that skips HELLO (out of spec, but tolerated for
+    // forward-compat) still attaches with sensible bytes-on-wire behavior.
+    let mut negotiated_client_caps = ClientCapabilities::default();
 
     loop {
         // Read the length prefix. EOF cleanly ends the session; a partial read
@@ -757,9 +758,9 @@ async fn handle_client(
                 // patch the live `AttachedClient` so downsample picks
                 // up the change — the alternative (protocol error
                 // close) gives the operator nothing to debug.
-                negotiated_color_support = client_caps.color_support;
+                negotiated_client_caps = client_caps;
                 state.with_mut(|s| {
-                    s.set_client_color_support(client_id, client_caps.color_support);
+                    s.set_client_capabilities(client_id, client_caps);
                     // SPEC §6.2: cache the negotiated layer set. The L3
                     // dispatch arms (METADATA_*) gate emission of
                     // `METADATA_CHANGED` on `client_speaks_l3` so non-L3
@@ -800,7 +801,7 @@ async fn handle_client(
                     request_scrollback,
                     scrollback_limit_lines,
                     &out_tx,
-                    negotiated_color_support,
+                    negotiated_client_caps,
                     &root_token,
                 )
                 .await;
@@ -1460,8 +1461,14 @@ async fn handle_spawn_terminal(
     let wire_and_handle: Option<(
         phux_protocol::ids::TerminalId,
         crate::terminal_actor::TerminalHandle,
+        ClientCapabilities,
     )> = state.with_mut(|s| {
         let wire_terminal_id = s.intern_terminal_wire(core_terminal_id);
+        let client_caps = s
+            .attached
+            .get(&client_id)
+            .map(|c| c.client_caps)
+            .unwrap_or_default();
         // Only auto-subscribe if the client is currently attached —
         // a bare `SPAWN_TERMINAL` from a non-attached client is legal
         // wire-wise (the frame doesn't require ATTACH first) but the
@@ -1474,10 +1481,10 @@ async fn handle_spawn_terminal(
         }
         s.terminal_handle(core_terminal_id)
             .cloned()
-            .map(|h| (wire_terminal_id, h))
+            .map(|h| (wire_terminal_id, h, client_caps))
     });
 
-    if let Some((wire_terminal_id, handle)) = wire_and_handle {
+    if let Some((wire_terminal_id, handle, client_caps)) = wire_and_handle {
         // Spawn the output pump BEFORE replying with `TerminalSpawned`
         // so any bytes the freshly-spawned PTY emits in the gap between
         // exec and the client's first read are queued on the broadcast
@@ -1492,11 +1499,12 @@ async fn handle_spawn_terminal(
                 match output_rx.recv().await {
                     Ok(bytes) => {
                         seq = seq.wrapping_add(1);
+                        let bytes = crate::downsample::rewrite_bytes_with_caps(&bytes, client_caps);
                         if pump_out_tx
                             .send(Outbound::Frame(FrameKind::TerminalOutput {
                                 terminal_id: pump_wire_terminal_id.clone(),
                                 seq,
-                                bytes: bytes.to_vec(),
+                                bytes,
                             }))
                             .await
                             .is_err()
@@ -1639,10 +1647,10 @@ fn prepare_attach(
     client_id: ClientId,
     session_name: &str,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-    color_support: phux_protocol::caps::ColorSupport,
+    client_caps: ClientCapabilities,
 ) -> Result<AttachPrepared, crate::state::AttachError> {
     state.with_mut(|s| {
-        let sid = s.attach(client_id, session_name, out_tx.clone(), color_support)?;
+        let sid = s.attach(client_id, session_name, out_tx.clone(), client_caps)?;
         // Record successful attach as session activity before we build
         // the snapshot. The order doesn't matter for
         // correctness (we're still inside the with_mut critical
@@ -1702,7 +1710,7 @@ async fn handle_attach(
     _request_scrollback: bool,
     _scrollback_limit_lines: u32,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-    color_support: phux_protocol::caps::ColorSupport,
+    client_caps: ClientCapabilities,
     root_token: &CancellationToken,
 ) {
     let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
@@ -1710,7 +1718,7 @@ async fn handle_attach(
     };
 
     let (snapshot, initial_client_id, panes_to_snapshot) =
-        match prepare_attach(state, client_id, &session_name, out_tx, color_support) {
+        match prepare_attach(state, client_id, &session_name, out_tx, client_caps) {
             Ok(t) => t,
             Err(crate::state::AttachError::UnknownSession(name)) => {
                 send_error(
@@ -1774,17 +1782,20 @@ async fn handle_attach(
         let mut output_rx = handle.output.subscribe();
         let pump_out_tx = out_tx.clone();
         let pump_wire_terminal_id = wire_terminal_id.clone();
+        let pump_client_caps = client_caps;
         tokio::task::spawn_local(async move {
             let mut seq: u64 = 0;
             loop {
                 match output_rx.recv().await {
                     Ok(bytes) => {
                         seq = seq.wrapping_add(1);
+                        let bytes =
+                            crate::downsample::rewrite_bytes_with_caps(&bytes, pump_client_caps);
                         if pump_out_tx
                             .send(Outbound::Frame(FrameKind::TerminalOutput {
                                 terminal_id: pump_wire_terminal_id.clone(),
                                 seq,
-                                bytes: bytes.to_vec(),
+                                bytes,
                             }))
                             .await
                             .is_err()
@@ -2486,7 +2497,7 @@ mod tests {
                         false,
                         0,
                         &out_tx,
-                        phux_protocol::caps::ColorSupport::default(),
+                        ClientCapabilities::default(),
                         &test_root_token,
                     )
                     .await;

@@ -44,7 +44,7 @@ use phux_core::session::Session;
 
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
-use phux_protocol::caps::{ColorSupport, Layer, LayerSet};
+use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
 use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId, WindowId as WireWindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::KeyEvent;
@@ -125,18 +125,18 @@ pub struct AttachedClient {
     /// Outbound mailbox; the per-client write task drains this and writes to
     /// the socket.
     pub tx: mpsc::Sender<Outbound>,
-    /// The client's advertised color tier (SPEC §6.2). The server MUST
-    /// downsample outbound color values to this tier before fanout —
-    /// see [`crate::downsample::rewrite_bytes`] for the helper the
+    /// The client's advertised capabilities (SPEC §6.2). The server MUST
+    /// downsample outbound terminal bytes to this set before fanout — see
+    /// [`crate::downsample::rewrite_bytes_with_caps`] for the helper the
     /// fanout layer plugs into.
     ///
     /// Populated from the [`phux_protocol::caps::ClientCapabilities`] the
     /// client advertised in HELLO (SPEC §6.1) and forwarded into
     /// [`ServerState::attach`]. Test scaffolding that never observed a
     /// HELLO calls [`ServerState::attach_default_caps`] which falls back
-    /// to [`ColorSupport::default`] (most-permissive — never silently
+    /// to [`ClientCapabilities::default`] (most-permissive — never silently
     /// downgrades).
-    pub color_support: ColorSupport,
+    pub client_caps: ClientCapabilities,
 }
 
 /// Errors returned by [`ServerState::attach`].
@@ -644,16 +644,17 @@ impl ServerState {
     /// session's currently active pane (if any). Returns a borrow of the
     /// [`Session`] for callers that want to build an `ATTACHED` snapshot.
     ///
-    /// `color_support` is the tier the client advertised in HELLO (SPEC §6.1/§6.2).
+    /// `client_caps` are the capabilities the client advertised in HELLO
+    /// (SPEC §6.1/§6.2).
     /// Callers that never observed a HELLO (test scaffolding) MAY pass
-    /// [`ColorSupport::default`]; the convenience wrapper
+    /// [`ClientCapabilities::default`]; the convenience wrapper
     /// [`Self::attach_default_caps`] does that for them.
     pub fn attach(
         &mut self,
         client_id: ClientId,
         session_name: &str,
         tx: mpsc::Sender<Outbound>,
-        color_support: ColorSupport,
+        client_caps: ClientCapabilities,
     ) -> Result<SessionId, AttachError> {
         if self.attached.contains_key(&client_id) {
             return Err(AttachError::AlreadyAttached(client_id));
@@ -668,7 +669,7 @@ impl ServerState {
                 id: client_id,
                 session: session_id,
                 tx,
-                color_support,
+                client_caps,
             },
         );
 
@@ -695,15 +696,29 @@ impl ServerState {
         session_name: &str,
         tx: mpsc::Sender<Outbound>,
     ) -> Result<SessionId, AttachError> {
-        self.attach(client_id, session_name, tx, ColorSupport::default())
+        self.attach(client_id, session_name, tx, ClientCapabilities::default())
     }
 
-    /// Update the recorded [`ColorSupport`] for an already-attached
+    /// Update the recorded [`ClientCapabilities`] for an already-attached
     /// client. Returns `false` if the client is not in [`Self::attached`].
     ///
     /// Used by the HELLO handler if a HELLO arrives after ATTACH (out of
     /// spec, but tolerated for forward-compat — the alternative is a
     /// protocol-error close that gives the operator no breadcrumbs).
+    pub fn set_client_capabilities(
+        &mut self,
+        client_id: ClientId,
+        client_caps: ClientCapabilities,
+    ) -> bool {
+        self.attached
+            .get_mut(&client_id)
+            .map(|c| {
+                c.client_caps = client_caps;
+            })
+            .is_some()
+    }
+
+    /// Compatibility wrapper for tests that still update color only.
     pub fn set_client_color_support(
         &mut self,
         client_id: ClientId,
@@ -712,7 +727,7 @@ impl ServerState {
         self.attached
             .get_mut(&client_id)
             .map(|c| {
-                c.color_support = color_support;
+                c.client_caps = c.client_caps.with_color_support(color_support);
             })
             .is_some()
     }
@@ -1223,7 +1238,7 @@ mod tests {
         let cid = s.new_client_id();
         s.attach_default_caps(cid, "default", mk_tx()).unwrap();
         let client = s.attached.get(&cid).unwrap();
-        assert_eq!(client.color_support, ColorSupport::TrueColor);
+        assert_eq!(client.client_caps.color_support, ColorSupport::TrueColor);
     }
 
     #[test]
@@ -1232,10 +1247,15 @@ mod tests {
         let mut s = ServerState::new();
         let _ = s.seed_session("default");
         let cid = s.new_client_id();
-        s.attach(cid, "default", mk_tx(), ColorSupport::Indexed16)
-            .unwrap();
+        s.attach(
+            cid,
+            "default",
+            mk_tx(),
+            ClientCapabilities::new().with_color_support(ColorSupport::Indexed16),
+        )
+        .unwrap();
         let client = s.attached.get(&cid).unwrap();
-        assert_eq!(client.color_support, ColorSupport::Indexed16);
+        assert_eq!(client.client_caps.color_support, ColorSupport::Indexed16);
     }
 
     #[test]
@@ -1249,7 +1269,7 @@ mod tests {
         s.attach_default_caps(cid, "default", mk_tx()).unwrap();
         assert!(s.set_client_color_support(cid, ColorSupport::Indexed256));
         let client = s.attached.get(&cid).unwrap();
-        assert_eq!(client.color_support, ColorSupport::Indexed256);
+        assert_eq!(client.client_caps.color_support, ColorSupport::Indexed256);
     }
 
     #[test]
