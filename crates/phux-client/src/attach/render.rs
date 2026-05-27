@@ -149,7 +149,8 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// overlay needs for direct stdout writes.
     ///
     /// Multi-pane drivers call this once per visible pane; dividers are
-    /// painted separately via [`super::multi_pane::paint_dividers`].
+    /// painted separately via
+    /// [`crate::render::chrome::dividers::render_dividers`].
     pub fn render_at(
         &mut self,
         terminal: &Terminal<'alloc, '_>,

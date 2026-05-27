@@ -19,14 +19,15 @@
 //!
 //! The output is a [`PaneLayout`] carrying both the per-pane [`Rect`]s
 //! (which `attach::driver` hands to each `TerminalRenderer`) and the
-//! list of [`DividerCell`]s (which [`paint_dividers`] writes to stdout
-//! as positioned, single-cell box-drawing emissions).
+//! list of [`DividerCell`]s (which the chrome layer at
+//! [`crate::render::chrome::dividers`] composites onto stdout via
+//! ratatui, with pane interiors marked `Cell::skip` so libghostty's
+//! direct VT output is not stomped — see ADR-0020).
 //!
 //! SIGWINCH-driven reflow lives in `attach::reflow` (sibling ticket
 //! phux-4li.7); this module is the pure compute step it composes with.
 
 use std::collections::HashMap;
-use std::io::{self, Write};
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::mouse::MouseEvent;
@@ -129,33 +130,11 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
 }
 
 // -----------------------------------------------------------------------------
-// paint_dividers — emit divider cells to a Write
+// Divider painting moved to `crate::render::chrome::dividers` (phux-5ke.3,
+// ADR-0020). This module stays pure data: `compute_layout` yields the
+// `PaneLayout`, and the chrome layer composites its `DividerCell`s with
+// skip-cell carve-outs over the pane interiors. No VT-byte path here.
 // -----------------------------------------------------------------------------
-
-/// Write every divider cell to `out` as a positioned single-cell paint.
-///
-/// Emits `\x1b[0m` first to clear any leftover SGR from the pane
-/// renderer's tail, then `CUP(y, x)` + the box-drawing character for
-/// each cell in the supplied order. Caller is responsible for the
-/// surrounding flush.
-///
-/// # Errors
-/// Forwards any `io::Error` from `out`.
-pub fn paint_dividers<W: Write>(out: &mut W, layout: &PaneLayout) -> io::Result<()> {
-    if layout.dividers.is_empty() {
-        return Ok(());
-    }
-    out.write_all(b"\x1b[0m")?;
-    let mut buf = [0u8; 4];
-    for cell in &layout.dividers {
-        // CUP is 1-based.
-        let r = cell.y.saturating_add(1);
-        let c = cell.x.saturating_add(1);
-        write!(out, "\x1b[{r};{c}H")?;
-        out.write_all(cell.ch.encode_utf8(&mut buf).as_bytes())?;
-    }
-    out.flush()
-}
 
 // -----------------------------------------------------------------------------
 // route_mouse_event — pure hit-test for INPUT_MOUSE routing (phux-4li.6)
@@ -954,37 +933,6 @@ mod tests {
             )
         });
         assert!(has_t, "expected at least one T-piece in cross-split chrome");
-    }
-
-    #[test]
-    fn paint_dividers_emits_box_drawing_chars() {
-        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
-        let state = LayoutState {
-            tree: Some(tree),
-            focus: Some(t(1)),
-        };
-        let layout = compute_layout(&state, (80, 24));
-        let mut buf: Vec<u8> = Vec::new();
-        paint_dividers(&mut buf, &layout).unwrap();
-        let s = String::from_utf8(buf).unwrap();
-        // Should start with a reset.
-        assert!(s.starts_with("\x1b[0m"));
-        // Heavy vertical bar should appear at least once.
-        assert!(s.contains('\u{2503}'));
-        // 24 CUP sequences for the divider column.
-        assert_eq!(s.matches("\x1b[").count(), 1 /*reset*/ + 24 /*cups*/);
-    }
-
-    #[test]
-    fn empty_layout_paint_is_noop() {
-        let layout = PaneLayout {
-            viewport: (80, 24),
-            rects: HashMap::new(),
-            dividers: Vec::new(),
-        };
-        let mut buf: Vec<u8> = Vec::new();
-        paint_dividers(&mut buf, &layout).unwrap();
-        assert!(buf.is_empty());
     }
 
     /// Snapshot test for the cardinal "phux-4li.4 acceptance case": a
