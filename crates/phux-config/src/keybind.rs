@@ -28,6 +28,28 @@
 //! `"S-a"`. This keeps surface TOML readable (`"X"` for `Shift+x`) and
 //! makes shifted-vs-unshifted bindings comparable as chord values.
 //!
+//! # Punctuation and the shifted-glyph rule
+//!
+//! ASCII punctuation parses as a single-char token mapping to the
+//! corresponding physical key on a US layout: `-` → `Minus`, `=` →
+//! `Equal`, `[` `]` → `BracketLeft` / `BracketRight`, `\` → `Backslash`,
+//! `;` → `Semicolon`, `'` → `Quote`, `,` → `Comma`, `.` → `Period`, `/`
+//! → `Slash`, `` ` `` → `Backquote`.
+//!
+//! Shifted punctuation glyphs (`!` `@` `#` `$` `%` `^` `&` `*` `(` `)`
+//! `_` `+` `{` `}` `|` `:` `"` `<` `>` `?` `~`) map to their **unshifted
+//! physical key plus an implicit `Shift` modifier**. For example `"|"`
+//! parses identically to `"S-\\"` (`PhysicalKey::Backslash` + `SHIFT`),
+//! and `"?"` parses as `"S-/"`. This is symmetric with the bare
+//! uppercase letter rule above and matches what the wire protocol can
+//! actually represent — wire chords carry physical keys, not glyphs, so
+//! `|` and `Shift+\` are the same event downstream.
+//!
+//! The mapping assumes a US ANSI layout. Bindings written with shifted
+//! glyphs on a non-US layout may not produce the chord the writer
+//! expects; spell them with explicit modifiers (`S-<key>`) for layout
+//! independence.
+//!
 //! [`Config`]: crate::Config
 
 use std::collections::BTreeMap;
@@ -242,10 +264,10 @@ fn split_modifier(s: &str) -> Option<(char, &str)> {
 }
 
 /// Parse the key portion of a chord. Returns `(key, implicit_shift)`
-/// where `implicit_shift` is true when a bare uppercase ASCII letter
-/// implied a Shift modifier.
+/// where `implicit_shift` is true when a bare uppercase ASCII letter or
+/// a shifted ASCII punctuation glyph implied a Shift modifier.
 fn parse_key_token(s: &str) -> Result<(PhysicalKey, bool), KeybindError> {
-    // Single-character tokens: ASCII letter or digit.
+    // Single-character tokens: ASCII letter, digit, or punctuation.
     if s.chars().count() == 1 {
         let ch = s.chars().next().unwrap_or('\0');
         if ch.is_ascii_alphabetic() {
@@ -256,6 +278,9 @@ fn parse_key_token(s: &str) -> Result<(PhysicalKey, bool), KeybindError> {
         if ch.is_ascii_digit() {
             let key = digit_to_key(ch).ok_or_else(|| KeybindError::UnknownKey(s.to_owned()))?;
             return Ok((key, false));
+        }
+        if let Some((key, implicit_shift)) = punct_to_key(ch) {
+            return Ok((key, implicit_shift));
         }
         return Err(KeybindError::UnknownKey(s.to_owned()));
     }
@@ -338,6 +363,51 @@ const fn digit_to_key(c: char) -> Option<PhysicalKey> {
         '7' => PhysicalKey::Digit7,
         '8' => PhysicalKey::Digit8,
         '9' => PhysicalKey::Digit9,
+        _ => return None,
+    })
+}
+
+/// Map an ASCII punctuation character to a physical key on the US
+/// layout. Returns `(key, implicit_shift)`; shifted glyphs (e.g. `|`,
+/// `?`) decompose into their unshifted physical key + `Shift`. See the
+/// module rustdoc for the layout assumption.
+const fn punct_to_key(c: char) -> Option<(PhysicalKey, bool)> {
+    Some(match c {
+        // Unshifted glyphs.
+        '`' => (PhysicalKey::Backquote, false),
+        '-' => (PhysicalKey::Minus, false),
+        '=' => (PhysicalKey::Equal, false),
+        '[' => (PhysicalKey::BracketLeft, false),
+        ']' => (PhysicalKey::BracketRight, false),
+        '\\' => (PhysicalKey::Backslash, false),
+        ';' => (PhysicalKey::Semicolon, false),
+        '\'' => (PhysicalKey::Quote, false),
+        ',' => (PhysicalKey::Comma, false),
+        '.' => (PhysicalKey::Period, false),
+        '/' => (PhysicalKey::Slash, false),
+        // Shifted glyphs whose unshifted physical key is a digit.
+        '!' => (PhysicalKey::Digit1, true),
+        '@' => (PhysicalKey::Digit2, true),
+        '#' => (PhysicalKey::Digit3, true),
+        '$' => (PhysicalKey::Digit4, true),
+        '%' => (PhysicalKey::Digit5, true),
+        '^' => (PhysicalKey::Digit6, true),
+        '&' => (PhysicalKey::Digit7, true),
+        '*' => (PhysicalKey::Digit8, true),
+        '(' => (PhysicalKey::Digit9, true),
+        ')' => (PhysicalKey::Digit0, true),
+        // Shifted glyphs whose unshifted physical key is punctuation.
+        '~' => (PhysicalKey::Backquote, true),
+        '_' => (PhysicalKey::Minus, true),
+        '+' => (PhysicalKey::Equal, true),
+        '{' => (PhysicalKey::BracketLeft, true),
+        '}' => (PhysicalKey::BracketRight, true),
+        '|' => (PhysicalKey::Backslash, true),
+        ':' => (PhysicalKey::Semicolon, true),
+        '"' => (PhysicalKey::Quote, true),
+        '<' => (PhysicalKey::Comma, true),
+        '>' => (PhysicalKey::Period, true),
+        '?' => (PhysicalKey::Slash, true),
         _ => return None,
     })
 }
@@ -543,5 +613,131 @@ impl Resolver {
     /// Clear any in-progress sequence and return to the root.
     pub fn reset(&mut self) {
         self.cursor = None;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ck(s: &str) -> KeyChord {
+        parse_chord(s).expect("parses")
+    }
+
+    #[test]
+    fn punct_unshifted_pipe_decomposes_to_shift_backslash() {
+        // `|` is Shift+\ on US ANSI; per the module rustdoc it parses as
+        // PhysicalKey::Backslash with an implicit Shift modifier, which
+        // must match the explicit `S-\\` form.
+        let bar = ck("|");
+        let expl = ck("S-\\");
+        assert_eq!(bar, expl);
+        assert_eq!(
+            bar,
+            KeyChord {
+                modifiers: ModSet::SHIFT,
+                key: PhysicalKey::Backslash,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_minus_is_unshifted() {
+        let c = ck("-");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::empty(),
+                key: PhysicalKey::Minus,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_slash_is_unshifted() {
+        let c = ck("/");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::empty(),
+                key: PhysicalKey::Slash,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_equal_is_unshifted() {
+        let c = ck("=");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::empty(),
+                key: PhysicalKey::Equal,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_apostrophe_is_unshifted_quote() {
+        let c = ck("'");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::empty(),
+                key: PhysicalKey::Quote,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_double_quote_implies_shift_on_quote() {
+        let c = ck("\"");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::SHIFT,
+                key: PhysicalKey::Quote,
+            }
+        );
+    }
+
+    #[test]
+    fn ctrl_slash_combines_modifier_with_punctuation_key() {
+        let c = ck("C-/");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::CTRL,
+                key: PhysicalKey::Slash,
+            }
+        );
+    }
+
+    #[test]
+    fn punct_semicolon_is_unshifted() {
+        let c = ck(";");
+        assert_eq!(
+            c,
+            KeyChord {
+                modifiers: ModSet::empty(),
+                key: PhysicalKey::Semicolon,
+            }
+        );
+    }
+
+    #[test]
+    fn non_ascii_char_is_still_unknown_key() {
+        // ASCII punctuation now parses, but a non-ASCII codepoint (here a
+        // BMP Unicode arrow) must still error — we only handle the US
+        // ANSI glyph set.
+        let err = parse_chord("→").unwrap_err();
+        assert!(
+            matches!(err, KeybindError::UnknownKey(ref s) if s == "→"),
+            "got {err:?}"
+        );
     }
 }

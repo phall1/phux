@@ -12,7 +12,8 @@
 #   S-a    Shift+a  (equivalent: a bare uppercase letter "A")
 #   Tab    named key (case-sensitive)
 #   F1     function key 1..24
-# Keys today are ASCII letters/digits or named keys only (no punctuation).
+#   |      ASCII punctuation; shifted glyphs (|, ?, ", etc.) decompose
+#          to physical-key + implicit Shift on a US layout.
 #
 # For the full schema, see crates/phux-config/src/schema.rs and DESIGN.md.
 
@@ -28,10 +29,10 @@ mouse = true
 prefix = "C-a"
 
 [keybindings.prefix-table]
-# Pane splits. Letter-only until the chord parser accepts punctuation
-# (tracked as a follow-up); for now: v = side-by-side, b = top/bottom.
-"v" = { action = "split-pane", direction = "vertical" }
-"b" = { action = "split-pane", direction = "horizontal" }
+# Pane splits, tmux-style: | for a vertical divider (side-by-side panes),
+# - for a horizontal divider (stacked panes).
+"|" = { action = "split-pane", direction = "vertical" }
+"-" = { action = "split-pane", direction = "horizontal" }
 
 # Kill the focused pane. Soft-kill via shell exit; see phux-4li.12.
 "x" = "kill-pane"
