@@ -31,7 +31,9 @@ use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
 use phux_protocol::ids::{CollectionId, TerminalId};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
+use phux_protocol::wire::frame::{
+    AttachTarget, FrameKind, Scope, SpawnError, SpawnResult, ViewportInfo,
+};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
@@ -41,7 +43,7 @@ use super::connection::Connection;
 use super::input::{InputEvent, StdinParser};
 use super::render::{TerminalRenderer, write_reset};
 use super::status_bar::{Position, StatusBarPainter, make_context};
-use crate::layout::{Direction, LayoutState, SplitDir};
+use crate::layout::{self, Direction, LayoutState, SplitDir};
 use crate::predict::{
     Overlay, PredictionState, PredictiveConfig, reconcile_terminal_output_per_cell,
 };
@@ -381,6 +383,13 @@ async fn main_loop(
     let mut resolver = build_resolver();
     let mut layout_get_request_id: Option<u32> = None;
     let mut next_request_id: u32 = 1;
+    // phux-4li.12: in-flight `split-pane` actions parked by request id.
+    // Populated by `run_action` when it dispatches SPAWN_TERMINAL;
+    // drained by `handle_server_frame`'s TerminalSpawned arm when the
+    // reply arrives. The map is small (one entry per outstanding
+    // user-triggered split) so a HashMap is overkill for cap but
+    // matches the layout-key request-id pattern.
+    let mut pending_splits: HashMap<u32, PendingSplit> = HashMap::new();
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -424,6 +433,7 @@ async fn main_loop(
         &mut predict,
         &overlay,
         layout_get_request_id,
+        &mut pending_splits,
     )?;
     if outcome.exit {
         return Ok(());
@@ -493,9 +503,28 @@ async fn main_loop(
                             &mut predict,
                             &overlay,
                             layout_get_request_id,
+                            &mut pending_splits,
                         )?;
                         if outcome.exit {
                             return Ok(());
+                        }
+                        // phux-4li.12: a layout mutation triggered by a
+                        // server frame (TerminalSpawned ok, TerminalClosed)
+                        // requires the same `SET_METADATA` broadcast as
+                        // a local action — see `ActionEffects.set_metadata`
+                        // for the local-action path.
+                        if outcome.emit_set_metadata
+                            && let Some(bytes) = encode_layout_or_log(&layout_state)
+                        {
+                            let request_id = next_request_id;
+                            next_request_id = next_request_id.wrapping_add(1);
+                            conn.send(&FrameKind::SetMetadata {
+                                request_id,
+                                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+                                key: LAYOUT_KEY.to_owned(),
+                                value: bytes,
+                            })
+                            .await?;
                         }
                         if outcome.layout_replaced {
                             // phux-4li.5: layout changed under us
@@ -543,6 +572,7 @@ async fn main_loop(
                     layout_state: &mut layout_state,
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
+                    pending_splits: &mut pending_splits,
                 };
                 dispatch_input_events(
                     conn,
@@ -567,6 +597,7 @@ async fn main_loop(
                     layout_state: &mut layout_state,
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
+                    pending_splits: &mut pending_splits,
                 };
                 dispatch_input_events(
                     conn,
@@ -595,11 +626,13 @@ async fn main_loop(
                 conn.send(&viewport_resize_frame(viewport)).await?;
 
                 if layout_state.tree.is_some() {
-                    // phux-4li.9: multi-pane reflow. Diff prev vs new
-                    // pane_rects to detect under-viable viewport; libghostty
-                    // resize for each pane happens inside repaint_multi_pane.
-                    // Per-Terminal RESIZE wire emission is gated on the L1
-                    // Terminal-lifecycle wire family — see phux-4li.10.
+                    // phux-4li.9 / phux-4li.12: multi-pane reflow.
+                    // Diff prev vs new pane_rects to detect under-viable
+                    // viewport; libghostty resize for each pane happens
+                    // inside repaint_multi_pane. Per-Terminal RESIZE
+                    // wire emission (one frame per pane whose dims
+                    // actually changed) keeps the server-side PTYs in
+                    // step with the client's freshly resolved layout.
                     let prev_rects = super::multi_pane::compute_layout(
                         &layout_state, prev_dims,
                     ).rects;
@@ -612,6 +645,18 @@ async fn main_loop(
                             rows = viewport_dims.1,
                             "viewport too small for current layout; rendering may be garbled",
                         );
+                    }
+                    // phux-4li.12: emit a TERMINAL_RESIZE per leaf
+                    // whose (w, h) actually changed. The server ioctls
+                    // TIOCSWINSZ on the matching PTY + resizes its
+                    // libghostty Terminal; no reply is expected.
+                    for (terminal_id, new_rect) in &diff.changed {
+                        conn.send(&FrameKind::TerminalResize {
+                            terminal_id: terminal_id.clone(),
+                            cols: new_rect.w,
+                            rows: new_rect.h,
+                        })
+                        .await?;
                     }
                     repaint_multi_pane(
                         &layout_state,
@@ -708,6 +753,10 @@ struct DispatchCtx<'a> {
     /// the layout `SET_METADATA`, which doesn't need a reply), but we
     /// reserve the counter for future `SPAWN`/kill wiring.
     next_request_id: &'a mut u32,
+    /// phux-4li.12: parked split actions awaiting their
+    /// `TERMINAL_SPAWNED` reply. `run_action` inserts;
+    /// `handle_server_frame` removes.
+    pending_splits: &'a mut HashMap<u32, PendingSplit>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -797,6 +846,19 @@ async fn dispatch_input_events(
                     if effects.bell {
                         let mut stdout = io::stdout().lock();
                         let _ = actions::write_bell(&mut stdout);
+                    }
+                    // phux-4li.12: parked split — send the SPAWN_TERMINAL
+                    // and remember the intent for the reply handler.
+                    if let Some((request_id, pending, frame)) = effects.spawn_terminal {
+                        ctx.pending_splits.insert(request_id, pending);
+                        conn.send(&frame).await?;
+                    }
+                    // phux-4li.12: kill-pane keystroke sequence. Each
+                    // frame is an INPUT_KEY targeting the focused
+                    // Terminal; the TERMINAL_CLOSED fold-out happens
+                    // when the shell exits.
+                    for frame in effects.kill_frames {
+                        conn.send(&frame).await?;
                     }
                     continue;
                 }
@@ -952,6 +1014,93 @@ fn consume_chord(
     }
 }
 
+/// Parked state for an in-flight `split-pane` action (phux-4li.12).
+///
+/// `run_action` emits a `SPAWN_TERMINAL` request and parks one of these
+/// keyed by the request id. When the matching `TERMINAL_SPAWNED { Ok }`
+/// reply arrives, the driver applies [`actions::apply_split`] against
+/// the focused leaf captured here, splitting along the recorded
+/// direction. If a sibling action mutated focus between request and
+/// reply, the captured `focused_at_request` keeps the split anchored
+/// to the leaf the user actually targeted.
+#[derive(Debug, Clone)]
+pub(super) struct PendingSplit {
+    /// Leaf the user was focused on when they pressed the chord; the
+    /// split is applied against this id, not the live focus (which may
+    /// have moved). Empty layouts can't request a split so this is
+    /// always populated.
+    pub focused_at_request: TerminalId,
+    /// Axis along which to split.
+    pub dir: SplitDir,
+}
+
+/// Pure seam for the `TerminalSpawned { Ok }` handler (phux-4li.12).
+///
+/// Applies a parked [`PendingSplit`] against `state`. The driver side
+/// then takes the returned new state, replaces its `layout_state`, and
+/// emits `SET_METADATA` + a repaint. Extracted out of
+/// `handle_server_frame` so the layout-mutation contract is unit
+/// testable without driving an async loop.
+///
+/// If `pending.focused_at_request` no longer exists in the tree (it
+/// was killed between the user pressing the chord and the spawn reply
+/// landing) the split is anchored at the current focus instead. If
+/// there is no current focus either, returns `Err(NoFocus)` and the
+/// driver bells + drops the spawned terminal id.
+///
+/// # Errors
+/// Propagates [`ActionError`] from [`actions::apply_split`].
+pub(super) fn apply_spawned_ok(
+    state: &LayoutState,
+    new_id: TerminalId,
+    pending: &PendingSplit,
+) -> Result<LayoutState, ActionError> {
+    // Anchor the split against the leaf the user targeted; if it's
+    // gone, fall back to live focus.
+    let leaves = state
+        .tree
+        .as_ref()
+        .map(crate::layout::leaves)
+        .unwrap_or_default();
+    let anchor = if leaves.contains(&pending.focused_at_request) {
+        pending.focused_at_request.clone()
+    } else {
+        state.focus.clone().ok_or(ActionError::NoFocus)?
+    };
+    // apply_split splits the *focused* leaf. Build a transient state
+    // with focus moved to the anchor, then call apply_split.
+    let anchored = LayoutState {
+        tree: state.tree.clone(),
+        focus: Some(anchor),
+    };
+    actions::apply_split(&anchored, new_id, pending.dir)
+}
+
+/// Pure seam for the `TerminalClosed` handler (phux-4li.12).
+///
+/// Folds `dying` out of `state`, using [`actions::apply_kill`] under
+/// the hood. Because `apply_kill` operates on `state.focus`, this
+/// helper first sets focus to `dying`, then applies the kill — the
+/// post-kill focus policy (first DFS leaf) lives inside `apply_kill`
+/// and is preserved.
+///
+/// Returns `Ok(new_state)` when the fold succeeded, `Err(_)` when the
+/// dying terminal wasn't a leaf in the tree (treat as a no-op — the
+/// caller drops the `PaneSlot` either way).
+///
+/// # Errors
+/// Propagates [`ActionError`] from [`actions::apply_kill`].
+pub(super) fn apply_terminal_closed(
+    state: &LayoutState,
+    dying: &TerminalId,
+) -> Result<LayoutState, ActionError> {
+    let anchored = LayoutState {
+        tree: state.tree.clone(),
+        focus: Some(dying.clone()),
+    };
+    actions::apply_kill(&anchored)
+}
+
 /// Side-effects a resolved action wants from the driver.
 #[derive(Debug, Default)]
 struct ActionEffects {
@@ -966,6 +1115,17 @@ struct ActionEffects {
     set_metadata: bool,
     /// `true` ⇒ emit a terminal bell (BEL `\x07`).
     bell: bool,
+    /// phux-4li.12: a `split-pane` action emitted a `SPAWN_TERMINAL`
+    /// and parked a [`PendingSplit`] keyed by `request_id`. The async
+    /// caller sends the frame, then inserts the parked entry into the
+    /// driver-wide `pending_splits` map.
+    spawn_terminal: Option<(u32, PendingSplit, FrameKind)>,
+    /// phux-4li.12: a `kill-pane` action ships a sequence of frames to
+    /// the focused Terminal (the "soft-kill via shell-exit" — see
+    /// `run_action`). The async caller sends them in order; the
+    /// resulting `TERMINAL_CLOSED` from the server folds the pane out
+    /// of the layout in [`handle_server_frame`].
+    kill_frames: Vec<FrameKind>,
 }
 
 /// Dispatch a resolved action against the driver's context.
@@ -983,27 +1143,68 @@ fn run_action(
     let mut effects = ActionEffects::default();
     match resolved.action.as_str() {
         "split-pane" => {
-            // SPAWN frame doesn't yet exist in the wire (no
-            // `FrameKind::SpawnTerminal` / reply variant). Without it
-            // we can't allocate a new `TerminalId` server-side, so
-            // split-pane bells and logs in v0.1. Filed as a follow-up
-            // — see phux-4li session notes.
-            tracing::warn!(
-                "split-pane: deferred pending SPAWN wire-frame allocation; \
-                 see phux-4li.5 deferred-scope note"
-            );
-            effects.bell = true;
+            // phux-4li.12: SPAWN_TERMINAL → server allocates the new
+            // Terminal under DEFAULT_COLLECTION_ID and replies with
+            // TERMINAL_SPAWNED { request_id, result: Ok(new_id) }. The
+            // layout mutation happens in the reply handler — see
+            // `handle_server_frame`'s TerminalSpawned arm and
+            // `apply_spawned_ok`. We park a `PendingSplit` keyed by
+            // request id so the reply knows which leaf to split.
+            let Some(dir) = split_dir_arg(resolved) else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "split-pane missing/bad `direction` arg (expected horizontal|vertical)",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("split-pane: no focused pane to split against; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            // CWD inheritance is phux-4li.1; until then we let the
+            // server pick (typically $HOME). `command = None` invokes
+            // the server's default shell; `env = None` inherits the
+            // server's environment as-is.
+            let frame = FrameKind::SpawnTerminal {
+                request_id,
+                collection: DEFAULT_COLLECTION_ID,
+                command: None,
+                cwd: None,
+                env: None,
+            };
+            effects.spawn_terminal = Some((
+                request_id,
+                PendingSplit {
+                    focused_at_request: focused_id,
+                    dir,
+                },
+                frame,
+            ));
         }
         "kill-pane" => {
-            // Same blocker as split-pane: no `TERMINAL_CLOSED` frame
-            // and no SPAWN_KILL exists in the wire. Once either lands
-            // (TERMINAL_CLOSED-driven cleanup OR an explicit kill
-            // frame), wire `actions::apply_kill` here + emit
-            // SET_METADATA. Until then bell + log.
-            tracing::warn!(
-                "kill-pane: deferred pending TERMINAL_CLOSED or kill-frame wire allocation"
-            );
-            effects.bell = true;
+            // phux-4li.12: soft-kill — write `exit\n` as a sequence of
+            // INPUT_KEY events to the focused Terminal. When the shell
+            // processes those keystrokes it exits, the PTY closes, and
+            // the server broadcasts TERMINAL_CLOSED which we then fold
+            // out of the layout in `handle_server_frame`.
+            //
+            // Caveat: this is softer than tmux's `kill-pane`, which
+            // sends SIGKILL to the entire process group. If the
+            // focused pane has an unresponsive foreground process
+            // (e.g. a stuck `cat` blocked on a non-existent FIFO) the
+            // keystrokes go nowhere. A future ticket may add an
+            // explicit KILL_TERMINAL wire frame; for v0.1 this gets
+            // the daily-drive flow working end-to-end.
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("kill-pane: no focused pane to kill; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            effects.kill_frames = soft_kill_input_frames(&focused_id);
         }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
@@ -1107,7 +1308,6 @@ fn encode_layout_or_log(state: &LayoutState) -> Option<Vec<u8>> {
 /// Allow `SplitDir` to be parsed from a `direction = "horizontal|vertical"`
 /// arg on a `split-pane` action. Lives here (not in `actions.rs`) so the
 /// pure helper module stays free of `ResolvedAction` parsing.
-#[allow(dead_code)] // wired in once SPAWN lands; kept for symmetry + warning-free build.
 fn split_dir_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<SplitDir> {
     let s = resolved.args.get("direction")?.as_str()?;
     match s {
@@ -1115,6 +1315,53 @@ fn split_dir_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Spli
         "vertical" => Some(SplitDir::Vertical),
         _ => None,
     }
+}
+
+/// phux-4li.12: build the `INPUT_KEY` frame sequence that types `exit\n`
+/// into the targeted Terminal. The shell processes those bytes, exits,
+/// the PTY closes, and the server emits `TERMINAL_CLOSED` which the
+/// driver folds out of the layout. See the `kill-pane` arm of
+/// [`run_action`] for the soft-kill caveat.
+fn soft_kill_input_frames(target: &TerminalId) -> Vec<FrameKind> {
+    use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
+    fn ascii_letter(ch: char, key: PhysicalKey) -> KeyEvent {
+        KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: Some(ch.to_string()),
+            unshifted_codepoint: Some(u32::from(ch)),
+        }
+    }
+    const fn named(key: PhysicalKey) -> KeyEvent {
+        KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: None,
+            unshifted_codepoint: None,
+        }
+    }
+
+    let events = [
+        ascii_letter('e', PhysicalKey::E),
+        ascii_letter('x', PhysicalKey::X),
+        ascii_letter('i', PhysicalKey::I),
+        ascii_letter('t', PhysicalKey::T),
+        named(PhysicalKey::Enter),
+    ];
+    events
+        .into_iter()
+        .map(|event| FrameKind::InputKey {
+            terminal_id: target.clone(),
+            event,
+        })
+        .collect()
 }
 
 /// Repaint the multi-pane composition after a layout mutation or a
@@ -1158,6 +1405,10 @@ fn repaint_multi_pane(
 /// The driver translates these into async actions (send a frame, exit
 /// the loop, repaint). Keeping the side-effect-free decision inside
 /// [`handle_server_frame`] lets the function stay synchronous.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "four parallel server-frame outcome flags; refactor into bitset would obscure callers"
+)]
 #[derive(Debug, Clone, Default)]
 struct FrameOutcome {
     /// `true` ⇒ the loop should exit cleanly (server sent `DETACHED`).
@@ -1170,6 +1421,11 @@ struct FrameOutcome {
     /// envelope (`MetadataValue` reply or `MetadataChanged` broadcast).
     /// The driver triggers a full repaint of the multi-pane composition.
     layout_replaced: bool,
+    /// phux-4li.12: `true` ⇒ the server-side frame mutated layout in
+    /// a way the *local* client originated (split landed, kill folded);
+    /// the driver should broadcast the new envelope via
+    /// `SET_METADATA` so sibling clients reconcile.
+    emit_set_metadata: bool,
 }
 
 /// Process one server-to-client frame. Returns a [`FrameOutcome`]
@@ -1184,6 +1440,10 @@ struct FrameOutcome {
     clippy::too_many_lines,
     reason = "phux-4li.5 added L3 reconcile branches; refactor with the status-bar arg-list cleanup"
 )]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "phux-4li.12 adds TerminalSpawned/TerminalClosed branches with full SpawnError matching; per-frame dispatcher is intentionally flat"
+)]
 fn handle_server_frame(
     frame: FrameKind,
     panes: &mut HashMap<TerminalId, PaneSlot>,
@@ -1195,6 +1455,7 @@ fn handle_server_frame(
     predict: &mut PredictionState,
     overlay: &Overlay,
     pending_layout_request: Option<u32>,
+    pending_splits: &mut HashMap<u32, PendingSplit>,
 ) -> Result<FrameOutcome, AttachError> {
     match frame {
         FrameKind::Attached {
@@ -1407,6 +1668,146 @@ fn handle_server_frame(
                 })
             }
         }
+        // phux-4li.12: split-pane reply path. Look up the parked
+        // PendingSplit by request id; on Ok apply the split + seed the
+        // new PaneSlot + broadcast the envelope. On Err log + bell.
+        FrameKind::TerminalSpawned { request_id, result } => {
+            let Some(pending) = pending_splits.remove(&request_id) else {
+                tracing::debug!(
+                    request_id,
+                    "stray TerminalSpawned with no matching pending split; ignoring",
+                );
+                return Ok(FrameOutcome::default());
+            };
+            match result {
+                SpawnResult::Ok(new_id) => {
+                    match apply_spawned_ok(layout_state, new_id.clone(), &pending) {
+                        Ok(new_state) => {
+                            *layout_state = new_state;
+                            // Seed a PaneSlot for the new Terminal so the
+                            // first TERMINAL_SNAPSHOT lands on a warm
+                            // mirror. Vacant-or-occupied — never overwrite
+                            // an existing slot (a TERMINAL_OUTPUT could
+                            // legally race ahead of TERMINAL_SPAWNED if
+                            // the server batched the spawn-then-output).
+                            if let std::collections::hash_map::Entry::Vacant(v) =
+                                panes.entry(new_id)
+                            {
+                                v.insert(PaneSlot::new()?);
+                            }
+                            // Move focus to the freshly spawned pane —
+                            // tmux-compatible (apply_split already sets
+                            // focus inside the returned state).
+                            focused_pane.clone_from(&layout_state.focus);
+                            Ok(FrameOutcome {
+                                layout_replaced: true,
+                                emit_set_metadata: true,
+                                ..FrameOutcome::default()
+                            })
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                error = %err,
+                                terminal = ?new_id,
+                                "apply_spawned_ok failed; dropping spawned terminal",
+                            );
+                            bell_to_stdout();
+                            Ok(FrameOutcome::default())
+                        }
+                    }
+                }
+                SpawnResult::Err(SpawnError::CollectionNotFound) => {
+                    // v0.1 clients only ever target DEFAULT_COLLECTION_ID,
+                    // which the server always exposes; this branch
+                    // means a server-side L2 invariant changed under
+                    // us. Log loudly + bell.
+                    tracing::warn!(
+                        request_id,
+                        "TerminalSpawned: server reports CollectionNotFound for DEFAULT collection",
+                    );
+                    bell_to_stdout();
+                    Ok(FrameOutcome::default())
+                }
+                SpawnResult::Err(SpawnError::SpawnFailed(reason)) => {
+                    tracing::warn!(
+                        request_id,
+                        reason = %reason,
+                        "TerminalSpawned: server-side spawn failed",
+                    );
+                    bell_to_stdout();
+                    Ok(FrameOutcome::default())
+                }
+                // SpawnError is #[non_exhaustive] — catch future
+                // variants so newer servers don't take the client down.
+                SpawnResult::Err(other) => {
+                    tracing::warn!(
+                        request_id,
+                        error = ?other,
+                        "TerminalSpawned: unknown spawn error variant",
+                    );
+                    bell_to_stdout();
+                    Ok(FrameOutcome::default())
+                }
+                // SpawnResult is also #[non_exhaustive].
+                _ => {
+                    tracing::warn!(request_id, "TerminalSpawned: unknown SpawnResult variant");
+                    Ok(FrameOutcome::default())
+                }
+            }
+        }
+        // phux-4li.12: a Terminal closed. Fold it out of the layout if
+        // it's a known leaf, drop its PaneSlot regardless. If we
+        // initiated the kill (or it died on us spontaneously), the
+        // server still broadcasts this so every attached client folds
+        // in lockstep.
+        FrameKind::TerminalClosed {
+            terminal_id,
+            exit_status,
+        } => {
+            tracing::info!(
+                terminal = ?terminal_id,
+                exit_status = ?exit_status,
+                "TerminalClosed",
+            );
+            let tree_leaves: Vec<TerminalId> = layout_state
+                .tree
+                .as_ref()
+                .map(layout::leaves)
+                .unwrap_or_default();
+            let known_leaf = tree_leaves.contains(&terminal_id);
+            // Always drop the slot — even for unknown leaves (could be
+            // a spawn-failure cleanup race or a stale id from before
+            // an attach).
+            panes.remove(&terminal_id);
+            if !known_leaf {
+                return Ok(FrameOutcome::default());
+            }
+            match apply_terminal_closed(layout_state, &terminal_id) {
+                Ok(new_state) => {
+                    *layout_state = new_state;
+                    // Re-anchor `focused_pane`. `apply_terminal_closed`
+                    // (via `apply_kill`) sets the new focus to the
+                    // first DFS leaf, or `None` if the tree is empty.
+                    focused_pane.clone_from(&layout_state.focus);
+                    Ok(FrameOutcome {
+                        layout_replaced: true,
+                        emit_set_metadata: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+                Err(err) => {
+                    // Closed terminal wasn't a leaf in the tree (race
+                    // we already covered with `known_leaf`, or the
+                    // layout was empty). Drop quietly — slot is gone.
+                    tracing::debug!(
+                        error = %err,
+                        terminal = ?terminal_id,
+                        "apply_terminal_closed: layout fold failed",
+                    );
+                    Ok(FrameOutcome::default())
+                }
+            }
+        }
         other => {
             // Anything else — `HELLO_OK`, `PONG`, future spec frames — is
             // accepted-but-ignored. The protocol decoder rejects unknown
@@ -1416,6 +1817,14 @@ fn handle_server_frame(
             Ok(FrameOutcome::default())
         }
     }
+}
+
+/// phux-4li.12: write a BEL to stdout. Used by `handle_server_frame`'s
+/// error branches (spawn failed, layout fold rejected) where we need
+/// to signal the user without surfacing structured error chrome.
+fn bell_to_stdout() {
+    let mut stdout = io::stdout().lock();
+    let _ = actions::write_bell(&mut stdout);
 }
 
 /// Decide whether `(scope, key)` matches the layout-coordination key
@@ -1834,5 +2243,243 @@ mod tests {
         let vp = current_viewport_or_default();
         // Cell dims fit in u16 by construction; just exercise the path.
         let _ = (vp.cols, vp.rows);
+    }
+
+    // ---------------------------------------------------------------------
+    // phux-4li.12: pure-seam tests for split-pane / kill-pane wiring.
+    //
+    // The driver's async main_loop is hard to test in isolation because
+    // it wires together a tokio select! across signals, sockets, and
+    // libghostty. Instead we extract `apply_spawned_ok` and
+    // `apply_terminal_closed` as pure functions and test those — the
+    // async dispatcher's job is mechanical (allocate id, send frame,
+    // park intent) and is covered indirectly by the round-trip integ
+    // tests in phux-server.
+    // ---------------------------------------------------------------------
+
+    use crate::layout::{LayoutNode, SplitDir, split_at};
+
+    fn tid(id: u32) -> TerminalId {
+        TerminalId::local(id)
+    }
+
+    #[test]
+    fn apply_spawned_ok_splits_anchored_to_focused_at_request() {
+        // Single pane focused on 1; pending split adds pane 2.
+        let state = LayoutState::single(tid(1));
+        let pending = PendingSplit {
+            focused_at_request: tid(1),
+            dir: SplitDir::Horizontal,
+        };
+        let new_state = apply_spawned_ok(&state, tid(2), &pending).expect("split applies");
+        // apply_split sets focus to the freshly added pane.
+        assert_eq!(new_state.focus, Some(tid(2)));
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        assert_eq!(leaves, vec![tid(1), tid(2)]);
+    }
+
+    #[test]
+    fn apply_spawned_ok_anchors_against_request_even_when_focus_moved() {
+        // ((1|2)/3), focus moved to 3 by the time the spawn reply lands,
+        // but the user's chord targeted pane 2 — verify the split lands
+        // adjacent to 2 (not to the live focus).
+        let t1 = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .expect("split 1+2");
+        let tree = split_at(&t1, &tid(2), &tid(3), SplitDir::Vertical, 0.5).expect("split 2+3");
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(tid(3)),
+        };
+        let pending = PendingSplit {
+            focused_at_request: tid(2),
+            dir: SplitDir::Horizontal,
+        };
+        let new_state =
+            apply_spawned_ok(&state, tid(99), &pending).expect("split applies against request");
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        // 99 should be sibling-adjacent to 2, leaves contains all 4.
+        assert!(
+            leaves.contains(&tid(99)),
+            "new pane not in tree: {leaves:?}"
+        );
+        assert!(leaves.contains(&tid(2)), "anchor pane gone: {leaves:?}");
+        assert!(leaves.contains(&tid(1)));
+        assert!(leaves.contains(&tid(3)));
+        assert_eq!(new_state.focus, Some(tid(99)));
+    }
+
+    #[test]
+    fn apply_spawned_ok_falls_back_to_live_focus_when_anchor_gone() {
+        // Pane 1 in tree, focus on 1, pending intent named pane 42 (no
+        // longer exists). Expect split anchored to 1 (live focus).
+        let state = LayoutState::single(tid(1));
+        let pending = PendingSplit {
+            focused_at_request: tid(42),
+            dir: SplitDir::Vertical,
+        };
+        let new_state = apply_spawned_ok(&state, tid(2), &pending).expect("split applies");
+        let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
+        assert_eq!(leaves, vec![tid(1), tid(2)]);
+    }
+
+    #[test]
+    fn apply_terminal_closed_folds_out_known_leaf() {
+        // (1|2), kill 1 → tree collapses to leaf(2), focus = 2.
+        let tree = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .expect("split");
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(tid(2)),
+        };
+        let new_state = apply_terminal_closed(&state, &tid(1)).expect("fold succeeds");
+        assert!(matches!(
+            new_state.tree.as_ref().expect("tree"),
+            LayoutNode::Leaf(p) if *p == tid(2)
+        ));
+        // apply_kill sets focus to the first DFS leaf in the surviving
+        // tree (here the only remaining leaf, 2).
+        assert_eq!(new_state.focus, Some(tid(2)));
+    }
+
+    #[test]
+    fn apply_terminal_closed_emptied_state_when_last_leaf_dies() {
+        let state = LayoutState::single(tid(1));
+        let new_state = apply_terminal_closed(&state, &tid(1)).expect("fold succeeds");
+        assert!(new_state.tree.is_none());
+        assert!(new_state.focus.is_none());
+    }
+
+    #[test]
+    fn apply_terminal_closed_rejects_unknown_leaf() {
+        let state = LayoutState::single(tid(1));
+        let err = apply_terminal_closed(&state, &tid(99)).unwrap_err();
+        // PaneNotInLayout — driver bubbles a debug log + drops PaneSlot.
+        assert!(
+            matches!(err, ActionError::Layout(_)),
+            "expected Layout error, got {err:?}"
+        );
+    }
+
+    /// Invariant: any sequence of (split, close) operations preserves
+    /// `leaves = (splits - closes + 1)` so long as the tree is
+    /// non-empty after each step. Not a true proptest (we drive the
+    /// pure helpers directly with deterministic ids), but exercises
+    /// the same algebra phux-4li.5's per-action tests guarantee.
+    #[test]
+    #[allow(clippy::cast_possible_wrap, reason = "leaf counts are tiny")]
+    fn split_close_sequence_preserves_leaf_count() {
+        let mut state = LayoutState::single(tid(1));
+        let mut next_id: u32 = 2;
+        let mut splits: i64 = 0;
+        let mut closes: i64 = 0;
+
+        // Three splits → 4 leaves.
+        for dir in [
+            SplitDir::Horizontal,
+            SplitDir::Vertical,
+            SplitDir::Horizontal,
+        ] {
+            let pending = PendingSplit {
+                focused_at_request: state.focus.clone().expect("focus"),
+                dir,
+            };
+            state = apply_spawned_ok(&state, tid(next_id), &pending).expect("split");
+            next_id += 1;
+            splits += 1;
+            let leaf_count = crate::layout::leaves(state.tree.as_ref().expect("tree")).len() as i64;
+            assert_eq!(leaf_count, splits - closes + 1);
+        }
+
+        // Two closes → 2 leaves.
+        for _ in 0..2 {
+            let dying = crate::layout::leaves(state.tree.as_ref().expect("tree"))[0].clone();
+            state = apply_terminal_closed(&state, &dying).expect("close");
+            closes += 1;
+            let leaf_count = crate::layout::leaves(state.tree.as_ref().expect("tree")).len() as i64;
+            assert_eq!(leaf_count, splits - closes + 1);
+        }
+    }
+
+    #[test]
+    fn soft_kill_input_frames_emits_exit_newline_sequence() {
+        let frames = soft_kill_input_frames(&tid(7));
+        assert_eq!(frames.len(), 5, "expected e/x/i/t/Enter");
+        // Each frame is INPUT_KEY targeting tid(7).
+        for f in &frames {
+            match f {
+                FrameKind::InputKey { terminal_id, .. } => {
+                    assert_eq!(terminal_id, &tid(7));
+                }
+                other => panic!("expected InputKey, got {other:?}"),
+            }
+        }
+        // First four are printable letters with text="e".."t".
+        let expected_text = ["e", "x", "i", "t"];
+        for (i, want) in expected_text.iter().enumerate() {
+            match &frames[i] {
+                FrameKind::InputKey { event, .. } => {
+                    assert_eq!(
+                        event.text.as_deref(),
+                        Some(*want),
+                        "frame {i}: text mismatch",
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        // Last frame is Enter (no text).
+        match &frames[4] {
+            FrameKind::InputKey { event, .. } => {
+                assert_eq!(event.key, phux_protocol::input::key::PhysicalKey::Enter);
+                assert_eq!(event.text, None);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn split_dir_arg_parses_horizontal_and_vertical() {
+        use phux_config::keybind::ResolvedAction;
+        let mut h = ResolvedAction {
+            action: "split-pane".to_owned(),
+            args: std::collections::BTreeMap::new(),
+        };
+        h.args.insert(
+            "direction".to_owned(),
+            toml::Value::String("horizontal".into()),
+        );
+        assert_eq!(split_dir_arg(&h), Some(SplitDir::Horizontal));
+
+        let mut v = ResolvedAction {
+            action: "split-pane".to_owned(),
+            args: std::collections::BTreeMap::new(),
+        };
+        v.args.insert(
+            "direction".to_owned(),
+            toml::Value::String("vertical".into()),
+        );
+        assert_eq!(split_dir_arg(&v), Some(SplitDir::Vertical));
+
+        let mut bogus = ResolvedAction {
+            action: "split-pane".to_owned(),
+            args: std::collections::BTreeMap::new(),
+        };
+        bogus.args.insert(
+            "direction".to_owned(),
+            toml::Value::String("diagonal".into()),
+        );
+        assert_eq!(split_dir_arg(&bogus), None);
     }
 }
