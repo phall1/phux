@@ -8,10 +8,28 @@
 //! Coordinates are pane-local surface-space pixels (NOT cells), matching
 //! libghostty's `mouse::Position` shape exactly — see SPEC.md §9.2.1 for the
 //! cell-geometry contract.
+//!
+//! # Mouse mode bits ([`MouseProtocol`] / [`MouseEncoding`])
+//!
+//! Per SPEC.md §8.5, cursor and mode state — including the inner program's
+//! mouse-tracking protocol and the wire format it asks for — live entirely
+//! inside each end's `libghostty_vt::Terminal`. They are **not** separate
+//! wire concepts: clients query their local `Terminal::modes()` to learn
+//! whether to forward mouse events, and the server reads its `Terminal`
+//! directly via `Encoder::set_options_from_terminal` when emitting PTY
+//! bytes for an inbound `INPUT_MOUSE`.
+//!
+//! [`MouseProtocol`] and [`MouseEncoding`] are therefore re-exports of
+//! libghostty's canonical `mouse::TrackingMode` and `mouse::Format` (per
+//! ADR-0008): they exist as named handles for the server-side state the
+//! inner program toggles via DECSET, not as wire fields.
 
 use super::key::ModSet;
 
-pub use libghostty_vt::mouse::{Action as MouseAction, Button as MouseButton};
+pub use libghostty_vt::mouse::{
+    Action as MouseAction, Button as MouseButton, Format as MouseEncoding,
+    TrackingMode as MouseProtocol,
+};
 
 /// A normalized mouse input event flowing from client to server.
 ///
@@ -69,5 +87,52 @@ mod tests {
     fn mouse_event_is_copy() {
         fn assert_copy<T: Copy>() {}
         assert_copy::<MouseEvent>();
+    }
+
+    /// `MouseProtocol` covers the five DECSET tracking modes the inner
+    /// program may select (SPEC.md §8.5). Names follow libghostty's
+    /// `TrackingMode` — see ADR-0008.
+    #[test]
+    fn mouse_protocol_variants_present() {
+        // None      → tracking disabled
+        // X10       → DECSET 9, press-only
+        // Normal    → DECSET 1000, press + release
+        // Button    → DECSET 1002, press + release + drag (button-event)
+        // Any       → DECSET 1003, all motion (any-event)
+        let _ = MouseProtocol::None;
+        let _ = MouseProtocol::X10;
+        let _ = MouseProtocol::Normal;
+        let _ = MouseProtocol::Button;
+        let _ = MouseProtocol::Any;
+        assert_ne!(MouseProtocol::None, MouseProtocol::X10);
+        assert_ne!(MouseProtocol::Normal, MouseProtocol::Button);
+        assert_ne!(MouseProtocol::Button, MouseProtocol::Any);
+    }
+
+    /// `MouseEncoding` covers the five wire formats the inner program may
+    /// select via DECSET 1005 / 1006 / 1015 / 1016 (SPEC.md §8.5). Names
+    /// follow libghostty's `Format` — see ADR-0008.
+    #[test]
+    fn mouse_encoding_variants_present() {
+        // X10       → legacy (CSI M Cb Cx Cy), DECSET 1006/1015/1016 all off
+        // Utf8      → DECSET 1005 (UTF-8 extended)
+        // Sgr       → DECSET 1006 (SGR)
+        // Urxvt     → DECSET 1015 (urxvt)
+        // SgrPixels → DECSET 1016 (SGR with pixel coordinates)
+        let _ = MouseEncoding::X10;
+        let _ = MouseEncoding::Utf8;
+        let _ = MouseEncoding::Sgr;
+        let _ = MouseEncoding::Urxvt;
+        let _ = MouseEncoding::SgrPixels;
+        assert_ne!(MouseEncoding::X10, MouseEncoding::Sgr);
+        assert_ne!(MouseEncoding::Sgr, MouseEncoding::SgrPixels);
+        assert_ne!(MouseEncoding::Urxvt, MouseEncoding::Utf8);
+    }
+
+    #[test]
+    fn mouse_protocol_and_encoding_are_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<MouseProtocol>();
+        assert_copy::<MouseEncoding>();
     }
 }
