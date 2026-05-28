@@ -451,7 +451,7 @@ async fn main_loop(
         overlays.is_active(),
     )?;
     if outcome.exit {
-        return Ok(());
+        exit_after_detach();
     }
     if outcome.subscribe_layout {
         // phux-4li.5: ask the server for any persisted layout, then
@@ -522,7 +522,7 @@ async fn main_loop(
                             overlays.is_active(),
                         )?;
                         if outcome.exit {
-                            return Ok(());
+                            exit_after_detach();
                         }
                         // phux-4li.12: a layout mutation triggered by a
                         // server frame (TerminalSpawned ok, TerminalClosed)
@@ -572,7 +572,7 @@ async fn main_loop(
                         // frame — treat it as a clean shutdown because
                         // the user requested detach. Otherwise the loop
                         // bubbles the disconnect up unchanged.
-                        return Ok(());
+                        exit_after_detach();
                     }
                     Err(err) => return Err(err),
                 }
@@ -1179,6 +1179,29 @@ fn terminal_reset_on_signal() {
     }
     let mut out = io::stdout().lock();
     let _ = write_terminal_reset(&mut out);
+}
+
+/// Clean client exit after a server-acknowledged DETACH (or a
+/// detach-intended disconnect). Restores the terminal and exits the
+/// process immediately rather than returning up the stack.
+///
+/// Why not just `return Ok(())` and let `RawModeGuard::drop` + the
+/// runtime teardown clean up? Because `tokio::io::stdin()` parks an
+/// **uncancellable** blocking `read()` on a helper thread. The terminal
+/// restore (guard Drop) does run, but the subsequent runtime drop then
+/// blocks forever waiting for that stuck read to return. The result is
+/// a zombie client that never exits, keeps a reader on the shared PTY,
+/// and steals the first line the user types next — most painfully their
+/// reattach command, which is why reattach "did nothing." Exiting here
+/// closes that window: the restore mirrors the signal path, and
+/// `process::exit` skips the teardown that would otherwise hang.
+#[allow(
+    clippy::exit,
+    reason = "detach must exit now; runtime drop hangs on the stdin read thread"
+)]
+fn exit_after_detach() -> ! {
+    terminal_reset_on_signal();
+    std::process::exit(0);
 }
 
 /// Install a global panic hook that runs [`write_terminal_reset`]
