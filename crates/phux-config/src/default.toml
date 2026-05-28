@@ -23,6 +23,26 @@ history-limit = 50000
 refresh-rate = 60
 mouse = true
 
+# How a newly-spawned pane picks its working directory. One of:
+#   "inherit-focused"     — match the focused pane's CWD (tmux behavior).
+#   "home"                — always start in $HOME.
+#   "session-root"        — the directory the session was created in.
+#   "last-cwd-per-window" — remember the last CWD per window and reuse.
+# Default "inherit-focused" requires server-side PTY working-dir tracking
+# (OSC 7 from the shell, or a kernel-side query); wiring is a follow-up
+# to phux-4li.1. The knob lands first so consumers can target it.
+cwd-inheritance = "inherit-focused"
+
+# When `phux` auto-creates a session on attach, what to spawn as the
+# initial program. Unset (= no key) means "use defaults.shell" (which
+# in turn honors $SHELL, then /bin/sh).
+# spawn-on-attach = "/usr/bin/zellij-like-launcher"
+
+# Template for auto-created session names. ${cwd-basename} expands to
+# the basename of the client's working directory at session-create time.
+# Unknown placeholders are passed through verbatim.
+session-name-template = "default"
+
 [keybindings]
 # Prefix: chord captured by the TUI before everything else. After hitting
 # the prefix, your next keystroke is matched against `prefix-table`.

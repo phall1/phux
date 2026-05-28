@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use phux_config::{Config, ConfigError, DefaultsCfg, parse_str};
+use phux_config::{Config, ConfigError, CwdInheritance, DefaultsCfg, parse_str};
 
 /// The canonical example from `docs/consumers/tui.md` §4.2.
 const CANONICAL: &str = r##"
@@ -220,6 +220,92 @@ predictive-echo = 1
     );
     // The offending value sits on line 3 (leading newline + section line + value line).
     assert_eq!(line, 3, "error should point at the broken value line");
+}
+
+// ---------------------------------------------------------------------------
+// [defaults] sane-default spawn knobs  (phux-4li.1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn defaults_spawn_knobs_default_when_absent() {
+    // Empty config: all three new knobs default to their shipped values.
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::InheritFocused);
+    assert_eq!(cfg.defaults.spawn_on_attach, None);
+    assert_eq!(cfg.defaults.session_name_template, "default");
+}
+
+#[test]
+fn defaults_spawn_knobs_round_trip_user_values() {
+    let input = r#"
+[defaults]
+cwd-inheritance       = "home"
+spawn-on-attach       = "/usr/bin/tmux-like"
+session-name-template = "phux-${cwd-basename}"
+"#;
+    let cfg = parse_str(input, &path()).expect("knobs parse");
+    assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::Home);
+    assert_eq!(
+        cfg.defaults.spawn_on_attach.as_deref(),
+        Some("/usr/bin/tmux-like")
+    );
+    assert_eq!(cfg.defaults.session_name_template, "phux-${cwd-basename}");
+
+    // Re-serialize and re-parse: PartialEq holds.
+    let reser = toml::to_string(&cfg).expect("reserialize");
+    let reparsed = parse_str(&reser, &path()).expect("reparse");
+    assert_eq!(cfg, reparsed);
+}
+
+#[test]
+fn cwd_inheritance_accepts_all_variants() {
+    for (toml_value, expected) in [
+        ("inherit-focused", CwdInheritance::InheritFocused),
+        ("home", CwdInheritance::Home),
+        ("session-root", CwdInheritance::SessionRoot),
+        ("last-cwd-per-window", CwdInheritance::LastCwdPerWindow),
+    ] {
+        let input = format!("[defaults]\ncwd-inheritance = \"{toml_value}\"\n");
+        let cfg = parse_str(&input, &path())
+            .unwrap_or_else(|e| panic!("variant {toml_value} should parse: {e}"));
+        assert_eq!(cfg.defaults.cwd_inheritance, expected);
+    }
+}
+
+#[test]
+fn cwd_inheritance_unknown_variant_is_rejected() {
+    let input = r#"
+[defaults]
+cwd-inheritance = "random-walk"
+"#;
+    let err = parse_str(input, &path()).expect_err("unknown enum variant rejected");
+    assert!(matches!(err, ConfigError::Parse { .. }));
+}
+
+#[test]
+fn embedded_default_toml_populates_new_knobs() {
+    // The shipped `default.toml` (via `parse_with_defaults`) must
+    // populate the new knobs at their documented defaults.
+    let cfg = phux_config::parse_with_defaults("", &path()).expect("embedded defaults parse");
+    assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::InheritFocused);
+    assert_eq!(cfg.defaults.spawn_on_attach, None);
+    assert_eq!(cfg.defaults.session_name_template, "default");
+    // history-limit is the canonical scrollback knob (phux-4li.1 DEDUPE).
+    assert_eq!(cfg.defaults.history_limit, 50_000);
+}
+
+#[test]
+fn user_can_override_one_new_knob_without_restating_others() {
+    // Layered parse: setting only `cwd-inheritance` must leave the other
+    // new knobs at their embedded-default values.
+    let user = r#"
+[defaults]
+cwd-inheritance = "session-root"
+"#;
+    let cfg = phux_config::parse_with_defaults(user, &path()).expect("partial override parses");
+    assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::SessionRoot);
+    assert_eq!(cfg.defaults.spawn_on_attach, None);
+    assert_eq!(cfg.defaults.session_name_template, "default");
 }
 
 /// Replace the `:COL:` in `path:LINE:COL: message` with `:<col>:` so

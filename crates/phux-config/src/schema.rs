@@ -56,6 +56,11 @@ pub struct Config {
 // ---------------------------------------------------------------------------
 
 /// `[defaults]` table. See `docs/consumers/tui.md` §12 for shipped values.
+///
+/// This struct is intentionally NOT `#[non_exhaustive]`: it is constructed
+/// only via `Default` + struct-update syntax (`..DefaultsCfg::default()`)
+/// in tests and via serde everywhere else, so adding fields is
+/// source-compatible for all in-tree consumers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultsCfg {
@@ -65,6 +70,11 @@ pub struct DefaultsCfg {
     pub shell: Option<String>,
 
     /// Lines of scrollback retained per pane.
+    ///
+    /// The TOML key is `history-limit` — the tmux-shaped name kept since
+    /// `phux-config` first shipped. `scrollback-lines` was proposed in
+    /// phux-4li.1 but consciously folded into this field rather than
+    /// duplicated: they describe the same per-Terminal scrollback cap.
     #[serde(default = "default_history_limit", rename = "history-limit")]
     pub history_limit: u32,
 
@@ -79,6 +89,38 @@ pub struct DefaultsCfg {
     /// Mouse handling enabled at server level.
     #[serde(default = "default_true")]
     pub mouse: bool,
+
+    /// How a freshly-spawned pane chooses its working directory.
+    ///
+    /// Default: [`CwdInheritance::InheritFocused`], matching tmux. See
+    /// the enum docs for the full set.
+    ///
+    /// TODO(phux-4li.1 follow-up): wiring [`CwdInheritance::InheritFocused`]
+    /// requires the server to track per-Terminal PTY working directory
+    /// (OSC 7 from the shell or a kernel-side query). This ticket lands
+    /// only the config knob; the server-side mechanism is a follow-up.
+    #[serde(default, rename = "cwd-inheritance")]
+    pub cwd_inheritance: CwdInheritance,
+
+    /// Command to spawn when `phux` auto-creates a session on attach.
+    ///
+    /// `None` (default) ⇒ honor [`DefaultsCfg::shell`] (which in turn
+    /// honors `$SHELL`). Set explicitly to launch e.g. a TUI dashboard
+    /// or a specific REPL as the initial program.
+    #[serde(default, rename = "spawn-on-attach")]
+    pub spawn_on_attach: Option<String>,
+
+    /// Naming template for auto-created sessions.
+    ///
+    /// Default: `"default"`. Supports `${cwd-basename}` substitution
+    /// (resolved at session-creation time using the client's working
+    /// directory). Other placeholders may be added later; unknown
+    /// placeholders are passed through verbatim.
+    #[serde(
+        default = "default_session_name_template",
+        rename = "session-name-template"
+    )]
+    pub session_name_template: String,
 }
 
 impl Default for DefaultsCfg {
@@ -89,6 +131,9 @@ impl Default for DefaultsCfg {
             refresh_rate: default_refresh_rate(),
             log_filter: None,
             mouse: true,
+            cwd_inheritance: CwdInheritance::default(),
+            spawn_on_attach: None,
+            session_name_template: default_session_name_template(),
         }
     }
 }
@@ -101,6 +146,30 @@ const fn default_refresh_rate() -> u32 {
 }
 const fn default_true() -> bool {
     true
+}
+fn default_session_name_template() -> String {
+    "default".to_owned()
+}
+
+/// How a newly-spawned pane chooses its working directory.
+///
+/// Selected by the `defaults.cwd-inheritance` TOML key. Values use
+/// kebab-case on the wire and `PascalCase` in Rust.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CwdInheritance {
+    /// Inherit the focused pane's current working directory. Default —
+    /// matches tmux's default split behavior. Requires server-side PTY
+    /// working-dir tracking (TODO; see [`DefaultsCfg::cwd_inheritance`]).
+    #[default]
+    InheritFocused,
+    /// Always spawn in `$HOME`.
+    Home,
+    /// Spawn in the directory the session was created in.
+    SessionRoot,
+    /// Remember the last CWD per window and reuse it for new panes in
+    /// that window.
+    LastCwdPerWindow,
 }
 
 // ---------------------------------------------------------------------------

@@ -193,9 +193,13 @@ A minimal config:
 
 ```toml
 [defaults]
-shell          = "/bin/zsh"
-history-limit  = 50000
-refresh-rate   = 60
+shell                 = "/bin/zsh"
+history-limit         = 50000
+refresh-rate          = 60
+# Sane-default spawn knobs (phux-4li.1):
+cwd-inheritance       = "inherit-focused"
+session-name-template = "default"
+# spawn-on-attach     = "/usr/bin/some-launcher"  # default: defaults.shell
 
 [keybindings]
 prefix = "ctrl+space"
@@ -240,6 +244,25 @@ action = { kind = "notify", text = "pane {pane} exited with {exit-code}" }
 fg = "#cdd6f4"
 bg = "#1e1e2e"
 ```
+
+**Spawn defaults under `[defaults]`** shape what happens when a new pane
+or session comes into being:
+
+- **`cwd-inheritance`** (string enum, default `"inherit-focused"`)
+  controls how a freshly-spawned pane picks its working directory.
+  Values: `"inherit-focused"` (match the focused pane's CWD — tmux's
+  default), `"home"` (always `$HOME`), `"session-root"` (the directory
+  the session was created in), `"last-cwd-per-window"` (remember per
+  window). `inherit-focused` requires server-side PTY working-dir
+  tracking (OSC 7 from the shell, or a kernel-side query); the config
+  knob lands first (phux-4li.1), wiring follows.
+- **`spawn-on-attach`** (string, default unset) is the command `phux`
+  spawns when it auto-creates a session on attach. Unset ⇒ honor
+  `defaults.shell` (which honors `$SHELL`).
+- **`session-name-template`** (string, default `"default"`) names
+  auto-created sessions. Supports `${cwd-basename}` substitution against
+  the client's working directory at session-create time. Unknown
+  placeholders pass through verbatim.
 
 **Experimental knobs** live under `[experimental]`. Today the only key
 is `predictive-echo` (boolean, default `false`), which engages Mosh-class
@@ -652,6 +675,9 @@ The shipped defaults, in one place:
 | Prefix key                    | `ctrl+space`                             |
 | Pane on PTY exit              | close                                    |
 | Mouse                         | on                                       |
+| New-pane CWD inheritance      | `inherit-focused` (tmux-shaped)          |
+| Spawn-on-attach               | `defaults.shell` (unset = inherit)       |
+| Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Status bar                    | `{session}` / `{windows}` / `{date %H:%M}` |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
