@@ -149,6 +149,11 @@ pub(super) fn paint_full_frame(
         );
         let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
     }
+    // Flush the final cursor placement. See the note in
+    // `paint_bar_after_pane`: render_at flushes mid-frame, but the
+    // explicit CUP we write *after* the last render_at has no newline
+    // and would otherwise sit in the LineWriter buffer indefinitely.
+    let _ = stdout.flush();
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -218,6 +223,15 @@ pub(super) fn paint_bar_after_pane<W: Write>(
         tracing::trace!("paint_bar_after_pane: both None, parking at (0,0) hidden");
         let _ = write!(out, "\x1b[1;1H\x1b[?25l");
     }
+    // CRITICAL: flush so the cursor-restore CUP actually reaches the
+    // terminal. stdout is a LineWriter and the CUP we just wrote has no
+    // trailing newline, so without an explicit flush it stays buffered
+    // until the next pane output. When the pane is idle (a shell prompt)
+    // that output never comes, and the host cursor strands at the bar's
+    // tail — bottom-right. This is the real phux-gxy: the prior fixes
+    // computed the right CUP but never flushed it, so unit tests on the
+    // in-memory buffer passed while the live terminal never saw it.
+    let _ = out.flush();
 }
 
 /// Effective viewport available to pane rendering: outer dims with the

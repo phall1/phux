@@ -568,11 +568,19 @@ pub(super) fn encode_layout_or_log(state: &LayoutState) -> Option<Vec<u8>> {
 /// Allow `SplitDir` to be parsed from a `direction = "horizontal|vertical"`
 /// arg on a `split-pane` action. Lives here (not in `actions.rs`) so the
 /// pure helper module stays free of `ResolvedAction` parsing.
+///
+/// The `direction` string names the DIVIDER orientation (the tmux mental
+/// model the default config documents): `vertical` = a vertical divider,
+/// i.e. side-by-side panes, which geometrically is a `SplitDir::Horizontal`
+/// (split along the width — see `layout::fill_rects`). `horizontal` = a
+/// horizontal divider, i.e. stacked panes = `SplitDir::Vertical`. The
+/// names are deliberately crossed here: the user-facing word describes the
+/// divider; the internal enum describes the split axis.
 fn split_dir_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<SplitDir> {
     let s = resolved.args.get("direction")?.as_str()?;
     match s {
-        "horizontal" => Some(SplitDir::Horizontal),
-        "vertical" => Some(SplitDir::Vertical),
+        "horizontal" => Some(SplitDir::Vertical),
+        "vertical" => Some(SplitDir::Horizontal),
         _ => None,
     }
 }
@@ -674,6 +682,9 @@ mod tests {
     #[test]
     fn split_dir_arg_parses_horizontal_and_vertical() {
         use phux_config::keybind::ResolvedAction;
+        // `direction` names the divider orientation, not the split axis:
+        // "horizontal" divider ⇒ stacked panes ⇒ SplitDir::Vertical;
+        // "vertical" divider ⇒ side-by-side panes ⇒ SplitDir::Horizontal.
         let mut h = ResolvedAction {
             action: "split-pane".to_owned(),
             args: std::collections::BTreeMap::new(),
@@ -682,7 +693,7 @@ mod tests {
             "direction".to_owned(),
             toml::Value::String("horizontal".into()),
         );
-        assert_eq!(split_dir_arg(&h), Some(SplitDir::Horizontal));
+        assert_eq!(split_dir_arg(&h), Some(SplitDir::Vertical));
 
         let mut v = ResolvedAction {
             action: "split-pane".to_owned(),
@@ -692,7 +703,7 @@ mod tests {
             "direction".to_owned(),
             toml::Value::String("vertical".into()),
         );
-        assert_eq!(split_dir_arg(&v), Some(SplitDir::Vertical));
+        assert_eq!(split_dir_arg(&v), Some(SplitDir::Horizontal));
 
         let mut bogus = ResolvedAction {
             action: "split-pane".to_owned(),
