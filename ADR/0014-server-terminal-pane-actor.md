@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0014 — Server-side `Terminal` placement: per-pane PaneActor on a `LocalSet`
+
+**TL;DR.** Each pane is owned by a per-terminal actor: a single `spawn_local` task on the server's current-thread runtime that holds the libghostty `Terminal`, its `SnapshotSynthesizer`, and its PTY master. No other task ever borrows the `Terminal`. Cross-task coordination uses mpsc for unicast and broadcast for `PANE_OUTPUT` fanout. Preserves ADR-0003's one-event-loop invariant.
 
 Status: Accepted
 Date: 2026-05-25

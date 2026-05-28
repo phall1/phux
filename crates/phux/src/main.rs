@@ -9,7 +9,7 @@
 //!   phux kill      → kill sessions / windows / panes
 //!
 //! Subcommands are unstable until v0.1. The full CLI shape lives in
-//! DESIGN.md §4; subcommands not listed here are not yet wired.
+//! docs/consumers/tui.md §4; subcommands not listed here are not yet wired.
 
 #![forbid(unsafe_code)]
 #![allow(
@@ -106,7 +106,7 @@ fn main() -> ExitCode {
     let _dhat = dhat::Profiler::new_heap();
 
     eprintln!(
-        "phux {} (pre-alpha; see SPEC.md)",
+        "phux {} (pre-alpha; see docs/spec/)",
         env!("CARGO_PKG_VERSION")
     );
 
@@ -129,7 +129,7 @@ fn main() -> ExitCode {
 
 /// Naked `phux` invocation (phux-k61.1).
 ///
-/// Per DESIGN.md §1, `phux` with no arguments is the common case: attach
+/// Per docs/consumers/tui.md §1, `phux` with no arguments is the common case: attach
 /// to the user's server, lazily spawning it if it isn't running.
 ///
 /// Resolution cascade:
@@ -139,7 +139,7 @@ fn main() -> ExitCode {
 ///    for the socket to bind. Reuses [`maybe_auto_spawn_server`].
 /// 2. Attempt `ATTACH { target: Last }`. On a server with prior session
 ///    activity this resolves to the most-recently-focused session,
-///    matching DESIGN.md §1's "attach to default session" intent.
+///    matching docs/consumers/tui.md §1's "attach to default session" intent.
 /// 3. If `Last` is refused with no prior-attach memory (which is the
 ///    case on a freshly spawned server, or one whose only prior client
 ///    detached and the slot was never repopulated), fall back to

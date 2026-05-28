@@ -1,7 +1,7 @@
 //! `phux-q0e.1` — incremental synthesis path on `SnapshotSynthesizer`.
 //!
 //! Covers the four behaviors the ticket pins (per ADR-0018 and
-//! `research/2026-05-26-state-sync-algorithm.md` Dependencies §2):
+//! `research/archive/2026-05-26-state-sync-algorithm.md` Dependencies §2):
 //!
 //! 1. **Clean roundtrip.** Take a baseline full synthesis. Without further
 //!    `vt_write`, call `synthesize_incremental` — bytes must be empty.

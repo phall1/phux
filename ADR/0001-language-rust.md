@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0001 — Use Rust
+
+**TL;DR.** phux is implemented in Rust. The wire protocol is a tagged union and the server is a graph of long-lived state machines, both of which fit Rust's algebraic types and exhaustive matching. A maintained safe Rust crate over `libghostty-vt` eliminates the FFI-tax argument that would have favored Zig.
 
 Status: Accepted
 Date: 2026-05-24

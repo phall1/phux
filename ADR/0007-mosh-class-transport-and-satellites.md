@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0007 — Mosh-class transport semantics and satellite forward-compat
+
+**TL;DR.** Mosh is decomposed: snapshot-on-attach is adopted via byte replay, predictive echo is adopted as a client feature, SSP is rejected in favor of QUIC for v0.2+. Transport is a trait so v0.1's Unix socket and a future QUIC impl share one boundary. SessionId (and every other identity) carries a `{LOCAL, SATELLITE}` tag from day one so hub-and-spoke federation drops in without a wire break.
 
 > **Post-ADR-0013 amendment (2026-05-25):** ADR-0013 supersedes
 > ADR-0002 — pane content now ships as VT bytes (`PANE_OUTPUT`), not
@@ -17,7 +25,7 @@
 > `PANE_OUTPUT` bytes arrive. The UX guarantee is unchanged; the
 > substrate is libghostty, not a phux-defined mirror.
 
-Status: Accepted (forward-compat invariants); implementation deferred to v0.2+.
+Status: Accepted (forward-compat)
 Date: 2026-05-25
 
 > **Update 2026-05-26:** [ADR-0015](./0015-protocol-layering.md)

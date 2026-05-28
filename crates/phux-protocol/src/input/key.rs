@@ -18,7 +18,7 @@ pub use libghostty_vt::key::{Action as KeyAction, Key as PhysicalKey, Mods as Mo
 /// is the physical (W3C `code`-style) key; `text` and `unshifted_codepoint`
 /// carry the layout-resolved character.
 ///
-/// See SPEC.md §9.1 for field semantics.
+/// See docs/spec/input.md §2 for field semantics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyEvent {
     /// Press, release, or repeat.

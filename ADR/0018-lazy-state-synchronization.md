@@ -1,7 +1,20 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0018 — Lazy state synchronization is the wire's long-arc shape
 
-Status: Accepted (addendum 2026-05-26 revises the implementation gate; see end)
+**TL;DR.** phux's wire is lazy state synchronization of libghostty Terminal state between server and consumer mirrors: `TERMINAL_OUTPUT.bytes` carries the minimum VT to move the consumer's last-acked state to the canonical state, computed per-consumer per-tick. ADR-0013's pass-through bytes is the degenerate case. The wire shape does not change; only the server's emission strategy generalizes.
+
+Status: Accepted
 Date: 2026-05-26
+
+The 2026-05-26 addendum at the end of this ADR revises the
+implementation gate (the cache primitive is solved by `RenderState`;
+the synthesis primitive is smaller than originally estimated and not
+load-bearing on upstream libghostty).
 
 ## Context
 
@@ -17,7 +30,7 @@ because the round-trip is cheap, the transport is reliable, and the
 worst-case backlog of pending output per pane is bounded by what the
 shell produces between attaches.
 
-It breaks down on the deployments [`VISION.md`](../VISION.md) commits
+It breaks down on the deployments [`docs/vision.md`](../docs/vision.md) commits
 to longer-term:
 
 - **Lossy or high-latency transports.** A future QUIC datagram channel
@@ -47,7 +60,7 @@ to transition between two screen states") and predates Mosh by two
 decades. The engineering work is *composing them with libghostty as
 the state model.*
 
-See [`research/2026-05-26-state-sync-algorithm.md`](../research/2026-05-26-state-sync-algorithm.md)
+See [`research/archive/2026-05-26-state-sync-algorithm.md`](../research/archive/2026-05-26-state-sync-algorithm.md)
 for the full algorithm derivation, the libghostty primitive request,
 and references.
 

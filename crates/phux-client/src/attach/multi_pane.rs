@@ -153,7 +153,7 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
 ///
 /// A divider hit returns [`RouteDecision::DividerNoOp`]: the click
 /// landed on a between-pane cell, which v0.1 explicitly treats as a
-/// no-op (drag-to-resize is deferred per DESIGN.md §7 / ticket scope).
+/// no-op (drag-to-resize is deferred per docs/consumers/tui.md §7 / ticket scope).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouteDecision {
     /// The click hit a pane. The driver should:

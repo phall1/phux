@@ -1,50 +1,61 @@
+<!--
+audience: humans, contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+-->
+
 # phux
 
-A **libghostty-backed terminal control plane.** A long-lived server
-hosts terminals — spawned, observed, controlled, persisted, addressable
-across hosts — and a tmux-shaped TUI rides on top as one consumer
-among several.
+**A libghostty-backed terminal control plane.** Spawn, observe,
+control, persist, and address terminals — locally or across a fleet —
+with a tmux-shaped TUI riding on top as one consumer among several.
 
 > "Need to replace tmux with a libghostty-based multiplexer so it can
 > understand KIP."
 > — Mitchell Hashimoto
 
-The TUI is what most users will see first. Sessions, windows, panes,
-splits, status bar, keybindings — the vocabulary is tmux's because
-it's what people know. Under that surface, the wire protocol is much
-smaller and more general: terminals as first-class primitives,
-collections of terminals as a lifecycle bundle, an opaque metadata
-store on top. Other consumers — agent SDKs, recorders, future native
-GUIs — speak the same wire and pick the tiers they care about.
+## What it is
 
-Read [`VISION.md`](./VISION.md) for the long arc.
+The unit of work is the **terminal**, not the session or the pane.
+Both ends of the wire run [`libghostty_vt::Terminal`][lghv]: the
+server's is the canonical state for a managed terminal; the client's
+is a local mirror used for rendering. Nothing in the middle re-parses
+VT. Kitty keyboard, true colour, OSC 8, OSC 133, images — they all
+pass through end-to-end because the parser is identical on both ends.
+
+The wire is layered. Consumers declare which tiers they speak and the
+server omits messages from layers they don't subscribe to:
+
+- **L1 — Terminal.** PTY, bytes-out, structured input, snapshot, lifecycle, events.
+- **L2 — Collection.** Named lifecycle bundle of Terminals. Optional.
+- **L3 — Metadata.** Opaque KV the server stores but doesn't interpret. Where the TUI keeps its layout, window names, focus pointer.
+
+Identity is federation-ready from the first byte. `TerminalId` is a
+`LOCAL { id } | SATELLITE { host, id }` tagged union. Day-1 servers
+construct `LOCAL` only; day-N hubs route `SATELLITE` ids to satellites
+on other machines. The wire bytes don't change.
+
+[lghv]: https://github.com/Uzaaft/libghostty-rs
 
 ## Why it looks different from tmux underneath
 
-- Both ends run `libghostty_vt::Terminal`. The server's is the
-  canonical pane state; the client's is a local mirror used for
-  rendering. Nothing in the middle re-parses VT — modern terminal
-  protocols pass end-to-end (Kitty keyboard, true colour, OSC 8,
-  OSC 133, images).
-- The wire is asymmetric (ADR-0013): server→client *terminal content*
-  is **VT bytes** (forwarded from the PTY after per-client capability
-  rewriting); client→server *input* is **structured key, mouse,
-  focus, and paste events** built from libghostty's own atoms.
-- The protocol is layered (ADR-0015): **L1 Terminal** is the
-  substrate every consumer speaks; **L2 Collection** is an optional
-  lifecycle bundle; **L3 Metadata** is an opaque KV store where
-  consumers (the TUI, a future GUI, an SDK) keep their own state.
-  Conformance is per-tier — an agent SDK speaks L1 alone and never
-  hears "session" or "window."
-- Identity is federation-ready from day one (ADR-0007). `TerminalId`
-  is a `LOCAL` / `SATELLITE { host, id }` tagged union; v0.1 servers
-  construct `LOCAL`, v0.2+ hubs route to satellites. The wire bytes
-  don't change.
+- **No re-parse in the middle.** libghostty parses on both ends.
+  Modern terminal protocols pass through unchanged.
+- **The terminal is the substrate, not the pane.** Sessions, windows,
+  panes, splits live in L3 metadata, not on the wire — an agent SDK
+  never hears them.
+- **Federation is in the addressing.** Local UDS and the remote hub
+  speak the same wire. Not a single-machine tool that one day might
+  support remote attach.
+- **No consumer is privileged.** The reference TUI ships in-tree
+  because the substrate is only real if a real consumer rides it.
+
+For the full mental model, read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
+For the long arc, read [`docs/vision.md`](./docs/vision.md).
 
 ## Philosophy
 
-phux aims to be **smol**, in the [sense of the term that has become a
-small-software manifesto][smol]:
+phux aims to be [**smol**][smol]:
 
 > - Write programs that solve a well-defined problem.
 > - Write programs that behave the way most users expect them to behave.
@@ -52,114 +63,81 @@ small-software manifesto][smol]:
 > - Write programs that compose with other smol tools.
 > - Write programs that can be finished.
 
-The well-defined problem is: **spawn, observe, control, persist, and
+The well-defined problem: *spawn, observe, control, persist, and
 address libghostty terminals — locally or across a fleet — with
 conformance tiers a consumer can target without inheriting everything
-else.** The reference TUI proves the substrate is real. The substrate
-is what makes phux not-tmux. See `VISION.md` for the long form and
-`CONTRIBUTING.md` for the things we say no to.
+else.* The reference TUI proves the substrate is real. The substrate
+is what makes phux not-tmux.
 
 [smol]: https://smol.tauri.app/
 
 ## Status
 
-**Pre-alpha. Spec first, code second.** End-to-end attach works for a
-single pre-seeded session today; most of the substrate's lifecycle,
-metadata, and federation surface is not yet wired.
+**Pre-alpha. Spec first, code second.**
 
-What is in tree today (vocabulary is still the pre-ADR-0015 names —
-"pane" is the wire identity, "session/window" appear; the rename to
-L1/L2/L3 names is a follow-on cascade):
+Working today:
 
-- [`SPEC.md`](./SPEC.md) — normative wire protocol (currently
-  pre-layering; restructure under ADR-0015 is the next big cascade).
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md), [`DESIGN.md`](./DESIGN.md),
-  [`VISION.md`](./VISION.md), and [`ADR/`](./ADR/) — recorded
-  decisions and arc.
-- `phux-protocol` — length-prefixed TLV frame codec (SPEC Appendix A),
-  the `HELLO` / `ATTACH` / `DETACH` / `PANE_OUTPUT` / `PANE_SNAPSHOT`
-  / `INPUT_*` / `BELL` / `ERROR` / `PING` subset of the message
-  catalog, and structured input types that re-export libghostty's
-  atoms directly (ADR-0008).
-- `phux-core` — registries (slotmaps) for the in-process domain
-  objects that map to L1 terminals (currently named `Pane`) and the
-  TUI's binary-split layout convention (currently still on the
-  wire; demotes to L3 metadata under ADR-0015).
-- `phux-server` — tokio current-thread runtime, UDS listener at
-  `$XDG_RUNTIME_DIR/phux/phux.sock`, per-terminal actor (ADR-0014)
-  that owns a `libghostty_vt::Terminal` and a real PTY child,
-  per-terminal input encoders (ADR-0006), broadcast `PANE_OUTPUT`
-  fanout, `PANE_SNAPSHOT` synthesis from `RenderState`, a per-client
-  capability rewriter for outbound bytes.
-- `phux-client` — UDS attach loop, raw-mode/altscreen guard, stdin
-  keyboard parser, and a `libghostty_vt::Terminal` per attached
-  terminal driven by `RenderState` (ADR-0013), with per-row dirty
-  tracking driving incremental redraw.
-- `phux-config` — TOML schema + loader with `line:col` errors,
-  keybind parser/trie resolver, status `Widget` trait + time /
-  session-name widgets.
+- Auto-attach to a single session; detach; re-attach
+- Multi-pane splits, kill, focus, click-to-focus
+- Status bar with typed widgets; keybindings (prefix + global chords); help overlay
+- Multi-client attach to the same session
+- Full bytes-on-wire pass-through (Kitty keyboard, OSC 8, OSC 133, true colour, images)
 
-What is not wired up yet: most of the L2 / L3 surface (Collection
-lifecycle, metadata store, federation routing), automation, the
-agent SDK, predictive local echo, mouse / bracketed-paste parsing
-on the client, client-side keybinding dispatch, journaling and
-crash recovery, and the full subcommand set (`new`, `ls`, `kill`,
-etc. — today's binary ships `attach` and `server` only, with
-tmux-style auto-spawn).
+Not yet wired: most of L2 Collection lifecycle, most L3 metadata
+commands, federation routing, the agent SDK, predictive local echo,
+most of the `phux <subcommand>` CLI surface. See
+[`docs/QUICKSTART.md`](./docs/QUICKSTART.md) for the full state.
 
 ## Quickstart
 
 ```sh
-nix develop          # or `direnv allow` once, then auto
-just check           # type-check across the workspace
-just ci              # everything CI must pass
+nix develop                # or direnv allow once
+just ci                    # the bar — fmt-check + lint + test + deny + doc
+cargo run --bin phux       # auto-spawns a server and attaches
 ```
 
-The dev shell pins Rust 1.90, includes `zig_0_15` for libghostty-vt
-builds, plus `nextest`, `deny`, `watch`, `insta`, `mutants`, and
-`just`.
+Detach with the default prefix (`Ctrl-A d`). Walk-through in
+[`docs/QUICKSTART.md`](./docs/QUICKSTART.md).
 
-## Crate layout
+## Where to go next
 
-| Crate            | Purpose                                                       |
-|------------------|---------------------------------------------------------------|
-| `phux`           | Single binary; `attach` and `server` subcommands today        |
-| `phux-protocol`  | Wire types, codec, version negotiation; publish-ready         |
-| `phux-core`      | Domain types: in-process terminal / collection registries     |
-| `phux-server`    | Daemon: per-terminal actor, PTY supervision, output fanout    |
-| `phux-client`    | TUI client: local libghostty Terminal + RenderState redraw    |
-| `phux-config`    | TOML config schema + status widget contract                   |
+| You want to | Read |
+|---|---|
+| Understand the model | [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) |
+| Run it | [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) |
+| Read the wire spec | [`docs/spec/`](./docs/spec/) |
+| Understand how it's built | [`docs/architecture/`](./docs/architecture/) |
+| Read the TUI surface | [`docs/consumers/tui.md`](./docs/consumers/tui.md) |
+| Read the long arc | [`docs/vision.md`](./docs/vision.md) |
+| See past decisions | [`ADR/README.md`](./ADR/README.md) |
+| Contribute | [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
 
-`phux-protocol` is the only crate intended for publication; the rest
-are `publish = false`. ADR-0008 records why `phux-protocol` depends on
-`libghostty-vt` directly (gated behind the `server` feature so docs.rs
-+ crates.io see a git-dep-free shell).
+The doc system itself is defined in
+[`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) — frontmatter schema,
+TL;DR rule, ADR template, CI gates.
 
-Two future crates are on the design roadmap (not yet started):
+## Crates
 
-- `phux-client-sdk` — L1-only typed Rust handle for agents.
-  Spawn / observe / drive terminals over the wire, no TUI vocabulary.
-  The developer surface that makes the agent-first thesis real.
-- `phux-client-gui` — native GUI consumer over libghostty's surface
-  API. Renders terminals its own way; shares no chrome with the TUI.
+| Crate | Purpose |
+|---|---|
+| `phux` | Binary; `attach` and `server` subcommands today |
+| `phux-protocol` | Wire types, codec, version negotiation. The only crate intended for publication |
+| `phux-core` | Domain types: in-process terminal / collection registries |
+| `phux-server` | Daemon: per-terminal actor, PTY supervision, output fanout |
+| `phux-client` | TUI client: local libghostty Terminal + RenderState redraw + ratatui chrome |
+| `phux-config` | TOML config schema + status widget contract |
+
+Future, not yet started: `phux-client-sdk` (L1-only typed Rust handle
+for agents) and `phux-client-gui` (native GUI consumer over
+libghostty's surface API).
 
 ## Non-goals
 
-Documented in `CONTRIBUTING.md` and the relevant ADRs:
-
-- **No embedded scripting language.** Commands are typed wire messages.
-- **No plugin host.** Extensions are consumer-side; agents cover the
-  programmatic case structurally.
-- **No copy-mode reinvention.** Modern terminals do this well; we
-  surface libghostty's selection APIs.
-- **No homegrown crypto.** Unix socket perms + SSH (and future QUIC
-  TLS) at the transport.
-- **No format-template DSL.** Status widgets are typed; arbitrary
-  logic lives in widget binaries the TUI runs.
+No embedded scripting language. No plugin host. No copy-mode
+reinvention. No homegrown crypto. No format-template DSL. Full list
+with rationale in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
 Dual-licensed under [MIT](./LICENSE-MIT) or
 [Apache-2.0](./LICENSE-APACHE) at your option.
-
-[lghvt-rs]: https://github.com/Uzaaft/libghostty-rs

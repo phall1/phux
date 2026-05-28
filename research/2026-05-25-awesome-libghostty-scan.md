@@ -1,6 +1,17 @@
+---
+audience: contributors, agents
+stability: scratch
+last-reviewed: 2026-05-28
+---
+
 # Competitive scan: awesome-libghostty (2026-05-25)
 
-**Status**: Research artifact. Not a decision. See [phux-a97](../ADR/README.md) for follow-ups filed as bd issues.
+**TL;DR.** Survey of libghostty-adjacent projects on the
+awesome-libghostty list as of 2026-05-25. Identifies what phux should
+study, what's safely orthogonal, and what (if anything) invalidates
+the current ADRs. Research artifact, not a decision; follow-ups are
+filed as bd issues under [phux-a97](../ADR/README.md).
+
 **Source**: <https://github.com/Uzaaft/awesome-libghostty> as of 2026-05-25.
 **Scope**: Identify projects on the awesome-libghostty list that overlap phux's
 design bets, decide what to steal, and confirm whether anything invalidates the

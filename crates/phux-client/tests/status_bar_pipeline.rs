@@ -53,7 +53,7 @@ fn both_in_tree_widgets_render_to_bottom_row_from_config() {
 #[test]
 fn default_placement_is_bottom() {
     // No config knob for top/bottom exists today; the painter's
-    // Position::default() must be Bottom per DESIGN.md §8.5.
+    // Position::default() must be Bottom per docs/consumers/tui.md §8.5.
     let cfg =
         phux_config::parse_str(CONFIG_BOTH_WIDGETS, &PathBuf::from("test.toml")).expect("parse");
     let registry = WidgetRegistry::with_builtins();

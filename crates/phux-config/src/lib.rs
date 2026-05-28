@@ -1,7 +1,7 @@
 //! phux-config: TOML config + status-bar widget contract.
 //!
 //! This crate owns the typed schema for `~/.config/phux/config.toml`
-//! (see `DESIGN.md` §4). Higher-level crates load a [`Config`] via
+//! (see `docs/consumers/tui.md` §4). Higher-level crates load a [`Config`] via
 //! [`parse_str`] and consume the typed view; widget rendering, keybind
 //! resolution, and hook dispatch all read from this schema.
 //!

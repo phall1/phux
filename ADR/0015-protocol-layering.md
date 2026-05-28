@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0015 — Protocol layering: L1 substrate, L2 collections, L3 metadata
+
+**TL;DR.** The phux wire is three tiers. L1 carries Terminals (PTY plus libghostty `Terminal` plus identity, with bytes-out and structured input-in). L2 is optional Collections — named lifecycle bundles of Terminals. L3 is an optional opaque key-value metadata store. Sessions, windows, panes, layouts, focus are TUI-consumer conventions implemented via L3, not wire concepts. Federation and automation are cross-cuts, not layers.
 
 Status: Accepted
 Date: 2026-05-26
@@ -16,7 +24,7 @@ They are not. A Terminal is a primitive: PTY plus libghostty `Terminal`
 plus identity. A session-of-windows-of-panes is one *consumer's
 preferred way* to present a collection of Terminals on a display.
 Conflating them costs the protocol three properties phux's vision
-(see [`VISION.md`](../VISION.md)) needs:
+(see [`docs/vision.md`](../docs/vision.md)) needs:
 
 - **A consumer that doesn't want sessions and windows cannot speak the
   protocol without inheriting them.** An agent driving Terminals
@@ -38,7 +46,7 @@ Conflating them costs the protocol three properties phux's vision
   the wire knows about Terminals and nothing else.
 
 The shape this ADR establishes was settled in the design discussion
-that produced [`VISION.md`](../VISION.md). This document is the
+that produced [`docs/vision.md`](../docs/vision.md). This document is the
 formal version.
 
 ## Decision

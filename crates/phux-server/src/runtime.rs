@@ -8,10 +8,10 @@
 //!   per user, one event loop).
 //! * Bind a `SOCK_STREAM` Unix domain socket at a resolved path under
 //!   `$XDG_RUNTIME_DIR` (falling back to `/tmp/phux-$UID/`), as described in
-//!   `SPEC.md` §4 (Transport).
+//!   `docs/spec/proto.md` §4 (Transport).
 //! * Accept connections and spawn a per-client task on a
 //!   [`tokio::task::LocalSet`] (per ADR-0014) that reads length-prefixed
-//!   frames (`SPEC.md` §5), echoes `PING` with `PONG` (`SPEC.md` §7.5),
+//!   frames (`docs/spec/proto.md` §5), echoes `PING` with `PONG` (`docs/spec/proto.md` §7.4),
 //!   and handles `ATTACH` / `DETACH` by talking to the per-terminal
 //!   `TerminalActor`s (`phux-byc.8`). The
 //!   remaining catalog (`INPUT_KEY`, etc.) is recorded against the
@@ -48,7 +48,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{ConsumerAckRequest, SnapshotRequest, TerminalActor, TerminalHandle};
 
-/// Per-byte-count of the length prefix on every wire frame (see `SPEC.md` §5).
+/// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
 const LENGTH_PREFIX: usize = 4;
 
 /// Timeout for the "is the socket still live?" liveness probe used when an

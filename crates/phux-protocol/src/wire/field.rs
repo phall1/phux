@@ -1,6 +1,6 @@
 //! TLV field-ID constants used inside message bodies.
 //!
-//! Owned by phux-6yl.4. See `SPEC.md` §7 (message catalog) and Appendix A
+//! Owned by phux-6yl.4. See `docs/spec/proto.md` §7 (message catalog) and Appendix A
 //! (encoding primitives). Field IDs are stable within a major protocol
 //! version; additive minor-version changes append IDs but MUST NOT renumber
 //! existing ones.
@@ -135,11 +135,11 @@ pub const PANE_DIFF_PANE: u32 = 1;
 pub const PANE_DIFF_FRAME_ID: u32 = 2;
 /// Encoded `DiffOp` sequence.
 pub const PANE_DIFF_OPS: u32 = 3;
-/// Base frame id this diff applies on top of (`SPEC.md` §8.1).
+/// Base frame id this diff applies on top of (`docs/spec/L1.md` §2.1).
 pub const PANE_DIFF_BASE_FRAME_ID: u32 = 4;
-/// `CursorState` carried with every diff (`SPEC.md` §8.5).
+/// `CursorState` carried with every diff (`docs/spec/L1.md` §2.5).
 pub const PANE_DIFF_CURSOR: u32 = 5;
-/// `PaneModes` bitset carried with every diff (`SPEC.md` §8.5).
+/// `PaneModes` bitset carried with every diff (`docs/spec/L1.md` §2.5).
 pub const PANE_DIFF_MODES: u32 = 6;
 /// Revision tag, reserved for SPEC §8.1 compression schemes (`0` today).
 pub const PANE_DIFF_REVISION: u32 = 7;

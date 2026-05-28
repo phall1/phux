@@ -1,6 +1,6 @@
 //! Config loader: resolves the on-disk config path and parses it.
 //!
-//! Resolution rules (see `DESIGN.md` §4.1):
+//! Resolution rules (see `docs/consumers/tui.md` §4.1):
 //! * Prefer `$XDG_CONFIG_HOME/phux/config.toml` when `XDG_CONFIG_HOME` is set.
 //! * Otherwise use `$HOME/.config/phux/config.toml`.
 //! * If neither environment variable is set, fall back to the current

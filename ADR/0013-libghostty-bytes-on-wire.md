@@ -1,7 +1,17 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0013 — Libghostty bytes on the wire; structured input remains
 
-Status: Accepted. **Supersedes ADR-0002.**
+**TL;DR.** phux's wire carries VT bytes for pane content and structured events for input. Both server and client instantiate libghostty `Terminal`s; the client's is a local replica fed by server bytes. Per-client capability downsampling moves from the cell level to a server-side VT byte-stream rewriter. Supersedes ADR-0002 in full.
+
+Status: Accepted
 Date: 2026-05-25
+
+This ADR supersedes ADR-0002 in full.
 
 ## Context
 

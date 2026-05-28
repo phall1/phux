@@ -1,4 +1,17 @@
+---
+audience: contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # Contributing to phux
+
+**TL;DR.** Pass `just ci` before opening a PR; update `docs/spec/` +
+CHANGELOG for wire changes; write an ADR for any decision that closes
+off design space; no homegrown crypto, scripting language, plugin
+host, copy-mode reinvention, or template DSL. Doc conventions live in
+[`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md). The mental model is
+[`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
 
 phux is an experiment in building the terminal multiplexer that would
 exist if libghostty had been available in 2007. We are picky about
@@ -34,9 +47,10 @@ That target runs (and you must, locally, before pushing):
   cases and `insta` snapshots. State-machine changes need explicit
   transition tests. Bug fixes get a regression test, named after the
   issue.
-- **Update [`SPEC.md`](./SPEC.md) when the wire changes.** The spec is
+- **Update [`docs/spec/`](./docs/spec/) when the wire changes.** The spec is
   normative — code conforms to it, not the other way around. Bump the
-  protocol version per the rules in `SPEC.md` §6.
+  protocol version per the rules in [`docs/spec/proto.md`](./docs/spec/proto.md) §6
+  and append an entry to [`docs/spec/CHANGELOG.md`](./docs/spec/CHANGELOG.md).
 - **Write an ADR for any decision that closes off a design space.** See
   [`ADR/README.md`](./ADR/README.md). You do not need an ADR for a bug
   fix; you do for "should this be in `core` or `server`?"
@@ -149,7 +163,7 @@ allocator — use for profiling only, never for production builds.
 ## Reviewing your own work before opening a PR
 
 - Did the public API change? Rustdoc updated?
-- Did wire bytes change? `SPEC.md` updated? Version bumped?
+- Did wire bytes change? `docs/spec/` updated and CHANGELOG appended? Version bumped?
 - Could this be tested with `proptest`? Probably should be.
 - Is there a simpler shape with fewer abstractions? Prefer it.
 - Could a future contributor read this code cold and understand it?

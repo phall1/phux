@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0019 — Multi-pane TUI rendering: layout persistence, wire shape, and chrome
+
+**TL;DR.** The reference TUI's layout tree persists as a CBOR L3 metadata blob keyed `phux.tui.layout/v1`, scoped to a Collection. Layout edits are computed client-side and pushed via `SET_METADATA`; other clients subscribe to `METADATA_CHANGED` and re-render. Borders are plain Unicode box-drawing between panes, resize is proportional, and focus is per-client and not persisted. No wire substrate change.
 
 Status: Accepted
 Date: 2026-05-27

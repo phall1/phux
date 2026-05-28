@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0017 — The reference TUI is not protocol-privileged
+
+**TL;DR.** The reference TUI is one consumer among several with no protocol-level standing. The wire defines no message, type, or capability for the TUI's benefit alone — "window," "pane," "layout," "split," "focus," "status bar," "prefix" are TUI conventions implemented via L3 metadata. tmux control mode is one more consumer; the reserved `CC_FRONTEND` capability bit from ADR-0010 is reclaimed.
 
 Status: Accepted
 Date: 2026-05-26

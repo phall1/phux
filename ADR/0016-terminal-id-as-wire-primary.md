@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0016 — `TerminalId` as the wire primary; `PaneId` is a consumer-side alias
+
+**TL;DR.** The wire identity for a managed terminal is `TerminalId`, a tagged union of `LOCAL { id: u32 }` and `SATELLITE { host, id }` per ADR-0015's federation cross-cut. `PaneId` is removed from the wire. The string "pane" survives in the reference TUI's user-facing vocabulary; the leaf of the TUI's layout tree is a `TerminalId`. Every `PANE_*` wire message renames to `TERMINAL_*`.
 
 Status: Accepted
 Date: 2026-05-26

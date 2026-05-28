@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0009 — phux vs coder/mux: positioning
+
+**TL;DR.** phux is a terminal-multiplexer protocol substrate; coder/mux is an agent-orchestration product. They live at different layers and could coexist — a Mux-class product could ship on top of phux. They intersect only at remote execution and diverge everywhere else, so phux does not absorb agent-runner or workspace-management features.
 
 Status: Accepted
 Date: 2026-05-25

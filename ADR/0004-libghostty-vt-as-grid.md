@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0004 — libghostty-vt is the canonical grid
+
+**TL;DR.** Per-pane terminal state on the server is a `libghostty_vt::Terminal`, not a hand-written grid. We get the most standards-compliant emulator available, upstream bug fixes flow in for free, and phux's scope shrinks: we do not ship a VT parser. The coupling to libghostty's release cadence is managed via pinned commits.
 
 > **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002
 > (bytes-on-wire replaces structured cell diffs). This ADR is

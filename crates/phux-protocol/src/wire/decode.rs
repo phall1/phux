@@ -1,6 +1,6 @@
 //! Wire-frame decoder. Bounds-checked; never panics on malformed input.
 //!
-//! Owned by phux-6yl.4. See `SPEC.md` §5 (framing) and Appendix A
+//! Owned by phux-6yl.4. See `docs/spec/proto.md` §5 (framing) and Appendix A
 //! (primitives). Every decode method returns `Result` and refuses to read
 //! past the end of the borrowed slice.
 

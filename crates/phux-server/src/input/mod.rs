@@ -12,7 +12,7 @@
 //! 4. Own a `PerTerminal*Encoder` so encoder state stays private to a single
 //!    terminal (ADR-0006 §"Encoder options stay server-local").
 //!
-//! See SPEC.md §9 and ADR-0006 + ADR-0008.
+//! See docs/spec/input.md and ADR-0006 + ADR-0008.
 
 pub mod focus;
 pub mod key;

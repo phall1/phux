@@ -193,7 +193,7 @@ pub(super) async fn dispatch_input_events(
         // emits mouse coordinates in outer-viewport cells (treated as
         // 1-px-per-cell f64 per SPEC §9.2.1); we hit-test against the
         // multi-pane composition's `Rect`s. A click on a divider cell
-        // is dropped (drag-to-resize is deferred per DESIGN.md §7); a
+        // is dropped (drag-to-resize is deferred per docs/consumers/tui.md §7); a
         // click in a non-focused pane updates focus AND forwards the
         // event with pane-local coordinates substituted.
         if let InputEvent::Mouse(ref mouse) = ev {

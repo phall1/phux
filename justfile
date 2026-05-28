@@ -53,8 +53,13 @@ watch:
 check-ratatui-boundary:
     bash scripts/check-ratatui-boundary.sh
 
+# Doc system gates: frontmatter, TL;DR, dead links, ADR status, spec version.
+# See docs/CONVENTIONS.md.
+docs-check:
+    bash scripts/check-docs.sh
+
 # Everything CI must pass.
-ci: fmt-check lint check-ratatui-boundary test deny doc
+ci: fmt-check lint check-ratatui-boundary docs-check test deny doc
     @echo "ok"
 
 # Print the toolchain we are pinned to.

@@ -1,6 +1,6 @@
 //! Typed schema for `config.toml`.
 //!
-//! Field and section names track `DESIGN.md` §4 verbatim. The TOML side
+//! Field and section names track `docs/consumers/tui.md` §4 verbatim. The TOML side
 //! uses kebab-case (`history-limit`); the Rust side uses `snake_case`
 //! and `#[serde(rename = ...)]` bridges the two.
 //!
@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Top-level config. See `DESIGN.md` §4.2.
+/// Top-level config. See `docs/consumers/tui.md` §4.2.
 ///
 /// Sections are all optional; an empty config file parses to
 /// [`Config::default`].
@@ -46,7 +46,7 @@ pub struct Config {
     /// Experimental knobs gated behind `[experimental]`.
     ///
     /// Everything under this section is subject to change without notice.
-    /// See `DESIGN.md` §4.2 for the user-facing caveat.
+    /// See `docs/consumers/tui.md` §4.2 for the user-facing caveat.
     #[serde(default)]
     pub experimental: ExperimentalCfg,
 }
@@ -55,7 +55,7 @@ pub struct Config {
 // [defaults]
 // ---------------------------------------------------------------------------
 
-/// `[defaults]` table. See `DESIGN.md` §12 for shipped values.
+/// `[defaults]` table. See `docs/consumers/tui.md` §12 for shipped values.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DefaultsCfg {
@@ -144,7 +144,7 @@ fn default_prefix() -> String {
 
 /// An action attached to a binding, hook, or status slot.
 ///
-/// Per `DESIGN.md` §4.2, this is either a bare string (no parameters,
+/// Per `docs/consumers/tui.md` §4.2, this is either a bare string (no parameters,
 /// e.g. `"kill-pane"`) or an inline table whose `action` field names
 /// the action and whose remaining fields supply parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -166,7 +166,7 @@ pub enum Action {
 pub struct ParamAction {
     /// The action name (e.g. `new-pane`, `run`, `focus-pane`).
     ///
-    /// `DESIGN.md` uses both `action = "..."` (in keybindings, §4.2)
+    /// `docs/consumers/tui.md` uses both `action = "..."` (in keybindings, §4.2)
     /// and `kind = "..."` (in hooks, §9) to name the action. We accept
     /// either spelling on input and canonicalize to `action` on output.
     #[serde(alias = "kind")]
@@ -197,7 +197,7 @@ pub struct StatusCfg {
 
 /// A status-bar widget.
 ///
-/// Per `DESIGN.md` §8.1, this is either a bare string (`"session"` is
+/// Per `docs/consumers/tui.md` §8.1, this is either a bare string (`"session"` is
 /// shorthand for `{ kind = "session" }`) or an inline table with `kind`
 /// plus widget-specific options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -217,7 +217,7 @@ pub enum Widget {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WidgetSpec {
     /// Widget kind (`clock`, `session`, `exec`, ...). See
-    /// `DESIGN.md` §8.3 for the built-in catalog.
+    /// `docs/consumers/tui.md` §8.3 for the built-in catalog.
     pub kind: String,
     /// Remaining inline-table fields.
     #[serde(flatten)]
@@ -229,7 +229,7 @@ pub struct WidgetSpec {
 // ---------------------------------------------------------------------------
 
 /// One entry under `[[hooks.<name>]]`: a `when` predicate plus an
-/// `action` to run on match. See `DESIGN.md` §9.
+/// `action` to run on match. See `docs/consumers/tui.md` §9.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HookEntry {

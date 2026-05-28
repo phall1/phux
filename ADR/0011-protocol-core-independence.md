@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0011 — `phux-protocol` and `phux-core` are independent; `IdBridge` is their only meeting point
+
+**TL;DR.** `phux-core` and `phux-protocol` have no dependency edge in either direction. Both define same-named IDs and mirror info types deliberately: core's IDs are slotmap-generational keys for in-process safety, protocol's are u32 newtypes for wire stability. The two namespaces only meet in `phux-server`'s `IdBridge`, which allocates wire IDs monotonically and never recycles them.
 
 Status: Accepted
 Date: 2026-05-25
