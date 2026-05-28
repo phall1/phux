@@ -120,3 +120,5 @@
 {"id":"int-ccd2b598","kind":"field_change","created_at":"2026-05-28T02:04:03.645864Z","actor":"phall1","issue_id":"phux-a38.5","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"completed"}}
 {"id":"int-71120414","kind":"field_change","created_at":"2026-05-28T02:15:28.934628Z","actor":"phall1","issue_id":"phux-gxy","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"completed"}}
 {"id":"int-9416c7b0","kind":"field_change","created_at":"2026-05-28T03:37:24.122549Z","actor":"phall1","issue_id":"phux-gxy","extra":{"field":"status","new_value":"open","old_value":"closed"}}
+{"id":"int-b1342c19","kind":"field_change","created_at":"2026-05-28T04:48:55.560855Z","actor":"phall1","issue_id":"phux-bln","extra":{"field":"status","new_value":"closed","old_value":"open"}}
+{"id":"int-a9deaa93","kind":"field_change","created_at":"2026-05-28T04:48:56.159711Z","actor":"phall1","issue_id":"phux-d3e","extra":{"field":"status","new_value":"closed","old_value":"open"}}
