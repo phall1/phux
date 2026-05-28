@@ -643,8 +643,15 @@ const fn make_named_key(key: PhysicalKey, mods: ModSet) -> KeyEvent {
     }
 }
 
-/// Map a printable ASCII byte to a [`PhysicalKey`]. Defaults to
-/// `Unidentified` for punctuation we don't have a specific code for.
+/// Map a printable ASCII byte to a [`PhysicalKey`].
+///
+/// Punctuation routes through [`phux_config::keybind::punct_to_key`] so
+/// the runtime `KeyEvent` matches the same physical key the chord parser
+/// emits for the same glyph in `default.toml` (phux-gxy). Without that
+/// alignment, a chord like `"|"` → `{ key: Backslash, mods: SHIFT }` in
+/// the resolver never matched the runtime `{ key: Unidentified, mods:
+/// SHIFT }`, so every punctuation keybind silently forwarded to the
+/// shell.
 const fn ascii_to_physical(b: u8) -> PhysicalKey {
     match b {
         b' ' => PhysicalKey::Space,
@@ -665,7 +672,10 @@ const fn ascii_to_physical(b: u8) -> PhysicalKey {
             let upper = if b.is_ascii_lowercase() { b - 32 } else { b };
             ascii_letter_to_key_const(upper)
         }
-        _ => PhysicalKey::Unidentified,
+        _ => match phux_config::keybind::punct_to_key(b as char) {
+            Some((key, _shift)) => key,
+            None => PhysicalKey::Unidentified,
+        },
     }
 }
 
@@ -1570,6 +1580,56 @@ mod tests {
         assert!(keys[0].mods.contains(ModSet::SHIFT));
         assert!(keys[0].consumed_mods.contains(ModSet::SHIFT));
         assert_eq!(keys[0].unshifted_codepoint, Some(u32::from('a')));
+    }
+
+    // phux-gxy regression: punctuation glyphs must map to the same
+    // physical key the chord parser emits, or `default.toml` chords
+    // like `"|"` (split-pane) never match.
+    #[test]
+    fn pipe_maps_to_backslash_with_shift() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"|");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::Backslash);
+        assert!(keys[0].mods.contains(ModSet::SHIFT));
+    }
+
+    #[test]
+    fn minus_maps_to_minus_unshifted() {
+        let mut p = StdinParser::new();
+        let evs = p.feed(b"-");
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::Minus);
+        assert!(!keys[0].mods.contains(ModSet::SHIFT));
+    }
+
+    #[test]
+    fn punctuation_matches_chord_parser_for_default_split_binds() {
+        // The default config uses `"|"` and `"-"` as split chords; the
+        // resolver builds these via parse_chord. The runtime parser
+        // must emit the same (key, mods) shape or the chord never fires.
+        for &glyph in b"|-`=[]\\;',./~!@#$%^&*()_+{}:\"<>?" {
+            let mut p = StdinParser::new();
+            let evs = p.feed(&[glyph]);
+            let keys = key_only(&evs);
+            assert_eq!(keys.len(), 1, "no key for glyph {}", char::from(glyph));
+            let parser_key = (keys[0].key, keys[0].mods.contains(ModSet::SHIFT));
+            let chord_key = phux_config::keybind::parse_chord(&char::from(glyph).to_string())
+                .expect("chord parse")
+                .modifiers
+                .contains(ModSet::SHIFT);
+            let chord_pk = phux_config::keybind::parse_chord(&char::from(glyph).to_string())
+                .expect("chord parse")
+                .key;
+            assert_eq!(
+                parser_key,
+                (chord_pk, chord_key),
+                "mismatch on glyph {}",
+                char::from(glyph)
+            );
+        }
     }
 
     #[test]

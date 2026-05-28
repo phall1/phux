@@ -367,11 +367,19 @@ const fn digit_to_key(c: char) -> Option<PhysicalKey> {
     })
 }
 
-/// Map an ASCII punctuation character to a physical key on the US
-/// layout. Returns `(key, implicit_shift)`; shifted glyphs (e.g. `|`,
-/// `?`) decompose into their unshifted physical key + `Shift`. See the
+/// Map an ASCII punctuation character to a physical key on the US layout.
+///
+/// Returns `(key, implicit_shift)`; shifted glyphs (e.g. `|`, `?`)
+/// decompose into their unshifted physical key + `Shift`. See the
 /// module rustdoc for the layout assumption.
-const fn punct_to_key(c: char) -> Option<(PhysicalKey, bool)> {
+///
+/// `pub` so the client's stdin parser (`crates/phux-client/src/attach/input.rs`)
+/// can share the same table — phux-gxy was caused by the input parser
+/// mapping punctuation to `PhysicalKey::Unidentified` while the chord
+/// parser used this table, so chords like `C-a |` (split-pane) never
+/// matched.
+#[must_use]
+pub const fn punct_to_key(c: char) -> Option<(PhysicalKey, bool)> {
     Some(match c {
         // Unshifted glyphs.
         '`' => (PhysicalKey::Backquote, false),
