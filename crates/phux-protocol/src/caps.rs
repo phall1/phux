@@ -332,7 +332,7 @@ impl Default for KeyboardProtocolSet {
 ///
 /// Construct via [`Self::new`] (defaults across the board) plus the
 /// builder setters; that's the path that survives field-set growth.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct ClientCapabilities {
     /// The client's color tier (SPEC §6.2). See [`ColorSupport`].
@@ -399,6 +399,12 @@ impl ClientCapabilities {
     pub const fn with_hyperlinks(mut self, hyperlinks: bool) -> Self {
         self.hyperlinks = hyperlinks;
         self
+    }
+}
+
+impl Default for ClientCapabilities {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
