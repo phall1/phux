@@ -19,7 +19,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use super::{OverlayCommand, RenderOverlay};
-use crate::attach::DETACH_CHORD_DESCRIPTION;
 
 /// One row in the help table: a chord (or chord sequence) and the
 /// action it resolves to. `chord_text` already includes the prefix
@@ -37,13 +36,6 @@ struct Entry {
 /// Rendering is a single centered [`Paragraph`] inside a bordered
 /// [`Block`]; bindings are grouped into prefix-table vs global vs
 /// hardcoded sections.
-///
-/// The hardcoded section surfaces chords that the driver wires up
-/// directly (not through the keybindings resolver) — currently just
-/// the `Ctrl-b d` detach chord (phux-631 tracks making it
-/// configurable). The chord string is read from
-/// [`crate::attach::DETACH_CHORD_DESCRIPTION`] so it stays in sync
-/// with the driver site that actually owns it.
 #[derive(Debug)]
 pub struct HelpOverlay {
     /// Pretty-printed prefix chord (e.g. `"C-a"`), or empty if no
@@ -85,13 +77,7 @@ impl HelpOverlay {
                 action: action_label(action),
             })
             .collect();
-        // Hardcoded driver-owned chords. Currently just the detach
-        // chord; if a user rebinds detach via config (post phux-631)
-        // this list should shrink.
-        let hardcoded_entries = vec![Entry {
-            chord: DETACH_CHORD_DESCRIPTION.to_owned(),
-            action: "detach".to_owned(),
-        }];
+        let hardcoded_entries = Vec::new();
         // Find the chord (if any) that the user bound to `show-help`
         // for the footer hint. Scans `cfg.global` only — `show-help`
         // is a global by default and surfacing a prefix-table entry
@@ -302,6 +288,7 @@ mod tests {
 
     fn cfg() -> KeybindingsCfg {
         let mut prefix_table = BTreeMap::new();
+        prefix_table.insert("d".to_owned(), Action::Bare("detach".to_owned()));
         prefix_table.insert("x".to_owned(), Action::Bare("kill-pane".to_owned()));
         let mut split_args = BTreeMap::new();
         split_args.insert(
@@ -340,16 +327,10 @@ mod tests {
     fn from_config_collects_prefix_and_global() {
         let overlay = HelpOverlay::from_config(&cfg());
         assert_eq!(overlay.prefix, "C-a");
-        assert_eq!(overlay.prefix_entries.len(), 2);
+        assert_eq!(overlay.prefix_entries.len(), 3);
         assert_eq!(overlay.global_entries.len(), 1);
-        // Hardcoded section always carries at least the detach chord.
-        assert!(!overlay.hardcoded_entries.is_empty());
-        assert!(
-            overlay
-                .hardcoded_entries
-                .iter()
-                .any(|e| e.action == "detach")
-        );
+        assert!(overlay.hardcoded_entries.is_empty());
+        assert!(overlay.prefix_entries.iter().any(|e| e.action == "detach"));
         // show-help is bound to F1 in the test cfg.
         assert_eq!(overlay.show_help_chord.as_deref(), Some("F1"));
     }
@@ -465,7 +446,7 @@ mod tests {
         // robust against width-driven padding while still proving
         // that every section the overlay promises is actually
         // painted. Covers the regression that motivated phux-i08:
-        // hardcoded chords were missing entirely.
+        // configured prefix/global chords were missing from the overlay.
         let overlay = HelpOverlay::from_config(&cfg());
         let text = render_to_string(&overlay, 80, 24);
         // Section headers.
@@ -477,25 +458,14 @@ mod tests {
             text.contains("Global bindings"),
             "missing global header:\n{text}"
         );
-        assert!(
-            text.contains("Hardcoded"),
-            "missing hardcoded header:\n{text}"
-        );
         // At least one row from each section.
+        assert!(text.contains("C-a d"), "missing detach row:\n{text}");
         assert!(text.contains("C-a x"), "missing prefix-table row:\n{text}");
         assert!(
             text.contains("C-a v"),
             "missing parameterized prefix row:\n{text}"
         );
         assert!(text.contains("F1"), "missing global row:\n{text}");
-        // Hardcoded detach: chord text comes from
-        // `attach::DETACH_CHORD_DESCRIPTION`. We assert the action
-        // word ("detach") rather than the full chord string so a
-        // future phux-631 chord rename doesn't break this test.
-        assert!(
-            text.contains("detach"),
-            "missing hardcoded detach row:\n{text}"
-        );
         // Footer reflects the bound chord, not a hardcoded "F1".
         assert!(
             text.contains("Press F1 or Esc to close"),
