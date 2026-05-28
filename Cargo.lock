@@ -1374,6 +1374,7 @@ dependencies = [
  "phux-core",
  "phux-protocol",
  "phux-server",
+ "rustix 0.38.44",
  "tokio",
  "tracing",
  "tracing-subscriber",

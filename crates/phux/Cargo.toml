@@ -27,6 +27,11 @@ dhat = { workspace = true, optional = true }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# `process` feature only: `setsid(2)` to detach an auto-spawned server
+# from the launching client's controlling terminal so it survives the
+# terminal closing. Same crate already used by phux-client (termios);
+# no new third-party dependency enters the workspace.
+rustix = { version = "0.38", default-features = false, features = ["std", "process"] }
 
 [features]
 # Heap profiling via dhat. Swaps the global allocator for `dhat::Alloc`

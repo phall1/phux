@@ -95,6 +95,13 @@ enum Command {
         /// (or `/tmp/phux-$USER/phux.sock` if `XDG_RUNTIME_DIR` isn't set).
         #[arg(long)]
         socket: Option<PathBuf>,
+
+        /// Detach from the controlling terminal via `setsid(2)` before
+        /// binding. Set by the auto-spawn path so the server outlives
+        /// the launching client's terminal; a foreground `phux server`
+        /// run by hand leaves this off so Ctrl-C still works.
+        #[arg(long, hide = true)]
+        daemonize: bool,
     },
 }
 
@@ -122,7 +129,11 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Attach { session, socket }) => run_attach(session, socket),
-        Some(Command::Server { session, socket }) => run_server(&session, socket),
+        Some(Command::Server {
+            session,
+            socket,
+            daemonize,
+        }) => run_server(&session, socket, daemonize),
         None => run_naked(),
     }
 }
@@ -361,8 +372,19 @@ fn print_attach_error(err: &AttachError, socket_path: &Path, session: &str) {
 /// is backed by a real PTY running the user's `$SHELL` (falling back
 /// to `/bin/sh`). On Ctrl-C, `run_async` returns `Ok(())` and the
 /// process exits 0.
-fn run_server(session: &str, socket: Option<PathBuf>) -> ExitCode {
+fn run_server(session: &str, socket: Option<PathBuf>, daemonize: bool) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
+
+    // Auto-spawn path: detach from the launching client's controlling
+    // terminal so closing that terminal (SIGHUP to its session) can't
+    // take the server — and the sessions it holds — down with it. The
+    // client already nulled our stdio, so as a non-leader process
+    // `setsid` gives us a fresh session with no controlling terminal;
+    // we never open a tty afterward, so a session-leader double-fork
+    // isn't needed. An `EPERM` (already a group leader) is harmless.
+    if daemonize {
+        let _ = rustix::process::setsid();
+    }
 
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
@@ -414,11 +436,12 @@ fn run_server(session: &str, socket: Option<PathBuf>) -> ExitCode {
 /// Fork-exec the current binary as `phux server` (with the same
 /// `--socket` override), then poll for the socket to appear.
 ///
-/// Detachment strategy: stdio is fully nulled and the child runs on
-/// the same process group; the parent exiting after a successful
-/// attach is fine because the child holds the listener fd. This is
-/// "good enough for demo" — proper daemonization (double-fork +
-/// `setsid` + log redirection) is a follow-up.
+/// Detachment strategy: the child is launched with `--daemonize`, so it
+/// calls `setsid(2)` before binding and lands in its own session with no
+/// controlling terminal — closing the launching terminal can't SIGHUP it.
+/// stdin/stdout are nulled; stderr is redirected to `phux-server.log`
+/// beside the socket so a startup crash is debuggable. The server never
+/// opens a tty afterward, so a session-leader double-fork isn't needed.
 ///
 /// Returns `Ok` if the socket showed up within the timeout.
 fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result<()> {
@@ -429,15 +452,37 @@ fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result
         socket_path.display()
     );
 
+    // Redirect the daemon's stderr to a log file next to the socket so a
+    // crash-on-startup is debuggable (nulled stdio leaves no trace).
+    // Best-effort: fall back to /dev/null if the file can't be opened.
+    let log = socket_path
+        .parent()
+        .map(|dir| dir.join("phux-server.log"))
+        .and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        });
+
     let mut cmd = std::process::Command::new(current_exe);
     cmd.arg("server")
         .arg("--socket")
         .arg(socket_path)
         .arg("--session")
         .arg(session)
+        .arg("--daemonize")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::null());
+    match log {
+        Some(file) => {
+            cmd.stderr(file);
+        }
+        None => {
+            cmd.stderr(Stdio::null());
+        }
+    }
 
     // Spawn — we deliberately don't keep the `Child` around; the
     // server is its own lifecycle now. The OS reaps it when it exits.
