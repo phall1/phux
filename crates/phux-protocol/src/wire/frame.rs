@@ -1,8 +1,8 @@
 //! Frame header and `FrameKind` enum.
 //!
-//! See `SPEC.md` §5 (framing) and §7 (message catalog).
+//! See `docs/spec/proto.md` §5 (framing) and §7 (message catalog).
 //!
-//! Wire layout (per `SPEC.md` §5):
+//! Wire layout (per `docs/spec/proto.md` §5):
 //!
 //! ```text
 //! +-------------------------+
@@ -40,7 +40,7 @@ use super::encode::Encoder;
 use super::error::DecodeError;
 use super::info::{SessionSnapshot, encode_client_id, encode_session_snapshot};
 
-/// Maximum permitted value of the wire-frame `length` field, per `SPEC.md` §5
+/// Maximum permitted value of the wire-frame `length` field, per `docs/spec/proto.md` §5
 /// ("at most `16_777_216` (16 MiB)").
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
@@ -50,21 +50,21 @@ pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 // sibling tasks can wire them up without re-deriving the catalog.
 // -----------------------------------------------------------------------------
 
-/// Discriminant for `HELLO` (client to server, `SPEC.md` §6.1).
+/// Discriminant for `HELLO` (client to server, `docs/spec/proto.md` §6.1).
 pub const TYPE_HELLO: u8 = 0x01;
-/// Discriminant for `ATTACH` (client to server, `SPEC.md` §7.1 / §13).
+/// Discriminant for `ATTACH` (client to server, `docs/spec/proto.md` §7.1 / §13).
 pub const TYPE_ATTACH: u8 = 0x02;
-/// Discriminant for `DETACH` (client to server, `SPEC.md` §7.1 / §7.3).
+/// Discriminant for `DETACH` (client to server, `docs/spec/proto.md` §7.1 / §7.3).
 pub const TYPE_DETACH: u8 = 0x03;
-/// Discriminant for `INPUT_KEY` (client to server, `SPEC.md` §9.1).
+/// Discriminant for `INPUT_KEY` (client to server, `docs/spec/input.md` §2).
 pub const TYPE_INPUT_KEY: u8 = 0x10;
-/// Discriminant for `INPUT_PASTE` (client to server, `SPEC.md` §9.4).
+/// Discriminant for `INPUT_PASTE` (client to server, `docs/spec/input.md` §5).
 pub const TYPE_INPUT_PASTE: u8 = 0x11;
-/// Discriminant for `INPUT_MOUSE` (client to server, `SPEC.md` §9.2).
+/// Discriminant for `INPUT_MOUSE` (client to server, `docs/spec/input.md` §3).
 pub const TYPE_INPUT_MOUSE: u8 = 0x12;
-/// Discriminant for `INPUT_FOCUS` (client to server, `SPEC.md` §9.3).
+/// Discriminant for `INPUT_FOCUS` (client to server, `docs/spec/input.md` §4).
 pub const TYPE_INPUT_FOCUS: u8 = 0x14;
-/// Discriminant for `FRAME_ACK` (client to server, `SPEC.md` §7.proto.1 / §12.2).
+/// Discriminant for `FRAME_ACK` (client to server, `docs/spec/proto.md` §7.2 / §8.2).
 ///
 /// Per-Terminal cumulative acknowledgement of `TERMINAL_OUTPUT` (§8.1) frames
 /// the client has applied to its local `libghostty_vt::Terminal`. The server
@@ -78,7 +78,7 @@ pub const TYPE_INPUT_FOCUS: u8 = 0x14;
 /// the same older reference. No retransmit machinery; the ack is a hint, not a
 /// guarantee.
 pub const TYPE_FRAME_ACK: u8 = 0x21;
-/// Discriminant for `VIEWPORT_RESIZE` (client to server, `SPEC.md` §7.1 / §10.5).
+/// Discriminant for `VIEWPORT_RESIZE` (client to server, `docs/spec/proto.md` §7.1 / §10.5).
 ///
 /// The client emits this when its outer terminal changes size (SIGWINCH on
 /// Unix, the GUI resize event on graphical hosts). Payload reuses the
@@ -86,26 +86,26 @@ pub const TYPE_FRAME_ACK: u8 = 0x21;
 /// shape minimal and lets future tickets grow the per-cell pixel + padding
 /// metrics from SPEC §10.5 when the mouse-encoder needs them.
 pub const TYPE_VIEWPORT_RESIZE: u8 = 0x20;
-/// Discriminant for `PING` (client to server, `SPEC.md` §7.5).
+/// Discriminant for `PING` (client to server, `docs/spec/proto.md` §7.4).
 pub const TYPE_PING: u8 = 0x7F;
-/// Discriminant for `HELLO_OK` (server to client, `SPEC.md` §6.1). Reserved.
+/// Discriminant for `HELLO_OK` (server to client, `docs/spec/proto.md` §6.1). Reserved.
 pub const TYPE_HELLO_OK: u8 = 0x80;
-/// Discriminant for `ATTACHED` (server to client, `SPEC.md` §7.2 / §13).
+/// Discriminant for `ATTACHED` (server to client, `docs/spec/L1.md` §1 / §13).
 pub const TYPE_ATTACHED: u8 = 0x81;
-/// Discriminant for `DETACHED` (server to client, `SPEC.md` §7.2 / §7.3).
+/// Discriminant for `DETACHED` (server to client, `docs/spec/L1.md` §1 / §7.3).
 pub const TYPE_DETACHED: u8 = 0x82;
-/// Discriminant for `BELL` (server to client, `SPEC.md` §7.6).
+/// Discriminant for `BELL` (server to client, `docs/spec/L1.md` §1.2).
 pub const TYPE_BELL: u8 = 0xB0;
-/// Discriminant for `ERROR` (server to client, `SPEC.md` §14).
+/// Discriminant for `ERROR` (server to client, `docs/spec/proto.md` §9).
 ///
 /// Carries a structured [`ErrorCode`] plus a human-readable UTF-8 message
 /// and an optional `request_id` correlating the error with a prior
 /// `COMMAND` (per SPEC §14). Fatal errors MUST be followed by `DETACHED
 /// { reason: PROTOCOL_ERROR }` and transport close.
 pub const TYPE_ERROR: u8 = 0xC1;
-/// Discriminant for `PONG` (server to client, `SPEC.md` §7.5). Reserved.
+/// Discriminant for `PONG` (server to client, `docs/spec/proto.md` §7.4). Reserved.
 pub const TYPE_PONG: u8 = 0xFF;
-/// Discriminant for `TERMINAL_OUTPUT` (server to client, `SPEC.md` §7.2 / §8.1).
+/// Discriminant for `TERMINAL_OUTPUT` (server to client, `docs/spec/L1.md` §1 / §8.1).
 ///
 /// Hot-path terminal content under [ADR-0013]: the server forwards PTY bytes
 /// (possibly downsampled per the client's [`crate::caps::ColorSupport`])
@@ -113,7 +113,7 @@ pub const TYPE_PONG: u8 = 0xFF;
 /// `PANE_DIFF` is retired and its old discriminant (`0x40`) is no longer
 /// recognised.
 pub const TYPE_TERMINAL_OUTPUT: u8 = 0x90;
-/// Discriminant for `TERMINAL_SNAPSHOT` (server to client, `SPEC.md` §7.2 / §8.4).
+/// Discriminant for `TERMINAL_SNAPSHOT` (server to client, `docs/spec/L1.md` §1 / §8.4).
 ///
 /// Required per SPEC §16 conformance. Under [ADR-0013] the payload is a
 /// synthesised VT byte sequence (`vt_replay_bytes`) plus optional
@@ -132,28 +132,28 @@ pub const TYPE_TERMINAL_SNAPSHOT: u8 = 0x91;
 // `ERROR` (0xC1) already on lower discriminants.
 // -----------------------------------------------------------------------------
 
-/// Discriminant for `GET_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+/// Discriminant for `GET_METADATA` (client to server, `docs/spec/L3.md` §1 / §11.L3).
 pub const TYPE_GET_METADATA: u8 = 0x50;
-/// Discriminant for `SET_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+/// Discriminant for `SET_METADATA` (client to server, `docs/spec/L3.md` §1 / §11.L3).
 pub const TYPE_SET_METADATA: u8 = 0x51;
-/// Discriminant for `DELETE_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+/// Discriminant for `DELETE_METADATA` (client to server, `docs/spec/L3.md` §1 / §11.L3).
 pub const TYPE_DELETE_METADATA: u8 = 0x52;
-/// Discriminant for `LIST_METADATA` (client to server, `SPEC.md` §7.4 / §11.L3).
+/// Discriminant for `LIST_METADATA` (client to server, `docs/spec/L3.md` §1 / §11.L3).
 pub const TYPE_LIST_METADATA: u8 = 0x53;
-/// Discriminant for `SUBSCRIBE_METADATA` (client to server, `SPEC.md` §7.4).
+/// Discriminant for `SUBSCRIBE_METADATA` (client to server, `docs/spec/L3.md` §1).
 pub const TYPE_SUBSCRIBE_METADATA: u8 = 0x54;
 
-/// Discriminant for `METADATA_CHANGED` (server to client, `SPEC.md` §7.4).
+/// Discriminant for `METADATA_CHANGED` (server to client, `docs/spec/L3.md` §1).
 pub const TYPE_METADATA_CHANGED: u8 = 0xD0;
 
-/// Discriminant for `METADATA_VALUE` (server to client, `SPEC.md` §7.4).
+/// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries
 /// `Option<bytes>` — `Some(bytes)` when the key holds a value,
 /// `None` when the key is absent. Allocated by phux-4li.8.
 pub const TYPE_METADATA_VALUE: u8 = 0xD1;
 
-/// Discriminant for `METADATA_KEYS` (server to client, `SPEC.md` §7.4).
+/// Discriminant for `METADATA_KEYS` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `LIST_METADATA`; correlated by `request_id`. Carries
 /// the lexicographically sorted list of key names present in the
@@ -178,13 +178,13 @@ pub const TYPE_METADATA_KEYS: u8 = 0xD2;
 // 0.2.0-draft.2 entry.
 // -----------------------------------------------------------------------------
 
-/// Discriminant for `SPAWN_TERMINAL` (client to server, `SPEC.md` §7.2 / §10.1).
+/// Discriminant for `SPAWN_TERMINAL` (client to server, `docs/spec/L1.md` §1 / §10.1).
 ///
 /// Carries `{ request_id, collection, command: Option<list<str>>,
 /// cwd: Option<str>, env: Option<list<(str, str)>> }`. The reply rides on
 /// [`TYPE_TERMINAL_SPAWNED`] correlated by `request_id`.
 pub const TYPE_SPAWN_TERMINAL: u8 = 0x22;
-/// Discriminant for `TERMINAL_RESIZE` (client to server, `SPEC.md` §7.2 / §10.2).
+/// Discriminant for `TERMINAL_RESIZE` (client to server, `docs/spec/L1.md` §1 / §10.2).
 ///
 /// Per-Terminal PTY resize. Drives `ioctl(TIOCSWINSZ)` server-side; the
 /// outer-viewport `VIEWPORT_RESIZE` (`0x20`) remains the
@@ -192,12 +192,12 @@ pub const TYPE_SPAWN_TERMINAL: u8 = 0x22;
 /// client (phux-4li.9).
 pub const TYPE_TERMINAL_RESIZE: u8 = 0x23;
 
-/// Discriminant for `TERMINAL_CLOSED` (server to client, `SPEC.md` §7.2 / §10.1).
+/// Discriminant for `TERMINAL_CLOSED` (server to client, `docs/spec/L1.md` §1 / §10.1).
 ///
 /// Push notification when a Terminal's PTY exits, naturally or via
 /// `KILL_TERMINAL`. Honours the spec-only reservation at `0xA1`.
 pub const TYPE_TERMINAL_CLOSED: u8 = 0xA1;
-/// Discriminant for `TERMINAL_SPAWNED` (server to client, `SPEC.md` §7.2 / §10.1).
+/// Discriminant for `TERMINAL_SPAWNED` (server to client, `docs/spec/L1.md` §1 / §10.1).
 ///
 /// Reply frame for `SPAWN_TERMINAL`; correlated by `request_id`. Carries a
 /// `Result<TerminalId, SpawnError>` tagged union — see [`SpawnResult`].
@@ -508,7 +508,7 @@ pub enum SpawnResult {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum FrameKind {
-    /// `HELLO` — client to server handshake (`SPEC.md` §6.1).
+    /// `HELLO` — client to server handshake (`docs/spec/proto.md` §6.1).
     ///
     /// Carries the client's free-form identifier, the highest protocol
     /// version triple it supports, and a [`ClientCapabilities`] envelope
@@ -537,14 +537,14 @@ pub enum FrameKind {
         client_caps: ClientCapabilities,
     },
 
-    /// `PING` — liveness probe (`SPEC.md` §7.5). The peer MUST echo `nonce`
+    /// `PING` — liveness probe (`docs/spec/proto.md` §7.4). The peer MUST echo `nonce`
     /// back in a `PONG` frame.
     Ping {
         /// Opaque nonce echoed by the peer in `PONG`.
         nonce: u64,
     },
 
-    /// `TERMINAL_OUTPUT` — server-to-client terminal content (`SPEC.md` §8.1).
+    /// `TERMINAL_OUTPUT` — server-to-client terminal content (`docs/spec/L1.md` §2.1).
     ///
     /// The hot path under [ADR-0013]: the server forwards bytes from the
     /// terminal's PTY (after parsing into its canonical
@@ -560,14 +560,14 @@ pub enum FrameKind {
     TerminalOutput {
         /// Target terminal.
         terminal_id: TerminalId,
-        /// Monotonic per-terminal sequence id (`SPEC.md` §12).
+        /// Monotonic per-terminal sequence id (`docs/spec/proto.md` §8).
         seq: u64,
         /// VT bytes from the PTY (possibly downsampled per
         /// [`crate::caps::ColorSupport`]).
         bytes: Vec<u8>,
     },
 
-    /// `ATTACH` — client requests to attach to a session (`SPEC.md` §13).
+    /// `ATTACH` — client requests to attach to a session (`docs/spec/L1.md` §7).
     ///
     /// Conforms to SPEC §13 as of phux-i58: `target` tagged union plus
     /// viewport metrics plus scrollback negotiation.
@@ -585,13 +585,13 @@ pub enum FrameKind {
         scrollback_limit_lines: u32,
     },
 
-    /// `DETACH` — client signals clean departure (`SPEC.md` §7.3).
+    /// `DETACH` — client signals clean departure (`docs/spec/proto.md` §7.2).
     ///
     /// Carries no fields in the phux-4az scaffold; SPEC §7.3 also keeps it
     /// empty (the `DetachReason` is sent in `DETACHED` from the server).
     Detach,
 
-    /// `INPUT_KEY` — client forwards a structured key event (`SPEC.md` §9.1).
+    /// `INPUT_KEY` — client forwards a structured key event (`docs/spec/input.md` §2).
     ///
     /// Wire shape: tagged [`TerminalId`] followed by the encoded [`KeyEvent`].
     InputKey {
@@ -601,7 +601,7 @@ pub enum FrameKind {
         event: KeyEvent,
     },
 
-    /// `INPUT_MOUSE` — client forwards a mouse event (`SPEC.md` §9.2).
+    /// `INPUT_MOUSE` — client forwards a mouse event (`docs/spec/input.md` §3).
     InputMouse {
         /// Target terminal.
         terminal_id: TerminalId,
@@ -610,7 +610,7 @@ pub enum FrameKind {
     },
 
     /// `INPUT_FOCUS` — client reports focus change on its host window
-    /// (`SPEC.md` §9.3).
+    /// (`docs/spec/input.md` §4).
     InputFocus {
         /// Target terminal.
         terminal_id: TerminalId,
@@ -618,7 +618,7 @@ pub enum FrameKind {
         event: FocusEvent,
     },
 
-    /// `INPUT_PASTE` — client forwards a paste payload (`SPEC.md` §9.4).
+    /// `INPUT_PASTE` — client forwards a paste payload (`docs/spec/input.md` §5).
     InputPaste {
         /// Target terminal.
         terminal_id: TerminalId,
@@ -627,7 +627,7 @@ pub enum FrameKind {
     },
 
     /// `FRAME_ACK` — client acknowledges a `TERMINAL_OUTPUT` it has applied
-    /// (`SPEC.md` §7.proto.1 / §12.2).
+    /// (`docs/spec/proto.md` §7.2 / §8.2).
     ///
     /// Cumulative ack: acknowledging `seq = N` implies all prior emissions
     /// for `terminal_id` up to and including `N` have been applied to the
@@ -647,7 +647,7 @@ pub enum FrameKind {
     },
 
     /// `VIEWPORT_RESIZE` — the attached client's outer terminal changed
-    /// size (`SPEC.md` §7.1 / §10.5).
+    /// size (`docs/spec/proto.md` §7.1 / §10.5).
     ///
     /// The connection itself identifies which client this resize belongs
     /// to — there is no `client_id` field on the wire (consistent with
@@ -665,7 +665,7 @@ pub enum FrameKind {
     },
 
     /// `ATTACHED` — server acknowledges attach with initial state
-    /// (`SPEC.md` §13).
+    /// (`docs/spec/L1.md` §7).
     ///
     /// Conforms to SPEC §13 as of phux-i58: full `SessionSnapshot` plus the
     /// server-allocated `ClientId` identifying this attachment. The per-
@@ -680,14 +680,14 @@ pub enum FrameKind {
     },
 
     /// `DETACHED` — server confirms detach and closes the transport
-    /// (`SPEC.md` §7.3).
+    /// (`docs/spec/proto.md` §7.2).
     ///
     /// Phux-4az scaffold carries no fields. SPEC §7.3 defines
     /// `{ reason: DetachReason, message: str }`; those land in a follow-up
     /// once the server actually distinguishes shutdown causes.
     Detached,
 
-    /// `TERMINAL_SNAPSHOT` — initial state of a single terminal (`SPEC.md` §8.4).
+    /// `TERMINAL_SNAPSHOT` — initial state of a single terminal (`docs/spec/L1.md` §2.4).
     ///
     /// REQUIRED per SPEC §16 conformance. Sent after `ATTACHED` for each
     /// terminal the client needs initialised; subsequent updates flow as
@@ -720,13 +720,13 @@ pub enum FrameKind {
         scrollback_bytes: Option<Vec<u8>>,
     },
 
-    /// `BELL` — terminal received a bell character (`SPEC.md` §7.6).
+    /// `BELL` — terminal received a bell character (`docs/spec/L1.md` §1.2).
     Bell {
         /// Terminal that bell'd.
         terminal_id: TerminalId,
     },
 
-    /// `ERROR` — server-to-client structured error (`SPEC.md` §14).
+    /// `ERROR` — server-to-client structured error (`docs/spec/proto.md` §9).
     ///
     /// Carries a numeric [`ErrorCode`] plus a human-readable UTF-8
     /// `message`. `request_id` is `Some(_)` when the error correlates with
@@ -762,7 +762,7 @@ pub enum FrameKind {
     // the ADR-0019 layout-coordination story and ships here.
     // -------------------------------------------------------------------------
     /// `GET_METADATA` — client requests the value at `(scope, key)`
-    /// (`SPEC.md` §7.4 / §11.L3).
+    /// (`docs/spec/L3.md` §1 / §11.L3).
     ///
     /// The reply is currently a server-side function return; the wire
     /// reply path will ride the generic `COMMAND_RESULT` envelope when
@@ -778,7 +778,7 @@ pub enum FrameKind {
     },
 
     /// `SET_METADATA` — client writes `value` at `(scope, key)`
-    /// (`SPEC.md` §7.4 / §11.L3).
+    /// (`docs/spec/L3.md` §1 / §11.L3).
     ///
     /// Atomic write: the server stores `value` and broadcasts
     /// `MetadataChanged { scope, key, value: Some(value) }` to every
@@ -797,7 +797,7 @@ pub enum FrameKind {
     },
 
     /// `DELETE_METADATA` — client removes `key` from `scope`
-    /// (`SPEC.md` §7.4 / §11.L3).
+    /// (`docs/spec/L3.md` §1 / §11.L3).
     ///
     /// Idempotent: deleting a missing key is not an error. The server
     /// broadcasts `MetadataChanged { scope, key, value: None }` (a
@@ -812,7 +812,7 @@ pub enum FrameKind {
     },
 
     /// `LIST_METADATA` — client requests the set of key names in `scope`
-    /// (`SPEC.md` §7.4 / §11.L3).
+    /// (`docs/spec/L3.md` §1 / §11.L3).
     ///
     /// Returns key names only — values are not part of the listing. As
     /// with `GET_METADATA`, the wire reply path is deferred to the
@@ -826,7 +826,7 @@ pub enum FrameKind {
     },
 
     /// `SUBSCRIBE_METADATA` — client opts into `MetadataChanged` events
-    /// matching `(scope, key)` (`SPEC.md` §7.4).
+    /// matching `(scope, key)` (`docs/spec/L3.md` §1).
     ///
     /// A single subscribe per `(scope, key)` is enough; the server keys
     /// subscribers by `(client, scope, key)` so re-subscribes are
@@ -842,7 +842,7 @@ pub enum FrameKind {
     },
 
     /// `METADATA_CHANGED` — server notifies a subscriber that
-    /// `(scope, key)` was written or deleted (`SPEC.md` §7.4).
+    /// `(scope, key)` was written or deleted (`docs/spec/L3.md` §1).
     ///
     /// `value` is `Some(new_bytes)` on a SET and `None` on a DELETE
     /// (the tombstone case). Subscribers MAY re-issue `GET_METADATA`
@@ -863,7 +863,7 @@ pub enum FrameKind {
     },
 
     /// `METADATA_VALUE` — server reply to a prior `GET_METADATA`
-    /// (`SPEC.md` §7.4 / §11.L3). Allocated by phux-4li.8.
+    /// (`docs/spec/L3.md` §1 / §11.L3). Allocated by phux-4li.8.
     ///
     /// Correlated to the originating request by `request_id`. `value` is
     /// `Some(bytes)` when the key was present at the time of the lookup
@@ -886,7 +886,7 @@ pub enum FrameKind {
     },
 
     /// `METADATA_KEYS` — server reply to a prior `LIST_METADATA`
-    /// (`SPEC.md` §7.4 / §11.L3). Allocated by phux-4li.8.
+    /// (`docs/spec/L3.md` §1 / §11.L3). Allocated by phux-4li.8.
     ///
     /// Correlated to the originating request by `request_id`. Carries
     /// the set of key names present in the requested scope. Server
@@ -910,7 +910,7 @@ pub enum FrameKind {
     // tickets; this enum allocation is the wire substrate they build on.
     // -------------------------------------------------------------------------
     /// `SPAWN_TERMINAL` — client requests a new Terminal under `collection`
-    /// (`SPEC.md` §7.2 / §10.1).
+    /// (`docs/spec/L1.md` §1 / §10.1).
     ///
     /// Async: the server replies with [`FrameKind::TerminalSpawned`]
     /// correlated by `request_id`. `command = None` means "use the server's
@@ -942,7 +942,7 @@ pub enum FrameKind {
     },
 
     /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
-    /// (`SPEC.md` §7.2 / §10.1).
+    /// (`docs/spec/L1.md` §1 / §10.1).
     ///
     /// Correlated to the originating request by `request_id`. `result`
     /// carries either the freshly allocated [`TerminalId`] or a structured
@@ -958,7 +958,7 @@ pub enum FrameKind {
     },
 
     /// `TERMINAL_CLOSED` — server notifies clients that a Terminal exited
-    /// (`SPEC.md` §7.2 / §10.1).
+    /// (`docs/spec/L1.md` §1 / §10.1).
     ///
     /// Emitted when the underlying PTY exits, whether by `_exit(n)`, by
     /// signal, or via a `KILL_TERMINAL` command. `exit_status = Some(n)`
@@ -975,7 +975,7 @@ pub enum FrameKind {
     },
 
     /// `TERMINAL_RESIZE` — client signals a per-Terminal PTY resize
-    /// (`SPEC.md` §7.2 / §10.2).
+    /// (`docs/spec/L1.md` §1 / §10.2).
     ///
     /// Sent in addition to (not in place of) `VIEWPORT_RESIZE`: the
     /// outer-viewport frame conveys the client's smallest-common-bounding-
@@ -995,7 +995,7 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    /// Type discriminant from `SPEC.md` §7.
+    /// Type discriminant from `docs/spec/proto.md` §7.
     #[must_use]
     pub const fn type_byte(&self) -> u8 {
         match self {

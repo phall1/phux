@@ -61,7 +61,7 @@ use tokio_util::sync::CancellationToken;
 ///
 /// Bounded on purpose: a stuck client must not let the server accumulate
 /// unbounded backpressure. The exact number is small because outbound
-/// frames are *coalesced byte chunks* (see `SPEC.md` §8 and ADR-0013),
+/// frames are *coalesced byte chunks* (see `docs/spec/L1.md` §2 and ADR-0013),
 /// not individual PTY reads; eight in-flight `TERMINAL_OUTPUT` batches is
 /// well above steady state.
 pub const DEFAULT_CLIENT_MAILBOX: usize = 8;
@@ -78,17 +78,17 @@ pub struct ClientId(pub u64);
 /// Per-pane input event recorded against a pane.
 ///
 /// `phux-byc.4` records these into a per-pane log; a future task will turn
-/// them into PTY writes. The variant set tracks `SPEC.md` §9 (Input
+/// them into PTY writes. The variant set tracks `docs/spec/input.md` (Input
 /// events).
 #[derive(Debug, Clone)]
 pub enum TerminalInput {
-    /// A keystroke (`INPUT_KEY` on the wire — `SPEC.md` §9.1).
+    /// A keystroke (`INPUT_KEY` on the wire — `docs/spec/input.md` §2).
     Key(KeyEvent),
-    /// A mouse event (`INPUT_MOUSE` — `SPEC.md` §9.2).
+    /// A mouse event (`INPUT_MOUSE` — `docs/spec/input.md` §3).
     Mouse(MouseEvent),
-    /// A focus gained/lost notification (`INPUT_FOCUS` — `SPEC.md` §9.3).
+    /// A focus gained/lost notification (`INPUT_FOCUS` — `docs/spec/input.md` §4).
     Focus(FocusEvent),
-    /// A bracketed paste (`INPUT_PASTE` — `SPEC.md` §9.4).
+    /// A bracketed paste (`INPUT_PASTE` — `docs/spec/input.md` §5).
     Paste(PasteEvent),
 }
 

@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0003 — Single server, many sessions
+
+**TL;DR.** One phux-server per user holds every session in a single process (tmux's model), not one daemon per session (zmx's model). Cross-session operations become pointer moves, clients attach to one socket, and the system has one scheduler and one source of truth. The crash blast radius is mitigated by testing and journaled recovery.
 
 Status: Accepted
 Date: 2026-05-24

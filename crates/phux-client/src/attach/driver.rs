@@ -302,7 +302,7 @@ async fn send_attach(conn: &mut Connection, target: AttachTarget) -> Result<(), 
         target,
         viewport,
         // SPEC §13: clients SHOULD opt in to scrollback. The cap below
-        // matches the default in DESIGN.md §X; a configurable knob lives
+        // matches the default in docs/consumers/tui.md §X; a configurable knob lives
         // with the rest of `phux-config`.
         request_scrollback: true,
         scrollback_limit_lines: 10_000,

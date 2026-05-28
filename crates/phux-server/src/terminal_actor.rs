@@ -153,12 +153,12 @@ pub struct ConsumerSyncState {
     /// [`crate::state::AttachedClient`]'s `tx` at ATTACH time.
     pub outbound: mpsc::Sender<Outbound>,
     /// Wire-level terminal id for the `TerminalOutput` frame
-    /// (`SPEC.md` §8.1). Carried per-consumer because the runtime owns
+    /// (`docs/spec/L1.md` §2.1). Carried per-consumer because the runtime owns
     /// the mapping `(TerminalActor, WireTerminalId)` and may differ
     /// across consumers in future tier topologies.
     pub wire_terminal_id: u32,
     /// Per-consumer monotonic sequence id for `TERMINAL_OUTPUT`
-    /// (`SPEC.md` §8.1, §12). Starts at `1` and increments on each
+    /// (`docs/spec/L1.md` §2.1, §12). Starts at `1` and increments on each
     /// emitted frame. Per-consumer (not shared) so each consumer can
     /// `FRAME_ACK` against its own stream — this matches the existing
     /// per-pump scheme in `runtime.rs::handle_attach`.
@@ -296,7 +296,7 @@ const PTY_READ_CHUNK: usize = 4096;
 
 /// Tick interval for the state-sync emission driver (phux-q0e.3).
 ///
-/// 30 ms ≈ 33 Hz; per ADR-0018 / `research/2026-05-26-state-sync-algorithm.md`
+/// 30 ms ≈ 33 Hz; per ADR-0018 / `research/archive/2026-05-26-state-sync-algorithm.md`
 /// §"tick scheduler" first-cut. An RTT-adaptive cadence is the follow-up
 /// `phux-q0e.5` and lives outside this ticket's scope.
 pub const DEFAULT_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
@@ -1371,7 +1371,7 @@ impl TerminalActor {
             // hold up every other consumer's emission this tick. A
             // `Full` error means the consumer is wedged — the
             // per-client backpressure / disconnect machinery
-            // (`SPEC.md` §12.3) lives in the runtime; we just drop and
+            // (`docs/spec/proto.md` §8.3) lives in the runtime; we just drop and
             // continue, and the next tick re-diffs against the same
             // unacked reference so the consumer catches up naturally.
             match state.outbound.try_send(Outbound::Frame(frame)) {

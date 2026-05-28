@@ -15,7 +15,7 @@
 #   |      ASCII punctuation; shifted glyphs (|, ?, ", etc.) decompose
 #          to physical-key + implicit Shift on a US layout.
 #
-# For the full schema, see crates/phux-config/src/schema.rs and DESIGN.md.
+# For the full schema, see crates/phux-config/src/schema.rs and docs/consumers/tui.md.
 
 [defaults]
 # shell = unset → honor $SHELL (fallback /bin/sh).

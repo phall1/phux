@@ -1,9 +1,19 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0006 — Input event types re-export libghostty-vt's atoms
 
-Status: Accepted. Substantially rewritten on 2026-05-25 to consolidate
-the supersession by ADR-0008; see git history for the original draft and
-its two amendments. The decision recorded below is the current decision —
-ADR-0008 is the *why*, this ADR is the *what* for the input wire.
+**TL;DR.** phux-protocol re-exports libghostty-vt's input atoms (`PhysicalKey`, `KeyAction`, `ModSet`, `MouseAction`, `MouseButton`, `FocusEvent`) directly rather than mirroring them. Outer wire-side event structs wrap those atoms with terminal addressing and any phux-specific framing. Server-side conversion to libghostty-vt's allocator-bound `Event` types is a free function in phux-server.
+
+Status: Accepted
+
+This ADR was substantially rewritten on 2026-05-25 to consolidate the
+supersession by ADR-0008; see git history for the original draft and
+its two amendments. ADR-0008 is the *why*; this ADR is the *what* for
+the input wire.
 
 > **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002
 > (bytes-on-wire for pane content). This ADR is *reinforced*, not

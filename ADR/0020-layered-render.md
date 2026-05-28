@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0020 — Layered render: ratatui chrome over libghostty pane interiors
+
+**TL;DR.** phux-client uses two disjoint renderers in one process: ratatui for chrome (status bar, dividers, borders, overlays) and libghostty for pane interiors. ratatui marks pane rectangles `skip=true` so they carve out holes; pane bytes layer into those holes from a client-side `Terminal` mirror. SGR resets at every transition, one renderer positions the cursor, and ratatui imports are confined to `render/`.
 
 Status: Accepted
 Date: 2026-05-27

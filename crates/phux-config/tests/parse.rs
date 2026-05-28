@@ -1,7 +1,7 @@
 //! Integration tests for the config schema.
 //!
 //! Covers:
-//! 1. The canonical `DESIGN.md` §4.2 example round-trips
+//! 1. The canonical `docs/consumers/tui.md` §4.2 example round-trips
 //!    (`parse → serialize → reparse` is equal under `PartialEq`).
 //! 2. A syntactically-malformed input produces a `ConfigError::Parse`
 //!    with the expected `line:col`, and we snapshot its `Display`.
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use phux_config::{Config, ConfigError, DefaultsCfg, parse_str};
 
-/// The canonical example from `DESIGN.md` §4.2.
+/// The canonical example from `docs/consumers/tui.md` §4.2.
 const CANONICAL: &str = r##"
 [defaults]
 shell          = "/bin/zsh"

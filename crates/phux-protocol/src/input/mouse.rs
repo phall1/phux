@@ -6,12 +6,12 @@
 //! lifetime-bound and therefore not directly serializable.
 //!
 //! Coordinates are pane-local surface-space pixels (NOT cells), matching
-//! libghostty's `mouse::Position` shape exactly — see SPEC.md §9.2.1 for the
+//! libghostty's `mouse::Position` shape exactly — see docs/spec/input.md §3.1 for the
 //! cell-geometry contract.
 //!
 //! # Mouse mode bits ([`MouseProtocol`] / [`MouseEncoding`])
 //!
-//! Per SPEC.md §8.5, cursor and mode state — including the inner program's
+//! Per docs/spec/L1.md §2.5, cursor and mode state — including the inner program's
 //! mouse-tracking protocol and the wire format it asks for — live entirely
 //! inside each end's `libghostty_vt::Terminal`. They are **not** separate
 //! wire concepts: clients query their local `Terminal::modes()` to learn
@@ -42,7 +42,7 @@ pub use libghostty_vt::mouse::{
 /// # Coordinate system — cell-geometry contract
 ///
 /// `x` and `y` are **pane-local surface-space pixels**, NOT cell indices.
-/// SPEC.md §9.2.1 makes this load-bearing:
+/// docs/spec/input.md §3.1 makes this load-bearing:
 ///
 /// * Cell-quantized clients (TUIs without true pixel-precision input) MUST
 ///   emit positions at `cell_index × cell_size` — the server's encoder then
@@ -90,7 +90,7 @@ mod tests {
     }
 
     /// `MouseProtocol` covers the five DECSET tracking modes the inner
-    /// program may select (SPEC.md §8.5). Names follow libghostty's
+    /// program may select (docs/spec/L1.md §2.5). Names follow libghostty's
     /// `TrackingMode` — see ADR-0008.
     #[test]
     fn mouse_protocol_variants_present() {
@@ -110,7 +110,7 @@ mod tests {
     }
 
     /// `MouseEncoding` covers the five wire formats the inner program may
-    /// select via DECSET 1005 / 1006 / 1015 / 1016 (SPEC.md §8.5). Names
+    /// select via DECSET 1005 / 1006 / 1015 / 1016 (docs/spec/L1.md §2.5). Names
     /// follow libghostty's `Format` — see ADR-0008.
     #[test]
     fn mouse_encoding_variants_present() {

@@ -1,0 +1,32 @@
+---
+audience: consumers, contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+---
+
+# Wire-protocol changelog
+
+**TL;DR.** Wire-format change log for the phux protocol; the top
+entry's version must match `PROTOCOL_VERSION` in `phux-protocol`. CI
+gate `spec-version-sync` enforces this.
+
+---
+
+Newest version is at the top. The top entry's `<major>.<minor>.<patch>`
+must equal `PROTOCOL_VERSION` in `crates/phux-protocol/src/lib.rs`;
+`just docs-check` enforces it.
+
+| Version | Date       | Notes                                        |
+|---------|------------|----------------------------------------------|
+| 0.2.0-draft.4 | 2026-05-27 | phux-4rj: `ClientCapabilities` HELLO payload appends `images: bitset<ImageProtocol>`, `kbd_protocols: bitset<KeyboardProtocol>`, and `hyperlinks: bool` after the existing `color` and `layers` bytes. Server downsampling now gates sixel/kitty/iTerm2 image escapes, kitty keyboard APC replies, and OSC 8 hyperlink framing directly from the negotiated `ClientCapabilities`. The phux-i58 TLV migration remains out of scope. |
+| 0.2.0-draft.3 | 2026-05-27 | phux-dmb: `RolePolicy` added to `ATTACH` and `ATTACH_TERMINAL` as an additive field. Terminal subscriptions now have `PRIMARY` / `VIEWER` roles; only the primary may send input or terminal-mutating commands. `TakeoverPolicy::DELIBERATE` is required to displace an existing primary; silent takeover is forbidden. |
+| 0.2.0-draft.2 | 2026-05-27 | phux-4li.10: L1 Terminal lifecycle frames wire-allocated (§7.2.1). C→S discriminants `SPAWN_TERMINAL = 0x22`, `TERMINAL_RESIZE = 0x23`; S→C `TERMINAL_CLOSED = 0xA1` (honours the spec-only reservation from §7.2), `TERMINAL_SPAWNED = 0xA2`. `SpawnResult` and `SpawnError` tagged unions allocated (`Ok = 0x00`/`Err = 0x01` for `SpawnResult` — the convention extends to future `Result<T, E>` reply frames; `CollectionNotFound = 0x00`/`SpawnFailed(str) = 0x01` for `SpawnError`, both `#[non_exhaustive]`). `TERMINAL_CLOSED.exit_status: optional<i32>` is a deliberately compact subset of §10.1's `ExitStatus` tagged union — `Some(n)` for `_exit(n)`, `None` for signal kills and unknown causes; the wider tagged union grows in a follow-up if needed. `TERMINAL_RESIZE` is per-Terminal PTY resize, sent in addition to `VIEWPORT_RESIZE`. Appendix B reserved-range guidance updated for `0x24..=0x2F` and `0xA3..=0xAF`. Server / client wire-up lands in follow-up tickets; the codec is wire-complete on this commit. |
+| 0.2.0-draft.1 | 2026-05-27 | phux-4li.2: L3 metadata frames wire-allocated. C→S discriminants `GET_METADATA = 0x50`, `SET_METADATA = 0x51`, `DELETE_METADATA = 0x52`, `LIST_METADATA = 0x53`, `SUBSCRIBE_METADATA = 0x54`; S→C `METADATA_CHANGED = 0xD0`. `Scope` tagged union allocated (`Terminal` tag 0x00, `Collection` tag 0x01, `Global` tag 0x02). `METADATA_CHANGED` carries the new value inline (`optional<bytes>`) — supersedes the earlier "consumers re-GET after notification" sketch. `ClientCapabilities.layers` now wire-encoded as a trailing `u8` after `color_support` (additive trailing field per SPEC §6, no version bump beyond the L3 allocation). `CollectionId(u32)` allocated; L2 (which defines its full tagged-union shape) is still TBD. Reply path for GET/LIST defers to the `COMMAND_RESULT` envelope (§11). |
+| 0.2.0-draft | 2026-05-27 | phux-vp0.4: `TerminalId` becomes a tagged union (`LOCAL { id: u32 }` tag=0, `SATELLITE { host: str, id: u32 }` tag=1) per ADR-0016. Every `TerminalId` field on the wire gains a 1-byte tag prefix; the reference snapshot fixtures (§16) re-baseline accordingly. `ErrorCode::UnsupportedSatelliteRoute = 106` is added (was already SPEC-reserved). v0.1 servers only construct `LOCAL`; v0.1 decoders MUST accept `SATELLITE` and, if not a federation hub, reply `ERROR { UnsupportedSatelliteRoute }`. PROTOCOL_VERSION bumped 0.1.0 → 0.2.0 (pre-1.0 wire break). |
+| 0.1.0-draft.7 | 2026-05-26 | L1 vocabulary cascade Wave C (phux-vp0.2). §7 catalog reorganized by tier (proto / L1 / L2 / L3); §7.L1 messages renamed `PANE_*` → `TERMINAL_*` and `pane_id` → `terminal_id` per ADR-0016 (wire bytes unchanged). §7.3/§7.4 declare L2 (Collections) and L3 (Metadata) as reserved tiers with TBD discriminants. §6.1 HELLO gains `layers: bitset<Layer>` inside `ClientCapabilities` / `ServerCapabilities` (Appendix A field-tag extensibility keeps the wire compatible). §10 collapses Sessions/Windows/Panes/Layout/Focus into §10.1 Terminal lifecycle and §10.2 Viewport resize; the demoted TUI vocabulary lands non-normative in new §17. §6.2 reclaims the `CC_FRONTEND` capability slot per ADR-0017. §14 renames `PANE_NOT_FOUND` → `TERMINAL_NOT_FOUND` (numeric discriminant 104 preserved). §16 conformance restructured per-tier (16.0 common, 16.1 L1, 16.2 L1+L3, 16.3 L1+L2+L3). No wire bytes changed; no version bump. |
+| 0.1.0-draft.6 | 2026-05-26 | Editorial: §7.1 / §7.2 message catalogs grow a `Tier` column mapping each message to its [ADR-0015](../../ADR/0015-protocol-layering.md) layer (`proto` / `L1` / `L2` / `tui→L3` / `cmd`); legend and tier-notes added. Previews the layered restructure that will rename `PANE_*` → `TERMINAL_*` ([ADR-0016](../../ADR/0016-terminal-id-as-wire-primary.md)) and demote `WINDOW_*` / `LAYOUT_CHANGED` / `FOCUS_CHANGED` out of the wire ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)). No bytes changed. |
+| 0.1.0-draft.5 | 2026-05-26 | Editorial: §7.1 / §7.2 message catalogs grow a `Status` column tracking reference-implementation coverage (informative, non-normative). No wire change. |
+| 0.1.0-draft.4 | 2026-05-26 | Post-ADR-0013 cleanup: §2 Frame term re-anchored on per-pane `seq`; §6.2 inline comment on deprecated `RenderingMode`; §11.1 ADR cross-reference points at ADR-0013; §12 flow control rewritten for `PANE_OUTPUT` / per-pane `seq` (was `PANE_DIFF` / `frame_id`); Appendix B reserved-range guidance drops `DiffOp`. |
+| 0.1.0-draft.3 | 2026-05-25 | §8 rewritten for bytes-on-wire pane state sync; `PANE_DIFF` superseded by `PANE_OUTPUT`; `PANE_SNAPSHOT` carries `vt_replay_bytes`; §6.2 capability downsampling described as a server-side VT byte stream rewrite; §13 replay sequence and §16 conformance updated. ADR-0013. |
+| 0.1.0-draft.2 | 2026-05-24 | §7.7, §9, §10.5 revised to mirror libghostty input/OSC APIs. ADR-0006. |
+| 0.1.0-draft | 2026-05-24 | Initial draft. Subject to change.            |

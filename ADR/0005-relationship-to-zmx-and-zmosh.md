@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0005 — Relationship to zmx and zmosh
+
+**TL;DR.** phux is greenfield relative to zmx and zmosh: we steal patterns (PTY supervision, journaling, libghostty idioms, frozen wire shapes) and share an ecosystem, but we do not share code or fork their codebases. Their single-session, one-daemon-per-session data model does not map cleanly to phux's multi-session forest.
 
 Status: Accepted
 Date: 2026-05-24
@@ -41,7 +49,7 @@ patterns rather than reinventing:
 - Binary IPC with a non-exhaustive tag enum for forward-compat
   (zmx's `_` arm pattern; mirrored in our codec).
 - Journaled raw output for crash recovery
-  ([`ARCHITECTURE.md`](../ARCHITECTURE.md)).
+  ([`docs/architecture/`](../docs/architecture/)).
 - libghostty-vt usage idioms (see zmx's `daemonLoop` and `util.zig`).
 - "Frozen wire shape" discipline for stable structs (our spec
   achieves this with field-IDed encoding; see `SPEC.md` Appendix A).

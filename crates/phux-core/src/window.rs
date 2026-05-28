@@ -6,7 +6,7 @@
 //! structure; [`Window::panes`] remains the insertion-ordered source of
 //! truth for which panes are in the window.
 //!
-//! Spec ref: `SPEC.md` §10.3 Layout (binary subset; `TABBED` is reserved for
+//! Spec ref: `docs/spec/L3.md` §3.2 Layout (binary subset; `TABBED` is reserved for
 //! a later version and is intentionally absent here).
 
 use std::collections::HashMap;

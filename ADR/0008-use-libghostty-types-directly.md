@@ -1,9 +1,19 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0008 — Use libghostty-vt's types directly; stop reimplementing them
 
-Status: Accepted. Supersedes parts of ADR-0002 (the
-"protocol-independent-of-emulator" stance) for input and style types;
-supersedes the discriminant-equality claim and the post-hoc divergence
-amendment in ADR-0006.
+**TL;DR.** Where libghostty already models a plain type (no allocator lifetime, no FFI handle), phux re-exports it directly: input atoms, mouse atoms, style atoms. No parallel enums, no discriminant-pin tests, no per-variant conversion. The narrow "protocol-independent-of-emulator" claim from ADR-0002 is narrowed to multiplexer domain types only.
+
+Status: Accepted
+
+This ADR supersedes parts of ADR-0002 (the
+"protocol-independent-of-emulator" stance) for input and style types,
+and supersedes the discriminant-equality claim and the post-hoc
+divergence amendment in ADR-0006.
 
 > **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002 in
 > full (pane content moves from structured cell diffs to VT bytes on

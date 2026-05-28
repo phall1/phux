@@ -1,4 +1,16 @@
+---
+audience: contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # Architecture Decision Records
+
+**TL;DR.** Index of every decision that has closed off a design space
+in phux. Format and `Status:` vocabulary defined in
+[`../docs/CONVENTIONS.md`](../docs/CONVENTIONS.md). Read these when
+you need to know *why* something is the way it is — the architecture
+docs describe *what* the code is.
 
 We write down decisions so future contributors (including future-us) can
 understand why the system is the way it is. Format follows [Michael

@@ -1,6 +1,14 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0012 — Window layout is a binary split tree, not n-ary
 
-Status: Accepted.
+**TL;DR.** The reference TUI's layout is a binary split tree: every interior node is `Split { dir, ratio, left, right }` with exactly two children and `ratio: f32` in the open interval `(0.0, 1.0)`. Tree operations and wire encoding stay mechanical. A future `TABBED` variant is reserved but deliberately absent. Under ADR-0015 this is a TUI convention, not a wire concept.
+
+Status: Accepted
 Date: 2026-05-25
 
 > **Update 2026-05-26:** [ADR-0015](./0015-protocol-layering.md)

@@ -1,4 +1,4 @@
-//! Snapshot-graph types delivered with `ATTACHED` per `SPEC.md` §13.
+//! Snapshot-graph types delivered with `ATTACHED` per `docs/spec/L1.md` §7.
 //!
 //! SPEC §13 references `SessionInfo`, `WindowInfo`, `TerminalInfo`, and
 //! `SessionSnapshot` but does not define their fields. This module fills that
@@ -396,7 +396,7 @@ impl SessionSnapshot {
 
 // -----------------------------------------------------------------------------
 // Encoding helpers. Positional; same conventions as `wire::frame`.
-// SPEC.md Appendix A mandates TLV — tracked in phux-i58.
+// docs/spec/appendix-encoding.md mandates TLV — tracked in phux-i58.
 // -----------------------------------------------------------------------------
 
 pub(super) const fn encode_split_dir(dir: SplitDir) -> u8 {

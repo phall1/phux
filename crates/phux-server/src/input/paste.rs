@@ -11,7 +11,7 @@
 //! 3. Encodes via `paste::encode`, choosing the `bracketed` flag from the
 //!    pane's DEC mode 2004 state.
 //!
-//! See `SPEC.md` §9.4 and ADR-0006.
+//! See `docs/spec/input.md` §5 and ADR-0006.
 
 use libghostty_vt::{
     Error, Terminal,

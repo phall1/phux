@@ -1,3 +1,13 @@
+---
+audience: contributors, agents
+stability: scratch
+last-reviewed: 2026-05-28
+---
+
+> **Archived 2026-05-28.** Ratified by [ADR-0018](../../ADR/0018-lazy-state-synchronization.md).
+> Preserved here for the research record; not the authoritative source.
+> For current behavior see the ADR.
+
 # State synchronization for libghostty Terminals: algorithm composition
 
 **Date:** 2026-05-26 (substantially revised 2026-05-26; see "Revision
@@ -420,7 +430,7 @@ piggybacked timestamps on `FRAME_ACK`. Small.
   for any terminal that's emitted image content recently.
 
 - **TUI predictive echo composition.** Predictive echo is the
-  client-side overlay (ARCHITECTURE.md). State-sync server-side is
+  client-side overlay (docs/architecture/predictive-echo.md). State-sync server-side is
   orthogonal — predictive cells live in the overlay on top of the
   mirror; the mirror tracks server-acked state. They compose cleanly.
 

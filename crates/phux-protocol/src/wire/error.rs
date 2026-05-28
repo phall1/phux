@@ -1,13 +1,13 @@
 //! Wire decode errors.
 //!
-//! Owned by phux-6yl.4. See `SPEC.md` §5 and Appendix A.
+//! Owned by phux-6yl.4. See `docs/spec/proto.md` §5 and `docs/spec/appendix-encoding.md`.
 
 use thiserror::Error;
 
 /// Errors that can occur while decoding a wire frame.
 ///
 /// Every variant corresponds to a malformed-input condition that the decoder
-/// MUST surface without panicking. See `SPEC.md` §5 (framing) and Appendix A
+/// MUST surface without panicking. See `docs/spec/proto.md` §5 (framing) and Appendix A
 /// (encoding primitives).
 /// `PartialEq` is implemented but **not** `Eq` because
 /// [`Self::MalformedLayoutRatio`] carries an `f32`. Two `MalformedLayoutRatio`
@@ -35,7 +35,7 @@ pub enum DecodeError {
     },
 
     /// A declared length prefix would, if accepted, exceed the remaining
-    /// buffer or the protocol's hard frame-size cap of 16 MiB (`SPEC.md` §5).
+    /// buffer or the protocol's hard frame-size cap of 16 MiB (`docs/spec/proto.md` §5).
     #[error("declared length exceeds buffer or protocol cap")]
     LengthOverflow,
 

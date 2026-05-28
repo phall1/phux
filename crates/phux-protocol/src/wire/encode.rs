@@ -1,6 +1,6 @@
 //! Wire-frame encoder. Writes into `&mut bytes::BytesMut`.
 //!
-//! Owned by phux-6yl.4. See `SPEC.md` Appendix A.
+//! Owned by phux-6yl.4. See `docs/spec/appendix-encoding.md`.
 //!
 //! All multi-byte integers are encoded **big-endian**. Strings and byte
 //! sequences are length-prefixed with a `u32` big-endian count. The encoder
@@ -77,7 +77,7 @@ impl<'a> Encoder<'a> {
     ///
     /// Bit-for-bit encoding via [`f64::to_be_bytes`] — preserves NaNs and
     /// signed zeros. Used by mouse events whose pane-local positions are
-    /// pixel-precise per SPEC.md §9.2.1.
+    /// pixel-precise per docs/spec/input.md §3.1.
     pub fn write_f64_be(&mut self, value: f64) {
         self.buf.extend_from_slice(&value.to_be_bytes());
     }

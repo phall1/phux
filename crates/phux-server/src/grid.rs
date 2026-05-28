@@ -163,7 +163,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     ///
     /// Per ADR-0018 (Lazy state synchronization) and its 2026-05-26
     /// Addendum, this is the per-tick emission primitive. It follows the
-    /// 5-step algorithm from `research/2026-05-26-state-sync-algorithm.md`
+    /// 5-step algorithm from `research/archive/2026-05-26-state-sync-algorithm.md`
     /// Dependencies §2:
     ///
     /// 1. `render_state.update(terminal)` to refresh dirty state.

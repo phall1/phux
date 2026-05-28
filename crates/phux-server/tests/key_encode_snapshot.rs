@@ -8,7 +8,7 @@
 //! surface as a visible diff in PR review.
 //!
 //! Coverage spans the KIP / fixterms / modifyOtherKeys matrix at the
-//! encoder boundary. See SPEC.md §9.1.6.
+//! encoder boundary. See docs/spec/input.md §2.6.
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]

@@ -1,4 +1,12 @@
+---
+audience: contributors
+stability: stable
+last-reviewed: 2026-05-28
+---
+
 # 0010 — phux is frontend-agnostic; tmux control mode reserved as compat option
+
+**TL;DR.** phux's native wire is the primary and only required frontend protocol; tmux control mode is not on the roadmap. The architecture must not preclude a second frontend — domain code is frontend-agnostic, rendering goes through one seam, and a future CC adapter is purely additive. ADR-0017 later reclaims the `CC_FRONTEND` capability bit reserved here.
 
 > **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002 —
 > pane content moves from structured cell diffs to VT bytes on the
@@ -21,8 +29,7 @@
 > Inline prose below has been touched up where it leaned specifically
 > on cell-diff terminology; the conclusion is unchanged.
 
-Status: Accepted (forward-compat invariants); CC adapter not on the
-roadmap.
+Status: Accepted (forward-compat)
 Date: 2026-05-25
 
 > **Update 2026-05-26:** [ADR-0017](./0017-tui-not-protocol-privileged.md)

@@ -263,7 +263,7 @@ pub fn split_at(
 /// Centralised handler for the `#[non_exhaustive]` wildcard arms on
 /// matches over [`LayoutNode`]. v0.1 only knows `Leaf` and `Split`;
 /// any future variant would need a corresponding update here and a
-/// wire-protocol bump (see SPEC.md). Reached only via a forward-
+/// wire-protocol bump (see docs/spec/). Reached only via a forward-
 /// compatible decode from a newer server.
 //
 // `clippy::panic` is workspace-denied to keep production panics rare,

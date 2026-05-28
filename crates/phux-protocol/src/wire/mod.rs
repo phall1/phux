@@ -1,4 +1,4 @@
-//! Wire codec — length-prefixed TLV framing per `SPEC.md` Appendix A.
+//! Wire codec — length-prefixed TLV framing per `docs/spec/appendix-encoding.md`.
 //!
 //! All multi-byte integers are big-endian. Frames are length-prefixed.
 //! Field IDs and message types match SPEC §7's catalog.

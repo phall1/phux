@@ -1,6 +1,6 @@
 //! Wire protocol for phux.
 //!
-//! This crate defines the protocol described in [`SPEC.md`] at the workspace
+//! This crate defines the protocol described in [`docs/spec/`] at the workspace
 //! root: framing, message catalog, version negotiation, and the VT-bytes-on-
 //! wire terminal content shape (per [ADR-0013]).
 //!
@@ -18,7 +18,7 @@
 //!   (where git-only deps like `libghostty-vt` are disallowed) and
 //!   rendered on docs.rs.
 //!
-//! [`SPEC.md`]: https://github.com/phall1/phux/blob/main/SPEC.md
+//! [`docs/spec/`]: https://github.com/phall1/phux/tree/main/docs/spec
 //! [ADR-0008]: https://github.com/phall1/phux/blob/main/ADR/0008-use-libghostty-types-directly.md
 //! [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 

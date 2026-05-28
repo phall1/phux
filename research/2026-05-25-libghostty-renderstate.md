@@ -1,4 +1,16 @@
+---
+audience: contributors, agents
+stability: scratch
+last-reviewed: 2026-05-28
+---
+
 # Libghostty RenderState + dirty tracking — how phux uses it on both ends
+
+**TL;DR.** Capability survey of `libghostty-vt`'s `RenderState` read API
+and its two-tier (global + per-row) dirty bits. Describes the contract,
+the call sequence, and how the phux renderer side — client for displayed
+panes, server for snapshot synthesis on attach — drives one
+`RenderState` per pane. Reference for Wave 3 work landing ADR-0013.
 
 **Status**: Research artifact. Forward-looking documentation for the Wave 3
 server + client refactor that lands ADR-0013. See ADR-0013 for the decision;
@@ -256,5 +268,6 @@ style snapshot synthesis."
   `PANE_SNAPSHOT` wire shape.
 - SPEC §13 — attach replay sequence; the snapshot algorithm above
   produces the `vt_replay_bytes` that section references.
-- [ARCHITECTURE.md](../ARCHITECTURE.md) §"Wire protocol: bytes on
-  the wire" — the architectural framing this note complements.
+- [docs/architecture/crate-graph.md](../docs/architecture/crate-graph.md)
+  §"Wire bytes: implementation participation" — the architectural
+  framing this note complements.

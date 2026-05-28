@@ -31,7 +31,7 @@
 //!
 //! ### Placement
 //!
-//! Defaults to [`Position::Bottom`] per `DESIGN.md` §8.5. `Position::Top`
+//! Defaults to [`Position::Bottom`] per `docs/consumers/tui.md` §8.5. `Position::Top`
 //! is reserved for a future config knob — no TOML key surfaces it today.
 
 use std::io::{self, Write};
@@ -42,7 +42,7 @@ use ratatui::buffer::{Buffer, Cell as RatatuiCell};
 use ratatui::layout::Rect;
 
 /// Where the status bar lives in the outer terminal. Defaults to
-/// [`Self::Bottom`] per `DESIGN.md` §8.5.
+/// [`Self::Bottom`] per `docs/consumers/tui.md` §8.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
     /// One row at the very bottom of the outer terminal.

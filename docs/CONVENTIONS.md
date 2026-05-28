@@ -1,0 +1,294 @@
+---
+audience: contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+---
+
+# Doc conventions
+
+**TL;DR.** Every fact lives in exactly one doc. Each doc has a job and
+links to the others instead of restating them. Files declare their
+audience, stability, and last-reviewed date in YAML frontmatter. CI
+checks that the metadata is present and the links resolve. Read this
+file before adding a doc, moving a doc, or asking "where should this
+paragraph go."
+
+---
+
+## The doc system in one diagram
+
+```
+Orientation (cold-open, ~5 files, stable, ruthlessly small)
+  README.md ─────────────► landing page + router
+  docs/CONCEPTS.md ──────► canonical "what is phux"
+  docs/QUICKSTART.md ────► run it
+  CONTRIBUTING.md ───────► how to work in the repo
+  AGENTS.md, CLAUDE.md ──► agent shell hygiene, loaded every turn
+
+Reference (one source of truth per concept, addressable)
+  docs/spec/ ────────────► normative wire (proto / L1 / L2 / L3 / appendices)
+  docs/architecture/ ────► process model, threading, transport, etc.
+  docs/consumers/ ───────► tui.md, sdk.md (per consumer surface)
+  docs/operations.md ────► errors, logging, telemetry, security
+
+Decision (one decision per file, strict)
+  ADR/ ──────────────────► Nygard template, ~150 line cap
+
+Discipline (this file + CI)
+  docs/CONVENTIONS.md ───► you are here
+  scripts/check-docs.sh ─► mechanical enforcement
+  just docs-check ───────► wired into `just ci`
+```
+
+Anything that's not in those four layers is scratch (see
+[research/](#research-and-scratch-content) below).
+
+---
+
+## One fact, one home
+
+The single recurring failure mode of the previous doc tree was the same
+fact landing in four files and drifting independently. Each layer above
+has a **single owner** for each kind of content:
+
+| Question | Owner | Don't restate it in |
+|---|---|---|
+| What is phux? | `docs/CONCEPTS.md` | README, VISION, ARCH, DESIGN |
+| What's the wire byte? | `docs/spec/*` | ARCH, ADRs (link instead) |
+| How does the server process model work? | `docs/architecture/process-model.md` | SPEC, READMEs |
+| What does the TUI's keybind syntax look like? | `docs/consumers/tui.md` | SPEC, README |
+| Why did we pick X over Y? | `ADR/NNNN-*.md` | Anywhere else |
+| What's the long arc? | `docs/vision.md` | README, CONCEPTS (link only) |
+
+If you find yourself writing a paragraph that already exists somewhere
+else, **link instead**. If the existing version is wrong, fix it in
+place — don't fork.
+
+---
+
+## Frontmatter (required on every doc)
+
+Every Markdown file under `docs/`, `ADR/`, `research/`, and every
+top-level `.md` (AGENTS, CLAUDE, CONTRIBUTING) starts with YAML
+frontmatter:
+
+```yaml
+---
+audience: <one or more of: humans | agents | consumers | contributors>
+stability: <stable | evolving | scratch>
+last-reviewed: YYYY-MM-DD
+---
+```
+
+**The repo-root `README.md` is the one exception.** It is the project
+landing page on GitHub and on a future docs site; visible YAML at the
+top degrades the first impression. The README declares the same
+metadata via an HTML comment instead:
+
+```html
+<!--
+audience: humans, contributors, agents
+stability: stable
+last-reviewed: 2026-05-28
+-->
+```
+
+The `check-docs.sh` gate accepts this form for `README.md` only.
+
+Field semantics:
+
+- **`audience`**. Who is this written for? Comma-separated if more than
+  one. The four values:
+  - `humans` — end users (eventual; rare today)
+  - `agents` — AI coding agents loaded into context every turn
+  - `consumers` — downstream implementers of `phux-protocol`
+  - `contributors` — people working in this repo
+- **`stability`**. How often is this expected to change?
+  - `stable` — changes are rare, reviewed carefully. README, CONCEPTS,
+    the SPEC files, accepted ADRs.
+  - `evolving` — actively in flux. Subcommand docs while the CLI
+    surface is still settling.
+  - `scratch` — work-in-progress, not authoritative. `research/`.
+- **`last-reviewed`**. ISO date of the last full read-through.
+  Bump it when you've verified the file is still correct end-to-end,
+  not when you've made a small edit. This is the freshness signal CI
+  surfaces to agents.
+
+There is no `last-updated` field — `git log` already answers that and
+mechanical edits shouldn't reset freshness.
+
+---
+
+## TL;DR block (required on every doc)
+
+The first H1 is followed by a `**TL;DR.**` paragraph of roughly 50
+words (hard cap: 75). It is the summary that:
+
+- Lets a returning reader page in the gist before deciding to read on
+- Lets an AI agent load only the summaries of many docs into context
+  and decide which to expand
+
+Rules:
+
+- Self-contained — readable without the rest of the doc
+- States the doc's *job*, not its outline. Bad: "covers sections on X,
+  Y, Z." Good: "the normative L1 Terminal-substrate frames; every L1
+  consumer implements these."
+- No links inside the TL;DR. If you need to link, you're describing the
+  outline, not the job.
+
+---
+
+## Where new content goes
+
+A flowchart for "I have something to write":
+
+1. **Is it a decision** — picking between viable options, or saying no
+   to a design? → ADR.
+2. **Is it a wire byte, frame, or normative behavior**? → `docs/spec/`.
+3. **Is it the internal process / data / threading model**? →
+   `docs/architecture/`.
+4. **Is it a user-facing surface of a specific consumer** (the TUI's
+   keybinds, the SDK's API)? → `docs/consumers/`.
+5. **Is it errors, logging, telemetry, security**? →
+   `docs/operations.md`.
+6. **Is it the long arc / future shape**? → `docs/vision.md`.
+7. **Is it "what is phux"**? → `docs/CONCEPTS.md`. Nowhere else.
+8. **Is it the landing page / router**? → `README.md`.
+9. **Is it scratch research that hasn't crystallized**? →
+   `research/`, with `stability: scratch`.
+
+If you can't place it on the flowchart, the doc system is missing a
+home. File a bd ticket against the `[epic]` docs-restructure (phux-dfz)
+or its successor before inventing a new top-level `.md`.
+
+---
+
+## ADR template
+
+```markdown
+---
+audience: contributors
+stability: stable
+last-reviewed: YYYY-MM-DD
+---
+
+# NNNN — Short title
+
+**TL;DR.** ~50 words: the decision, in one paragraph.
+
+Status: <controlled vocabulary — see below>
+Date: YYYY-MM-DD
+
+## Context
+What is the situation that calls for a decision?
+
+## Decision
+What was decided.
+
+## Why
+Why this and not the alternatives. Be specific — "performance" is not
+a reason.
+
+## Tradeoffs
+What we give up. Often the most useful section to future-you.
+
+## Alternatives
+One short paragraph per real alternative. Not an essay.
+```
+
+Hard cap: **~150 lines**. If a decision needs more, the body belongs in
+`docs/architecture/` and the ADR points at it.
+
+### `Status:` controlled vocabulary
+
+One line. Exactly one of:
+
+- `Accepted`
+- `Accepted (forward-compat)` — the invariants are committed to, the
+  implementation is deferred to a later milestone
+- `Superseded by ADR-NNNN`
+- `Deprecated`
+
+No multi-line statuses. No prose qualifiers on the line. If a
+qualification is important, it goes in the TL;DR or the body.
+
+### When to write an ADR
+
+- Picking between viable approaches with long-term consequences.
+- Closing off a design space (deciding *against* something).
+- Anything you'd want to explain to a new contributor on day one.
+
+### When NOT to write an ADR
+
+- Bug fixes.
+- Refactors that don't change behavior.
+- Anything purely internal to a single function.
+- "I made a small architectural tweak." — that's a code comment or a
+  PR description, not an ADR.
+
+---
+
+## Style rules
+
+- **No emojis in committed files.** Plain prose only. (Inherited from
+  CONTRIBUTING.md and the existing repo norm.)
+- **No future-tense in stable docs.** If `docs/architecture/` describes
+  something not yet implemented, say so explicitly — don't write as if
+  it exists. (`evolving` stability is the safety valve.)
+- **Wire docs use SHALL / SHOULD / MAY** per RFC 2119, only in
+  `docs/spec/`. Outside the spec, prefer plain prose.
+- **Cross-reference by relative path**, not by URL. CI will catch dead
+  links.
+- **Don't restate the type system.** Module and item docs explain
+  *intent* (why this exists, what the constraint is, who calls it).
+  The type signature already explains *what*.
+
+---
+
+## CI enforcement (`just docs-check`)
+
+The discipline layer is mechanically checked. See
+[`scripts/check-docs.sh`](../scripts/check-docs.sh). Current gates:
+
+| Gate | What it catches |
+|---|---|
+| frontmatter-present | A doc missing the YAML header |
+| frontmatter-valid | Invalid `audience` / `stability` / `last-reviewed` |
+| tldr-present | A doc whose first non-header content isn't `**TL;DR.**` |
+| dead-link | A relative link that doesn't resolve |
+| adr-status | An ADR with a non-vocabulary `Status:` line |
+| spec-version-sync | `docs/spec/CHANGELOG.md` head version vs `phux-protocol`'s declared protocol version |
+
+All run under `just docs-check`, which is in `just ci`. Adding a check
+is welcome — open a PR against `scripts/check-docs.sh` and reference
+this file.
+
+---
+
+## Research and scratch content
+
+`research/` is the explicit scratch tier. Files there:
+
+- Have `stability: scratch` in their frontmatter
+- Are NOT linked from any `stable` doc
+- Get moved to `research/archive/` (or deleted) when ratified by an ADR
+  or absorbed into a reference doc
+
+If a research note has been overtaken by an ADR, leave a top banner
+pointing at the ADR before archiving, so search hits land somewhere
+useful.
+
+---
+
+## When this file is wrong
+
+You found a case where:
+
+- The flowchart doesn't have a home for a real piece of content
+- A "one home" rule is creating perverse linking
+- A CI gate is too strict (or too loose) for a real workflow
+
+File a ticket against the docs epic (or its successor) before
+inventing a workaround in tree. This file is the contract; drift here
+turns the whole system back into the mess it replaced.

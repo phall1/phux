@@ -10,7 +10,7 @@
 //!
 //! Layout: three slots from [`StatusCfg`] — `left`, `center`, `right` —
 //! each a list of widgets rendered with no implicit separator (per
-//! `DESIGN.md` §8.4). Slots are concatenated independently, then
+//! `docs/consumers/tui.md` §8.4). Slots are concatenated independently, then
 //! placed:
 //!
 //! - `left` flush at column 0,

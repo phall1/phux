@@ -56,8 +56,8 @@ id_type!(
     /// Identifier for a Collection (L2), the named lifecycle bundle of
     /// Terminals described in SPEC §7.3.
     ///
-    /// L2 is not yet wire-allocated (`SPEC.md` §7.3 discriminants are TBD)
-    /// but the L3 metadata wire frames (`SPEC.md` §7.4) reference
+    /// L2 is not yet wire-allocated (`docs/spec/proto.md` §7.2 discriminants are TBD)
+    /// but the L3 metadata wire frames (`docs/spec/L3.md` §1) reference
     /// `CollectionId` in the `Scope::Collection` variant, so the type is
     /// allocated here as part of phux-4li.2. Until L2 ships, v0.1 servers
     /// use a single static default `CollectionId(1)` and accept it in

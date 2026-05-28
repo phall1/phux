@@ -1,27 +1,45 @@
-# Design — Reference TUI
+---
+audience: humans, contributors, agents
+stability: evolving
+last-reviewed: 2026-05-28
+---
 
-This document describes the **reference TUI consumer's product surface**:
-the things a tmux-shaped phux user sees and configures. It is not
-normative — `SPEC.md` is. Where this document conflicts with `SPEC.md`,
-the spec wins; file an issue.
+# The phux reference TUI
+
+**TL;DR.** The reference TUI's consumer-facing surface: subcommands,
+keybinds, status bar, layout, hooks, recording. The TUI is one consumer
+of the phux wire spec; it has no protocol-level privileges (see
+[ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)). What's
+normative lives in [`../spec/`](../spec/) — this file is the
+human-facing reference for the tmux-shaped consumer that ships in tree.
+
+---
+
+## 0. What this is, what this isn't
+
+This document is the **reference TUI consumer's product surface**: the
+things a tmux-shaped phux user sees and configures. It describes how a
+user invokes the TUI, configures it, binds keys to it, reads its status
+output, and extends it. It is not the phux substrate; it is one of
+several consumers that ride the substrate. Where this document conflicts
+with the normative wire spec under [`../spec/`](../spec/), the spec
+wins; file an issue.
 
 The TUI is one consumer of the phux wire among several
-([ADR-0017](./ADR/0017-tui-not-protocol-privileged.md)). Other
-consumers — an agent SDK, a future native GUI — get their own design
-docs. The TUI's specialness is that it ships in tree as the
-human-facing reference; nothing on the wire exists for it alone.
+([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)). Other
+consumers — an agent SDK, a future native GUI — get their own files
+under [`docs/consumers/`](./). The TUI's specialness is that it ships in
+tree as the human-facing reference; nothing on the wire exists for it
+alone.
 
-For the long arc, read [`VISION.md`](./VISION.md). For the wire
-protocol, see [`SPEC.md`](./SPEC.md). For internal structure,
-[`ARCHITECTURE.md`](./ARCHITECTURE.md). This document is everything
-between: how a user invokes the TUI, configures it, binds keys to it,
-reads its status output, and extends it.
-
-## How the TUI's user model maps to the substrate
+For the long arc, read [`../vision.md`](../vision.md). For the wire
+protocol, see [`../spec/`](../spec/). For internal structure, see
+[`../architecture/`](../architecture/). This document is everything
+between.
 
 The user-facing vocabulary is tmux's because it's what people know.
 Under the hood, each TUI concept maps to one or more substrate
-concepts from [ADR-0015](./ADR/0015-protocol-layering.md):
+concepts from [ADR-0015](../../ADR/0015-protocol-layering.md):
 
 | TUI vocabulary | Substrate mapping |
 |---|---|
@@ -152,10 +170,10 @@ $XDG_STATE_HOME/phux/               # design intent; not yet implemented
 ```
 
 Today only the socket is real (see
-[`phux-server::runtime::default_socket_path`](./crates/phux-server/src/runtime.rs)).
+[`phux-server::runtime::default_socket_path`](../../crates/phux-server/src/runtime.rs)).
 The state-dir layout matches what
-[`ARCHITECTURE.md`](./ARCHITECTURE.md#process-model) describes; both
-docs treat it as the destination shape.
+[`../architecture/process-model.md`](../architecture/process-model.md)
+describes; both docs treat it as the destination shape.
 
 ### 4.2 Format
 
@@ -279,8 +297,8 @@ hyper/super at all. Users on Ghostty can opt in.
 
 ### 5.2 The dispatcher
 
-Bindings invoke **actions**. Actions are typed `Command`s from `SPEC.md`
-§11 plus a small set of client-side actions (detach, message-prompt,
+Bindings invoke **actions**. Actions are typed `Command`s from the wire
+spec (see [`../spec/L1.md`](../spec/L1.md) §5) plus a small set of client-side actions (detach, message-prompt,
 copy-selection-to-clipboard). They are *not* shell strings; they are
 named identifiers with typed parameters.
 
@@ -339,8 +357,10 @@ Users with strong opinions override it in one line of config.
 A window's layout is a **binary split tree**: each interior node is a
 split (horizontal or vertical) with a single `ratio` in `(0, 1)` and
 exactly two children; leaves are panes. Three-way and N-way splits
-are represented as nested binary splits. See ADR-0012 for the closed
-decision behind this shape and SPEC §10.3 for the wire form.
+are represented as nested binary splits. See
+[ADR-0012](../../ADR/0012-binary-split-tree-layout.md) for the closed
+decision behind this shape and the wire form in
+[`../spec/L3.md`](../spec/L3.md) §3.2.
 
 ```
 window: split(vertical, ratio = 0.5)
@@ -353,13 +373,14 @@ window: split(vertical, ratio = 0.5)
 (The first ratio gives pane #0 the top half of the window; the second
 gives pane #1 the left third of the bottom half.)
 
-Tabbed layout nodes are reserved for `SPEC.md` v0.2.
+Tabbed layout nodes are reserved for the v0.2 wire spec (see
+[`../spec/CHANGELOG.md`](../spec/CHANGELOG.md)).
 
 The client-side rendering surface for this tree — multi-pane tiling,
 borders, focus chrome, input routing to the focused pane, layout
 persistence in L3 metadata under `phux.tui.layout/v1`, and the
 keybind-action wiring — is settled by
-[ADR-0019](./ADR/0019-tui-multi-pane-rendering.md) and tracked under
+[ADR-0019](../../ADR/0019-tui-multi-pane-rendering.md) and tracked under
 the `phux-4li` epic.
 
 ### 6.2 Resize behavior
@@ -676,7 +697,8 @@ These are not in v0.1 but the design accommodates them so they don't
 require breaking changes:
 
 - **Resilient remote transport** (zmosh-style UDP/SSP). Hooks into the
-  `Transport` abstraction in `SPEC.md` §4.
+  `Transport` abstraction in the wire spec (see
+  [`../spec/proto.md`](../spec/proto.md) §4).
 - **Native GUI client** (libghostty surface). Talks the same protocol
   as the TUI client — the client's `libghostty_vt::Terminal` already
   parses `PANE_OUTPUT` bytes locally (ADR-0013); a GUI client swaps
@@ -685,12 +707,13 @@ require breaking changes:
 - **Multi-user shared sessions.** Today's protocol already supports
   multiple clients per session; ACL and identity will be a future
   authenticated transport addition.
-- **Tabbed layouts** (nested tab containers). `SPEC.md` §10.3 reserves
+- **Tabbed layouts** (nested tab containers). The wire spec (see
+  [`../spec/L3.md`](../spec/L3.md) §3.2) reserves
   the `TABBED` layout node.
 - **Image protocols** (sixel, kitty graphics). Under ADR-0013 these
   ride on the `PANE_OUTPUT` byte stream like any other VT sequence;
   per-client gating happens in the server's capability rewriter
-  (SPEC §6.2). The `Sixel` / `KittyGraphics` / `Iterm2` capability
+  (see [`../spec/proto.md`](../spec/proto.md) §6.2). The `Sixel` / `KittyGraphics` / `Iterm2` capability
   bits already exist; the work is in the rewriter, not the wire
   format.
 - **tmux control mode (CC) frontend.** Optional adapter that would let
@@ -699,8 +722,9 @@ require breaking changes:
   terminal. The native byte-stream protocol (ADR-0013) stays primary
   and strictly more capable; CC is one possible alternative consumer,
   not a roadmap commitment. Per
-  [ADR-0017](./ADR/0017-tui-not-protocol-privileged.md) the
+  [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md) the
   reference TUI has no protocol-level privilege, so a CC adapter
   picks its tier set (typically L1+L3) the same way the native TUI
-  does. The earlier `CC_FRONTEND` capability bit in `SPEC.md` §6.2
+  does. The earlier `CC_FRONTEND` capability bit in the wire spec
+  (see [`../spec/proto.md`](../spec/proto.md) §6.2)
   is **reclaimed** under ADR-0017; no capability bit is needed.
