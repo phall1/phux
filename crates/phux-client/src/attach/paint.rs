@@ -123,16 +123,31 @@ pub(super) fn paint_full_frame(
     if let Some((row, col)) = final_cursor {
         let one_based_row = row.saturating_add(1);
         let one_based_col = col.saturating_add(1);
+        tracing::trace!(
+            row,
+            col,
+            "paint_full_frame: restore cursor to focused last_cursor"
+        );
         let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
-    } else if let Some(fid) = focused_pane {
-        // No authoritative cursor (fresh attach pre-OUTPUT, or libghostty
-        // reported the cursor hidden). Park inside the focused pane's
-        // Rect and hide — next TERMINAL_OUTPUT will lift visibility.
-        if let Some(rect) = multi.rects.get(fid) {
-            let one_based_row = rect.y.saturating_add(1);
-            let one_based_col = rect.x.saturating_add(1);
-            let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
-        }
+    } else {
+        // No authoritative cursor. Park at the focused pane's Rect
+        // origin if we have one, otherwise top-left of the viewport.
+        // Always emit a CUP so the cursor never strands at the bar's
+        // tail (bottom-right) — that was phux-gxy's visible symptom
+        // when focused_pane was None and the bar repaint owned the
+        // final escape on the wire.
+        let (x, y) = focused_pane
+            .and_then(|fid| multi.rects.get(fid).copied())
+            .map_or((0, 0), |r| (r.x, r.y));
+        let one_based_row = y.saturating_add(1);
+        let one_based_col = x.saturating_add(1);
+        tracing::trace!(
+            row = y,
+            col = x,
+            focused_pane_set = focused_pane.is_some(),
+            "paint_full_frame: no last_cursor, parking at fallback hidden"
+        );
+        let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
     }
 }
 
@@ -185,6 +200,7 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     if let Some((row, col)) = restore_cursor {
         let one_based_row = row.saturating_add(1);
         let one_based_col = col.saturating_add(1);
+        tracing::trace!(row, col, "paint_bar_after_pane: restore cursor");
         let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
     } else if let Some((x, y)) = fallback_origin {
         // No authoritative cursor: park inside the focused pane and
@@ -192,7 +208,15 @@ pub(super) fn paint_bar_after_pane<W: Write>(
         // visibility back up via its own DECTCEM emit.
         let one_based_row = y.saturating_add(1);
         let one_based_col = x.saturating_add(1);
+        tracing::trace!(x, y, "paint_bar_after_pane: fallback origin (hidden)");
         let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
+    } else {
+        // Both None — historically a no-op (caller promised to own
+        // cursor placement after). But every observed caller of this
+        // shape strands the cursor at the bar's last cell. Park at
+        // top-left hidden as a safety net.
+        tracing::trace!("paint_bar_after_pane: both None, parking at (0,0) hidden");
+        let _ = write!(out, "\x1b[1;1H\x1b[?25l");
     }
 }
 
@@ -287,22 +311,24 @@ mod tests {
     }
 
     /// When `restore_cursor` is None AND `fallback_origin` is None,
-    /// the helper paints the bar but emits no CUP — the caller
-    /// (e.g. `paint_full_frame`) takes over cursor placement via a
-    /// follow-up pane render.
+    /// the helper now parks the cursor at (0,0) hidden as a safety
+    /// net. The old behavior (no CUP) stranded the cursor at the
+    /// bar's last cell — bottom-right of the host terminal — when no
+    /// follow-up paint owned final placement (phux-gxy).
     #[test]
-    fn paint_bar_after_pane_emits_no_cup_when_both_none() {
+    fn paint_bar_after_pane_parks_at_top_left_hidden_when_both_none() {
         let mut painter = build_painter();
         let mut out = Vec::new();
         paint_bar_after_pane(Some(&mut painter), &mut out, (80, 24), "demo", None, None);
         let s = String::from_utf8_lossy(&out);
         // Bar CUP to row 24 must be present (the bar still paints).
         assert!(s.contains("\x1b[24;1H"), "bar CUP missing; out = {s:?}");
-        // But no DECTCEM toggle from this helper.
+        // Safety-net CUP to (0,0) followed by hide.
         assert!(
-            !s.contains("\x1b[?25l"),
-            "unexpected ?25l in both-none path; out = {s:?}"
+            s.contains("\x1b[1;1H\x1b[?25l"),
+            "safety-net CUP+?25l missing; out = {s:?}"
         );
+        // Must NOT show cursor.
         assert!(
             !s.contains("\x1b[?25h"),
             "unexpected ?25h in both-none path; out = {s:?}"

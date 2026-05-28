@@ -89,6 +89,10 @@ pub(super) fn handle_server_frame(
             // Capture the initial focused pane so subsequent INPUT_* frames
             // know where to route.
             let bootstrap = snapshot.focused_pane;
+            tracing::debug!(
+                terminal_id = ?bootstrap,
+                "ATTACHED: seeding focused_pane from snapshot"
+            );
             *focused_pane = Some(bootstrap.clone());
             // phux-4li.4: seed the layout mirror with a single leaf so
             // the existing single-pane render path keeps working. The
