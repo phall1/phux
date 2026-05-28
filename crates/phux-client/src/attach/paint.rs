@@ -94,9 +94,6 @@ pub(super) fn paint_full_frame(
         }
     }
     let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
-    // `paint_full_frame` paints the focused pane AFTER the bar, so the
-    // focused pane's `render_at` owns final cursor placement. No
-    // fallback needed here.
     paint_bar_after_pane(
         status_bar,
         &mut stdout,
@@ -105,7 +102,15 @@ pub(super) fn paint_full_frame(
         None,
         None,
     );
-    let _ = focused_pane.and_then(|fid| {
+    // Paint the focused pane LAST so its render_at owns final cursor
+    // placement. But render_at may be a no-op (slot missing, or the
+    // libghostty Terminal grid has no diffs to emit), in which case
+    // the cursor is still wherever the bar's final write parked it —
+    // bottom-right of the host terminal. Capture `paint_focused_pane`'s
+    // last_cursor and always emit an explicit cursor placement so the
+    // frame ends with a deterministic cursor position regardless of
+    // whether render_at touched the cursor. See phux-gxy.
+    let final_cursor = focused_pane.and_then(|fid| {
         paint_focused_pane(
             &mut stdout,
             layout_state,
@@ -115,6 +120,20 @@ pub(super) fn paint_full_frame(
             has_bar,
         )
     });
+    if let Some((row, col)) = final_cursor {
+        let one_based_row = row.saturating_add(1);
+        let one_based_col = col.saturating_add(1);
+        let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
+    } else if let Some(fid) = focused_pane {
+        // No authoritative cursor (fresh attach pre-OUTPUT, or libghostty
+        // reported the cursor hidden). Park inside the focused pane's
+        // Rect and hide — next TERMINAL_OUTPUT will lift visibility.
+        if let Some(rect) = multi.rects.get(fid) {
+            let one_based_row = rect.y.saturating_add(1);
+            let one_based_col = rect.x.saturating_add(1);
+            let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
+        }
+    }
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
