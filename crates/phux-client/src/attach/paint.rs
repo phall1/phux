@@ -36,6 +36,7 @@ pub(super) fn paint_focused_pane<W: Write>(
     focused: &TerminalId,
     viewport_dims: (u16, u16),
     has_bar: bool,
+    force_full: bool,
 ) -> Option<(u16, u16)> {
     let pane_dims = pane_viewport(viewport_dims, has_bar);
     let rect = super::multi_pane::compute_layout(layout_state, pane_dims)
@@ -50,9 +51,13 @@ pub(super) fn paint_focused_pane<W: Write>(
         });
     let slot = panes.get_mut(focused)?;
     let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
-    let _ = slot
-        .renderer
-        .render_at(&slot.terminal, out, (rect.x, rect.y));
+    let _ = if force_full {
+        slot.renderer
+            .render_at_full(&slot.terminal, out, (rect.x, rect.y))
+    } else {
+        slot.renderer
+            .render_at(&slot.terminal, out, (rect.x, rect.y))
+    };
     slot.renderer.last_cursor()
 }
 
@@ -88,9 +93,13 @@ pub(super) fn paint_full_frame(
         }
         if let Some(slot) = panes.get_mut(id) {
             let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+            // Force a full redraw: the ED2 above cleared the screen, so
+            // an incremental "only dirty rows" paint would leave a pane
+            // whose content is unchanged (the survivor of a split/resize)
+            // blank.
             let _ = slot
                 .renderer
-                .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
+                .render_at_full(&slot.terminal, &mut stdout, (rect.x, rect.y));
         }
     }
     let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
@@ -118,6 +127,7 @@ pub(super) fn paint_full_frame(
             fid,
             viewport_dims,
             has_bar,
+            true,
         )
     });
     if let Some((row, col)) = final_cursor {

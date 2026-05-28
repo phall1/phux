@@ -240,6 +240,7 @@ pub(super) fn handle_server_frame(
                     fid,
                     viewport_dims,
                     has_bar,
+                    false,
                 );
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;

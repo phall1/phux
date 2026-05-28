@@ -157,9 +157,43 @@ impl<'alloc> TerminalRenderer<'alloc> {
         out: &mut impl Write,
         origin: (u16, u16),
     ) -> Result<Dirty, RenderError> {
+        self.render_at_inner(terminal, out, origin, false)
+    }
+
+    /// Like [`Self::render_at`] but unconditionally repaints every row,
+    /// ignoring the incremental dirty tracking.
+    ///
+    /// Required by the full-frame paint path: that path emits `ED2`
+    /// (clear screen) before re-rendering each pane, which wipes the
+    /// terminal but leaves libghostty's per-row dirty bits clean for a
+    /// pane whose *content* didn't change (e.g. the surviving pane after
+    /// a split or resize). A plain `render_at` would see `Dirty::Clean`,
+    /// early-return, and leave that pane blank on the freshly-cleared
+    /// screen. Forcing a full redraw repaints it from the grid. See the
+    /// split-leaves-original-pane-blank bug.
+    pub fn render_at_full(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        out: &mut impl Write,
+        origin: (u16, u16),
+    ) -> Result<Dirty, RenderError> {
+        self.render_at_inner(terminal, out, origin, true)
+    }
+
+    fn render_at_inner(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        out: &mut impl Write,
+        origin: (u16, u16),
+        force_full: bool,
+    ) -> Result<Dirty, RenderError> {
         let (ox, oy) = origin;
         let snapshot = self.state.update(terminal)?;
-        let dirty = snapshot.dirty()?;
+        let dirty = if force_full {
+            Dirty::Full
+        } else {
+            snapshot.dirty()?
+        };
 
         match dirty {
             Dirty::Clean => return Ok(dirty),
