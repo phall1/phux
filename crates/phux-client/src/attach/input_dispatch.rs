@@ -283,9 +283,8 @@ pub(super) async fn dispatch_input_events(
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
-        if let Some(frame) = ev.into_frame(pane.clone()) {
-            conn.send(&frame).await?;
-        }
+        let frame = ev.into_frame(pane.clone());
+        conn.send(&frame).await?;
     }
     // Paint the prediction overlay once per dispatch batch so a burst of
     // keystrokes produces a single positioned write run, not one per
@@ -338,6 +337,10 @@ fn consume_chord(
 
 /// Side-effects a resolved action wants from the driver.
 #[derive(Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "action dispatcher returns independent side-effect flags to keep async I/O outside run_action"
+)]
 struct ActionEffects {
     /// `true` ⇒ `layout_state` was mutated in-place; driver repaints.
     layout_mutated: bool,

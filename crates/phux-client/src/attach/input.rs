@@ -131,12 +131,12 @@ impl InputEvent {
     /// Wrap this event in the appropriate [`FrameKind`] addressed to
     /// `terminal_id`.
     #[must_use]
-    pub fn into_frame(self, terminal_id: TerminalId) -> Option<FrameKind> {
+    pub fn into_frame(self, terminal_id: TerminalId) -> FrameKind {
         match self {
-            Self::Key(event) => Some(FrameKind::InputKey { terminal_id, event }),
-            Self::Mouse(event) => Some(FrameKind::InputMouse { terminal_id, event }),
-            Self::Focus(event) => Some(FrameKind::InputFocus { terminal_id, event }),
-            Self::Paste(event) => Some(FrameKind::InputPaste { terminal_id, event }),
+            Self::Key(event) => FrameKind::InputKey { terminal_id, event },
+            Self::Mouse(event) => FrameKind::InputMouse { terminal_id, event },
+            Self::Focus(event) => FrameKind::InputFocus { terminal_id, event },
+            Self::Paste(event) => FrameKind::InputPaste { terminal_id, event },
         }
     }
 }
@@ -1871,9 +1871,7 @@ mod tests {
             text: Some("a".to_owned()),
             unshifted_codepoint: Some(u32::from('a')),
         };
-        let frame = InputEvent::Key(key)
-            .into_frame(TerminalId::local(42))
-            .expect("frame");
+        let frame = InputEvent::Key(key).into_frame(TerminalId::local(42));
         match frame {
             FrameKind::InputKey { terminal_id, .. } => {
                 assert_eq!(terminal_id, TerminalId::local(42));
@@ -1914,9 +1912,7 @@ mod tests {
 
     #[test]
     fn focus_event_into_frame_carries_terminal_id() {
-        let frame = InputEvent::Focus(FocusEvent::Gained)
-            .into_frame(TerminalId::new(7))
-            .expect("frame");
+        let frame = InputEvent::Focus(FocusEvent::Gained).into_frame(TerminalId::new(7));
         match frame {
             FrameKind::InputFocus { terminal_id, event } => {
                 assert_eq!(terminal_id, TerminalId::new(7));
@@ -2046,9 +2042,7 @@ mod tests {
             x: 1.0,
             y: 2.0,
         };
-        let frame = InputEvent::Mouse(ev)
-            .into_frame(TerminalId::new(99))
-            .expect("frame");
+        let frame = InputEvent::Mouse(ev).into_frame(TerminalId::new(99));
         match frame {
             FrameKind::InputMouse { terminal_id, .. } => {
                 assert_eq!(terminal_id, TerminalId::new(99));
@@ -2267,8 +2261,7 @@ mod tests {
             trust: PasteTrust::Untrusted,
             data: b"x".to_vec(),
         })
-        .into_frame(TerminalId::new(11))
-        .expect("frame");
+        .into_frame(TerminalId::new(11));
         match frame {
             FrameKind::InputPaste { terminal_id, event } => {
                 assert_eq!(terminal_id, TerminalId::new(11));
