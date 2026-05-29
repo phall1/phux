@@ -1436,6 +1436,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "phux-mcp"
+version = "0.0.0"
+dependencies = [
+ "phux-client",
+ "phux-core",
+ "phux-protocol",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "phux-protocol"
 version = "0.0.1"
 dependencies = [

@@ -1,0 +1,31 @@
+[package]
+name = "phux-mcp"
+description = "Minimal Model Context Protocol stdio adapter over the phux agent surface."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "phux-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# The adapter reuses the agent surface (snapshot/send-keys/run/wait) and the
+# wire types directly — MCP is a thin adapter, not a separate core
+# (ADR-0022 §5). No MCP framework dep: the JSON-RPC is hand-rolled over
+# serde_json so the surface stays reimplementable in any language.
+phux-client.workspace = true
+phux-core.workspace = true
+phux-protocol = { workspace = true, features = ["server"] }
+serde.workspace = true
+serde_json.workspace = true
+# Current-thread runtime: the client lib is async and its client-side
+# libghostty Terminal is !Send (ADR-0003). `io-std` for async stdin/stdout.
+tokio = { workspace = true, features = ["io-std"] }
