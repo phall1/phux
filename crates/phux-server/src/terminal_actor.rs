@@ -648,7 +648,7 @@ impl TerminalActor {
     ///
     /// The `Terminal` is allocated via libghostty's default allocator
     /// (NULL alloc → `'static` lifetimes). `max_scrollback` is
-    /// [`DEFAULT_MAX_SCROLLBACK`] — a tmux-style mid-range value the
+    /// `DEFAULT_MAX_SCROLLBACK` — a tmux-style mid-range value the
     /// runtime overrides with `defaults.history-limit` via
     /// [`Self::build_with_token`].
     #[allow(clippy::new_ret_no_self, reason = "bundle-shaped constructor")]

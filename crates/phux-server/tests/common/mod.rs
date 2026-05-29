@@ -15,8 +15,7 @@
 //! show up here, even if `ServerState` unit tests keep passing.
 //!
 //! All `recv` paths in these helpers are wrapped in `tokio::time::timeout`
-//! per the byc.6.* tickets (5-second deadline). A hang is a failure, not
-//! a wait-for-Godot.
+//! (`WIRE_RECV_TIMEOUT`). A hang is a failure, not a wait-for-Godot.
 
 #![allow(dead_code, reason = "shared helpers; some binaries use a subset")]
 #![allow(clippy::expect_used, reason = "tests")]
@@ -48,10 +47,14 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
-/// Deadline applied to every wire `recv` in the byc.6.* tests. Matches the
-/// ticket's "wrap every recv in `tokio::time::timeout(Duration::from_secs(5))`"
-/// requirement.
-pub const WIRE_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// Deadline applied to every wire `recv` in the integration tests. The
+/// margin is generous because these tests drive real PTYs and assert on
+/// rendered screen content; under full-parallel nextest many PTY-backed
+/// tests contend for CPU, so a tight deadline turns scheduler latency into
+/// spurious failures. A genuinely hung server still fails the run, just
+/// later. The recv resolves in milliseconds on the happy path, so the
+/// deadline only elapses on an actual fault.
+pub const WIRE_RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Deadline for the per-test socket-connect bootstrap. Two seconds matches
 /// the byc.8 `attach_lifecycle` helper and is a comfortable margin for the
