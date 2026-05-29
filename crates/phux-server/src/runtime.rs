@@ -89,6 +89,14 @@ pub struct ServerConfig {
     /// Ignored when `seed_with_pty` is `false`. `None` (the default)
     /// falls back to [`crate::terminal_actor::default_shell_command`].
     pub seed_command: Option<portable_pty::CommandBuilder>,
+    /// Lines of scrollback retained per pane (`defaults.history-limit`,
+    /// SPEC DESIGN.md §4.2). Threaded into every `TerminalActor`'s
+    /// scrollback cap at construction — both the pre-seeded session and
+    /// any session created later via `AttachTarget::CreateIfMissing` or
+    /// `SPAWN_TERMINAL`. The binary populates this from
+    /// `phux_config`'s `defaults.history-limit`;
+    /// [`Self::with_default_socket`] uses the schema default.
+    pub history_limit: u32,
 }
 
 impl ServerConfig {
@@ -101,6 +109,7 @@ impl ServerConfig {
             pre_seeded_session: None,
             seed_with_pty: false,
             seed_command: None,
+            history_limit: phux_config::DefaultsCfg::default().history_limit,
         }
     }
 }
@@ -236,6 +245,11 @@ impl ServerRuntime {
         // wire `command` (or fall back to `default_shell_command`), not
         // inherit naked-`phux`'s launcher. So the override stays `None`.
         state.with_mut(|s| s.set_attach_create_pty(seed_with_pty, None));
+        // Mirror `defaults.history-limit` into shared state so the
+        // attach-time creation path (`CreateIfMissing`) and
+        // `SPAWN_TERMINAL` build their panes with the configured cap.
+        let history_limit = self.cfg.history_limit;
+        state.with_mut(|s| s.set_history_limit(history_limit));
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -268,9 +282,9 @@ impl ServerRuntime {
                     let seeded = if seed_with_pty {
                         let cmd = seed_command
                             .unwrap_or_else(crate::terminal_actor::default_shell_command);
-                        seed_session_with_pty(&state, name, cmd, &root_token)
+                        seed_session_with_pty(&state, name, cmd, history_limit, &root_token)
                     } else {
-                        seed_session_with_actor(&state, name, &root_token)
+                        seed_session_with_actor(&state, name, history_limit, &root_token)
                     };
                     if let Err(err) = seeded {
                         warn!(
@@ -313,6 +327,7 @@ impl ServerRuntime {
 pub(crate) fn seed_session_with_actor(
     state: &SharedState,
     name: &str,
+    history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
@@ -320,7 +335,8 @@ pub(crate) fn seed_session_with_actor(
     // Default 80x24 — same as `phux_core::Pane::new`'s default dims.
     // Real resize wiring lands with VIEWPORT_RESIZE (phux-4hp).
     let terminal_token = root_token.child_token();
-    let bundle = TerminalActor::build_with_token(80, 24, None, terminal_token.clone())?;
+    let bundle =
+        TerminalActor::build_with_token(80, 24, None, history_limit, terminal_token.clone())?;
     let crate::terminal_actor::TerminalActorBundle {
         actor,
         handle,
@@ -354,12 +370,14 @@ pub fn seed_session_with_pty(
     state: &SharedState,
     name: &str,
     cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
     let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
     let terminal_token = root_token.child_token();
-    let bundle = TerminalActor::build_with_token(80, 24, Some(cmd), terminal_token.clone())?;
+    let bundle =
+        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
     let crate::terminal_actor::TerminalActorBundle {
         actor,
         handle,
@@ -1270,8 +1288,13 @@ async fn resolve_create_if_missing(
     // Slow path: create the session + seed pane. Snapshot the server's
     // configured PTY mode and (optional) override command before
     // releasing the state borrow.
-    let (with_pty, override_cmd) =
-        state.with(|s| (s.attach_create_seeds_pty(), s.attach_create_seed_command()));
+    let (with_pty, override_cmd, history_limit) = state.with(|s| {
+        (
+            s.attach_create_seeds_pty(),
+            s.attach_create_seed_command(),
+            s.history_limit(),
+        )
+    });
 
     let seed_result = if with_pty {
         // Resolve the command. Precedence:
@@ -1298,13 +1321,13 @@ async fn resolve_create_if_missing(
             }
             _ => crate::terminal_actor::default_shell_command(),
         });
-        seed_session_with_pty(state, &name, cmd, root_token)
+        seed_session_with_pty(state, &name, cmd, history_limit, root_token)
     } else {
         // No-PTY path: the wire `command` is meaningless without a
         // child to exec it on. We still create the session+pane so
         // the snapshot path has a target — this is the shape every
         // existing `spawn_server` test uses.
-        seed_session_with_actor(state, &name, root_token)
+        seed_session_with_actor(state, &name, history_limit, root_token)
     };
 
     if let Err(err) = seed_result {
@@ -1460,24 +1483,26 @@ async fn handle_spawn_terminal(
         }
     });
 
-    let core_terminal_id = match seed_session_with_pty(state, &session_name, builder, root_token) {
-        Ok(id) => id,
-        Err(err) => {
-            warn!(
-                ?client_id,
-                request_id,
-                error = %err,
-                "SPAWN_TERMINAL: failed to spawn pane actor",
-            );
-            let _ = out_tx
-                .send(Outbound::Frame(FrameKind::TerminalSpawned {
+    let history_limit = state.with(crate::state::ServerState::history_limit);
+    let core_terminal_id =
+        match seed_session_with_pty(state, &session_name, builder, history_limit, root_token) {
+            Ok(id) => id,
+            Err(err) => {
+                warn!(
+                    ?client_id,
                     request_id,
-                    result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
-                }))
-                .await;
-            return;
-        }
-    };
+                    error = %err,
+                    "SPAWN_TERMINAL: failed to spawn pane actor",
+                );
+                let _ = out_tx
+                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
+                        request_id,
+                        result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
+                    }))
+                    .await;
+                return;
+            }
+        };
 
     // Auto-subscribe the spawning client to the new pane and snapshot
     // its `TerminalHandle` so we can spawn an output pump. Without

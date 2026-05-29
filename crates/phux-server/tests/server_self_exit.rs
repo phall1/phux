@@ -35,6 +35,7 @@ fn seeded_cfg(socket_path: std::path::PathBuf, script: &str) -> ServerConfig {
         pre_seeded_session: Some("solo".to_owned()),
         seed_with_pty: true,
         seed_command: Some(cmd),
+        ..ServerConfig::with_default_socket()
     }
 }
 

@@ -294,6 +294,12 @@ pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
 /// rarely splits a sequence boundary.
 const PTY_READ_CHUNK: usize = 4096;
 
+/// Per-Terminal scrollback cap used by the no-config convenience
+/// constructors ([`TerminalActor::new`] / [`TerminalActor::new_with_command`]).
+/// A tmux-style mid-range value; the runtime path overrides it with
+/// `defaults.history-limit` via [`TerminalActor::build_with_token`].
+const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
+
 /// Tick interval for the state-sync emission driver (phux-q0e.3).
 ///
 /// 30 ms ≈ 33 Hz; per ADR-0018 / `research/archive/2026-05-26-state-sync-algorithm.md`
@@ -641,11 +647,19 @@ impl TerminalActor {
     /// without driving a real process.
     ///
     /// The `Terminal` is allocated via libghostty's default allocator
-    /// (NULL alloc → `'static` lifetimes). `max_scrollback` defaults to
-    /// `10_000` — a tmux-style mid-range value.
+    /// (NULL alloc → `'static` lifetimes). `max_scrollback` is
+    /// [`DEFAULT_MAX_SCROLLBACK`] — a tmux-style mid-range value the
+    /// runtime overrides with `defaults.history-limit` via
+    /// [`Self::build_with_token`].
     #[allow(clippy::new_ret_no_self, reason = "bundle-shaped constructor")]
     pub fn new(cols: u16, rows: u16) -> Result<TerminalActorBundle, TerminalActorError> {
-        Self::build(cols, rows, None, CancellationToken::new())
+        Self::build(
+            cols,
+            rows,
+            None,
+            DEFAULT_MAX_SCROLLBACK,
+            CancellationToken::new(),
+        )
     }
 
     /// Build a fresh actor backed by a real PTY running `cmd`.
@@ -659,7 +673,13 @@ impl TerminalActor {
         cols: u16,
         rows: u16,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
-        Self::build(cols, rows, Some(cmd), CancellationToken::new())
+        Self::build(
+            cols,
+            rows,
+            Some(cmd),
+            DEFAULT_MAX_SCROLLBACK,
+            CancellationToken::new(),
+        )
     }
 
     /// Convenience: spawn the user's default shell (`$SHELL` or
@@ -683,21 +703,26 @@ impl TerminalActor {
         cols: u16,
         rows: u16,
         cmd: Option<CommandBuilder>,
+        max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
-        Self::build(cols, rows, cmd, token)
+        Self::build(cols, rows, cmd, max_scrollback, token)
     }
 
     fn build(
         cols: u16,
         rows: u16,
         cmd: Option<CommandBuilder>,
+        max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
         let terminal = Terminal::new(TerminalOptions {
             cols,
             rows,
-            max_scrollback: 10_000,
+            // `defaults.history-limit` is a `u32` on the wire/config; the
+            // libghostty option is `usize`. The widen is lossless on all
+            // supported targets.
+            max_scrollback: max_scrollback as usize,
         })?;
         let synth = SnapshotSynthesizer::new()?;
         let key_enc = PerTerminalKeyEncoder::new()?;
@@ -1659,7 +1684,8 @@ mod tests {
                 let parent = CancellationToken::new();
                 let child = parent.child_token();
                 let bundle =
-                    TerminalActor::build_with_token(20, 5, None, child).expect("build_with_token");
+                    TerminalActor::build_with_token(20, 5, None, DEFAULT_MAX_SCROLLBACK, child)
+                        .expect("build_with_token");
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
                 parent.cancel();

@@ -23,6 +23,12 @@ tokio-console = ["dep:console-subscriber"]
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
+# phux-config supplies the canonical `defaults.history-limit` default
+# (`DefaultsCfg::default().history_limit`) so `ServerConfig::with_default_socket`
+# does not duplicate the `50_000` constant. The dep is config-shape only:
+# the server reads the schema's default and threads the resolved value into
+# each `TerminalActor`'s scrollback cap.
+phux-config.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -852,11 +852,20 @@ fn run_server(
     // pass nothing, so an explicitly-created session still gets a shell.
     let seed_command = seed_command.map(phux_server::terminal_actor::shell_command);
 
+    // `defaults.history-limit` bounds each pane's retained scrollback.
+    // A failed/absent config falls back to the schema default rather
+    // than aborting startup, mirroring the other config reads here.
+    let history_limit = config_loader::load().map_or_else(
+        |_| phux_config::DefaultsCfg::default().history_limit,
+        |cfg| cfg.defaults.history_limit,
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
         seed_with_pty: true,
         seed_command,
+        history_limit,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

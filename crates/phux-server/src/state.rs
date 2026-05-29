@@ -263,6 +263,16 @@ pub struct ServerState {
     /// [`crate::terminal_actor::default_shell_command`] (the user's
     /// `$SHELL`, or `/bin/sh`).
     attach_create_seed_command: Option<CommandBuilder>,
+    /// Lines of scrollback retained per pane (`defaults.history-limit`).
+    /// Mirrors [`crate::runtime::ServerConfig::history_limit`] so the
+    /// attach-time creation path (`AttachTarget::CreateIfMissing`) and
+    /// `SPAWN_TERMINAL` build their `TerminalActor`s with the configured
+    /// cap without an extra channel to the runtime. Set by the runtime
+    /// via [`Self::set_history_limit`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default so tests that never
+    /// call the setter still get a sane bound.
+    history_limit: u32,
     /// Whether any client has ever attached to this server.
     ///
     /// Gates the tmux-model self-exit (phux-60s): the server only exits
@@ -467,6 +477,7 @@ impl ServerState {
             client_layers: HashMap::new(),
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
+            history_limit: phux_config::DefaultsCfg::default().history_limit,
             has_served_client: false,
         }
     }
@@ -504,6 +515,20 @@ impl ServerState {
     #[must_use]
     pub fn attach_create_seed_command(&self) -> Option<CommandBuilder> {
         self.attach_create_seed_command.clone()
+    }
+
+    /// Set the per-pane scrollback cap (`defaults.history-limit`) used
+    /// by the attach-time creation path and `SPAWN_TERMINAL`. Called
+    /// once at server startup to mirror
+    /// [`crate::runtime::ServerConfig::history_limit`] into state.
+    pub const fn set_history_limit(&mut self, history_limit: u32) {
+        self.history_limit = history_limit;
+    }
+
+    /// Read the per-pane scrollback cap set by [`Self::set_history_limit`].
+    #[must_use]
+    pub const fn history_limit(&self) -> u32 {
+        self.history_limit
     }
 
     /// Borrow the L3 metadata store.
