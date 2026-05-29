@@ -307,6 +307,19 @@ const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 /// `phux-q0e.5` and lives outside this ticket's scope.
 pub const DEFAULT_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
 
+/// Debounce window for the post-resize client resync (phux-8v1).
+///
+/// Dragging a terminal window fires a SIGWINCH storm — one
+/// `VIEWPORT_RESIZE` (hence one resize) per step, many per second.
+/// Broadcasting a full snapshot on each would flood the client with
+/// snapshots synthesized at successive widths; one synthesized at width
+/// N that lands on a mirror already resized to width M wraps/duplicates
+/// rows. Instead we coalesce: arm a timer on each resync-requesting
+/// resize and emit a single snapshot this long after the *last* one,
+/// synthesized at the final settled size. 50 ms sits above per-SIGWINCH
+/// cadence and below human settle perception.
+pub const RESIZE_RESYNC_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Request for the pane's current `vt_replay_bytes` snapshot.
 ///
 /// Sent by the ATTACH handler on the per-client task; the actor walks
@@ -1281,6 +1294,16 @@ impl TerminalActor {
         // tick before any other branch has a chance to react.
         let _ = tick.tick().await;
 
+        // phux-8v1 drag fix: debounce timer for the post-resize client
+        // resync. (Re)armed on each resync-requesting resize; when it
+        // fires we broadcast ONE snapshot at the settled size. Init far
+        // out — `resync_pending` is false until a resize arms it, and we
+        // always `reset()` the deadline when arming, so the initial
+        // instant is never observed.
+        let resync_debounce = tokio::time::sleep(std::time::Duration::from_secs(3600));
+        tokio::pin!(resync_debounce);
+        let mut resync_pending = false;
+
         loop {
             // For panes without a PTY, the `pty_rx` branch needs an
             // always-pending future. We construct that with
@@ -1384,10 +1407,26 @@ impl TerminalActor {
                     // phux-8v1: re-broadcast a full snapshot for live
                     // resizes so client mirrors reconverge after their
                     // independent reflow. Suppressed for the ATTACH-time
-                    // resize (the handshake snapshot covers it).
+                    // resize (the handshake snapshot covers it). Debounced
+                    // (RESIZE_RESYNC_DEBOUNCE) so a drag storm coalesces
+                    // into a single snapshot at the settled size rather
+                    // than flooding the client with stale-width snapshots.
                     if req.resync_clients {
-                        self.broadcast_resync_after_resize();
+                        resync_pending = true;
+                        resync_debounce
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + RESIZE_RESYNC_DEBOUNCE);
                     }
+                }
+
+                // phux-8v1: debounced resize resync — fires once the
+                // resize storm settles (RESIZE_RESYNC_DEBOUNCE after the
+                // last resync-requesting resize). Guarded by
+                // `resync_pending` so the idle far-future timer never
+                // fires spuriously.
+                () = &mut resync_debounce, if resync_pending => {
+                    resync_pending = false;
+                    self.broadcast_resync_after_resize();
                 }
 
                 Some(req) = self.consumer_attach_rx.recv() => {
@@ -2086,6 +2125,69 @@ mod tests {
                     contains_subslice(&acc, b"phux8v1-marker"),
                     "resize broadcast did not re-send pre-resize grid content; got {:?}",
                     String::from_utf8_lossy(&acc),
+                );
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// phux-8v1 drag fix: a STORM of rapid live resizes (a window drag)
+    /// must COALESCE into a single resync snapshot, not one per resize.
+    /// Without the debounce the client gets flooded with snapshots
+    /// synthesized at successive widths, and a stale-width one corrupts
+    /// the mirror (the duplicated-characters-while-dragging symptom).
+    /// We count broadcasts carrying the snapshot preamble (`ESC [ ! p`);
+    /// each resync is exactly one such message, so the count is the
+    /// snapshot count regardless of any interleaved PTY output.
+    #[tokio::test]
+    async fn rapid_resizes_coalesce_into_one_resync_snapshot() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle =
+                    TerminalActor::new_with_seed(80, 24, b"drag-marker").expect("seed");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let mut out = handle.output.subscribe();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                // Fire a storm of live resizes back-to-back, well within
+                // the RESIZE_RESYNC_DEBOUNCE window.
+                for w in [70u16, 60, 50, 60, 70, 80, 90, 100] {
+                    handle
+                        .resize
+                        .send(ResizeRequest { cols: w, rows: 24, resync_clients: true })
+                        .await
+                        .expect("send resize");
+                }
+
+                // Wait comfortably past the debounce so the single
+                // coalesced snapshot has fired.
+                tokio::time::sleep(RESIZE_RESYNC_DEBOUNCE * 4).await;
+
+                // Count snapshot-bearing broadcasts. Debounced => exactly 1.
+                let mut snapshots = 0usize;
+                loop {
+                    match out.try_recv() {
+                        Ok(bytes) => {
+                            if contains_subslice(&bytes, b"\x1b[!p") {
+                                snapshots += 1;
+                            }
+                        }
+                        // Lagged: skip and keep draining (no-op falls
+                        // through to the loop's next iteration).
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                        Err(_) => break,
+                    }
+                }
+                assert_eq!(
+                    snapshots, 1,
+                    "a resize storm must coalesce into exactly one resync snapshot, got {snapshots}",
                 );
 
                 token.cancel();
