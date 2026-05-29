@@ -198,6 +198,26 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Send input to a pane (ADR-0022). tmux-shaped: each KEY is a named
+    /// key (`Enter`, `Tab`, `Escape`, `Up`, `C-c`, `M-x`, …) or a literal
+    /// string sent character by character. Routes by `terminal_id`, so —
+    /// unlike snapshot — it does not attach or resize the pane.
+    ///
+    ///   phux send-keys demo "echo hi" Enter
+    #[command(name = "send-keys")]
+    SendKeys {
+        /// Session whose focused pane receives the input.
+        session: String,
+
+        /// Keys to send: named keys and/or literal strings, in order.
+        #[arg(trailing_var_arg = true, required = true)]
+        keys: Vec<String>,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -243,6 +263,11 @@ fn main() -> ExitCode {
             json,
             socket,
         }) => run_snapshot(session, json, socket),
+        Some(Command::SendKeys {
+            session,
+            keys,
+            socket,
+        }) => run_send_keys(&session, &keys, socket),
         None => run_naked(),
     }
 }
@@ -853,6 +878,27 @@ fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) ->
         }
         Err(err) => {
             eprintln!("phux: snapshot failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `phux send-keys` — attach to a session and send input to its focused
+/// pane. The server only accepts input from an attached, subscribed
+/// client, so this attaches like the interactive client (see
+/// [`phux_client::send_keys::send`] for the transient-resize caveat).
+fn run_send_keys(session: &str, keys: &[String], socket: Option<PathBuf>) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    let target = AttachTarget::ByName(session.to_owned());
+    match rt.block_on(phux_client::send_keys::send(&socket_path, target, keys)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "send-keys"),
+        Err(err) => {
+            eprintln!("phux: send-keys failed: {err}");
             ExitCode::FAILURE
         }
     }
