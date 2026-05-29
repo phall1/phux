@@ -16,6 +16,7 @@ use phux_protocol::caps::{
     KeyboardProtocolSet, Layer, LayerSet,
 };
 use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
+use phux_protocol::input::InputEvent;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -1505,6 +1506,51 @@ fn command_get_screen_round_trips() {
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
+}
+
+#[test]
+fn command_route_input_round_trips() {
+    // ROUTE_INPUT (tag 0x08): TerminalId + an InputEvent tagged union.
+    // Exercise all four atom variants so each InputEvent tag round-trips.
+    let key = KeyEvent {
+        action: KeyAction::Press,
+        key: PhysicalKey::Z,
+        mods: ModSet::empty(),
+        consumed_mods: ModSet::empty(),
+        composing: false,
+        text: Some("z".to_owned()),
+        unshifted_codepoint: Some(u32::from('z')),
+    };
+    let mouse = MouseEvent {
+        action: MouseAction::Press,
+        button: MouseButton::Left,
+        mods: ModSet::empty(),
+        x: 12.0,
+        y: 7.0,
+    };
+    let paste = PasteEvent {
+        trust: PasteTrust::Trusted,
+        data: b"hello".to_vec(),
+    };
+    for event in [
+        InputEvent::Key(key),
+        InputEvent::Mouse(mouse),
+        InputEvent::Focus(FocusEvent::Gained),
+        InputEvent::Paste(paste),
+    ] {
+        let frame = FrameKind::Command {
+            request_id: 21,
+            command: Command::RouteInput {
+                terminal_id: TerminalId::local(5),
+                event,
+            },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
 }
 
 #[test]

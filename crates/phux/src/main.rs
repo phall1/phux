@@ -1250,10 +1250,10 @@ fn print_run_result(result: &phux_client::run::RunResult) {
     );
 }
 
-/// `phux send-keys` — attach to a session and send input to its focused
-/// pane. The server only accepts input from an attached, subscribed
-/// client, so this attaches like the interactive client (see
-/// [`phux_client::send_keys::send`] for the transient-resize caveat).
+/// `phux send-keys` — send input to a session's focused pane via the
+/// side-effect-free `ROUTE_INPUT` route. Resolves the focused pane from a
+/// `GET_STATE` snapshot and routes the events by id, so it neither attaches
+/// nor resizes the live pane (see [`phux_client::send_keys::send`]).
 fn run_send_keys(session: &str, keys: &[String], socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {

@@ -140,10 +140,10 @@ fn extract_output(lines: &[String], rc_idx: usize, nonce: &str) -> (String, bool
 
 /// Run `cmd` in the focused pane of `target`, capturing its exit code.
 ///
-/// Submits the command (bracketed by sentinels) via the input path — which
-/// means it attaches transiently, like `send-keys` — then polls the
-/// side-effect-free screen read until the `RC` sentinel appears or
-/// `timeout` elapses.
+/// Submits the command (bracketed by sentinels) via the side-effect-free
+/// `ROUTE_INPUT` path, like `send-keys` — so it neither attaches nor
+/// resizes the pane — then polls the side-effect-free screen read until the
+/// `RC` sentinel appears or `timeout` elapses.
 ///
 /// # Errors
 ///

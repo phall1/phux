@@ -51,7 +51,7 @@ pub async fn get_screen(
 
 /// Send one command and return the matching `COMMAND_RESULT`, skipping any
 /// unrelated frames the server interleaves (SPEC §5).
-async fn command(
+pub(crate) async fn command(
     conn: &mut Connection,
     request_id: u32,
     command: Command,

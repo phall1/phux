@@ -33,6 +33,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
+use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
     AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, MAX_FRAME_LEN,
     SpawnError, SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
@@ -1772,6 +1773,9 @@ async fn handle_command(
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
         Command::GetScreen { terminal_id } => handle_get_screen(state, &terminal_id).await,
+        Command::RouteInput { terminal_id, event } => {
+            handle_route_input(state, &terminal_id, event)
+        }
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -1898,6 +1902,75 @@ async fn handle_get_screen(
             )
         },
     )
+}
+
+/// Build the `Ok` reply for `ROUTE_INPUT`.
+///
+/// The write counterpart to [`handle_get_screen`]: it resolves the wire id
+/// to its pane actor and feeds the already-built input event straight into
+/// the pane's input mailbox — the same mailbox `handle_terminal_input`
+/// targets, but with no attach / subscription gate and, crucially, no
+/// resize. So unlike the ATTACH-then-`INPUT_KEY` path, routing input here
+/// never transiently shrinks the pane to the caller's viewport; the live
+/// dimensions are preserved (ADR-0022, `phux-3j3`).
+///
+/// `try_send` is non-blocking for the same single-threaded-runtime reason
+/// as `handle_terminal_input`: input is fire-and-forget per SPEC §9, so a
+/// full mailbox drops the event rather than blocking the read loop. The
+/// command still acks `Ok` (the event was accepted for delivery); only an
+/// unknown Terminal or a gone actor produces an `Error`.
+fn handle_route_input(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    event: InputEvent,
+) -> CommandResult {
+    // v0.1 non-federation-hub servers reject SATELLITE-routed input
+    // (ADR-0016 / SPEC §10.1), matching `handle_terminal_input`.
+    if !terminal_id.is_local() {
+        return CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("ROUTE_INPUT to satellite route unsupported: {terminal_id:?}"),
+        };
+    }
+    // Clone the (Send) handle out of the lock; we never await inside it.
+    let handle = state.with(|s| {
+        s.terminal_from_wire(terminal_id)
+            .and_then(|core| s.terminal_handle(core).cloned())
+    });
+    let Some(handle) = handle else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+    let input = match event {
+        InputEvent::Key(event) => TerminalInput::Key(event),
+        InputEvent::Mouse(event) => TerminalInput::Mouse(event),
+        InputEvent::Focus(event) => TerminalInput::Focus(event),
+        InputEvent::Paste(event) => TerminalInput::Paste(event),
+        // `InputEvent` is `#[non_exhaustive]`; a future atom a newer peer
+        // sends is not yet routable here.
+        _ => {
+            return CommandResult::Error {
+                code: ErrorCode::InvalidCommand,
+                message: "unsupported ROUTE_INPUT event".to_owned(),
+            };
+        }
+    };
+    match handle.input.try_send(input) {
+        Ok(()) => CommandResult::Ok,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            warn!(
+                ?terminal_id,
+                "ROUTE_INPUT mailbox full; dropping (fire-and-forget per SPEC §9)"
+            );
+            CommandResult::Ok
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for ROUTE_INPUT".to_owned(),
+        },
+    }
 }
 
 /// A `SessionSnapshot` describing a server with no sessions: empty lists,

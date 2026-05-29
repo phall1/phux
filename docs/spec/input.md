@@ -399,3 +399,9 @@ A client whose role for a Terminal is `PRIMARY` MAY send input for that
 Terminal. Transport authentication remains out of band
 ([proto.md §10](./proto.md)); roles are
 an in-protocol concurrency policy, not an authentication mechanism.
+
+The same four atoms (`KEY` / `MOUSE` / `FOCUS` / `PASTE`) can also be
+delivered out of band, without an attach, via the `ROUTE_INPUT` control
+command ([L1.md §5.1](./L1.md)). That path bundles the atom into an
+`InputEvent` tagged union and feeds it to the Terminal directly; the
+same `PRIMARY`/`VIEWER` authority and fire-and-forget semantics apply.

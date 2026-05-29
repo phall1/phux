@@ -1,5 +1,5 @@
-//! Translate a tmux-style key-spec into wire input frames (phux-21o,
-//! ADR-0022).
+//! Translate a tmux-style key-spec into routed input events (phux-21o,
+//! ADR-0022, phux-3j3).
 //!
 //! Each CLI argument is either a **named key** (`Enter`, `Tab`, `Escape`,
 //! `Up`, `C-c`, `M-x`, …) or a **literal string** sent character by
@@ -8,17 +8,24 @@
 //! the *same* [`StdinParser`] the
 //! interactive client uses for real keystrokes, so the resulting
 //! `KeyEvent`s are identical to typing — no hand-rolled char→key table.
+//!
+//! The built events ride the side-effect-free `ROUTE_INPUT` control
+//! command (L1.md §5.1) rather than an `ATTACH` + `INPUT_KEY` stream. So,
+//! like `GET_SCREEN`, this neither subscribes the caller nor resizes the
+//! pane to the caller's viewport — the live session keeps its dimensions
+//! (phux-3j3).
 
 use std::path::Path;
 
-use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::TerminalId;
-use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, ViewportInfo};
+use phux_protocol::input::InputEvent as WireInputEvent;
+use phux_protocol::wire::frame::{AttachTarget, Command, CommandResult, CommandValue, StateScope};
+use phux_protocol::wire::info::SessionSnapshot;
 
 use crate::attach::AttachError;
 use crate::attach::connection::Connection;
-use crate::attach::input::StdinParser;
+use crate::attach::input::{InputEvent, StdinParser};
+use crate::snapshot::command;
 
 /// Translate one key-spec argument to the bytes a terminal would receive.
 ///
@@ -67,38 +74,75 @@ fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
-/// Translate all key-spec args into wire input frames addressed to `target`.
+/// Translate all key-spec args into structured [`InputEvent`]s.
 ///
 /// Concatenates the args' bytes through one [`StdinParser`] (so an `Up`
 /// arg yields the arrow `KeyEvent`, a bare `Escape` is flushed at the
-/// end, etc.).
+/// end, etc.). The events are then routed by id via `ROUTE_INPUT`; they
+/// are not addressed to a Terminal here.
 #[must_use]
-pub fn frames_for(args: &[String], target: &TerminalId) -> Vec<FrameKind> {
+pub fn events_for(args: &[String]) -> Vec<InputEvent> {
     let mut parser = StdinParser::default();
-    let mut frames = Vec::new();
+    let mut events = Vec::new();
     for arg in args {
-        for ev in parser.feed(&spec_to_bytes(arg)) {
-            frames.push(ev.into_frame(target.clone()));
-        }
+        events.extend(parser.feed(&spec_to_bytes(arg)));
     }
-    for ev in parser.flush() {
-        frames.push(ev.into_frame(target.clone()));
-    }
-    frames
+    events.extend(parser.flush());
+    events
 }
 
-/// Attach to `target`, send `keys` to its focused pane, then detach.
+/// Lower a client-side [`InputEvent`] to the protocol's wire input union.
 ///
-/// Input must come from an attached, subscribed client — the server drops
-/// input frames from unattached connections (`handle_terminal_input`'s
-/// attach + subscription gate). So this attaches like the interactive
-/// client; ATTACH carries a viewport, so it may transiently resize the
-/// pane (same bootstrap caveat as `snapshot`; the side-effect-free path is
-/// a control-plane input route, tracked under the agent epic).
+/// The two enums carry the same four libghostty-backed atoms; this is a
+/// field-for-field rewrap, kept here so `ROUTE_INPUT` need not depend on
+/// the client's parser type.
+fn to_wire_event(event: InputEvent) -> WireInputEvent {
+    match event {
+        InputEvent::Key(e) => WireInputEvent::Key(e),
+        InputEvent::Mouse(e) => WireInputEvent::Mouse(e),
+        InputEvent::Focus(e) => WireInputEvent::Focus(e),
+        InputEvent::Paste(e) => WireInputEvent::Paste(e),
+    }
+}
+
+/// Resolve `target` to the Terminal id of its focused pane, against a
+/// `GET_STATE` snapshot. Mirrors the server's own focus rule: a session's
+/// `active_window`, then that window's `active_pane`. For
+/// [`AttachTarget::Last`] (no name) we defer to the snapshot's
+/// server-wide `focused_pane`.
+fn resolve_focused_pane(snapshot: &SessionSnapshot, target: &AttachTarget) -> Option<TerminalId> {
+    let session = match target {
+        AttachTarget::Last => return Some(snapshot.focused_pane.clone()),
+        AttachTarget::ByName(name) | AttachTarget::CreateIfMissing { name, .. } => {
+            snapshot.sessions.iter().find(|s| &s.name == name)?
+        }
+        AttachTarget::ById(id) => snapshot.sessions.iter().find(|s| s.id == *id)?,
+        // `AttachTarget` is `#[non_exhaustive]`; a future target a newer
+        // build introduces is not resolvable here.
+        _ => return None,
+    };
+    let active_window = session.active_window?;
+    snapshot
+        .windows
+        .iter()
+        .find(|w| w.id == active_window)
+        .and_then(|w| w.active_pane.clone())
+}
+
+/// Send `keys` to the focused pane of `target` via the side-effect-free
+/// `ROUTE_INPUT` route, returning the resolved pane id.
 ///
-/// The server reads frames in order, so the `InputKey` frames are
-/// dispatched to the pane actor before the trailing `DETACH` — no drain
-/// race.
+/// No `ATTACH`: the target's focused pane is resolved client-side from a
+/// `GET_STATE` snapshot (the same way `phux snapshot`/`kill` resolve
+/// selectors), then each built [`InputEvent`] is delivered with a
+/// `ROUTE_INPUT` command. Because nothing attaches and no viewport is
+/// advertised, the live pane keeps its dimensions — unlike the old
+/// attach-then-`INPUT_KEY` path, which transiently resized the pane to the
+/// caller's `80x24` viewport (phux-3j3).
+///
+/// Each `ROUTE_INPUT` is acked by a `COMMAND_RESULT` the server emits in
+/// order, so the events land on the pane actor's input mailbox in send
+/// order — no drain race.
 ///
 /// Returns the [`TerminalId`] of the focused pane the keys were sent to,
 /// so callers (e.g. `phux run`) can read back the *same* pane.
@@ -108,35 +152,51 @@ pub async fn send(
     keys: &[String],
 ) -> Result<TerminalId, AttachError> {
     let mut conn = Connection::connect(socket).await?;
-    conn.send(&FrameKind::Hello {
-        client_name: format!("phux-send-keys/{}", env!("CARGO_PKG_VERSION")),
-        protocol_major: PROTOCOL_VERSION.major,
-        protocol_minor: PROTOCOL_VERSION.minor,
-        protocol_patch: PROTOCOL_VERSION.patch,
-        client_caps: ClientCapabilities::new()
-            .with_color_support(detect_color_support())
-            .with_layers(LayerSet::with(&[Layer::L3])),
-    })
-    .await?;
-    conn.send(&FrameKind::Attach {
-        target,
-        viewport: ViewportInfo::new(80, 24),
-        request_scrollback: false,
-        scrollback_limit_lines: 0,
-    })
-    .await?;
-    let focused = loop {
-        match conn.recv().await? {
-            FrameKind::Attached { snapshot, .. } => break snapshot.focused_pane,
-            FrameKind::Error { message, .. } => return Err(AttachError::Refused(message)),
-            _ => {}
+    // Resolve the focused pane without attaching (side-effect-free).
+    let snapshot = match command(
+        &mut conn,
+        1,
+        Command::GetState {
+            scope: StateScope::Server,
+        },
+    )
+    .await?
+    {
+        CommandResult::OkWith(CommandValue::State(snap)) => snap,
+        CommandResult::Error { message, .. } => return Err(AttachError::Refused(message)),
+        other => {
+            return Err(AttachError::Protocol(format!(
+                "unexpected GET_STATE result: {other:?}"
+            )));
         }
     };
-    for frame in frames_for(keys, &focused) {
-        conn.send(&frame).await?;
+    let pane = resolve_focused_pane(&snapshot, &target).ok_or_else(|| {
+        AttachError::Refused("no such session, or it has no focused pane".to_owned())
+    })?;
+
+    for (i, event) in events_for(keys).into_iter().enumerate() {
+        // request_id 1 was GET_STATE; route-input acks start at 2.
+        let request_id = u32::try_from(i).unwrap_or(u32::MAX - 1).saturating_add(2);
+        match command(
+            &mut conn,
+            request_id,
+            Command::RouteInput {
+                terminal_id: pane.clone(),
+                event: to_wire_event(event),
+            },
+        )
+        .await?
+        {
+            CommandResult::Ok => {}
+            CommandResult::Error { message, .. } => return Err(AttachError::Refused(message)),
+            other => {
+                return Err(AttachError::Protocol(format!(
+                    "unexpected ROUTE_INPUT result: {other:?}"
+                )));
+            }
+        }
     }
-    conn.send(&FrameKind::Detach).await?;
-    Ok(focused)
+    Ok(pane)
 }
 
 #[cfg(test)]
@@ -164,11 +224,10 @@ mod tests {
     }
 
     #[test]
-    fn frames_emit_one_inputkey_per_char() {
-        let t = TerminalId::local(1);
-        let frames = frames_for(&["ab".to_owned(), "Enter".to_owned()], &t);
+    fn events_emit_one_key_per_char() {
+        let events = events_for(&["ab".to_owned(), "Enter".to_owned()]);
         // 'a', 'b', and Enter — three key events.
-        assert_eq!(frames.len(), 3, "got {frames:?}");
-        assert!(matches!(frames[0], FrameKind::InputKey { .. }));
+        assert_eq!(events.len(), 3, "got {events:?}");
+        assert!(matches!(events[0], InputEvent::Key(_)));
     }
 }

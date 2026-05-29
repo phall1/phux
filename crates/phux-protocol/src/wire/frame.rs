@@ -30,6 +30,7 @@ use crate::ids::{
     ClientId, CollectionId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL,
     TERMINAL_ID_TAG_SATELLITE, TerminalId,
 };
+use crate::input::InputEvent;
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
@@ -261,6 +262,23 @@ pub(crate) const COMMAND_TAG_GET_STATE: u8 = 0x05;
 /// reserved `0x06` (SPEC §5.1 catalog order); `GET_SCREEN` is an additive
 /// agent-surface command (ADR-0022 §5), not part of the original catalog.
 pub(crate) const COMMAND_TAG_GET_SCREEN: u8 = 0x07;
+/// Wire tag for [`Command::RouteInput`]. Appended after `GET_SCREEN`'s
+/// `0x07`; `ROUTE_INPUT` is an additive agent-surface command (ADR-0022)
+/// that delivers an already-built input event to a Terminal without an
+/// attach, subscription, or resize — the write counterpart to the
+/// side-effect-free `GET_SCREEN` read.
+pub(crate) const COMMAND_TAG_ROUTE_INPUT: u8 = 0x08;
+
+// Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
+// mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
+/// Wire tag for [`InputEvent::Key`].
+pub(crate) const INPUT_EVENT_TAG_KEY: u8 = 0x00;
+/// Wire tag for [`InputEvent::Mouse`].
+pub(crate) const INPUT_EVENT_TAG_MOUSE: u8 = 0x01;
+/// Wire tag for [`InputEvent::Focus`].
+pub(crate) const INPUT_EVENT_TAG_FOCUS: u8 = 0x02;
+/// Wire tag for [`InputEvent::Paste`].
+pub(crate) const INPUT_EVENT_TAG_PASTE: u8 = 0x03;
 
 // Wire tags for the `StateScope` tagged union (SPEC §5.1, GET_STATE arg).
 /// Wire tag for [`StateScope::Server`].
@@ -570,11 +588,14 @@ pub enum StateScope {
 /// A typed control-plane command carried by [`FrameKind::Command`] (SPEC §5.1).
 ///
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
-/// the three the CLI needs — `KILL_TERMINAL`, `GET_STATE`, and the
-/// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5). Unknown wire
-/// tags surface as [`DecodeError::UnknownEnumValue`] rather than coercing
-/// to a placeholder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// the ones the CLI needs — `KILL_TERMINAL`, `GET_STATE`, the
+/// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), and the
+/// appended `ROUTE_INPUT` write counterpart. Unknown wire tags surface as
+/// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
+///
+/// Only `PartialEq` (not `Eq`): `RouteInput` carries a [`MouseEvent`] whose
+/// coordinates are not `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Command {
     /// Terminate the underlying PTY of `terminal_id`. Asynchronously emits
@@ -601,6 +622,19 @@ pub enum Command {
     GetScreen {
         /// The Terminal whose screen to project.
         terminal_id: TerminalId,
+    },
+    /// Deliver an already-built input `event` to `terminal_id` without an
+    /// attach, subscription, or resize. The write counterpart to the
+    /// side-effect-free `GetScreen` read: the server feeds the event
+    /// straight into the pane's input pipeline, so unlike `ATTACH` this
+    /// never disturbs the live session's dimensions (ADR-0022, `phux-3j3`).
+    /// The reply rides `COMMAND_RESULT { Ok }` (or an `Error` if the
+    /// Terminal is unknown). Backs `phux send-keys`/`run`.
+    RouteInput {
+        /// The Terminal to deliver the input to.
+        terminal_id: TerminalId,
+        /// The structured input event (key/mouse/focus/paste).
+        event: InputEvent,
     },
 }
 
@@ -1956,6 +1990,46 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u8(COMMAND_TAG_GET_SCREEN);
             encode_terminal_id(terminal_id, enc);
         }
+        Command::RouteInput { terminal_id, event } => {
+            enc.write_u8(COMMAND_TAG_ROUTE_INPUT);
+            encode_terminal_id(terminal_id, enc);
+            encode_input_event(event, enc);
+        }
+    }
+}
+
+fn encode_input_event(event: &InputEvent, enc: &mut Encoder<'_>) {
+    match event {
+        InputEvent::Key(event) => {
+            enc.write_u8(INPUT_EVENT_TAG_KEY);
+            encode_key_event(event, enc);
+        }
+        InputEvent::Mouse(event) => {
+            enc.write_u8(INPUT_EVENT_TAG_MOUSE);
+            encode_mouse_event(event, enc);
+        }
+        InputEvent::Focus(event) => {
+            enc.write_u8(INPUT_EVENT_TAG_FOCUS);
+            enc.write_u8(encode_focus_event(*event));
+        }
+        InputEvent::Paste(event) => {
+            enc.write_u8(INPUT_EVENT_TAG_PASTE);
+            encode_paste_event(event, enc);
+        }
+    }
+}
+
+fn decode_input_event(dec: &mut Decoder<'_>) -> Result<InputEvent, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        INPUT_EVENT_TAG_KEY => Ok(InputEvent::Key(decode_key_event(dec)?)),
+        INPUT_EVENT_TAG_MOUSE => Ok(InputEvent::Mouse(decode_mouse_event(dec)?)),
+        INPUT_EVENT_TAG_FOCUS => Ok(InputEvent::Focus(decode_focus_event(dec.read_u8()?)?)),
+        INPUT_EVENT_TAG_PASTE => Ok(InputEvent::Paste(decode_paste_event(dec)?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "InputEvent",
+            value: u32::from(other),
+        }),
     }
 }
 
@@ -1970,6 +2044,10 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
         }),
         COMMAND_TAG_GET_SCREEN => Ok(Command::GetScreen {
             terminal_id: decode_terminal_id(dec)?,
+        }),
+        COMMAND_TAG_ROUTE_INPUT => Ok(Command::RouteInput {
+            terminal_id: decode_terminal_id(dec)?,
+            event: decode_input_event(dec)?,
         }),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",
