@@ -85,7 +85,7 @@ fn render(bytes: &[u8], cols: u16, rows: u16) -> (Vec<String>, Option<(u16, u16)
 /// Decode "\r", "\x01", "\n", "\t" escapes in a keystroke arg.
 fn unescape(s: &str) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut chars = s.chars().peekable();
+    let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c != '\\' {
             let mut b = [0u8; 4];
