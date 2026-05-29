@@ -263,6 +263,16 @@ pub struct ServerState {
     /// [`crate::terminal_actor::default_shell_command`] (the user's
     /// `$SHELL`, or `/bin/sh`).
     attach_create_seed_command: Option<CommandBuilder>,
+    /// Whether any client has ever attached to this server.
+    ///
+    /// Gates the tmux-model self-exit (phux-60s): the server only exits
+    /// when its last session is reaped **after** it has served at least
+    /// one client. A freshly auto-spawned server whose seed pane dies
+    /// before anyone attaches therefore stays alive (empty) instead of
+    /// vanishing mid-handshake — the launching `phux` then repopulates it
+    /// via `CreateIfMissing`. Without this guard the auto-spawn → attach
+    /// flow races the server's own self-exit.
+    has_served_client: bool,
 }
 
 /// Default Collection identifier exposed by v0.1 servers.
@@ -392,6 +402,15 @@ impl MetadataStore {
         keys
     }
 
+    /// Drop every key scoped to `terminal`. Called when the Terminal
+    /// closes (the L1 lifecycle that owns the per-Terminal scope — see
+    /// the `terminal` field doc). Subscriptions targeting the dead
+    /// Terminal are connection-scoped and are reaped on detach, so they
+    /// are left untouched here.
+    pub fn forget_terminal(&mut self, terminal: &phux_protocol::ids::TerminalId) {
+        self.terminal.remove(terminal);
+    }
+
     /// Register `(client, scope, key)` as an active subscription. The
     /// underlying set is idempotent: re-subscribing the same triple is
     /// a noop.
@@ -448,6 +467,7 @@ impl ServerState {
             client_layers: HashMap::new(),
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
+            has_served_client: false,
         }
     }
 
@@ -672,6 +692,10 @@ impl ServerState {
                 client_caps,
             },
         );
+        // The server has now served at least one client, so the
+        // tmux-model self-exit (phux-60s) is armed — see the
+        // `has_served_client` field doc.
+        self.has_served_client = true;
 
         // Subscribe to the session's active pane if there is one. This is the
         // first cut; richer subscription (every visible pane, dynamic
@@ -750,6 +774,94 @@ impl ServerState {
         // negotiation. Keeps the maps bounded across attach churn.
         self.metadata.drop_client(client_id);
         self.client_layers.remove(&client_id);
+    }
+
+    /// Whether any client has ever attached (arms the phux-60s self-exit).
+    /// See the `has_served_client` field documentation for the rationale.
+    #[must_use]
+    pub const fn has_served_client(&self) -> bool {
+        self.has_served_client
+    }
+
+    /// Reap a pane whose actor has exited, cascading the removal up the
+    /// `pane → window → session` tree (phux-60s, the tmux server-lifecycle
+    /// model). When the pane's window has no panes left the window is
+    /// removed; when that window's session has no windows left the session
+    /// is removed.
+    ///
+    /// Returns `true` iff the server now holds zero sessions — the signal
+    /// the runtime uses to self-exit (nothing left to serve). Idempotent on
+    /// an unknown or already-reaped pane: it touches nothing and reports the
+    /// current emptiness.
+    ///
+    /// This is the structural counterpart to the `on_terminal_exited`
+    /// path in `runtime.rs`: that path detaches clients focused on the
+    /// dead pane; this one frees the domain entities and their server-side
+    /// bookkeeping (actor handle, token, input log, subscribers, wire-id
+    /// interning, and per-Terminal L3 metadata).
+    pub fn reap_terminal(&mut self, pane: TerminalId) -> bool {
+        // Resolve the parent window before the registry drops the pane.
+        let window_id = self.registry.terminal(pane).map(|t| t.window);
+        if self.registry.remove_terminal(pane).is_some() {
+            self.forget_terminal_bookkeeping(pane);
+        }
+        let Some(window_id) = window_id else {
+            return self.registry.session_count() == 0;
+        };
+
+        // Cascade up only while the parent has been emptied.
+        let window_empty = self
+            .registry
+            .window(window_id)
+            .is_some_and(|w| w.panes.is_empty());
+        if window_empty {
+            let session_id = self.registry.window(window_id).map(|w| w.session);
+            if self.registry.remove_window(window_id).is_some() {
+                self.forget_window_bookkeeping(window_id);
+            }
+            if let Some(session_id) = session_id {
+                let session_empty = self
+                    .registry
+                    .session(session_id)
+                    .is_some_and(|s| s.windows.is_empty());
+                if session_empty && self.registry.remove_session(session_id).is_some() {
+                    self.forget_session_bookkeeping(session_id);
+                }
+            }
+        }
+
+        self.registry.session_count() == 0
+    }
+
+    /// Drop every server-side map entry keyed on a now-removed pane.
+    ///
+    /// Cancels the actor token defensively (the actor has usually already
+    /// exited by the time we reap, but a still-live token is cleanly
+    /// resolved by the cancel) and retires the wire id without reuse.
+    fn forget_terminal_bookkeeping(&mut self, pane: TerminalId) {
+        self.terminals.remove(&pane);
+        if let Some(token) = self.terminal_tokens.remove(&pane) {
+            token.cancel();
+        }
+        self.terminal_inputs.remove(&pane);
+        self.terminal_subscribers.remove(&pane);
+        if let Some(wire) = self.terminal_wire_forward.remove(&pane) {
+            self.terminal_wire_reverse.remove(&wire);
+            self.metadata.forget_terminal(&wire);
+        }
+    }
+
+    /// Retire a removed window's wire-id mapping (no reuse).
+    fn forget_window_bookkeeping(&mut self, window: WindowId) {
+        if let Some(wire) = self.window_wire_forward.remove(&window) {
+            self.window_wire_reverse.remove(&wire);
+        }
+    }
+
+    /// Forget a removed session's wire id and last-touch ordering entry.
+    fn forget_session_bookkeeping(&mut self, session: SessionId) {
+        self.session_id_bridge.forget(session);
+        self.session_last_touched.remove(&session);
     }
 
     /// Subscribers (snapshot) for `pane`. Returns an empty slice if no
@@ -1194,6 +1306,87 @@ mod tests {
         // Not attached at all — must not panic.
         s.detach(cid);
         s.detach(cid);
+    }
+
+    #[test]
+    fn reap_last_pane_empties_server() {
+        let mut s = ServerState::new();
+        let (sid, _wid, pid) = s.seed_session("default");
+        assert_eq!(s.registry.session_count(), 1);
+
+        let server_empty = s.reap_terminal(pid);
+
+        assert!(server_empty, "reaping the only pane must empty the server");
+        assert_eq!(s.registry.session_count(), 0);
+        assert!(s.registry.session(sid).is_none(), "session cascaded away");
+        assert!(s.registry.terminal(pid).is_none());
+    }
+
+    #[test]
+    fn reap_one_of_two_sessions_keeps_server_alive() {
+        let mut s = ServerState::new();
+        let (sid_a, _wa, pid_a) = s.seed_session("a");
+        let (sid_b, _wb, _pb) = s.seed_session("b");
+
+        let server_empty = s.reap_terminal(pid_a);
+
+        assert!(!server_empty, "a second session is still live");
+        assert_eq!(s.registry.session_count(), 1);
+        assert!(s.registry.session(sid_a).is_none(), "session a reaped");
+        assert!(s.registry.session(sid_b).is_some(), "session b untouched");
+    }
+
+    #[test]
+    fn reap_pane_in_multipane_window_keeps_session() {
+        let mut s = ServerState::new();
+        let (sid, wid, pid1) = s.seed_session("default");
+        // Add a second pane to the same window so reaping one does not
+        // empty the window.
+        let pid2 = s.registry.new_terminal(wid).unwrap();
+
+        let server_empty = s.reap_terminal(pid1);
+
+        assert!(!server_empty);
+        assert_eq!(s.registry.session_count(), 1);
+        assert!(s.registry.session(sid).is_some());
+        assert!(s.registry.terminal(pid1).is_none(), "reaped pane gone");
+        assert!(s.registry.terminal(pid2).is_some(), "sibling pane survives");
+        assert_eq!(
+            s.registry.window(wid).map(|w| w.panes.len()),
+            Some(1),
+            "window keeps the surviving pane",
+        );
+    }
+
+    #[test]
+    fn reap_is_idempotent_on_unknown_pane() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+
+        assert!(s.reap_terminal(pid), "first reap empties the server");
+        // Second reap of the now-unknown pane must not panic and must
+        // report the server is (still) empty.
+        assert!(s.reap_terminal(pid));
+        assert_eq!(s.registry.session_count(), 0);
+    }
+
+    #[test]
+    fn reap_clears_pane_bookkeeping() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        let wire = s.intern_terminal_wire(pid);
+        assert!(!s.subscribers_for_terminal(pid).is_empty());
+        assert_eq!(s.terminal_from_wire(&wire), Some(pid));
+
+        s.reap_terminal(pid);
+
+        assert!(s.subscribers_for_terminal(pid).is_empty());
+        assert!(
+            s.terminal_from_wire(&wire).is_none(),
+            "wire id retired on reap",
+        );
     }
 
     #[test]

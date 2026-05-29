@@ -388,13 +388,21 @@ this repository as of 2026-05-26. It is informative, not normative.
 | 0x02  | C → S     | `ATTACH`          | [L1.md §replay](./L1.md) | shipped |
 | 0x03  | C → S     | `DETACH`          | §7.2               | shipped   |
 | 0x21  | C → S     | `FRAME_ACK`       | §8                 | shipped   |
+| 0x31  | C → S     | `COMMAND`         | [L1.md §5](./L1.md)| shipped   |
 | 0x40  | C → S     | `SUBSCRIBE`       | §7.3               | spec-only |
 | 0x7F  | C → S     | `PING`            | §7.4               | shipped   |
 | 0x80  | S → C     | `HELLO_OK`        | §6.1               | spec-only |
 | 0x81  | S → C     | `ATTACHED`        | [L1.md §replay](./L1.md) | shipped |
 | 0x82  | S → C     | `DETACHED`        | §7.2               | shipped   |
 | 0xC1  | S → C     | `ERROR`           | §9                 | shipped   |
+| 0xC2  | S → C     | `COMMAND_RESULT`  | [L1.md §5](./L1.md)| shipped   |
 | 0xFF  | S → C     | `PONG`            | §7.4               | partial   |
+
+The `COMMAND` / `COMMAND_RESULT` envelope (§5, allocated 0.2.0-draft.5
+per [ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips
+through the codec. v0.1 wires the `KILL_TERMINAL` (tag 0x03) and
+`GET_STATE` (tag 0x05) commands; the remaining §5.1 catalog entries are
+reserved and decode as `UnknownEnumValue` until allocated.
 
 ### 7.2 DETACH / DETACHED
 

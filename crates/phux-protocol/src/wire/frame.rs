@@ -38,7 +38,9 @@ use crate::input::paste::PasteEvent;
 use super::decode::Decoder;
 use super::encode::Encoder;
 use super::error::DecodeError;
-use super::info::{SessionSnapshot, encode_client_id, encode_session_snapshot};
+use super::info::{
+    SessionSnapshot, decode_session_snapshot, encode_client_id, encode_session_snapshot,
+};
 
 /// Maximum permitted value of the wire-frame `length` field, per `docs/spec/proto.md` §5
 /// ("at most `16_777_216` (16 MiB)").
@@ -228,6 +230,57 @@ pub(crate) const SCOPE_TAG_TERMINAL: u8 = 0;
 pub(crate) const SCOPE_TAG_COLLECTION: u8 = 1;
 /// Wire tag for [`Scope::Global`].
 pub(crate) const SCOPE_TAG_GLOBAL: u8 = 2;
+
+// -----------------------------------------------------------------------------
+// Control-plane frame discriminants — SPEC §5 (phux-k61 / ADR-0021).
+//
+// The generic command envelope. `COMMAND` (C→S) carries a typed `Command`
+// correlated by `request_id`; `COMMAND_RESULT` (S→C) carries the matching
+// `CommandResult`. Allocated from the control-plane ranges reserved in
+// Appendix B (`0x31..=0x3F` C→S, `0xC2..=0xCF` S→C; `0xC1` is ERROR).
+// ADR-0021 routes the CLI control verbs (`ls`, `kill`) through this rather
+// than minting per-verb frames.
+// -----------------------------------------------------------------------------
+
+/// Discriminant for `COMMAND` (client to server, `docs/spec/L1.md` §5).
+pub const TYPE_COMMAND: u8 = 0x31;
+/// Discriminant for `COMMAND_RESULT` (server to client, `docs/spec/L1.md` §5).
+pub const TYPE_COMMAND_RESULT: u8 = 0xC2;
+
+// Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
+// spec catalog order so the allocation is stable as later verbs land:
+// SPAWN=0x00, ATTACH_TERMINAL=0x01, DETACH_TERMINAL=0x02, KILL_TERMINAL=0x03,
+// RESIZE_TERMINAL=0x04, GET_STATE=0x05, RUN_HOOK=0x06. v0.1 implements only
+// KILL_TERMINAL and GET_STATE (ADR-0021 §3); the rest are reserved and
+// decode as `UnknownEnumValue` until wired.
+/// Wire tag for [`Command::KillTerminal`].
+pub(crate) const COMMAND_TAG_KILL_TERMINAL: u8 = 0x03;
+/// Wire tag for [`Command::GetState`].
+pub(crate) const COMMAND_TAG_GET_STATE: u8 = 0x05;
+
+// Wire tags for the `StateScope` tagged union (SPEC §5.1, GET_STATE arg).
+/// Wire tag for [`StateScope::Server`].
+pub(crate) const STATE_SCOPE_TAG_SERVER: u8 = 0x00;
+
+// Wire tags for the `CommandResult` tagged union (SPEC §5).
+/// Wire tag for [`CommandResult::Ok`].
+pub(crate) const COMMAND_RESULT_TAG_OK: u8 = 0x00;
+/// Wire tag for [`CommandResult::OkWith`].
+pub(crate) const COMMAND_RESULT_TAG_OK_WITH: u8 = 0x01;
+/// Wire tag for [`CommandResult::Error`].
+pub(crate) const COMMAND_RESULT_TAG_ERROR: u8 = 0x02;
+
+// Wire tags for the `CommandValue` tagged union (SPEC §5).
+/// Wire tag for [`CommandValue::TerminalId`].
+pub(crate) const COMMAND_VALUE_TAG_TERMINAL_ID: u8 = 0x00;
+/// Wire tag for [`CommandValue::CollectionId`].
+pub(crate) const COMMAND_VALUE_TAG_COLLECTION_ID: u8 = 0x01;
+/// Wire tag for [`CommandValue::State`].
+pub(crate) const COMMAND_VALUE_TAG_STATE: u8 = 0x02;
+/// Wire tag for [`CommandValue::Json`].
+pub(crate) const COMMAND_VALUE_TAG_JSON: u8 = 0x03;
+/// Wire tag for [`CommandValue::Bytes`].
+pub(crate) const COMMAND_VALUE_TAG_BYTES: u8 = 0x04;
 
 // -----------------------------------------------------------------------------
 // ErrorCode enum — SPEC §14.
@@ -491,6 +544,87 @@ pub enum SpawnResult {
     Ok(TerminalId),
     /// Structured failure; see [`SpawnError`].
     Err(SpawnError),
+}
+
+// -----------------------------------------------------------------------------
+// Control-plane command types — SPEC §5 (phux-k61 / ADR-0021).
+// -----------------------------------------------------------------------------
+
+/// Scope argument for [`Command::GetState`] (SPEC §5.1).
+///
+/// `#[non_exhaustive]`: v0.1 exposes only `Server` (the whole-server
+/// snapshot, which is what `phux ls` and client-side selector resolution
+/// need). Narrower scopes (a single Collection, a single Terminal) are
+/// additive minor changes when L2 lands — see [ADR-0021](../../../ADR/0021-control-plane-commands.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StateScope {
+    /// Snapshot the entire server (every Terminal the caller may see).
+    Server,
+}
+
+/// A typed control-plane command carried by [`FrameKind::Command`] (SPEC §5.1).
+///
+/// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
+/// only the two the CLI needs (ADR-0021 §3). Unknown wire tags surface as
+/// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Command {
+    /// Terminate the underlying PTY of `terminal_id`. Asynchronously emits
+    /// `TERMINAL_CLOSED`. Backs `phux kill` (one command per resolved
+    /// Terminal — see ADR-0021).
+    KillTerminal {
+        /// The Terminal to terminate.
+        terminal_id: TerminalId,
+    },
+    /// Request a snapshot of server state in `scope`. The reply rides on
+    /// `COMMAND_RESULT { Ok_With(State(..)) }`. Backs `phux ls` and the
+    /// CLI's client-side selector resolution.
+    GetState {
+        /// What to snapshot.
+        scope: StateScope,
+    },
+}
+
+/// A successful command's payload (SPEC §5, `CommandValue`).
+///
+/// `#[non_exhaustive]` for forward-compatible additions.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum CommandValue {
+    /// A Terminal identifier (e.g. the result of a spawn).
+    TerminalId(TerminalId),
+    /// A Collection identifier (L2).
+    CollectionId(CollectionId),
+    /// A server-state snapshot (reply to `GET_STATE`). Reuses the
+    /// `ATTACHED` snapshot shape — see the wire-bytes note in SPEC §7.
+    State(SessionSnapshot),
+    /// A structured JSON return, for commands whose result is open-shaped.
+    Json(String),
+    /// Opaque bytes (e.g. an L3 metadata value).
+    Bytes(Vec<u8>),
+}
+
+/// The outcome of a [`Command`], carried by [`FrameKind::CommandResult`]
+/// (SPEC §5).
+///
+/// `#[non_exhaustive]` for forward-compatible additions.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum CommandResult {
+    /// The command succeeded and returned no value.
+    Ok,
+    /// The command succeeded and returned a [`CommandValue`].
+    OkWith(CommandValue),
+    /// The command failed; carries a structured [`ErrorCode`] and a
+    /// human-readable UTF-8 diagnostic.
+    Error {
+        /// Structured failure code.
+        code: ErrorCode,
+        /// Human-readable diagnostic (UTF-8; unconstrained otherwise).
+        message: String,
+    },
 }
 
 /// Decoded wire frame.
@@ -992,6 +1126,30 @@ pub enum FrameKind {
         /// New height in cells.
         rows: u16,
     },
+
+    /// `COMMAND` — the generic control-plane request envelope
+    /// (`docs/spec/L1.md` §5, ADR-0021).
+    ///
+    /// Carries a typed [`Command`] correlated to its eventual
+    /// [`FrameKind::CommandResult`] by `request_id`. Asynchronous: the
+    /// server MAY interleave other frames before the result (SPEC §5).
+    Command {
+        /// Correlates this request with the eventual `CommandResult`.
+        request_id: u32,
+        /// The command to execute.
+        command: Command,
+    },
+
+    /// `COMMAND_RESULT` — reply to a prior [`FrameKind::Command`]
+    /// (`docs/spec/L1.md` §5, ADR-0021).
+    ///
+    /// Correlated to the originating request by `request_id`.
+    CommandResult {
+        /// Correlates this reply with a prior `Command.request_id`.
+        request_id: u32,
+        /// The command's outcome.
+        result: CommandResult,
+    },
 }
 
 impl FrameKind {
@@ -1027,6 +1185,8 @@ impl FrameKind {
             Self::TerminalSpawned { .. } => TYPE_TERMINAL_SPAWNED,
             Self::TerminalClosed { .. } => TYPE_TERMINAL_CLOSED,
             Self::TerminalResize { .. } => TYPE_TERMINAL_RESIZE,
+            Self::Command { .. } => TYPE_COMMAND,
+            Self::CommandResult { .. } => TYPE_COMMAND_RESULT,
         }
     }
 
@@ -1246,6 +1406,17 @@ impl FrameKind {
                 encode_terminal_id(terminal_id, &mut enc);
                 enc.write_u16_be(*cols);
                 enc.write_u16_be(*rows);
+            }
+            Self::Command {
+                request_id,
+                command,
+            } => {
+                enc.write_u32_be(*request_id);
+                encode_command(command, &mut enc);
+            }
+            Self::CommandResult { request_id, result } => {
+                enc.write_u32_be(*request_id);
+                encode_command_result(result, &mut enc);
             }
         }
 
@@ -1736,6 +1907,143 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
         SPAWN_ERROR_TAG_SPAWN_FAILED => Ok(SpawnError::SpawnFailed(dec.read_str()?.to_owned())),
         other => Err(DecodeError::UnknownEnumValue {
             field: "SpawnError",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Control-plane command codec — SPEC §5 (phux-k61 / ADR-0021).
+//
+// COMMAND body:        u32 request_id, then Command (tag + body).
+// COMMAND_RESULT body: u32 request_id, then CommandResult (tag + body).
+//
+// Command tags follow the SPEC §5.1 catalog order; only KILL_TERMINAL
+// (0x03) and GET_STATE (0x05) are wired in v0.1. CommandResult / CommandValue
+// tags use the same `Ok = 0x00` / sequential convention as the rest of the
+// wire.
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
+    match command {
+        Command::KillTerminal { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_KILL_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
+        Command::GetState { scope } => {
+            enc.write_u8(COMMAND_TAG_GET_STATE);
+            encode_state_scope(scope, enc);
+        }
+    }
+}
+
+pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        COMMAND_TAG_KILL_TERMINAL => Ok(Command::KillTerminal {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
+        COMMAND_TAG_GET_STATE => Ok(Command::GetState {
+            scope: decode_state_scope(dec)?,
+        }),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Command",
+            value: u32::from(other),
+        }),
+    }
+}
+
+fn encode_state_scope(scope: &StateScope, enc: &mut Encoder<'_>) {
+    match scope {
+        StateScope::Server => enc.write_u8(STATE_SCOPE_TAG_SERVER),
+    }
+}
+
+fn decode_state_scope(dec: &mut Decoder<'_>) -> Result<StateScope, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        STATE_SCOPE_TAG_SERVER => Ok(StateScope::Server),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "StateScope",
+            value: u32::from(other),
+        }),
+    }
+}
+
+pub(super) fn encode_command_result(result: &CommandResult, enc: &mut Encoder<'_>) {
+    match result {
+        CommandResult::Ok => enc.write_u8(COMMAND_RESULT_TAG_OK),
+        CommandResult::OkWith(value) => {
+            enc.write_u8(COMMAND_RESULT_TAG_OK_WITH);
+            encode_command_value(value, enc);
+        }
+        CommandResult::Error { code, message } => {
+            enc.write_u8(COMMAND_RESULT_TAG_ERROR);
+            enc.write_u16_be(code.as_wire());
+            enc.write_str(message);
+        }
+    }
+}
+
+pub(super) fn decode_command_result(dec: &mut Decoder<'_>) -> Result<CommandResult, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        COMMAND_RESULT_TAG_OK => Ok(CommandResult::Ok),
+        COMMAND_RESULT_TAG_OK_WITH => Ok(CommandResult::OkWith(decode_command_value(dec)?)),
+        COMMAND_RESULT_TAG_ERROR => {
+            let code_raw = dec.read_u16_be()?;
+            let code =
+                ErrorCode::from_wire(code_raw).ok_or_else(|| DecodeError::UnknownEnumValue {
+                    field: "ErrorCode",
+                    value: u32::from(code_raw),
+                })?;
+            let message = dec.read_str()?.to_owned();
+            Ok(CommandResult::Error { code, message })
+        }
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "CommandResult",
+            value: u32::from(other),
+        }),
+    }
+}
+
+fn encode_command_value(value: &CommandValue, enc: &mut Encoder<'_>) {
+    match value {
+        CommandValue::TerminalId(id) => {
+            enc.write_u8(COMMAND_VALUE_TAG_TERMINAL_ID);
+            encode_terminal_id(id, enc);
+        }
+        CommandValue::CollectionId(id) => {
+            enc.write_u8(COMMAND_VALUE_TAG_COLLECTION_ID);
+            enc.write_u32_be(id.get());
+        }
+        CommandValue::State(snapshot) => {
+            enc.write_u8(COMMAND_VALUE_TAG_STATE);
+            encode_session_snapshot(snapshot, enc);
+        }
+        CommandValue::Json(s) => {
+            enc.write_u8(COMMAND_VALUE_TAG_JSON);
+            enc.write_str(s);
+        }
+        CommandValue::Bytes(b) => {
+            enc.write_u8(COMMAND_VALUE_TAG_BYTES);
+            enc.write_bytes(b);
+        }
+    }
+}
+
+fn decode_command_value(dec: &mut Decoder<'_>) -> Result<CommandValue, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        COMMAND_VALUE_TAG_TERMINAL_ID => Ok(CommandValue::TerminalId(decode_terminal_id(dec)?)),
+        COMMAND_VALUE_TAG_COLLECTION_ID => Ok(CommandValue::CollectionId(CollectionId::new(
+            dec.read_u32_be()?,
+        ))),
+        COMMAND_VALUE_TAG_STATE => Ok(CommandValue::State(decode_session_snapshot(dec)?)),
+        COMMAND_VALUE_TAG_JSON => Ok(CommandValue::Json(dec.read_str()?.to_owned())),
+        COMMAND_VALUE_TAG_BYTES => Ok(CommandValue::Bytes(dec.read_bytes()?.to_vec())),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "CommandValue",
             value: u32::from(other),
         }),
     }

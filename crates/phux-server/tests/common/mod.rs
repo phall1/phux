@@ -179,6 +179,37 @@ pub async fn recv_typed(stream: &mut UnixStream) -> (u8, FrameKind) {
     (type_byte, frame)
 }
 
+/// Like [`recv_typed`] but returns `None` on a clean connection close
+/// (`UnexpectedEof` on the length prefix) instead of panicking. Use this
+/// in read loops that may outlive the server: with the tmux server-exit
+/// model (phux-60s) the server drops every client connection when its
+/// last session is reaped, so a graceful EOF mid-loop is expected, not a
+/// failure. Still panics on the [`WIRE_RECV_TIMEOUT`] (a hung server is a
+/// loud failure) and on a partial/garbled frame.
+pub async fn try_recv_typed(stream: &mut UnixStream) -> Option<(u8, FrameKind)> {
+    let framed = timeout(WIRE_RECV_TIMEOUT, async {
+        let mut header = [0u8; 4];
+        match stream.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return None,
+            Err(e) => panic!("recv header io error: {e}"),
+        }
+        let body_len = u32::from_be_bytes(header) as usize;
+        let mut body = vec![0u8; body_len];
+        stream.read_exact(&mut body).await.unwrap();
+        let mut framed = Vec::with_capacity(4 + body_len);
+        framed.extend_from_slice(&header);
+        framed.extend_from_slice(&body);
+        Some(framed)
+    })
+    .await
+    .expect("timed out waiting for frame")?;
+    let type_byte = framed[4];
+    let (frame, rest) = FrameKind::decode(&framed).expect("decode frame");
+    assert!(rest.is_empty(), "decoder did not consume entire frame");
+    Some((type_byte, frame))
+}
+
 /// Encode a [`FrameKind`] into a length-prefixed wire buffer.
 pub fn encode_frame(frame: &FrameKind) -> BytesMut {
     let mut buf = BytesMut::new();

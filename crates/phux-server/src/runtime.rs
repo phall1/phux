@@ -34,8 +34,8 @@ use futures_util::stream::FuturesUnordered;
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, FrameKind, MAX_FRAME_LEN, SpawnError, SpawnResult, TYPE_PONG,
-    ViewportInfo,
+    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, MAX_FRAME_LEN,
+    SpawnError, SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -328,7 +328,7 @@ pub(crate) fn seed_session_with_actor(
     state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
     });
-    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify);
+    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     Ok(terminal)
 }
 
@@ -367,7 +367,7 @@ pub fn seed_session_with_pty(
     state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
     });
-    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify);
+    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     Ok(terminal)
 }
 
@@ -401,6 +401,7 @@ fn spawn_terminal_exit_watcher(
     state: SharedState,
     pane: phux_core::ids::TerminalId,
     exit_notify: Option<oneshot::Receiver<Option<i32>>>,
+    root_token: CancellationToken,
 ) {
     let Some(rx) = exit_notify else {
         return;
@@ -419,6 +420,27 @@ fn spawn_terminal_exit_watcher(
         // client whose focused pane was this one.
         broadcast_terminal_closed(&state, pane, exit_status).await;
         on_terminal_exited(&state, pane).await;
+        // phux-60s: reap the dead pane, cascading to its window and
+        // session when they empty. When the last session is gone the
+        // server has nothing left to serve, so fire the root token —
+        // the tmux server-exit model. Without this the server lingers
+        // forever after every shell exits.
+        //
+        // Two guards keep this from misfiring:
+        //   * `has_served_client`: a freshly auto-spawned server whose
+        //     seed pane dies before anyone attaches must NOT vanish — the
+        //     launching `phux` is still racing to connect and will
+        //     repopulate it via `CreateIfMissing`. Only self-exit once
+        //     we've actually served someone.
+        //   * `!root_token.is_cancelled()`: a Ctrl-C shutdown cancels the
+        //     pane actor too, routing through here; don't log a spurious
+        //     "self-exit" or double-cancel during normal teardown.
+        let (server_empty, served) =
+            state.with_mut(|s| (s.reap_terminal(pane), s.has_served_client()));
+        if server_empty && served && !root_token.is_cancelled() {
+            info!("last session reaped after serving clients; server self-exit");
+            root_token.cancel();
+        }
     });
 }
 
@@ -913,6 +935,12 @@ async fn handle_client(
                 rows,
             } => {
                 handle_terminal_resize(&state, client_id, &terminal_id, cols, rows);
+            }
+            FrameKind::Command {
+                request_id,
+                command,
+            } => {
+                handle_command(&state, client_id, request_id, command, &out_tx).await;
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -1687,6 +1715,107 @@ fn prepare_attach(
             phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
         Ok((snapshot, initial_client_id, panes_to_snapshot))
     })
+}
+
+// -----------------------------------------------------------------------------
+// Control-plane command dispatch — SPEC §5 (phux-k61 / ADR-0021).
+// -----------------------------------------------------------------------------
+
+/// Dispatch a `COMMAND` envelope and reply with `COMMAND_RESULT`
+/// correlated by `request_id`. The control plane for the CLI's `ls` /
+/// `kill` verbs. Per SPEC §5 a command is asynchronous: the result MAY
+/// follow other frames the command triggered (e.g. `KILL_TERMINAL`'s
+/// `TERMINAL_CLOSED`).
+async fn handle_command(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    command: Command,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) {
+    let result = match command {
+        Command::GetState { scope } => handle_get_state(state, &scope),
+        Command::KillTerminal { terminal_id } => {
+            // Resolve the wire id to the core pane, then cancel its actor.
+            // Cancellation drops the actor's `exit_notify`, which the
+            // per-pane EOF watcher (phux-it8) treats identically to PTY
+            // EOF: it broadcasts `TERMINAL_CLOSED` and reaps the pane
+            // (phux-60s), cascading to session removal + server self-exit
+            // when the last session empties. So KILL_TERMINAL reuses the
+            // exact teardown a natural shell exit takes — no separate
+            // kill plumbing, and the async `TERMINAL_CLOSED` still fires.
+            state
+                .with(|s| s.terminal_from_wire(&terminal_id))
+                .map_or_else(
+                    || CommandResult::Error {
+                        code: ErrorCode::TerminalNotFound,
+                        message: format!("no such terminal: {terminal_id:?}"),
+                    },
+                    |core_id| {
+                        state.with_mut(|s| s.detach_terminal_actor(core_id));
+                        CommandResult::Ok
+                    },
+                )
+        }
+        // `Command` is `#[non_exhaustive]`: a forward-compat command this
+        // server doesn't implement decodes only if a newer peer sent a
+        // tag we allocated but haven't wired (the decoder rejects truly
+        // unknown tags). Refuse it per SPEC §5 with `INVALID_COMMAND`.
+        _ => CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: "command not supported by this server".to_owned(),
+        },
+    };
+    debug!(
+        ?client_id,
+        request_id, "COMMAND dispatched; sending COMMAND_RESULT"
+    );
+    let _ = out_tx
+        .send(Outbound::Frame(FrameKind::CommandResult {
+            request_id,
+            result,
+        }))
+        .await;
+}
+
+/// Build the `OK_WITH(STATE(..))` reply for `GET_STATE`.
+///
+/// v0.1 supports only [`StateScope::Server`] (the whole-server snapshot).
+/// The snapshot reuses the `ATTACHED` [`SessionSnapshot`] shape; `phux ls`
+/// and client-side selector resolution read its `sessions` list and ignore
+/// the focused-* fields. An empty server yields an empty session list with
+/// sentinel focus ids (the wire requires the focus fields to be present).
+fn handle_get_state(state: &SharedState, scope: &StateScope) -> CommandResult {
+    match scope {
+        StateScope::Server => {
+            let snapshot = state.with_mut(|s| {
+                let focus = s
+                    .most_recently_touched_session()
+                    .or_else(|| s.registry.sessions().next().map(|(id, _)| id));
+                focus.and_then(|sid| s.build_session_snapshot(sid))
+            });
+            CommandResult::OkWith(CommandValue::State(
+                snapshot.unwrap_or_else(empty_session_snapshot),
+            ))
+        }
+        // `StateScope` is `#[non_exhaustive]`; a narrower scope a newer
+        // peer requests is not yet supported.
+        _ => CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: "unsupported GET_STATE scope".to_owned(),
+        },
+    }
+}
+
+/// A `SessionSnapshot` describing a server with no sessions: empty lists,
+/// sentinel focus ids. Used by `GET_STATE` when the registry is empty.
+const fn empty_session_snapshot() -> phux_protocol::wire::info::SessionSnapshot {
+    use phux_protocol::ids::{SessionId, TerminalId, WindowId};
+    phux_protocol::wire::info::SessionSnapshot::new(
+        SessionId::new(0),
+        WindowId::new(0),
+        TerminalId::local(0),
+    )
 }
 
 /// Resolve `target`, call [`prepare_attach`], and queue the

@@ -42,6 +42,7 @@ Nygard's template][nygard].
 | [0018](./0018-lazy-state-synchronization.md) | The wire is lazy state synchronization of libghostty Terminal state; ADR-0013's pass-through bytes is the degenerate case | Accepted (builds on [0013](./0013-libghostty-bytes-on-wire.md)) |
 | [0019](./0019-tui-multi-pane-rendering.md) | Multi-pane TUI rendering: layout persistence, wire shape, and chrome | Accepted |
 | [0020](./0020-layered-render.md) | Layered render: ratatui chrome over libghostty pane interiors | Accepted |
+| [0021](./0021-control-plane-commands.md) | Control-plane verbs ride the generic `COMMAND` envelope; selectors resolve client-side; no session/window on the wire | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md)) |
 
 ## When to write an ADR
 

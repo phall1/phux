@@ -21,7 +21,8 @@ use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, Scope, SpawnError, SpawnResult, ViewportInfo,
+    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, Scope, SpawnError, SpawnResult,
+    StateScope, ViewportInfo,
 };
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
@@ -1437,6 +1438,112 @@ proptest! {
         prop_assert_eq!(decoded, frame);
         prop_assert!(tail.is_empty());
     }
+
+    #[test]
+    fn roundtrip_command_kill_terminal(
+        request_id in any::<u32>(),
+        terminal_id in arb_terminal_id(),
+    ) {
+        let frame = FrameKind::Command {
+            request_id,
+            command: Command::KillTerminal { terminal_id },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn roundtrip_command_result_ok_and_error(
+        request_id in any::<u32>(),
+        message in ".{0,48}",
+    ) {
+        for result in [
+            CommandResult::Ok,
+            CommandResult::Error { code: ErrorCode::InvalidCommand, message },
+        ] {
+            let frame = FrameKind::CommandResult { request_id, result };
+            let mut buf = BytesMut::new();
+            frame.encode(&mut buf);
+            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+            prop_assert_eq!(decoded, frame);
+            prop_assert!(tail.is_empty());
+        }
+    }
+}
+
+#[test]
+fn command_get_state_round_trips() {
+    let frame = FrameKind::Command {
+        request_id: 7,
+        command: Command::GetState {
+            scope: StateScope::Server,
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_result_ok_with_state_snapshot_round_trips() {
+    // `GET_STATE`'s reply: OK_WITH(STATE(snapshot)). Reuses the ATTACHED
+    // snapshot shape, so a non-trivial snapshot must survive the round trip.
+    let info = SessionInfo::new(SessionId::new(1), "work".to_owned());
+    let snap = SessionSnapshot::new(SessionId::new(1), WindowId::new(1), TerminalId::local(1))
+        .with_sessions(vec![info]);
+    let frame = FrameKind::CommandResult {
+        request_id: 9,
+        result: CommandResult::OkWith(CommandValue::State(snap)),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_result_ok_with_terminal_id_round_trips() {
+    let frame = FrameKind::CommandResult {
+        request_id: 3,
+        result: CommandResult::OkWith(CommandValue::TerminalId(TerminalId::local(42))),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_unknown_tag_is_rejected() {
+    // A COMMAND frame carrying an unallocated command tag (0x7F) must
+    // decode-fail rather than silently coerce. Hand-build the bytes:
+    // [len:u32][type COMMAND][request_id:u32][cmd tag 0x7F].
+    let mut buf = BytesMut::new();
+    let body: &[u8] = &[
+        0x31, // TYPE_COMMAND
+        0, 0, 0, 1,    // request_id
+        0x7F, // unallocated Command tag
+    ];
+    buf.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    buf.extend_from_slice(body);
+    let err = FrameKind::decode(&buf).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DecodeError::UnknownEnumValue {
+                field: "Command",
+                ..
+            }
+        ),
+        "expected UnknownEnumValue for Command, got {err:?}",
+    );
 }
 
 #[test]

@@ -16,6 +16,14 @@
     clippy::print_stderr,
     reason = "binary entry point; stderr is the report"
 )]
+#![allow(
+    clippy::print_stdout,
+    reason = "binary entry point; `phux ls` writes its listing to stdout"
+)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "bin-internal submodules expose items to the crate root via pub(crate); plain `pub` would trip unreachable_pub in a binary with no external API"
+)]
 
 // Opt-in dhat heap profiling. Swaps the global allocator for
 // `dhat::Alloc` and the `Profiler::new_heap()` guard installed in
@@ -32,12 +40,18 @@ use std::process::{ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
+use phux_client::attach::connection::Connection;
 use phux_client::attach::{self, AttachError};
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
-use phux_protocol::wire::frame::AttachTarget;
+use phux_protocol::wire::frame::{
+    AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
+};
+use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
 use phux_server::{ServerConfig, ServerRuntime};
+
+mod selector;
 
 /// Default name the `phux server` subcommand pre-seeds, and the name
 /// the `phux attach` auto-spawn path requests when the user doesn't
@@ -103,6 +117,57 @@ enum Command {
         #[arg(long, hide = true)]
         daemonize: bool,
     },
+
+    /// List sessions on the running server.
+    ///
+    /// Queries the server via the `GET_STATE` control command (ADR-0021)
+    /// and prints one line per session. Does not start a server: with no
+    /// server running it reports as much and exits non-zero (like
+    /// `tmux ls`).
+    Ls {
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Create a new session and attach to it.
+    ///
+    /// v0.1 maps to "create the named session if it does not exist, then
+    /// attach" (the server's `CreateIfMissing` path). Auto-starts a
+    /// server if none is running.
+    New {
+        /// Session name. Defaults to the standard session name.
+        #[arg(short = 's', long = "session")]
+        session: Option<String>,
+
+        /// Working directory for the seed pane.
+        #[arg(short = 'c', long = "cwd")]
+        cwd: Option<PathBuf>,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+
+        /// Command (and arguments) to run in the seed pane instead of the
+        /// default shell. Everything after `--` is taken verbatim.
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+
+    /// Kill a session, window, or pane.
+    ///
+    /// `TARGET` uses the selector grammar (`docs/consumers/tui.md` §3):
+    /// `name`, `name:N`, `name:N.M`, `name:tag`, `@N`, `.`. The selector
+    /// is resolved client-side against a server-state snapshot to a set of
+    /// Terminals; the server is then asked to kill each (ADR-0021).
+    Kill {
+        /// What to kill (selector).
+        target: String,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -134,6 +199,14 @@ fn main() -> ExitCode {
             socket,
             daemonize,
         }) => run_server(&session, socket, daemonize),
+        Some(Command::Ls { socket }) => run_ls(socket),
+        Some(Command::New {
+            session,
+            cwd,
+            socket,
+            command,
+        }) => run_new(session, cwd, socket, command),
+        Some(Command::Kill { target, socket }) => run_kill(&target, socket),
         None => run_naked(),
     }
 }
@@ -151,19 +224,16 @@ fn main() -> ExitCode {
 /// 2. Attempt `ATTACH { target: Last }`. On a server with prior session
 ///    activity this resolves to the most-recently-focused session,
 ///    matching docs/consumers/tui.md §1's "attach to default session" intent.
-/// 3. If `Last` is refused with no prior-attach memory (which is the
-///    case on a freshly spawned server, or one whose only prior client
-///    detached and the slot was never repopulated), fall back to
-///    `ATTACH { target: ByName(DEFAULT_SESSION_NAME) }`. The auto-spawn
-///    path pre-seeds that name, so this is always wired up immediately
-///    after step 1.
+/// 3. If `Last` is refused with no prior-attach memory (a freshly spawned
+///    server, or one whose sessions were all reaped), fall back to
+///    `ATTACH { target: CreateIfMissing(DEFAULT_SESSION_NAME) }`, which
+///    attaches to the default session or creates it first. This is what
+///    makes the auto-spawn path robust: if the server's seed pane exited
+///    before we connected (the server stays alive but empty, phux-60s
+///    "serve before self-exit"), this step repopulates it instead of
+///    surfacing a dead-end "no session" error.
 ///
-/// We avoid introducing a new `ListSessions` / `CreateIfMissing` wire
-/// frame here: the existing `AttachTarget::Last` + `AttachTarget::ByName`
-/// pair covers the "server is alive with sessions" and "server is fresh
-/// with default" cases without expanding the protocol. The "server is
-/// alive but all sessions were killed" edge case still surfaces a clean
-/// error — see follow-up phux-k61.2 (server-side `CreateIfMissing`).
+/// The shared cascade lives in [`attach_default_with_fallback`].
 fn run_naked() -> ExitCode {
     let socket_path = default_socket_path();
 
@@ -194,40 +264,8 @@ fn run_naked() -> ExitCode {
         }
     };
 
-    // Step 1: try Last. The server resolves this to the most-recently-
-    // focused session and falls back to SessionNotFound when prior
-    // activity memory is empty.
-    let last_result = rt.block_on(run_attach_once(
-        &socket_path,
-        AttachTarget::Last,
-        predict_cfg,
-    ));
-
-    match last_result {
+    match rt.block_on(attach_default_with_fallback(&socket_path, predict_cfg)) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(AttachError::Refused(message)) => {
-            // The server told us no — most commonly because there is no
-            // prior-attach memory yet. Step 2: ask for the default
-            // session by name. If the server was auto-spawned we just
-            // pre-seeded it; if the user spun up the server manually
-            // they likely used the default `--session default` and the
-            // name is still right.
-            eprintln!(
-                "phux: no prior-attach session (server said: {message}); trying `{DEFAULT_SESSION_NAME}`"
-            );
-            let by_name_result = rt.block_on(run_attach_once(
-                &socket_path,
-                AttachTarget::ByName(DEFAULT_SESSION_NAME.to_owned()),
-                predict_cfg,
-            ));
-            match by_name_result {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(err) => {
-                    print_attach_error(&err, &socket_path, DEFAULT_SESSION_NAME);
-                    ExitCode::FAILURE
-                }
-            }
-        }
         Err(err) => {
             print_attach_error(&err, &socket_path, DEFAULT_SESSION_NAME);
             ExitCode::FAILURE
@@ -253,6 +291,44 @@ async fn run_attach_once(
         attach::run_with_predict(socket_path, target, predict_cfg).await
     } else {
         attach::run(socket_path, target).await
+    }
+}
+
+/// Attach to the user's default session with the naked-`phux` fallback
+/// cascade: try `Last`; if the server has no prior-attach memory, fall
+/// back to `CreateIfMissing(default)`.
+///
+/// The `CreateIfMissing` step is what makes the cascade robust to an
+/// *empty* server — e.g. one whose auto-spawned seed pane exited before
+/// any client attached. The server stays alive (phux-60s only self-exits
+/// after it has served a client), and this step creates a fresh default
+/// session and attaches, rather than dead-ending on "session not found".
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn attach_default_with_fallback(
+    socket_path: &Path,
+    predict_cfg: PredictiveConfig,
+) -> Result<(), AttachError> {
+    match run_attach_once(socket_path, AttachTarget::Last, predict_cfg).await {
+        Ok(()) => Ok(()),
+        Err(AttachError::Refused(message)) => {
+            eprintln!(
+                "phux: no prior-attach session (server said: {message}); creating `{DEFAULT_SESSION_NAME}`"
+            );
+            run_attach_once(
+                socket_path,
+                AttachTarget::CreateIfMissing {
+                    name: DEFAULT_SESSION_NAME.to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+                predict_cfg,
+            )
+            .await
+        }
+        Err(err) => Err(err),
     }
 }
 
@@ -317,10 +393,13 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
         }
     };
 
-    let result = if predict_cfg.enabled {
-        rt.block_on(attach::run_with_predict(&socket_path, target, predict_cfg))
-    } else {
-        rt.block_on(attach::run(&socket_path, target))
+    // No explicit name → behave like naked `phux`: try `Last`, then
+    // create-and-attach the default session. This is robust to an empty
+    // server (e.g. one whose auto-spawned seed pane exited before we
+    // connected). An explicit name attaches to that session only.
+    let result = match target {
+        AttachTarget::Last => rt.block_on(attach_default_with_fallback(&socket_path, predict_cfg)),
+        other => rt.block_on(run_attach_once(&socket_path, other, predict_cfg)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -332,6 +411,311 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Control-plane CLI verbs — `ls` / `new` / `kill` (phux-k61, ADR-0021).
+//
+// `ls` and `kill` ride the generic COMMAND envelope: connect, send
+// COMMAND, read COMMAND_RESULT. Selectors for `kill` are resolved
+// client-side against a GET_STATE snapshot (the server never sees a
+// session/window selector). `new` reuses the ATTACH CreateIfMissing path.
+// -----------------------------------------------------------------------------
+
+/// Build a current-thread tokio runtime, or print why and return the
+/// failure exit code.
+fn cli_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| {
+            eprintln!("failed to build runtime: {err}");
+            ExitCode::FAILURE
+        })
+}
+
+/// Send one command over `conn` and return the matching `COMMAND_RESULT`,
+/// skipping any unrelated frames the server interleaves (SPEC §5).
+async fn command_on(
+    conn: &mut Connection,
+    request_id: u32,
+    command: WireCommand,
+) -> Result<CommandResult, AttachError> {
+    conn.send(&FrameKind::Command {
+        request_id,
+        command,
+    })
+    .await?;
+    loop {
+        match conn.recv().await? {
+            FrameKind::CommandResult {
+                request_id: got,
+                result,
+            } if got == request_id => return Ok(result),
+            _ => {}
+        }
+    }
+}
+
+/// One-shot: open a fresh connection, send `command`, return its result.
+async fn request_command(
+    socket_path: &Path,
+    command: WireCommand,
+) -> Result<CommandResult, AttachError> {
+    let mut conn = Connection::connect(socket_path).await?;
+    command_on(&mut conn, 1, command).await
+}
+
+/// Print a "no server" diagnostic for a connect-time error, or a generic
+/// one otherwise. Returns the failure exit code for the caller to bubble.
+fn report_no_server(err: &AttachError, socket_path: &Path, verb: &str) -> ExitCode {
+    match err {
+        AttachError::Io(io_err)
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound,
+            ) =>
+        {
+            eprintln!("phux: no server running at {}", socket_path.display());
+        }
+        AttachError::Disconnected => {
+            eprintln!("phux: server closed the connection during {verb}");
+        }
+        other => eprintln!("phux: {verb} failed: {other}"),
+    }
+    ExitCode::FAILURE
+}
+
+/// `phux ls` — list sessions via `GET_STATE`. Does not auto-start a
+/// server.
+fn run_ls(socket: Option<PathBuf>) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    let result = rt.block_on(request_command(
+        &socket_path,
+        WireCommand::GetState {
+            scope: StateScope::Server,
+        },
+    ));
+    match result {
+        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => {
+            print_sessions(&snapshot);
+            ExitCode::SUCCESS
+        }
+        Ok(other) => {
+            eprintln!("phux: unexpected GET_STATE result: {other:?}");
+            ExitCode::FAILURE
+        }
+        Err(err) => report_no_server(&err, &socket_path, "ls"),
+    }
+}
+
+/// Render the session list, one line per session (tmux-`ls`-ish).
+fn print_sessions(snapshot: &SessionSnapshot) {
+    let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    for s in sessions {
+        let windows = if s.window_count == 1 {
+            "window"
+        } else {
+            "windows"
+        };
+        let attached = if s.attached_client_count > 0 {
+            " (attached)"
+        } else {
+            ""
+        };
+        println!("{}: {} {windows}{attached}", s.name, s.window_count);
+    }
+}
+
+/// `phux new` — create a *new* session and attach to it.
+///
+/// "New" is enforced client-side against a `GET_STATE` snapshot: an
+/// explicit `-s NAME` that already exists is an error (like tmux's
+/// duplicate-session refusal), and an omitted name is auto-assigned the
+/// smallest free numeric name. The create+attach itself rides
+/// `CreateIfMissing` (ADR-0021 defers a dedicated create-session command).
+fn run_new(
+    session: Option<String>,
+    cwd: Option<PathBuf>,
+    socket: Option<PathBuf>,
+    command: Vec<String>,
+) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    // If a server is up, snapshot its session names so we can enforce
+    // "new" (reject a duplicate -s, auto-name an omitted one). No server
+    // yet → no existing names; the auto-spawn below seeds the chosen name.
+    let existing = if socket_path.exists() {
+        match rt.block_on(request_command(
+            &socket_path,
+            WireCommand::GetState {
+                scope: StateScope::Server,
+            },
+        )) {
+            Ok(CommandResult::OkWith(CommandValue::State(snap))) => {
+                snap.sessions.iter().map(|s| s.name.clone()).collect()
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    let name = match session {
+        Some(requested) => {
+            if existing.contains(&requested) {
+                eprintln!(
+                    "phux: session '{requested}' already exists (use `phux attach {requested}` to join it)"
+                );
+                return ExitCode::FAILURE;
+            }
+            requested
+        }
+        None => unique_session_name(&existing),
+    };
+
+    if !socket_path.exists()
+        && let Err(err) = maybe_auto_spawn_server(&socket_path, &name)
+    {
+        eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
+    }
+
+    let target = AttachTarget::CreateIfMissing {
+        name: name.clone(),
+        command: if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        },
+        cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
+    };
+
+    let predict_cfg = match config_loader::load() {
+        Ok(cfg) => PredictiveConfig {
+            enabled: cfg.experimental.predictive_echo,
+        },
+        Err(err) => {
+            eprintln!("phux: config load failed ({err}); using defaults");
+            PredictiveConfig::disabled()
+        }
+    };
+    match rt.block_on(run_attach_once(&socket_path, target, predict_cfg)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            print_attach_error(&err, &socket_path, &name);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Smallest non-negative integer (as a string) not already a session
+/// name. Matches tmux's default numeric session naming and guarantees
+/// `phux new` (no `-s`) produces a distinct session each time.
+fn unique_session_name(existing: &[String]) -> String {
+    let mut n: u32 = 0;
+    loop {
+        let candidate = n.to_string();
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
+/// `phux kill TARGET` — resolve the selector client-side, then ask the
+/// server to kill each resolved Terminal. Exit codes: 0 on success,
+/// 1 on a selector miss / no server, 2 on a server-side refusal.
+fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
+    let selector = match selector::parse(target) {
+        Ok(sel) => sel,
+        Err(err) => {
+            eprintln!("phux: invalid target '{target}': {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    rt.block_on(async move {
+        let mut conn = match Connection::connect(&socket_path).await {
+            Ok(conn) => conn,
+            Err(err) => return report_no_server(&err, &socket_path, "kill"),
+        };
+
+        // Resolve the selector against a fresh snapshot.
+        let snapshot = match command_on(
+            &mut conn,
+            0,
+            WireCommand::GetState {
+                scope: StateScope::Server,
+            },
+        )
+        .await
+        {
+            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
+            Ok(other) => {
+                eprintln!("phux: unexpected GET_STATE result: {other:?}");
+                return ExitCode::FAILURE;
+            }
+            Err(err) => return report_no_server(&err, &socket_path, "kill"),
+        };
+
+        let terminals = selector::resolve(&selector, &snapshot);
+        if terminals.is_empty() {
+            eprintln!("phux: no such target: {target}");
+            return ExitCode::FAILURE;
+        }
+
+        let mut refused = false;
+        for (i, terminal_id) in terminals.into_iter().enumerate() {
+            let request_id = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+            match command_on(
+                &mut conn,
+                request_id,
+                WireCommand::KillTerminal {
+                    terminal_id: terminal_id.clone(),
+                },
+            )
+            .await
+            {
+                Ok(CommandResult::Ok) => {}
+                Ok(CommandResult::Error { message, .. }) => {
+                    eprintln!("phux: kill refused for {terminal_id:?}: {message}");
+                    refused = true;
+                }
+                Ok(other) => {
+                    eprintln!("phux: unexpected kill result for {terminal_id:?}: {other:?}");
+                    refused = true;
+                }
+                // A clean disconnect means the server self-exited after its
+                // last session was reaped (phux-60s): the remaining target
+                // Terminals are already gone, so this is success, not failure.
+                Err(AttachError::Disconnected) => break,
+                Err(err) => {
+                    eprintln!("phux: kill failed for {terminal_id:?}: {err}");
+                    refused = true;
+                }
+            }
+        }
+
+        if refused {
+            ExitCode::from(2)
+        } else {
+            ExitCode::SUCCESS
+        }
+    })
 }
 
 /// Print an `AttachError` as a one-line, actionable message on stderr.
@@ -507,5 +891,23 @@ fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result
             ));
         }
         std::thread::sleep(AUTO_SPAWN_POLL_INTERVAL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_session_name;
+
+    #[test]
+    fn unique_session_name_starts_at_zero_and_skips_taken() {
+        assert_eq!(unique_session_name(&[]), "0");
+        assert_eq!(unique_session_name(&["0".to_owned()]), "1");
+        assert_eq!(
+            unique_session_name(&["0".to_owned(), "1".to_owned(), "3".to_owned()]),
+            "2",
+        );
+        // Non-numeric names (e.g. the auto-spawn "default") don't block
+        // the numeric sequence.
+        assert_eq!(unique_session_name(&["default".to_owned()]), "0");
     }
 }

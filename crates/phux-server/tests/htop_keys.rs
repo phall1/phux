@@ -47,7 +47,7 @@ use tokio::time::timeout;
 
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
-    spawn_server_with_seed_cmd, wait_for_socket,
+    spawn_server_with_seed_cmd, try_recv_typed, wait_for_socket,
 };
 
 /// Build a `KeyEvent` for an ASCII printable. Mirrors the shape used by
@@ -257,12 +257,20 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
         // could echo) or some bytes that DON'T contain a CSI-u
         // encoding of Ctrl-C. The bug-shape we're guarding against is
         // CSI-u showing up here.
+        // Ctrl-C kills `cat` (SIGINT in cooked mode), which is this
+        // session's only pane. Under the tmux server-exit model
+        // (phux-60s) that reaps the session and the server self-exits,
+        // dropping the connection. So this loop must tolerate a clean
+        // EOF as well as the read deadline — both end accumulation.
         let mut acc: Vec<u8> = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
-            let Ok((type_byte, frame)) = timeout(remaining, recv_typed(&mut stream)).await else {
+            let Ok(maybe) = timeout(remaining, try_recv_typed(&mut stream)).await else {
                 break;
+            };
+            let Some((type_byte, frame)) = maybe else {
+                break; // server self-exited and closed the connection
             };
             if type_byte == TYPE_TERMINAL_OUTPUT
                 && let FrameKind::TerminalOutput { bytes, .. } = frame
