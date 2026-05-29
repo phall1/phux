@@ -41,6 +41,25 @@ pub mod render;
 pub mod server_frame;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
+
+/// The output sink the attach driver composites into.
+///
+/// The driver threads one `&mut` of this through the whole render path
+/// (panes, status bar, dividers, overlays, cursor restore). It is a pure
+/// byte sink — a blanket impl covers real stdout (the production tty
+/// path), a `Vec<u8>` capture (tests today, and a future headless agent
+/// surface), or any other `Write`. The chrome toolkit's structured types
+/// are rasterized to VT bytes before reaching this boundary, so the sink
+/// never carries a grid buffer across module lines.
+///
+/// The composition entry points (`run_with_stdout`, the driver
+/// `main_loop`, `handle_server_frame`, `paint_full_frame`,
+/// `dispatch_input_events`) are bound on this trait so the seam is named
+/// at the boundary; the lower-level byte renderer and chrome painters
+/// stay on plain `Write`, since `RenderSink: Write` lets the sink flow
+/// down to them unchanged.
+pub trait RenderSink: std::io::Write {}
+impl<T: std::io::Write + ?Sized> RenderSink for T {}
 // Status bar lives under `crate::render::chrome::status_bar` post
 // phux-5ke.2 (ADR-0020). Re-exported here so external callers (the
 // `phux-client::attach::status_bar::*` integration test path included)

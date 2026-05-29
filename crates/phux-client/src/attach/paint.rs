@@ -10,7 +10,7 @@
 //! Rects never spill into it.
 
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::Write;
 use std::time::SystemTime;
 
 use libghostty_vt::Terminal;
@@ -100,7 +100,8 @@ pub(super) fn paint_focused_pane<W: Write>(
 /// base for an incremental repaint. For "focused pane got output"
 /// situations call [`paint_focused_pane`] + [`paint_bar_after_pane`]
 /// instead.
-pub(super) fn paint_full_frame(
+pub(super) fn paint_full_frame<W: super::RenderSink>(
+    out: &mut W,
     layout_state: &LayoutState,
     panes: &mut HashMap<TerminalId, PaneSlot>,
     focused_pane: Option<&TerminalId>,
@@ -111,9 +112,8 @@ pub(super) fn paint_full_frame(
     let has_bar = status_bar.is_some();
     let pane_dims = pane_viewport(viewport_dims, has_bar);
     let multi = super::multi_pane::compute_layout(layout_state, pane_dims);
-    let mut stdout = io::stdout().lock();
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
-    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
+    let _ = out.write_all(b"\x1b[2J\x1b[H");
     // Non-focused panes first; chrome (dividers + status bar) next; the
     // focused pane's render_at is intentionally the LAST cursor-touching
     // emit in the frame so it owns final cursor position + DECTCEM. This
@@ -132,18 +132,11 @@ pub(super) fn paint_full_frame(
             // blank.
             let _ = slot
                 .renderer
-                .render_at_full(&slot.terminal, &mut stdout, (rect.x, rect.y));
+                .render_at_full(&slot.terminal, out, (rect.x, rect.y));
         }
     }
-    let _ = crate::render::chrome::dividers::render_dividers(&mut stdout, &multi, focused_pane);
-    paint_bar_after_pane(
-        status_bar,
-        &mut stdout,
-        viewport_dims,
-        session_name,
-        None,
-        None,
-    );
+    let _ = crate::render::chrome::dividers::render_dividers(out, &multi, focused_pane);
+    paint_bar_after_pane(status_bar, out, viewport_dims, session_name, None, None);
     // Paint the focused pane LAST so its render_at owns final cursor
     // placement. But render_at may be a no-op (slot missing, or the
     // libghostty Terminal grid has no diffs to emit), in which case
@@ -153,15 +146,7 @@ pub(super) fn paint_full_frame(
     // frame ends with a deterministic cursor position regardless of
     // whether render_at touched the cursor. See phux-gxy.
     let final_cursor = focused_pane.and_then(|fid| {
-        paint_focused_pane(
-            &mut stdout,
-            layout_state,
-            panes,
-            fid,
-            viewport_dims,
-            has_bar,
-            true,
-        )
+        paint_focused_pane(out, layout_state, panes, fid, viewport_dims, has_bar, true)
     });
     if let Some((row, col)) = final_cursor {
         let one_based_row = row.saturating_add(1);
@@ -171,7 +156,7 @@ pub(super) fn paint_full_frame(
             col,
             "paint_full_frame: restore cursor to focused last_cursor"
         );
-        let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
+        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
     } else {
         // No authoritative cursor. Park at the focused pane's Rect
         // origin if we have one, otherwise top-left of the viewport.
@@ -190,13 +175,13 @@ pub(super) fn paint_full_frame(
             focused_pane_set = focused_pane.is_some(),
             "paint_full_frame: no last_cursor, parking at fallback hidden"
         );
-        let _ = write!(stdout, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
+        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
     }
     // Flush the final cursor placement. See the note in
     // `paint_bar_after_pane`: render_at flushes mid-frame, but the
     // explicit CUP we write *after* the last render_at has no newline
     // and would otherwise sit in the LineWriter buffer indefinitely.
-    let _ = stdout.flush();
+    let _ = out.flush();
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -293,9 +278,11 @@ pub(super) const fn pane_viewport(outer: (u16, u16), has_status_bar: bool) -> (u
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+    use crate::attach::driver::PaneSlot;
     use crate::render::chrome::status_bar::Position;
     use phux_config::widget::WidgetRegistry;
     use phux_config::{StatusCfg, Widget};
+    use phux_protocol::wire::info::{LayoutNode, SplitDir};
 
     fn build_painter() -> StatusBarPainter {
         let cfg = StatusCfg {
@@ -305,6 +292,59 @@ mod tests {
         let reg = WidgetRegistry::with_builtins();
         let bar = phux_config::widget::StatusBar::build(&cfg, &reg).expect("bar build");
         StatusBarPainter::new(bar, Position::Bottom)
+    }
+
+    /// `paint_full_frame` against an injected `Vec<u8>` sink composites
+    /// the whole frame for a two-pane layout: it leads with ED2 + home,
+    /// emits both panes' rect-anchored content, draws the divider, and
+    /// ends with an explicit cursor placement. Locks the full-frame
+    /// composition contract on the now-injectable sink (phux-549).
+    #[test]
+    fn paint_full_frame_composites_two_panes_into_sink() {
+        let left = TerminalId::local(1);
+        let right = TerminalId::local(2);
+        let layout = LayoutState {
+            tree: Some(LayoutNode::Split {
+                dir: SplitDir::Horizontal,
+                ratio: 0.5,
+                left: Box::new(LayoutNode::Leaf(left.clone())),
+                right: Box::new(LayoutNode::Leaf(right.clone())),
+            }),
+            focus: Some(left.clone()),
+        };
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(left.clone(), PaneSlot::new().expect("left slot"));
+        panes.insert(right, PaneSlot::new().expect("right slot"));
+
+        let mut out: Vec<u8> = Vec::new();
+        paint_full_frame(
+            &mut out,
+            &layout,
+            &mut panes,
+            Some(&left),
+            (80, 24),
+            None,
+            "demo",
+        );
+
+        let s = String::from_utf8_lossy(&out);
+        // ED2 (clear screen) + cursor home must lead the frame.
+        assert!(
+            s.starts_with("\x1b[2J\x1b[H"),
+            "frame must open with ED2 + home; out = {s:?}"
+        );
+        // The divider for a 0.5 side-by-side split sits at column 40
+        // (1-based 41). render_dividers emits CUPs into that column.
+        assert!(
+            s.contains(";41H") || s.contains(";40H"),
+            "expected a divider CUP near the split column; out = {s:?}"
+        );
+        // The frame ends with an explicit cursor placement (CUP + DECTCEM)
+        // — never stranded at the bar tail (phux-gxy).
+        assert!(
+            s.contains("\x1b[?25h") || s.contains("\x1b[?25l"),
+            "frame must end with an explicit cursor visibility; out = {s:?}"
+        );
     }
 
     /// phux-9xn regression: when `restore_cursor` is None (e.g. fresh

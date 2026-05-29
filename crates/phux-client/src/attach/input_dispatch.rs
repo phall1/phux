@@ -7,7 +7,6 @@
 //! `split-pane` chord to its remote `SPAWN_TERMINAL` reply.
 
 use std::collections::HashMap;
-use std::io;
 
 use phux_protocol::TerminalId;
 use phux_protocol::wire::frame::{FrameKind, Scope};
@@ -83,7 +82,8 @@ pub(super) struct DispatchCtx<'a> {
     clippy::cognitive_complexity,
     reason = "branch density rises with each input-event kind we route; same shape as the action-dispatch arm"
 )]
-pub(super) async fn dispatch_input_events(
+pub(super) async fn dispatch_input_events<W: super::RenderSink>(
+    out: &mut W,
     conn: &mut Connection,
     events: Vec<InputEvent>,
     focused_pane: &mut Option<TerminalId>,
@@ -165,8 +165,7 @@ pub(super) async fn dispatch_input_events(
                         }
                     }
                     if effects.bell {
-                        let mut stdout = io::stdout().lock();
-                        let _ = actions::write_bell(&mut stdout);
+                        let _ = actions::write_bell(out);
                     }
                     if effects.detach && !*detach_pending {
                         conn.send(&FrameKind::Detach).await?;
@@ -290,8 +289,7 @@ pub(super) async fn dispatch_input_events(
     // keystrokes produces a single positioned write run, not one per
     // event. The overlay is a no-op on an empty queue.
     if predicted_any {
-        let mut stdout = io::stdout().lock();
-        let _ = overlay.render(predict, &mut stdout);
+        let _ = overlay.render(predict, out);
     }
     // Hand the layout-mutation signal back to `main_loop`, which holds
     // the status-bar painter and session name needed for a proper full

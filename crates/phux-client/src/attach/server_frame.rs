@@ -6,7 +6,6 @@
 //! `ATTACHED`, repaint after a layout-replacing frame).
 
 use std::collections::HashMap;
-use std::io::{self, Write};
 
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
@@ -72,7 +71,8 @@ pub(super) struct FrameOutcome {
     clippy::cognitive_complexity,
     reason = "phux-4li.12 adds TerminalSpawned/TerminalClosed branches with full SpawnError matching; per-frame dispatcher is intentionally flat"
 )]
-pub(super) fn handle_server_frame(
+pub(super) fn handle_server_frame<W: super::RenderSink>(
+    out: &mut W,
     frame: FrameKind,
     panes: &mut HashMap<TerminalId, PaneSlot>,
     layout_state: &mut LayoutState,
@@ -188,8 +188,7 @@ pub(super) fn handle_server_frame(
                 if overlay_active {
                     let _ = overlay;
                 } else {
-                    let mut stdout = io::stdout().lock();
-                    let _ = slot.renderer.render_at(&slot.terminal, &mut stdout, origin);
+                    let _ = slot.renderer.render_at(&slot.terminal, out, origin);
                     if let Some((row, col)) = slot.renderer.last_cursor() {
                         predict.set_cursor(row, col);
                     }
@@ -210,7 +209,7 @@ pub(super) fn handle_server_frame(
                     // of the bar row (bottom-right).
                     paint_bar_after_pane(
                         status_bar,
-                        &mut stdout,
+                        out,
                         viewport_dims,
                         session_name,
                         focused_cursor,
@@ -246,10 +245,9 @@ pub(super) fn handle_server_frame(
                 && !overlay_active
                 && let Some(fid) = focused_pane.as_ref()
             {
-                let mut stdout = io::stdout().lock();
                 let has_bar = status_bar.is_some();
                 let focused_cursor = paint_focused_pane(
-                    &mut stdout,
+                    out,
                     layout_state,
                     panes,
                     fid,
@@ -280,7 +278,7 @@ pub(super) fn handle_server_frame(
                 // Overlay paints any predictions still alive (the tail
                 // of a partial confirmation). On a fully-drained queue
                 // this is a no-op.
-                let _ = overlay.render(predict, &mut stdout);
+                let _ = overlay.render(predict, out);
                 // phux-9xn: compute the focused pane's Rect origin so
                 // the bar paint can park the cursor there if
                 // `last_cursor` is None. Without this fallback the
@@ -294,7 +292,7 @@ pub(super) fn handle_server_frame(
                     .or(Some((0, 0)));
                 paint_bar_after_pane(
                     status_bar,
-                    &mut stdout,
+                    out,
                     viewport_dims,
                     session_name,
                     focused_cursor,
@@ -313,11 +311,10 @@ pub(super) fn handle_server_frame(
                 let pane_dims = pane_viewport(viewport_dims, has_bar);
                 let rects = super::multi_pane::compute_layout(layout_state, pane_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
-                    let mut stdout = io::stdout().lock();
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ =
-                            slot.renderer
-                                .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
+                        let _ = slot
+                            .renderer
+                            .render_at(&slot.terminal, out, (rect.x, rect.y));
                     }
                     // Restore the focused pane's cursor: the render above
                     // left the host cursor inside the non-focused pane.
@@ -332,7 +329,7 @@ pub(super) fn handle_server_frame(
                             .map(|r| (r.x, r.y));
                         paint_bar_after_pane(
                             status_bar,
-                            &mut stdout,
+                            out,
                             viewport_dims,
                             session_name,
                             focused_cursor,
@@ -340,14 +337,14 @@ pub(super) fn handle_server_frame(
                         );
                     } else if let Some((row, col)) = focused_cursor {
                         let _ = write!(
-                            stdout,
+                            out,
                             "\x1b[{};{}H\x1b[?25h",
                             row.saturating_add(1),
                             col.saturating_add(1)
                         );
-                        let _ = stdout.flush();
+                        let _ = out.flush();
                     } else {
-                        let _ = stdout.flush();
+                        let _ = out.flush();
                     }
                 }
             }
@@ -360,10 +357,9 @@ pub(super) fn handle_server_frame(
         FrameKind::Bell { .. } => {
             // Forward bell to the outer terminal. The user's terminal
             // emulator decides whether to render visually, audibly, or
-            // not at all.
-            let mut stdout = io::stdout().lock();
-            let _ = stdout.write_all(b"\x07");
-            let _ = stdout.flush();
+            // not at all. Routed through the injected sink so a headless
+            // capture sees the BEL too (an agent can observe `\x07`).
+            let _ = actions::write_bell(out);
             Ok(FrameOutcome::default())
         }
         // phux-4li.5: reconcile-on-attach reply path. The driver sends
@@ -482,7 +478,7 @@ pub(super) fn handle_server_frame(
                                 terminal = ?new_id,
                                 "apply_spawned_ok failed; dropping spawned terminal",
                             );
-                            bell_to_stdout();
+                            let _ = actions::write_bell(out);
                             Ok(FrameOutcome::default())
                         }
                     }
@@ -496,7 +492,7 @@ pub(super) fn handle_server_frame(
                         request_id,
                         "TerminalSpawned: server reports CollectionNotFound for DEFAULT collection",
                     );
-                    bell_to_stdout();
+                    let _ = actions::write_bell(out);
                     Ok(FrameOutcome::default())
                 }
                 SpawnResult::Err(SpawnError::SpawnFailed(reason)) => {
@@ -505,7 +501,7 @@ pub(super) fn handle_server_frame(
                         reason = %reason,
                         "TerminalSpawned: server-side spawn failed",
                     );
-                    bell_to_stdout();
+                    let _ = actions::write_bell(out);
                     Ok(FrameOutcome::default())
                 }
                 // SpawnError is #[non_exhaustive] — catch future
@@ -516,7 +512,7 @@ pub(super) fn handle_server_frame(
                         error = ?other,
                         "TerminalSpawned: unknown spawn error variant",
                     );
-                    bell_to_stdout();
+                    let _ = actions::write_bell(out);
                     Ok(FrameOutcome::default())
                 }
                 // SpawnResult is also #[non_exhaustive].
@@ -593,14 +589,6 @@ pub(super) fn handle_server_frame(
     }
 }
 
-/// phux-4li.12: write a BEL to stdout. Used by `handle_server_frame`'s
-/// error branches (spawn failed, layout fold rejected) where we need
-/// to signal the user without surfacing structured error chrome.
-fn bell_to_stdout() {
-    let mut stdout = io::stdout().lock();
-    let _ = actions::write_bell(&mut stdout);
-}
-
 /// phux-17u: resolve the focused session's display name from an
 /// `ATTACHED` snapshot for the status-bar `session-name` widget.
 ///
@@ -663,7 +651,220 @@ fn reconcile_loaded_layout(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use super::handle_server_frame;
+    use std::collections::HashMap;
+
+    use phux_protocol::ids::TerminalId;
+    use phux_protocol::wire::frame::FrameKind;
+    use phux_protocol::wire::info::{LayoutNode, SplitDir};
+
+    use crate::attach::driver::PaneSlot;
+    use crate::layout::LayoutState;
+    use crate::predict::{Overlay, PredictionState, PredictiveConfig};
+
+    /// Strip CSI escape sequences (`ESC [ ... final`) from a captured
+    /// render stream, leaving only the printable glyphs, so a content
+    /// assertion can't be satisfied by control bytes that happen to share
+    /// a letter (e.g. the `h`/`l` in `\x1b[?25h` / `\x1b[?25l`).
+    fn strip_csi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Consume params/intermediates up to the final byte (@..~).
+                for n in chars.by_ref() {
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            } else if c != '\x1b' {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn tid(id: u32) -> TerminalId {
+        TerminalId::local(id)
+    }
+
+    /// Build a `panes` map with a warm [`PaneSlot`] per supplied id.
+    fn panes_for(ids: &[&TerminalId]) -> HashMap<TerminalId, PaneSlot> {
+        let mut panes = HashMap::new();
+        for id in ids {
+            panes.insert((*id).clone(), PaneSlot::new().expect("pane slot"));
+        }
+        panes
+    }
+
+    /// Two leaves split side-by-side (vertical divider), with `focus` on
+    /// the supplied leaf. Exercises the multi-pane render paths without a
+    /// real tty.
+    fn two_pane_layout(left: &TerminalId, right: &TerminalId, focus: &TerminalId) -> LayoutState {
+        LayoutState {
+            tree: Some(LayoutNode::Split {
+                dir: SplitDir::Horizontal,
+                ratio: 0.5,
+                left: Box::new(LayoutNode::Leaf(left.clone())),
+                right: Box::new(LayoutNode::Leaf(right.clone())),
+            }),
+            focus: Some(focus.clone()),
+        }
+    }
+
+    fn drive_output(
+        out: &mut Vec<u8>,
+        layout: &mut LayoutState,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        bytes: &[u8],
+    ) {
+        let mut session_name = String::new();
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        handle_server_frame(
+            out,
+            FrameKind::TerminalOutput {
+                terminal_id: terminal_id.clone(),
+                seq: 1,
+                bytes: bytes.to_vec(),
+            },
+            panes,
+            layout,
+            focused,
+            &mut session_name,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            false,
+        )
+        .expect("handle_server_frame");
+    }
+
+    /// phux-2x9 via the injectable sink: a NON-focused pane must repaint
+    /// on its own `TERMINAL_OUTPUT` so it isn't visually frozen. We feed
+    /// output for the right (non-focused) pane and assert the captured VT
+    /// carries a CUP into the right pane's rect origin plus the emitted
+    /// graphemes — proving the regression without a live terminal.
+    #[test]
+    fn non_focused_pane_repaints_on_output() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_layout(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &right,
+            b"hello",
+        );
+
+        let s = String::from_utf8_lossy(&out);
+        // The right pane occupies the columns after the divider in an
+        // 80-col / 0.5 split: left pane cols 0..39, divider at col 40,
+        // right pane from col 41 (0-based) ⇒ 1-based CUP `;42H`.
+        assert!(
+            s.contains(";42H"),
+            "expected CUP into right pane origin (col 42); out = {s:?}"
+        );
+        // The renderer emits one cell at a time with an SGR delta between
+        // cells, so the graphemes are interleaved with escape sequences.
+        // Strip CSI sequences before the glyph check, otherwise `h`/`l`
+        // would be satisfied by the cursor mode-set bytes (`\x1b[?25h` /
+        // `\x1b[?25l`) rather than the pane content itself.
+        let visible = strip_csi(&s);
+        assert!(
+            visible.contains("hello"),
+            "non-focused pane should render its glyphs; visible = {visible:?}, raw = {s:?}"
+        );
+    }
+
+    /// The focused pane's output renders into its own rect (column 1 for
+    /// the left pane) and the captured stream is non-empty.
+    #[test]
+    fn focused_pane_repaints_on_output() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_layout(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &left,
+            b"world",
+        );
+
+        let s = String::from_utf8_lossy(&out);
+        // Focused pane renders at column 1 (left pane origin). Glyphs are
+        // interleaved with SGR resets, so assert on ordered chars.
+        assert!(
+            s.contains("\x1b[1;1H"),
+            "expected CUP into left pane origin (col 1); out = {s:?}"
+        );
+        for ch in ['w', 'o', 'r', 'l', 'd'] {
+            assert!(
+                s.contains(ch),
+                "focused pane glyph {ch:?} missing; out = {s:?}"
+            );
+        }
+    }
+
+    /// A `Bell` frame routes a BEL byte through the injected sink, so a
+    /// headless capture (and a future agent surface) can observe it.
+    #[test]
+    fn bell_frame_writes_bel_to_sink() {
+        let mut layout = LayoutState::single(tid(1));
+        let mut focused = Some(tid(1));
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut session_name = String::new();
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+
+        let mut out: Vec<u8> = Vec::new();
+        handle_server_frame(
+            &mut out,
+            FrameKind::Bell {
+                terminal_id: tid(1),
+            },
+            &mut panes,
+            &mut layout,
+            &mut focused,
+            &mut session_name,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            false,
+        )
+        .expect("handle_server_frame");
+
+        assert_eq!(&out, b"\x07", "bell must emit a single BEL byte");
+    }
+}
+
+#[cfg(test)]
+mod session_name_tests {
     use super::focused_session_name;
     use phux_protocol::ids::{SessionId, TerminalId, WindowId};
     use phux_protocol::wire::info::{SessionInfo, SessionSnapshot};

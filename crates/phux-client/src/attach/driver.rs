@@ -202,27 +202,29 @@ pub async fn run_with_predict(
     run_with_stdout_predict(socket, target, &mut io::stdout(), predict).await
 }
 
-/// Same as [`run`], but writes any terminal-control bytes (alt-screen
-/// enter, cursor hide, the renderer's per-row CUP/SGR, cleanup) to a
-/// caller-supplied `Write`.
+/// Same as [`run`], but writes the entire composited output stream to a
+/// caller-supplied [`RenderSink`](super::RenderSink) (any `Write`).
+///
+/// The stream covers alt-screen enter, cursor hide, every pane's per-row
+/// CUP/SGR, the status bar, overlays, and cleanup.
+///
+/// The renderer and all chrome painters are generic over `Write`, and the
+/// driver threads this one sink through `main_loop` into
+/// `handle_server_frame`, `paint_full_frame`, and `dispatch_input_events`.
+/// So the whole attach render path is injectable: production passes real
+/// stdout via [`run`]; tests and the headless agent surface pass a
+/// `Vec<u8>` (or any other `Write`) and read back the captured VT.
 ///
 /// Exposed so tests can capture the byte stream and assert on it — in
 /// particular, the regression guard for `phux-roz` asserts that the
-/// pre-handshake failure path NEVER emits `\x1b[?1049h`. Production
-/// callers should use [`run`] which targets real stdout; the stdin /
-/// signal / termios paths are unchanged.
-///
-/// The writer is only used for terminal-control bytes emitted *outside*
-/// the renderer in pre-handshake setup. The renderer itself still
-/// writes to `io::stdout()` because the libghostty render iterators
-/// are not generic over `Write`. The pre-handshake regression guard
-/// (no alt-screen on failure) does not need the renderer to participate
-/// because that path never reaches the renderer.
+/// pre-handshake failure path NEVER emits `\x1b[?1049h`. The stdin /
+/// signal / termios cleanup paths run on real stdout regardless of the
+/// injected sink (Drop / signal handlers can't reach it).
 #[allow(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
-pub async fn run_with_stdout<W: Write>(
+pub async fn run_with_stdout<W: super::RenderSink>(
     socket: &Path,
     target: AttachTarget,
     out: &mut W,
@@ -237,7 +239,7 @@ pub async fn run_with_stdout<W: Write>(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
-pub async fn run_with_stdout_predict<W: Write>(
+pub async fn run_with_stdout_predict<W: super::RenderSink>(
     socket: &Path,
     target: AttachTarget,
     out: &mut W,
@@ -266,7 +268,7 @@ pub async fn run_with_stdout_predict<W: Write>(
     // is global, so we only register it once per process.
     install_panic_hook_once();
 
-    main_loop(&mut conn, attached, predict).await
+    main_loop(&mut conn, attached, predict, out).await
 }
 
 /// Send `HELLO` and (when the server starts sending it) wait for
@@ -355,10 +357,11 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
     clippy::cognitive_complexity,
     reason = "select! arms + phux-4li.5 outcome dispatch; ditto"
 )]
-async fn main_loop(
+async fn main_loop<W: super::RenderSink>(
     conn: &mut Connection,
     initial_attached: FrameKind,
     predict_cfg: PredictiveConfig,
+    out: &mut W,
 ) -> Result<(), AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -437,6 +440,7 @@ async fn main_loop(
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place.
     let outcome = handle_server_frame(
+        out,
         initial_attached,
         &mut panes,
         &mut layout_state,
@@ -521,6 +525,7 @@ async fn main_loop(
                             .rects
                         });
                         let outcome = handle_server_frame(
+                            out,
                             f,
                             &mut panes,
                             &mut layout_state,
@@ -596,6 +601,7 @@ async fn main_loop(
                             // libghostty mirror is already updated.
                             if !overlays.is_active() {
                                 paint_full_frame(
+                                    out,
                                     &layout_state,
                                     &mut panes,
                                     focused_pane.as_ref(),
@@ -643,6 +649,7 @@ async fn main_loop(
                     keybindings: keybindings_snapshot.as_ref(),
                 };
                 let layout_changed = dispatch_input_events(
+                    out,
                     conn,
                     events,
                     &mut focused_pane,
@@ -662,6 +669,7 @@ async fn main_loop(
                     // pane repaint and go straight to overlay paint.
                     if !overlays.is_active() {
                         paint_full_frame(
+                            out,
                             &layout_state,
                             &mut panes,
                             focused_pane.as_ref(),
@@ -672,9 +680,8 @@ async fn main_loop(
                     }
                 }
                 if overlays.is_active() {
-                    let mut stdout = io::stdout().lock();
-                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(&mut stdout, viewport_dims);
+                    let _ = out.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(out, viewport_dims);
                 }
             }
 
@@ -693,6 +700,7 @@ async fn main_loop(
                     keybindings: keybindings_snapshot.as_ref(),
                 };
                 let layout_changed = dispatch_input_events(
+                    out,
                     conn,
                     events,
                     &mut focused_pane,
@@ -705,6 +713,7 @@ async fn main_loop(
                 .await?;
                 if layout_changed && !overlays.is_active() {
                     paint_full_frame(
+                        out,
                         &layout_state,
                         &mut panes,
                         focused_pane.as_ref(),
@@ -714,9 +723,8 @@ async fn main_loop(
                     );
                 }
                 if overlays.is_active() {
-                    let mut stdout = io::stdout().lock();
-                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(&mut stdout, viewport_dims);
+                    let _ = out.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(out, viewport_dims);
                 }
             }
 
@@ -770,11 +778,11 @@ async fn main_loop(
                 // dispatch path triggers a full-frame repaint and the
                 // user sees the resized layout.
                 if overlays.is_active() {
-                    let mut stdout = io::stdout().lock();
-                    let _ = stdout.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(&mut stdout, viewport_dims);
+                    let _ = out.write_all(b"\x1b[2J\x1b[H");
+                    let _ = overlays.paint(out, viewport_dims);
                 } else {
                     paint_full_frame(
+                        out,
                         &layout_state,
                         &mut panes,
                         focused_pane.as_ref(),
@@ -794,7 +802,6 @@ async fn main_loop(
                 // partially overwritten by the bar paint; skip ticks
                 // while a modal is up.
                 if !overlays.is_active() {
-                    let mut stdout = io::stdout().lock();
                     // Restore the cursor to wherever the focused pane left it
                     // so an idle tick doesn't strand the cursor in the bar.
                     let focused_cursor = focused_pane.as_ref()
@@ -825,7 +832,7 @@ async fn main_loop(
                     );
                     paint_bar_after_pane(
                         status_bar.as_mut(),
-                        &mut stdout,
+                        out,
                         viewport_dims,
                         &session_name,
                         focused_cursor,
