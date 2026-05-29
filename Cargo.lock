@@ -1378,6 +1378,7 @@ dependencies = [
  "portable-pty",
  "rustix 0.38.44",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
