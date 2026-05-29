@@ -237,8 +237,15 @@ fn main() -> ExitCode {
 fn run_naked() -> ExitCode {
     let socket_path = default_socket_path();
 
+    // phux-4li.1: name the auto-created default session from
+    // `defaults.session-name-template` (e.g. `phux-${cwd-basename}`)
+    // instead of the bare `DEFAULT_SESSION_NAME`. The same resolved name
+    // feeds the auto-spawn seed AND the CreateIfMissing fallback so both
+    // paths agree on which session to attach to.
+    let default_name = resolved_default_session_name();
+
     if !socket_path.exists()
-        && let Err(err) = maybe_auto_spawn_server(&socket_path, DEFAULT_SESSION_NAME)
+        && let Err(err) = maybe_auto_spawn_server(&socket_path, &default_name)
     {
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
@@ -264,12 +271,37 @@ fn run_naked() -> ExitCode {
         }
     };
 
-    match rt.block_on(attach_default_with_fallback(&socket_path, predict_cfg)) {
+    match rt.block_on(attach_default_with_fallback(
+        &socket_path,
+        &default_name,
+        predict_cfg,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            print_attach_error(&err, &socket_path, DEFAULT_SESSION_NAME);
+            print_attach_error(&err, &socket_path, &default_name);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Resolve the name for an auto-created default session from
+/// `defaults.session-name-template`, substituting `${cwd-basename}`
+/// against the client's current working directory (phux-4li.1).
+///
+/// Falls back to [`DEFAULT_SESSION_NAME`] when the config can't be
+/// loaded, the cwd can't be read, or the template renders empty (e.g. a
+/// `${cwd-basename}`-only template invoked from `/`).
+fn resolved_default_session_name() -> String {
+    let template = config_loader::load().map_or_else(
+        |_| DEFAULT_SESSION_NAME.to_owned(),
+        |cfg| cfg.defaults.session_name_template,
+    );
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let name = phux_config::render_session_name_template(&template, &cwd);
+    if name.is_empty() {
+        DEFAULT_SESSION_NAME.to_owned()
+    } else {
+        name
     }
 }
 
@@ -309,18 +341,19 @@ async fn run_attach_once(
 )]
 async fn attach_default_with_fallback(
     socket_path: &Path,
+    default_name: &str,
     predict_cfg: PredictiveConfig,
 ) -> Result<(), AttachError> {
     match run_attach_once(socket_path, AttachTarget::Last, predict_cfg).await {
         Ok(()) => Ok(()),
         Err(AttachError::Refused(message)) => {
             eprintln!(
-                "phux: no prior-attach session (server said: {message}); creating `{DEFAULT_SESSION_NAME}`"
+                "phux: no prior-attach session (server said: {message}); creating `{default_name}`"
             );
             run_attach_once(
                 socket_path,
                 AttachTarget::CreateIfMissing {
-                    name: DEFAULT_SESSION_NAME.to_owned(),
+                    name: default_name.to_owned(),
                     command: None,
                     cwd: None,
                 },
@@ -341,13 +374,13 @@ async fn attach_default_with_fallback(
 fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
     // Resolve the session name to pass through to auto-spawn before we
-    // move `session` into the AttachTarget. Falling back to
-    // DEFAULT_SESSION_NAME matches what bare `phux` (no subcommand,
-    // no name) will eventually request.
-    let session_for_spawn = session
-        .as_deref()
-        .unwrap_or(DEFAULT_SESSION_NAME)
-        .to_owned();
+    // move `session` into the AttachTarget. With no explicit name this
+    // path behaves like naked `phux`, so it resolves the same
+    // `session-name-template` (phux-4li.1) rather than the bare
+    // DEFAULT_SESSION_NAME — keeping the auto-spawn seed and the
+    // create-and-attach fallback on one agreed name.
+    let default_name = resolved_default_session_name();
+    let session_for_spawn = session.clone().unwrap_or_else(|| default_name.clone());
     let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
 
     // Best-effort: if no socket exists, fork-exec ourselves into a
@@ -398,7 +431,11 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     // server (e.g. one whose auto-spawned seed pane exited before we
     // connected). An explicit name attaches to that session only.
     let result = match target {
-        AttachTarget::Last => rt.block_on(attach_default_with_fallback(&socket_path, predict_cfg)),
+        AttachTarget::Last => rt.block_on(attach_default_with_fallback(
+            &socket_path,
+            &default_name,
+            predict_cfg,
+        )),
         other => rt.block_on(run_attach_once(&socket_path, other, predict_cfg)),
     };
     match result {

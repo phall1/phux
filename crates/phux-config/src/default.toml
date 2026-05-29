@@ -38,9 +38,12 @@ cwd-inheritance = "inherit-focused"
 # in turn honors $SHELL, then /bin/sh).
 # spawn-on-attach = "/usr/bin/zellij-like-launcher"
 
-# Template for auto-created session names. ${cwd-basename} expands to
-# the basename of the client's working directory at session-create time.
-# Unknown placeholders are passed through verbatim.
+# Template for auto-created session names (naked `phux` / `phux attach`
+# with no name). ${cwd-basename} expands to the basename of the client's
+# working directory at session-create time (`:` in it becomes `_` so the
+# name stays selector-safe); unknown placeholders pass through verbatim.
+# e.g. session-name-template = "${cwd-basename}" names the session after
+# the directory you launched from.
 session-name-template = "default"
 
 [keybindings]

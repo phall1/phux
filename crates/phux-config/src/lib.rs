@@ -148,3 +148,93 @@ fn merge_tables(mut base: toml::Table, overlay: toml::Table) -> toml::Table {
     }
     base
 }
+
+/// Render a [`DefaultsCfg::session_name_template`] into a concrete
+/// session name for an auto-created session (phux-4li.1).
+///
+/// Substitutes the `${cwd-basename}` placeholder with the final path
+/// component of `cwd`. Session names double as selector tokens
+/// (`name:N.M`, see `docs/consumers/tui.md` §3), and `:` is the
+/// session→window delimiter, so any `:` in the basename is replaced with
+/// `_` to keep an auto-name from colliding with the selector grammar.
+/// (`.` is left intact — it only delimits inside the `name:N.M` tail, so
+/// a dotted directory name like `my.project` parses cleanly as a bare
+/// session name.) Unknown placeholders pass through verbatim.
+///
+/// May return an empty string when the template renders empty (e.g. the
+/// template is exactly `${cwd-basename}` and `cwd` is `/`, which has no
+/// final component); the caller decides the fallback.
+#[must_use]
+pub fn render_session_name_template(template: &str, cwd: &Path) -> String {
+    let basename = cwd
+        .file_name()
+        .map(|os| os.to_string_lossy().replace(':', "_"))
+        .unwrap_or_default();
+    template.replace("${cwd-basename}", &basename)
+}
+
+#[cfg(test)]
+mod session_name_tests {
+    use super::render_session_name_template;
+    use std::path::Path;
+
+    #[test]
+    fn literal_template_passes_through_unchanged() {
+        // The shipped default is the literal "default" — no placeholder,
+        // so behavior is unchanged unless the user opts into a template.
+        assert_eq!(
+            render_session_name_template("default", Path::new("/Users/phall/workspace/phux")),
+            "default"
+        );
+    }
+
+    #[test]
+    fn cwd_basename_substitutes_the_final_component() {
+        assert_eq!(
+            render_session_name_template(
+                "phux-${cwd-basename}",
+                Path::new("/Users/phall/workspace/phux")
+            ),
+            "phux-phux"
+        );
+        assert_eq!(
+            render_session_name_template("${cwd-basename}", Path::new("/home/me/notes")),
+            "notes"
+        );
+    }
+
+    #[test]
+    fn colon_in_basename_is_sanitized_to_underscore() {
+        // ':' would otherwise read as the session→window selector
+        // delimiter.
+        assert_eq!(
+            render_session_name_template("${cwd-basename}", Path::new("/tmp/a:b")),
+            "a_b"
+        );
+    }
+
+    #[test]
+    fn dot_in_basename_is_preserved() {
+        assert_eq!(
+            render_session_name_template("${cwd-basename}", Path::new("/tmp/my.project")),
+            "my.project"
+        );
+    }
+
+    #[test]
+    fn root_cwd_renders_empty_basename() {
+        // No final component — caller falls back to a default name.
+        assert_eq!(
+            render_session_name_template("${cwd-basename}", Path::new("/")),
+            ""
+        );
+    }
+
+    #[test]
+    fn unknown_placeholder_passes_through_verbatim() {
+        assert_eq!(
+            render_session_name_template("${unknown}", Path::new("/tmp/x")),
+            "${unknown}"
+        );
+    }
+}
