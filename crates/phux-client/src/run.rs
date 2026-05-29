@@ -33,6 +33,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use phux_core::screen::ScreenState;
+use phux_protocol::TerminalId;
 use phux_protocol::wire::frame::AttachTarget;
 use serde::Serialize;
 use tokio::time::Instant;
@@ -145,6 +146,11 @@ fn extract_output(lines: &[String], rc_idx: usize, nonce: &str) -> (String, bool
 /// resizes the pane — then polls the side-effect-free screen read until the
 /// `RC` sentinel appears or `timeout` elapses.
 ///
+/// The focused-pane convenience over [`run_in`]: it resolves `target`'s
+/// focused pane via [`send_keys::send`] before polling. Callers that have
+/// already resolved a selector to a concrete pane (the CLI's full `TARGET`
+/// grammar, phux-n95) call [`run_in`] directly.
+///
 /// # Errors
 ///
 /// Propagates [`AttachError`] from the input send or the screen reads.
@@ -160,7 +166,45 @@ pub async fn run(
     // Submit the command; learn the exact pane it landed in so we poll the
     // same one we wrote to.
     let pane = send_keys::send(socket, target, &[line, "Enter".to_owned()]).await?;
+    poll_for_rc(socket, pane, cmd, nonce, timeout, start).await
+}
 
+/// Run `cmd` in a pre-resolved `pane`, capturing its exit code.
+///
+/// The pane-targeted core of [`run`]: the caller has already resolved a
+/// selector (the CLI's full `TARGET` grammar; phux-n95) to a concrete
+/// [`TerminalId`], so the command lands on exactly that pane with no focus
+/// heuristic. Submits via the side-effect-free `ROUTE_INPUT` path and polls
+/// the side-effect-free screen read until the `RC` sentinel appears or
+/// `timeout` elapses.
+///
+/// # Errors
+///
+/// Propagates [`AttachError`] from the input send or the screen reads.
+pub async fn run_in(
+    socket: &Path,
+    pane: TerminalId,
+    cmd: &str,
+    nonce: &str,
+    timeout: Option<Duration>,
+) -> Result<RunOutcome, AttachError> {
+    let line = command_line(cmd, nonce);
+    let start = Instant::now();
+    send_keys::send_to(socket, pane.clone(), &[line, "Enter".to_owned()]).await?;
+    poll_for_rc(socket, pane, cmd, nonce, timeout, start).await
+}
+
+/// Poll `pane`'s screen until the `RC` sentinel for `nonce` appears or
+/// `timeout` (measured from `start`) elapses. Shared tail of [`run`] and
+/// [`run_in`].
+async fn poll_for_rc(
+    socket: &Path,
+    pane: TerminalId,
+    cmd: &str,
+    nonce: &str,
+    timeout: Option<Duration>,
+    start: Instant,
+) -> Result<RunOutcome, AttachError> {
     loop {
         let screen = get_screen(socket, pane.clone()).await?;
         if let Some((idx, code)) = parse_rc(&screen.lines, nonce) {

@@ -53,9 +53,14 @@ tells you whether a prompt is waiting (`null` when off-viewport/hidden).
 
 ## Flag placement (the one parsing trap)
 
+Every verb's first positional is a `TARGET` selector — a session (`build`),
+a window (`build:1`), a pane (`build:1.0`), an opaque id (`@42`), or `.`/`=`
+for the focused / last-focused session. A session-wide target resolves to
+its focused pane; a `:window.pane` target hits exactly that pane.
+
 `--socket`, `--json`, `--timeout`, `--until`, `--idle` are **per-verb**
 flags and must come **after the verb but before its trailing positional
-args** (`send-keys`/`run` slurp everything after the session name):
+args** (`send-keys`/`run` slurp everything after the target):
 
 ```sh
 phux ls --json                          # ok
@@ -118,9 +123,10 @@ the shell version.
 
 ## Boundaries (v0)
 
-- `snapshot`/`wait` are side-effect-free (`GET_SCREEN`); `send-keys`/`run`
-  attach transiently to submit input, which can briefly resize the pane —
-  avoid firing them at a pane a human is mid-keystroke in.
+- All four verbs are side-effect-free: `snapshot`/`wait` read via
+  `GET_SCREEN`, and `send-keys`/`run` route input by pane id (`ROUTE_INPUT`)
+  without attaching or resizing the pane. They still *type into a live
+  pane*, so avoid firing them at a pane a human is mid-keystroke in.
 - `run`/`snapshot` output is viewport-bounded; `truncated: true` means it
   scrolled past the viewport (full capture awaits scrollback).
 - `run` cannot capture a command that *replaces* the shell (`exit`,

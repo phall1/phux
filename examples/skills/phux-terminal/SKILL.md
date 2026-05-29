@@ -31,15 +31,19 @@ it's lower overhead.
 ```sh
 phux ls --json                       # sessions on the running server (JSON)
 phux new -s NAME                     # create a session (auto-starts a server)
-phux snapshot NAME --json            # read the focused pane as structured JSON
-phux send-keys NAME KEY...           # send input to the focused pane
-phux run NAME "CMD"                  # run a command, get its exit code + output
-phux wait NAME --until TEXT          # block until the screen shows TEXT
-phux kill NAME                       # destroy a session/pane
+phux snapshot TARGET --json          # read a pane as structured JSON
+phux send-keys TARGET KEY...         # send input to a pane
+phux run TARGET "CMD"                # run a command, get its exit code + output
+phux wait TARGET --until TEXT        # block until the screen shows TEXT
+phux kill TARGET                     # destroy a session/window/pane
 ```
 
-`--socket PATH` overrides the UDS. **Flags must precede `send-keys`' trailing
-keys** (`phux send-keys --socket P NAME ...`), or they get parsed as keys.
+`TARGET` is a selector: a session name (`work`), a window (`work:1` or
+`work:editor`), a pane (`work:1.0`), an opaque id (`@42`), or `.`/`=` for the
+focused / last-focused session. A session-wide target resolves to its
+focused pane; a `:window.pane` target hits exactly that pane. `--socket PATH`
+overrides the UDS. **Flags must precede `send-keys`' trailing keys**
+(`phux send-keys --socket P TARGET ...`), or they get parsed as keys.
 
 ### Reading the screen — `snapshot`
 
@@ -124,10 +128,10 @@ backgrounded work where there's no single "command done" moment.
 - **`snapshot` is side-effect-free** — it reads the server's own grid
   (`GET_SCREEN`), so it never attaches or resizes the pane and is safe to
   poll, even against a pane a human is using.
-- **`send-keys`/`run` attach transiently** to submit input, which can resize
-  the pane to 80x24 for a moment (it self-heals): the server only accepts
-  input from an attached client. Avoid firing them against a pane a human is
-  mid-keystroke in. A side-effect-free input route is coming.
+- **`send-keys`/`run` are side-effect-free too.** They resolve the target to
+  a pane id client-side and route input by id (`ROUTE_INPUT`), so they
+  neither attach nor resize the pane. Still, they *type into a live pane* —
+  avoid firing them at a pane a human is mid-keystroke in.
 - **`run` output is viewport-bounded.** If a command prints more than fits on
   screen, `output` is the visible tail and `truncated` is true. Full capture
   awaits scrollback support.

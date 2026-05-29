@@ -206,16 +206,18 @@ enum Command {
 
     /// Send input to a pane (ADR-0022). tmux-shaped: each KEY is a named
     /// key (`Enter`, `Tab`, `Escape`, `Up`, `C-c`, `M-x`, …) or a literal
-    /// string sent character by character. The server only accepts input
-    /// from an attached, subscribed client, so this attaches transiently
-    /// (which may briefly resize the pane); a side-effect-free input route
-    /// is tracked under the agent epic.
+    /// string sent character by character. TARGET is the full selector
+    /// grammar (`session`, `session:window`, `session:window.pane`, `@id`,
+    /// `.`, `=`); it resolves client-side to one pane and the events route
+    /// to it by id, so the live pane is neither attached nor resized.
     ///
     ///   phux send-keys demo "echo hi" Enter
+    ///   phux send-keys work:1.0 C-c
     #[command(name = "send-keys")]
     SendKeys {
-        /// Session whose focused pane receives the input.
-        session: String,
+        /// Target selector: session, session:window, session:window.pane,
+        /// @id, `.` (focused), or `=` (last-focused).
+        target: String,
 
         /// Keys to send: named keys and/or literal strings, in order.
         #[arg(trailing_var_arg = true, required = true)]
@@ -264,15 +266,18 @@ enum Command {
     /// Run a command in a pane and report its exit code, output, and
     /// duration (ADR-0022 §3). Brackets the command with sentinels to
     /// capture `$?`, so it assumes a POSIX shell (sh/bash/zsh). The process
-    /// exit code mirrors the command's. Like send-keys, it attaches
-    /// transiently to submit. Flags (--timeout/--json) MUST precede the
+    /// exit code mirrors the command's. TARGET is the full selector grammar
+    /// (`session`, `session:window`, `session:window.pane`, `@id`, `.`,
+    /// `=`), resolved client-side to one pane; the command routes to it by
+    /// id (no attach, no resize). Flags (--timeout/--json) MUST precede the
     /// command, or they are swallowed into it.
     ///
     ///   phux run build "cargo test"
-    ///   phux run --timeout 30 build "cargo test"
+    ///   phux run --timeout 30 work:1.0 "cargo test"
     Run {
-        /// Target session whose focused pane runs the command.
-        session: String,
+        /// Target selector: session, session:window, session:window.pane,
+        /// @id, `.` (focused), or `=` (last-focused).
+        target: String,
 
         /// The command line: all trailing args, joined with spaces.
         #[arg(trailing_var_arg = true, required = true)]
@@ -337,10 +342,10 @@ fn main() -> ExitCode {
             socket,
         }) => run_snapshot(session.as_deref(), json, socket),
         Some(Command::SendKeys {
-            session,
+            target,
             keys,
             socket,
-        }) => run_send_keys(&session, &keys, socket),
+        }) => run_send_keys(&target, &keys, socket),
         Some(Command::Wait {
             session,
             until,
@@ -350,12 +355,12 @@ fn main() -> ExitCode {
             socket,
         }) => run_wait(session.as_deref(), until, idle, timeout, json, socket),
         Some(Command::Run {
-            session,
+            target,
             command,
             timeout,
             json,
             socket,
-        }) => run_run(&session, &command, timeout, json, socket),
+        }) => run_run(&target, &command, timeout, json, socket),
         None => run_naked(),
     }
 }
@@ -1145,8 +1150,14 @@ fn run_wait(
 /// `phux run TARGET CMD...` — run a command in a pane and report its exit
 /// code, output, and duration (ADR-0022 §3). The process exits with the
 /// command's own code, so `phux run … && next` composes like a shell.
+///
+/// `TARGET` is the full selector grammar (`docs/consumers/tui.md` §3):
+/// `session`, `session:window`, `session:window.pane`, `@id`, `.`, `=`. It
+/// is resolved client-side to a single pane (the selected one — the focused
+/// pane when the selector spans several), then the command runs in exactly
+/// that pane (phux-n95).
 fn run_run(
-    session: &str,
+    target: &str,
     command: &[String],
     timeout: Option<u64>,
     json: bool,
@@ -1154,8 +1165,11 @@ fn run_run(
 ) -> ExitCode {
     use phux_client::run::RunOutcome;
 
+    let selector = match parse_selector(Some(target)) {
+        Ok(sel) => sel,
+        Err(code) => return code,
+    };
     let cmd = command.join(" ");
-    let target = AttachTarget::ByName(session.to_owned());
     // `run` polls until the command's sentinel appears; an interactive or
     // never-returning command would otherwise hang forever. Default to a
     // generous cap; `--timeout 0` opts back into waiting indefinitely.
@@ -1172,7 +1186,11 @@ fn run_run(
     };
 
     rt.block_on(async move {
-        match phux_client::run::run(&socket_path, target, &cmd, &nonce, timeout).await {
+        let pane = match resolve_target(&socket_path, &selector, "run").await {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+        match phux_client::run::run_in(&socket_path, pane, &cmd, &nonce, timeout).await {
             Ok(RunOutcome::Completed(result)) => {
                 if json {
                     match serde_json::to_string_pretty(&result) {
@@ -1203,7 +1221,7 @@ fn run_run(
             }
             Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "run"),
             Err(AttachError::Refused(msg)) => {
-                eprintln!("phux: cannot run in '{session}': {msg} (try `phux ls`)");
+                eprintln!("phux: cannot run in '{target}': {msg} (try `phux ls`)");
                 ExitCode::FAILURE
             }
             Err(err) => {
@@ -1250,29 +1268,43 @@ fn print_run_result(result: &phux_client::run::RunResult) {
     );
 }
 
-/// `phux send-keys` — send input to a session's focused pane via the
-/// side-effect-free `ROUTE_INPUT` route. Resolves the focused pane from a
-/// `GET_STATE` snapshot and routes the events by id, so it neither attaches
-/// nor resizes the live pane (see [`phux_client::send_keys::send`]).
-fn run_send_keys(session: &str, keys: &[String], socket: Option<PathBuf>) -> ExitCode {
+/// `phux send-keys TARGET KEYS...` — send input to a pane via the
+/// side-effect-free `ROUTE_INPUT` route.
+///
+/// `TARGET` is the full selector grammar (`docs/consumers/tui.md` §3):
+/// `session`, `session:window`, `session:window.pane`, `@id`, `.`, `=`. It
+/// is resolved client-side to a single pane (the selected one — the focused
+/// pane when the selector spans several), then the events route to exactly
+/// that pane by id, so this neither attaches nor resizes the live pane
+/// (phux-n95; see [`phux_client::send_keys::send_to`]).
+fn run_send_keys(target: &str, keys: &[String], socket: Option<PathBuf>) -> ExitCode {
+    let selector = match parse_selector(Some(target)) {
+        Ok(sel) => sel,
+        Err(code) => return code,
+    };
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
         Ok(rt) => rt,
         Err(code) => return code,
     };
-    let target = AttachTarget::ByName(session.to_owned());
-    match rt.block_on(phux_client::send_keys::send(&socket_path, target, keys)) {
-        Ok(_pane) => ExitCode::SUCCESS,
-        Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "send-keys"),
-        Err(AttachError::Refused(msg)) => {
-            eprintln!("phux: cannot send to '{session}': {msg} (try `phux ls`)");
-            ExitCode::FAILURE
+    rt.block_on(async move {
+        let pane = match resolve_target(&socket_path, &selector, "send-keys").await {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+        match phux_client::send_keys::send_to(&socket_path, pane, keys).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "send-keys"),
+            Err(AttachError::Refused(msg)) => {
+                eprintln!("phux: cannot send to '{target}': {msg} (try `phux ls`)");
+                ExitCode::FAILURE
+            }
+            Err(err) => {
+                eprintln!("phux: send-keys failed: {err}");
+                ExitCode::FAILURE
+            }
         }
-        Err(err) => {
-            eprintln!("phux: send-keys failed: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
 /// Human-readable boxed rendering of a captured screen (no tmux, no TTY).
@@ -1504,7 +1536,8 @@ fn maybe_auto_spawn_server(
 mod tests {
     use phux_protocol::ids::TerminalId;
 
-    use super::{pick_target_pane, run_nonce, unique_session_name};
+    use super::selector::{Selector, WindowRef};
+    use super::{parse_selector, pick_target_pane, run_nonce, unique_session_name};
 
     #[test]
     fn unique_session_name_starts_at_zero_and_skips_taken() {
@@ -1540,5 +1573,61 @@ mod tests {
         // The pid is stable within a process; the time component must still
         // make two nonces differ (defends the stale-sentinel fix).
         assert_ne!(run_nonce(), run_nonce());
+    }
+
+    /// The full `TARGET` grammar now feeds run/send-keys/snapshot/wait/kill
+    /// alike (phux-n95). `parse_selector` is the shared CLI front door:
+    /// `None` defaults to the focused/last session, and every documented
+    /// form parses to its [`Selector`] variant.
+    #[test]
+    fn parse_selector_accepts_every_grammar_form() {
+        // Absent target defaults to the last/focused session.
+        assert_eq!(parse_selector(None).unwrap(), Selector::Last);
+        assert_eq!(parse_selector(Some(".")).unwrap(), Selector::Current);
+        assert_eq!(parse_selector(Some("=")).unwrap(), Selector::Last);
+        assert_eq!(
+            parse_selector(Some("work")).unwrap(),
+            Selector::Session("work".to_owned()),
+        );
+        assert_eq!(
+            parse_selector(Some("work:1")).unwrap(),
+            Selector::Window("work".to_owned(), WindowRef::Index(1)),
+        );
+        assert_eq!(
+            parse_selector(Some("work:editor")).unwrap(),
+            Selector::Window("work".to_owned(), WindowRef::Tag("editor".to_owned())),
+        );
+        assert_eq!(
+            parse_selector(Some("work:1.2")).unwrap(),
+            Selector::Pane("work".to_owned(), WindowRef::Index(1), 2),
+        );
+        assert_eq!(
+            parse_selector(Some("work:editor.0")).unwrap(),
+            Selector::Pane("work".to_owned(), WindowRef::Tag("editor".to_owned()), 0),
+        );
+        assert_eq!(
+            parse_selector(Some("@42")).unwrap(),
+            Selector::TerminalId(42),
+        );
+    }
+
+    /// Malformed targets fail at parse time with the CLI failure code,
+    /// before any server round trip (so run/send-keys reject bad syntax up
+    /// front rather than resolving it). A nonexistent-but-well-formed target
+    /// parses fine here; it fails later as a resolution miss.
+    #[test]
+    fn parse_selector_rejects_malformed_targets() {
+        // Explicit empty string is a parse error (distinct from `None`).
+        assert!(parse_selector(Some("")).is_err());
+        // `@N` with a non-numeric id.
+        assert!(parse_selector(Some("@nope")).is_err());
+        // Pane index after the `.` must be numeric.
+        assert!(parse_selector(Some("work:1.x")).is_err());
+        // A well-formed but unknown session is NOT a parse error — it
+        // resolves to nothing later.
+        assert_eq!(
+            parse_selector(Some("ghost")).unwrap(),
+            Selector::Session("ghost".to_owned()),
+        );
     }
 }

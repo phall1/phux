@@ -82,9 +82,11 @@ phux new [-s NAME] [-c CWD] [--] [COMMAND...]
 phux ls                       # list sessions (alias: list-sessions)     spec-only
 phux windows [-s SESSION]     # list windows                             spec-only
 phux panes [-w WINDOW]        # list panes                               spec-only
-phux kill TARGET              # kill session/window/pane by selector     spec-only
-phux send TARGET KEYS...      # send keys to a pane (scripting)          spec-only
-phux capture TARGET           # dump pane grid (for piping/scripting)    spec-only
+phux kill TARGET              # kill session/window/pane by selector     shipped
+phux send-keys TARGET KEYS... # send keys to a pane (scripting)          shipped
+phux run TARGET CMD...        # run a command in a pane, capture $?      shipped
+phux snapshot [TARGET]        # dump pane grid (for piping/scripting)    shipped
+phux wait [TARGET]            # poll a pane until a condition holds      shipped
 phux config [show|edit|path]  # config inspection                        spec-only
 phux messages                 # recent server-emitted messages           spec-only
 phux version                  # print version                            spec-only
@@ -132,12 +134,25 @@ CLI arguments, keybinding actions, and hook arguments.
 |                       | server's lifetime                                |
 | `=`                   | last (most recently focused)                     |
 
+One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, and
+`run` all accept the same `TARGET` (phux-n95) and resolve it client-side
+against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
+selector. A selector that names several panes (a whole session or window)
+resolves to a single **selected pane**: the focused pane if it is among
+the matches, else the first in snapshot order. So `phux send-keys work …`
+targets the pane you are looking at in session `work`, while
+`phux send-keys work:1.0 …` targets exactly window 1, pane 0. `send-keys`
+and `run` route input to that resolved pane by id — no attach, no resize
+(phux-3j3). Omit the target on `snapshot`/`wait` to default to the
+focused/last session.
+
 The CLI infers what kind of selector is expected from the command. When
 ambiguity matters, prefer the most specific form. Example:
 
 ```sh
 phux kill work:edit.2         # second pane in window "edit" of session "work"
-phux send @42 "ls\n"          # by stable ID
+phux send-keys @42 "ls" Enter # send to the pane with stable id 42
+phux run work:1.0 "cargo test"# run in window 1, pane 0 of session "work"
 phux kill =                   # kill last-focused (within whatever the command targets)
 ```
 

@@ -285,3 +285,128 @@ fn wait_until_times_out_when_marker_never_appears() {
         "`phux wait` should exit 124 on timeout"
     );
 }
+
+/// Run a verb capturing exit code and stderr together — for asserting the
+/// diagnostic on a selector that fails to parse or resolve.
+fn run_status_and_stderr(server: &ServerGuard, args: &[&str]) -> (i32, String) {
+    let out = server
+        .cmd(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run phux verb with stderr");
+    let code = out
+        .status
+        .code()
+        .unwrap_or_else(|| panic!("phux {args:?} terminated by signal: {:?}", out.status));
+    (code, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+// --- Selector grammar across run + send-keys (phux-n95) ----------------
+//
+// run/send-keys take the SAME `TARGET` grammar as snapshot/wait/kill, and
+// resolve it client-side to the selected pane. The seeded server has one
+// session ("work") with one window (index 0) holding one pane (local id 1),
+// so every form below names that same pane; the test asserts each resolves
+// (run mirrors `true`'s exit 0) rather than failing as "no such target".
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn run_accepts_window_selector() {
+    let server = ServerGuard::start();
+    assert_eq!(
+        run_status(&server, &["run", "--timeout", "15", "work:0", "true"]),
+        0,
+        "`phux run work:0` should resolve the window selector and mirror exit 0",
+    );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn run_accepts_pane_selector() {
+    let server = ServerGuard::start();
+    assert_eq!(
+        run_status(&server, &["run", "--timeout", "15", "work:0.0", "true"]),
+        0,
+        "`phux run work:0.0` should resolve the pane selector and mirror exit 0",
+    );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn run_accepts_terminal_id_selector() {
+    let server = ServerGuard::start();
+    // The seed pane is local id 1 (the first Terminal the server creates).
+    assert_eq!(
+        run_status(&server, &["run", "--timeout", "15", "@1", "true"]),
+        0,
+        "`phux run @1` should resolve the opaque-id selector and mirror exit 0",
+    );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn run_rejects_malformed_selector_before_touching_server() {
+    let server = ServerGuard::start();
+    // A non-numeric pane index is a PARSE error: it fails up front with the
+    // CLI failure code, never reaching resolution.
+    let (code, stderr) = run_status_and_stderr(&server, &["run", "work:0.x", "true"]);
+    assert_eq!(code, 1, "a malformed selector should exit 1");
+    assert!(
+        stderr.contains("invalid target"),
+        "expected an 'invalid target' parse diagnostic, got: {stderr}",
+    );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn run_reports_no_such_target_for_unknown_session() {
+    let server = ServerGuard::start();
+    // Well-formed but nonexistent: parses fine, then misses at resolution.
+    let (code, stderr) = run_status_and_stderr(
+        &server,
+        &["run", "--timeout", "5", "no-such-session-qzx", "true"],
+    );
+    assert_eq!(code, 1, "an unresolvable target should exit 1");
+    assert!(
+        stderr.contains("no such target"),
+        "expected a 'no such target' resolution diagnostic, got: {stderr}",
+    );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn send_keys_pane_selector_routes_to_that_pane() {
+    let server = ServerGuard::start();
+    // Address the pane explicitly (window 0, pane 0) and inject a marker.
+    assert_eq!(
+        run_status(
+            &server,
+            &[
+                "send-keys",
+                "work:0.0",
+                "echo PANE_SELECTOR_MARK_QZX",
+                "Enter"
+            ],
+        ),
+        0,
+        "send-keys with a pane selector should resolve and route",
+    );
+    // The marker must land on that very pane, observable via the same
+    // selector form (here the opaque id of the seed pane).
+    assert_eq!(
+        run_status(
+            &server,
+            &[
+                "wait",
+                "@1",
+                "--until",
+                "PANE_SELECTOR_MARK_QZX",
+                "--timeout",
+                "5",
+            ],
+        ),
+        0,
+        "the marker should be visible on the pane the selector named",
+    );
+}

@@ -140,9 +140,10 @@ fn resolve_focused_pane(snapshot: &SessionSnapshot, target: &AttachTarget) -> Op
 /// attach-then-`INPUT_KEY` path, which transiently resized the pane to the
 /// caller's `80x24` viewport (phux-3j3).
 ///
-/// Each `ROUTE_INPUT` is acked by a `COMMAND_RESULT` the server emits in
-/// order, so the events land on the pane actor's input mailbox in send
-/// order — no drain race.
+/// This is the focused-pane convenience over [`send_to`]: callers that have
+/// already resolved a selector to a concrete pane (e.g. via the CLI's full
+/// `TARGET` grammar, phux-n95) call [`send_to`] directly and skip this
+/// extra `GET_STATE` round trip.
 ///
 /// Returns the [`TerminalId`] of the focused pane the keys were sent to,
 /// so callers (e.g. `phux run`) can read back the *same* pane.
@@ -173,12 +174,46 @@ pub async fn send(
     let pane = resolve_focused_pane(&snapshot, &target).ok_or_else(|| {
         AttachError::Refused("no such session, or it has no focused pane".to_owned())
     })?;
+    route_keys(&mut conn, &pane, keys).await?;
+    Ok(pane)
+}
 
+/// Send `keys` to a pre-resolved `pane` via the side-effect-free
+/// `ROUTE_INPUT` route.
+///
+/// The pane-targeted core of [`send`]: the caller has already resolved a
+/// selector (the CLI's full `TARGET` grammar — `session`, `session:window`,
+/// `session:window.pane`, `@id`; phux-n95) to a concrete [`TerminalId`], so
+/// there is no `GET_STATE` round trip and no focus heuristic — the keys land
+/// on exactly the pane named. Like [`send`], nothing attaches, so the live
+/// pane keeps its dimensions (phux-3j3).
+///
+/// # Errors
+///
+/// Propagates [`AttachError`] from the connection or the `ROUTE_INPUT`
+/// acks; an unknown pane id surfaces as [`AttachError::Refused`] from the
+/// server.
+pub async fn send_to(socket: &Path, pane: TerminalId, keys: &[String]) -> Result<(), AttachError> {
+    let mut conn = Connection::connect(socket).await?;
+    route_keys(&mut conn, &pane, keys).await
+}
+
+/// Deliver each built [`InputEvent`] to `pane` over `conn` via `ROUTE_INPUT`.
+///
+/// Each `ROUTE_INPUT` is acked by a `COMMAND_RESULT` the server emits in
+/// order, so the events land on the pane actor's input mailbox in send
+/// order — no drain race.
+async fn route_keys(
+    conn: &mut Connection,
+    pane: &TerminalId,
+    keys: &[String],
+) -> Result<(), AttachError> {
     for (i, event) in events_for(keys).into_iter().enumerate() {
-        // request_id 1 was GET_STATE; route-input acks start at 2.
+        // request_id 1 may have been a preceding GET_STATE; route-input
+        // acks start at 2 so a shared connection never reuses an id.
         let request_id = u32::try_from(i).unwrap_or(u32::MAX - 1).saturating_add(2);
         match command(
-            &mut conn,
+            conn,
             request_id,
             Command::RouteInput {
                 terminal_id: pane.clone(),
@@ -196,7 +231,7 @@ pub async fn send(
             }
         }
     }
-    Ok(pane)
+    Ok(())
 }
 
 #[cfg(test)]
