@@ -25,7 +25,7 @@ use crate::render::chrome::status_bar::StatusBarPainter;
 /// [`handle_server_frame`] lets the function stay synchronous.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "four parallel server-frame outcome flags; refactor into bitset would obscure callers"
+    reason = "parallel server-frame outcome flags; refactor into bitset would obscure callers"
 )]
 #[derive(Debug, Clone, Default)]
 pub(super) struct FrameOutcome {
@@ -44,6 +44,16 @@ pub(super) struct FrameOutcome {
     /// the driver should broadcast the new envelope via
     /// `SET_METADATA` so sibling clients reconcile.
     pub(super) emit_set_metadata: bool,
+    /// phux-tnh: `true` ⇒ a pane lifecycle event (close/spawn) changed
+    /// surviving panes' dimensions. The driver must diff the new layout
+    /// against the pre-frame rects and emit a `TERMINAL_RESIZE` per
+    /// changed leaf so the server reflows each PTY (TIOCSWINSZ) — without
+    /// this the survivor of a close keeps its old small winsize and the
+    /// shell never redraws to fill the freed space. Set ONLY by the
+    /// `TerminalClosed`/`TerminalSpawned` arms, not by the broader
+    /// `layout_replaced` reconcile/broadcast paths (which already sized
+    /// their panes and would otherwise thrash on attach).
+    pub(super) reflow_panes: bool,
 }
 
 /// Process one server-to-client frame. Returns a [`FrameOutcome`]
@@ -406,6 +416,11 @@ pub(super) fn handle_server_frame(
                             Ok(FrameOutcome {
                                 layout_replaced: true,
                                 emit_set_metadata: true,
+                                // phux-tnh: the split shrank the sibling
+                                // and added a leaf; emit per-leaf resizes
+                                // so the server learns the real split dims
+                                // instead of leaving panes at spawn size.
+                                reflow_panes: true,
                                 ..FrameOutcome::default()
                             })
                         }
@@ -496,6 +511,9 @@ pub(super) fn handle_server_frame(
                     Ok(FrameOutcome {
                         layout_replaced: true,
                         emit_set_metadata: true,
+                        // phux-tnh: the survivor's Rect grew; tell the
+                        // server so its PTY winsize grows too.
+                        reflow_panes: true,
                         ..FrameOutcome::default()
                     })
                 }

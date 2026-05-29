@@ -507,6 +507,19 @@ async fn main_loop(
             frame = conn.recv() => {
                 match frame {
                     Ok(f) => {
+                        // phux-tnh: snapshot the current per-leaf rects
+                        // BEFORE the frame may fold (close) or split the
+                        // layout, so a TerminalClosed/Spawned can diff
+                        // against them and resize survivors whose dims
+                        // changed. Only meaningful in multi-pane mode;
+                        // skipped (no cost) on the single-pane hot path.
+                        let prev_rects = layout_state.tree.as_ref().map(|_| {
+                            super::multi_pane::compute_layout(
+                                &layout_state,
+                                pane_viewport(viewport_dims, status_bar.is_some()),
+                            )
+                            .rects
+                        });
                         let outcome = handle_server_frame(
                             f,
                             &mut panes,
@@ -541,6 +554,36 @@ async fn main_loop(
                                 value: bytes,
                             })
                             .await?;
+                        }
+                        // phux-tnh: a pane close/spawn changed surviving
+                        // panes' dimensions. Diff the folded/split layout
+                        // against the pre-frame rects and emit a
+                        // TERMINAL_RESIZE per changed leaf — same path the
+                        // SIGWINCH arm uses — so the server reflows each
+                        // PTY (TIOCSWINSZ) and the shell redraws to fill.
+                        // Without this the survivor of a close keeps its
+                        // old small winsize ("survivor stays small").
+                        // Sent BEFORE the repaint so the server's resync
+                        // snapshot lands after the local mirror has grown.
+                        if outcome.reflow_panes
+                            && layout_state.tree.is_some()
+                            && let Some(prev_rects) = &prev_rects
+                        {
+                            let new_pane_dims =
+                                pane_viewport(viewport_dims, status_bar.is_some());
+                            let diff = super::reflow::compute_reflow(
+                                &layout_state,
+                                prev_rects,
+                                new_pane_dims,
+                            );
+                            for (terminal_id, new_rect) in &diff.changed {
+                                conn.send(&FrameKind::TerminalResize {
+                                    terminal_id: terminal_id.clone(),
+                                    cols: new_rect.w,
+                                    rows: new_rect.h,
+                                })
+                                .await?;
+                            }
                         }
                         if outcome.layout_replaced {
                             // phux-4li.5: layout changed under us
