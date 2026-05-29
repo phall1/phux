@@ -88,7 +88,7 @@ pub(super) fn handle_server_frame(
         } => {
             // Capture the initial focused pane so subsequent INPUT_* frames
             // know where to route.
-            let bootstrap = snapshot.focused_pane;
+            let bootstrap = snapshot.focused_pane.clone();
             tracing::debug!(
                 terminal_id = ?bootstrap,
                 "ATTACHED: seeding focused_pane from snapshot"
@@ -107,12 +107,15 @@ pub(super) fn handle_server_frame(
             if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
                 v.insert(PaneSlot::new()?);
             }
-            // phux-nz4.5: stash the session name for the status-bar
-            // `WidgetContext`. The Snapshot type names the session via
-            // its window graph; for v0 the session-name widget reads
-            // from a string slot we maintain here, defaulting to the
-            // empty string until a session-graph carrier lands.
-            *session_name = String::new();
+            // phux-17u: stash the session name for the status-bar
+            // `WidgetContext`. The snapshot carries `sessions:
+            // Vec<SessionInfo>` plus `focused_session`; the name is the
+            // `SessionInfo` whose `id` matches the focused session. The
+            // server populates this from `Session::name` in
+            // `build_session_snapshot`. Falls back to empty if the
+            // focused session somehow isn't in the list (shouldn't
+            // happen — the focused session is always one of them).
+            *session_name = focused_session_name(&snapshot);
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
             // TERMINAL_SNAPSHOT.
@@ -528,6 +531,24 @@ fn bell_to_stdout() {
     let _ = actions::write_bell(&mut stdout);
 }
 
+/// phux-17u: resolve the focused session's display name from an
+/// `ATTACHED` snapshot for the status-bar `session-name` widget.
+///
+/// The snapshot carries `sessions: Vec<SessionInfo>` plus a
+/// `focused_session` id; the name is the `SessionInfo` whose `id`
+/// matches. Returns the empty string when the focused session isn't in
+/// the list — which shouldn't happen (the focused session is always one
+/// of the snapshot's own sessions), but an empty widget is a safer
+/// degradation than a panic.
+fn focused_session_name(snapshot: &phux_protocol::wire::info::SessionSnapshot) -> String {
+    snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == snapshot.focused_session)
+        .map(|s| s.name.clone())
+        .unwrap_or_default()
+}
+
 /// Decide whether `(scope, key)` matches the layout-coordination key
 /// ADR-0019 reserves (`phux.tui.layout/v1`, scoped to the default
 /// Collection).
@@ -569,4 +590,41 @@ fn reconcile_loaded_layout(
             .or_else(|| tree_leaves.into_iter().next());
     }
     state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::focused_session_name;
+    use phux_protocol::ids::{SessionId, TerminalId, WindowId};
+    use phux_protocol::wire::info::{SessionInfo, SessionSnapshot};
+
+    fn snapshot_with(sessions: Vec<SessionInfo>, focused: SessionId) -> SessionSnapshot {
+        SessionSnapshot::new(focused, WindowId::new(0), TerminalId::local(0))
+            .with_sessions(sessions)
+    }
+
+    #[test]
+    fn focused_session_name_resolves_the_matching_session() {
+        // phux-17u: the widget reads the name of the focused session,
+        // not the first session in the list.
+        let snapshot = snapshot_with(
+            vec![
+                SessionInfo::new(SessionId::new(1), "work"),
+                SessionInfo::new(SessionId::new(2), "play"),
+            ],
+            SessionId::new(2),
+        );
+        assert_eq!(focused_session_name(&snapshot), "play");
+    }
+
+    #[test]
+    fn focused_session_name_is_empty_when_focus_is_absent() {
+        // Degrade to an empty widget rather than panic if the focused
+        // session somehow isn't in the list.
+        let snapshot = snapshot_with(
+            vec![SessionInfo::new(SessionId::new(1), "work")],
+            SessionId::new(99),
+        );
+        assert_eq!(focused_session_name(&snapshot), "");
+    }
 }
