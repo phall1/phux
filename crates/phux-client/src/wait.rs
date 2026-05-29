@@ -28,6 +28,14 @@ use crate::snapshot::get_screen;
 /// the per-poll round-trip cost on a local UDS.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// Floor on the adaptive poll interval.
+///
+/// For [`Condition::Idle`] the loop shrinks its poll gap toward `dwell / 4`
+/// so a small `--idle` is honored instead of being rounded up to a full
+/// [`DEFAULT_POLL_INTERVAL`]; this is the smallest gap it will use, bounding
+/// the per-poll round-trip cost.
+pub const MIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
 /// Default dwell for [`Condition::Idle`] when the caller gives no explicit
 /// duration: the pane must hold still this long to count as settled.
 pub const DEFAULT_IDLE_DWELL: Duration = Duration::from_millis(500);
@@ -42,7 +50,42 @@ pub enum Condition {
     Contains(String),
     /// Met once the viewport text holds still for this long — the pane has
     /// "settled" (output stopped, prompt likely back).
+    ///
+    /// Settling is byte-exact: the pane must be unchanged across the dwell.
+    /// Idle resolution is bounded by the poll interval, which for this
+    /// condition is shrunk adaptively toward `dwell / 4` (down to
+    /// [`MIN_POLL_INTERVAL`]) so a small dwell is honored rather than
+    /// rounded up to a full [`DEFAULT_POLL_INTERVAL`]; see
+    /// [`effective_interval`].
+    ///
+    /// Limitation: a pane whose visible content changes on *every* poll —
+    /// a spinner, a live clock, a progress bar — never holds still and so
+    /// never satisfies `Idle`. There is no heuristic here that ignores
+    /// "churning" rows. For such panes, wait on specific output with
+    /// `--until` instead, and always pass a `--timeout` as a backstop.
     Idle(Duration),
+}
+
+/// The poll gap [`poll_until`] should use for `condition`, given the
+/// caller's `requested` ceiling.
+///
+/// For [`Condition::Contains`] the gap is just `requested` (no benefit to
+/// polling faster than the caller asked). For [`Condition::Idle`] the gap
+/// shrinks to `clamp(dwell / 4, MIN_POLL_INTERVAL, requested)` so a dwell
+/// smaller than `requested` is still observed at sub-dwell granularity
+/// instead of being rounded up to one full poll. Sampling at roughly a
+/// quarter of the dwell means the tracker sees several unchanged reads
+/// before the dwell elapses, so the reported settle time tracks the
+/// request rather than overshooting by a whole interval.
+#[must_use]
+pub fn effective_interval(condition: &Condition, requested: Duration) -> Duration {
+    match condition {
+        Condition::Contains(_) => requested,
+        // `max(MIN_POLL_INTERVAL)` first, then cap at `requested`: this is
+        // `clamp` without its `min > max` panic should a caller pass a
+        // `requested` below the floor.
+        Condition::Idle(dwell) => (*dwell / 4).max(MIN_POLL_INTERVAL).min(requested),
+    }
 }
 
 /// Tracks whether the viewport has held still long enough to count as
@@ -100,10 +143,15 @@ pub struct WaitResult {
 
 /// Poll `terminal_id` until `condition` holds or `timeout` elapses.
 ///
-/// Reads the screen every `interval` via the side-effect-free
-/// [`get_screen`]. Returns [`WaitOutcome::TimedOut`] (not an error) when
-/// the deadline passes first, so callers map the two outcomes to their own
-/// exit codes. `timeout = None` waits indefinitely.
+/// Reads the screen via the side-effect-free [`get_screen`]. The `interval`
+/// argument is the *requested ceiling*; the effective poll gap is derived
+/// per condition by [`effective_interval`], so [`Condition::Idle`] with a
+/// small dwell polls faster (down to [`MIN_POLL_INTERVAL`]) and resolves at
+/// sub-dwell granularity rather than rounding up to a full interval.
+///
+/// Returns [`WaitOutcome::TimedOut`] (not an error) when the deadline passes
+/// first, so callers map the two outcomes to their own exit codes.
+/// `timeout = None` waits indefinitely.
 ///
 /// # Errors
 ///
@@ -119,6 +167,7 @@ pub async fn poll_until(
     let start = Instant::now();
     let mut polls: u32 = 0;
     let mut idle = IdleTracker::new(start);
+    let interval = effective_interval(condition, interval);
 
     loop {
         let screen = get_screen(socket, terminal_id.clone()).await?;
@@ -197,6 +246,54 @@ mod tests {
         assert!(!idle.observe(&lines(&["a"]), t0 + Duration::from_millis(60), dwell));
         // Unchanged and past the dwell.
         assert!(idle.observe(&lines(&["a"]), t0 + Duration::from_millis(160), dwell));
+    }
+
+    #[test]
+    fn effective_interval_contains_uses_requested() {
+        let cond = Condition::Contains("x".to_owned());
+        assert_eq!(
+            effective_interval(&cond, DEFAULT_POLL_INTERVAL),
+            DEFAULT_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn effective_interval_small_dwell_clamps_to_min() {
+        // dwell/4 = 10ms, below the 25ms floor.
+        let cond = Condition::Idle(Duration::from_millis(40));
+        assert_eq!(
+            effective_interval(&cond, DEFAULT_POLL_INTERVAL),
+            MIN_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn effective_interval_mid_dwell_tracks_quarter() {
+        // dwell/4 = 100ms, inside [25ms, 150ms].
+        let cond = Condition::Idle(Duration::from_millis(400));
+        assert_eq!(
+            effective_interval(&cond, DEFAULT_POLL_INTERVAL),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn effective_interval_large_dwell_clamps_to_requested() {
+        // dwell/4 = 2.5s, capped at the requested 150ms ceiling.
+        let cond = Condition::Idle(Duration::from_secs(10));
+        assert_eq!(
+            effective_interval(&cond, DEFAULT_POLL_INTERVAL),
+            DEFAULT_POLL_INTERVAL
+        );
+    }
+
+    #[test]
+    fn effective_interval_handles_requested_below_floor() {
+        // A pathological requested ceiling below MIN_POLL_INTERVAL must not
+        // panic; the cap wins.
+        let cond = Condition::Idle(Duration::from_millis(400));
+        let tiny = Duration::from_millis(10);
+        assert_eq!(effective_interval(&cond, tiny), tiny);
     }
 
     #[test]
