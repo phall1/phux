@@ -45,6 +45,38 @@ pub enum Condition {
     Idle(Duration),
 }
 
+/// Tracks whether the viewport has held still long enough to count as
+/// "settled" for [`Condition::Idle`]. Pulled out of the poll loop so the
+/// dwell logic is unit-testable with an injected clock.
+#[derive(Debug)]
+struct IdleTracker {
+    last: Option<Vec<String>>,
+    stable_since: Instant,
+}
+
+impl IdleTracker {
+    const fn new(now: Instant) -> Self {
+        Self {
+            last: None,
+            stable_since: now,
+        }
+    }
+
+    /// Record the latest `lines` observed at `now`; return `true` once they
+    /// have been unchanged for at least `dwell`. The first observation, and
+    /// any observation that differs from the previous one, resets the dwell
+    /// clock and returns `false`.
+    fn observe(&mut self, lines: &[String], now: Instant, dwell: Duration) -> bool {
+        if self.last.as_deref() == Some(lines) {
+            now.duration_since(self.stable_since) >= dwell
+        } else {
+            self.stable_since = now;
+            self.last = Some(lines.to_vec());
+            false
+        }
+    }
+}
+
 /// Why [`poll_until`] returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitOutcome {
@@ -86,9 +118,7 @@ pub async fn poll_until(
 ) -> Result<WaitResult, AttachError> {
     let start = Instant::now();
     let mut polls: u32 = 0;
-    // Idle bookkeeping: the last content we saw and when it last changed.
-    let mut last_lines: Option<Vec<String>> = None;
-    let mut stable_since = start;
+    let mut idle = IdleTracker::new(start);
 
     loop {
         let screen = get_screen(socket, terminal_id.clone()).await?;
@@ -99,16 +129,7 @@ pub async fn poll_until(
                 .lines
                 .iter()
                 .any(|line| line.contains(needle.as_str())),
-            Condition::Idle(dwell) => {
-                if last_lines.as_ref() == Some(&screen.lines) {
-                    stable_since.elapsed() >= *dwell
-                } else {
-                    // Content changed (or first read): reset the dwell clock.
-                    stable_since = Instant::now();
-                    last_lines = Some(screen.lines.clone());
-                    false
-                }
-            }
+            Condition::Idle(dwell) => idle.observe(&screen.lines, Instant::now(), *dwell),
         };
         if met {
             return Ok(WaitResult {
@@ -143,19 +164,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn contains_matches_any_line() {
-        let cond = Condition::Contains("DONE".to_owned());
-        let s = screen(&["building", "step 2", "all DONE here"]);
-        let met = matches!(&cond, Condition::Contains(n) if s.lines.iter().any(|l| l.contains(n)));
-        assert!(met);
+    fn lines(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|s| (*s).to_owned()).collect()
     }
 
     #[test]
-    fn contains_misses_when_absent() {
-        let cond = Condition::Contains("DONE".to_owned());
-        let s = screen(&["building", "step 2"]);
-        let met = matches!(&cond, Condition::Contains(n) if s.lines.iter().any(|l| l.contains(n)));
-        assert!(!met);
+    fn contains_matches_any_line() {
+        let s = screen(&["building", "step 2", "all DONE here"]);
+        assert!(s.lines.iter().any(|l| l.contains("DONE")));
+        assert!(!s.lines.iter().any(|l| l.contains("MISSING")));
+    }
+
+    #[test]
+    fn idle_first_observation_never_settles() {
+        let t0 = Instant::now();
+        let mut idle = IdleTracker::new(t0);
+        // Even with a generous gap, the first read just records a baseline.
+        assert!(!idle.observe(
+            &lines(&["a"]),
+            t0 + Duration::from_secs(10),
+            Duration::from_millis(50)
+        ));
+    }
+
+    #[test]
+    fn idle_settles_after_dwell_without_change() {
+        let t0 = Instant::now();
+        let mut idle = IdleTracker::new(t0);
+        let dwell = Duration::from_millis(100);
+        assert!(!idle.observe(&lines(&["a"]), t0, dwell)); // baseline
+        // Unchanged but not yet dwelled.
+        assert!(!idle.observe(&lines(&["a"]), t0 + Duration::from_millis(60), dwell));
+        // Unchanged and past the dwell.
+        assert!(idle.observe(&lines(&["a"]), t0 + Duration::from_millis(160), dwell));
+    }
+
+    #[test]
+    fn idle_resets_dwell_on_any_change() {
+        let t0 = Instant::now();
+        let mut idle = IdleTracker::new(t0);
+        let dwell = Duration::from_millis(100);
+        assert!(!idle.observe(&lines(&["a"]), t0, dwell));
+        // Content changes well after the dwell would have elapsed — must NOT
+        // settle, and must restart the clock from this moment.
+        assert!(!idle.observe(&lines(&["b"]), t0 + Duration::from_millis(500), dwell));
+        // 60ms after the change: still not settled.
+        assert!(!idle.observe(&lines(&["b"]), t0 + Duration::from_millis(560), dwell));
+        // 110ms after the change: settled.
+        assert!(idle.observe(&lines(&["b"]), t0 + Duration::from_millis(610), dwell));
     }
 }

@@ -222,6 +222,7 @@ enum Command {
     /// Wait until a pane meets a condition, polling the side-effect-free
     /// screen read (ADR-0022 §4). The poll floor of the event surface:
     /// always works, no shell integration. Exit 0 when met, 124 on timeout.
+    /// Flags must precede the target.
     ///
     ///   phux wait build --until "BUILD SUCCESSFUL"
     ///   phux wait repl --idle 750
@@ -229,7 +230,9 @@ enum Command {
         /// Target selector. Omit for the most-recently-focused session.
         session: Option<String>,
 
-        /// Succeed once any visible line contains this substring.
+        /// Succeed once any visible line contains this substring. NOTE: this
+        /// matches ANY visible row, including the shell's echo of a command
+        /// you just typed — match on text that appears only in OUTPUT.
         #[arg(long, value_name = "TEXT")]
         until: Option<String>,
 
@@ -252,11 +255,14 @@ enum Command {
     },
 
     /// Run a command in a pane and report its exit code, output, and
-    /// duration (ADR-0022 §3). Appends a sentinel to capture `$?`, so it
-    /// assumes a POSIX shell (sh/bash/zsh). The process exit code mirrors
-    /// the command's. Like send-keys, it attaches transiently to submit.
+    /// duration (ADR-0022 §3). Brackets the command with sentinels to
+    /// capture `$?`, so it assumes a POSIX shell (sh/bash/zsh). The process
+    /// exit code mirrors the command's. Like send-keys, it attaches
+    /// transiently to submit. Flags (--timeout/--json) MUST precede the
+    /// command, or they are swallowed into it.
     ///
     ///   phux run build "cargo test"
+    ///   phux run --timeout 30 build "cargo test"
     Run {
         /// Target session whose focused pane runs the command.
         session: String,
@@ -265,7 +271,8 @@ enum Command {
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
 
-        /// Give up after this many seconds (exit 124). Default: wait forever.
+        /// Give up after this many seconds (exit 125). Default: 600s.
+        /// Pass 0 to wait indefinitely.
         #[arg(long, value_name = "SECS")]
         timeout: Option<u64>,
 
@@ -952,15 +959,25 @@ async fn resolve_target(
         Err(err) => return Err(report_no_server(&err, socket_path, verb)),
     };
     let candidates = selector::resolve(selector, &snapshot);
+    pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
+        eprintln!("phux: no such target");
+        ExitCode::FAILURE
+    })
+}
+
+/// Choose one pane from a selector's `candidates`: prefer the one equal to
+/// the server's `focused` pane (the common "the session I'm looking at"
+/// case), else the first in snapshot order. `None` only when the selector
+/// matched nothing. Pure so it is unit-testable without a server.
+fn pick_target_pane(
+    candidates: &[phux_protocol::ids::TerminalId],
+    focused: &phux_protocol::ids::TerminalId,
+) -> Option<phux_protocol::ids::TerminalId> {
     candidates
         .iter()
-        .find(|id| **id == snapshot.focused_pane)
+        .find(|id| *id == focused)
         .or_else(|| candidates.first())
         .cloned()
-        .ok_or_else(|| {
-            eprintln!("phux: no such target");
-            ExitCode::FAILURE
-        })
 }
 
 /// `phux snapshot [TARGET]` — read a pane as structured data (ADR-0022).
@@ -1099,10 +1116,15 @@ fn run_run(
 
     let cmd = command.join(" ");
     let target = AttachTarget::ByName(session.to_owned());
-    let timeout = timeout.map(Duration::from_secs);
-    // A per-invocation nonce keeps the sentinel from colliding with the
-    // command's own output. The pid is unique to this `phux run` process.
-    let nonce = std::process::id().to_string();
+    // `run` polls until the command's sentinel appears; an interactive or
+    // never-returning command would otherwise hang forever. Default to a
+    // generous cap; `--timeout 0` opts back into waiting indefinitely.
+    let timeout = match timeout {
+        None => Some(Duration::from_secs(RUN_DEFAULT_TIMEOUT_SECS)),
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+    };
+    let nonce = run_nonce();
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
         Ok(rt) => rt,
@@ -1133,15 +1155,43 @@ fn run_run(
                 ..
             }) => {
                 eprintln!("phux: '{command}' did not finish within {duration_ms}ms");
-                ExitCode::from(124)
+                // 125, not 124: `run` mirrors the child's code into 0..=255,
+                // and 124 is a code real commands (notably GNU `timeout`)
+                // produce. 125 is the wrapper-failure convention (env/timeout),
+                // so a caller can distinguish "phux gave up" from the child.
+                ExitCode::from(RUN_TIMEOUT_EXIT_CODE)
             }
             Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "run"),
+            Err(AttachError::Refused(msg)) => {
+                eprintln!("phux: cannot run in '{session}': {msg} (try `phux ls`)");
+                ExitCode::FAILURE
+            }
             Err(err) => {
                 eprintln!("phux: run failed: {err}");
                 ExitCode::FAILURE
             }
         }
     })
+}
+
+/// Default `run` timeout when `--timeout` is unset. Bounds the poll so an
+/// interactive or never-returning command does not hang forever; users opt
+/// back into unbounded waits with `--timeout 0`.
+const RUN_DEFAULT_TIMEOUT_SECS: u64 = 600;
+
+/// Exit code `run` returns when it gives up waiting for the sentinel.
+/// Distinct from a mirrored child code (the wrapper-failure convention).
+const RUN_TIMEOUT_EXIT_CODE: u8 = 125;
+
+/// A per-invocation sentinel nonce. The pid is recycled across process
+/// lifetimes, so it alone is not unique over time; mixing in the process
+/// start time (nanoseconds since the epoch) makes a residual sentinel from
+/// an earlier `run` unable to collide with this one.
+fn run_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}x{nanos}", std::process::id())
 }
 
 /// Human-readable rendering of a `run` result.
@@ -1174,6 +1224,10 @@ fn run_send_keys(session: &str, keys: &[String], socket: Option<PathBuf>) -> Exi
     match rt.block_on(phux_client::send_keys::send(&socket_path, target, keys)) {
         Ok(_pane) => ExitCode::SUCCESS,
         Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "send-keys"),
+        Err(AttachError::Refused(msg)) => {
+            eprintln!("phux: cannot send to '{session}': {msg} (try `phux ls`)");
+            ExitCode::FAILURE
+        }
         Err(err) => {
             eprintln!("phux: send-keys failed: {err}");
             ExitCode::FAILURE
@@ -1408,7 +1462,9 @@ fn maybe_auto_spawn_server(
 
 #[cfg(test)]
 mod tests {
-    use super::unique_session_name;
+    use phux_protocol::ids::TerminalId;
+
+    use super::{pick_target_pane, run_nonce, unique_session_name};
 
     #[test]
     fn unique_session_name_starts_at_zero_and_skips_taken() {
@@ -1421,5 +1477,28 @@ mod tests {
         // Non-numeric names (e.g. the auto-spawn "default") don't block
         // the numeric sequence.
         assert_eq!(unique_session_name(&["default".to_owned()]), "0");
+    }
+
+    #[test]
+    fn pick_target_pane_prefers_focused_then_first_then_none() {
+        let a = TerminalId::local(1);
+        let b = TerminalId::local(2);
+        let c = TerminalId::local(3);
+        // Focused is among the candidates -> pick it, not the first.
+        assert_eq!(
+            pick_target_pane(&[a.clone(), b.clone()], &b),
+            Some(b.clone())
+        );
+        // Focused not among candidates -> first in snapshot order.
+        assert_eq!(pick_target_pane(&[a.clone(), c], &b), Some(a));
+        // Empty candidate set -> None (a selector miss).
+        assert_eq!(pick_target_pane(&[], &b), None);
+    }
+
+    #[test]
+    fn run_nonce_is_unique_across_invocations() {
+        // The pid is stable within a process; the time component must still
+        // make two nonces differ (defends the stale-sentinel fix).
+        assert_ne!(run_nonce(), run_nonce());
     }
 }
