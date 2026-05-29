@@ -11,6 +11,7 @@ pub mod ids;
 pub mod registry;
 pub mod screen;
 pub mod session;
+pub mod session_list;
 pub mod terminal;
 pub mod window;
 

@@ -44,6 +44,7 @@ use phux_client::attach::connection::Connection;
 use phux_client::attach::{self, AttachError};
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
+use phux_core::session_list::{SessionJson, SessionListJson};
 use phux_protocol::wire::frame::{
     AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
 };
@@ -131,8 +132,14 @@ enum Command {
     /// Queries the server via the `GET_STATE` control command (ADR-0021)
     /// and prints one line per session. Does not start a server: with no
     /// server running it reports as much and exits non-zero (like
-    /// `tmux ls`).
+    /// `tmux ls`). Pass `--json` for the stable, versioned machine shape
+    /// (ADR-0022) instead of the human text.
     Ls {
+        /// Emit the session list as stable, versioned JSON
+        /// (`SessionListJson`, ADR-0022) instead of human text.
+        #[arg(long)]
+        json: bool,
+
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -316,7 +323,7 @@ fn main() -> ExitCode {
             daemonize,
             seed_command,
         }) => run_server(&session, socket, daemonize, seed_command.as_deref()),
-        Some(Command::Ls { socket }) => run_ls(socket),
+        Some(Command::Ls { json, socket }) => run_ls(json, socket),
         Some(Command::New {
             session,
             cwd,
@@ -687,8 +694,9 @@ fn report_no_server(err: &AttachError, socket_path: &Path, verb: &str) -> ExitCo
 }
 
 /// `phux ls` — list sessions via `GET_STATE`. Does not auto-start a
-/// server.
-fn run_ls(socket: Option<PathBuf>) -> ExitCode {
+/// server. With `json`, emits the stable [`SessionListJson`] contract
+/// (ADR-0022); otherwise the human text from [`print_sessions`].
+fn run_ls(json: bool, socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
         Ok(rt) => rt,
@@ -702,8 +710,12 @@ fn run_ls(socket: Option<PathBuf>) -> ExitCode {
     ));
     match result {
         Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => {
-            print_sessions(&snapshot);
-            ExitCode::SUCCESS
+            if json {
+                print_sessions_json(&snapshot)
+            } else {
+                print_sessions(&snapshot);
+                ExitCode::SUCCESS
+            }
         }
         Ok(other) => {
             eprintln!("phux: unexpected GET_STATE result: {other:?}");
@@ -729,6 +741,34 @@ fn print_sessions(snapshot: &SessionSnapshot) {
             ""
         };
         println!("{}: {} {windows}{attached}", s.name, s.window_count);
+    }
+}
+
+/// Emit the session list as the stable [`SessionListJson`] contract.
+///
+/// Sessions are name-sorted to match [`print_sessions`], keeping the two
+/// views consistent and the JSON stable across runs.
+fn print_sessions_json(snapshot: &SessionSnapshot) -> ExitCode {
+    let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
+    sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    let entries = sessions
+        .into_iter()
+        .map(|s| SessionJson {
+            name: s.name.clone(),
+            windows: s.window_count,
+            attached: s.attached_client_count > 0,
+        })
+        .collect();
+    let list = SessionListJson::new(entries);
+    match serde_json::to_string_pretty(&list) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: failed to serialize session list as JSON: {err}");
+            ExitCode::FAILURE
+        }
     }
 }
 
