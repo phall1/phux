@@ -33,9 +33,11 @@ mouse = true
 # to phux-4li.1. The knob lands first so consumers can target it.
 cwd-inheritance = "inherit-focused"
 
-# When `phux` auto-creates a session on attach, what to spawn as the
-# initial program. Unset (= no key) means "use defaults.shell" (which
-# in turn honors $SHELL, then /bin/sh).
+# What naked `phux` (or `phux attach` with no name) opens with when it
+# auto-creates its default session: this command runs via `$SHELL -c`.
+# `phux new` deliberately ignores this and gives an explicitly-created
+# session a plain shell. Unset (= no key) means "use defaults.shell"
+# (which in turn honors $SHELL, then /bin/sh).
 # spawn-on-attach = "/usr/bin/zellij-like-launcher"
 
 # Template for auto-created session names (naked `phux` / `phux attach`

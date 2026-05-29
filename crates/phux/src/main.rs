@@ -116,6 +116,14 @@ enum Command {
         /// run by hand leaves this off so Ctrl-C still works.
         #[arg(long, hide = true)]
         daemonize: bool,
+
+        /// Run this command (via `$SHELL -c`) as the pre-seeded session's
+        /// initial program instead of a bare shell. The naked-`phux`
+        /// auto-spawn path passes `defaults.spawn-on-attach` here
+        /// (phux-07y); `phux new` deliberately does not, so an
+        /// explicitly-created session still gets a shell.
+        #[arg(long, hide = true)]
+        seed_command: Option<String>,
     },
 
     /// List sessions on the running server.
@@ -198,7 +206,8 @@ fn main() -> ExitCode {
             session,
             socket,
             daemonize,
-        }) => run_server(&session, socket, daemonize),
+            seed_command,
+        }) => run_server(&session, socket, daemonize, seed_command.as_deref()),
         Some(Command::Ls { socket }) => run_ls(socket),
         Some(Command::New {
             session,
@@ -245,7 +254,11 @@ fn run_naked() -> ExitCode {
     let default_name = resolved_default_session_name();
 
     if !socket_path.exists()
-        && let Err(err) = maybe_auto_spawn_server(&socket_path, &default_name)
+        && let Err(err) = maybe_auto_spawn_server(
+            &socket_path,
+            &default_name,
+            configured_spawn_on_attach().as_deref(),
+        )
     {
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
@@ -303,6 +316,15 @@ fn resolved_default_session_name() -> String {
     } else {
         name
     }
+}
+
+/// Read `defaults.spawn-on-attach` from the on-disk config (phux-07y).
+///
+/// The naked-`phux` / `phux attach`-no-name auto-spawn passes this to the
+/// server as the pre-seeded session's initial program. `None` (unset key
+/// or unreadable config) ⇒ the seed pane runs the user's `$SHELL`.
+fn configured_spawn_on_attach() -> Option<String> {
+    config_loader::load().ok()?.defaults.spawn_on_attach
 }
 
 /// Drive one attach attempt against `socket_path` with `target`, picking
@@ -381,6 +403,14 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     // create-and-attach fallback on one agreed name.
     let default_name = resolved_default_session_name();
     let session_for_spawn = session.clone().unwrap_or_else(|| default_name.clone());
+    // phux-07y: only the no-name (naked-`phux`-equivalent) case seeds with
+    // `defaults.spawn-on-attach`. An explicit `phux attach NAME` is like
+    // `phux new`: its auto-spawned seed pane gets a plain shell.
+    let seed_command = if session.is_none() {
+        configured_spawn_on_attach()
+    } else {
+        None
+    };
     let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
 
     // Best-effort: if no socket exists, fork-exec ourselves into a
@@ -392,7 +422,7 @@ fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     // `ATTACH` doesn't refuse with "session not found" against a
     // surprise `default` session.
     if !socket_path.exists() {
-        match maybe_auto_spawn_server(&socket_path, &session_for_spawn) {
+        match maybe_auto_spawn_server(&socket_path, &session_for_spawn, seed_command.as_deref()) {
             Ok(()) => {}
             Err(err) => {
                 eprintln!(
@@ -621,7 +651,10 @@ fn run_new(
     };
 
     if !socket_path.exists()
-        && let Err(err) = maybe_auto_spawn_server(&socket_path, &name)
+        // phux-07y: `phux new` never seeds with spawn-on-attach — an
+        // explicitly-created session gets a plain shell (or the `-- CMD`
+        // the user gave, applied per-session via CreateIfMissing).
+        && let Err(err) = maybe_auto_spawn_server(&socket_path, &name, None)
     {
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
@@ -793,7 +826,12 @@ fn print_attach_error(err: &AttachError, socket_path: &Path, session: &str) {
 /// is backed by a real PTY running the user's `$SHELL` (falling back
 /// to `/bin/sh`). On Ctrl-C, `run_async` returns `Ok(())` and the
 /// process exits 0.
-fn run_server(session: &str, socket: Option<PathBuf>, daemonize: bool) -> ExitCode {
+fn run_server(
+    session: &str,
+    socket: Option<PathBuf>,
+    daemonize: bool,
+    seed_command: Option<&str>,
+) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
 
     // Auto-spawn path: detach from the launching client's controlling
@@ -807,11 +845,18 @@ fn run_server(session: &str, socket: Option<PathBuf>, daemonize: bool) -> ExitCo
         let _ = rustix::process::setsid();
     }
 
+    // phux-07y: `--seed-command` runs that command (via `$SHELL -c`) as
+    // the pre-seeded session's initial program instead of a bare shell.
+    // The naked-`phux` auto-spawn path passes `defaults.spawn-on-attach`
+    // here; `phux new`'s auto-spawn and a hand-started `phux server`
+    // pass nothing, so an explicitly-created session still gets a shell.
+    let seed_command = seed_command.map(phux_server::terminal_actor::shell_command);
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
         seed_with_pty: true,
-        seed_command: None,
+        seed_command,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -865,7 +910,11 @@ fn run_server(session: &str, socket: Option<PathBuf>, daemonize: bool) -> ExitCo
 /// opens a tty afterward, so a session-leader double-fork isn't needed.
 ///
 /// Returns `Ok` if the socket showed up within the timeout.
-fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result<()> {
+fn maybe_auto_spawn_server(
+    socket_path: &Path,
+    session: &str,
+    seed_command: Option<&str>,
+) -> std::io::Result<()> {
     let current_exe = std::env::current_exe()?;
 
     eprintln!(
@@ -896,6 +945,11 @@ fn maybe_auto_spawn_server(socket_path: &Path, session: &str) -> std::io::Result
         .arg("--daemonize")
         .stdin(Stdio::null())
         .stdout(Stdio::null());
+    // phux-07y: forward the pre-seed command (naked `phux` passes
+    // `defaults.spawn-on-attach`; other callers pass `None`).
+    if let Some(seed) = seed_command {
+        cmd.arg("--seed-command").arg(seed);
+    }
     match log {
         Some(file) => {
             cmd.stderr(file);

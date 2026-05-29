@@ -224,16 +224,18 @@ impl ServerRuntime {
         let pre_seeded = self.cfg.pre_seeded_session.clone();
         let seed_with_pty = self.cfg.seed_with_pty;
         let seed_command = self.cfg.seed_command.clone();
-        // Mirror the PTY / seed-command preferences into shared state so
-        // `handle_attach`'s `AttachTarget::CreateIfMissing` branch
-        // (phux-k61.3) can spawn the new session's seed pane in the
-        // same mode the server was configured with. We use `clone()`
-        // (not `take`) on the local so the pre-seed path below still
-        // gets its own copy.
-        {
-            let attach_create_cmd = seed_command.clone();
-            state.with_mut(|s| s.set_attach_create_pty(seed_with_pty, attach_create_cmd));
-        }
+        // Mirror the PTY *mode* into shared state so `handle_attach`'s
+        // `AttachTarget::CreateIfMissing` branch (phux-k61.3) spawns new
+        // sessions' seed panes with PTYs when the server runs with them.
+        //
+        // phux-07y: the seed *command* is deliberately NOT mirrored as
+        // the CreateIfMissing override. `seed_command` is the pre-seeded
+        // session's program (e.g. `defaults.spawn-on-attach`, the thing
+        // naked `phux` opens with); a CreateIfMissing-created session —
+        // `phux new`, `phux new -- vim` — must instead honor its own
+        // wire `command` (or fall back to `default_shell_command`), not
+        // inherit naked-`phux`'s launcher. So the override stays `None`.
+        state.with_mut(|s| s.set_attach_create_pty(seed_with_pty, None));
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`

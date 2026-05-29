@@ -617,6 +617,24 @@ pub fn default_shell_command() -> CommandBuilder {
     cmd
 }
 
+/// Build a [`CommandBuilder`] that runs a user-supplied command line as a
+/// seed pane's initial program (e.g. `defaults.spawn-on-attach`,
+/// phux-07y).
+///
+/// The command runs via `$SHELL -c <command>` (falling back to
+/// `/bin/sh`), so shell quoting and arguments inside `command` behave the
+/// same as they would at an interactive prompt, and the pane closes when
+/// the command exits. `TERM` is set to match [`default_shell_command`].
+#[must_use]
+pub fn shell_command(command: &str) -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.arg("-c");
+    cmd.arg(command);
+    cmd.env("TERM", "xterm-256color");
+    cmd
+}
+
 impl TerminalActor {
     /// Build a fresh actor of the given dimensions **without** a backing
     /// PTY. Used by tests that exercise snapshot / shutdown semantics
@@ -1508,6 +1526,22 @@ fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, Te
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// phux-07y: `shell_command` runs the user's command via
+    /// `$SHELL -c <command>` so quoting / args work and the pane closes
+    /// when the command exits.
+    #[test]
+    fn shell_command_wraps_in_shell_dash_c() {
+        let cmd = shell_command("btop --utf-force");
+        let argv = cmd.get_argv();
+        assert_eq!(argv.len(), 3, "expected [shell, -c, command]");
+        assert!(
+            !argv[0].is_empty(),
+            "argv[0] is the resolved shell (SHELL or /bin/sh)"
+        );
+        assert_eq!(argv[1], "-c");
+        assert_eq!(argv[2], "btop --utf-force");
+    }
 
     /// Direct synchronous test: snapshot-of-blank-Terminal yields the
     /// expected reset preamble. Doesn't spawn the actor; exercises the
