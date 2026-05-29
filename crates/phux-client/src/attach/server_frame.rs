@@ -158,7 +158,7 @@ pub(super) fn handle_server_frame(
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
             };
-            slot.terminal.resize(cols, rows, 0, 0)?;
+            super::paint::safe_resize(&mut slot.terminal, cols, rows)?;
             // Apply scrollback first (if any), then the visible-state
             // replay — order per SPEC §8.4 / §13.
             if let Some(sb) = scrollback_bytes {

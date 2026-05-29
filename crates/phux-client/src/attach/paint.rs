@@ -13,11 +13,44 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use std::time::SystemTime;
 
+use libghostty_vt::Terminal;
 use phux_protocol::ids::TerminalId;
 
 use super::driver::PaneSlot;
 use crate::layout::LayoutState;
 use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
+
+/// Resize a libghostty [`Terminal`], working around a `PageList.resizeCols`
+/// integer overflow (phux-y06) that panics — inside libghostty's Zig — when
+/// **both** the column and row counts shrink in a single `resize()` call.
+/// Shrinking a single axis, or growing, is safe.
+///
+/// When both axes shrink versus the Terminal's current `cols()`/`rows()`,
+/// we decompose the resize into two single-axis steps (rows first, then
+/// cols), each of which is individually safe. Otherwise we resize in one
+/// call. `cols`/`rows` are clamped to a 1-cell minimum (libghostty has no
+/// concept of a zero-dimension grid).
+///
+/// The proper fix is upstream in libghostty's `PageList.resizeCols`; drop
+/// this shim once the pinned `libghostty-vt` rev carries it.
+pub(super) fn safe_resize(
+    terminal: &mut Terminal<'_, '_>,
+    cols: u16,
+    rows: u16,
+) -> libghostty_vt::error::Result<()> {
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    // If we can't read the current size, fall back to a direct resize —
+    // we only special-case the proven-bad both-shrink transition.
+    let cur_cols = terminal.cols().unwrap_or(cols);
+    let cur_rows = terminal.rows().unwrap_or(rows);
+    if cols < cur_cols && rows < cur_rows {
+        // Shrink rows alone first (cols unchanged → single-axis, safe),
+        // then the call below shrinks cols alone (rows already at target).
+        terminal.resize(cur_cols, rows, 0, 0)?;
+    }
+    terminal.resize(cols, rows, 0, 0)
+}
 
 /// Render one pane into its outer-viewport sub-Rect.
 ///
@@ -50,7 +83,7 @@ pub(super) fn paint_focused_pane<W: Write>(
             h: pane_dims.1,
         });
     let slot = panes.get_mut(focused)?;
-    let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+    let _ = safe_resize(&mut slot.terminal, rect.w, rect.h);
     let _ = if force_full {
         slot.renderer
             .render_at_full(&slot.terminal, out, (rect.x, rect.y))
@@ -92,7 +125,7 @@ pub(super) fn paint_full_frame(
             continue;
         }
         if let Some(slot) = panes.get_mut(id) {
-            let _ = slot.terminal.resize(rect.w.max(1), rect.h.max(1), 0, 0);
+            let _ = safe_resize(&mut slot.terminal, rect.w, rect.h);
             // Force a full redraw: the ED2 above cleared the screen, so
             // an incremental "only dirty rows" paint would leave a pane
             // whose content is unchanged (the survivor of a split/resize)

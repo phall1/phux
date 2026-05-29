@@ -1014,13 +1014,29 @@ impl TerminalActor {
     /// Apply a resize to both the libghostty `Terminal` and the PTY
     /// kernel-side winsize. Idempotent; logs and continues on errors.
     fn handle_resize(&mut self, cols: u16, rows: u16) {
+        let (old_cols, old_rows) = (self.cols, self.rows);
         self.cols = cols;
         self.rows = rows;
         // `Terminal::resize` takes pixel dims for image-protocol sizing;
         // pass 0 (server does not maintain pixel metrics — clients
         // own pixel rendering per ADR-0013).
-        if let Err(err) = self.terminal.borrow_mut().resize(cols, rows, 0, 0) {
-            warn!(?err, cols, rows, "terminal resize failed");
+        //
+        // phux-y06: libghostty's `PageList.resizeCols` overflows (panics
+        // in Zig) when cols AND rows both shrink in a single resize()
+        // call. Decompose a both-shrink into two single-axis steps (rows
+        // first, then cols); each is individually safe. Drop this once
+        // the pinned libghostty-vt rev fixes resizeCols upstream.
+        {
+            let mut term = self.terminal.borrow_mut();
+            let result = if cols < old_cols && rows < old_rows {
+                term.resize(old_cols, rows, 0, 0)
+                    .and_then(|()| term.resize(cols, rows, 0, 0))
+            } else {
+                term.resize(cols, rows, 0, 0)
+            };
+            if let Err(err) = result {
+                warn!(?err, cols, rows, "terminal resize failed");
+            }
         }
         if let Some(pty) = &self.pty {
             let size = PtySize {
