@@ -15,6 +15,9 @@ workspace = true
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
+# `phux snapshot` deserializes the `GET_SCREEN` JSON contract
+# (`phux_core::ScreenState`, ADR-0022 §2) returned by the server.
+serde_json.workspace = true
 # phux-nz4.5: status-bar composer (`StatusBar`) + widget contract live
 # in phux-config; the client owns rendering the composed bar to VT.
 phux-config.workspace = true

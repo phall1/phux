@@ -46,7 +46,6 @@ use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::{
     AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
-    ViewportInfo,
 };
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
@@ -181,11 +180,10 @@ enum Command {
     /// Capture a session's focused pane as structured data (ADR-0022).
     ///
     /// The agent "floor": read what's on screen as JSON (`--json`) or a
-    /// boxed text view, without a TTY or tmux. The output reports the
-    /// pane's true dimensions. Bootstrap caveat: ATTACH carries a viewport,
-    /// so this may transiently resize the focused pane (self-heals on the
-    /// next real-client paint); the read-only server-side query is tracked
-    /// under the agent epic.
+    /// boxed text view, without a TTY or tmux. Issues the side-effect-free
+    /// `GET_SCREEN` command — the server walks its own grid, so this
+    /// neither attaches nor resizes the pane, and is safe to poll against a
+    /// pane another client is using.
     Snapshot {
         /// Session name. Omit for the most-recently-focused session.
         session: Option<String>,
@@ -201,8 +199,10 @@ enum Command {
 
     /// Send input to a pane (ADR-0022). tmux-shaped: each KEY is a named
     /// key (`Enter`, `Tab`, `Escape`, `Up`, `C-c`, `M-x`, …) or a literal
-    /// string sent character by character. Routes by `terminal_id`, so —
-    /// unlike snapshot — it does not attach or resize the pane.
+    /// string sent character by character. The server only accepts input
+    /// from an attached, subscribed client, so this attaches transiently
+    /// (which may briefly resize the pane); a side-effect-free input route
+    /// is tracked under the agent epic.
     ///
     ///   phux send-keys demo "echo hi" Enter
     #[command(name = "send-keys")]
@@ -840,47 +840,92 @@ fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
     })
 }
 
-/// `phux snapshot` — capture the focused pane as structured data (ADR-0022).
+/// `phux snapshot [TARGET]` — read a pane as structured data (ADR-0022).
 ///
-/// One-shot: connect, attach, walk the snapshot grid, emit JSON or a boxed
-/// text view, exit. See [`phux_client::snapshot`] for the bootstrap caveat
-/// (ATTACH transiently resizes the pane to `size`).
+/// Resolves `TARGET` (a selector; default: the focused session) to a pane
+/// client-side against a `GET_STATE` snapshot, then issues the
+/// side-effect-free `GET_SCREEN` command — the server walks its own grid,
+/// so this neither attaches nor resizes the pane (unlike the old
+/// attach-walk path; ADR-0022 §5, `phux-oki`). Emits JSON or a boxed text
+/// view, then exits.
 fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) -> ExitCode {
-    let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
+    let selector = match session.as_deref() {
+        None => selector::Selector::Last,
+        Some(target) => match selector::parse(target) {
+            Ok(sel) => sel,
+            Err(err) => {
+                eprintln!("phux: invalid target '{target}': {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
         Ok(rt) => rt,
         Err(code) => return code,
     };
-    // The snapshot reports the pane's true dims regardless of this hint
-    // (it races ahead of the attach-resize); a standard 80x24 keeps the
-    // transient resize minimal. The read-only server-side query (no
-    // attach, no resize) is the tracked successor (ADR-0022 §5).
-    let screen = rt.block_on(phux_client::snapshot::capture(
-        &socket_path,
-        target,
-        ViewportInfo::new(80, 24),
-    ));
-    match screen {
-        Ok(screen) if json => match serde_json::to_string_pretty(&screen) {
-            Ok(s) => {
-                println!("{s}");
-                ExitCode::SUCCESS
+
+    rt.block_on(async move {
+        // 1. Resolve the selector to a pane against a fresh server snapshot.
+        let snapshot = match request_command(
+            &socket_path,
+            WireCommand::GetState {
+                scope: StateScope::Server,
+            },
+        )
+        .await
+        {
+            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
+            Ok(other) => {
+                eprintln!("phux: unexpected GET_STATE result: {other:?}");
+                return ExitCode::FAILURE;
+            }
+            Err(err) => return report_no_server(&err, &socket_path, "snapshot"),
+        };
+        let candidates = selector::resolve(&selector, &snapshot);
+        // Prefer the focused pane when the selector spans several (e.g. a
+        // whole session); otherwise take the first in snapshot order.
+        let Some(terminal_id) = candidates
+            .iter()
+            .find(|id| **id == snapshot.focused_pane)
+            .or_else(|| candidates.first())
+            .cloned()
+        else {
+            eprintln!(
+                "phux: no such target: {}",
+                session.as_deref().unwrap_or("(focused session)")
+            );
+            return ExitCode::FAILURE;
+        };
+
+        // 2. Read the screen — side-effect-free, safe to poll.
+        let screen = match phux_client::snapshot::get_screen(&socket_path, terminal_id).await {
+            Ok(screen) => screen,
+            Err(err @ AttachError::Io(_)) => {
+                return report_no_server(&err, &socket_path, "snapshot");
             }
             Err(err) => {
-                eprintln!("phux: failed to serialize snapshot: {err}");
-                ExitCode::FAILURE
+                eprintln!("phux: snapshot failed: {err}");
+                return ExitCode::FAILURE;
             }
-        },
-        Ok(screen) => {
+        };
+
+        if json {
+            match serde_json::to_string_pretty(&screen) {
+                Ok(s) => {
+                    println!("{s}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("phux: failed to serialize snapshot: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        } else {
             print_screen_box(&screen);
             ExitCode::SUCCESS
         }
-        Err(err) => {
-            eprintln!("phux: snapshot failed: {err}");
-            ExitCode::FAILURE
-        }
-    }
+    })
 }
 
 /// `phux send-keys` — attach to a session and send input to its focused

@@ -333,6 +333,22 @@ pub struct SnapshotRequest {
     pub reply: oneshot::Sender<SnapshotBytes>,
 }
 
+/// Request for the pane's current screen as structured data
+/// (`phux-oki`, ADR-0022).
+///
+/// Sent by the `GET_SCREEN` command handler. The actor walks its own
+/// `Terminal` into a [`phux_core::screen::ScreenState`] and replies on the
+/// oneshot — side-effect-free: no resize, no client disturbance, unlike
+/// the attach path.
+#[derive(Debug)]
+pub struct ScreenRequest {
+    /// Wire-local pane id to stamp into the projected `ScreenState`.
+    pub pane: u32,
+    /// Channel the actor uses to ship the projection back. Dropping the
+    /// receiver is benign — the actor discards the reply.
+    pub reply: oneshot::Sender<phux_core::screen::ScreenState>,
+}
+
 /// A resize request delivered to a [`TerminalActor`] over its `resize`
 /// mailbox.
 ///
@@ -369,6 +385,10 @@ pub struct TerminalHandle {
     /// Sender for snapshot requests. The ATTACH handler uses this to
     /// build `TERMINAL_SNAPSHOT` frames.
     pub snapshot: mpsc::Sender<SnapshotRequest>,
+    /// Sender for structured screen reads. The `GET_SCREEN` command
+    /// handler uses this to project the pane's grid to JSON without
+    /// attaching (`phux-oki`, ADR-0022 §5).
+    pub screen: mpsc::Sender<ScreenRequest>,
     /// Output broadcast channel; subscribers receive every PTY byte
     /// chunk forwarded by the actor.
     pub output: broadcast::Sender<Bytes>,
@@ -424,6 +444,7 @@ pub struct TerminalActor {
     paste_enc: RefCell<PerTerminalPasteEncoder>,
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
+    screen_rx: mpsc::Receiver<ScreenRequest>,
     resize_rx: mpsc::Receiver<ResizeRequest>,
     consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
     consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
@@ -766,6 +787,7 @@ impl TerminalActor {
 
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (consumer_attach_tx, consumer_attach_rx) =
             mpsc::channel::<ConsumerAttachRequest>(DEFAULT_INPUT_MAILBOX);
@@ -793,6 +815,7 @@ impl TerminalActor {
             paste_enc: RefCell::new(PerTerminalPasteEncoder::new()),
             input_rx,
             snapshot_rx,
+            screen_rx,
             resize_rx,
             consumer_attach_rx,
             consumer_detach_rx,
@@ -810,6 +833,7 @@ impl TerminalActor {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            screen: screen_tx,
             output: output_tx,
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
@@ -1035,6 +1059,18 @@ impl TerminalActor {
         let terminal = self.terminal.borrow();
         let mut synth = self.synth.borrow_mut();
         synth.synthesize(&terminal)
+    }
+
+    /// Project the current `Terminal` grid into a structured
+    /// [`phux_core::screen::ScreenState`], stamping `pane` as the
+    /// wire-local id. Side-effect-free — the read path for `GET_SCREEN`.
+    fn screen_state(
+        &self,
+        pane: u32,
+    ) -> Result<phux_core::screen::ScreenState, crate::grid::SynthesisError> {
+        let terminal = self.terminal.borrow();
+        let mut synth = self.synth.borrow_mut();
+        synth.screen_state(&terminal, pane)
     }
 
     /// Translate a [`TerminalInput`] into PTY bytes via the per-pane
@@ -1400,6 +1436,21 @@ impl TerminalActor {
                         }
                     };
                     let _ = req.reply.send(snap);
+                }
+
+                Some(req) = self.screen_rx.recv() => {
+                    let screen = self.screen_state(req.pane).unwrap_or_else(|err| {
+                        warn!(error = %err, "screen projection failed; replying with empty");
+                        phux_core::screen::ScreenState {
+                            schema_version: phux_core::screen::SCHEMA_VERSION,
+                            pane: req.pane,
+                            cols: self.cols,
+                            rows: self.rows,
+                            cursor: None,
+                            lines: Vec::new(),
+                        }
+                    });
+                    let _ = req.reply.send(screen);
                 }
 
                 Some(req) = self.resize_rx.recv() => {

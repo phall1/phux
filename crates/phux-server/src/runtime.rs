@@ -47,7 +47,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
-    ConsumerAckRequest, ResizeRequest, SnapshotRequest, TerminalActor, TerminalHandle,
+    ConsumerAckRequest, ResizeRequest, ScreenRequest, SnapshotRequest, TerminalActor,
+    TerminalHandle,
 };
 
 /// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
@@ -1770,6 +1771,7 @@ async fn handle_command(
 ) {
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
+        Command::GetScreen { terminal_id } => handle_get_screen(state, &terminal_id).await,
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -1840,6 +1842,62 @@ fn handle_get_state(state: &SharedState, scope: &StateScope) -> CommandResult {
             message: "unsupported GET_STATE scope".to_owned(),
         },
     }
+}
+
+/// Build the `OK_WITH(JSON(..))` reply for `GET_SCREEN`.
+///
+/// Resolves the wire id to its pane actor, then asks the actor to project
+/// its own `Terminal` grid into a [`phux_core::screen::ScreenState`]
+/// serialized as JSON — the stable agent-surface contract (ADR-0022 §2).
+/// This is side-effect-free: it neither attaches nor resizes, so polling
+/// it (the `phux wait`/`run` floor) never disturbs the live pane.
+async fn handle_get_screen(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+) -> CommandResult {
+    // Clone the (Send) handle out of the lock; the actor reply is awaited
+    // outside the critical section.
+    let handle = state.with(|s| {
+        s.terminal_from_wire(terminal_id)
+            .and_then(|core| s.terminal_handle(core).cloned())
+    });
+    let Some(handle) = handle else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+    let pane = terminal_id.local_id().unwrap_or(0);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if handle
+        .screen
+        .send(ScreenRequest {
+            pane,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for GET_SCREEN".to_owned(),
+        };
+    }
+    reply_rx.await.map_or_else(
+        |_| CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor dropped the GET_SCREEN reply".to_owned(),
+        },
+        |screen| {
+            serde_json::to_string(&screen).map_or_else(
+                |err| CommandResult::Error {
+                    code: ErrorCode::InternalError,
+                    message: format!("screen serialization failed: {err}"),
+                },
+                |json| CommandResult::OkWith(CommandValue::Json(json)),
+            )
+        },
+    )
 }
 
 /// A `SessionSnapshot` describing a server with no sessions: empty lists,
@@ -2523,6 +2581,7 @@ mod tests {
         // channels exist purely to satisfy the struct shape.
         let (input_tx, _input_rx) = mpsc::channel(8);
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
+        let (screen_tx, _screen_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<ResizeRequest>(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
@@ -2531,6 +2590,7 @@ mod tests {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            screen: screen_tx,
             output: output_tx,
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
@@ -2631,6 +2691,7 @@ mod tests {
                 for &pid in &terminal_ids {
                     let (input_tx, _input_rx) = mpsc::channel(8);
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
+                    let (screen_tx, _screen_rx) = mpsc::channel(8);
                     let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
                     let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
@@ -2639,6 +2700,7 @@ mod tests {
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
+                        screen: screen_tx,
                         output: output_tx,
                         resize: resize_tx,
                         consumer_attach: consumer_attach_tx,

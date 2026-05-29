@@ -15,6 +15,10 @@ workspace = true
 [dependencies]
 thiserror.workspace = true
 slotmap.workspace = true
+# `ScreenState` (the agent-surface read shape, ADR-0022) is the one
+# serialized domain type: the server produces it, the CLI emits it as the
+# stable JSON contract. Pure data — no I/O — so it lives here, shared.
+serde.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

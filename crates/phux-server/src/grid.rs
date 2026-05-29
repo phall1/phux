@@ -29,6 +29,8 @@
 
 use std::io::Write as _;
 
+use phux_core::screen::{CursorState, SCHEMA_VERSION, ScreenState};
+
 use libghostty_vt::{
     RenderState, Terminal,
     render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
@@ -118,6 +120,64 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             cols,
             rows: rows_n,
             bytes: out,
+        })
+    }
+
+    /// Walk `terminal`'s viewport into a structured [`ScreenState`] — the
+    /// agent surface's read shape (ADR-0022 §2, `phux-oki`).
+    ///
+    /// Unlike [`Self::synthesize`], this does not emit VT bytes; it
+    /// projects the grid to plain text rows + cursor, exactly what a
+    /// reasoning agent (rather than a rendering terminal) wants. It runs
+    /// on the server's own `Terminal`, so the read is side-effect-free —
+    /// no attach, no resize. `pane` is the wire-local id stamped into the
+    /// result for the caller.
+    pub fn screen_state(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        pane: u32,
+    ) -> Result<ScreenState, SynthesisError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let cols = snapshot.cols()?;
+        let rows_n = snapshot.rows()?;
+
+        let cursor = snapshot.cursor_viewport()?.map(|c| CursorState {
+            x: c.x,
+            y: c.y,
+            visible: snapshot.cursor_visible().unwrap_or(true),
+        });
+
+        let mut lines: Vec<String> = Vec::with_capacity(usize::from(rows_n));
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_n {
+                break;
+            }
+            let mut buf = String::with_capacity(usize::from(cols));
+            let mut cell_iter = self.cells.update(row)?;
+            while let Some(cell) = cell_iter.next() {
+                if matches!(cell.raw_cell()?.wide()?, CellWide::SpacerTail) {
+                    continue;
+                }
+                let graphemes = cell.graphemes()?;
+                if graphemes.is_empty() {
+                    buf.push(' ');
+                } else {
+                    buf.extend(graphemes);
+                }
+            }
+            lines.push(buf.trim_end().to_owned());
+            row_index += 1;
+        }
+
+        Ok(ScreenState {
+            schema_version: SCHEMA_VERSION,
+            pane,
+            cols,
+            rows: rows_n,
+            cursor,
+            lines,
         })
     }
 
@@ -580,6 +640,27 @@ mod tests {
             i += 1;
         }
         grid
+    }
+
+    #[test]
+    fn screen_state_projects_text_lines_and_dims() {
+        // The agent-surface read path: walk the grid into structured text.
+        let mut t = fresh(20, 5);
+        t.vt_write(b"hello\r\nworld");
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth.screen_state(&t, 7).expect("screen_state");
+
+        assert_eq!(screen.schema_version, SCHEMA_VERSION);
+        assert_eq!(screen.pane, 7, "pane id is stamped from the argument");
+        assert_eq!((screen.cols, screen.rows), (20, 5));
+        assert_eq!(screen.lines.len(), 5, "one entry per grid row");
+        assert_eq!(screen.lines[0], "hello");
+        assert_eq!(screen.lines[1], "world");
+        // Trailing blank rows trim to empty strings.
+        assert_eq!(screen.lines[4], "");
+        // Cursor lands just past "world" on row 1 (0-based).
+        let cursor = screen.cursor.expect("cursor resolvable in viewport");
+        assert_eq!((cursor.x, cursor.y), (5, 1));
     }
 
     #[test]

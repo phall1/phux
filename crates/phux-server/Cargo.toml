@@ -29,6 +29,9 @@ phux-core.workspace = true
 # the server reads the schema's default and threads the resolved value into
 # each `TerminalActor`'s scrollback cap.
 phux-config.workspace = true
+# `GET_SCREEN` serializes `phux_core::ScreenState` into the COMMAND_RESULT
+# JSON payload (ADR-0022 §2); the CLI deserializes the same contract.
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -1490,6 +1490,41 @@ fn command_get_state_round_trips() {
 }
 
 #[test]
+fn command_get_screen_round_trips() {
+    // GET_SCREEN (tag 0x07): carries just the target TerminalId, like
+    // KILL_TERMINAL. The reply is OK_WITH(JSON(..)) — covered by the
+    // generic CommandValue::Json roundtrip.
+    let frame = FrameKind::Command {
+        request_id: 11,
+        command: Command::GetScreen {
+            terminal_id: TerminalId::local(5),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_result_ok_with_json_round_trips() {
+    // GET_SCREEN's reply shape: OK_WITH(JSON(serialized ScreenState)).
+    let frame = FrameKind::CommandResult {
+        request_id: 12,
+        result: CommandResult::OkWith(CommandValue::Json(
+            r#"{"schema_version":1,"pane":5,"cols":80,"rows":24,"cursor":null,"lines":["$ "]}"#
+                .to_owned(),
+        )),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn command_result_ok_with_state_snapshot_round_trips() {
     // `GET_STATE`'s reply: OK_WITH(STATE(snapshot)). Reuses the ATTACHED
     // snapshot shape, so a non-trivial snapshot must survive the round trip.

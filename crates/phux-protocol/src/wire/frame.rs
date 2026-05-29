@@ -257,6 +257,10 @@ pub const TYPE_COMMAND_RESULT: u8 = 0xC2;
 pub(crate) const COMMAND_TAG_KILL_TERMINAL: u8 = 0x03;
 /// Wire tag for [`Command::GetState`].
 pub(crate) const COMMAND_TAG_GET_STATE: u8 = 0x05;
+/// Wire tag for [`Command::GetScreen`]. Appended after `RUN_HOOK`'s
+/// reserved `0x06` (SPEC §5.1 catalog order); `GET_SCREEN` is an additive
+/// agent-surface command (ADR-0022 §5), not part of the original catalog.
+pub(crate) const COMMAND_TAG_GET_SCREEN: u8 = 0x07;
 
 // Wire tags for the `StateScope` tagged union (SPEC §5.1, GET_STATE arg).
 /// Wire tag for [`StateScope::Server`].
@@ -566,8 +570,10 @@ pub enum StateScope {
 /// A typed control-plane command carried by [`FrameKind::Command`] (SPEC §5.1).
 ///
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
-/// only the two the CLI needs (ADR-0021 §3). Unknown wire tags surface as
-/// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
+/// the three the CLI needs — `KILL_TERMINAL`, `GET_STATE`, and the
+/// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5). Unknown wire
+/// tags surface as [`DecodeError::UnknownEnumValue`] rather than coercing
+/// to a placeholder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Command {
@@ -584,6 +590,17 @@ pub enum Command {
     GetState {
         /// What to snapshot.
         scope: StateScope,
+    },
+    /// Read `terminal_id`'s current screen as structured data, with no
+    /// side effects — the server walks its own `Terminal` grid, so unlike
+    /// `ATTACH` this neither resizes the pane nor disturbs the live
+    /// session (ADR-0022 §5, `phux-oki`). The reply rides on
+    /// `COMMAND_RESULT { Ok_With(Json(..)) }` carrying a serialized
+    /// `phux_core::ScreenState`. Backs `phux snapshot` and the poll floor
+    /// under `phux wait`/`run`.
+    GetScreen {
+        /// The Terminal whose screen to project.
+        terminal_id: TerminalId,
     },
 }
 
@@ -1918,8 +1935,9 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 // COMMAND body:        u32 request_id, then Command (tag + body).
 // COMMAND_RESULT body: u32 request_id, then CommandResult (tag + body).
 //
-// Command tags follow the SPEC §5.1 catalog order; only KILL_TERMINAL
-// (0x03) and GET_STATE (0x05) are wired in v0.1. CommandResult / CommandValue
+// Command tags follow the SPEC §5.1 catalog order; KILL_TERMINAL (0x03)
+// and GET_STATE (0x05) are wired in v0.1, plus the appended GET_SCREEN
+// (0x07, after RUN_HOOK's reserved 0x06). CommandResult / CommandValue
 // tags use the same `Ok = 0x00` / sequential convention as the rest of the
 // wire.
 // -----------------------------------------------------------------------------
@@ -1934,6 +1952,10 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u8(COMMAND_TAG_GET_STATE);
             encode_state_scope(scope, enc);
         }
+        Command::GetScreen { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_GET_SCREEN);
+            encode_terminal_id(terminal_id, enc);
+        }
     }
 }
 
@@ -1945,6 +1967,9 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
         }),
         COMMAND_TAG_GET_STATE => Ok(Command::GetState {
             scope: decode_state_scope(dec)?,
+        }),
+        COMMAND_TAG_GET_SCREEN => Ok(Command::GetScreen {
+            terminal_id: decode_terminal_id(dec)?,
         }),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",

@@ -83,10 +83,13 @@ stops changing. Don't busy-spin; sleep briefly between snapshots.
 
 ## Gotchas (v0)
 
-- **`snapshot`/`send-keys` attach transiently**, which can resize the pane to
-  80x24 for a moment (it self-heals). Don't run them against a pane a human
-  is actively using mid-keystroke. A side-effect-free read/input path is
-  coming.
+- **`snapshot` is side-effect-free** — it reads the server's own grid
+  (`GET_SCREEN`), so it never attaches or resizes the pane and is safe to
+  poll, even against a pane a human is using.
+- **`send-keys` attaches transiently**, which can resize the pane to 80x24
+  for a moment (it self-heals): the server only accepts input from an
+  attached client. Avoid firing it against a pane a human is mid-keystroke
+  in. A side-effect-free input route is coming.
 - **No command-exit yet.** You can't get a command's exit code directly; read
   the screen and infer (or run `echo $?` and snapshot). `phux run` will fix
   this.

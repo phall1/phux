@@ -1,14 +1,18 @@
 //! Server-side dispatch for the generic `COMMAND` envelope (SPEC §5,
 //! phux-k61 / ADR-0021).
 //!
-//! Covers the two v0.1 commands the CLI control verbs ride:
+//! Covers the v0.1 commands the CLI control verbs ride:
 //!
 //! 1. **GET_STATE** → `COMMAND_RESULT { Ok_With(State(snapshot)) }` whose
 //!    `sessions` list names the seeded session (this is what `phux ls`
 //!    reads, and what client-side selector resolution walks).
-//! 2. **KILL_TERMINAL on an unknown id** → `COMMAND_RESULT { Error(
+//! 2. **GET_SCREEN on a live pane** → `COMMAND_RESULT { Ok_With(Json(..)) }`
+//!    carrying a `ScreenState` whose pane id and dims match the target —
+//!    the side-effect-free agent read (ADR-0022 §5). Plus the unknown-id
+//!    `TerminalNotFound` path.
+//! 3. **KILL_TERMINAL on an unknown id** → `COMMAND_RESULT { Error(
 //!    TerminalNotFound, …) }`.
-//! 3. **KILL_TERMINAL on a live pane** → `COMMAND_RESULT { Ok }` plus the
+//! 4. **KILL_TERMINAL on a live pane** → `COMMAND_RESULT { Ok }` plus the
 //!    asynchronous `TERMINAL_CLOSED` the reap path emits. Because the
 //!    seeded session is the server's only one, the kill also triggers the
 //!    tmux-model self-exit (phux-60s), so the test tolerates the
@@ -92,6 +96,85 @@ fn get_state_lists_the_seeded_session() {
                 );
             }
             other => panic!("expected Ok_With(State(..)), got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn get_screen_returns_structured_screen_for_live_pane() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Attach to learn a real wire terminal id + its dims.
+        send_frame(&mut stream, &attach_by_name("work")).await;
+        let (pane_id, cols, rows) = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::Attached { snapshot, .. } = frame {
+                let p = &snapshot.panes[0];
+                break (p.id.clone(), p.cols, p.rows);
+            }
+        };
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 5,
+                command: Command::GetScreen {
+                    terminal_id: pane_id.clone(),
+                },
+            },
+        )
+        .await;
+
+        let result = await_command_result(&mut stream, 5).await;
+        match result {
+            CommandResult::OkWith(CommandValue::Json(json)) => {
+                let screen: phux_core::screen::ScreenState = serde_json::from_str(&json)
+                    .expect("GET_SCREEN reply must be valid ScreenState");
+                assert_eq!(screen.schema_version, phux_core::screen::SCHEMA_VERSION);
+                assert_eq!(
+                    screen.pane,
+                    pane_id.local_id().unwrap(),
+                    "projected pane id must match the requested terminal",
+                );
+                assert_eq!((screen.cols, screen.rows), (cols, rows));
+                assert_eq!(
+                    screen.lines.len(),
+                    usize::from(rows),
+                    "one line per grid row",
+                );
+            }
+            other => panic!("expected Ok_With(Json(..)), got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn get_screen_unknown_id_returns_terminal_not_found() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 8,
+                command: Command::GetScreen {
+                    terminal_id: TerminalId::local(99_999),
+                },
+            },
+        )
+        .await;
+
+        let result = await_command_result(&mut stream, 8).await;
+        match result {
+            CommandResult::Error { code, .. } => assert_eq!(code, ErrorCode::TerminalNotFound),
+            other => panic!("expected Error(TerminalNotFound), got {other:?}"),
         }
     });
 }
