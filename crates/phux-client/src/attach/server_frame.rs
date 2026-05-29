@@ -232,9 +232,11 @@ pub(super) fn handle_server_frame(
             let is_focused = Some(&terminal_id) == focused_pane.as_ref();
             // Drop bytes into the slot's libghostty Terminal. Scoped so
             // the mut borrow on `panes` releases before the focused-pane
-            // render path re-borrows it via `paint_focused_pane`.
+            // render path re-borrows it via `paint_focused_pane`. Clone
+            // the id into the entry so `terminal_id` survives for the
+            // non-focused repaint below.
             {
-                let slot = match panes.entry(terminal_id) {
+                let slot = match panes.entry(terminal_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                     std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
                 };
@@ -298,6 +300,56 @@ pub(super) fn handle_server_frame(
                     focused_cursor,
                     fallback_origin,
                 );
+            } else if !overlay_active {
+                // phux-2x9: repaint a NON-focused pane on its own output
+                // so it isn't visually frozen — output (and the
+                // post-split/resize resync snapshot) must show without
+                // the user focusing the pane. render_at is dirty-tracked,
+                // so steady-state output only repaints changed rows. After
+                // painting into this pane's rect we restore the focused
+                // pane's cursor so the host cursor stays where the user is
+                // typing.
+                let has_bar = status_bar.is_some();
+                let pane_dims = pane_viewport(viewport_dims, has_bar);
+                let rects = super::multi_pane::compute_layout(layout_state, pane_dims).rects;
+                if let Some(rect) = rects.get(&terminal_id).copied() {
+                    let mut stdout = io::stdout().lock();
+                    if let Some(slot) = panes.get_mut(&terminal_id) {
+                        let _ =
+                            slot.renderer
+                                .render_at(&slot.terminal, &mut stdout, (rect.x, rect.y));
+                    }
+                    // Restore the focused pane's cursor: the render above
+                    // left the host cursor inside the non-focused pane.
+                    let focused_cursor = focused_pane
+                        .as_ref()
+                        .and_then(|fid| panes.get(fid))
+                        .and_then(|s| s.renderer.last_cursor());
+                    if status_bar.is_some() {
+                        let fallback = focused_pane
+                            .as_ref()
+                            .and_then(|fid| rects.get(fid))
+                            .map(|r| (r.x, r.y));
+                        paint_bar_after_pane(
+                            status_bar,
+                            &mut stdout,
+                            viewport_dims,
+                            session_name,
+                            focused_cursor,
+                            fallback,
+                        );
+                    } else if let Some((row, col)) = focused_cursor {
+                        let _ = write!(
+                            stdout,
+                            "\x1b[{};{}H\x1b[?25h",
+                            row.saturating_add(1),
+                            col.saturating_add(1)
+                        );
+                        let _ = stdout.flush();
+                    } else {
+                        let _ = stdout.flush();
+                    }
+                }
             }
             Ok(FrameOutcome::default())
         }
