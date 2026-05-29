@@ -99,7 +99,14 @@ pub fn frames_for(args: &[String], target: &TerminalId) -> Vec<FrameKind> {
 /// The server reads frames in order, so the `InputKey` frames are
 /// dispatched to the pane actor before the trailing `DETACH` — no drain
 /// race.
-pub async fn send(socket: &Path, target: AttachTarget, keys: &[String]) -> Result<(), AttachError> {
+///
+/// Returns the [`TerminalId`] of the focused pane the keys were sent to,
+/// so callers (e.g. `phux run`) can read back the *same* pane.
+pub async fn send(
+    socket: &Path,
+    target: AttachTarget,
+    keys: &[String],
+) -> Result<TerminalId, AttachError> {
     let mut conn = Connection::connect(socket).await?;
     conn.send(&FrameKind::Hello {
         client_name: format!("phux-send-keys/{}", env!("CARGO_PKG_VERSION")),
@@ -129,7 +136,7 @@ pub async fn send(socket: &Path, target: AttachTarget, keys: &[String]) -> Resul
         conn.send(&frame).await?;
     }
     conn.send(&FrameKind::Detach).await?;
-    Ok(())
+    Ok(focused)
 }
 
 #[cfg(test)]

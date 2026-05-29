@@ -33,6 +33,8 @@ phux ls --json                       # sessions on the running server (JSON)
 phux new -s NAME                     # create a session (auto-starts a server)
 phux snapshot NAME --json            # read the focused pane as structured JSON
 phux send-keys NAME KEY...           # send input to the focused pane
+phux run NAME "CMD"                  # run a command, get its exit code + output
+phux wait NAME --until TEXT          # block until the screen shows TEXT
 phux kill NAME                       # destroy a session/pane
 ```
 
@@ -67,31 +69,67 @@ Named keys: `Enter` `Tab` `Escape` `Space` `BSpace` `Up` `Down` `Left`
 `Right` `Home` `End`, `C-<x>` (control), `M-<x>` (alt). Anything else is a
 literal string.
 
+### Running a command — `run`
+
+For "run this and tell me the exit code," reach for `run` instead of
+`send-keys` + polling. It submits the command, waits for it to finish, and
+reports structured results — and the `phux` process **exits with the
+command's own code**, so it composes like a shell:
+
+```jsonc
+$ phux run build "cargo test" --json
+{ "command": "cargo test", "exit_code": 0,
+  "output": "test result: ok. 42 passed; 0 failed",
+  "duration_ms": 5130, "truncated": false }
+```
+
+```sh
+phux run build "make" && phux run build "make install"   # chains on success
+```
+
+`run` assumes a **POSIX shell** (sh/bash/zsh): it appends a sentinel to read
+`$?`. It can't capture a command that *replaces* the shell (`exit`, `exec`)
+— that kills the session. If `truncated` is true, the output scrolled past
+the viewport (full capture awaits scrollback support).
+
+### Waiting on a condition — `wait`
+
+When you've started something with `send-keys` and want to block until it's
+ready (exit 0 when met, 124 on `--timeout`):
+
+```sh
+phux wait server --until "Listening on"     # a line appears
+phux wait repl   --idle 750                  # screen stops changing for 750ms
+phux wait job    --until DONE --timeout 60   # ...or give up after 60s
+```
+
+`--until` matches **any visible line, including the echo of a command you
+just typed** — so match on text that only appears in *output*, not in the
+command itself.
+
 ## The read+act loop
 
 ```sh
 phux new -s work
-phux send-keys work "make build" Enter
-# ... poll until it settles ...
-phux snapshot work --json     # read result; check for errors / the prompt
-phux send-keys work "make test" Enter
+phux run work "make build"    # blocks, returns exit code
+phux run work "make test"     # only if you chain; or check exit codes
 ```
 
-Until `phux wait`/`run` land, "wait for it to finish" means: `snapshot` in a
-loop until the prompt returns (cursor back at a prompt line) or the output
-stops changing. Don't busy-spin; sleep briefly between snapshots.
+Prefer `run` for discrete commands (you get the exit code for free). Drop to
+`send-keys` + `wait`/`snapshot` for interactive programs, REPLs, or
+backgrounded work where there's no single "command done" moment.
 
 ## Gotchas (v0)
 
 - **`snapshot` is side-effect-free** — it reads the server's own grid
   (`GET_SCREEN`), so it never attaches or resizes the pane and is safe to
   poll, even against a pane a human is using.
-- **`send-keys` attaches transiently**, which can resize the pane to 80x24
-  for a moment (it self-heals): the server only accepts input from an
-  attached client. Avoid firing it against a pane a human is mid-keystroke
-  in. A side-effect-free input route is coming.
-- **No command-exit yet.** You can't get a command's exit code directly; read
-  the screen and infer (or run `echo $?` and snapshot). `phux run` will fix
-  this.
+- **`send-keys`/`run` attach transiently** to submit input, which can resize
+  the pane to 80x24 for a moment (it self-heals): the server only accepts
+  input from an attached client. Avoid firing them against a pane a human is
+  mid-keystroke in. A side-effect-free input route is coming.
+- **`run` output is viewport-bounded.** If a command prints more than fits on
+  screen, `output` is the visible tail and `truncated` is true. Full capture
+  awaits scrollback support.
 - The server is **one per user**; sessions persist until killed or the
   machine reboots — that's the point. Use `phux ls` to find them again.

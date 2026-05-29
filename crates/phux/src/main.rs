@@ -218,6 +218,65 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Wait until a pane meets a condition, polling the side-effect-free
+    /// screen read (ADR-0022 §4). The poll floor of the event surface:
+    /// always works, no shell integration. Exit 0 when met, 124 on timeout.
+    ///
+    ///   phux wait build --until "BUILD SUCCESSFUL"
+    ///   phux wait repl --idle 750
+    Wait {
+        /// Target selector. Omit for the most-recently-focused session.
+        session: Option<String>,
+
+        /// Succeed once any visible line contains this substring.
+        #[arg(long, value_name = "TEXT")]
+        until: Option<String>,
+
+        /// Succeed once the screen holds still for this many milliseconds
+        /// (the pane has settled). Default when no `--until` is given.
+        #[arg(long, value_name = "MS")]
+        idle: Option<u64>,
+
+        /// Give up after this many seconds (exit 124). Default: wait forever.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+
+        /// Emit the final screen as JSON instead of staying silent.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Run a command in a pane and report its exit code, output, and
+    /// duration (ADR-0022 §3). Appends a sentinel to capture `$?`, so it
+    /// assumes a POSIX shell (sh/bash/zsh). The process exit code mirrors
+    /// the command's. Like send-keys, it attaches transiently to submit.
+    ///
+    ///   phux run build "cargo test"
+    Run {
+        /// Target session whose focused pane runs the command.
+        session: String,
+
+        /// The command line: all trailing args, joined with spaces.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+
+        /// Give up after this many seconds (exit 124). Default: wait forever.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+
+        /// Emit the result as JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -262,12 +321,27 @@ fn main() -> ExitCode {
             session,
             json,
             socket,
-        }) => run_snapshot(session, json, socket),
+        }) => run_snapshot(session.as_deref(), json, socket),
         Some(Command::SendKeys {
             session,
             keys,
             socket,
         }) => run_send_keys(&session, &keys, socket),
+        Some(Command::Wait {
+            session,
+            until,
+            idle,
+            timeout,
+            json,
+            socket,
+        }) => run_wait(session.as_deref(), until, idle, timeout, json, socket),
+        Some(Command::Run {
+            session,
+            command,
+            timeout,
+            json,
+            socket,
+        }) => run_run(&session, &command, timeout, json, socket),
         None => run_naked(),
     }
 }
@@ -840,24 +914,66 @@ fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
     })
 }
 
+/// Parse an optional target string into a [`selector::Selector`],
+/// defaulting to the focused/last session when absent. On a parse error,
+/// prints a diagnostic and returns the failure exit code for the caller to
+/// bubble.
+fn parse_selector(session: Option<&str>) -> Result<selector::Selector, ExitCode> {
+    session.map_or(Ok(selector::Selector::Last), |target| {
+        selector::parse(target).map_err(|err| {
+            eprintln!("phux: invalid target '{target}': {err}");
+            ExitCode::FAILURE
+        })
+    })
+}
+
+/// Resolve `selector` to a single pane against a fresh `GET_STATE`
+/// snapshot. Prefers the focused pane when the selector spans several
+/// (e.g. a whole session); otherwise the first in snapshot order. Prints
+/// diagnostics and returns the failure exit code on no-server / miss.
+async fn resolve_target(
+    socket_path: &Path,
+    selector: &selector::Selector,
+    verb: &str,
+) -> Result<phux_protocol::ids::TerminalId, ExitCode> {
+    let snapshot = match request_command(
+        socket_path,
+        WireCommand::GetState {
+            scope: StateScope::Server,
+        },
+    )
+    .await
+    {
+        Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
+        Ok(other) => {
+            eprintln!("phux: unexpected GET_STATE result: {other:?}");
+            return Err(ExitCode::FAILURE);
+        }
+        Err(err) => return Err(report_no_server(&err, socket_path, verb)),
+    };
+    let candidates = selector::resolve(selector, &snapshot);
+    candidates
+        .iter()
+        .find(|id| **id == snapshot.focused_pane)
+        .or_else(|| candidates.first())
+        .cloned()
+        .ok_or_else(|| {
+            eprintln!("phux: no such target");
+            ExitCode::FAILURE
+        })
+}
+
 /// `phux snapshot [TARGET]` — read a pane as structured data (ADR-0022).
 ///
 /// Resolves `TARGET` (a selector; default: the focused session) to a pane
-/// client-side against a `GET_STATE` snapshot, then issues the
-/// side-effect-free `GET_SCREEN` command — the server walks its own grid,
-/// so this neither attaches nor resizes the pane (unlike the old
-/// attach-walk path; ADR-0022 §5, `phux-oki`). Emits JSON or a boxed text
-/// view, then exits.
-fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) -> ExitCode {
-    let selector = match session.as_deref() {
-        None => selector::Selector::Last,
-        Some(target) => match selector::parse(target) {
-            Ok(sel) => sel,
-            Err(err) => {
-                eprintln!("phux: invalid target '{target}': {err}");
-                return ExitCode::FAILURE;
-            }
-        },
+/// client-side, then issues the side-effect-free `GET_SCREEN` command —
+/// the server walks its own grid, so this neither attaches nor resizes the
+/// pane (unlike the old attach-walk path; ADR-0022 §5, `phux-oki`). Emits
+/// JSON or a boxed text view, then exits.
+fn run_snapshot(session: Option<&str>, json: bool, socket: Option<PathBuf>) -> ExitCode {
+    let selector = match parse_selector(session) {
+        Ok(sel) => sel,
+        Err(code) => return code,
     };
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
@@ -866,39 +982,12 @@ fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) ->
     };
 
     rt.block_on(async move {
-        // 1. Resolve the selector to a pane against a fresh server snapshot.
-        let snapshot = match request_command(
-            &socket_path,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )
-        .await
-        {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-            Ok(other) => {
-                eprintln!("phux: unexpected GET_STATE result: {other:?}");
-                return ExitCode::FAILURE;
-            }
-            Err(err) => return report_no_server(&err, &socket_path, "snapshot"),
-        };
-        let candidates = selector::resolve(&selector, &snapshot);
-        // Prefer the focused pane when the selector spans several (e.g. a
-        // whole session); otherwise take the first in snapshot order.
-        let Some(terminal_id) = candidates
-            .iter()
-            .find(|id| **id == snapshot.focused_pane)
-            .or_else(|| candidates.first())
-            .cloned()
-        else {
-            eprintln!(
-                "phux: no such target: {}",
-                session.as_deref().unwrap_or("(focused session)")
-            );
-            return ExitCode::FAILURE;
+        let terminal_id = match resolve_target(&socket_path, &selector, "snapshot").await {
+            Ok(id) => id,
+            Err(code) => return code,
         };
 
-        // 2. Read the screen — side-effect-free, safe to poll.
+        // Read the screen — side-effect-free, safe to poll.
         let screen = match phux_client::snapshot::get_screen(&socket_path, terminal_id).await {
             Ok(screen) => screen,
             Err(err @ AttachError::Io(_)) => {
@@ -928,6 +1017,149 @@ fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) ->
     })
 }
 
+/// `phux wait [TARGET]` — poll until a pane meets a condition (ADR-0022 §4).
+///
+/// `--until TEXT` waits for a visible line to contain `TEXT`; `--idle MS`
+/// waits for the screen to settle; with neither, defaults to idle. Exits 0
+/// when met, 124 on `--timeout`. The poll floor of the event surface: it
+/// reads via the side-effect-free `GET_SCREEN`, so it never disturbs the
+/// pane.
+fn run_wait(
+    session: Option<&str>,
+    until: Option<String>,
+    idle: Option<u64>,
+    timeout: Option<u64>,
+    json: bool,
+    socket: Option<PathBuf>,
+) -> ExitCode {
+    use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
+
+    let selector = match parse_selector(session) {
+        Ok(sel) => sel,
+        Err(code) => return code,
+    };
+    // `--until` takes precedence; otherwise settle on idle (explicit ms or
+    // the default dwell).
+    let condition = until.map_or_else(
+        || Condition::Idle(idle.map_or(DEFAULT_IDLE_DWELL, Duration::from_millis)),
+        Condition::Contains,
+    );
+    let timeout = timeout.map(Duration::from_secs);
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    rt.block_on(async move {
+        let terminal_id = match resolve_target(&socket_path, &selector, "wait").await {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+        let result = match phux_client::wait::poll_until(
+            &socket_path,
+            terminal_id,
+            &condition,
+            timeout,
+            DEFAULT_POLL_INTERVAL,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err @ AttachError::Io(_)) => return report_no_server(&err, &socket_path, "wait"),
+            Err(err) => {
+                eprintln!("phux: wait failed: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if json && let Ok(s) = serde_json::to_string_pretty(&result.screen) {
+            println!("{s}");
+        }
+        match result.outcome {
+            WaitOutcome::Met => ExitCode::SUCCESS,
+            WaitOutcome::TimedOut => {
+                eprintln!("phux: wait timed out after {} polls", result.polls);
+                ExitCode::from(124)
+            }
+        }
+    })
+}
+
+/// `phux run TARGET CMD...` — run a command in a pane and report its exit
+/// code, output, and duration (ADR-0022 §3). The process exits with the
+/// command's own code, so `phux run … && next` composes like a shell.
+fn run_run(
+    session: &str,
+    command: &[String],
+    timeout: Option<u64>,
+    json: bool,
+    socket: Option<PathBuf>,
+) -> ExitCode {
+    use phux_client::run::RunOutcome;
+
+    let cmd = command.join(" ");
+    let target = AttachTarget::ByName(session.to_owned());
+    let timeout = timeout.map(Duration::from_secs);
+    // A per-invocation nonce keeps the sentinel from colliding with the
+    // command's own output. The pid is unique to this `phux run` process.
+    let nonce = std::process::id().to_string();
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    rt.block_on(async move {
+        match phux_client::run::run(&socket_path, target, &cmd, &nonce, timeout).await {
+            Ok(RunOutcome::Completed(result)) => {
+                if json {
+                    match serde_json::to_string_pretty(&result) {
+                        Ok(s) => println!("{s}"),
+                        Err(err) => {
+                            eprintln!("phux: failed to serialize run result: {err}");
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                } else {
+                    print_run_result(&result);
+                }
+                // Mirror the command's exit code (clamped to the 0..=255
+                // process-exit range; negative/large codes saturate to 255).
+                ExitCode::from(u8::try_from(result.exit_code).unwrap_or(255))
+            }
+            Ok(RunOutcome::TimedOut {
+                command,
+                duration_ms,
+                ..
+            }) => {
+                eprintln!("phux: '{command}' did not finish within {duration_ms}ms");
+                ExitCode::from(124)
+            }
+            Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "run"),
+            Err(err) => {
+                eprintln!("phux: run failed: {err}");
+                ExitCode::FAILURE
+            }
+        }
+    })
+}
+
+/// Human-readable rendering of a `run` result.
+fn print_run_result(result: &phux_client::run::RunResult) {
+    if !result.output.is_empty() {
+        println!("{}", result.output);
+    }
+    let trunc = if result.truncated {
+        " (output truncated; needs scrollback)"
+    } else {
+        ""
+    };
+    println!(
+        "exit={} ({}ms){trunc}",
+        result.exit_code, result.duration_ms
+    );
+}
+
 /// `phux send-keys` — attach to a session and send input to its focused
 /// pane. The server only accepts input from an attached, subscribed
 /// client, so this attaches like the interactive client (see
@@ -940,7 +1172,7 @@ fn run_send_keys(session: &str, keys: &[String], socket: Option<PathBuf>) -> Exi
     };
     let target = AttachTarget::ByName(session.to_owned());
     match rt.block_on(phux_client::send_keys::send(&socket_path, target, keys)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_pane) => ExitCode::SUCCESS,
         Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "send-keys"),
         Err(err) => {
             eprintln!("phux: send-keys failed: {err}");

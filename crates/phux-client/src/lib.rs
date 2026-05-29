@@ -26,5 +26,7 @@ pub mod attach;
 pub mod layout;
 pub mod predict;
 pub mod render;
+pub mod run;
 pub mod send_keys;
 pub mod snapshot;
+pub mod wait;
