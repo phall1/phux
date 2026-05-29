@@ -133,3 +133,11 @@ backgrounded work where there's no single "command done" moment.
   awaits scrollback support.
 - The server is **one per user**; sessions persist until killed or the
   machine reboots — that's the point. Use `phux ls` to find them again.
+
+## Driving phux from code
+
+When you're scripting phux from another program rather than running verbs
+by hand, see the `phux-agent-cli` skill — it covers the stable `--json`
+contracts, flag placement, exit-code mirroring, and a `Phux` wrapper
+class. Runnable, tested examples live in
+[`examples/agents/`](../../agents/).
