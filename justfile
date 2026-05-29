@@ -32,6 +32,14 @@ lint:
 test:
     cargo nextest run --workspace --all-features
 
+# End-to-end tests that spawn real PTY-backed `phux server` subprocesses
+# (crates/phux/tests/run_wait_e2e.rs). They are `#[ignore]`d so the default
+# `test`/`ci` run stays deterministic — in the full parallel pool the server
+# spawns starve and the socket-bind wait trips. Run on demand (they pass
+# reliably one binary at a time, ~2s). CI may invoke this as a separate step.
+e2e:
+    cargo nextest run -p phux --test run_wait_e2e --run-ignored all
+
 # Stable-cargo test for environments without nextest.
 test-cargo:
     cargo test --workspace --all-features

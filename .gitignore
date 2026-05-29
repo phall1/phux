@@ -16,3 +16,7 @@ flamegraph.svg
 # bv (beads viewer) local config and caches
 .bv/
 .claude/worktrees/
+
+# dhat heap profiler output (emitted when built with --features dhat-heap)
+dhat-heap.json
+**/dhat-heap.json

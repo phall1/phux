@@ -43,8 +43,10 @@ const PHUX: &str = env!("CARGO_BIN_EXE_phux");
 const SESSION: &str = "work";
 
 /// How long to wait for the server to bind its socket. Generous: the
-/// very first build/start on a cold CI host is the slow case.
-const SOCKET_DEADLINE: Duration = Duration::from_secs(20);
+/// very first build/start on a cold CI host is the slow case, and under a
+/// loaded full-workspace run the spawned server competes for CPU (the
+/// e2e-server nextest group serializes these tests to bound that load).
+const SOCKET_DEADLINE: Duration = Duration::from_secs(30);
 
 /// Poll cadence while waiting for the socket file to appear.
 const SOCKET_POLL: Duration = Duration::from_millis(50);
@@ -167,6 +169,7 @@ fn run_stdout(server: &ServerGuard, args: &[&str]) -> String {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn run_mirrors_zero_exit_for_true() {
     let server = ServerGuard::start();
     assert_eq!(
@@ -177,6 +180,7 @@ fn run_mirrors_zero_exit_for_true() {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn run_mirrors_one_exit_for_false() {
     let server = ServerGuard::start();
     assert_eq!(
@@ -187,6 +191,7 @@ fn run_mirrors_one_exit_for_false() {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn run_mirrors_arbitrary_nonzero_exit() {
     // `(exit 7)` runs in a SUBSHELL, so the exit does not terminate the
     // pane's interactive shell — verified empirically: `phux ls` still
@@ -207,6 +212,7 @@ fn run_mirrors_arbitrary_nonzero_exit() {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn run_json_reports_output_and_clean_exit() {
     let server = ServerGuard::start();
     // `--json` MUST precede the trailing command, or it is swallowed into
@@ -229,6 +235,7 @@ fn run_json_reports_output_and_clean_exit() {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn wait_until_succeeds_when_marker_appears() {
     let server = ServerGuard::start();
     // Inject a marker into the pane, then wait for it. `--until` also
@@ -259,6 +266,7 @@ fn wait_until_succeeds_when_marker_appears() {
 }
 
 #[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
 fn wait_until_times_out_when_marker_never_appears() {
     let server = ServerGuard::start();
     assert_eq!(
