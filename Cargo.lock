@@ -1377,6 +1377,7 @@ dependencies = [
  "phux-server",
  "portable-pty",
  "rustix 0.38.44",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

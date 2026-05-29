@@ -26,3 +26,4 @@ pub mod attach;
 pub mod layout;
 pub mod predict;
 pub mod render;
+pub mod snapshot;

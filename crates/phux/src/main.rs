@@ -46,6 +46,7 @@ use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::{
     AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
+    ViewportInfo,
 };
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
@@ -176,6 +177,27 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Capture a session's focused pane as structured data (ADR-0022).
+    ///
+    /// The agent "floor": read what's on screen as JSON (`--json`) or a
+    /// boxed text view, without a TTY or tmux. The output reports the
+    /// pane's true dimensions. Bootstrap caveat: ATTACH carries a viewport,
+    /// so this may transiently resize the focused pane (self-heals on the
+    /// next real-client paint); the read-only server-side query is tracked
+    /// under the agent epic.
+    Snapshot {
+        /// Session name. Omit for the most-recently-focused session.
+        session: Option<String>,
+
+        /// Emit JSON (stable schema) instead of the human boxed view.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -216,6 +238,11 @@ fn main() -> ExitCode {
             command,
         }) => run_new(session, cwd, socket, command),
         Some(Command::Kill { target, socket }) => run_kill(&target, socket),
+        Some(Command::Snapshot {
+            session,
+            json,
+            socket,
+        }) => run_snapshot(session, json, socket),
         None => run_naked(),
     }
 }
@@ -786,6 +813,68 @@ fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
             ExitCode::SUCCESS
         }
     })
+}
+
+/// `phux snapshot` — capture the focused pane as structured data (ADR-0022).
+///
+/// One-shot: connect, attach, walk the snapshot grid, emit JSON or a boxed
+/// text view, exit. See [`phux_client::snapshot`] for the bootstrap caveat
+/// (ATTACH transiently resizes the pane to `size`).
+fn run_snapshot(session: Option<String>, json: bool, socket: Option<PathBuf>) -> ExitCode {
+    let target = session.map_or(AttachTarget::Last, AttachTarget::ByName);
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    // The snapshot reports the pane's true dims regardless of this hint
+    // (it races ahead of the attach-resize); a standard 80x24 keeps the
+    // transient resize minimal. The read-only server-side query (no
+    // attach, no resize) is the tracked successor (ADR-0022 §5).
+    let screen = rt.block_on(phux_client::snapshot::capture(
+        &socket_path,
+        target,
+        ViewportInfo::new(80, 24),
+    ));
+    match screen {
+        Ok(screen) if json => match serde_json::to_string_pretty(&screen) {
+            Ok(s) => {
+                println!("{s}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("phux: failed to serialize snapshot: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(screen) => {
+            print_screen_box(&screen);
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: snapshot failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Human-readable boxed rendering of a captured screen (no tmux, no TTY).
+fn print_screen_box(screen: &phux_client::snapshot::ScreenState) {
+    let bar = "─".repeat(usize::from(screen.cols));
+    println!("┌{bar}┐");
+    for line in &screen.lines {
+        let pad = usize::from(screen.cols).saturating_sub(line.chars().count());
+        println!("│{line}{}│", " ".repeat(pad));
+    }
+    println!("└{bar}┘");
+    let cursor = screen
+        .cursor
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |c| format!("{},{}", c.x, c.y));
+    println!(
+        "pane={} {}x{} cursor={cursor}",
+        screen.pane, screen.cols, screen.rows
+    );
 }
 
 /// Print an `AttachError` as a one-line, actionable message on stderr.
