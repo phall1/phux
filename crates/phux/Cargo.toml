@@ -33,6 +33,15 @@ tracing-subscriber.workspace = true
 # no new third-party dependency enters the workspace.
 rustix = { version = "0.38", default-features = false, features = ["std", "process"] }
 
+[dev-dependencies]
+# Raw-PTY black-box harnesses (examples/) that spawn the real `phux attach`
+# binary in a pseudoterminal, drive it, resize the PTY, and inspect what the
+# client paints via a libghostty oracle. Used to reproduce/verify
+# host-terminal rendering bugs (e.g. phux-8v1 resize duplication) that the
+# tmux probe masks because tmux reflows + reinterprets the byte stream itself.
+portable-pty.workspace = true
+libghostty-vt.workspace = true
+
 [features]
 # Heap profiling via dhat. Swaps the global allocator for `dhat::Alloc`
 # and installs a `dhat::Profiler` guard for the lifetime of `main()`.

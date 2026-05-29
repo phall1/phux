@@ -29,7 +29,7 @@ use std::time::Duration;
 use libghostty_vt::{Terminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_server::state::TerminalInput;
-use phux_server::terminal_actor::{SnapshotRequest, TerminalActor};
+use phux_server::terminal_actor::{ResizeRequest, SnapshotRequest, TerminalActor};
 use portable_pty::CommandBuilder;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -352,7 +352,15 @@ fn resize_path_does_not_panic_against_pty() {
         let token = bundle.token;
         let join = tokio::task::spawn_local(bundle.actor.run());
 
-        handle.resize.send((120, 40)).await.expect("resize");
+        handle
+            .resize
+            .send(ResizeRequest {
+                cols: 120,
+                rows: 40,
+                resync_clients: true,
+            })
+            .await
+            .expect("resize");
         // Yield so the actor processes the resize before shutdown.
         for _ in 0..32 {
             tokio::task::yield_now().await;

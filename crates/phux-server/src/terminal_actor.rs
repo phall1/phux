@@ -320,6 +320,28 @@ pub struct SnapshotRequest {
     pub reply: oneshot::Sender<SnapshotBytes>,
 }
 
+/// A resize request delivered to a [`TerminalActor`] over its `resize`
+/// mailbox.
+///
+/// `resync_clients` controls the phux-8v1 post-resize behavior: when
+/// `true`, the actor re-broadcasts a full grid snapshot after the reflow
+/// so attached clients (whose mirror reflowed independently and may have
+/// dropped rows) reconverge. It is `true` for *live* resizes from an
+/// already-attached client (SIGWINCH → `VIEWPORT_RESIZE`/`TERMINAL_RESIZE`)
+/// and `false` for the ATTACH-time resize — the attach handshake already
+/// sends an authoritative `TERMINAL_SNAPSHOT`, and a resync broadcast
+/// there would race ahead of it and reorder the handshake.
+#[derive(Debug, Clone, Copy)]
+pub struct ResizeRequest {
+    /// New grid width in cells.
+    pub cols: u16,
+    /// New grid height in cells.
+    pub rows: u16,
+    /// Re-broadcast a full snapshot after reflow (live resize) vs stay
+    /// quiet (attach-time resize). See the type-level doc.
+    pub resync_clients: bool,
+}
+
 /// Cross-task handle to a [`TerminalActor`].
 ///
 /// `TerminalHandle` is `Send + Clone`: per-client tasks clone it freely to
@@ -337,11 +359,12 @@ pub struct TerminalHandle {
     /// Output broadcast channel; subscribers receive every PTY byte
     /// chunk forwarded by the actor.
     pub output: broadcast::Sender<Bytes>,
-    /// Resize control channel. Wired but not yet driven end-to-end —
-    /// `VIEWPORT_RESIZE` routing through the runtime lands with
-    /// `phux-4hp`. The actor honours messages it receives (libghostty
-    /// `Terminal::set_size`, PTY winsize ioctl).
-    pub resize: mpsc::Sender<(u16, u16)>,
+    /// Resize control channel. The actor honours each request by
+    /// resizing libghostty's `Terminal` and the PTY winsize ioctl, and
+    /// (when [`ResizeRequest::resync_clients`] is set) re-broadcasting a
+    /// full grid snapshot so client mirrors reconverge after reflow
+    /// (phux-8v1).
+    pub resize: mpsc::Sender<ResizeRequest>,
     /// ADR-0018 per-consumer state-sync lifecycle (phux-q0e.2). The
     /// runtime sends a [`ConsumerAttachRequest`] on each successful
     /// ATTACH so the actor allocates the per-consumer `RenderState`
@@ -388,7 +411,7 @@ pub struct TerminalActor {
     paste_enc: RefCell<PerTerminalPasteEncoder>,
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
-    resize_rx: mpsc::Receiver<(u16, u16)>,
+    resize_rx: mpsc::Receiver<ResizeRequest>,
     consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
     consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
     /// Per-consumer state-sync `FRAME_ACK` channel (phux-q0e.4). Drained
@@ -1078,6 +1101,52 @@ impl TerminalActor {
         }
     }
 
+    /// phux-8v1: after a resize reflows the canonical `Terminal`,
+    /// broadcast a full synthesized snapshot of the post-reflow grid to
+    /// every attached client.
+    ///
+    /// Why this is needed: a resize triggers an *independent* reflow on
+    /// both the server's canonical `Terminal` and each client's mirror
+    /// `Terminal`. Those reflows can diverge — libghostty's cols-shrink
+    /// reflow does not reproduce the client mirror's content identically,
+    /// dropping rows — so after a resize the client mirror and the server
+    /// grid disagree. The live output path (the PTY-byte broadcast fanned
+    /// out by the per-attach pump in `runtime.rs`) only carries *new* PTY
+    /// bytes, so the historical grid content is never re-sent and the
+    /// divergence is permanent: the user sees lost / duplicated rows
+    /// ("repeating/duplicated characters on resize").
+    ///
+    /// The synthesized bytes from [`SnapshotSynthesizer::synthesize`] open
+    /// with a `DECSTR + ED2 + home` reset preamble, so feeding them to the
+    /// client mirror via the ordinary `TERMINAL_OUTPUT` → `vt_write` path
+    /// resets that mirror and repaints it from authoritative state. We
+    /// reuse the existing output broadcast rather than the per-consumer
+    /// state-sync path (`consumer_states`) because the runtime drives the
+    /// broadcast/pump path; the q0e per-consumer tick is not wired into
+    /// the runtime today.
+    fn broadcast_resync_after_resize(&self) {
+        // No subscribers → nothing to resync. `receiver_count` is the
+        // broadcast channel's live-subscriber count; the seed receiver
+        // held by the actor was dropped at construction, so this is the
+        // attached-pump count.
+        if self.output_tx.receiver_count() == 0 {
+            return;
+        }
+        match self.synthesize() {
+            Ok(snap) => {
+                // A `Lagged`/no-receiver send error is benign here — the
+                // next PTY output or a re-attach snapshot re-syncs.
+                let _ = self.output_tx.send(Bytes::from(snap.bytes));
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "resize resync: snapshot synthesis failed; clients recover on next output",
+                );
+            }
+        }
+    }
+
     /// Best-effort reap the child if it has already exited. Called on
     /// PTY EOF — at that point the child has almost certainly exited
     /// (EOF on the master fd indicates the slave has been closed,
@@ -1310,8 +1379,15 @@ impl TerminalActor {
                     let _ = req.reply.send(snap);
                 }
 
-                Some((cols, rows)) = self.resize_rx.recv() => {
-                    self.handle_resize(cols, rows);
+                Some(req) = self.resize_rx.recv() => {
+                    self.handle_resize(req.cols, req.rows);
+                    // phux-8v1: re-broadcast a full snapshot for live
+                    // resizes so client mirrors reconverge after their
+                    // independent reflow. Suppressed for the ATTACH-time
+                    // resize (the handshake snapshot covers it).
+                    if req.resync_clients {
+                        self.broadcast_resync_after_resize();
+                    }
                 }
 
                 Some(req) = self.consumer_attach_rx.recv() => {
@@ -1924,7 +2000,15 @@ mod tests {
                 let token = bundle.token;
                 let join = tokio::task::spawn_local(bundle.actor.run());
 
-                handle.resize.send((120, 40)).await.expect("send resize");
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 120,
+                        rows: 40,
+                        resync_clients: false,
+                    })
+                    .await
+                    .expect("send resize");
                 // Give the actor a moment to process the resize before
                 // we shut it down. A bounded `yield_now` loop is the
                 // current-thread-friendly version of `sleep(0)`.
@@ -1939,5 +2023,82 @@ mod tests {
                     .expect("actor task panicked");
             })
             .await;
+    }
+
+    /// phux-8v1 regression: a resize must re-broadcast a full snapshot of
+    /// the post-reflow grid so attached clients (whose mirror reflowed
+    /// independently and may have dropped rows) reconverge on the
+    /// canonical content. We assert the broadcast that follows a resize
+    /// carries the snapshot reset preamble (`ESC [ ! p`, DECSTR) AND the
+    /// content that was on the grid before the resize — without this fix
+    /// the only post-resize bytes are new PTY output, so prior content is
+    /// never re-sent and the client shows lost/duplicated rows.
+    #[tokio::test]
+    async fn resize_rebroadcasts_grid_snapshot_for_phux_8v1() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new_with_seed(80, 24, b"phux8v1-marker").expect("seed");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                // Subscribe BEFORE the actor runs so we don't miss the
+                // resize broadcast.
+                let mut out = handle.output.subscribe();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 40,
+                        rows: 10,
+                        resync_clients: true,
+                    })
+                    .await
+                    .expect("send resize");
+
+                // Collect broadcast bytes for a bounded window and look
+                // for the snapshot. `recv` resolves as soon as the resize
+                // broadcast lands.
+                let mut acc: Vec<u8> = Vec::new();
+                for _ in 0..32 {
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), out.recv())
+                        .await
+                    {
+                        Ok(Ok(bytes)) => {
+                            acc.extend_from_slice(&bytes);
+                            if contains_subslice(&acc, b"\x1b[!p")
+                                && contains_subslice(&acc, b"phux8v1-marker")
+                            {
+                                break;
+                            }
+                        }
+                        Ok(Err(_)) => break, // channel closed
+                        Err(_) => tokio::task::yield_now().await, // timeout tick
+                    }
+                }
+
+                assert!(
+                    contains_subslice(&acc, b"\x1b[!p"),
+                    "resize broadcast missing DECSTR snapshot preamble; got {:?}",
+                    String::from_utf8_lossy(&acc),
+                );
+                assert!(
+                    contains_subslice(&acc, b"phux8v1-marker"),
+                    "resize broadcast did not re-send pre-resize grid content; got {:?}",
+                    String::from_utf8_lossy(&acc),
+                );
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// Naive subsequence search for test assertions on VT byte streams.
+    fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
     }
 }

@@ -46,7 +46,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
-use crate::terminal_actor::{ConsumerAckRequest, SnapshotRequest, TerminalActor, TerminalHandle};
+use crate::terminal_actor::{
+    ConsumerAckRequest, ResizeRequest, SnapshotRequest, TerminalActor, TerminalHandle,
+};
 
 /// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
 const LENGTH_PREFIX: usize = 4;
@@ -1669,7 +1671,13 @@ fn handle_terminal_resize(
             );
             return;
         };
-        match handle.resize.try_send((cols, rows)) {
+        // Live per-pane resize (TERMINAL_RESIZE): resync clients so their
+        // mirrors reconverge after reflow (phux-8v1).
+        match handle.resize.try_send(ResizeRequest {
+            cols,
+            rows,
+            resync_clients: true,
+        }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
@@ -2055,7 +2063,10 @@ fn apply_attach_viewport(
             if let Some(pane) = s.registry.terminal_mut(*terminal_id) {
                 pane.dims = (cols, rows);
             }
-            match handle.resize.try_send((cols, rows)) {
+            // ATTACH-time resize: do NOT resync — the attach handshake
+            // already sends an authoritative TERMINAL_SNAPSHOT, and a
+            // resync broadcast here would race ahead of it (phux-8v1).
+            match handle.resize.try_send(ResizeRequest { cols, rows, resync_clients: false }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
@@ -2137,7 +2148,12 @@ fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &V
         // next snapshot, re-syncs) and SPEC §10.5 explicitly classes
         // VIEWPORT_RESIZE as best-effort.
         if let Some(handle) = s.terminals.get(&terminal_id) {
-            match handle.resize.try_send((viewport.cols, viewport.rows)) {
+            // Live viewport resize (SIGWINCH): resync clients (phux-8v1).
+            match handle.resize.try_send(ResizeRequest {
+                cols: viewport.cols,
+                rows: viewport.rows,
+                resync_clients: true,
+            }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
@@ -2508,7 +2524,7 @@ mod tests {
         let (input_tx, _input_rx) = mpsc::channel(8);
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(8);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<ResizeRequest>(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
         let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
         let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
@@ -2541,18 +2557,22 @@ mod tests {
         handle_viewport_resize(&state, client_id, &viewport);
 
         // The connector ran inside the same task; the channel must
-        // already carry exactly one (cols, rows) tuple.
+        // already carry exactly one resize request.
         let observed = resize_rx
             .try_recv()
-            .expect("resize tuple must be queued on the channel");
+            .expect("resize request must be queued on the channel");
         assert_eq!(
-            observed,
+            (observed.cols, observed.rows),
             (132, 50),
             "TerminalHandle::resize must receive the new viewport dims",
         );
         assert!(
+            observed.resync_clients,
+            "a live VIEWPORT_RESIZE must request a client resync (phux-8v1)",
+        );
+        assert!(
             resize_rx.try_recv().is_err(),
-            "exactly one resize tuple should be queued — got more",
+            "exactly one resize request should be queued — got more",
         );
     }
 
@@ -2612,7 +2632,7 @@ mod tests {
                     let (input_tx, _input_rx) = mpsc::channel(8);
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
                     let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
-                    let (resize_tx, _resize_rx) = mpsc::channel::<(u16, u16)>(8);
+                    let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
                     let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
                     let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);

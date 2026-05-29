@@ -1369,11 +1369,13 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "dhat",
+ "libghostty-vt",
  "phux-client",
  "phux-config",
  "phux-core",
  "phux-protocol",
  "phux-server",
+ "portable-pty",
  "rustix 0.38.44",
  "tokio",
  "tracing",
