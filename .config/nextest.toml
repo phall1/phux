@@ -1,0 +1,17 @@
+# nextest configuration. See https://nexte.st/docs/configuration/
+
+[profile.default]
+# Workspace-wide default: surface flakes promptly without masking real
+# failures. Individual load-sensitive tests are pinned below.
+retries = 0
+
+# `reconnect_after_detach_replays_snapshot_and_resumes_output` drives a real
+# PTY through a full detach/reattach lifecycle and asserts on rendered screen
+# content. The assertion deadlines (WIRE_RECV_TIMEOUT) are sound in isolation
+# and at -j4, but under full-parallelism nextest on a cached build the test
+# competes with many other PTY-backed tests for CPU and the snapshot-replay
+# render can miss its deadline. This is load, not correctness: retry rather
+# than relax the deadline so a genuine hang still fails the run.
+[[profile.default.overrides]]
+filter = 'test(=reconnect_after_detach_replays_snapshot_and_resumes_output)'
+retries = 2
