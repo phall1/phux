@@ -98,6 +98,27 @@ impl StatusBar {
         })
     }
 
+    /// An empty bar: no widgets in any slot.
+    ///
+    /// phux-9vf: the TUI's error-line painter wraps an empty bar so the
+    /// widget pipeline produces no output — the painter substitutes a
+    /// fixed diagnostic row instead. Cheaper and clearer than threading
+    /// an `Option<StatusBar>` through the painter.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            left: Slot {
+                widgets: Vec::new(),
+            },
+            center: Slot {
+                widgets: Vec::new(),
+            },
+            right: Slot {
+                widgets: Vec::new(),
+            },
+        }
+    }
+
     /// True if no slot carries any widgets — caller may then skip
     /// reserving a status row entirely.
     #[must_use]

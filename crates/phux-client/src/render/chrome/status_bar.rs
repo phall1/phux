@@ -273,6 +273,12 @@ pub struct StatusBarPainter {
     /// by the driver from the `Workspace` and injected into the render
     /// context inside [`Self::paint`]; a change invalidates the cache.
     windows: Vec<WindowInfo>,
+    /// phux-9vf: when `Some`, the painter ignores `bar`/`windows` and
+    /// paints this fixed error line instead. Set by the attach path when
+    /// the on-disk config fails to load or build, so the user sees a
+    /// visible reason the bar and keybindings are degraded rather than a
+    /// silently empty row.
+    error: Option<String>,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -286,6 +292,7 @@ impl std::fmt::Debug for StatusBarPainter {
             )
             .field("last_viewport", &self.last_viewport)
             .field("windows.len", &self.windows.len())
+            .field("error", &self.error)
             .finish()
     }
 }
@@ -300,6 +307,29 @@ impl StatusBarPainter {
             last_row: None,
             last_viewport: None,
             windows: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// phux-9vf: build a painter that shows a fixed error line instead of
+    /// the configured widgets.
+    ///
+    /// The attach path reaches for this when the on-disk config fails to
+    /// load or build: rather than silently dropping to an empty bar (and
+    /// no keybindings) with only a `tracing::warn` the user never sees,
+    /// the bar row shows the parse error and points at `phux config show`
+    /// for the full diagnostic. The painter built this way is never
+    /// "empty" and always reports a poll interval, so the error stays on
+    /// screen across repaints.
+    #[must_use]
+    pub fn error_line(message: impl Into<String>) -> Self {
+        Self {
+            bar: StatusBar::empty(),
+            position: Position::default(),
+            last_row: None,
+            last_viewport: None,
+            windows: Vec::new(),
+            error: Some(message.into()),
         }
     }
 
@@ -314,15 +344,23 @@ impl StatusBarPainter {
     }
 
     /// True if the underlying bar has no widgets configured.
+    ///
+    /// phux-9vf: an error-line painter is never empty — the fixed
+    /// diagnostic must always reserve and paint its row so the user sees
+    /// why their chrome is degraded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.bar.is_empty()
+        self.error.is_none() && self.bar.is_empty()
     }
 
     /// Tightest poll interval among the bar's widgets. `None` ⇒ no
     /// time-based repaint is needed. v0 returns a conservative
     /// `Some(1s)` when the bar isn't empty so the `time` widget
     /// refreshes at its declared cadence.
+    ///
+    /// phux-9vf: an error-line painter reports the same `Some(1s)` so the
+    /// driver's `status_tick` arm keeps repainting it and the diagnostic
+    /// survives pane output stomping the bottom row.
     #[must_use]
     pub fn min_poll_interval(&self) -> Option<Duration> {
         if self.is_empty() {
@@ -348,7 +386,16 @@ impl StatusBarPainter {
         rows: u16,
         ctx: &StatusBarContext<'_>,
     ) -> io::Result<()> {
-        if cols == 0 || rows == 0 || (self.bar.is_empty() && self.windows.is_empty()) {
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+        // phux-9vf: an error-line painter bypasses the widget pipeline and
+        // paints the fixed diagnostic. It takes priority over the normal
+        // "empty bar with no windows is a no-op" short-circuit below.
+        if self.error.is_some() {
+            return self.paint_error_line(out, cols, rows);
+        }
+        if self.bar.is_empty() && self.windows.is_empty() {
             return Ok(());
         }
         let new_row = self.bar.render(&ctx.as_widget(), cols);
@@ -377,6 +424,57 @@ impl StatusBarPainter {
         // usable standalone in tests.
         render_status_bar(out, &self.bar, &ctx, row_index, cols)?;
         self.last_row = Some((cols, new_row));
+        self.last_viewport = Some((cols, rows));
+        Ok(())
+    }
+
+    /// phux-9vf: paint the fixed error diagnostic onto the bar row.
+    ///
+    /// Bypasses the widget composer entirely: the message is laid into a
+    /// reverse-video row (so it reads as an alarm strip rather than blending
+    /// into normal chrome) and truncated to `cols`. Cached on `last_row` /
+    /// `last_viewport` like the normal path so repeated paints with
+    /// unchanged dims are no-ops; a resize forces a repaint.
+    fn paint_error_line<W: Write>(&mut self, out: &mut W, cols: u16, rows: u16) -> io::Result<()> {
+        // Callers gate on `self.error.is_some()`; an empty string is a
+        // valid (if unusual) diagnostic, so default to "" rather than
+        // returning early.
+        let message = self.error.clone().unwrap_or_default();
+        // The error row carries no widget cells; we key the cache solely on
+        // viewport dims (the message is fixed for this painter's lifetime).
+        let viewport_changed = self.last_viewport != Some((cols, rows));
+        if !viewport_changed && self.last_row.is_some() {
+            return Ok(());
+        }
+        let row_index: u16 = match self.position {
+            Position::Bottom => rows.saturating_sub(1),
+            Position::Top => 0,
+        };
+        let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
+        let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        let mut x: u16 = 0;
+        for ch in message.chars() {
+            if x >= cols {
+                break;
+            }
+            let mut tmp = [0u8; 4];
+            let cell = &mut buffer[(x, 0)];
+            cell.set_symbol(ch.encode_utf8(&mut tmp));
+            cell.set_style(style);
+            x = x.saturating_add(1);
+        }
+        // Extend the reverse-video field across the rest of the row so the
+        // alarm strip spans the full width, not just the message.
+        while x < cols {
+            let cell = &mut buffer[(x, 0)];
+            cell.set_symbol(" ");
+            cell.set_style(style);
+            x = x.saturating_add(1);
+        }
+        write_buffer(out, &buffer, row_index, cols)?;
+        // Mark the cache populated so the dims-only key short-circuits the
+        // next repaint; the stored row is empty (we don't compose widgets).
+        self.last_row = Some((cols, Vec::new()));
         self.last_viewport = Some((cols, rows));
         Ok(())
     }
@@ -533,6 +631,65 @@ mod tests {
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("main"), "session widget missing: {s:?}");
         assert!(s.contains("LITERAL"), "time widget missing: {s:?}");
+    }
+
+    #[test]
+    fn error_line_painter_is_not_empty_and_polls() {
+        // phux-9vf: an error-line painter must report non-empty + a poll
+        // interval so the driver reserves the row and keeps repainting the
+        // diagnostic (otherwise pane output stomps it and it never returns).
+        let p = StatusBarPainter::error_line("config error: boom (run: phux config show)");
+        assert!(!p.is_empty(), "error-line painter must not be empty");
+        assert_eq!(p.min_poll_interval(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn error_line_painter_renders_message_on_bar_row() {
+        // phux-9vf: the fixed diagnostic paints onto the bar row even though
+        // no widgets are configured (the normal empty-bar short-circuit
+        // would otherwise emit nothing).
+        let mut p =
+            StatusBarPainter::error_line("config error: dup [status] (run: phux config show)");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 80, 24, &ctx_default("")).unwrap();
+        let s = String::from_utf8_lossy(&buf);
+        assert!(s.contains("\x1b[24;1H"), "no CUP-to-bar-row: {s:?}");
+        // The painter emits one SGR-wrapped cell per glyph, so the message
+        // is not a contiguous substring of the raw VT. Strip the CSI escapes
+        // to recover the printable text and assert on that.
+        let printable = strip_csi(&s);
+        assert!(
+            printable.contains("config error"),
+            "missing error text: {printable:?} (raw {s:?})"
+        );
+        assert!(
+            printable.contains("phux config show"),
+            "missing call-to-action: {printable:?} (raw {s:?})"
+        );
+    }
+
+    #[test]
+    fn error_line_painter_repaint_is_idempotent_on_unchanged_dims() {
+        let mut p = StatusBarPainter::error_line("config error: boom");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let first_len = buf.len();
+        assert!(first_len > 0, "first paint must emit the error row");
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert_eq!(buf.len(), first_len, "unchanged dims must be a no-op");
+    }
+
+    #[test]
+    fn error_line_painter_repaints_after_invalidate() {
+        // The driver invalidates the bar after pane output overwrites the
+        // bottom row; the diagnostic must then repaint.
+        let mut p = StatusBarPainter::error_line("config error: boom");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let first_len = buf.len();
+        p.invalidate();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert!(buf.len() > first_len, "invalidate must force a repaint");
     }
 
     #[test]

@@ -959,16 +959,23 @@ fn window_infos(workspace: &Workspace) -> Vec<phux_config::widget::WindowInfo> {
         .collect()
 }
 
-/// phux-nz4.5: load the on-disk config and build a [`StatusBarPainter`]
-/// from `[status]`. Errors fall back to no bar (logged) so a malformed
-/// config never blocks attach. Returns `None` when the bar would be
-/// empty (no widgets configured) — callers can short-circuit on that.
+/// phux-nz4.5 / phux-9vf: load the on-disk config and build a
+/// [`StatusBarPainter`] from `[status]`.
+///
+/// A malformed config never blocks attach — but it no longer vanishes
+/// silently either. On a load or build failure we surface a visible
+/// error line (`StatusBarPainter::error_line`) on the bar row pointing
+/// the user at `phux config show` for the full diagnostic, instead of
+/// dropping to an empty bar (and, alongside [`build_resolver`], no
+/// keybindings) with only a `tracing::warn` nobody sees. Returns `None`
+/// only when the config is valid and the bar would be empty (no widgets
+/// configured) — callers short-circuit on that.
 fn build_status_bar_painter() -> Option<StatusBarPainter> {
     let cfg = match phux_config::loader::load() {
         Ok(c) => c,
         Err(err) => {
-            tracing::warn!(error = %err, "phux-config load failed; status bar disabled");
-            return None;
+            tracing::warn!(error = %err, "phux-config load failed; surfacing on status bar");
+            return Some(StatusBarPainter::error_line(config_error_line(&err)));
         }
     };
     let registry = phux_config::WidgetRegistry::with_builtins();
@@ -976,10 +983,17 @@ fn build_status_bar_painter() -> Option<StatusBarPainter> {
         Ok(bar) if bar.is_empty() => None,
         Ok(bar) => Some(StatusBarPainter::new(bar, Position::default())),
         Err(err) => {
-            tracing::warn!(error = %err, "status-bar build failed; status bar disabled");
-            None
+            tracing::warn!(error = %err, "status-bar build failed; surfacing on status bar");
+            Some(StatusBarPainter::error_line(config_error_line(&err)))
         }
     }
+}
+
+/// phux-9vf: format a one-line, on-screen config error for the status
+/// bar. Mirrors what `phux config show` prints to stderr (the
+/// `Display` of the error) and appends the actionable next step.
+fn config_error_line(err: &impl std::fmt::Display) -> String {
+    format!("config error: {err} (run: phux config show)")
 }
 
 /// Build a `VIEWPORT_RESIZE` frame from a [`ViewportInfo`].
