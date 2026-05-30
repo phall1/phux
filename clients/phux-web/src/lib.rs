@@ -7,6 +7,10 @@
 
 #![deny(missing_docs)]
 
+pub mod session;
+
+pub use session::{Outcome, Session};
+
 use phux_vt_web::{Grid, Rgb};
 use web_sys::CanvasRenderingContext2d;
 

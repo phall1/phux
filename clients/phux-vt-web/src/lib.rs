@@ -16,6 +16,8 @@
 
 #![deny(missing_docs)]
 
+use std::rc::Rc;
+
 use js_sys::{Array, Function, Object, Reflect, Uint8Array, WebAssembly};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -117,7 +119,7 @@ impl Vt {
     /// # Errors
     /// Returns the underlying `JsValue` if instantiation fails or an expected
     /// export is missing.
-    pub async fn load() -> Result<Self, JsValue> {
+    pub async fn load() -> Result<Rc<Self>, JsValue> {
         let env = Object::new();
         Reflect::set(&env, &"log".into(), &Function::new_no_args(""))?;
         let imports = Object::new();
@@ -136,7 +138,7 @@ impl Vt {
                 .map_err(|_| JsValue::from_str(&format!("missing export: {name}")))
         };
 
-        Ok(Self {
+        Ok(Rc::new(Self {
             memory,
             alloc: f("ghostty_wasm_alloc_u8_array")?,
             free: f("ghostty_wasm_free_u8_array")?,
@@ -153,13 +155,13 @@ impl Vt {
             cells_new: f("ghostty_render_state_row_cells_new")?,
             cells_next: f("ghostty_render_state_row_cells_next")?,
             cells_get: f("ghostty_render_state_row_cells_get")?,
-        })
+        }))
     }
 
     /// Open a terminal of `cols`×`rows`, with its own render state + reusable
     /// row/cell iterators and scratch buffers.
     #[must_use]
-    pub fn terminal(&self, cols: u16, rows: u16) -> Terminal<'_> {
+    pub fn terminal(self: &Rc<Self>, cols: u16, rows: u16) -> Terminal {
         // GhosttyTerminalOptions (wasm32): cols u16@0, rows u16@2, scrollback u32@4.
         let opts = self.wasm_alloc(8);
         self.w_u16(opts, cols);
@@ -185,7 +187,7 @@ impl Vt {
         let _ = self.call(&self.cells_new, &[0.0, f64::from(cells_slot)]);
 
         Terminal {
-            vt: self,
+            vt: Rc::clone(self),
             term,
             state,
             iter_slot,
@@ -252,8 +254,8 @@ impl Vt {
 /// An open terminal: a libghostty terminal grid + render state, driven by a
 /// [`Vt`] engine. Feed it VT bytes with [`Terminal::write`] and read the grid
 /// back with [`Terminal::rows_text`] (text) for rendering.
-pub struct Terminal<'a> {
-    vt: &'a Vt,
+pub struct Terminal {
+    vt: Rc<Vt>,
     term: u32,
     state: u32,
     iter_slot: u32,
@@ -262,7 +264,7 @@ pub struct Terminal<'a> {
     grapheme_buf: u32,
 }
 
-impl Terminal<'_> {
+impl Terminal {
     /// Feed VT-encoded bytes (PTY output) through the terminal's parser.
     pub fn write(&self, data: &[u8]) {
         if data.is_empty() {
@@ -294,7 +296,7 @@ impl Terminal<'_> {
     /// is read separately by the renderer). Trailing blanks are trimmed.
     #[must_use]
     pub fn rows_text(&self) -> Vec<String> {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let _ = vt.call(&vt.rs_update, &[f64::from(self.state), f64::from(self.term)]);
         // Bind the row iterator to the current render state (rewrites iter_slot).
         let _ = vt.call(
@@ -322,7 +324,7 @@ impl Terminal<'_> {
 
     /// The base grapheme of the current cell (or space if blank/unreadable).
     fn cell_base_char(&self, cells: u32) -> char {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let r = vt.call(
             &vt.cells_get,
             &[f64::from(cells), ROW_CELLS_DATA_GRAPHEMES_LEN, f64::from(self.scratch)],
@@ -344,7 +346,7 @@ impl Terminal<'_> {
     /// fg/bg, plus the terminal's default fg/bg. Rows are padded to `cols`.
     #[must_use]
     pub fn grid(&self) -> Grid {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let _ = vt.call(&vt.rs_update, &[f64::from(self.state), f64::from(self.term)]);
 
         let cols = self.rs_u32(RENDER_STATE_DATA_COLS) as u16;
@@ -388,30 +390,30 @@ impl Terminal<'_> {
     }
 
     fn rs_u32(&self, tag: f64) -> u32 {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let _ = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]);
         vt.r_u32(self.scratch)
     }
 
     fn rs_color(&self, tag: f64) -> Option<Rgb> {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let r = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]) as i32;
         (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
     }
 
     fn cell_color(&self, cells: u32, tag: f64) -> Option<Rgb> {
-        let vt = self.vt;
+        let vt = &*self.vt;
         let r = vt.call(&vt.cells_get, &[f64::from(cells), tag, f64::from(self.scratch)]) as i32;
         (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
     }
 
     fn read_rgb(&self, ptr: u32) -> Rgb {
-        let vt = self.vt;
+        let vt = &*self.vt;
         Rgb { r: vt.r_u8(ptr), g: vt.r_u8(ptr + 1), b: vt.r_u8(ptr + 2) }
     }
 }
 
-impl Drop for Terminal<'_> {
+impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.vt.call(&self.vt.terminal_free, &[f64::from(self.term)]);
     }
