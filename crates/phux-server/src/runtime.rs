@@ -48,8 +48,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
-    ConsumerAckRequest, ResizeRequest, ScreenRequest, SnapshotRequest, TerminalActor,
-    TerminalHandle,
+    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, ResizeRequest, ScreenRequest,
+    SnapshotRequest, TerminalActor, TerminalHandle,
 };
 
 /// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
@@ -563,8 +563,51 @@ async fn on_terminal_exited(state: &SharedState, pane: phux_core::ids::TerminalI
         // socket died. The subsequent detach() call covers state
         // cleanup either way.
         let _ = tx.send(Outbound::Frame(FrameKind::Detached)).await;
-        state.with_mut(|s| s.detach(client_id));
+        detach_and_release_consumer_state(state, client_id);
     }
+}
+
+/// Free the per-consumer state-sync entries (ADR-0018, phux-0q8) this
+/// client holds across every pane it subscribes to, then remove the
+/// client from `ServerState`.
+///
+/// Counterpart to the `consumer_attach` registration the ATTACH path
+/// performs per pane. Run at every client-teardown site (explicit
+/// DETACH, transport disconnect, PTY EOF) so the per-consumer
+/// `RenderState` cache the actor allocated at attach is dropped rather
+/// than leaked until pane teardown.
+///
+/// Handles are gathered under-lock (`subscribed_terminal_handles`); the
+/// `consumer_detach` sends happen off-lock to avoid awaiting inside
+/// `with_mut`. `try_send` is non-blocking and best-effort: a full or
+/// closed mailbox just means the actor is gone or saturated, in which
+/// case the per-consumer entry is freed when the actor itself tears down.
+fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
+    let wire_client_id =
+        phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
+    let handles = state.with(|s| s.subscribed_terminal_handles(client_id));
+    for handle in handles {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        match handle.consumer_detach.try_send(ConsumerDetachRequest {
+            client_id: wire_client_id,
+            reply: reply_tx,
+        }) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                trace!(
+                    ?client_id,
+                    "consumer_detach mailbox full; per-consumer entry freed on actor teardown",
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                trace!(
+                    ?client_id,
+                    "consumer_detach: pane actor gone; nothing to free"
+                );
+            }
+        }
+    }
+    state.with_mut(|s| s.detach(client_id));
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.
@@ -653,7 +696,7 @@ async fn accept_loop(
                             // the explicit `DETACH` semantics for the wire
                             // path that will land alongside the protocol
                             // variants.
-                            task_state.with_mut(|s| s.detach(client_id));
+                            detach_and_release_consumer_state(&task_state, client_id);
                         });
                     }
                     Err(err) => {
@@ -864,7 +907,7 @@ async fn handle_client(
                 // writer being gone is the next thing to happen
                 // anyway. Logging here would be pure noise.
                 let _ = out_tx.send(Outbound::Frame(FrameKind::Detached)).await;
-                state.with_mut(|s| s.detach(client_id));
+                detach_and_release_consumer_state(&state, client_id);
             }
             FrameKind::ViewportResize { viewport } => {
                 debug!(
@@ -2074,8 +2117,70 @@ async fn handle_attach(
     // this sequentially made attach latency scale with the SUM of pane
     // reply times. With `FuturesUnordered` it scales with the MAX —
     // one slow pane no longer stalls the rest.
+    // Bridge `state::ClientId` (u64 newtype) -> `phux_protocol::ClientId`
+    // (u32), matching `handle_frame_ack`'s conversion so the
+    // per-consumer state map keys line up across attach / ack / detach.
+    let wire_client_id =
+        phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
+
     let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
     for (terminal_id, handle, wire_terminal_id) in panes_to_snapshot {
+        // ADR-0018 / phux-0q8: register the per-consumer state-sync entry
+        // so the actor allocates and primes a per-consumer `RenderState`
+        // cache for this client/pane, keyed by `wire_client_id`. We do
+        // this BEFORE emitting the snapshot so the per-consumer cache is
+        // primed against the same canonical state the snapshot installs
+        // on the client mirror (see `register_consumer`'s doc).
+        //
+        // The entry drives the dormant `FRAME_ACK` eviction loop
+        // (`on_frame_ack` -> `mark_synced`); it does NOT change the live
+        // output path. The actor's `tick_emit` stays gated off in v0.1
+        // (`consumer_tick_emits == false`), so the broadcast pump spawned
+        // just below remains the sole emitter — no double-paint. Flipping
+        // to tick emission is the production switch tracked for later.
+        //
+        // Awaited (not fire-and-forget) so the cache is primed before the
+        // pump starts streaming deltas; a dropped reply or actor-gone is
+        // logged and we proceed (the broadcast path still works).
+        if let Some(wire_id) = wire_terminal_id.local_id() {
+            let (attach_reply_tx, attach_reply_rx) = oneshot::channel();
+            if handle
+                .consumer_attach
+                .send(ConsumerAttachRequest {
+                    client_id: wire_client_id,
+                    outbound: out_tx.clone(),
+                    wire_terminal_id: wire_id,
+                    reply: attach_reply_tx,
+                })
+                .await
+                .is_ok()
+            {
+                match attach_reply_rx.await {
+                    Ok(Ok(())) => {
+                        trace!(?terminal_id, "per-consumer state-sync entry registered");
+                    }
+                    Ok(Err(err)) => {
+                        warn!(
+                            ?terminal_id,
+                            error = %err,
+                            "per-consumer state-sync register failed; broadcast path still serves this pane",
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            ?terminal_id,
+                            "per-consumer state-sync register: actor dropped reply",
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    ?terminal_id,
+                    "per-consumer state-sync register: actor mailbox closed",
+                );
+            }
+        }
+
         // Subscribe to live PTY output BEFORE requesting the snapshot.
         // Subscribing first means anything the TerminalActor broadcasts
         // after this point lands in our receiver; we then ask for a
@@ -2876,6 +2981,155 @@ mod tests {
                 assert_eq!(snaps_seen, N, "expected one TERMINAL_SNAPSHOT per pane");
 
                 attach_task.await.expect("attach task panicked");
+            })
+            .await;
+    }
+
+    /// phux-0q8: ATTACH wires the per-consumer state-sync lifecycle.
+    /// `handle_attach` must send a `ConsumerAttachRequest` (carrying the
+    /// resolved wire terminal id) and await its reply before streaming;
+    /// the DETACH-class teardown helper must send a matching
+    /// `ConsumerDetachRequest` so the actor frees the per-consumer
+    /// `RenderState`. We inject a hand-built `TerminalHandle` and hold the
+    /// consumer-lifecycle receivers so the test observes both ends without
+    /// standing up a libghostty actor.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear setup-attach-observe-detach-observe body; splitting would scatter the lifecycle proof"
+    )]
+    async fn attach_registers_and_detach_unregisters_consumer_lifecycle() {
+        use bytes::Bytes;
+        use phux_core::ids::TerminalId as CoreTerminalId;
+        use tokio::sync::{broadcast, mpsc};
+        use tokio::task::LocalSet;
+
+        use crate::grid::SnapshotBytes;
+        use crate::terminal_actor::{
+            ConsumerAttachRequest, ConsumerDetachRequest, SnapshotRequest, TerminalHandle,
+        };
+
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                let (_sid, _wid, pid): (_, _, CoreTerminalId) =
+                    state.with_mut(|s| s.seed_session("lifecycle"));
+
+                let (input_tx, _input_rx) = mpsc::channel(8);
+                let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<SnapshotRequest>(8);
+                let (screen_tx, _screen_rx) = mpsc::channel(8);
+                let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+                let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
+                let (consumer_attach_tx, mut consumer_attach_rx) =
+                    mpsc::channel::<ConsumerAttachRequest>(8);
+                let (consumer_detach_tx, mut consumer_detach_rx) =
+                    mpsc::channel::<ConsumerDetachRequest>(8);
+                let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+                let handle = TerminalHandle {
+                    input: input_tx,
+                    snapshot: snapshot_tx,
+                    screen: screen_tx,
+                    output: output_tx,
+                    resize: resize_tx,
+                    consumer_attach: consumer_attach_tx,
+                    consumer_detach: consumer_detach_tx,
+                    consumer_ack: consumer_ack_tx,
+                    cols: 80,
+                    rows: 24,
+                };
+                state.with_mut(|s| {
+                    let _ = s.register_terminal_handle(pid, handle, CancellationToken::new());
+                });
+
+                let (out_tx, mut out_rx) =
+                    mpsc::channel::<Outbound>(crate::state::DEFAULT_CLIENT_MAILBOX);
+                let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+
+                let state_for_task = state.clone();
+                let token = CancellationToken::new();
+                let attach_task = tokio::task::spawn_local(async move {
+                    handle_attach(
+                        &state_for_task,
+                        client_id,
+                        AttachTarget::ByName("lifecycle".to_owned()),
+                        ViewportInfo::new(80, 24),
+                        false,
+                        0,
+                        &out_tx,
+                        ClientCapabilities::default(),
+                        &token,
+                    )
+                    .await;
+                });
+
+                // ATTACHED first.
+                let attached = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+                    .await
+                    .expect("attached frame did not arrive")
+                    .expect("out_rx closed");
+                assert!(matches!(
+                    attached,
+                    Outbound::Frame(FrameKind::Attached { .. })
+                ));
+
+                // The consumer-attach request must land, carrying the wire
+                // terminal id. Reply Ok so `handle_attach` proceeds.
+                let attach_req =
+                    tokio::time::timeout(Duration::from_secs(2), consumer_attach_rx.recv())
+                        .await
+                        .expect("ConsumerAttachRequest never arrived — register not wired?")
+                        .expect("consumer_attach channel closed");
+                assert_eq!(
+                    attach_req.client_id,
+                    phux_protocol::ids::ClientId::new(
+                        u32::try_from(client_id.0).unwrap_or(u32::MAX)
+                    ),
+                    "consumer attach keyed by the wire client id",
+                );
+                assert!(
+                    attach_req.wire_terminal_id >= 1,
+                    "wire terminal id assigned"
+                );
+                attach_req.reply.send(Ok(())).expect("send attach reply");
+
+                // Service the snapshot request so the attach task completes.
+                let snap_req = tokio::time::timeout(Duration::from_secs(2), snapshot_rx.recv())
+                    .await
+                    .expect("snapshot request did not arrive")
+                    .expect("snapshot channel closed");
+                snap_req
+                    .reply
+                    .send(SnapshotBytes {
+                        cols: 80,
+                        rows: 24,
+                        bytes: b"snap".to_vec(),
+                    })
+                    .expect("send snapshot reply");
+
+                attach_task.await.expect("attach task panicked");
+
+                // Now tear the client down. The helper must send a
+                // ConsumerDetachRequest for the subscribed pane.
+                detach_and_release_consumer_state(&state, client_id);
+                let detach_req =
+                    tokio::time::timeout(Duration::from_secs(2), consumer_detach_rx.recv())
+                        .await
+                        .expect("ConsumerDetachRequest never arrived — detach not wired?")
+                        .expect("consumer_detach channel closed");
+                assert_eq!(
+                    detach_req.client_id,
+                    phux_protocol::ids::ClientId::new(
+                        u32::try_from(client_id.0).unwrap_or(u32::MAX)
+                    ),
+                    "consumer detach keyed by the same wire client id",
+                );
+
+                // And the client is gone from ServerState.
+                assert!(
+                    state.with(|s| !s.attached.contains_key(&client_id)),
+                    "detach helper must remove the client from ServerState",
+                );
             })
             .await;
     }

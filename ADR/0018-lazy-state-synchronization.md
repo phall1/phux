@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-05-29
 ---
 
 # 0018 — Lazy state synchronization is the wire's long-arc shape
@@ -295,3 +295,36 @@ This addendum only revises *what's blocking implementation* and
 *where the work lives*. The "Consequences" bullet about
 "implementation ticket blocked on the libghostty primitive" is
 superseded by the new tickets filed under the state-sync epic.
+
+## Addendum — 2026-05-29: lifecycle live, emission gated (phux-0q8)
+
+The per-consumer machinery (steps 2–4 above) is implemented AND wired
+into the runtime: the ATTACH path sends `ConsumerAttachRequest` so the
+actor allocates and primes a per-consumer `RenderState` cache, the
+DETACH / disconnect / EOF paths send `ConsumerDetachRequest` to free
+it, and inbound `FRAME_ACK` clears that consumer's dirty cache via
+`mark_synced`. `consumer_states` is now populated at attach and drained
+at detach.
+
+**What is deliberately NOT live in v0.1: tick *emission*.** The actor's
+`tick_emit` is gated by an internal `consumer_tick_emits` flag,
+defaulted off. The live server→consumer emitter remains the
+pass-through broadcast pump (the degenerate case named in *Decision*):
+the PTY's bytes after canonical parse + capability rewrite. Two reasons
+the tick must not also emit while the broadcast pump is the live path:
+
+1. **Double-paint.** Both paths write `TERMINAL_OUTPUT` to the same
+   consumer mailbox with independent `seq` counters; an emitting tick
+   would deliver the same content twice and break the
+   monotonic-`seq`-per-consumer invariant.
+2. **No client ack loop yet.** The v0.1 client does not send
+   `FRAME_ACK`, so `mark_synced` never fires from acks; an emitting
+   tick would re-diff an ever-larger unacked delta forever.
+
+Flipping `consumer_tick_emits` to `true` is the production switch. It
+is gated on (a) the client driving the `FRAME_ACK` loop and (b) the
+broadcast pump being suppressed per tick-managed consumer so exactly
+one emitter serves each consumer. Until then the lifecycle runs live
+(allocating, priming, ack-evicting, and freeing the per-consumer cache)
+while emission stays pass-through — the two coexist without
+double-painting.

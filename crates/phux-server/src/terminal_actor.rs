@@ -467,6 +467,32 @@ pub struct TerminalActor {
     /// `RenderState` is `!Send` — fine; the whole actor lives on the
     /// `LocalSet` thread (ADR-0014).
     consumer_states: HashMap<ClientId, ConsumerSyncState>,
+    /// Whether the per-consumer state-sync tick (phux-q0e.3) is allowed
+    /// to *emit* `TerminalOutput` frames (ADR-0018).
+    ///
+    /// `false` in the v0.1 deployment: the live server->client emission
+    /// path is the raw PTY-byte broadcast pump in `runtime.rs`
+    /// (`handle.output.subscribe()` -> per-attach `TerminalOutput`). The
+    /// per-consumer lifecycle (`register_consumer` / `unregister_consumer`
+    /// / `on_frame_ack`) still runs so the per-consumer `RenderState`
+    /// cache primitive is allocated, primed, freed, and ack-evicted —
+    /// but `tick_emit` must NOT also push frames, for two reasons:
+    ///
+    /// 1. **Double-paint.** A tick-emitted `TerminalOutput` and the
+    ///    broadcast pump's `TerminalOutput` both land on the same
+    ///    consumer's mailbox with independent `seq` counters, so the
+    ///    consumer would apply the same bytes twice and interleave
+    ///    non-monotonic `seq` (SPEC §12.2 requires monotonic-per-consumer).
+    /// 2. **Unbounded diff growth.** The v0.1 client does not send
+    ///    `FRAME_ACK`, so `mark_synced` (the only dirty-clearing point per
+    ///    ADR-0018) never fires from acks; an emitting tick would re-diff
+    ///    an ever-larger unacked delta forever.
+    ///
+    /// Flipping this to `true` is the production switch tracked as future
+    /// work: it requires the client to drive the `FRAME_ACK` loop and the
+    /// broadcast pump to be gated off per managed consumer. Until then the
+    /// machinery stays live-but-non-emitting.
+    consumer_tick_emits: bool,
     /// Bytes streaming in from the PTY reader thread. `None` when this
     /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
     /// branch becomes a no-op via `Option::as_mut`.
@@ -829,6 +855,8 @@ impl TerminalActor {
             consumer_detach_rx,
             consumer_ack_rx,
             consumer_states: HashMap::new(),
+            // v0.1: lifecycle runs, tick does not emit. See the field doc.
+            consumer_tick_emits: false,
             pty_rx,
             pty_tx,
             pty,
@@ -1058,6 +1086,15 @@ impl TerminalActor {
     #[cfg(test)]
     pub fn consumer_state(&self, client_id: ClientId) -> Option<&ConsumerSyncState> {
         self.consumer_states.get(&client_id)
+    }
+
+    /// Test-only: enable the per-consumer tick emission gate
+    /// (`consumer_tick_emits`). Production keeps this `false` (the live
+    /// emitter is the broadcast pump); tests flip it to exercise the
+    /// `tick_emit` synthesis-and-emit path directly.
+    #[cfg(test)]
+    pub const fn enable_tick_emit_for_test(&mut self) {
+        self.consumer_tick_emits = true;
     }
 
     /// Synthesize a snapshot of the current `Terminal` state. Exposed
@@ -1575,6 +1612,15 @@ impl TerminalActor {
     /// emittable; `FRAME_ACK` (phux-q0e.4) is the only thing allowed to
     /// clear dirty bits.
     fn tick_emit(&mut self) {
+        // v0.1 coexistence gate (phux-0q8): the live emission path is the
+        // raw broadcast pump in `runtime.rs`, so the tick must not also
+        // emit or the consumer double-paints (see `consumer_tick_emits`).
+        // The per-consumer `RenderState` cache is still maintained by
+        // `register_consumer` (prime) and `on_frame_ack` (mark_synced);
+        // the tick only *emits* from it, and emission is what we gate.
+        if !self.consumer_tick_emits {
+            return;
+        }
         // Borrow the terminal once per tick. The `synthesize_incremental`
         // call only reads from it.
         let terminal = self.terminal.borrow();
@@ -2091,6 +2137,113 @@ mod tests {
         actor.on_frame_ack(client, 9);
         assert!(actor.consumer_state(client).is_none());
         assert_eq!(actor.consumer_count(), 0);
+    }
+
+    /// phux-0q8 coexistence gate: with a consumer registered but the
+    /// emission gate at its production default (`consumer_tick_emits ==
+    /// false`), `tick_emit` MUST NOT push any frame onto the consumer's
+    /// outbound mailbox — even with dirty seeded content. This is the
+    /// invariant that lets the per-consumer lifecycle run live alongside
+    /// the broadcast pump without double-painting the client.
+    #[test]
+    fn tick_emit_is_silent_while_gate_is_off() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+        // Make the grid genuinely dirty AFTER register so a non-gated tick
+        // would have something to emit — proving the gate, not an empty diff.
+        actor.terminal.borrow_mut().vt_write(b"dirty-content");
+
+        // Several ticks: the gate must keep every one silent.
+        for _ in 0..3 {
+            actor.tick_emit();
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "gate off: tick_emit must not emit while the broadcast pump is the live path",
+        );
+        // The per-consumer entry is still live (lifecycle is active) —
+        // only emission is suppressed.
+        assert_eq!(actor.consumer_count(), 1);
+        assert_eq!(
+            actor.consumer_state(client).expect("state").next_seq,
+            1,
+            "no emission means the per-consumer seq never advanced",
+        );
+    }
+
+    /// phux-0q8 / phux-q0e.3: with the gate flipped on (the future
+    /// production switch), `tick_emit` synthesizes the dirty seeded grid
+    /// and ships exactly one `TerminalOutput` carrying the content,
+    /// stamping `seq = 1`. A second tick with no further writes is silent
+    /// (the synthesizer's internal `RenderState` advanced past the now-
+    /// clean grid). Proves the emission path is reachable and correct, not
+    /// merely dead code held behind the gate.
+    #[test]
+    fn tick_emit_emits_once_when_gate_is_on() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        // Register against the (blank) terminal: the synthesizer is primed
+        // so deltas are measured "from now." Writing AFTER register is what
+        // makes the next tick dirty.
+        actor.register_consumer(client, tx, 11).expect("register");
+        actor.terminal.borrow_mut().vt_write(b"q0e-marker");
+
+        actor.tick_emit();
+        let frame = rx
+            .try_recv()
+            .expect("gate on: first tick must emit the dirty grid");
+        let Outbound::Frame(FrameKind::TerminalOutput {
+            terminal_id,
+            seq,
+            bytes,
+        }) = frame
+        else {
+            panic!("expected a TerminalOutput frame from tick_emit");
+        };
+        assert_eq!(seq, 1, "first tick emission stamps seq=1");
+        assert_eq!(
+            terminal_id.local_id(),
+            Some(11),
+            "tick frame carries the registered wire terminal id",
+        );
+        assert!(
+            contains_subslice(&bytes, b"q0e-marker"),
+            "tick emission must carry the seeded grid content; got {:?}",
+            String::from_utf8_lossy(&bytes),
+        );
+
+        // ADR-0018 loss tolerance: an UNACKED diff stays re-emittable, so
+        // the next tick re-sends it (now seq=2). `tick_emit` deliberately
+        // never calls `mark_synced`.
+        actor.tick_emit();
+        let frame = rx
+            .try_recv()
+            .expect("gate on: unacked diff re-emits next tick");
+        let Outbound::Frame(FrameKind::TerminalOutput { seq, .. }) = frame else {
+            panic!("expected a TerminalOutput frame on re-emit");
+        };
+        assert_eq!(seq, 2, "re-emission of the unacked diff stamps seq=2");
+
+        // FRAME_ACK is the only thing that clears the per-consumer dirty
+        // cache (`mark_synced`). After acking seq=2, the now-clean grid
+        // produces no further emission.
+        actor.on_frame_ack(client, 2);
+        actor.tick_emit();
+        assert!(
+            rx.try_recv().is_err(),
+            "gate on: after FRAME_ACK clears the dirty cache, a clean grid is silent",
+        );
+        assert_eq!(
+            actor.consumer_state(client).expect("state").next_seq,
+            3,
+            "two emissions advanced next_seq to 3; the post-ack tick was silent",
+        );
     }
 
     /// Resize updates both the libghostty `Terminal` and (when present)

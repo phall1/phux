@@ -898,6 +898,23 @@ impl ServerState {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// Clone the [`TerminalHandle`] of every pane `client_id` currently
+    /// subscribes to (phux-0q8). The runtime uses this at DETACH /
+    /// disconnect / EOF time to send a
+    /// [`ConsumerDetachRequest`](crate::terminal_actor::ConsumerDetachRequest) to each
+    /// pane actor so the per-consumer `RenderState` cache (ADR-0018) is
+    /// freed, mirroring the `register_consumer` calls the ATTACH path
+    /// made. Gathered under-lock; the sends happen off-lock in the
+    /// runtime to avoid awaiting inside `with_mut`.
+    #[must_use]
+    pub fn subscribed_terminal_handles(&self, client_id: ClientId) -> Vec<TerminalHandle> {
+        self.terminal_subscribers
+            .iter()
+            .filter(|(_, subs)| subs.contains(&client_id))
+            .filter_map(|(terminal, _)| self.terminal_handle(*terminal).cloned())
+            .collect()
+    }
+
     /// Append `input` to the per-pane log. The log is shared across all
     /// attached clients of the pane's session; this is the merge point for
     /// multi-client keystrokes.
