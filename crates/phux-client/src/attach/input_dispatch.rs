@@ -152,6 +152,9 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     if effects.set_focus.is_some() {
                         *focused_pane = effects.set_focus;
                     }
+                    if effects.clear_predict {
+                        predict.clear();
+                    }
                     if effects.set_metadata {
                         // Send SET_METADATA carrying the new envelope.
                         // Encoding can fail only if the state is empty
@@ -369,6 +372,11 @@ struct ActionEffects {
     set_metadata: bool,
     /// `true` ⇒ emit a terminal bell (BEL `\x07`).
     bell: bool,
+    /// phux-4li.16: `true` ⇒ the active window changed; the driver must
+    /// drop the prediction queue (anchored to the old window's focused
+    /// pane) so a stale ghost echo doesn't paint into the new window
+    /// before the next `TERMINAL_OUTPUT` reconciles.
+    clear_predict: bool,
     /// `true` ⇒ emit `DETACH` and wait for `DETACHED`.
     detach: bool,
     /// phux-4li.12: a `split-pane` action emitted a `SPAWN_TERMINAL`
@@ -510,6 +518,22 @@ fn run_action(
             }
             effects.kill_frames = leaves.iter().flat_map(soft_kill_input_frames).collect();
         }
+        "next-window" => {
+            switch_window(ctx, &mut effects, Workspace::next);
+        }
+        "previous-window" => {
+            switch_window(ctx, &mut effects, Workspace::prev);
+        }
+        "select-window" => {
+            let Some(index) = index_arg(resolved) else {
+                tracing::warn!(args = ?resolved.args, "select-window missing/bad `index` arg");
+                effects.bell = true;
+                return effects;
+            };
+            switch_window(ctx, &mut effects, |w| {
+                w.select(index);
+            });
+        }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
                 if let Some(ls) = ctx.workspace.active_window_mut()
@@ -621,6 +645,36 @@ fn direction_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Dire
 fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
     let v = resolved.args.get("amount")?.as_integer()?;
     Some(v.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16)
+}
+
+/// Pull a window index out of a [`ResolvedAction`]'s `index = N` arg.
+/// Negative or non-integer values yield `None` (the caller bells).
+fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
+    let v = resolved.args.get("index")?.as_integer()?;
+    usize::try_from(v).ok()
+}
+
+/// Apply a window-switch `mutate` to the workspace and, **only if the
+/// active window actually changed**, record the follow-up: repaint the
+/// new composition, drop the prediction queue, and move focus to the new
+/// active window's focused leaf. A no-op switch (single window, wrap to
+/// self, or an out-of-range `select`) leaves `effects` untouched.
+///
+/// Window selection is per-client like focus (ADR-0019 decision 6), so
+/// this emits no `SET_METADATA` — siblings keep their own active window.
+fn switch_window(
+    ctx: &mut DispatchCtx<'_>,
+    effects: &mut ActionEffects,
+    mutate: impl FnOnce(&mut Workspace),
+) {
+    let before = ctx.workspace.active;
+    mutate(ctx.workspace);
+    if ctx.workspace.active == before {
+        return;
+    }
+    effects.layout_mutated = true;
+    effects.clear_predict = true;
+    effects.set_focus = ctx.workspace.active_window().and_then(|w| w.focus.clone());
 }
 
 /// Encode the workspace for `SET_METADATA`, logging encode failures.
@@ -859,6 +913,63 @@ mod tests {
         assert_eq!(effects.kill_frames.len(), 15);
         // No synchronous removal — TerminalClosed folds + prunes.
         assert_eq!(workspace.windows.len(), 1);
+    }
+
+    #[test]
+    fn next_window_switches_active_clears_predict_no_metadata() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        workspace.select(0);
+        let effects = run(&bare_action("next-window"), &mut workspace);
+        assert_eq!(workspace.active, 1);
+        assert!(effects.layout_mutated);
+        assert!(effects.clear_predict);
+        assert!(!effects.set_metadata, "window switch is per-client");
+        assert_eq!(effects.set_focus, Some(tid(2)));
+    }
+
+    #[test]
+    fn next_window_single_window_is_noop() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("next-window"), &mut workspace);
+        assert_eq!(workspace.active, 0);
+        assert!(!effects.layout_mutated);
+        assert!(!effects.clear_predict);
+    }
+
+    #[test]
+    fn select_window_jumps_to_index() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        workspace.add_window("3".to_owned(), tid(3)); // active = 2
+        let mut action = bare_action("select-window");
+        action
+            .args
+            .insert("index".to_owned(), toml::Value::Integer(0));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(workspace.active, 0);
+        assert!(effects.layout_mutated);
+        assert_eq!(effects.set_focus, Some(tid(1)));
+    }
+
+    #[test]
+    fn select_window_out_of_range_is_noop() {
+        let mut workspace = Workspace::single(tid(1)); // only index 0
+        let mut action = bare_action("select-window");
+        action
+            .args
+            .insert("index".to_owned(), toml::Value::Integer(5));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(workspace.active, 0);
+        assert!(!effects.layout_mutated);
+    }
+
+    #[test]
+    fn select_window_missing_index_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("select-window"), &mut workspace);
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
     }
 
     #[test]
