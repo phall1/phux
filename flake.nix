@@ -42,6 +42,8 @@
             pkgs.cargo-watch
             pkgs.cargo-insta
             pkgs.cargo-mutants
+            # Shell linting for scripts/ and examples/agents/ (just shellcheck).
+            pkgs.shellcheck
             # Debugging.
             pkgs.lldb
           ];

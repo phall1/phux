@@ -47,6 +47,23 @@ test:
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all
 
+# Smoke-test the examples/agents/ scripts against a throwaway server, so
+# they cannot rot silently against CLI changes (phux-wiv). Builds `phux`
+# once, pins SHELL=/bin/sh for a banner-free seed pane (no p10k/direnv
+# noise in snapshots), then runs every example and fails on any non-zero
+# exit. Like `e2e` it spawns real PTY-backed servers, so it stays OUT of
+# the parallel `ci` pool and runs on demand or as its own CI step.
+examples-smoke:
+    bash scripts/examples-smoke.sh
+
+# Lint shell scripts with shellcheck (the harness, the boundary/docs
+# guards, and the examples). Provided by the dev shell. Gates at
+# `warning` severity: the examples carry deliberate `info`-level nits
+# (sourced libs shellcheck can't follow, single-quoted heredoc-ish
+# program strings) that are correct as written. On-demand, not in `ci`.
+shellcheck:
+    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh
+
 # Stable-cargo test for environments without nextest.
 test-cargo:
     cargo test --workspace --all-features
