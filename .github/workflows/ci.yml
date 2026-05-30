@@ -7,6 +7,13 @@
 # Runners: ubuntu-latest only for now. macOS can be added to a matrix later
 # when a contributor needs it (the devshell already supports darwin systems
 # via flake-utils.lib.eachDefaultSystem).
+#
+# Cache key includes a CPU fingerprint (`CPU_KEY`): libghostty-vt's build.rs
+# lets zig auto-detect the host CPU for native builds, so the resulting `.a`
+# carries instructions specific to whichever runner compiled it. GitHub's
+# hosted fleet spans CPU generations; restoring such an artifact onto a leaner
+# runner aborts with SIGILL at load time. Keying the cache on /proc/cpuinfo
+# keeps native artifacts pinned to matching hardware.
 
 name: ci
 
@@ -29,11 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: cargo fmt --check
         run: nix develop -c cargo fmt --check
 
@@ -42,11 +51,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: cargo clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
@@ -55,11 +66,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: cargo nextest run
         run: nix develop -c cargo nextest run --workspace
 
@@ -68,11 +81,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: cargo deny check
         run: nix develop -c cargo deny check
 
@@ -81,10 +96,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - name: cargo doc
         run: nix develop -c env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace
