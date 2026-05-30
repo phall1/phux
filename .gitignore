@@ -20,3 +20,6 @@ flamegraph.svg
 # dhat heap profiler output (emitted when built with --features dhat-heap)
 dhat-heap.json
 **/dhat-heap.json
+
+# `just scaffold-config` writes a throwaway config here for local testing.
+.phux-xdg/

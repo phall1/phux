@@ -310,6 +310,44 @@ enum Command {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Inspect and scaffold the phux config file (phux-ijp).
+    ///
+    /// phux is config-driven (ADR-0023): defaults ship in the binary and
+    /// your `config.toml` is a sparse overlay merged on top. These
+    /// subcommands never touch a running server.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+/// `phux config <action>` — local config inspection and scaffolding.
+#[derive(Debug, Subcommand)]
+enum ConfigAction {
+    /// Write a commented starter config to the canonical path.
+    ///
+    /// The file is the shipped defaults, fully commented out: inert until
+    /// you uncomment a line, so the binary's defaults stay authoritative.
+    /// Refuses to overwrite an existing config unless `--force`.
+    Init {
+        /// Overwrite an existing config file instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Print the resolved config path. Pure path math — prints the path
+    /// whether or not the file exists.
+    Path,
+
+    /// Print the effective config (shipped defaults + your overrides) as
+    /// TOML. With `--default`, print the shipped defaults verbatim
+    /// instead, ignoring any user config.
+    Show {
+        /// Show the shipped defaults verbatim, not the merged result.
+        #[arg(long)]
+        default: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -377,7 +415,75 @@ fn main() -> ExitCode {
             json,
             socket,
         }) => run_run(&target, &command, timeout, json, socket),
+        Some(Command::Config { action }) => run_config(&action),
         None => run_naked(),
+    }
+}
+
+/// `phux config <action>` (phux-ijp). Entirely client-local: inspects
+/// and scaffolds the on-disk config without contacting a server.
+fn run_config(action: &ConfigAction) -> ExitCode {
+    match action {
+        ConfigAction::Path => {
+            println!("{}", config_loader::config_path().display());
+            ExitCode::SUCCESS
+        }
+        ConfigAction::Init { force } => {
+            let path = config_loader::config_path();
+            match phux_config::scaffold::write_reference_config(&path, *force) {
+                Ok(phux_config::scaffold::ScaffoldOutcome::Wrote(p)) => {
+                    println!("wrote {}", p.display());
+                    ExitCode::SUCCESS
+                }
+                Ok(phux_config::scaffold::ScaffoldOutcome::Skipped(p)) => {
+                    eprintln!(
+                        "phux: {} already exists; refusing to overwrite (use --force)",
+                        p.display()
+                    );
+                    ExitCode::FAILURE
+                }
+                Err(err) => {
+                    eprintln!("phux: could not write config: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        ConfigAction::Show { default } => {
+            // `--default` echoes the embedded defaults verbatim, comments
+            // and all — the annotated source of truth. Plain `show`
+            // renders the effective merged document (defaults + the user's
+            // overrides) as canonical TOML.
+            if *default {
+                print!("{}", phux_config::DEFAULT_CONFIG_TOML);
+                return ExitCode::SUCCESS;
+            }
+            let path = config_loader::config_path();
+            let user_input = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(err) => {
+                    eprintln!("phux: could not read {}: {err}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let merged = match phux_config::merged_config_table(&user_input, &path) {
+                Ok(table) => table,
+                Err(err) => {
+                    eprintln!("phux: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match toml::to_string(&merged) {
+                Ok(rendered) => {
+                    print!("{rendered}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("phux: could not render config: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
     }
 }
 

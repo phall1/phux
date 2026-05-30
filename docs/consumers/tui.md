@@ -87,7 +87,7 @@ phux send-keys TARGET KEYS... # send keys to a pane (scripting)          shipped
 phux run TARGET CMD...        # run a command in a pane, capture $?      shipped
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)    shipped
 phux wait [TARGET]            # poll a pane until a condition holds      shipped
-phux config [show|edit|path]  # config inspection                        spec-only
+phux config <init|path|show>  # scaffold + inspect config                init/path/show shipped; edit spec-only
 phux messages                 # recent server-emitted messages           spec-only
 phux version                  # print version                            spec-only
 phux help [COMMAND]                                                       spec-only
@@ -159,6 +159,44 @@ phux kill =                   # kill last-focused (within whatever the command t
 ---
 
 ## 4. Configuration
+
+### 4.0 Philosophy and the `phux config` commands
+
+phux is **config-driven**, in the Ghostty mold
+([ADR-0023](../../ADR/0023-config-ux-philosophy.md)): one TOML file is the
+whole source of truth, and phux never writes settings back from running
+state. There is no `set-option` verb. The defaults you don't override
+ship *inside the binary* as an embedded, annotated `default.toml`; your
+`config.toml` is a sparse overlay merged on top of it leaf-by-leaf. A key
+you omit keeps tracking the binary's default, so a phux upgrade that
+improves a default reaches you automatically — your file is overrides,
+not a frozen snapshot.
+
+A missing config file is not an error; phux runs on the embedded defaults
+alone. To get a documented starting point and to inspect what's active:
+
+```
+phux config path            # print the resolved config path (no I/O)
+phux config init            # scaffold a commented starter config there;
+                            #   refuses to overwrite (use --force)
+phux config show            # print the effective config (defaults + your
+                            #   overrides) as canonical TOML
+phux config show --default  # print the shipped defaults verbatim,
+                            #   comments and all — the annotated source
+```
+
+`phux config init` writes the shipped defaults *with every line commented
+out*: the file documents every option next to its real default value, yet
+imposes no overrides until you uncomment a line. That is what keeps the
+binary's defaults authoritative — uncommenting is the only way the file
+changes behavior. `config show` renders the merged TOML *table*, so it
+answers "what is my effective config" rather than reproducing your file's
+comments or key order; `cat` the file for the latter.
+
+For testing config changes inside a checkout without touching your real
+`~/.config/phux`, `just scaffold-config` drops a starter into a
+worktree-local `./.phux-xdg` (gitignored); point `XDG_CONFIG_HOME` at it
+to exercise the result.
 
 ### 4.1 File location
 

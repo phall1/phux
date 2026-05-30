@@ -17,6 +17,7 @@ mod schema;
 // Wave 5 modules — each owned by its respective subtask:
 pub mod keybind; // phux-nz4.3
 pub mod loader; // phux-nz4.2
+pub mod scaffold; // phux-ijp (config init: commented projection of default.toml)
 pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Widget is the trait)
 
 pub use error::{ConfigError, byte_offset_to_line_col};
@@ -97,6 +98,36 @@ pub fn parse_str(input: &str, path: &Path) -> Result<Config, ConfigError> {
 /// the user input fail to parse as TOML, or if the merged document
 /// fails to deserialize into the schema.
 pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, ConfigError> {
+    let merged = merged_config_table(user_input, path)?;
+    toml::Value::Table(merged).try_into().map_err(|e| {
+        let (line, col) = e
+            .span()
+            .map_or((1, 1), |r| byte_offset_to_line_col(user_input, r.start));
+        ConfigError::Parse {
+            path: path.to_path_buf(),
+            line,
+            col,
+            message: e.message().to_owned(),
+        }
+    })
+}
+
+/// Merge `user_input` over [`DEFAULT_CONFIG_TOML`] and return the
+/// resulting TOML table *without* deserializing into [`Config`].
+///
+/// This is the document-level half of [`parse_with_defaults`]: it is
+/// what `phux config show` serializes to render the effective config
+/// (the shipped defaults with the user's overrides applied). Keeping it
+/// at the table level means the rendered output is valid round-trippable
+/// TOML rather than a typed struct re-serialized in schema order.
+///
+/// `path` is used only for error reporting on `user_input`.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Parse`] if the embedded defaults or
+/// `user_input` are not valid TOML.
+pub fn merged_config_table(user_input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
     let default_table: toml::Table = toml::from_str(DEFAULT_CONFIG_TOML).map_err(|e| {
         let (line, col) = e.span().map_or((1, 1), |r| {
             byte_offset_to_line_col(DEFAULT_CONFIG_TOML, r.start)
@@ -119,18 +150,7 @@ pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, Conf
             message: e.message().to_owned(),
         }
     })?;
-    let merged = merge_tables(default_table, user_table);
-    toml::Value::Table(merged).try_into().map_err(|e| {
-        let (line, col) = e
-            .span()
-            .map_or((1, 1), |r| byte_offset_to_line_col(user_input, r.start));
-        ConfigError::Parse {
-            path: path.to_path_buf(),
-            line,
-            col,
-            message: e.message().to_owned(),
-        }
-    })
+    Ok(merge_tables(default_table, user_table))
 }
 
 /// Recursively merge `overlay` into `base`. Tables merge per-key;

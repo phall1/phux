@@ -4,6 +4,13 @@
 default:
     @just --list
 
+# Scaffold a commented starter config into a worktree-local XDG dir
+# (./.phux-xdg) so you can test config changes without touching your real
+# ~/.config/phux. Re-run freely: `phux config init` refuses to clobber.
+# Inspect the result with: XDG_CONFIG_HOME="$PWD/.phux-xdg" phux config show
+scaffold-config:
+    XDG_CONFIG_HOME="{{justfile_directory()}}/.phux-xdg" cargo run -q -p phux -- config init
+
 # Quick type-check across the workspace.
 check:
     cargo check --workspace --all-targets
