@@ -15,11 +15,12 @@ use phux_config::keybind::ResolvedAction;
 use phux_protocol::input::key::{KeyAction, KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 use super::{OverlayCommand, RenderOverlay};
+use crate::render::Theme;
 
 /// A single-line text-input modal that commits to an action.
 #[derive(Debug, Clone)]
@@ -32,27 +33,37 @@ pub struct PromptOverlay {
     arg_key: String,
     /// Current input buffer.
     input: String,
+    /// Color slots snapshotted from the active [`Theme`] at construction.
+    /// Captured (not borrowed) so the overlay stays `'static`.
+    theme: Theme,
 }
 
 impl PromptOverlay {
     /// Build a prompt that commits the typed text as
     /// `action { arg_key: <text> }`. `initial` pre-fills the input
-    /// (cursor lands at the end).
+    /// (cursor lands at the end); `theme` styles the modal chrome.
     #[must_use]
-    pub fn new(title: &str, action: &str, arg_key: &str, initial: &str) -> Self {
+    pub fn new(title: &str, action: &str, arg_key: &str, initial: &str, theme: &Theme) -> Self {
         Self {
             title: title.to_owned(),
             action: action.to_owned(),
             arg_key: arg_key.to_owned(),
             input: initial.to_owned(),
+            theme: *theme,
         }
     }
 
     /// The `rename-window` prompt, pre-filled with the window's current
-    /// name.
+    /// name and styled with `theme`.
     #[must_use]
-    pub fn rename_window(current_name: &str) -> Self {
-        Self::new("rename window", "rename-window", "name", current_name)
+    pub fn rename_window(current_name: &str, theme: &Theme) -> Self {
+        Self::new(
+            "rename window",
+            "rename-window",
+            "name",
+            current_name,
+            theme,
+        )
     }
 
     fn committed_action(&self) -> ResolvedAction {
@@ -84,10 +95,11 @@ impl RenderOverlay for PromptOverlay {
         let modal = Self::modal_area(area);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border))
             .title(Span::styled(
                 format!(" {} ", self.title),
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center);
@@ -159,7 +171,7 @@ mod tests {
 
     #[test]
     fn typing_then_enter_commits_resolved_action() {
-        let mut p = PromptOverlay::rename_window("");
+        let mut p = PromptOverlay::rename_window("", &Theme::default());
         for ch in ['b', 'u', 'i', 'l', 'd'] {
             assert_eq!(typ(&mut p, ch), OverlayCommand::Stay);
         }
@@ -176,7 +188,7 @@ mod tests {
 
     #[test]
     fn backspace_edits_buffer() {
-        let mut p = PromptOverlay::rename_window("ab");
+        let mut p = PromptOverlay::rename_window("ab", &Theme::default());
         assert_eq!(
             p.handle_key(&press(PhysicalKey::Backspace, None)),
             OverlayCommand::Stay
@@ -192,7 +204,7 @@ mod tests {
 
     #[test]
     fn escape_cancels() {
-        let mut p = PromptOverlay::rename_window("x");
+        let mut p = PromptOverlay::rename_window("x", &Theme::default());
         assert_eq!(
             p.handle_key(&press(PhysicalKey::Escape, None)),
             OverlayCommand::Dismiss
@@ -201,7 +213,7 @@ mod tests {
 
     #[test]
     fn empty_enter_cancels_rather_than_committing_blank() {
-        let mut p = PromptOverlay::rename_window("");
+        let mut p = PromptOverlay::rename_window("", &Theme::default());
         assert_eq!(
             p.handle_key(&press(PhysicalKey::Enter, None)),
             OverlayCommand::Dismiss
@@ -210,7 +222,7 @@ mod tests {
 
     #[test]
     fn control_text_is_ignored() {
-        let mut p = PromptOverlay::rename_window("");
+        let mut p = PromptOverlay::rename_window("", &Theme::default());
         // A control char in `text` must not enter the buffer.
         assert_eq!(typ(&mut p, '\t'), OverlayCommand::Stay);
         assert_eq!(

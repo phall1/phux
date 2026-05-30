@@ -18,6 +18,7 @@ use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
+use crate::render::Theme;
 use crate::render::overlay::{HelpOverlay, OverlayOutcome, OverlayState, PromptOverlay};
 
 /// Mutable context the input-dispatch path needs to update on a chord
@@ -58,6 +59,11 @@ pub(super) struct DispatchCtx<'a> {
     /// body. `None` when config load failed (overlay still pushes but
     /// shows "no bindings configured").
     pub keybindings: Option<&'a phux_config::KeybindingsCfg>,
+    /// phux-ahv.4: chrome + overlay color theme, resolved from
+    /// `[theme]` config at driver start. Overlays snapshot it at
+    /// construction (`show-help`, `rename-window`) so their painted
+    /// colors flow from a single source of truth.
+    pub theme: &'a Theme,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -603,7 +609,7 @@ fn run_action(
                     .map(|w| w.name.clone())
                     .unwrap_or_default();
                 ctx.overlays
-                    .push(Box::new(PromptOverlay::rename_window(&current)));
+                    .push(Box::new(PromptOverlay::rename_window(&current, ctx.theme)));
                 effects.layout_mutated = true;
             }
         }
@@ -659,8 +665,8 @@ fn run_action(
             // intent was "open phux help"). Idempotent: pushing while
             // already active just replaces (debug-logged).
             let overlay = ctx.keybindings.map_or_else(
-                || HelpOverlay::from_config(&phux_config::KeybindingsCfg::default()),
-                HelpOverlay::from_config,
+                || HelpOverlay::from_config(&phux_config::KeybindingsCfg::default(), ctx.theme),
+                |kb| HelpOverlay::from_config(kb, ctx.theme),
             );
             ctx.overlays.push(Box::new(overlay));
         }
@@ -935,6 +941,7 @@ mod tests {
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
+        let theme = Theme::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -944,6 +951,7 @@ mod tests {
             pending_windows: &mut pending_windows,
             overlays: &mut overlays,
             keybindings: None,
+            theme: &theme,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1073,6 +1081,7 @@ mod tests {
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
+        let theme = Theme::default();
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1083,6 +1092,7 @@ mod tests {
                 pending_windows: &mut pending_windows,
                 overlays: &mut overlays,
                 keybindings: None,
+                theme: &theme,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -1119,6 +1129,7 @@ mod tests {
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
+        let theme = Theme::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1128,6 +1139,7 @@ mod tests {
             pending_windows: &mut pending_windows,
             overlays: &mut overlays,
             keybindings: None,
+            theme: &theme,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),

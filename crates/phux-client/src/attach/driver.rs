@@ -405,8 +405,22 @@ async fn main_loop<W: super::RenderSink>(
     // reload (which could surface IO errors under user fingers); on
     // load failure the help modal still works, just showing "no
     // bindings configured".
+    // phux-ahv.4: load the config once and split out both the
+    // keybindings snapshot (help overlay) and the color theme (chrome +
+    // overlays). On load failure both fall back to defaults — the help
+    // modal shows "no bindings" and chrome paints with the built-in
+    // palette.
+    let loaded_cfg = phux_config::loader::load().ok();
     let keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
-        phux_config::loader::load().ok().map(|c| c.keybindings);
+        loaded_cfg.as_ref().map(|c| c.keybindings.clone());
+    // phux-ahv.4: single source of truth for chrome + overlay colors,
+    // owned alongside the keybindings snapshot and threaded into the
+    // overlay render path via `DispatchCtx`.
+    let theme: crate::render::Theme = loaded_cfg
+        .as_ref()
+        .map_or_else(crate::render::Theme::default, |c| {
+            crate::render::Theme::from_cfg(&c.theme)
+        });
     // phux-5ke.4: overlay state — initially empty. Pushed onto by the
     // `show-help` action; drained by `OverlayState::handle_key` when
     // the active overlay returns `Dismiss`. While active, key events
@@ -675,6 +689,7 @@ async fn main_loop<W: super::RenderSink>(
                     pending_windows: &mut pending_windows,
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
+                    theme: &theme,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -732,6 +747,7 @@ async fn main_loop<W: super::RenderSink>(
                     pending_windows: &mut pending_windows,
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
+                    theme: &theme,
                 };
                 let layout_changed = dispatch_input_events(
                     out,

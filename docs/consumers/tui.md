@@ -294,8 +294,8 @@ when   = { exit-code = "*" }
 action = { kind = "notify", text = "pane {pane} exited with {exit-code}" }
 
 [theme]
-fg = "#cdd6f4"
-bg = "#1e1e2e"
+accent = "#cdd6f4"
+section_header = "yellow"
 ```
 
 **Spawn defaults under `[defaults]`** shape what happens when a new pane
@@ -343,6 +343,35 @@ Config reloads are explicit, not automatic. `phux config reload` re-reads
 the config file and applies it server-wide. We do not watch the file
 because watch-reload introduces a class of "saved-mid-edit, now my
 keybindings are gone" papercuts.
+
+### 4.4 Theme color slots
+
+`[theme]` is a free-form `slot = color` map. The renderer recognizes a
+fixed set of named slots that color the chrome (status bar, dividers) and
+overlays (help, prompt modals). Unknown slot keys are ignored; an
+unparseable color keeps that slot's default. Both cases are logged at
+`warn` rather than failing the load. Colors accept named values
+(`"cyan"`), hex (`"#cdd6f4"`), and ANSI indices (`"12"`).
+
+Recognized slots:
+
+| Slot             | Default     | Used for                                  |
+|------------------|-------------|-------------------------------------------|
+| `accent`         | cyan        | Modal titles (help / prompt border title) |
+| `chord`          | green       | Keybinding chords in the help table       |
+| `action`         | terminal fg | Action labels                             |
+| `dim`            | dark gray   | Footer hints, the "no bindings" notice    |
+| `border`         | terminal fg | Modal borders                             |
+| `title`          | cyan        | Titles that diverge from `accent`         |
+| `section_header` | yellow      | Section headings inside the help modal    |
+| `error`          | red         | Error / alarm text                        |
+
+```toml
+[theme]
+accent = "magenta"
+section_header = "#cdd6f4"
+chord = "12"
+```
 
 ---
 

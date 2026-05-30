@@ -14,11 +14,12 @@ use phux_config::{Action, KeybindingsCfg};
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
 use super::{OverlayCommand, RenderOverlay};
+use crate::render::Theme;
 
 /// One row in the help table: a chord (or chord sequence) and the
 /// action it resolves to. `chord_text` already includes the prefix
@@ -53,14 +54,18 @@ pub struct HelpOverlay {
     /// sees `Press ? or Esc to close` rather than a stale `F1`.
     /// `None` when no global binding maps to `show-help`.
     show_help_chord: Option<String>,
+    /// Color slots snapshotted from the active [`Theme`] at construction.
+    /// Captured (not borrowed) so the overlay stays `'static`.
+    theme: Theme,
 }
 
 impl HelpOverlay {
-    /// Build the overlay from a config snapshot. Cheap; clones small
-    /// strings. The overlay owns its entries — the source `cfg` may be
+    /// Build the overlay from a config snapshot, styled with `theme`.
+    /// Cheap; clones small strings and copies the `Theme`. The overlay
+    /// owns its entries and colors — both `cfg` and `theme` may be
     /// dropped immediately after construction.
     #[must_use]
-    pub fn from_config(cfg: &KeybindingsCfg) -> Self {
+    pub fn from_config(cfg: &KeybindingsCfg, theme: &Theme) -> Self {
         let prefix_entries: Vec<Entry> = cfg
             .prefix_table
             .iter()
@@ -100,6 +105,7 @@ impl HelpOverlay {
             global_entries,
             hardcoded_entries,
             show_help_chord,
+            theme: *theme,
         }
     }
 
@@ -136,11 +142,11 @@ impl HelpOverlay {
             lines.push(Line::from(Span::styled(
                 format!("Prefix bindings ({})", self.prefix),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(self.theme.section_header)
                     .add_modifier(Modifier::BOLD),
             )));
             for e in &self.prefix_entries {
-                lines.push(entry_line(e, chord_width));
+                lines.push(entry_line(e, chord_width, self.theme.chord));
             }
         }
         if !self.global_entries.is_empty() {
@@ -150,11 +156,11 @@ impl HelpOverlay {
             lines.push(Line::from(Span::styled(
                 "Global bindings",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(self.theme.section_header)
                     .add_modifier(Modifier::BOLD),
             )));
             for e in &self.global_entries {
-                lines.push(entry_line(e, chord_width));
+                lines.push(entry_line(e, chord_width, self.theme.chord));
             }
         }
         if !self.hardcoded_entries.is_empty() {
@@ -164,17 +170,17 @@ impl HelpOverlay {
             lines.push(Line::from(Span::styled(
                 "Hardcoded",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(self.theme.section_header)
                     .add_modifier(Modifier::BOLD),
             )));
             for e in &self.hardcoded_entries {
-                lines.push(entry_line(e, chord_width));
+                lines.push(entry_line(e, chord_width, self.theme.chord));
             }
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
                 "No keybindings configured.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.dim),
             )));
         }
         lines.push(Line::from(""));
@@ -185,7 +191,7 @@ impl HelpOverlay {
         lines.push(Line::from(Span::styled(
             footer,
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(self.theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )));
         lines
@@ -197,10 +203,11 @@ impl RenderOverlay for HelpOverlay {
         let modal = Self::centered(area);
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.border))
             .title(Span::styled(
                 " phux help ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ))
             .title_alignment(Alignment::Center);
@@ -225,14 +232,14 @@ impl RenderOverlay for HelpOverlay {
 
 /// One row in the help body — chord left-aligned, padded to `width`,
 /// then a separator and the action name.
-fn entry_line(e: &Entry, width: usize) -> Line<'_> {
+fn entry_line(e: &Entry, width: usize, chord_color: ratatui::style::Color) -> Line<'_> {
     let pad = width.saturating_sub(e.chord.len());
     let padding = " ".repeat(pad);
     Line::from(vec![
         Span::styled(
             e.chord.clone(),
             Style::default()
-                .fg(Color::Green)
+                .fg(chord_color)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(padding),
@@ -325,7 +332,7 @@ mod tests {
 
     #[test]
     fn from_config_collects_prefix_and_global() {
-        let overlay = HelpOverlay::from_config(&cfg());
+        let overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         assert_eq!(overlay.prefix, "C-a");
         assert_eq!(overlay.prefix_entries.len(), 3);
         assert_eq!(overlay.global_entries.len(), 1);
@@ -339,7 +346,7 @@ mod tests {
     fn no_show_help_binding_falls_back_to_esc_only_footer() {
         let mut c = cfg();
         c.global.clear();
-        let overlay = HelpOverlay::from_config(&c);
+        let overlay = HelpOverlay::from_config(&c, &Theme::default());
         assert_eq!(overlay.show_help_chord, None);
         let text = render_to_string(&overlay, 80, 24);
         assert!(text.contains("Press Esc to close"), "text was:\n{text}");
@@ -355,7 +362,7 @@ mod tests {
             .insert("|".to_owned(), Action::Bare("split-pane".to_owned()));
         c.prefix_table
             .insert("-".to_owned(), Action::Bare("split-pane".to_owned()));
-        let overlay = HelpOverlay::from_config(&c);
+        let overlay = HelpOverlay::from_config(&c, &Theme::default());
         let text = render_to_string(&overlay, 80, 24);
         assert!(text.contains("C-a |"), "missing `C-a |` row:\n{text}");
         assert!(text.contains("C-a -"), "missing `C-a -` row:\n{text}");
@@ -363,7 +370,7 @@ mod tests {
 
     #[test]
     fn esc_dismisses() {
-        let mut overlay = HelpOverlay::from_config(&cfg());
+        let mut overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         assert_eq!(
             overlay.handle_key(&key(PhysicalKey::Escape)),
             OverlayCommand::Dismiss
@@ -372,7 +379,7 @@ mod tests {
 
     #[test]
     fn f1_dismisses() {
-        let mut overlay = HelpOverlay::from_config(&cfg());
+        let mut overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         assert_eq!(
             overlay.handle_key(&key(PhysicalKey::F1)),
             OverlayCommand::Dismiss
@@ -381,7 +388,7 @@ mod tests {
 
     #[test]
     fn other_keys_stay() {
-        let mut overlay = HelpOverlay::from_config(&cfg());
+        let mut overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         assert_eq!(
             overlay.handle_key(&key(PhysicalKey::A)),
             OverlayCommand::Stay
@@ -432,7 +439,7 @@ mod tests {
 
     #[test]
     fn render_into_buffer_does_not_panic() {
-        let overlay = HelpOverlay::from_config(&cfg());
+        let overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         let text = render_to_string(&overlay, 80, 24);
         assert!(
             text.contains("phux help"),
@@ -447,7 +454,7 @@ mod tests {
         // that every section the overlay promises is actually
         // painted. Covers the regression that motivated phux-i08:
         // configured prefix/global chords were missing from the overlay.
-        let overlay = HelpOverlay::from_config(&cfg());
+        let overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
         let text = render_to_string(&overlay, 80, 24);
         // Section headers.
         assert!(

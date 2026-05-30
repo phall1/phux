@@ -21,3 +21,6 @@
 pub mod chrome;
 pub mod overlay;
 mod sgr;
+pub mod theme;
+
+pub use theme::Theme;
