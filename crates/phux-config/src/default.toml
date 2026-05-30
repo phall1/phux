@@ -68,9 +68,34 @@ prefix = "C-a"
 "k" = { action = "focus-direction", direction = "up" }
 "l" = { action = "focus-direction", direction = "right" }
 
-# Cycle through panes in DFS order.
-"n" = "next-pane"
-"p" = "previous-pane"
+# Cycle through panes in DFS order. tmux uses n/p for *windows*, so the
+# pane-cycle bindings live on o / ; (phux-4li.16).
+"o" = "next-pane"
+";" = "previous-pane"
+
+# Windows ("tabs"), tmux-style (phux-4li.15/.16). c opens a new window;
+# n/p cycle windows; & kills the active window (all its panes); 0-9 jump
+# to a window by the position shown in the status bar.
+"c" = "new-window"
+"n" = "next-window"
+"p" = "previous-window"
+"&" = "kill-window"
+"0" = { action = "select-window", index = 0 }
+"1" = { action = "select-window", index = 1 }
+"2" = { action = "select-window", index = 2 }
+"3" = { action = "select-window", index = 3 }
+"4" = { action = "select-window", index = 4 }
+"5" = { action = "select-window", index = 5 }
+"6" = { action = "select-window", index = 6 }
+"7" = { action = "select-window", index = 7 }
+"8" = { action = "select-window", index = 8 }
+"9" = { action = "select-window", index = 9 }
+
+# Rename the active window. With an explicit name it renames immediately,
+# e.g. "," = { action = "rename-window", name = "build" }. The bare
+# binding auto-labels with the next free number for now; an interactive
+# type-a-name prompt is a follow-up (phux-ahv).
+"," = "rename-window"
 
 # Detach this client from the session.
 "d" = "detach"

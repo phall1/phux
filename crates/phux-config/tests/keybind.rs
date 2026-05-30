@@ -169,6 +169,16 @@ fn resolver_builds_from_three_bindings() {
 }
 
 #[test]
+fn shipped_default_keybindings_build_a_resolver() {
+    // Regression guard: every chord in the embedded default.toml must
+    // parse and the prefix table must be unambiguous (phux-4li.18 added
+    // the window bindings o/;/c/n/p/&/0-9/, alongside the pane ones).
+    let cfg = phux_config::parse_with_defaults("", std::path::Path::new("<embedded default.toml>"))
+        .expect("default config parses");
+    Resolver::new(&cfg.keybindings).expect("default keybindings build a resolver");
+}
+
+#[test]
 fn resolver_rejects_ambiguous_prefix_binding() {
     // A global "C-b" binding plus a prefix table makes the prefix chord
     // ambiguous: feeding "C-b" would both resolve the global AND open the

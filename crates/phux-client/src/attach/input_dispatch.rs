@@ -534,6 +534,21 @@ fn run_action(
                 w.select(index);
             });
         }
+        "rename-window" => {
+            if ctx.workspace.active_window().is_none() {
+                tracing::warn!("rename-window: no active window; dropping action");
+                effects.bell = true;
+                return effects;
+            }
+            // An explicit `name` renames immediately; the bare binding
+            // auto-labels with the next free number (interactive name
+            // entry is a follow-up). A rename is shared window state, so
+            // unlike a focus/switch it broadcasts via SET_METADATA.
+            let name = name_arg(resolved).unwrap_or_else(|| ctx.workspace.default_window_name());
+            ctx.workspace.rename_active(name);
+            effects.layout_mutated = true;
+            effects.set_metadata = true;
+        }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
                 if let Some(ls) = ctx.workspace.active_window_mut()
@@ -652,6 +667,11 @@ fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
 fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
     let v = resolved.args.get("index")?.as_integer()?;
     usize::try_from(v).ok()
+}
+
+/// Pull a window name out of a [`ResolvedAction`]'s `name = "..."` arg.
+fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
+    resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
 }
 
 /// Apply a window-switch `mutate` to the workspace and, **only if the
@@ -970,6 +990,28 @@ mod tests {
         let effects = run(&bare_action("select-window"), &mut workspace);
         assert!(effects.bell);
         assert!(!effects.layout_mutated);
+    }
+
+    #[test]
+    fn rename_window_with_name_arg_renames_and_broadcasts() {
+        let mut workspace = Workspace::single(tid(1)); // window "1"
+        let mut action = bare_action("rename-window");
+        action
+            .args
+            .insert("name".to_owned(), toml::Value::String("build".into()));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(workspace.windows[0].name, "build");
+        assert!(effects.layout_mutated);
+        assert!(effects.set_metadata, "rename is shared window state");
+    }
+
+    #[test]
+    fn rename_window_no_arg_auto_labels() {
+        let mut workspace = Workspace::single(tid(1)); // window "1"
+        let effects = run(&bare_action("rename-window"), &mut workspace);
+        // Next free integer label (skips the in-use "1").
+        assert_eq!(workspace.windows[0].name, "2");
+        assert!(effects.layout_mutated);
     }
 
     #[test]
