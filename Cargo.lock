@@ -1510,6 +1510,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bytes",
  "insta",
+ "int-enum",
  "libghostty-vt",
  "proptest",
  "thiserror 2.0.18",

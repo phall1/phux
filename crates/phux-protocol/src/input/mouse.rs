@@ -1,54 +1,90 @@
-//! Mouse input — `MouseEvent` plus re-exports of libghostty's canonical atoms.
+//! Mouse input — the `MouseEvent` wire type and its atoms.
 //!
-//! Per ADR-0008, `MouseAction` and `MouseButton` are libghostty-vt's types
-//! under phux-flavored names. The wrapper struct [`MouseEvent`] is
-//! phux-defined because libghostty's `mouse::Event<'alloc>` is allocator-
-//! lifetime-bound and therefore not directly serializable.
+//! Per [ADR-0023] the wire owns its atoms: `MouseAction` and `MouseButton` are
+//! phux-defined and libghostty-free (their wire discriminants match libghostty's
+//! `mouse::{Action, Button}`). Under the `server` feature they convert to/from
+//! libghostty, and the server-side state handles `MouseProtocol`/`MouseEncoding`
+//! are re-exported (those are DECSET-toggled `Terminal` state, not wire fields —
+//! docs/spec/L1.md §2.5).
 //!
 //! Coordinates are pane-local surface-space pixels (NOT cells), matching
-//! libghostty's `mouse::Position` shape exactly — see docs/spec/input.md §3.1 for the
-//! cell-geometry contract.
+//! libghostty's `mouse::Position` shape — see docs/spec/input.md §3.1.
 //!
-//! # Mouse mode bits ([`MouseProtocol`] / [`MouseEncoding`])
-//!
-//! Per docs/spec/L1.md §2.5, cursor and mode state — including the inner program's
-//! mouse-tracking protocol and the wire format it asks for — live entirely
-//! inside each end's `libghostty_vt::Terminal`. They are **not** separate
-//! wire concepts: clients query their local `Terminal::modes()` to learn
-//! whether to forward mouse events, and the server reads its `Terminal`
-//! directly via `Encoder::set_options_from_terminal` when emitting PTY
-//! bytes for an inbound `INPUT_MOUSE`.
-//!
-//! [`MouseProtocol`] and [`MouseEncoding`] are therefore re-exports of
-//! libghostty's canonical `mouse::TrackingMode` and `mouse::Format` (per
-//! ADR-0008): they exist as named handles for the server-side state the
-//! inner program toggles via DECSET, not as wire fields.
+//! [ADR-0023]: https://github.com/phall1/phux/blob/main/ADR/0023-wire-owns-input-atoms.md
 
 use super::key::ModSet;
 
-pub use libghostty_vt::mouse::{
-    Action as MouseAction, Button as MouseButton, Format as MouseEncoding,
-    TrackingMode as MouseProtocol,
-};
+/// What the mouse did. Wire `u32`; values match libghostty's `mouse::Action`.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    /// Button pressed.
+    Press = 0,
+    /// Button released.
+    Release = 1,
+    /// Pointer moved.
+    Motion = 2,
+}
+
+impl TryFrom<u32> for MouseAction {
+    type Error = u32;
+    fn try_from(v: u32) -> Result<Self, u32> {
+        match v {
+            0 => Ok(Self::Press),
+            1 => Ok(Self::Release),
+            2 => Ok(Self::Motion),
+            other => Err(other),
+        }
+    }
+}
+
+/// Which mouse button. Wire `u32`; values match libghostty's `mouse::Button`.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(missing_docs, reason = "button identities are self-explanatory")]
+pub enum MouseButton {
+    Unknown = 0,
+    Left = 1,
+    Right = 2,
+    Middle = 3,
+    Four = 4,
+    Five = 5,
+    Six = 6,
+    Seven = 7,
+    Eight = 8,
+    Nine = 9,
+    Ten = 10,
+    Eleven = 11,
+}
+
+impl TryFrom<u32> for MouseButton {
+    type Error = u32;
+    fn try_from(v: u32) -> Result<Self, u32> {
+        Ok(match v {
+            0 => Self::Unknown,
+            1 => Self::Left,
+            2 => Self::Right,
+            3 => Self::Middle,
+            4 => Self::Four,
+            5 => Self::Five,
+            6 => Self::Six,
+            7 => Self::Seven,
+            8 => Self::Eight,
+            9 => Self::Nine,
+            10 => Self::Ten,
+            11 => Self::Eleven,
+            other => return Err(other),
+        })
+    }
+}
 
 /// A normalized mouse input event flowing from client to server.
 ///
-/// Composes libghostty's `MouseAction`, `MouseButton`, and our `ModSet`
-/// (which is itself libghostty's `key::Mods`). The server reconstructs a
-/// `libghostty_vt::mouse::Event` from these fields, derives a
-/// `mouse::EncoderSize` from the latest `VIEWPORT_RESIZE`, and hands the
-/// event to a per-pane `mouse::Encoder`.
-///
 /// # Coordinate system — cell-geometry contract
 ///
-/// `x` and `y` are **pane-local surface-space pixels**, NOT cell indices.
-/// docs/spec/input.md §3.1 makes this load-bearing:
-///
-/// * Cell-quantized clients (TUIs without true pixel-precision input) MUST
-///   emit positions at `cell_index × cell_size` — the server's encoder then
-///   produces correct output in both cell-format (SGR, URXVT) and
-///   pixel-format (SGR-Pixels) mouse protocols.
-/// * Clients with real pixel input pass it through unchanged.
+/// `x` and `y` are **pane-local surface-space pixels**, NOT cell indices
+/// (docs/spec/input.md §3.1). Cell-quantized clients MUST emit positions at
+/// `cell_index × cell_size`; clients with real pixel input pass it through.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MouseEvent {
     /// What the mouse did: press, release, or motion.
@@ -65,12 +101,69 @@ pub struct MouseEvent {
 
 // `MouseEvent` is `PartialEq` but not `Eq` because `f64` is not `Eq`.
 
+/// Server-side mouse state handles + atom conversions (libghostty boundary).
+#[cfg(feature = "server")]
+mod server_side {
+    use super::{MouseAction, MouseButton};
+
+    /// The inner program's mouse-tracking protocol (DECSET state, not a wire
+    /// field). Re-exported from libghostty.
+    pub use libghostty_vt::mouse::{Format as MouseEncoding, TrackingMode as MouseProtocol};
+
+    impl From<MouseAction> for libghostty_vt::mouse::Action {
+        fn from(a: MouseAction) -> Self {
+            match a {
+                MouseAction::Press => Self::Press,
+                MouseAction::Release => Self::Release,
+                MouseAction::Motion => Self::Motion,
+            }
+        }
+    }
+
+    impl From<MouseButton> for libghostty_vt::mouse::Button {
+        fn from(b: MouseButton) -> Self {
+            use libghostty_vt::mouse::Button as L;
+            match b {
+                MouseButton::Unknown => L::Unknown,
+                MouseButton::Left => L::Left,
+                MouseButton::Right => L::Right,
+                MouseButton::Middle => L::Middle,
+                MouseButton::Four => L::Four,
+                MouseButton::Five => L::Five,
+                MouseButton::Six => L::Six,
+                MouseButton::Seven => L::Seven,
+                MouseButton::Eight => L::Eight,
+                MouseButton::Nine => L::Nine,
+                MouseButton::Ten => L::Ten,
+                MouseButton::Eleven => L::Eleven,
+            }
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+pub use server_side::{MouseEncoding, MouseProtocol};
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn mouse_event_composes_libghostty_atoms() {
+    fn mouse_atoms_round_trip_wire_discriminants() {
+        for a in [MouseAction::Press, MouseAction::Release, MouseAction::Motion] {
+            assert_eq!(MouseAction::try_from(a as u32), Ok(a));
+        }
+        for b in [MouseButton::Left, MouseButton::Middle, MouseButton::Eleven] {
+            assert_eq!(MouseButton::try_from(b as u32), Ok(b));
+        }
+        assert!(MouseAction::try_from(99).is_err());
+        assert!(MouseButton::try_from(99).is_err());
+    }
+
+    #[test]
+    fn mouse_event_is_copy() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<MouseEvent>();
         let ev = MouseEvent {
             action: MouseAction::Press,
             button: MouseButton::Left,
@@ -79,60 +172,6 @@ mod tests {
             y: 34.25,
         };
         assert_eq!(ev.action, MouseAction::Press);
-        assert_eq!(ev.button, MouseButton::Left);
         assert!((ev.x - 12.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn mouse_event_is_copy() {
-        fn assert_copy<T: Copy>() {}
-        assert_copy::<MouseEvent>();
-    }
-
-    /// `MouseProtocol` covers the five DECSET tracking modes the inner
-    /// program may select (docs/spec/L1.md §2.5). Names follow libghostty's
-    /// `TrackingMode` — see ADR-0008.
-    #[test]
-    fn mouse_protocol_variants_present() {
-        // None      → tracking disabled
-        // X10       → DECSET 9, press-only
-        // Normal    → DECSET 1000, press + release
-        // Button    → DECSET 1002, press + release + drag (button-event)
-        // Any       → DECSET 1003, all motion (any-event)
-        let _ = MouseProtocol::None;
-        let _ = MouseProtocol::X10;
-        let _ = MouseProtocol::Normal;
-        let _ = MouseProtocol::Button;
-        let _ = MouseProtocol::Any;
-        assert_ne!(MouseProtocol::None, MouseProtocol::X10);
-        assert_ne!(MouseProtocol::Normal, MouseProtocol::Button);
-        assert_ne!(MouseProtocol::Button, MouseProtocol::Any);
-    }
-
-    /// `MouseEncoding` covers the five wire formats the inner program may
-    /// select via DECSET 1005 / 1006 / 1015 / 1016 (docs/spec/L1.md §2.5). Names
-    /// follow libghostty's `Format` — see ADR-0008.
-    #[test]
-    fn mouse_encoding_variants_present() {
-        // X10       → legacy (CSI M Cb Cx Cy), DECSET 1006/1015/1016 all off
-        // Utf8      → DECSET 1005 (UTF-8 extended)
-        // Sgr       → DECSET 1006 (SGR)
-        // Urxvt     → DECSET 1015 (urxvt)
-        // SgrPixels → DECSET 1016 (SGR with pixel coordinates)
-        let _ = MouseEncoding::X10;
-        let _ = MouseEncoding::Utf8;
-        let _ = MouseEncoding::Sgr;
-        let _ = MouseEncoding::Urxvt;
-        let _ = MouseEncoding::SgrPixels;
-        assert_ne!(MouseEncoding::X10, MouseEncoding::Sgr);
-        assert_ne!(MouseEncoding::Sgr, MouseEncoding::SgrPixels);
-        assert_ne!(MouseEncoding::Urxvt, MouseEncoding::Utf8);
-    }
-
-    #[test]
-    fn mouse_protocol_and_encoding_are_copy() {
-        fn assert_copy<T: Copy>() {}
-        assert_copy::<MouseProtocol>();
-        assert_copy::<MouseEncoding>();
     }
 }

@@ -40,6 +40,8 @@ impl PerTerminalFocusEncoder {
         if !terminal.mode(Mode::FOCUS_EVENT)? {
             return Ok(None);
         }
+        // Wire atom -> libghostty's focus::Event for the encoder (ADR-0023).
+        let event = libghostty_vt::focus::Event::from(event);
         // 8 bytes is plenty for CSI I / CSI O (3 bytes each).
         self.buf.resize(8, 0);
         let written = loop {

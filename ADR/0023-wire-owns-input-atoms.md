@@ -46,9 +46,12 @@ events to libghostty's key/mouse encoders to produce PTY bytes.
 ## Decision
 
 1. `phux-protocol` defines its own wire input atoms, libghostty-free:
-   `PhysicalKey(u32)` (transparent newtype over the W3C key discriminant),
-   `KeyAction` (Press/Release/Repeat), `ModSet` (`bitflags`, `u16`), and the
-   focus/mouse atoms. The wire encode/decode is unchanged (same bytes).
+   `PhysicalKey` is a phux-owned copy of libghostty's `key::Key` enum (same
+   discriminants, derives `int_enum::IntEnum` for `TryFrom<u32>`); `KeyAction`
+   (Press/Release/Repeat), `ModSet` (`bitflags`, `u16`), and the focus/mouse
+   atoms are likewise native. The wire encode/decode is unchanged (same bytes).
+   A copied enum (not a `u32` newtype) because consumers — notably
+   `phux-config`'s keybind parser — reference named variants (`PhysicalKey::Tab`).
 2. `pub mod input` and `pub mod wire` are no longer gated behind `server`; the
    codec builds with default (libghostty-free) features and so compiles for
    `wasm32`.
@@ -68,12 +71,12 @@ canonical *engine* (ADR-0008's real intent) while it is no longer the canonical
 
 ## Tradeoffs
 
-- Two representations of the key discriminant now exist (phux `u32` newtype +
-  libghostty enum), kept in lockstep by the conversion impls + a round-trip test.
-  We accept this seam to decouple the wire from the engine.
-- `PhysicalKey` is a `u32` newtype, not a 170-variant enum, so it is less
-  self-documenting than libghostty's `Key`. Named consts cover the common keys;
-  exhaustiveness lives in libghostty (consulted via the `server` conversion).
+- The `PhysicalKey` enum is a copy of libghostty's `Key` (176 W3C key codes), so
+  the two can drift. We accept the copy to decouple the wire from the engine and
+  to keep `phux-config`'s named-variant ergonomics; a `server`-gated round-trip
+  test (`atoms_round_trip_libghostty`) catches any divergence at CI time.
+- `KeyAction`/`ModSet`/focus/mouse atoms are likewise duplicated, but they are
+  tiny and stable.
 
 ## Alternatives considered
 
@@ -81,9 +84,10 @@ canonical *engine* (ADR-0008's real intent) while it is no longer the canonical
   type universe, but requires either compiling the zig FFI into the wasm binary
   (the rust+zig shared-linear-memory problem) or a types-only build mode of
   libghostty-vt — upstream work with real risk, for a worse layering.
-- **Mirror libghostty's `Key` as a 170-variant enum in phux-protocol.** Faithful
-  but a maintenance burden that silently drifts; the `u32` newtype + conversion
-  is leaner and the drift is caught by the round-trip test.
+- **A `u32` newtype for `PhysicalKey` instead of a copied enum.** Leaner (no
+  176-variant copy), but `phux-config`'s keybind parser maps names to
+  `PhysicalKey::Tab`/`Enter`/… variants, which a newtype can't provide without a
+  large named-const list — so the enum copy is the smaller change in practice.
 
 [ADR-0008]: 0008-use-libghostty-types-directly.md
 [ADR-0017]: 0017-tui-not-protocol-privileged.md

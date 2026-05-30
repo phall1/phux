@@ -26,11 +26,10 @@
 #![warn(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(feature = "server")]
-#[cfg_attr(docsrs, doc(cfg(feature = "server")))]
+// The wire codec and its input atoms are libghostty-free (ADR-0023) and so
+// build for any target, including wasm browser consumers. libghostty
+// conversions for the atoms live behind the `server` feature.
 pub mod input;
-#[cfg(feature = "server")]
-#[cfg_attr(docsrs, doc(cfg(feature = "server")))]
 pub mod wire;
 
 pub mod caps;

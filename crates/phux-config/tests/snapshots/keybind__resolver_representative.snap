@@ -7,7 +7,7 @@ Resolver {
         action: None,
         children: {
             KeyChord {
-                modifiers: Mods(
+                modifiers: ModSet(
                     CTRL,
                 ),
                 key: B,
@@ -15,7 +15,7 @@ Resolver {
                 action: None,
                 children: {
                     KeyChord {
-                        modifiers: Mods(
+                        modifiers: ModSet(
                             0x0,
                         ),
                         key: C,
@@ -29,7 +29,7 @@ Resolver {
                         children: {},
                     },
                     KeyChord {
-                        modifiers: Mods(
+                        modifiers: ModSet(
                             0x0,
                         ),
                         key: D,
@@ -45,7 +45,7 @@ Resolver {
                 },
             },
             KeyChord {
-                modifiers: Mods(
+                modifiers: ModSet(
                     ALT,
                 ),
                 key: Q,
@@ -61,7 +61,7 @@ Resolver {
         },
     },
     prefix: KeyChord {
-        modifiers: Mods(
+        modifiers: ModSet(
             CTRL,
         ),
         key: B,

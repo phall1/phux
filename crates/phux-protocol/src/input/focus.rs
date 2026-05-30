@@ -1,9 +1,40 @@
-//! Focus input — direct re-export of libghostty's `focus::Event`.
+//! Focus input — the `FocusEvent` wire atom.
 //!
-//! Per ADR-0008, `FocusEvent` IS libghostty's `focus::Event` (a plain enum
-//! `Gained`/`Lost`). No wrapping; no `gained: bool` indirection.
+//! Per [ADR-0023] the wire owns its atoms: `FocusEvent` is phux-defined and
+//! libghostty-free. Under the `server` feature it converts to/from libghostty's
+//! `focus::Event`.
+//!
+//! [ADR-0023]: https://github.com/phall1/phux/blob/main/ADR/0023-wire-owns-input-atoms.md
 
-pub use libghostty_vt::focus::Event as FocusEvent;
+/// Host-window focus change reported by a client.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusEvent {
+    /// The client window gained focus.
+    Gained = 0,
+    /// The client window lost focus.
+    Lost = 1,
+}
+
+#[cfg(feature = "server")]
+impl From<FocusEvent> for libghostty_vt::focus::Event {
+    fn from(e: FocusEvent) -> Self {
+        match e {
+            FocusEvent::Gained => Self::Gained,
+            FocusEvent::Lost => Self::Lost,
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+impl From<libghostty_vt::focus::Event> for FocusEvent {
+    fn from(e: libghostty_vt::focus::Event) -> Self {
+        match e {
+            libghostty_vt::focus::Event::Gained => Self::Gained,
+            libghostty_vt::focus::Event::Lost => Self::Lost,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

@@ -23,10 +23,10 @@ use phux_protocol::input::key::KeyEvent;
 /// encoder.
 pub fn key_event_to_libghostty(ev: &KeyEvent) -> Result<LgKeyEvent<'static>, Error> {
     let mut out = LgKeyEvent::new()?;
-    out.set_action(ev.action)
-        .set_key(ev.key)
-        .set_mods(ev.mods)
-        .set_consumed_mods(ev.consumed_mods)
+    out.set_action(ev.action.into())
+        .set_key(ev.key.into())
+        .set_mods(ev.mods.into())
+        .set_consumed_mods(ev.consumed_mods.into())
         .set_composing(ev.composing)
         .set_utf8(ev.text.clone());
     if let Some(cp) = ev.unshifted_codepoint
@@ -138,15 +138,24 @@ mod tests {
         );
     }
 
-    /// Sanity: `KeyAction`, `PhysicalKey`, and `ModSet` are now the same
-    /// types as libghostty's `key::Action`, `key::Key`, and `key::Mods`
-    /// (re-exported per ADR-0008). This test exists so the *intent* shows
-    /// up in code; the equality is enforced at the type-system level.
+    /// ADR-0023: the wire atoms are phux-owned but share libghostty's
+    /// discriminants; the `server`-gated conversions are lossless for known
+    /// values, keeping the two in lockstep.
     #[test]
-    fn types_are_libghostty() {
-        fn assert_same_type<T>(_: T, _: T) {}
-        assert_same_type(KeyAction::Press, Action::Press);
-        assert_same_type(PhysicalKey::A, Key::A);
-        assert_same_type(ModSet::CTRL, Mods::CTRL);
+    fn atoms_round_trip_libghostty() {
+        for (pa, la) in [
+            (KeyAction::Press, Action::Press),
+            (KeyAction::Release, Action::Release),
+            (KeyAction::Repeat, Action::Repeat),
+        ] {
+            assert_eq!(Action::from(pa), la);
+            assert_eq!(KeyAction::from(la), pa);
+        }
+        assert_eq!(Key::from(PhysicalKey::A), Key::A);
+        assert_eq!(PhysicalKey::from(Key::A), PhysicalKey::A);
+        assert_eq!(
+            Mods::from(ModSet::CTRL | ModSet::SHIFT),
+            Mods::CTRL | Mods::SHIFT
+        );
     }
 }
