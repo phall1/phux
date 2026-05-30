@@ -1470,6 +1470,7 @@ dependencies = [
  "dhat",
  "futures-util",
  "insta",
+ "libc",
  "libghostty-vt",
  "phux-config",
  "phux-core",

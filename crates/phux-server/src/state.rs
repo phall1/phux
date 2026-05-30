@@ -273,6 +273,17 @@ pub struct ServerState {
     /// Defaults to the `phux_config` schema default so tests that never
     /// call the setter still get a sane bound.
     history_limit: u32,
+    /// How a freshly-spawned pane chooses its working directory
+    /// (`defaults.cwd-inheritance`). Mirrors
+    /// [`crate::runtime::ServerConfig::cwd_inheritance`] so the
+    /// `SPAWN_TERMINAL` handler resolves the new pane's CWD without an
+    /// extra channel to the runtime. Set by the runtime via
+    /// [`Self::set_cwd_inheritance`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default
+    /// ([`phux_config::CwdInheritance::InheritFocused`]) so tests that
+    /// never call the setter exercise the tmux-default behavior.
+    cwd_inheritance: phux_config::CwdInheritance,
     /// Whether any client has ever attached to this server.
     ///
     /// Gates the tmux-model self-exit (phux-60s): the server only exits
@@ -478,6 +489,7 @@ impl ServerState {
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
+            cwd_inheritance: phux_config::CwdInheritance::default(),
             has_served_client: false,
         }
     }
@@ -529,6 +541,21 @@ impl ServerState {
     #[must_use]
     pub const fn history_limit(&self) -> u32 {
         self.history_limit
+    }
+
+    /// Set the working-directory inheritance policy
+    /// (`defaults.cwd-inheritance`) used by `SPAWN_TERMINAL`. Called once
+    /// at server startup to mirror
+    /// [`crate::runtime::ServerConfig::cwd_inheritance`] into state.
+    pub const fn set_cwd_inheritance(&mut self, mode: phux_config::CwdInheritance) {
+        self.cwd_inheritance = mode;
+    }
+
+    /// Read the working-directory inheritance policy set by
+    /// [`Self::set_cwd_inheritance`].
+    #[must_use]
+    pub const fn cwd_inheritance(&self) -> phux_config::CwdInheritance {
+        self.cwd_inheritance
     }
 
     /// Borrow the L3 metadata store.

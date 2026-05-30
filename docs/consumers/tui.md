@@ -302,13 +302,18 @@ bg = "#1e1e2e"
 or session comes into being:
 
 - **`cwd-inheritance`** (string enum, default `"inherit-focused"`)
-  controls how a freshly-spawned pane picks its working directory.
+  controls how a freshly-spawned pane picks its working directory when a
+  `SPAWN_TERMINAL` leaves `cwd` unset (an explicit `cwd` always wins).
   Values: `"inherit-focused"` (match the focused pane's CWD — tmux's
   default), `"home"` (always `$HOME`), `"session-root"` (the directory
   the session was created in), `"last-cwd-per-window"` (remember per
-  window). `inherit-focused` requires server-side PTY working-dir
-  tracking (OSC 7 from the shell, or a kernel-side query); the config
-  knob lands first (phux-4li.1), wiring follows.
+  window). `inherit-focused` and `home` are wired server-side
+  (phux-cs6): `inherit-focused` reads the focused pane's *live* PTY
+  working directory via a kernel query (`/proc/<pid>/cwd` on Linux,
+  `proc_pidinfo` on macOS), so it tracks `cd` without any shell OSC 7
+  setup. `session-root` and `last-cwd-per-window` are accepted but not
+  yet resolved server-side (they fall back to no override); completing
+  them is a phux-cs6 follow-up.
 - **`spawn-on-attach`** (string, default unset) is the command `phux`
   spawns when it auto-creates a session on attach. Unset ⇒ honor
   `defaults.shell` (which honors `$SHELL`).

@@ -48,8 +48,8 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
-    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, ResizeRequest, ScreenRequest,
-    SnapshotRequest, TerminalActor, TerminalHandle,
+    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
+    ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
 };
 
 /// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
@@ -101,6 +101,17 @@ pub struct ServerConfig {
     /// `phux_config`'s `defaults.history-limit`;
     /// [`Self::with_default_socket`] uses the schema default.
     pub history_limit: u32,
+    /// How a freshly-spawned pane chooses its working directory
+    /// (`defaults.cwd-inheritance`, SPEC DESIGN.md). Threaded into
+    /// shared state so `SPAWN_TERMINAL` resolves the new pane's CWD when
+    /// the wire frame leaves `cwd` unset:
+    /// [`phux_config::CwdInheritance::InheritFocused`] reads the spawning
+    /// client's focused pane's live PTY working directory via a kernel
+    /// query ([`crate::cwd_query`]); the other modes pick `$HOME` or the
+    /// session root. The binary populates this from
+    /// `phux_config`'s `defaults.cwd-inheritance`;
+    /// [`Self::with_default_socket`] uses the schema default.
+    pub cwd_inheritance: phux_config::CwdInheritance,
 }
 
 impl ServerConfig {
@@ -114,6 +125,7 @@ impl ServerConfig {
             seed_with_pty: false,
             seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
+            cwd_inheritance: phux_config::CwdInheritance::default(),
         }
     }
 }
@@ -254,6 +266,11 @@ impl ServerRuntime {
         // `SPAWN_TERMINAL` build their panes with the configured cap.
         let history_limit = self.cfg.history_limit;
         state.with_mut(|s| s.set_history_limit(history_limit));
+        // Mirror `defaults.cwd-inheritance` into shared state so the
+        // `SPAWN_TERMINAL` handler resolves a new pane's working directory
+        // from the configured policy.
+        let cwd_inheritance = self.cfg.cwd_inheritance;
+        state.with_mut(|s| s.set_cwd_inheritance(cwd_inheritance));
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -1400,6 +1417,52 @@ async fn resolve_create_if_missing(
     Some(name)
 }
 
+/// Resolve a freshly-spawned pane's working directory from
+/// `defaults.cwd-inheritance` (phux-cs6) when the `SPAWN_TERMINAL` wire
+/// frame left `cwd` unset.
+///
+/// Returns the directory to seed the new pane's `CommandBuilder.cwd`
+/// with, or `None` to inherit the server process's CWD (no override) —
+/// the same effect the wire-`cwd = None` path had before this policy
+/// existed.
+///
+/// Policy mapping:
+/// * [`InheritFocused`](phux_config::CwdInheritance::InheritFocused) —
+///   look up the spawning client's focused pane and ask its actor for
+///   the live PTY CWD (a kernel query on the PTY child, see
+///   [`crate::cwd_query`]). `None` when the client is not attached, has
+///   no focused pane, the pane has no live handle, or the query is
+///   unsupported/denied — each falls through to no override.
+/// * [`Home`](phux_config::CwdInheritance::Home) — `$HOME`, or `None`
+///   when unset.
+/// * [`SessionRoot`](phux_config::CwdInheritance::SessionRoot) /
+///   [`LastCwdPerWindow`](phux_config::CwdInheritance::LastCwdPerWindow)
+///   — not yet wired (the server does not record a session-creation
+///   directory or per-window last-CWD); they fall through to no
+///   override. Tracked as follow-ups under phux-cs6.
+async fn resolve_inherited_cwd(state: &SharedState, client_id: ClientId) -> Option<String> {
+    let mode = state.with(crate::state::ServerState::cwd_inheritance);
+    match mode {
+        phux_config::CwdInheritance::InheritFocused => {
+            // Find the spawning client's focused pane's actor handle in a
+            // single critical section, then query it off-lock (the actor
+            // runs on the same LocalSet; `with` must not be held across
+            // the await).
+            let handle = state.with(|s| {
+                let session = s.attached.get(&client_id)?.session;
+                let focused = s.active_pane_of_session(session)?;
+                s.terminal_handle(focused).cloned()
+            })?;
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            handle.pwd.send(PwdRequest { reply }).await.ok()?;
+            rx.await.ok().flatten()
+        }
+        phux_config::CwdInheritance::Home => std::env::var("HOME").ok().filter(|h| !h.is_empty()),
+        phux_config::CwdInheritance::SessionRoot
+        | phux_config::CwdInheritance::LastCwdPerWindow => None,
+    }
+}
+
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
 /// v0.1 servers expose a single default Collection at
@@ -1500,7 +1563,14 @@ async fn handle_spawn_terminal(
         }
         _ => crate::terminal_actor::default_shell_command(),
     };
+    // Working directory precedence (phux-cs6): an explicit wire `cwd`
+    // always wins; otherwise fall back to `defaults.cwd-inheritance`. The
+    // inherit-focused policy reads the spawning client's focused pane's
+    // live PTY CWD via a kernel query, so `C-a |` from a pane cd'd to
+    // /tmp opens the new pane in /tmp.
     if let Some(path) = cwd {
+        builder.cwd(path);
+    } else if let Some(path) = resolve_inherited_cwd(state, client_id).await {
         builder.cwd(path);
     }
     if let Some(pairs) = env {
@@ -2768,6 +2838,7 @@ mod tests {
         let (input_tx, _input_rx) = mpsc::channel(8);
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (screen_tx, _screen_rx) = mpsc::channel(8);
+        let (pwd_tx, _pwd_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<ResizeRequest>(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
@@ -2777,6 +2848,7 @@ mod tests {
             input: input_tx,
             snapshot: snapshot_tx,
             screen: screen_tx,
+            pwd: pwd_tx,
             output: output_tx,
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
@@ -2878,6 +2950,7 @@ mod tests {
                     let (input_tx, _input_rx) = mpsc::channel(8);
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
                     let (screen_tx, _screen_rx) = mpsc::channel(8);
+                    let (pwd_tx, _pwd_rx) = mpsc::channel(8);
                     let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
                     let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
@@ -2887,6 +2960,7 @@ mod tests {
                         input: input_tx,
                         snapshot: snapshot_tx,
                         screen: screen_tx,
+                        pwd: pwd_tx,
                         output: output_tx,
                         resize: resize_tx,
                         consumer_attach: consumer_attach_tx,
@@ -3019,6 +3093,7 @@ mod tests {
                 let (input_tx, _input_rx) = mpsc::channel(8);
                 let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<SnapshotRequest>(8);
                 let (screen_tx, _screen_rx) = mpsc::channel(8);
+                let (pwd_tx, _pwd_rx) = mpsc::channel(8);
                 let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
                 let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                 let (consumer_attach_tx, mut consumer_attach_rx) =
@@ -3030,6 +3105,7 @@ mod tests {
                     input: input_tx,
                     snapshot: snapshot_tx,
                     screen: screen_tx,
+                    pwd: pwd_tx,
                     output: output_tx,
                     resize: resize_tx,
                     consumer_attach: consumer_attach_tx,

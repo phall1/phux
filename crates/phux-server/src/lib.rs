@@ -8,6 +8,7 @@
 
 #![warn(missing_docs)]
 
+pub mod cwd_query;
 pub mod downsample;
 pub mod grid;
 pub mod id_bridge;

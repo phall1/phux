@@ -60,6 +60,17 @@ portable-pty.workspace = true
 # requires zig 0.15.x on PATH; the nix dev shell provides it.
 libghostty-vt.workspace = true
 
+# `defaults.cwd-inheritance = inherit-focused` (phux-cs6) opens a new pane
+# in the focused pane's live CWD. No portable VT signal carries this (the
+# bundled libghostty surfaces OSC 7 without exposing the path), so the
+# server queries the kernel for the PTY child's working directory. On
+# macOS that means `proc_pidinfo(PROC_PIDVNODEPATHINFO)` via `libc`; Linux
+# uses the dependency-free `/proc/<pid>/cwd` symlink (no extra dep). `libc`
+# is already in the dependency graph transitively (tokio, portable-pty);
+# this promotes it to a direct, macOS-gated dependency for the FFI decls.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 insta.workspace = true
 criterion.workspace = true

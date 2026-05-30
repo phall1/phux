@@ -1536,12 +1536,21 @@ fn run_server(
         |cfg| cfg.defaults.history_limit,
     );
 
+    // `defaults.cwd-inheritance` selects how `SPAWN_TERMINAL` resolves a
+    // new pane's working directory. Same fallback-on-error policy as the
+    // other config reads here.
+    let cwd_inheritance = config_loader::load().map_or_else(
+        |_| phux_config::DefaultsCfg::default().cwd_inheritance,
+        |cfg| cfg.defaults.cwd_inheritance,
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
         seed_with_pty: true,
         seed_command,
         history_limit,
+        cwd_inheritance,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

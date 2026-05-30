@@ -357,6 +357,33 @@ pub struct ScreenRequest {
     pub reply: oneshot::Sender<phux_core::screen::ScreenState>,
 }
 
+/// Request for the pane's live current working directory (`phux-cs6`).
+///
+/// Sent by the `SPAWN_TERMINAL` handler when `defaults.cwd-inheritance`
+/// is [`phux_config::CwdInheritance::InheritFocused`] and the wire frame
+/// left `cwd` unset: the new pane should open in the focused pane's live
+/// CWD. The actor asks the kernel for its PTY child's working directory
+/// via [`crate::cwd_query::process_cwd`] (the shell's directory *now*,
+/// after any `cd`) and replies on the oneshot. Side-effect-free: no
+/// resize, no client disturbance.
+///
+/// This deliberately does not use libghostty's `Terminal::pwd`: the
+/// bundled libghostty surfaces OSC 7 only as an opaque `ReportPwd`
+/// command without exposing the announced path, so that getter never
+/// populates from the byte stream. The kernel query also needs no shell
+/// OSC 7 configuration.
+///
+/// The reply is `None` when there is no PTY (no-PTY actor), the child has
+/// no pid (already exited), or the platform query is unsupported/denied —
+/// the caller then falls back to a non-inherited default.
+#[derive(Debug)]
+pub struct PwdRequest {
+    /// Channel the actor uses to ship the working directory back.
+    /// `None` ⇒ no resolvable CWD. Dropping the receiver is benign — the
+    /// actor discards the reply.
+    pub reply: oneshot::Sender<Option<String>>,
+}
+
 /// A resize request delivered to a [`TerminalActor`] over its `resize`
 /// mailbox.
 ///
@@ -397,6 +424,13 @@ pub struct TerminalHandle {
     /// handler uses this to project the pane's grid to JSON without
     /// attaching (`phux-oki`, ADR-0022 §5).
     pub screen: mpsc::Sender<ScreenRequest>,
+    /// Sender for working-directory reads (`phux-cs6`). The
+    /// `SPAWN_TERMINAL` handler uses this to resolve
+    /// `defaults.cwd-inheritance = inherit-focused`: it asks the focused
+    /// pane's actor for its live CWD (a kernel query against the PTY
+    /// child, see [`PwdRequest`]) and seeds the new pane's
+    /// `CommandBuilder.cwd` with it.
+    pub pwd: mpsc::Sender<PwdRequest>,
     /// Output broadcast channel; subscribers receive every PTY byte
     /// chunk forwarded by the actor.
     pub output: broadcast::Sender<Bytes>,
@@ -453,6 +487,7 @@ pub struct TerminalActor {
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
     screen_rx: mpsc::Receiver<ScreenRequest>,
+    pwd_rx: mpsc::Receiver<PwdRequest>,
     resize_rx: mpsc::Receiver<ResizeRequest>,
     consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
     consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
@@ -822,6 +857,7 @@ impl TerminalActor {
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (pwd_tx, pwd_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (consumer_attach_tx, consumer_attach_rx) =
             mpsc::channel::<ConsumerAttachRequest>(DEFAULT_INPUT_MAILBOX);
@@ -850,6 +886,7 @@ impl TerminalActor {
             input_rx,
             snapshot_rx,
             screen_rx,
+            pwd_rx,
             resize_rx,
             consumer_attach_rx,
             consumer_detach_rx,
@@ -870,6 +907,7 @@ impl TerminalActor {
             input: input_tx,
             snapshot: snapshot_tx,
             screen: screen_tx,
+            pwd: pwd_tx,
             output: output_tx,
             resize: resize_tx,
             consumer_attach: consumer_attach_tx,
@@ -1506,6 +1544,22 @@ impl TerminalActor {
                     let _ = req.reply.send(screen);
                 }
 
+                Some(req) = self.pwd_rx.recv() => {
+                    // Resolve the pane's live working directory by asking
+                    // the kernel for the PTY child's CWD (the shell's
+                    // directory *now*, after any `cd`). `None` when there
+                    // is no PTY (no-PTY actor), the child has no pid, or
+                    // the query is unsupported/denied — the caller then
+                    // falls back to a non-inherited default.
+                    let cwd = self
+                        .pty
+                        .as_ref()
+                        .and_then(|p| p.child.process_id())
+                        .and_then(crate::cwd_query::process_cwd)
+                        .map(|p| p.to_string_lossy().into_owned());
+                    let _ = req.reply.send(cwd);
+                }
+
                 Some(req) = self.resize_rx.recv() => {
                     self.handle_resize(req.cols, req.rows);
                     // phux-8v1: re-broadcast a full snapshot for live
@@ -1869,6 +1923,89 @@ mod tests {
                     body.contains("hi there"),
                     "actor-synthesized bytes should contain seeded text"
                 );
+            })
+            .await;
+    }
+
+    /// phux-cs6: the actor answers a `PwdRequest` with its PTY child's
+    /// live working directory. A shell is spawned that `cd`s into a
+    /// freshly-created temp dir and then blocks (`read`), so its CWD is
+    /// the temp dir when the kernel query runs. This is the actor-level
+    /// proof of the inherit-focused acceptance criterion.
+    #[tokio::test(flavor = "current_thread")]
+    async fn actor_responds_to_pwd_request_with_pty_child_cwd() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                // Canonicalize: macOS hands back the realpath
+                // (/private/var/... for /var/...), which is what the
+                // kernel query returns too.
+                let dir_path = dir.path().canonicalize().expect("canonicalize tempdir");
+
+                let mut cmd = CommandBuilder::new("/bin/sh");
+                cmd.arg("-c");
+                cmd.arg(format!("cd '{}' && read _", dir_path.display()));
+                let bundle = TerminalActor::build_with_token(
+                    20,
+                    5,
+                    Some(cmd),
+                    DEFAULT_MAX_SCROLLBACK,
+                    CancellationToken::new(),
+                )
+                .expect("build_with_token");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                // Poll the actor until the shell has executed the `cd`.
+                // The query races the child's startup, so retry briefly.
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut got: Option<String> = None;
+                while tokio::time::Instant::now() < deadline {
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    handle
+                        .pwd
+                        .send(PwdRequest { reply: reply_tx })
+                        .await
+                        .expect("send pwd request");
+                    got = reply_rx.await.expect("pwd reply");
+                    if got.as_deref() == Some(dir_path.to_str().expect("utf8 path")) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                assert_eq!(
+                    got.as_deref(),
+                    Some(dir_path.to_str().expect("utf8 path")),
+                    "actor should report the PTY child's live CWD",
+                );
+
+                token.cancel();
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(500), join).await;
+            })
+            .await;
+    }
+
+    /// phux-cs6: a no-PTY actor has no child to query, so `pwd` is `None`
+    /// and the spawn path falls back to a non-inherited default.
+    #[tokio::test(flavor = "current_thread")]
+    async fn actor_pwd_request_is_none_without_pty() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new_with_seed(20, 5, b"no pty here").expect("seed");
+                let handle = bundle.handle.clone();
+                let _token = bundle.token;
+                tokio::task::spawn_local(bundle.actor.run());
+
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .pwd
+                    .send(PwdRequest { reply: reply_tx })
+                    .await
+                    .expect("send pwd request");
+                assert_eq!(reply_rx.await.expect("pwd reply"), None);
             })
             .await;
     }

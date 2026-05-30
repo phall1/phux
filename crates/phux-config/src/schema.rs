@@ -95,10 +95,12 @@ pub struct DefaultsCfg {
     /// Default: [`CwdInheritance::InheritFocused`], matching tmux. See
     /// the enum docs for the full set.
     ///
-    /// TODO(phux-4li.1 follow-up): wiring [`CwdInheritance::InheritFocused`]
-    /// requires the server to track per-Terminal PTY working directory
-    /// (OSC 7 from the shell or a kernel-side query). This ticket lands
-    /// only the config knob; the server-side mechanism is a follow-up.
+    /// Wired server-side in `phux-server` (phux-cs6): `SPAWN_TERMINAL`
+    /// reads this policy when the wire frame leaves `cwd` unset.
+    /// `inherit-focused` resolves the focused pane's live PTY working
+    /// directory via a kernel query on the PTY child; `home` uses
+    /// `$HOME`. `session-root` and `last-cwd-per-window` are accepted but
+    /// not yet resolved server-side (follow-ups).
     #[serde(default, rename = "cwd-inheritance")]
     pub cwd_inheritance: CwdInheritance,
 
@@ -159,8 +161,9 @@ fn default_session_name_template() -> String {
 #[serde(rename_all = "kebab-case")]
 pub enum CwdInheritance {
     /// Inherit the focused pane's current working directory. Default —
-    /// matches tmux's default split behavior. Requires server-side PTY
-    /// working-dir tracking (TODO; see [`DefaultsCfg::cwd_inheritance`]).
+    /// matches tmux's default split behavior. Resolved server-side from
+    /// the focused pane's live PTY working directory via a kernel query;
+    /// see [`DefaultsCfg::cwd_inheritance`].
     #[default]
     InheritFocused,
     /// Always spawn in `$HOME`.

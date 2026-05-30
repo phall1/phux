@@ -47,13 +47,14 @@ use phux_protocol::wire::frame::{
     TYPE_TERMINAL_SPAWNED,
 };
 use phux_server::DEFAULT_COLLECTION_ID;
+use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 use crate::common::{
-    SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, recv_typed, run_local, send_frame, spawn_server,
-    wait_for_socket,
+    SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
+    spawn_server, spawn_server_with_seed_cmd, wait_for_socket,
 };
 
 /// Drain frames until a `TERMINAL_SPAWNED` arrives whose `request_id`
@@ -494,6 +495,126 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
 
         drop(stream_a);
         drop(stream_b);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// Drain until the accumulated TERMINAL_OUTPUT bytes for `pane` contain
+/// `needle` (a byte sequence), or the timeout fires. Mirrors
+/// `await_echo_on` but matches a multi-byte subsequence.
+async fn await_output_contains(
+    stream: &mut UnixStream,
+    pane: &phux_protocol::ids::TerminalId,
+    needle: &[u8],
+) -> Vec<u8> {
+    let mut acc: Vec<u8> = Vec::new();
+    let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let Ok((type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
+            break;
+        };
+        if type_byte != TYPE_TERMINAL_OUTPUT {
+            continue;
+        }
+        if let FrameKind::TerminalOutput {
+            terminal_id, bytes, ..
+        } = frame
+            && &terminal_id == pane
+        {
+            acc.extend_from_slice(&bytes);
+            if acc.windows(needle.len()).any(|w| w == needle) {
+                return acc;
+            }
+        }
+    }
+    acc
+}
+
+/// phux-cs6 acceptance: with `defaults.cwd-inheritance = inherit-focused`
+/// (the schema default the test server runs with), a `SPAWN_TERMINAL`
+/// that leaves `cwd` unset opens the new pane in the *focused* pane's
+/// live working directory.
+///
+/// The focused (pre-seeded) pane is a shell that `cd`s into a fresh temp
+/// dir and then blocks. The spawned pane runs `pwd`, whose stdout — the
+/// inherited directory — comes back as TERMINAL_OUTPUT. This is the wire-
+/// level proof of the `C-a |` cd-to-/tmp scenario in the bead.
+#[test]
+fn spawn_terminal_inherits_focused_pane_live_cwd() {
+    use phux_protocol::wire::frame::TYPE_ATTACHED;
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // Focused pane: a shell sitting in a known temp dir. Canonicalize
+        // so the expected path matches what the kernel CWD query returns
+        // (macOS resolves /var → /private/var).
+        let cwd_dir = TempDir::new().unwrap();
+        let cwd_path = cwd_dir.path().canonicalize().expect("canonicalize cwd");
+        let mut seed = CommandBuilder::new("/bin/sh");
+        seed.arg("-c");
+        seed.arg(format!("cd '{}' && exec read _", cwd_path.display()));
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "focused", seed);
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // ATTACH ByName focuses the pre-seeded pane.
+        send_frame(&mut stream, &attach_by_name("focused")).await;
+        let (type_byte, _attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        // Drain the seed pane's TERMINAL_SNAPSHOT.
+        let (type_byte, _snap) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte,
+            phux_protocol::wire::frame::TYPE_TERMINAL_SNAPSHOT,
+            "expected TERMINAL_SNAPSHOT",
+        );
+
+        // Give the seed shell a beat to run its `cd` before we query it.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // SPAWN_TERMINAL with cwd UNSET and a command that prints its
+        // CWD. With inherit-focused, the server seeds the new pane's
+        // CommandBuilder.cwd from the focused pane's live directory.
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 1,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "pwd; exec read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 1).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = cwd_path.to_str().expect("utf8 cwd").as_bytes();
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "spawned pane must inherit the focused pane's live CWD ({}); got output: {body:?}",
+            cwd_path.display(),
+        );
+
+        drop(stream);
         shutdown_tx.send(()).ok();
         timeout(Duration::from_secs(5), server_handle)
             .await
