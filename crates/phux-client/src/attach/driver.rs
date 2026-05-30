@@ -481,6 +481,11 @@ async fn main_loop<W: super::RenderSink>(
         })
         .await?;
     }
+    // phux-4li.17: seed the window/tab strip from the bootstrap layout so
+    // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
+    if let Some(sb) = status_bar.as_mut() {
+        sb.set_window_tabs(window_tab_strip(&workspace));
+    }
 
     loop {
         // Arm the bare-ESC idle timer only when the parser has pending
@@ -606,6 +611,9 @@ async fn main_loop<W: super::RenderSink>(
                             // the repaint — the dismiss path always
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
+                            if let Some(sb) = status_bar.as_mut() {
+                                sb.set_window_tabs(window_tab_strip(&workspace));
+                            }
                             if !overlays.is_active()
                                 && let Some(ls) = workspace.active_window()
                             {
@@ -671,6 +679,9 @@ async fn main_loop<W: super::RenderSink>(
                 )
                 .await?;
                 if layout_changed {
+                    if let Some(sb) = status_bar.as_mut() {
+                        sb.set_window_tabs(window_tab_strip(&workspace));
+                    }
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
                     // below restores pane content under the now-gone
@@ -724,6 +735,9 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                if layout_changed && let Some(sb) = status_bar.as_mut() {
+                    sb.set_window_tabs(window_tab_strip(&workspace));
+                }
                 if layout_changed
                     && !overlays.is_active()
                     && let Some(ls) = workspace.active_window()
@@ -928,6 +942,24 @@ fn build_resolver() -> Option<phux_config::keybind::Resolver> {
             None
         }
     }
+}
+
+/// phux-4li.17: format the window/tab strip for the status bar from the
+/// current [`Workspace`]. tmux-style `{position}:{name}`, the active
+/// window suffixed with `*`. The 0-based position is the stable selector
+/// (`select-window index=N`, `prefix + N`); the name is the editable
+/// label. Empty when there are no windows.
+fn window_tab_strip(workspace: &Workspace) -> String {
+    workspace
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(i, w)| {
+            let marker = if i == workspace.active { "*" } else { "" };
+            format!("{i}:{}{marker}", w.name)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// phux-nz4.5: load the on-disk config and build a [`StatusBarPainter`]

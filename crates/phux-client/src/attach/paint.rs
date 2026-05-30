@@ -223,7 +223,9 @@ pub(super) fn paint_bar_after_pane<W: Write>(
         out,
         viewport_dims.0,
         viewport_dims.1,
-        &make_context(session_name, SystemTime::now()),
+        // The window/tab strip is owned by the painter and injected
+        // inside `paint`; pass an empty strip here.
+        &make_context(session_name, SystemTime::now(), ""),
     );
     // After the bar repaints, the cursor sits on the bar row. Put it
     // back at the focused pane's known position when we have one;

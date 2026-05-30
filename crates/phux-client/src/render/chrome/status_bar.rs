@@ -65,6 +65,11 @@ pub struct StatusBarContext<'a> {
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
+    /// phux-4li.17: pre-formatted window/tab strip (`0:bash 1:vim*`),
+    /// drawn left-anchored over the widget row. `""` ⇒ no window bar.
+    /// This is TUI-side state, not a `phux-config` widget, so it lives
+    /// on the context rather than in the widget pipeline.
+    pub window_tabs: &'a str,
 }
 
 impl<'a> StatusBarContext<'a> {
@@ -83,8 +88,32 @@ impl<'a> StatusBarContext<'a> {
 /// in `attach/` can construct one without depending on
 /// `phux-config`'s internals directly.
 #[must_use]
-pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarContext<'_> {
-    StatusBarContext { now, session_name }
+pub const fn make_context<'a>(
+    session_name: &'a str,
+    now: SystemTime,
+    window_tabs: &'a str,
+) -> StatusBarContext<'a> {
+    StatusBarContext {
+        now,
+        session_name,
+        window_tabs,
+    }
+}
+
+/// Overwrite the leftmost cells of `buffer` with `tabs`, char-by-char,
+/// truncated at `cols`. Used to anchor the window/tab strip on the left
+/// edge of the status row.
+fn overlay_window_tabs(buffer: &mut Buffer, tabs: &str, cols: u16) {
+    if tabs.is_empty() {
+        return;
+    }
+    for (col, ch) in tabs.chars().enumerate().take(usize::from(cols)) {
+        let Ok(x) = u16::try_from(col) else {
+            break;
+        };
+        let mut tmp = [0u8; 4];
+        buffer[(x, 0)].set_symbol(ch.encode_utf8(&mut tmp));
+    }
 }
 
 /// Render the composed status row at `row_index` for a viewport of
@@ -107,7 +136,9 @@ pub fn render_status_bar<W: Write>(
     row_index: u16,
     cols: u16,
 ) -> io::Result<()> {
-    if cols == 0 || bar.is_empty() {
+    // phux-4li.17: paint when there are configured widgets OR a window
+    // bar to draw. An empty bar with no windows is still a no-op.
+    if cols == 0 || (bar.is_empty() && ctx.window_tabs.is_empty()) {
         return Ok(());
     }
 
@@ -122,6 +153,11 @@ pub fn render_status_bar<W: Write>(
     //    (0,0)..(cols,1); we never read it back.
     let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
     fill_buffer(&mut buffer, &row, cols);
+    // phux-4li.17: overlay the window/tab strip on the left edge,
+    // overwriting any left-slot widget cells. The strip is plain text
+    // (`0:bash 1:vim*`, active marked with `*`); reverse-video styling
+    // is deferred until the cell emit path grows per-cell SGR.
+    overlay_window_tabs(&mut buffer, ctx.window_tabs, cols);
 
     // 3. Emit the buffer to VT. Cursor hide for the duration of the
     //    paint; SGR reset on entry and exit so we don't inherit nor
@@ -212,6 +248,10 @@ pub struct StatusBarPainter {
     /// Last (cols, rows) we painted into. Different dims invalidate
     /// `last_row` and force a fresh paint.
     last_viewport: Option<(u16, u16)>,
+    /// phux-4li.17: pre-formatted window/tab strip, drawn left-anchored
+    /// over the widget row. Updated by the driver from the `Workspace`;
+    /// a change invalidates the paint cache.
+    window_tabs: String,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -224,6 +264,7 @@ impl std::fmt::Debug for StatusBarPainter {
                 &self.last_row.as_ref().map(|(_, r)| r.len()),
             )
             .field("last_viewport", &self.last_viewport)
+            .field("window_tabs", &self.window_tabs)
             .finish()
     }
 }
@@ -237,6 +278,16 @@ impl StatusBarPainter {
             position,
             last_row: None,
             last_viewport: None,
+            window_tabs: String::new(),
+        }
+    }
+
+    /// Update the window/tab strip. A change forces the next paint to
+    /// redraw (the strip isn't part of the widget-row cache key).
+    pub fn set_window_tabs(&mut self, tabs: String) {
+        if self.window_tabs != tabs {
+            self.window_tabs = tabs;
+            self.invalidate();
         }
     }
 
@@ -275,7 +326,7 @@ impl StatusBarPainter {
         rows: u16,
         ctx: &StatusBarContext<'_>,
     ) -> io::Result<()> {
-        if cols == 0 || rows == 0 || self.bar.is_empty() {
+        if cols == 0 || rows == 0 || (self.bar.is_empty() && self.window_tabs.is_empty()) {
             return Ok(());
         }
         let new_row = self.bar.render(&ctx.as_widget(), cols);
@@ -291,11 +342,18 @@ impl StatusBarPainter {
             Position::Bottom => rows.saturating_sub(1),
             Position::Top => 0,
         };
+        // The window/tab strip is owned by the painter (the driver sets
+        // it from the Workspace); inject it into the render context so
+        // callers don't have to thread it through every paint path.
+        let ctx = StatusBarContext {
+            window_tabs: &self.window_tabs,
+            ..*ctx
+        };
         // Delegate to the ratatui-backed renderer. We pre-composed
         // `new_row` for cache-keying; the renderer recomposes — cheap
         // (same inputs, deterministic) and keeps `render_status_bar`
         // usable standalone in tests.
-        render_status_bar(out, &self.bar, ctx, row_index, cols)?;
+        render_status_bar(out, &self.bar, &ctx, row_index, cols)?;
         self.last_row = Some((cols, new_row));
         self.last_viewport = Some((cols, rows));
         Ok(())
@@ -322,6 +380,7 @@ mod tests {
         StatusBarContext {
             now: UNIX_EPOCH,
             session_name: session,
+            window_tabs: "",
         }
     }
 
@@ -489,9 +548,56 @@ mod tests {
     #[test]
     fn make_context_helper_exposes_session_and_now() {
         let now = UNIX_EPOCH;
-        let c = make_context("alpha", now);
+        let c = make_context("alpha", now, "");
         assert_eq!(c.session_name, "alpha");
         assert_eq!(c.now, now);
+    }
+
+    #[test]
+    fn window_tab_strip_renders_over_empty_bar() {
+        // No configured widgets, but a window strip ⇒ the bar paints the
+        // strip anyway (relaxed empty gate).
+        let bar = build_bar(&StatusCfg::default());
+        let ctx = StatusBarContext {
+            now: UNIX_EPOCH,
+            session_name: "",
+            window_tabs: "0:bash 1:vim*",
+        };
+        let mut buf = Vec::new();
+        render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("0:bash 1:vim*"),
+            "tab strip should render; got {s:?}"
+        );
+    }
+
+    #[test]
+    fn empty_bar_and_empty_strip_is_noop() {
+        let bar = build_bar(&StatusCfg::default());
+        let ctx = StatusBarContext {
+            now: UNIX_EPOCH,
+            session_name: "",
+            window_tabs: "",
+        };
+        let mut buf = Vec::new();
+        render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
+        assert!(buf.is_empty(), "empty bar + no tabs must not paint");
+    }
+
+    #[test]
+    fn painter_set_window_tabs_paints_strip() {
+        // A painter built from an empty widget bar still paints once it
+        // has a window strip, and a changed strip forces a repaint.
+        let mut p = StatusBarPainter::new(build_bar(&StatusCfg::default()), Position::Bottom);
+        p.set_window_tabs("0:a*".to_owned());
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("0:a*"),
+            "painter should render the strip; got {s:?}"
+        );
     }
 
     #[test]
