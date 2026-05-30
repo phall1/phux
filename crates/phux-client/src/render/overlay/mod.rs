@@ -23,8 +23,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 pub mod help;
+pub mod prompt;
 
 pub use help::HelpOverlay;
+pub use prompt::PromptOverlay;
 
 /// A chrome-layer overlay rendered above pane interiors.
 ///
@@ -50,13 +52,27 @@ pub trait RenderOverlay {
 }
 
 /// What an overlay wants the driver to do after [`RenderOverlay::handle_key`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum OverlayCommand {
     /// Keep the overlay active; the key was consumed.
     Stay,
     /// Close the overlay. The driver triggers a full repaint to restore
     /// pane content on the next loop iteration.
     Dismiss,
+    /// Close the overlay and run this action in the dispatcher — e.g. a
+    /// committed rename prompt returning `rename-window { name }`. The
+    /// dispatcher feeds it through the normal `run_action` path.
+    Commit(phux_config::keybind::ResolvedAction),
+}
+
+/// What [`OverlayState::handle_key`] hands back to the dispatcher.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum OverlayOutcome {
+    /// Nothing to do (key consumed, overlay stayed or dismissed).
+    #[default]
+    None,
+    /// The overlay committed; run this action.
+    RunAction(phux_config::keybind::ResolvedAction),
 }
 
 /// One-slot overlay state. v1 carries at most one active overlay; the
@@ -107,12 +123,22 @@ impl OverlayState {
     }
 
     /// Dispatch a key event to the active overlay. Auto-dismisses on
-    /// [`OverlayCommand::Dismiss`]. No-op when no overlay is active.
-    pub fn handle_key(&mut self, key: &KeyEvent) {
-        if let Some(active) = self.active.as_mut() {
-            match active.handle_key(key) {
-                OverlayCommand::Stay => {}
-                OverlayCommand::Dismiss => self.dismiss(),
+    /// [`OverlayCommand::Dismiss`] and [`OverlayCommand::Commit`]; the
+    /// latter also returns the action for the dispatcher to run. No-op
+    /// (returns [`OverlayOutcome::None`]) when no overlay is active.
+    pub fn handle_key(&mut self, key: &KeyEvent) -> OverlayOutcome {
+        let Some(active) = self.active.as_mut() else {
+            return OverlayOutcome::None;
+        };
+        match active.handle_key(key) {
+            OverlayCommand::Stay => OverlayOutcome::None,
+            OverlayCommand::Dismiss => {
+                self.dismiss();
+                OverlayOutcome::None
+            }
+            OverlayCommand::Commit(action) => {
+                self.dismiss();
+                OverlayOutcome::RunAction(action)
             }
         }
     }

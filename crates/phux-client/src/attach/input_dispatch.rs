@@ -18,7 +18,7 @@ use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::input::InputEvent;
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
-use crate::render::overlay::{HelpOverlay, OverlayState};
+use crate::render::overlay::{HelpOverlay, OverlayOutcome, OverlayState, PromptOverlay};
 
 /// Mutable context the input-dispatch path needs to update on a chord
 /// that resolves to a layout action (phux-4li.5). Bundles the items
@@ -122,7 +122,25 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     }
                 }
                 let was_active = ctx.overlays.is_active();
-                ctx.overlays.handle_key(key_event);
+                // phux-ahv.1: an overlay may commit an action (e.g. the
+                // rename prompt returning `rename-window { name }`); run
+                // it through the same path as a keybinding.
+                if let OverlayOutcome::RunAction(resolved) = ctx.overlays.handle_key(key_event) {
+                    let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                    if apply_action_effects(
+                        effects,
+                        out,
+                        conn,
+                        ctx,
+                        focused_pane,
+                        detach_pending,
+                        predict,
+                    )
+                    .await?
+                    {
+                        layout_changed = true;
+                    }
+                }
                 // On dismiss, repaint everything: the overlay scribbled
                 // over pane cells and we need a coherent base for the
                 // next TERMINAL_OUTPUT.
@@ -146,58 +164,18 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 ChordOutcome::Resolved(resolved) => {
                     let effects = run_action(&resolved, ctx, focused_pane.as_ref());
-                    if effects.layout_mutated {
+                    if apply_action_effects(
+                        effects,
+                        out,
+                        conn,
+                        ctx,
+                        focused_pane,
+                        detach_pending,
+                        predict,
+                    )
+                    .await?
+                    {
                         layout_changed = true;
-                    }
-                    if effects.set_focus.is_some() {
-                        *focused_pane = effects.set_focus;
-                    }
-                    if effects.clear_predict {
-                        predict.clear();
-                    }
-                    if effects.set_metadata {
-                        // Send SET_METADATA carrying the new envelope.
-                        // Encoding can fail only if the state is empty
-                        // (we just produced it — should not happen),
-                        // but propagate cleanly if it ever does.
-                        if let Some(bytes) = encode_layout_or_log(ctx.workspace) {
-                            let request_id = *ctx.next_request_id;
-                            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
-                            conn.send(&FrameKind::SetMetadata {
-                                request_id,
-                                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
-                                key: LAYOUT_KEY.to_owned(),
-                                value: bytes,
-                            })
-                            .await?;
-                        }
-                    }
-                    if effects.bell {
-                        let _ = actions::write_bell(out);
-                    }
-                    if effects.detach && !*detach_pending {
-                        conn.send(&FrameKind::Detach).await?;
-                        *detach_pending = true;
-                    }
-                    // phux-4li.12: parked split — send the SPAWN_TERMINAL
-                    // and remember the intent for the reply handler.
-                    if let Some((request_id, pending, frame)) = effects.spawn_terminal {
-                        ctx.pending_splits.insert(request_id, pending);
-                        conn.send(&frame).await?;
-                    }
-                    // phux-4li.15: parked new-window — same SPAWN flow as
-                    // a split, but the reply opens a new window instead of
-                    // growing the active one.
-                    if let Some((request_id, pending, frame)) = effects.spawn_window {
-                        ctx.pending_windows.insert(request_id, pending);
-                        conn.send(&frame).await?;
-                    }
-                    // phux-4li.12: kill-pane keystroke sequence. Each
-                    // frame is an INPUT_KEY targeting the focused
-                    // Terminal; the TERMINAL_CLOSED fold-out happens
-                    // when the shell exits.
-                    for frame in effects.kill_frames {
-                        conn.send(&frame).await?;
                     }
                     continue;
                 }
@@ -315,6 +293,74 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     // Hand the layout-mutation signal back to `main_loop`, which holds
     // the status-bar painter and session name needed for a proper full
     // frame. We never paint from here.
+    Ok(layout_changed)
+}
+
+/// Apply the side-effects of a resolved action: layout-mutation repaint
+/// signal, focus move, prediction reset, `SET_METADATA` broadcast, bell,
+/// detach, parked spawn (split / new-window), and kill-frame sequences.
+///
+/// Shared by the keybinding path and the overlay-commit path (phux-ahv.1)
+/// so a rename committed from the prompt broadcasts and repaints exactly
+/// like a keybinding would. Returns `true` if the layout changed (the
+/// caller repaints).
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn apply_action_effects<W: super::RenderSink>(
+    effects: ActionEffects,
+    out: &mut W,
+    conn: &mut Connection,
+    ctx: &mut DispatchCtx<'_>,
+    focused_pane: &mut Option<TerminalId>,
+    detach_pending: &mut bool,
+    predict: &mut PredictionState,
+) -> Result<bool, AttachError> {
+    let layout_changed = effects.layout_mutated;
+    if effects.set_focus.is_some() {
+        *focused_pane = effects.set_focus;
+    }
+    if effects.clear_predict {
+        predict.clear();
+    }
+    if effects.set_metadata {
+        // Encoding can fail only on an empty workspace (we just produced
+        // it — shouldn't happen), but propagate cleanly if it ever does.
+        if let Some(bytes) = encode_layout_or_log(ctx.workspace) {
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            conn.send(&FrameKind::SetMetadata {
+                request_id,
+                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+                key: LAYOUT_KEY.to_owned(),
+                value: bytes,
+            })
+            .await?;
+        }
+    }
+    if effects.bell {
+        let _ = actions::write_bell(out);
+    }
+    if effects.detach && !*detach_pending {
+        conn.send(&FrameKind::Detach).await?;
+        *detach_pending = true;
+    }
+    // Parked split — send the SPAWN_TERMINAL and remember the intent.
+    if let Some((request_id, pending, frame)) = effects.spawn_terminal {
+        ctx.pending_splits.insert(request_id, pending);
+        conn.send(&frame).await?;
+    }
+    // Parked new-window — same SPAWN flow; the reply opens a window.
+    if let Some((request_id, pending, frame)) = effects.spawn_window {
+        ctx.pending_windows.insert(request_id, pending);
+        conn.send(&frame).await?;
+    }
+    // kill-pane / kill-window keystroke sequences; the TERMINAL_CLOSED
+    // fold-out happens when each shell exits.
+    for frame in effects.kill_frames {
+        conn.send(&frame).await?;
+    }
     Ok(layout_changed)
 }
 
@@ -540,14 +586,26 @@ fn run_action(
                 effects.bell = true;
                 return effects;
             }
-            // An explicit `name` renames immediately; the bare binding
-            // auto-labels with the next free number (interactive name
-            // entry is a follow-up). A rename is shared window state, so
-            // unlike a focus/switch it broadcasts via SET_METADATA.
-            let name = name_arg(resolved).unwrap_or_else(|| ctx.workspace.default_window_name());
-            ctx.workspace.rename_active(name);
-            effects.layout_mutated = true;
-            effects.set_metadata = true;
+            if let Some(name) = name_arg(resolved) {
+                // Explicit `name` renames immediately. A rename is shared
+                // window state, so (unlike focus/switch) it broadcasts.
+                ctx.workspace.rename_active(name);
+                effects.layout_mutated = true;
+                effects.set_metadata = true;
+            } else {
+                // No name ⇒ open the interactive prompt pre-filled with
+                // the active window's current name. On commit it re-runs
+                // `rename-window` with the typed name (phux-ahv.1).
+                let current = ctx
+                    .workspace
+                    .windows
+                    .get(ctx.workspace.active)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_default();
+                ctx.overlays
+                    .push(Box::new(PromptOverlay::rename_window(&current)));
+                effects.layout_mutated = true;
+            }
         }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
@@ -1005,13 +1063,45 @@ mod tests {
         assert!(effects.set_metadata, "rename is shared window state");
     }
 
+    /// Like [`run`], but returns the `OverlayState` so a test can assert
+    /// an action pushed an overlay.
+    fn run_capturing(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+    ) -> (ActionEffects, OverlayState) {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let effects = {
+            let mut ctx = DispatchCtx {
+                resolver: None,
+                workspace,
+                viewport: (80, 24),
+                next_request_id: &mut next_request_id,
+                pending_splits: &mut pending_splits,
+                pending_windows: &mut pending_windows,
+                overlays: &mut overlays,
+                keybindings: None,
+            };
+            let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+            run_action(action, &mut ctx, focused.as_ref())
+        };
+        (effects, overlays)
+    }
+
     #[test]
-    fn rename_window_no_arg_auto_labels() {
+    fn rename_window_no_arg_opens_prompt() {
         let mut workspace = Workspace::single(tid(1)); // window "1"
-        let effects = run(&bare_action("rename-window"), &mut workspace);
-        // Next free integer label (skips the in-use "1").
-        assert_eq!(workspace.windows[0].name, "2");
+        let (effects, overlays) = run_capturing(&bare_action("rename-window"), &mut workspace);
+        assert!(
+            overlays.is_active(),
+            "no-arg rename should open the prompt overlay"
+        );
         assert!(effects.layout_mutated);
+        // Not renamed yet — that happens when the prompt commits.
+        assert_eq!(workspace.windows[0].name, "1");
+        assert!(!effects.set_metadata, "no broadcast until commit");
     }
 
     #[test]
