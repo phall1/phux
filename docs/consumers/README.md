@@ -20,6 +20,7 @@ privileges ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)).
 | File | Owns |
 |---|---|
 | [tui.md](./tui.md) | Reference TUI: CLI, keybinds, status bar, layout, hooks, recording |
+| [mcp.md](./mcp.md) | Agent MCP adapter: JSON-RPC stdio tool surface (ls/snapshot/send_keys/run/wait) |
 | [sdk.md](./sdk.md) | Agent SDK shape (forward-looking; not yet shipped) |
 
 Future consumers — a native GUI, a recorder, a tmux-CC adapter — get
