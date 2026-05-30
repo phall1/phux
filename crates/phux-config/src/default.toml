@@ -115,7 +115,15 @@ prefix = "C-a"
 #   "M-Enter" = "detach"
 
 [status]
-# Minimal status bar: session name on the left, clock on the right.
-left   = ["session-name"]
+# Left: the window/tab bar. The `windows` widget renders one tab per
+# window as `{index}:{name}`; by default the active tab is bold +
+# reverse-video and the rest are dimmed. Every part is restylable —
+# `active`/`inactive` take a style table (fg/bg color strings +
+# bold/dim/italic/underline/reverse), and `separator`/`format` tune the
+# layout, e.g.:
+#   { kind = "windows", active = { fg = "black", bg = "green", bold = true }, inactive = { fg = "gray" }, separator = " | " }
+# Right: session name + clock (the leading space in the time format keeps
+# them apart).
+left   = [{ kind = "windows" }]
 center = []
-right  = [{ kind = "time", format = "%H:%M" }]
+right  = ["session-name", { kind = "time", format = " %H:%M" }]

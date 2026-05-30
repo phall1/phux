@@ -581,7 +581,7 @@ architectural revision to grow a status bar plugin story.
 |-----------------|--------------------------------------------------------------|
 | `session`       | `format?` (default: `"{name}"`)                              |
 | `window`        | `format?` (default: `"{name}"`)                              |
-| `windows`       | `active-mark?`, `inactive-format?`, `active-format?`         |
+| `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented** |
 | `pane`          | `format?`                                                    |
 | `cwd`           | `format?`, `truncate?` (chars)                               |
 | `exit`          | `format?` (last command exit code, OSC 133)                  |
@@ -593,8 +593,12 @@ architectural revision to grow a status bar plugin story.
 | `spacer`        | flexible expanding space; no parameters                      |
 | `exec`          | `command`, `interval?` (default `5s`), `parse-ansi?` (true)  |
 
-Every widget kind accepts a `style` table with optional `fg`, `bg`,
-`bold`, `italic`, `underline` keys.
+Every widget kind accepts a `style` table with optional `fg`, `bg`
+(color strings: names, `#rrggbb`, or palette indices), and the boolean
+attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
+implemented built-ins today are `time`, `session-name`, and `windows`
+(the others above are design intent); `windows` takes its `active` and
+`inactive` segments as such style tables.
 
 ### 8.4 Refresh and ordering
 
