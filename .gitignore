@@ -1,4 +1,6 @@
 target/
+# Release tarballs staged by scripts/dist.sh before upload.
+dist/
 result
 result-*
 .direnv/

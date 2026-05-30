@@ -99,6 +99,23 @@ toolchain:
     @rustc --version
     @cargo --version
 
+# Package the host-target release binaries into a tarball matching the
+# release workflow's naming (phux-<tag>-<target>.tar.gz) under dist/. Used
+# to seed the first Homebrew release locally; CI does this per-target on a
+# `v*` tag. Pass the tag, e.g. `just dist v0.0.1`.
+dist TAG:
+    bash scripts/dist.sh {{TAG}}
+
+# Dry-run the crates.io publish of phux-protocol (package + verify, no
+# upload). The only publishable crate. Mirrors the publish-crate workflow.
+publish-protocol-dry:
+    cargo publish --dry-run -p phux-protocol
+
+# Publish phux-protocol to crates.io. IRREVERSIBLE. Requires `cargo login`
+# (or CARGO_REGISTRY_TOKEN). Run `just publish-protocol-dry` first.
+publish-protocol:
+    cargo publish -p phux-protocol
+
 # Builds the `profiling` profile (release codegen + line-table debug
 # info) then records a Firefox Profiler JSON at target/samply-profile.json.
 # Default subcommand is `server`; pass any other subcommand + args:
