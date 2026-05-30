@@ -216,11 +216,30 @@ pub struct ConsumerAttachRequest {
     /// passes the resolved value here at ATTACH time.
     pub wire_terminal_id: u32,
     /// Channel the actor uses to acknowledge the lifecycle insertion.
-    /// `Ok(())` on success; `Err(...)` if the per-consumer
+    /// `Ok(outcome)` on success (the outcome reports whether this actor
+    /// is tick-managing the consumer); `Err(...)` if the per-consumer
     /// `SnapshotSynthesizer` or its priming pass could not be allocated.
     /// Dropping the receiver on the caller side is benign — the actor
     /// uses `send().ok()`.
-    pub reply: oneshot::Sender<Result<(), ConsumerAttachError>>,
+    pub reply: oneshot::Sender<Result<ConsumerAttachOutcome, ConsumerAttachError>>,
+}
+
+/// Successful outcome of a [`ConsumerAttachRequest`].
+///
+/// phux-3uv: the runtime needs to know whether this actor will *emit*
+/// `TERMINAL_OUTPUT` for the consumer via the state-sync tick
+/// (`consumer_tick_emits == true`). If so, the runtime must SUPPRESS its
+/// own broadcast pump for this pane so exactly one emitter serves the
+/// consumer (SPEC §12.2 monotonic-per-consumer; two independent `seq`
+/// streams on one mailbox would double-paint). If the actor is not
+/// tick-managing (gate off, or a non-emitting variant), the runtime keeps
+/// the broadcast pump as the sole emitter.
+#[derive(Debug, Clone, Copy)]
+pub struct ConsumerAttachOutcome {
+    /// `true` ⇒ this actor's `tick_emit` will push `TERMINAL_OUTPUT`
+    /// frames for the consumer; the runtime must NOT also spawn a
+    /// broadcast pump for this pane.
+    pub tick_managed: bool,
 }
 
 /// Errors surfaced by the private `TerminalActor::register_consumer`
@@ -505,28 +524,46 @@ pub struct TerminalActor {
     /// Whether the per-consumer state-sync tick (phux-q0e.3) is allowed
     /// to *emit* `TerminalOutput` frames (ADR-0018).
     ///
-    /// `false` in the v0.1 deployment: the live server->client emission
-    /// path is the raw PTY-byte broadcast pump in `runtime.rs`
-    /// (`handle.output.subscribe()` -> per-attach `TerminalOutput`). The
-    /// per-consumer lifecycle (`register_consumer` / `unregister_consumer`
-    /// / `on_frame_ack`) still runs so the per-consumer `RenderState`
-    /// cache primitive is allocated, primed, freed, and ack-evicted —
-    /// but `tick_emit` must NOT also push frames, for two reasons:
+    /// `false` in production. When `true` the tick is the live
+    /// server->client emission path: per attached consumer it walks the
+    /// per-consumer `SnapshotSynthesizer`, diffs the live `Terminal`
+    /// against that consumer's last-synced reference, and pushes only the
+    /// delta with a per-consumer monotonic `seq`; the client acks each
+    /// applied frame and `on_frame_ack` -> `mark_synced` evicts the dirty
+    /// cache.
     ///
-    /// 1. **Double-paint.** A tick-emitted `TerminalOutput` and the
-    ///    broadcast pump's `TerminalOutput` both land on the same
-    ///    consumer's mailbox with independent `seq` counters, so the
-    ///    consumer would apply the same bytes twice and interleave
-    ///    non-monotonic `seq` (SPEC §12.2 requires monotonic-per-consumer).
-    /// 2. **Unbounded diff growth.** The v0.1 client does not send
-    ///    `FRAME_ACK`, so `mark_synced` (the only dirty-clearing point per
-    ///    ADR-0018) never fires from acks; an emitting tick would re-diff
-    ///    an ever-larger unacked delta forever.
+    /// Three prerequisites gate flipping this on. phux-3uv landed the
+    /// first two; the third is an open blocker that keeps it `false`:
     ///
-    /// Flipping this to `true` is the production switch tracked as future
-    /// work: it requires the client to drive the `FRAME_ACK` loop and the
-    /// broadcast pump to be gated off per managed consumer. Until then the
-    /// machinery stays live-but-non-emitting.
+    /// 1. **Single emitter (DONE, phux-3uv).** The runtime's
+    ///    `handle_attach` suppresses its raw PTY-byte broadcast pump for
+    ///    any consumer this actor reports as tick-managed (via
+    ///    [`ConsumerAttachOutcome::tick_managed`]). Without that a
+    ///    tick-emitted `TerminalOutput` and the broadcast pump's would
+    ///    both land on the same consumer mailbox with independent `seq` —
+    ///    double-paint, non-monotonic `seq` (SPEC §12.2).
+    /// 2. **Acked eviction (DONE, phux-3uv).** The client drives the
+    ///    `FRAME_ACK` loop, so `mark_synced` fires on each ack. Without
+    ///    acks the tick would re-diff an ever-larger unacked delta forever
+    ///    (loss tolerance still holds: a dropped ack re-emits a larger diff
+    ///    against the older reference).
+    /// 3. **Per-consumer dirty isolation (BLOCKER, follow-up to
+    ///    phux-3uv).** `RenderState::update` *consumes* the Terminal's
+    ///    dirty state (libghostty `render.rs:307`). With N consumers
+    ///    sharing one pane, the first consumer's `update` in a tick clears
+    ///    the shared dirty bits, so every other consumer that tick reads
+    ///    `Dirty::Clean` and emits nothing — multi-client same-pane attach
+    ///    (byc.6.4/6.5) starves all-but-one consumer. ADR-0018's
+    ///    per-consumer-RenderState diffing assumes isolation this
+    ///    libghostty version does not provide on read; resolving it needs
+    ///    a synthesizer change (e.g. snapshot the dirty set before any
+    ///    consumer walk, or diff against a per-consumer reference grid
+    ///    rather than the shared dirty bits) and is out of phux-3uv's
+    ///    scope.
+    ///
+    /// Set to `true` only by tests that exercise a SINGLE consumer
+    /// (which is correct under prerequisite 3); production and multi-
+    /// consumer paths keep it `false`.
     consumer_tick_emits: bool,
     /// Bytes streaming in from the PTY reader thread. `None` when this
     /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
@@ -892,7 +929,19 @@ impl TerminalActor {
             consumer_detach_rx,
             consumer_ack_rx,
             consumer_states: HashMap::new(),
-            // v0.1: lifecycle runs, tick does not emit. See the field doc.
+            // phux-3uv: STAYS `false`. The client FRAME_ACK loop and the
+            // per-tick-managed-consumer broadcast suppression (both landed
+            // in phux-3uv) are the two prerequisites for flipping this on,
+            // but a third blocker surfaced: `RenderState::update` *consumes*
+            // the Terminal's dirty state (libghostty render.rs:307 — "This
+            // consumes terminal/screen dirty state"). With N consumers
+            // sharing one pane, the first consumer's `update` in a tick
+            // clears the shared dirty bits, so every other consumer that
+            // tick sees `Dirty::Clean` and emits nothing — multi-client
+            // same-pane attach (byc.6.4/6.5) starves all-but-one consumer.
+            // The per-consumer-RenderState model in ADR-0018 needs dirty
+            // isolation that this libghostty version does not provide on
+            // read. Tracked as the follow-up to phux-3uv. See the field doc.
             consumer_tick_emits: false,
             pty_rx,
             pty_tx,
@@ -1127,9 +1176,11 @@ impl TerminalActor {
     }
 
     /// Test-only: enable the per-consumer tick emission gate
-    /// (`consumer_tick_emits`). Production keeps this `false` (the live
-    /// emitter is the broadcast pump); tests flip it to exercise the
-    /// `tick_emit` synthesis-and-emit path directly.
+    /// (`consumer_tick_emits`). Production keeps this `false` (see the
+    /// field doc — prerequisite 3, per-consumer dirty isolation, is an
+    /// open blocker). Tests flip it on to exercise the single-consumer
+    /// `tick_emit` synthesis-and-emit + `FRAME_ACK` loop, which IS correct
+    /// under that blocker (one `RenderState::update` per tick).
     #[cfg(test)]
     pub const fn enable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = true;
@@ -1594,7 +1645,14 @@ impl TerminalActor {
                         wire_terminal_id,
                         reply,
                     } = req;
-                    let result = self.register_consumer(client_id, outbound, wire_terminal_id);
+                    // phux-3uv: map register success to an outcome that
+                    // tells the runtime whether this actor is tick-managing
+                    // the consumer. Tick-managed ⇒ the runtime suppresses
+                    // its broadcast pump for this pane (single emitter).
+                    let tick_managed = self.consumer_tick_emits;
+                    let result = self
+                        .register_consumer(client_id, outbound, wire_terminal_id)
+                        .map(|()| ConsumerAttachOutcome { tick_managed });
                     if let Err(err) = &result {
                         warn!(
                             ?client_id,
@@ -1606,6 +1664,7 @@ impl TerminalActor {
                         trace!(
                             ?client_id,
                             wire_terminal_id,
+                            tick_managed,
                             "consumer attached: per-consumer synthesizer primed"
                         );
                     }
@@ -1666,12 +1725,17 @@ impl TerminalActor {
     /// emittable; `FRAME_ACK` (phux-q0e.4) is the only thing allowed to
     /// clear dirty bits.
     fn tick_emit(&mut self) {
-        // v0.1 coexistence gate (phux-0q8): the live emission path is the
-        // raw broadcast pump in `runtime.rs`, so the tick must not also
-        // emit or the consumer double-paints (see `consumer_tick_emits`).
-        // The per-consumer `RenderState` cache is still maintained by
-        // `register_consumer` (prime) and `on_frame_ack` (mark_synced);
-        // the tick only *emits* from it, and emission is what we gate.
+        // Emission gate (phux-0q8 / phux-3uv). Production runs this OFF:
+        // the broadcast pump in `runtime.rs` is the live emitter and the
+        // tick must stay silent or the consumer double-paints. When ON
+        // (single-consumer tests today) the tick is the single emitter and
+        // the runtime suppresses its broadcast pump per tick-managed
+        // consumer (see `ConsumerAttachOutcome`); the multi-consumer flip
+        // is blocked on per-consumer dirty isolation (see the
+        // `consumer_tick_emits` field doc, prerequisite 3). Either way the
+        // per-consumer `RenderState` cache is maintained by
+        // `register_consumer` (prime) and `on_frame_ack` (mark_synced); the
+        // gate only controls *emission*.
         if !self.consumer_tick_emits {
             return;
         }
@@ -2311,13 +2375,14 @@ mod tests {
         );
     }
 
-    /// phux-0q8 / phux-q0e.3: with the gate flipped on (the future
-    /// production switch), `tick_emit` synthesizes the dirty seeded grid
-    /// and ships exactly one `TerminalOutput` carrying the content,
-    /// stamping `seq = 1`. A second tick with no further writes is silent
-    /// (the synthesizer's internal `RenderState` advanced past the now-
-    /// clean grid). Proves the emission path is reachable and correct, not
-    /// merely dead code held behind the gate.
+    /// phux-0q8 / phux-q0e.3 / phux-3uv: with the gate flipped on for a
+    /// SINGLE consumer, `tick_emit` synthesizes the dirty seeded grid and
+    /// ships exactly one `TerminalOutput` carrying the content, stamping
+    /// `seq = 1`. A second tick with no further writes re-emits the unacked
+    /// diff (`seq = 2`); a `FRAME_ACK` then clears the dirty cache so the
+    /// next tick is silent. Proves the single-consumer emission + ack loop
+    /// is correct (the path phux-3uv made solid; multi-consumer remains
+    /// gated off — see the `consumer_tick_emits` field doc, prerequisite 3).
     #[test]
     fn tick_emit_emits_once_when_gate_is_on() {
         let bundle = TerminalActor::new(20, 5).expect("new");

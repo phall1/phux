@@ -2484,16 +2484,20 @@ async fn handle_attach(
         // primed against the same canonical state the snapshot installs
         // on the client mirror (see `register_consumer`'s doc).
         //
-        // The entry drives the dormant `FRAME_ACK` eviction loop
-        // (`on_frame_ack` -> `mark_synced`); it does NOT change the live
-        // output path. The actor's `tick_emit` stays gated off in v0.1
-        // (`consumer_tick_emits == false`), so the broadcast pump spawned
-        // just below remains the sole emitter — no double-paint. Flipping
-        // to tick emission is the production switch tracked for later.
+        // phux-3uv: the register reply reports whether the actor is
+        // tick-managing this consumer (`consumer_tick_emits == true`). If
+        // so, the actor's `tick_emit` is the sole emitter and we MUST
+        // suppress the broadcast pump below — otherwise two independent
+        // `seq` streams land on one consumer mailbox (double-paint, SPEC
+        // §12.2 monotonic-per-consumer violation). If not tick-managed
+        // (gate off, or register failed / actor gone / no local id), the
+        // broadcast pump stays the live emitter and the per-consumer
+        // entry just drives the dormant `FRAME_ACK` eviction loop.
         //
         // Awaited (not fire-and-forget) so the cache is primed before the
         // pump starts streaming deltas; a dropped reply or actor-gone is
-        // logged and we proceed (the broadcast path still works).
+        // logged and we fall back to the broadcast path.
+        let mut tick_managed = false;
         if let Some(wire_id) = wire_terminal_id.local_id() {
             let (attach_reply_tx, attach_reply_rx) = oneshot::channel();
             if handle
@@ -2508,8 +2512,12 @@ async fn handle_attach(
                 .is_ok()
             {
                 match attach_reply_rx.await {
-                    Ok(Ok(())) => {
-                        trace!(?terminal_id, "per-consumer state-sync entry registered");
+                    Ok(Ok(outcome)) => {
+                        tick_managed = outcome.tick_managed;
+                        trace!(
+                            ?terminal_id,
+                            tick_managed, "per-consumer state-sync entry registered",
+                        );
                     }
                     Ok(Err(err)) => {
                         warn!(
@@ -2533,48 +2541,55 @@ async fn handle_attach(
             }
         }
 
-        // Subscribe to live PTY output BEFORE requesting the snapshot.
-        // Subscribing first means anything the TerminalActor broadcasts
-        // after this point lands in our receiver; we then ask for a
-        // snapshot so the client has a complete starting picture, and
-        // any subsequent TerminalOutput we forward is "post-snapshot
-        // delta" rather than racing against it.
-        let mut output_rx = handle.output.subscribe();
-        let pump_out_tx = out_tx.clone();
-        let pump_wire_terminal_id = wire_terminal_id.clone();
-        let pump_client_caps = client_caps;
-        tokio::task::spawn_local(async move {
-            let mut seq: u64 = 0;
-            loop {
-                match output_rx.recv().await {
-                    Ok(bytes) => {
-                        seq = seq.wrapping_add(1);
-                        let bytes =
-                            crate::downsample::rewrite_bytes_with_caps(&bytes, pump_client_caps);
-                        if pump_out_tx
-                            .send(Outbound::Frame(FrameKind::TerminalOutput {
-                                terminal_id: pump_wire_terminal_id.clone(),
-                                seq,
-                                bytes,
-                            }))
-                            .await
-                            .is_err()
-                        {
-                            // Client mailbox closed (detach or disconnect).
-                            break;
+        // phux-3uv: suppress the broadcast pump for a tick-managed
+        // consumer — the actor's `tick_emit` is the single emitter for
+        // this pane. Non-tick-managed consumers keep the broadcast pump.
+        if !tick_managed {
+            // Subscribe to live PTY output BEFORE requesting the snapshot.
+            // Subscribing first means anything the TerminalActor broadcasts
+            // after this point lands in our receiver; we then ask for a
+            // snapshot so the client has a complete starting picture, and
+            // any subsequent TerminalOutput we forward is "post-snapshot
+            // delta" rather than racing against it.
+            let mut output_rx = handle.output.subscribe();
+            let pump_out_tx = out_tx.clone();
+            let pump_wire_terminal_id = wire_terminal_id.clone();
+            let pump_client_caps = client_caps;
+            tokio::task::spawn_local(async move {
+                let mut seq: u64 = 0;
+                loop {
+                    match output_rx.recv().await {
+                        Ok(bytes) => {
+                            seq = seq.wrapping_add(1);
+                            let bytes = crate::downsample::rewrite_bytes_with_caps(
+                                &bytes,
+                                pump_client_caps,
+                            );
+                            if pump_out_tx
+                                .send(Outbound::Frame(FrameKind::TerminalOutput {
+                                    terminal_id: pump_wire_terminal_id.clone(),
+                                    seq,
+                                    bytes,
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                // Client mailbox closed (detach or disconnect).
+                                break;
+                            }
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(
+                                terminal_id = ?pump_wire_terminal_id,
+                                dropped = n,
+                                "TerminalOutput pump lagged; consider larger broadcast capacity",
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(
-                            terminal_id = ?pump_wire_terminal_id,
-                            dropped = n,
-                            "TerminalOutput pump lagged; consider larger broadcast capacity",
-                        );
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-            }
-        });
+            });
+        }
 
         let (reply_tx, reply_rx) = oneshot::channel();
         if handle
@@ -3449,7 +3464,16 @@ mod tests {
                     attach_req.wire_terminal_id >= 1,
                     "wire terminal id assigned"
                 );
-                attach_req.reply.send(Ok(())).expect("send attach reply");
+                // phux-3uv: reply `tick_managed: false` so `handle_attach`
+                // keeps its broadcast pump (this stub actor never tick-
+                // emits). The test exercises the register/snapshot/detach
+                // lifecycle, not the emitter-selection branch.
+                attach_req
+                    .reply
+                    .send(Ok(crate::terminal_actor::ConsumerAttachOutcome {
+                        tick_managed: false,
+                    }))
+                    .expect("send attach reply");
 
                 // Service the snapshot request so the attach task completes.
                 let snap_req = tokio::time::timeout(Duration::from_secs(2), snapshot_rx.recv())

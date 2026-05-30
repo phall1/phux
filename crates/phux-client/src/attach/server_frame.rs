@@ -53,6 +53,15 @@ pub(super) struct FrameOutcome {
     /// `layout_replaced` reconcile/broadcast paths (which already sized
     /// their panes and would otherwise thrash on attach).
     pub(super) reflow_panes: bool,
+    /// phux-3uv: `Some((terminal_id, seq))` ⇒ the client applied a
+    /// `TERMINAL_OUTPUT` frame and the driver must send a cumulative
+    /// `FRAME_ACK { terminal_id, seq }` back to the server. This closes
+    /// the ADR-0018 lazy-state-sync loop: the server's per-consumer
+    /// `SnapshotSynthesizer` calls `mark_synced` on receipt, clearing the
+    /// dirty bits that produced the acked frame so the next tick re-diffs
+    /// against the acked reference (rather than re-emitting an unbounded
+    /// unacked delta forever). Set ONLY by the `TerminalOutput` arm.
+    pub(super) ack: Option<(TerminalId, u64)>,
 }
 
 /// Process one server-to-client frame. Returns a [`FrameOutcome`]
@@ -223,9 +232,18 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         }
         FrameKind::TerminalOutput {
             terminal_id,
-            seq: _,
+            seq,
             bytes,
         } => {
+            // phux-3uv / ADR-0018: ack every applied frame. The bytes are
+            // written into the pane mirror below (vt_write) before any
+            // render branch, so by the time we return the cumulative
+            // application invariant holds regardless of focus/overlay
+            // state — emit the `FRAME_ACK` unconditionally on the outcome.
+            // `seq == 0` is the server's "empty initial frame" sentinel
+            // (see `LastAckedCursorMode`); never acking it keeps
+            // `last_acked_seq` at its `0` initial value, which is correct.
+            let ack = (seq != 0).then(|| (terminal_id.clone(), seq));
             // phux-4li.4: ingest output into the matching pane's
             // libghostty Terminal even when it's not focused, so the
             // mirror stays warm for when the user focuses it. Render +
@@ -248,7 +266,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // applies to the active window's composition; if there's no
             // active window there's nothing on-screen to repaint.
             let Some(active_ls) = workspace.active_window() else {
-                return Ok(FrameOutcome::default());
+                return Ok(FrameOutcome {
+                    ack,
+                    ..FrameOutcome::default()
+                });
             };
             if is_focused
                 && !overlay_active
@@ -355,7 +376,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     }
                 }
             }
-            Ok(FrameOutcome::default())
+            Ok(FrameOutcome {
+                ack,
+                ..FrameOutcome::default()
+            })
         }
         FrameKind::Detached => Ok(FrameOutcome {
             exit: true,
@@ -748,7 +772,7 @@ fn reconcile_loaded_layout(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::handle_server_frame;
+    use super::{FrameOutcome, handle_server_frame};
     use std::collections::HashMap;
 
     use phux_protocol::ids::TerminalId;
@@ -825,6 +849,20 @@ mod tests {
         terminal_id: &TerminalId,
         bytes: &[u8],
     ) {
+        let _ = drive_output_seq(out, layout, focused, panes, terminal_id, bytes, 1);
+    }
+
+    /// Like [`drive_output`] but stamps an explicit `seq` and returns the
+    /// [`FrameOutcome`] so ack-emission tests can inspect `outcome.ack`.
+    fn drive_output_seq(
+        out: &mut Vec<u8>,
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        bytes: &[u8],
+        seq: u64,
+    ) -> FrameOutcome {
         let mut session_name = String::new();
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
         let overlay = Overlay;
@@ -834,7 +872,7 @@ mod tests {
             out,
             FrameKind::TerminalOutput {
                 terminal_id: terminal_id.clone(),
-                seq: 1,
+                seq,
                 bytes: bytes.to_vec(),
             },
             panes,
@@ -850,7 +888,61 @@ mod tests {
             &mut pending_windows,
             false,
         )
-        .expect("handle_server_frame");
+        .expect("handle_server_frame")
+    }
+
+    /// phux-3uv: a `TERMINAL_OUTPUT` with a non-zero `seq` yields an
+    /// `ack` outcome carrying that frame's `(terminal_id, seq)`, so the
+    /// driver sends a cumulative `FRAME_ACK`. The ack is set regardless of
+    /// focus — the bytes are applied to the pane mirror before any render
+    /// branch — so we drive a NON-focused pane and still expect the ack.
+    #[test]
+    fn terminal_output_yields_frame_ack_outcome() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &right,
+            b"hi",
+            7,
+        );
+        assert_eq!(
+            outcome.ack,
+            Some((right.clone(), 7)),
+            "non-zero seq must ack the delivering terminal's seq",
+        );
+    }
+
+    /// phux-3uv: `seq == 0` is the server's "empty initial frame"
+    /// sentinel; the client must NOT ack it (acking 0 is meaningless and
+    /// would be a no-op against the server's `last_acked_seq == 0`).
+    #[test]
+    fn terminal_output_seq_zero_is_not_acked() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        let outcome = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &right,
+            b"hi",
+            0,
+        );
+        assert_eq!(outcome.ack, None, "seq=0 sentinel must not be acked");
     }
 
     /// phux-2x9 via the injectable sink: a NON-focused pane must repaint

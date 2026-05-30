@@ -553,6 +553,16 @@ async fn main_loop<W: super::RenderSink>(
                         if outcome.exit {
                             exit_after_detach();
                         }
+                        // phux-3uv / ADR-0018: ack the applied TERMINAL_OUTPUT
+                        // so the server's per-consumer SnapshotSynthesizer
+                        // clears the dirty bits that produced this frame
+                        // (mark_synced) and the next state-sync tick re-diffs
+                        // against the acked reference. Without this the
+                        // server re-emits an ever-growing unacked delta
+                        // forever (see `tick_emit`). Cumulative per SPEC §12.2.
+                        if let Some((terminal_id, seq)) = outcome.ack {
+                            conn.send(&FrameKind::FrameAck { terminal_id, seq }).await?;
+                        }
                         // phux-4li.12: a layout mutation triggered by a
                         // server frame (TerminalSpawned ok, TerminalClosed)
                         // requires the same `SET_METADATA` broadcast as
