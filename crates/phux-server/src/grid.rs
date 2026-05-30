@@ -1040,6 +1040,62 @@ mod tests {
     }
 
     #[test]
+    fn screen_state_cells_accounts_for_spacer_head_at_soft_wrap() {
+        // A wide glyph that does not fit in the final column of a row
+        // soft-wraps to the next row; libghostty fills the vacated final
+        // column with a `CellWide::SpacerHead` (grid width 1, empty
+        // grapheme) and places the wide glyph at column 0 of the next row.
+        //
+        // The cells walk skips `SpacerTail` (a wide glyph's second column)
+        // but treats `SpacerHead` as a normal width-1 cell, advancing
+        // col_index by 1 — which matches libghostty's column model, where
+        // `Cell.gridWidth()` returns 1 for `spacer_head` and 2 only for
+        // `wide`. This test pins that accounting across the wrap boundary
+        // (phux-ja1).
+        //
+        // Layout on a 4-column grid for bold "abc你d":
+        //   row 0:  a(0) b(1) c(2) SpacerHead(3)
+        //   row 1:  你(0,wide) SpacerTail(1) d(2)
+        // Bold applies to every cell, so each surfaces in the projection.
+        let mut t = fresh(4, 3);
+        t.vt_write(b"\x1b[1m");
+        t.vt_write("abc你d".as_bytes());
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 1, None, true)
+            .expect("screen_state_with_scrollback");
+        let cells = screen.cells.expect("cells = true populates Some(..)");
+
+        // The (row, col) coordinates every bold cell reports. The SpacerHead
+        // occupies the soft-wrap row's final column (row 0, col 3): it is a
+        // real width-1 cell, not skipped like a SpacerTail, so it both
+        // surfaces here and advances col_index by exactly 1.
+        let coords: Vec<(u16, u16)> = cells.iter().map(|c| (c.row, c.col)).collect();
+        assert_eq!(
+            coords,
+            vec![(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 2)],
+            "SpacerHead is a width-1 cell at the wrapped row's last column; \
+             the wide glyph restarts column accounting at col 0 of the next \
+             row and its SpacerTail (row 1, col 1) is skipped, got {cells:?}",
+        );
+
+        // The wrap resets column accounting per row: the wide glyph that the
+        // SpacerHead displaced lands at col 0 of row 1, and the trailing "d"
+        // reports col 2 (the wide glyph advanced two columns, its SpacerTail
+        // contributing none). The SpacerHead did not leak a column into the
+        // next row.
+        assert!(
+            cells.iter().any(|c| (c.row, c.col) == (1, 0)),
+            "wide glyph wrapped to row 1 must report col 0, got {cells:?}",
+        );
+        assert!(
+            cells.iter().any(|c| (c.row, c.col) == (1, 2)),
+            "cell after the wrapped wide glyph must report true col 2, got {cells:?}",
+        );
+    }
+
+    #[test]
     fn screen_state_with_scrollback_collects_history() {
         // A 3-row viewport with 5 written lines pushes the oldest two into
         // scrollback. Requesting all history (Some(SCROLLBACK_ALL)) must
