@@ -43,6 +43,7 @@ Nygard's template][nygard].
 | [0019](./0019-tui-multi-pane-rendering.md) | Multi-pane TUI rendering: layout persistence, wire shape, and chrome | Accepted |
 | [0020](./0020-layered-render.md) | Layered render: ratatui chrome over libghostty pane interiors | Accepted |
 | [0021](./0021-control-plane-commands.md) | Control-plane verbs ride the generic `COMMAND` envelope; selectors resolve client-side; no session/window on the wire | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md)) |
+| [0023](./0023-config-ux-philosophy.md) | Config UX: pure-config; defaults are a live embedded base layer; scaffold is a commented projection that never overwrites | Accepted (TUI-local, builds on [0017](./0017-tui-not-protocol-privileged.md)) |
 
 ## When to write an ADR
 
