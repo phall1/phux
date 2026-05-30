@@ -123,7 +123,7 @@ impl KeyChord {
     /// Returns `true` when the event is a key *press* (not release or
     /// auto-repeat), targets the same [`PhysicalKey`], and carries the
     /// same logical modifiers once the event's `mods` are masked to
-    /// [`CHORD_MODS`] (lock and side bits ignored — see its docs).
+    /// the chord modifier set (lock and side bits ignored).
     ///
     /// This is the comparison the help-overlay dismiss path wants: feed
     /// it the chord parsed from the user's `show-help` binding and the
