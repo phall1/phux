@@ -34,7 +34,7 @@ pub async fn get_screen(
     socket: &Path,
     terminal_id: TerminalId,
 ) -> Result<ScreenState, AttachError> {
-    get_screen_scrollback(socket, terminal_id, None).await
+    get_screen_scrollback(socket, terminal_id, None, false).await
 }
 
 /// Read `terminal_id`'s current screen as structured data, optionally
@@ -48,6 +48,10 @@ pub async fn get_screen(
 /// for all retained history, `Some(n)` for the most-recent `n` history
 /// rows. The history lands in [`ScreenState::scrollback`].
 ///
+/// `cells` (`phux-8yl`): when `true`, the reply's [`ScreenState::cells`]
+/// field carries per-cell OSC-133 semantic marks + styles; when `false`
+/// it is `None`.
+///
 /// # Errors
 ///
 /// Returns [`AttachError`] on connect/transport failure, when the server
@@ -57,6 +61,7 @@ pub async fn get_screen_scrollback(
     socket: &Path,
     terminal_id: TerminalId,
     request_scrollback: Option<u32>,
+    cells: bool,
 ) -> Result<ScreenState, AttachError> {
     let mut conn = Connection::connect(socket).await?;
     let result = command(
@@ -65,6 +70,7 @@ pub async fn get_screen_scrollback(
         Command::GetScreen {
             terminal_id,
             request_scrollback,
+            cells,
         },
     )
     .await?;

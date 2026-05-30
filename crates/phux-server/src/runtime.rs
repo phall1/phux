@@ -1775,7 +1775,8 @@ async fn handle_command(
         Command::GetScreen {
             terminal_id,
             request_scrollback,
-        } => handle_get_screen(state, &terminal_id, request_scrollback).await,
+            cells,
+        } => handle_get_screen(state, &terminal_id, request_scrollback, cells).await,
         Command::RouteInput { terminal_id, event } => {
             handle_route_input(state, &terminal_id, event)
         }
@@ -1862,6 +1863,7 @@ async fn handle_get_screen(
     state: &SharedState,
     terminal_id: &phux_protocol::ids::TerminalId,
     request_scrollback: Option<u32>,
+    cells: bool,
 ) -> CommandResult {
     // Clone the (Send) handle out of the lock; the actor reply is awaited
     // outside the critical section.
@@ -1882,6 +1884,7 @@ async fn handle_get_screen(
         .send(ScreenRequest {
             pane,
             scrollback: request_scrollback,
+            cells,
             reply: reply_tx,
         })
         .await

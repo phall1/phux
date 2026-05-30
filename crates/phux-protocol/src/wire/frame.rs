@@ -631,6 +631,13 @@ pub enum Command {
         /// the original `GET_SCREEN` body (which ended after `terminal_id`)
         /// would see the `0` presence byte: the field is wire-additive.
         request_scrollback: Option<u32>,
+        /// When `true`, the reply's `ScreenState` carries the additive
+        /// `cells[]` field: per-cell OSC-133 semantic marks + styles
+        /// (`phux-8yl`). Encoded as a trailing `bool` byte *after*
+        /// `request_scrollback`; a decoder reading a pre-`phux-8yl` body
+        /// (which ended after `request_scrollback`) finds no byte and
+        /// defaults it to `false`, so the field is wire-additive.
+        cells: bool,
     },
     /// Deliver an already-built input `event` to `terminal_id` without an
     /// attach, subscription, or resize. The write counterpart to the
@@ -1998,10 +2005,12 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
         Command::GetScreen {
             terminal_id,
             request_scrollback,
+            cells,
         } => {
             enc.write_u8(COMMAND_TAG_GET_SCREEN);
             encode_terminal_id(terminal_id, enc);
             encode_optional_u32(*request_scrollback, enc);
+            enc.write_u8(u8::from(*cells));
         }
         Command::RouteInput { terminal_id, event } => {
             enc.write_u8(COMMAND_TAG_ROUTE_INPUT);
@@ -2055,10 +2064,26 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
         COMMAND_TAG_GET_STATE => Ok(Command::GetState {
             scope: decode_state_scope(dec)?,
         }),
-        COMMAND_TAG_GET_SCREEN => Ok(Command::GetScreen {
-            terminal_id: decode_terminal_id(dec)?,
-            request_scrollback: decode_optional_u32(dec)?,
-        }),
+        COMMAND_TAG_GET_SCREEN => {
+            let terminal_id = decode_terminal_id(dec)?;
+            let request_scrollback = decode_optional_u32(dec)?;
+            // `cells` is a trailing additive bool (`phux-8yl`): a
+            // pre-`phux-8yl` body ends after `request_scrollback`, so an
+            // absent byte (cursor already at the frame-body end) means
+            // `false`. A present byte is read as a bool (non-zero is
+            // `true`). `at_body_end` (not `remaining().is_empty()`) keeps a
+            // following frame's bytes from being misread as `cells`.
+            let cells = if dec.at_body_end() {
+                false
+            } else {
+                dec.read_u8()? != 0
+            };
+            Ok(Command::GetScreen {
+                terminal_id,
+                request_scrollback,
+                cells,
+            })
+        }
         COMMAND_TAG_ROUTE_INPUT => Ok(Command::RouteInput {
             terminal_id: decode_terminal_id(dec)?,
             event: decode_input_event(dec)?,

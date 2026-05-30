@@ -211,6 +211,7 @@ mod tests {
             cursor: None,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
             scrollback: Vec::new(),
+            cells: None,
         }
     }
 

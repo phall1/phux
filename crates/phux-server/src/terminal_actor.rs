@@ -348,6 +348,10 @@ pub struct ScreenRequest {
     /// `Some(0)` for all retained history, `Some(n)` for the most-recent
     /// `n` history rows. Carried from `GET_SCREEN.request_scrollback`.
     pub scrollback: Option<u32>,
+    /// When `true`, populate [`phux_core::screen::ScreenState::cells`] with
+    /// per-cell semantic marks + styles. Carried from `GET_SCREEN.cells`
+    /// (`phux-8yl`).
+    pub cells: bool,
     /// Channel the actor uses to ship the projection back. Dropping the
     /// receiver is benign — the actor discards the reply.
     pub reply: oneshot::Sender<phux_core::screen::ScreenState>,
@@ -1072,10 +1076,11 @@ impl TerminalActor {
         &self,
         pane: u32,
         scrollback: Option<u32>,
+        cells: bool,
     ) -> Result<phux_core::screen::ScreenState, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
         let mut synth = self.synth.borrow_mut();
-        synth.screen_state_with_scrollback(&terminal, pane, scrollback)
+        synth.screen_state_with_scrollback(&terminal, pane, scrollback, cells)
     }
 
     /// Translate a [`TerminalInput`] into PTY bytes via the per-pane
@@ -1444,7 +1449,8 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.screen_rx.recv() => {
-                    let screen = self.screen_state(req.pane, req.scrollback).unwrap_or_else(|err| {
+                    let want_cells = req.cells;
+                    let screen = self.screen_state(req.pane, req.scrollback, req.cells).unwrap_or_else(|err| {
                         warn!(error = %err, "screen projection failed; replying with empty");
                         phux_core::screen::ScreenState {
                             schema_version: phux_core::screen::SCHEMA_VERSION,
@@ -1454,6 +1460,10 @@ impl TerminalActor {
                             cursor: None,
                             lines: Vec::new(),
                             scrollback: Vec::new(),
+                            // Honour the request shape even on the error
+                            // path: an empty cells vec, not a misleading
+                            // `None`, when the caller asked for cells.
+                            cells: want_cells.then(Vec::new),
                         }
                     });
                     let _ = req.reply.send(screen);

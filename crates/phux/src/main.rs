@@ -206,6 +206,13 @@ enum Command {
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0")]
         scrollback: Option<u32>,
 
+        /// Include per-cell OSC-133 semantic marks + styles (`phux-8yl`).
+        /// Populates the JSON `cells` array (sparse: only cells with a
+        /// non-default style or a semantic mark). No effect on the boxed
+        /// view, which is plain text.
+        #[arg(long)]
+        cells: bool,
+
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -347,8 +354,9 @@ fn main() -> ExitCode {
             session,
             json,
             scrollback,
+            cells,
             socket,
-        }) => run_snapshot(session.as_deref(), json, scrollback, socket),
+        }) => run_snapshot(session.as_deref(), json, scrollback, cells, socket),
         Some(Command::SendKeys {
             target,
             keys,
@@ -1044,6 +1052,7 @@ fn run_snapshot(
     session: Option<&str>,
     json: bool,
     scrollback: Option<u32>,
+    cells: bool,
     socket: Option<PathBuf>,
 ) -> ExitCode {
     let selector = match parse_selector(session) {
@@ -1063,11 +1072,13 @@ fn run_snapshot(
         };
 
         // Read the screen — side-effect-free, safe to poll. `scrollback`
-        // maps straight onto the wire request: None/Some(0=all)/Some(n).
+        // maps straight onto the wire request: None/Some(0=all)/Some(n);
+        // `cells` requests the per-cell semantic/style projection.
         let screen = match phux_client::snapshot::get_screen_scrollback(
             &socket_path,
             terminal_id,
             scrollback,
+            cells,
         )
         .await
         {

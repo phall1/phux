@@ -30,19 +30,43 @@ use crate::ids::CollectionId;
 pub struct Decoder<'a> {
     input: &'a [u8],
     pos: usize,
+    /// End offset of the current frame body, set by [`Self::read_frame`]
+    /// once the length header is parsed. Lets variant decoders distinguish
+    /// "ran out of this frame's body" (a backward-compat trailing field is
+    /// absent) from "ran out of the whole buffer", without conflating a
+    /// following frame's bytes with this frame's optional tail. `None`
+    /// outside a framed decode (the boundary is unknown), in which case
+    /// [`Self::at_body_end`] falls back to the input end.
+    body_end: Option<usize>,
 }
 
 impl<'a> Decoder<'a> {
     /// Wrap `input` for primitive reads.
     #[must_use]
     pub const fn new(input: &'a [u8]) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            body_end: None,
+        }
     }
 
     /// Current read offset within the input.
     #[must_use]
     pub const fn position(&self) -> usize {
         self.pos
+    }
+
+    /// Whether the cursor is at (or past) the end of the current frame
+    /// body. A variant decoder consults this to decide whether an additive
+    /// trailing field is present: `true` means the producer encoded a body
+    /// that ended before this field, so the field defaults.
+    ///
+    /// Outside a framed decode (`body_end` unset) this falls back to the
+    /// end of the borrowed input.
+    #[must_use]
+    pub fn at_body_end(&self) -> bool {
+        self.pos >= self.body_end.unwrap_or(self.input.len())
     }
 
     /// Remaining (unread) bytes.
@@ -160,6 +184,10 @@ impl<'a> Decoder<'a> {
         if body_end > self.input.len() {
             return Err(DecodeError::UnexpectedEof);
         }
+        // Record the body boundary so variant decoders can detect absent
+        // additive trailing fields (e.g. GET_SCREEN's `cells`) without
+        // mistaking a following frame's bytes for this frame's tail.
+        self.body_end = Some(body_end);
 
         let type_byte = self.read_u8()?;
         let frame = match type_byte {

@@ -125,6 +125,7 @@ fn get_screen_returns_structured_screen_for_live_pane() {
                 command: Command::GetScreen {
                     terminal_id: pane_id.clone(),
                     request_scrollback: None,
+                    cells: false,
                 },
             },
         )
@@ -151,6 +152,61 @@ fn get_screen_returns_structured_screen_for_live_pane() {
                     screen.scrollback.is_empty(),
                     "no scrollback requested -> empty scrollback (phux-o1v)",
                 );
+                assert!(
+                    screen.cells.is_none(),
+                    "no cells requested -> cells None (phux-8yl)",
+                );
+            }
+            other => panic!("expected Ok_With(Json(..)), got {other:?}"),
+        }
+    });
+}
+
+/// Wire-level GET_SCREEN with `cells: true` must drive the production read
+/// loop (`handle_client`) all the way to a `ScreenState` whose `cells`
+/// field is `Some(..)` rather than `None` (`phux-8yl`). This proves the
+/// flag threads from the decoded `Command::GetScreen` through dispatch ->
+/// `ScreenRequest` -> the grid walk; the per-cell *content* (semantic
+/// marks, styles) is exercised by the grid.rs unit tests against a
+/// Terminal seeded with `vt_write`, where the grid is deterministic.
+#[test]
+fn get_screen_with_cells_requests_cell_projection() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(&mut stream, &attach_by_name("work")).await;
+        let pane_id = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::Attached { snapshot, .. } = frame {
+                break snapshot.panes[0].id.clone();
+            }
+        };
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 21,
+                command: Command::GetScreen {
+                    terminal_id: pane_id.clone(),
+                    request_scrollback: None,
+                    cells: true,
+                },
+            },
+        )
+        .await;
+
+        let result = await_command_result(&mut stream, 21).await;
+        match result {
+            CommandResult::OkWith(CommandValue::Json(json)) => {
+                let screen: phux_core::screen::ScreenState = serde_json::from_str(&json)
+                    .expect("GET_SCREEN reply must be valid ScreenState");
+                assert!(
+                    screen.cells.is_some(),
+                    "cells: true must populate Some(..) through dispatch (phux-8yl)",
+                );
             }
             other => panic!("expected Ok_With(Json(..)), got {other:?}"),
         }
@@ -172,6 +228,7 @@ fn get_screen_unknown_id_returns_terminal_not_found() {
                 command: Command::GetScreen {
                     terminal_id: TerminalId::local(99_999),
                     request_scrollback: None,
+                    cells: false,
                 },
             },
         )

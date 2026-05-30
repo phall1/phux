@@ -1493,23 +1493,117 @@ fn command_get_state_round_trips() {
 #[test]
 fn command_get_screen_round_trips() {
     // GET_SCREEN (tag 0x07): TerminalId + a trailing optional<u32>
-    // `request_scrollback` (phux-o1v). The reply is OK_WITH(JSON(..)) —
-    // covered by the generic CommandValue::Json roundtrip. Exercise all
-    // three scrollback states so the presence byte + value round-trip.
+    // `request_scrollback` (phux-o1v) + a trailing bool `cells` (phux-8yl).
+    // The reply is OK_WITH(JSON(..)) — covered by the generic
+    // CommandValue::Json roundtrip. Exercise every scrollback state crossed
+    // with both `cells` values so the presence byte + value + cells bool
+    // round-trip.
     for request_scrollback in [None, Some(0), Some(42)] {
-        let frame = FrameKind::Command {
-            request_id: 11,
-            command: Command::GetScreen {
-                terminal_id: TerminalId::local(5),
-                request_scrollback,
-            },
-        };
-        let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
-        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
-        assert_eq!(decoded, frame);
-        assert!(tail.is_empty());
+        for cells in [false, true] {
+            let frame = FrameKind::Command {
+                request_id: 11,
+                command: Command::GetScreen {
+                    terminal_id: TerminalId::local(5),
+                    request_scrollback,
+                    cells,
+                },
+            };
+            let mut buf = BytesMut::new();
+            frame.encode(&mut buf);
+            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+            assert_eq!(decoded, frame);
+            assert!(tail.is_empty());
+        }
     }
+}
+
+#[test]
+fn command_get_screen_decodes_pre_cells_body_as_false() {
+    // Backward-compat (phux-8yl): a GET_SCREEN frame encoded *before* the
+    // trailing `cells` bool existed has a body that ends after
+    // `request_scrollback`, with a length header one byte shorter. A
+    // current decoder must read the missing `cells` as `false`, not error
+    // on EOF. Reconstruct the pre-cells frame by stripping the trailing
+    // `cells` byte off a current encoding *and* fixing up the length
+    // header to match the shorter body — the framing layer is
+    // length-bounded, so the header is load-bearing.
+    let frame = FrameKind::Command {
+        request_id: 7,
+        command: Command::GetScreen {
+            terminal_id: TerminalId::local(9),
+            request_scrollback: Some(3),
+            cells: false,
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+
+    // Drop the trailing `cells` byte the encoder appended.
+    let mut pre_cells = buf[..buf.len() - 1].to_vec();
+    // The first four bytes are the big-endian body length; decrement it by
+    // one to match the now-shorter body (the dropped `cells` byte).
+    let new_len = u32::from_be_bytes([pre_cells[0], pre_cells[1], pre_cells[2], pre_cells[3]]) - 1;
+    pre_cells[0..4].copy_from_slice(&new_len.to_be_bytes());
+
+    let (decoded, tail) = FrameKind::decode(&pre_cells).unwrap();
+    assert_eq!(decoded, frame, "absent cells byte must decode as false");
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_get_screen_back_to_back_frames_dont_bleed_cells() {
+    // Two GET_SCREEN frames concatenated in one buffer: decoding the first
+    // (with `cells: false`, so its body ends after `request_scrollback`
+    // when produced by an old peer) must NOT consume the *second* frame's
+    // leading byte as its `cells`. The `at_body_end` boundary, not a raw
+    // "any bytes remain" check, is what guarantees this (phux-8yl).
+    let mut first = BytesMut::new();
+    FrameKind::Command {
+        request_id: 1,
+        command: Command::GetScreen {
+            terminal_id: TerminalId::local(1),
+            request_scrollback: None,
+            cells: false,
+        },
+    }
+    .encode(&mut first);
+    // Strip the first frame's trailing `cells` byte + fix its length, to
+    // mimic an old peer that never wrote it.
+    let mut first = first[..first.len() - 1].to_vec();
+    let new_len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) - 1;
+    first[0..4].copy_from_slice(&new_len.to_be_bytes());
+
+    let second = FrameKind::Command {
+        request_id: 2,
+        command: Command::GetScreen {
+            terminal_id: TerminalId::local(2),
+            request_scrollback: None,
+            cells: true,
+        },
+    };
+    let mut second_buf = BytesMut::new();
+    second.encode(&mut second_buf);
+
+    let mut buf = first;
+    buf.extend_from_slice(&second_buf);
+
+    let (decoded_first, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(
+        decoded_first,
+        FrameKind::Command {
+            request_id: 1,
+            command: Command::GetScreen {
+                terminal_id: TerminalId::local(1),
+                request_scrollback: None,
+                cells: false,
+            },
+        },
+        "first frame's absent cells must default false, not steal frame 2's byte",
+    );
+    // The remainder must decode as the intact second frame.
+    let (decoded_second, rest) = FrameKind::decode(tail).unwrap();
+    assert_eq!(decoded_second, second);
+    assert!(rest.is_empty());
 }
 
 #[test]

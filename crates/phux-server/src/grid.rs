@@ -29,13 +29,15 @@
 
 use std::io::Write as _;
 
-use phux_core::screen::{CursorState, SCHEMA_VERSION, ScreenState};
+use phux_core::screen::{
+    CellColor, CellInfo, CellStyle, CursorState, SCHEMA_VERSION, ScreenState, SemanticContent,
+};
 
 use libghostty_vt::{
     RenderState, Terminal,
     render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
-    screen::CellWide,
-    style::{RgbColor, Style},
+    screen::{CellSemanticContent, CellWide},
+    style::{RgbColor, Style, StyleColor},
     terminal::{Mode, Point, PointCoordinate},
 };
 
@@ -152,7 +154,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &Terminal<'alloc, '_>,
         pane: u32,
     ) -> Result<ScreenState, SynthesisError> {
-        self.screen_state_with_scrollback(terminal, pane, None)
+        self.screen_state_with_scrollback(terminal, pane, None, false)
     }
 
     /// Like [`Self::screen_state`], but additionally projects up to
@@ -173,11 +175,20 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// so the read stays safe to poll against a live pane. The viewport
     /// walk is unchanged from [`Self::screen_state`] and still uses the
     /// pooled render iterators.
+    ///
+    /// When `cells` is `true`, the viewport walk additionally collects a
+    /// sparse [`ScreenState::cells`] vec: per-cell OSC-133 semantic marks
+    /// (via `Cell::semantic_content`) and styles (via `CellIteration::style`
+    /// plus the resolved foreground/background). Only cells with a
+    /// non-default style or a semantic mark are emitted, in row-major order,
+    /// skipping wide-cell tails — see the private `collect_cell`. When `false`,
+    /// `cells` is left `None` and the walk pays nothing (`phux-8yl`).
     pub fn screen_state_with_scrollback(
         &mut self,
         terminal: &Terminal<'alloc, '_>,
         pane: u32,
         scrollback: Option<u32>,
+        cells: bool,
     ) -> Result<ScreenState, SynthesisError> {
         // Read history first, before borrowing `render_state` for the
         // viewport snapshot: `grid_ref` borrows `terminal` immutably and
@@ -198,6 +209,10 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             visible: snapshot.cursor_visible().unwrap_or(true),
         });
 
+        // Only allocate the cells vec when the caller asked; the common
+        // `--cells`-absent snapshot pays nothing.
+        let mut cell_infos: Option<Vec<CellInfo>> = cells.then(Vec::new);
+
         let mut lines: Vec<String> = Vec::with_capacity(usize::from(rows_n));
         let mut row_iter = self.rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
@@ -206,10 +221,21 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 break;
             }
             let mut buf = String::with_capacity(usize::from(cols));
+            let mut col_index: u16 = 0;
             let mut cell_iter = self.cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
-                if matches!(cell.raw_cell()?.wide()?, CellWide::SpacerTail) {
+                let wide = cell.raw_cell()?.wide()?;
+                if matches!(wide, CellWide::SpacerTail) {
+                    // Wide-cell tail: the base glyph spans both columns and
+                    // advances col_index by its display width below, so skip
+                    // the tail for both the text and the cells projection
+                    // (no column emitted).
                     continue;
+                }
+                if let Some(infos) = cell_infos.as_mut()
+                    && let Some(info) = collect_cell(cell, row_index, col_index)?
+                {
+                    infos.push(info);
                 }
                 let graphemes = cell.graphemes()?;
                 if graphemes.is_empty() {
@@ -217,6 +243,12 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 } else {
                     buf.extend(graphemes);
                 }
+                // Advance by the cell's display width so a styled/marked cell
+                // to the right of a double-width (CJK/emoji) glyph reports the
+                // true grid column — the same space cursor.x lives in. A Wide
+                // base occupies two columns; its SpacerTail is skipped above.
+                col_index =
+                    col_index.saturating_add(if matches!(wide, CellWide::Wide) { 2 } else { 1 });
             }
             lines.push(buf.trim_end().to_owned());
             row_index += 1;
@@ -230,6 +262,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             cursor,
             lines,
             scrollback: scrollback_lines,
+            cells: cell_infos,
         })
     }
 
@@ -514,6 +547,106 @@ fn emit_cell(
     Ok(())
 }
 
+/// Project one viewport cell into a [`CellInfo`], or `None` when the cell
+/// carries neither a non-default style nor an OSC-133 semantic mark
+/// (`phux-8yl`).
+///
+/// Returning `None` for plain cells keeps the [`ScreenState::cells`] vec
+/// sparse: a mostly-blank grid emits almost nothing, so the JSON stays
+/// small while every styled or semantically-marked cell is still reported.
+/// `row`/`col` are the viewport-relative, zero-based coordinates of the
+/// cell's left edge (wide-cell tails are skipped by the caller).
+fn collect_cell(
+    cell: &CellIteration<'_, '_>,
+    row: u16,
+    col: u16,
+) -> Result<Option<CellInfo>, SynthesisError> {
+    let style = cell.style()?;
+    // libghostty defaults every cell's semantic content to `Output`,
+    // whether or not the shell emitted any OSC-133 marks — so `Output` is
+    // the *absence* of a meaningful mark, not a signal. Collapse it to
+    // `None` and surface only `Input` / `Prompt`, the marks an agent can
+    // actually act on; this also keeps the cells projection sparse (a grid
+    // with no shell integration emits no semantic field at all).
+    let semantic = match cell.raw_cell()?.semantic_content()? {
+        CellSemanticContent::Output => None,
+        CellSemanticContent::Input => Some(SemanticContent::Input),
+        CellSemanticContent::Prompt => Some(SemanticContent::Prompt),
+    };
+
+    // Resolve fg/bg via the iteration's color helpers (which apply the
+    // palette/default), falling back to the raw `StyleColor` so a palette
+    // index survives as a palette index in the projection.
+    let fg = cell_color(cell.fg_color()?, style.fg_color);
+    let bg = cell_color(cell.bg_color()?, style.bg_color);
+
+    let cell_style = CellStyle {
+        bold: style.bold,
+        faint: style.faint,
+        italic: style.italic,
+        underline: !matches!(style.underline, libghostty_vt::style::Underline::None),
+        blink: style.blink,
+        inverse: style.inverse,
+        invisible: style.invisible,
+        strikethrough: style.strikethrough,
+        overline: style.overline,
+        fg,
+        bg,
+    };
+
+    // Sparse: drop cells that carry nothing an agent could act on.
+    if semantic.is_none() && cell_style == DEFAULT_CELL_STYLE {
+        return Ok(None);
+    }
+
+    Ok(Some(CellInfo {
+        col,
+        row,
+        semantic,
+        style: cell_style,
+    }))
+}
+
+/// The all-off, all-default [`CellStyle`] — the sentinel `collect_cell`
+/// compares against to keep the cells projection sparse.
+const DEFAULT_CELL_STYLE: CellStyle = CellStyle {
+    bold: false,
+    faint: false,
+    italic: false,
+    underline: false,
+    blink: false,
+    inverse: false,
+    invisible: false,
+    strikethrough: false,
+    overline: false,
+    fg: CellColor::Default,
+    bg: CellColor::Default,
+};
+
+/// Project a cell color to [`CellColor`].
+///
+/// Prefers the cell's explicit per-cell [`StyleColor`] so a palette index
+/// keeps its identity (`Palette { index }`) rather than collapsing to RGB.
+/// When the cell sets no explicit color (`StyleColor::None`) but the
+/// iteration still resolves a concrete RGB (`resolved` — e.g. a non-default
+/// background inherited from the terminal palette), that RGB is surfaced;
+/// otherwise the projection is [`CellColor::Default`].
+fn cell_color(resolved: Option<RgbColor>, raw: StyleColor) -> CellColor {
+    match raw {
+        StyleColor::Palette(index) => CellColor::Palette { index: index.0 },
+        StyleColor::Rgb(rgb) => CellColor::Rgb {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        },
+        StyleColor::None => resolved.map_or(CellColor::Default, |rgb| CellColor::Rgb {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        }),
+    }
+}
+
 /// Post-row-walk epilogue shared by both synthesis paths: reset SGR,
 /// re-establish cursor position + visibility + visual style, and replay
 /// the load-bearing mode bits queried from the canonical [`Terminal`].
@@ -783,6 +916,130 @@ mod tests {
     }
 
     #[test]
+    fn screen_state_without_cells_leaves_cells_none() {
+        // The default read path (cells = false) must not allocate the
+        // cells projection — back-compat with the pre-phux-8yl shape.
+        let mut t = fresh(20, 3);
+        t.vt_write(b"hello");
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth.screen_state(&t, 1).expect("screen_state");
+        assert!(screen.cells.is_none(), "cells = false leaves cells None");
+    }
+
+    #[test]
+    fn screen_state_cells_collects_styles_sparsely() {
+        // A bold-red "HI" followed by plain "ok": the styled cells must
+        // surface in the cells projection, the plain cells must NOT (the
+        // vec is sparse), and the styled cells must carry the right
+        // attributes + RGB-resolved color (phux-8yl).
+        let mut t = fresh(20, 2);
+        // ESC[1;31m = bold + red fg; "HI"; ESC[0m reset; " ok".
+        t.vt_write(b"\x1b[1;31mHI\x1b[0m ok");
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 1, None, true)
+            .expect("screen_state_with_scrollback");
+        let cells = screen.cells.expect("cells = true populates Some(..)");
+
+        // Exactly the two styled cells (H, I) are emitted; the blank and
+        // the plain "ok" cells are dropped by the sparse filter (no style,
+        // no mark).
+        assert_eq!(
+            cells.len(),
+            2,
+            "only the two bold-red cells are emitted, got {cells:?}",
+        );
+        for (i, cell) in cells.iter().enumerate() {
+            assert_eq!((cell.row, cell.col), (0, u16::try_from(i).unwrap()));
+            assert!(cell.style.bold, "bold cell {i}");
+            assert!(!cell.style.italic, "not italic {i}");
+            // ANSI `31` is palette slot 1 (red); the explicit per-cell
+            // palette index is preserved rather than collapsed to RGB.
+            assert_eq!(
+                cell.style.fg,
+                CellColor::Palette { index: 1 },
+                "ANSI red keeps its palette identity",
+            );
+            assert_eq!(cell.style.bg, CellColor::Default, "no explicit bg");
+            assert!(
+                cell.semantic.is_none(),
+                "no OSC-133 marks written -> Output collapses to None",
+            );
+        }
+    }
+
+    #[test]
+    fn screen_state_cells_captures_osc133_semantic_marks() {
+        // OSC-133 shell-integration marks classify cells as prompt / input
+        // / output. Emit a prompt mark (`OSC 133 ; A`), prompt text, then a
+        // command-start mark (`OSC 133 ; B`) and typed input. The cells
+        // projection must surface the per-cell semantic content (phux-8yl).
+        let mut t = fresh(40, 2);
+        // OSC 133 ; A  -> prompt start. Then "$ " is prompt text.
+        t.vt_write(b"\x1b]133;A\x07$ ");
+        // OSC 133 ; B  -> command (input) start. Then "ls" is input.
+        t.vt_write(b"\x1b]133;B\x07ls");
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 1, None, true)
+            .expect("screen_state_with_scrollback");
+        let cells = screen.cells.expect("cells = true populates Some(..)");
+
+        // The prompt glyph "$" must carry Prompt; the input glyph "l"/"s"
+        // must carry Input. We assert on the marks rather than exact cell
+        // counts so the test is robust to how libghostty attributes the
+        // trailing space.
+        let prompt_marked = cells
+            .iter()
+            .any(|c| matches!(c.semantic, Some(SemanticContent::Prompt)));
+        let input_marked = cells
+            .iter()
+            .any(|c| matches!(c.semantic, Some(SemanticContent::Input)));
+        assert!(
+            prompt_marked,
+            "OSC-133 ;A region must surface a Prompt cell, got {cells:?}",
+        );
+        assert!(
+            input_marked,
+            "OSC-133 ;B region must surface an Input cell, got {cells:?}",
+        );
+    }
+
+    #[test]
+    fn screen_state_cells_reports_true_column_after_wide_glyph() {
+        // A double-width CJK glyph occupies two grid columns; libghostty
+        // emits its second column as a SpacerTail. The cells projection must
+        // advance its column counter by the glyph's full display width so a
+        // styled cell to its right reports the true grid column — the same
+        // coordinate space cursor.x lives in. Regression: the phux-8yl walk
+        // advanced col_index by 1 per cell, under-counting after wide glyphs.
+        let mut t = fresh(20, 2);
+        // Unstyled wide glyph (你, two columns) then a bold "X" at col 2.
+        t.vt_write("你".as_bytes());
+        t.vt_write(b"\x1b[1mX");
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 1, None, true)
+            .expect("screen_state_with_scrollback");
+        let cells = screen.cells.expect("cells = true populates Some(..)");
+
+        // The wide glyph is unstyled and dropped by the sparse filter, so the
+        // bold X is the only emitted cell; it must report col 2, not col 1.
+        let x = cells
+            .iter()
+            .find(|c| c.style.bold)
+            .expect("bold X after the wide glyph must be emitted");
+        assert_eq!(
+            (x.row, x.col),
+            (0, 2),
+            "styled cell after a double-width glyph must report true column 2, got {cells:?}",
+        );
+    }
+
+    #[test]
     fn screen_state_with_scrollback_collects_history() {
         // A 3-row viewport with 5 written lines pushes the oldest two into
         // scrollback. Requesting all history (Some(SCROLLBACK_ALL)) must
@@ -794,7 +1051,7 @@ mod tests {
 
         let mut synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
-            .screen_state_with_scrollback(&t, 7, Some(SCROLLBACK_ALL))
+            .screen_state_with_scrollback(&t, 7, Some(SCROLLBACK_ALL), false)
             .expect("screen_state_with_scrollback");
 
         assert_eq!(screen.schema_version, SCHEMA_VERSION);
@@ -820,7 +1077,7 @@ mod tests {
 
         let mut synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
-            .screen_state_with_scrollback(&t, 1, Some(2))
+            .screen_state_with_scrollback(&t, 1, Some(2), false)
             .expect("screen_state_with_scrollback");
 
         assert_eq!(
@@ -839,7 +1096,7 @@ mod tests {
 
         let mut synth = SnapshotSynthesizer::new().expect("synth");
         let none = synth
-            .screen_state_with_scrollback(&t, 0, None)
+            .screen_state_with_scrollback(&t, 0, None, false)
             .expect("with None");
         let legacy = synth.screen_state(&t, 0).expect("screen_state");
 
@@ -858,7 +1115,7 @@ mod tests {
 
         let mut synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
-            .screen_state_with_scrollback(&t, 0, Some(SCROLLBACK_ALL))
+            .screen_state_with_scrollback(&t, 0, Some(SCROLLBACK_ALL), false)
             .expect("screen_state_with_scrollback");
         assert!(screen.scrollback.is_empty());
         assert_eq!(screen.lines[0], "only one line");
