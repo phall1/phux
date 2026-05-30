@@ -29,6 +29,46 @@ mod widgets;
 pub use status_bar::{StatusBar, row_to_string};
 pub use widgets::session_name::SessionNameWidget;
 pub use widgets::time::TimeWidget;
+pub use widgets::windows::WindowsWidget;
+
+/// Visual style for a status-bar [`Cell`], expressed as plain data.
+///
+/// Colors are strings (`"red"`, `"#cdd6f4"`, `"12"`) interpreted by the
+/// render layer — phux-config never imports ratatui (ADR-0020), so the
+/// translation to `ratatui::style::Color` happens in
+/// `phux-client`'s chrome module. This mirrors the existing
+/// `[theme].slots` color-as-string convention.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields, default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent SGR attribute toggle; a bitflags enum would only obscure the TOML-facing shape"
+)]
+pub struct CellStyle {
+    /// Foreground color string, or `None` for the terminal default.
+    pub fg: Option<String>,
+    /// Background color string, or `None` for the terminal default.
+    pub bg: Option<String>,
+    /// Bold.
+    pub bold: bool,
+    /// Dim / faint.
+    pub dim: bool,
+    /// Italic.
+    pub italic: bool,
+    /// Underline.
+    pub underline: bool,
+    /// Reverse video (swap fg/bg).
+    pub reverse: bool,
+}
+
+impl CellStyle {
+    /// `true` when every field is at its default (no styling). Used to
+    /// store `None` rather than an all-default style on a [`Cell`].
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 /// A single status-bar cell.
 ///
@@ -41,6 +81,20 @@ pub struct Cell {
     /// First element is the base codepoint; remaining elements are combining
     /// codepoints in source order.
     pub text: SmallVec<[char; 2]>,
+    /// Optional per-cell style. `None` ⇒ inherit the terminal default
+    /// (plain). The render layer (phux-client) translates this to SGR.
+    pub style: Option<CellStyle>,
+}
+
+/// A window as the `windows` widget sees it: a display name and whether
+/// it is the client's active window. Positional index in the slice is the
+/// window's selector (matches `select-window index=N`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowInfo {
+    /// Window display name (the editable label).
+    pub name: String,
+    /// `true` for the active window (rendered with the active style).
+    pub active: bool,
 }
 
 /// Context passed to a [`StatusWidget`] at render time.
@@ -55,6 +109,10 @@ pub struct WidgetContext<'a> {
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
+    /// The TUI's windows in display order, with the active one flagged.
+    /// Consumed by the `windows` (tab-bar) widget; empty for consumers
+    /// that don't present windows.
+    pub windows: &'a [WindowInfo],
 }
 
 /// A horizontal strip of cells produced by a widget for one render pass.
@@ -73,10 +131,22 @@ impl WidgetCells {
     /// use today.
     #[must_use]
     pub fn from_text(s: &str) -> Self {
+        Self::from_styled(s, None)
+    }
+
+    /// Build a [`WidgetCells`] from a string with one style applied to
+    /// every cell. `None` ⇒ plain (terminal default).
+    #[must_use]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "style is cloned into each cell; by-value keeps the builder call sites ergonomic"
+    )]
+    pub fn from_styled(s: &str, style: Option<CellStyle>) -> Self {
         let cells = s
             .chars()
             .map(|c| Cell {
                 text: smallvec::smallvec![c],
+                style: style.clone(),
             })
             .collect();
         Self { cells }
@@ -150,6 +220,7 @@ impl WidgetRegistry {
         let mut r = Self::new();
         r.register("time", widgets::time::factory);
         r.register("session-name", widgets::session_name::factory);
+        r.register("windows", widgets::windows::factory);
         r
     }
 
