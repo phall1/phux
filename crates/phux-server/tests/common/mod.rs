@@ -118,6 +118,36 @@ pub fn spawn_server_with_seed_cmd(
     (tx, handle)
 }
 
+/// Spawn a [`ServerRuntime`] that seeds panes with a *real PTY* but no
+/// server-wide override command (`seed_with_pty = true`, `seed_command =
+/// None`). Under this config a `CREATE_SESSION` carrying a non-empty wire
+/// `command` runs that command in the seed pane — the override that wins in
+/// [`spawn_server_with_seed_cmd`] is absent, so the wire command takes
+/// effect. Used to verify the `CREATE_SESSION { command }` path end-to-end
+/// against a deterministic PTY fixture (`phux-rhh`).
+pub fn spawn_server_seed_pty_no_cmd(
+    socket_path: PathBuf,
+    pre_seeded: Option<&str>,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    let (tx, rx) = oneshot::channel::<()>();
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: pre_seeded.map(str::to_owned),
+        seed_with_pty: true,
+        seed_command: None,
+        ..ServerConfig::with_default_socket()
+    };
+    let handle = tokio::task::spawn_local(async move {
+        let server = ServerRuntime::new(cfg);
+        server
+            .run_async(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (tx, handle)
+}
+
 /// Block on `fut` inside a fresh `current_thread` runtime + `LocalSet`.
 /// Mirrors the byc.8 `attach_lifecycle` helper exactly so the wire
 /// surface stays identical across tests.

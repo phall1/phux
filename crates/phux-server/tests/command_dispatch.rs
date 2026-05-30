@@ -21,7 +21,8 @@
 //!    creating a named session under the default collection *without*
 //!    attaching (the returned id resolves to a live seed pane, GET_STATE
 //!    lists the new session). Plus the duplicate-name and unknown-collection
-//!    refusals (`phux-fdh`, ADR-0021 §3).
+//!    refusals (`phux-fdh`, ADR-0021 §3), and the non-empty-seed-command
+//!    path — the wire `command` actually runs in the seed pane (`phux-rhh`).
 //! 6. **KILL_COLLECTION** → `COMMAND_RESULT { Ok }` tearing down a whole
 //!    named session in one round-trip; a fresh GET_STATE no longer lists it.
 //!    Plus the unknown-session (`SessionNotFound`) and unknown-collection
@@ -50,7 +51,7 @@ use tokio::time::timeout;
 
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
-    spawn_server, try_recv_typed, wait_for_socket,
+    spawn_server, spawn_server_seed_pty_no_cmd, try_recv_typed, wait_for_socket,
 };
 
 /// Drain frames until a `COMMAND_RESULT` with `request_id` arrives.
@@ -542,6 +543,89 @@ fn create_session_unknown_collection_is_refused() {
             }
             other => panic!("expected Error(InvalidCommand), got {other:?}"),
         }
+    });
+}
+
+/// CREATE_SESSION carrying a NON-EMPTY seed command actually runs that
+/// command in the seed pane (`phux-rhh`). The server is configured with a
+/// real PTY but no server-wide override command, so the wire `command`
+/// takes effect; the fixture writes a deterministic marker, which a poll of
+/// GET_SCREEN on the returned seed-pane id must observe. The whole path
+/// rides `handle_client` (the production read loop) — the test speaks only
+/// wire bytes — closing the Q5 coverage gap a prior verify flagged (the
+/// existing CREATE_SESSION tests only exercised the default-seed path).
+#[test]
+fn create_session_runs_non_empty_seed_command() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // PTY-backed seeds, but no override command: the wire `command`
+        // below is what the seed pane execs.
+        let (_shutdown_tx, _server) =
+            spawn_server_seed_pty_no_cmd(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Deterministic fixture: print a marker, then idle so the pane stays
+        // live long enough for the GET_SCREEN poll to sample it.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 40,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "seeded".to_owned(),
+                    command: Some(vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "printf RHHMARKER; sleep 30".to_owned(),
+                    ]),
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        let seed = match await_command_result(&mut stream, 40).await {
+            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        };
+
+        // Poll GET_SCREEN on the seed pane until the marker the seed command
+        // printed shows up — proof the wire `command` actually ran in the
+        // seed pane (PTY startup + exec is asynchronous).
+        let mut request_id = 41;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut saw_marker = false;
+        while tokio::time::Instant::now() < deadline {
+            send_frame(
+                &mut stream,
+                &FrameKind::Command {
+                    request_id,
+                    command: Command::GetScreen {
+                        terminal_id: seed.clone(),
+                        request_scrollback: None,
+                        cells: false,
+                    },
+                },
+            )
+            .await;
+            if let CommandResult::OkWith(CommandValue::Json(json)) =
+                await_command_result(&mut stream, request_id).await
+            {
+                let screen: phux_core::screen::ScreenState = serde_json::from_str(&json)
+                    .expect("GET_SCREEN reply must be valid ScreenState");
+                if screen.lines.iter().any(|line| line.contains("RHHMARKER")) {
+                    saw_marker = true;
+                    break;
+                }
+            }
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(
+            saw_marker,
+            "CREATE_SESSION seed command must run in the seed pane (RHHMARKER never rendered)",
+        );
     });
 }
 
