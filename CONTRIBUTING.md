@@ -15,9 +15,11 @@ host, copy-mode reinvention, or template DSL. Doc conventions live in
 
 phux is an experiment in building the terminal multiplexer that would
 exist if libghostty had been available in 2007. We are picky about
-contributions — not to be precious, but because every multiplexer that
-came before ours was strangled by accumulated cruft, and we are deeply
-allergic.
+contributions for a concrete reason: the multiplexers before us each
+grew a scripting language, a plugin host, a config DSL, and a copy-mode
+of their own, and the accreted surface is now the thing nobody can
+finish refactoring. Every feature we decline is one we never have to
+keep working across every future version of the wire.
 
 The yardstick is the [smol manifesto](https://smol.tauri.app/): solve a
 well-defined problem; behave the way users expect; be maintainable by

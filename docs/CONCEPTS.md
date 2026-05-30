@@ -46,15 +46,14 @@ real if a real consumer rides it. The substrate is the point.
 
 Both ends of the phux wire run `libghostty_vt::Terminal`. The server's
 is the canonical state for a managed terminal; the client's is a local
-mirror used for rendering.
+mirror used for rendering. The same parser sits on both ends and
+nothing in the middle re-encodes the stream.
 
-This is structural, not incidental. Modern terminal protocols — Kitty
-keyboard, true colour, OSC 8 hyperlinks, OSC 133 prompt boundaries,
-image protocols, mouse pixel-precision — pass through end-to-end
-because libghostty parses on both ends and nothing in the middle
-re-encodes them. Multiplexers built before libghostty (tmux, screen,
-zellij) re-parse VT in the middle of the path and degrade these
-features as a matter of architecture. phux structurally cannot.
+That is why modern terminal protocols — Kitty keyboard, true colour,
+OSC 8 hyperlinks, OSC 133 prompt boundaries, image protocols, mouse
+pixel-precision — pass through losslessly. Multiplexers built before
+libghostty (tmux, screen, zellij) re-parse VT mid-path and degrade
+these features as a matter of architecture. phux structurally cannot.
 
 The decision and its consequences are recorded in
 [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md),
@@ -131,21 +130,21 @@ TerminalId = LOCAL     { id: u32 }
 ```
 
 Day-1 servers construct `LOCAL` only. Day-N hubs route `SATELLITE` ids
-to satellite servers running on other machines. The wire bytes are the
-same in both cases. v0.1 servers MUST accept SATELLITE-tagged ids and
-reply `UnsupportedSatelliteRoute` if they're not a federation hub —
-this is forward-compat baked in from day one.
+to satellite servers on other machines. The wire bytes are identical in
+both cases. A v0.1 server accepts SATELLITE-tagged ids and, if it isn't
+a federation hub, replies `UnsupportedSatelliteRoute` — the
+forward-compatibility is in the addressing, present from the first
+release.
 
 See [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md)
 and [ADR-0016 (TerminalId as the wire primary)](../ADR/0016-terminal-id-as-wire-primary.md).
 
-Why this matters: phux is not a single-machine tool that one day might
-support remote attach. It is a control plane from the first byte. A
-fleet of agents working on a fleet of cloud boxes is the load-bearing
-use case — terminals as addressable resources, accessible from one
-place, observable in real time, persistent across disconnect. tmux
-cannot become this without throwing its wire away. phux's wire is
-already pointed at it.
+So phux is a control plane from the first byte, not a single-machine
+tool with remote attach grafted on later. The load-bearing case is a
+fleet of agents working across a fleet of cloud boxes: terminals as
+addressable resources, reachable from one place, observable live,
+persistent across disconnect. tmux cannot become this without
+discarding its wire; phux's wire already points here.
 
 The transport between hub and satellites is whatever works — SSH-stdio
 first, QUIC eventually — behind a `Transport` trait. Domain code never

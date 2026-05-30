@@ -16,28 +16,30 @@ today — read [`CONCEPTS.md`](./CONCEPTS.md).
 
 ## Why now
 
-Two things changed.
+Two structural changes, neither of which existed when tmux's
+architecture was set, make a different design possible.
 
-**libghostty exists.** A bytes-in / structure-out terminal emulator
-that both the server and a client can run, identically, with no
-re-parsing in between. Modern terminal protocols — the Kitty keyboard
-protocol, true colour, OSC 8 hyperlinks, OSC 133 prompt boundaries,
-image protocols, mouse pixel-precision — pass through end-to-end
-because libghostty parses on both ends. tmux, screen, zellij — all
-built before libghostty — re-parse VT in the middle of the path and
-degrade these features as a matter of architecture. phux structurally
-cannot.
+**libghostty is reusable as a library.** A bytes-in / structure-out
+terminal emulator that the server and the client can both run
+identically, with no re-parsing in between. Modern terminal protocols —
+the Kitty keyboard protocol, true colour, OSC 8 hyperlinks, OSC 133
+prompt boundaries, image protocols, mouse pixel-precision — pass
+through end-to-end because the same parser sits on both ends. tmux,
+screen, and zellij predate this and re-parse VT mid-path, degrading
+those features as a matter of architecture. phux structurally cannot.
 
-**Agents arrived.** Programs that drive terminals — Claude Code,
-Cursor's agent, anything orchestrating a developer workflow — are now
-a primary consumer category, alongside humans. They want primitives,
-not opinions. They want to know when a command started and finished
-and what its exit code was, not to scrape a grid. They want to spawn
-a terminal on a remote box and observe it from a control plane, not
-to SSH into a tmux session by name. The existing multiplexers are not
-built for this, and the gap is widening.
+**Agents became a consumer category.** Programs that drive terminals —
+Claude Code, Cursor's agent, anything orchestrating a developer
+workflow — now sit alongside humans as first-class consumers. They want
+primitives, not opinions: a `command-end` event with an exit code, not
+a grid to scrape; a terminal spawned on a remote box and observed from
+a control plane, not an SSH-into-a-named-tmux-session ritual. The
+existing multiplexers were not built for this, and the gap widens as
+agents proliferate.
 
-phux is what falls out of taking both of those seriously at once.
+What falls out of taking both seriously at once is a terminal control
+plane rather than a better multiplexer — the rest of this document is
+where that leads.
 
 ---
 

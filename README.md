@@ -10,6 +10,8 @@ last-reviewed: 2026-05-28
 control, persist, and address terminals — locally or across a fleet —
 with a tmux-shaped TUI riding on top as one consumer among several.
 
+The gap it fills, in the words of libghostty's author:
+
 > "Need to replace tmux with a libghostty-based multiplexer so it can
 > understand KIP."
 > — Mitchell Hashimoto
@@ -55,27 +57,20 @@ For the long arc, read [`docs/vision.md`](./docs/vision.md).
 
 ## Philosophy
 
-phux aims to be [**smol**][smol]:
-
-> - Write programs that solve a well-defined problem.
-> - Write programs that behave the way most users expect them to behave.
-> - Write programs that a single person can maintain.
-> - Write programs that compose with other smol tools.
-> - Write programs that can be finished.
-
-The well-defined problem: *spawn, observe, control, persist, and
-address libghostty terminals — locally or across a fleet — with
-conformance tiers a consumer can target without inheriting everything
-else.* The reference TUI proves the substrate is real. The substrate
-is what makes phux not-tmux.
-
-[smol]: https://smol.tauri.app/
+phux solves one problem and refuses to grow a second: spawn, observe,
+control, persist, and address libghostty terminals — locally or across
+a fleet — over a layered wire whose tiers a consumer can target
+without inheriting everything else. The terminal is the substrate; a
+consumer is anything that rides it. The reference TUI is the proof that
+the substrate is real, not the product the substrate exists to serve.
+Everything that doesn't make terminals more spawnable, observable, or
+addressable is out of scope on purpose — see Non-goals below.
 
 ## Status
 
-**Pre-alpha. Spec first, code second.**
+**Pre-alpha. The wire spec leads; the implementation follows it.**
 
-Working today:
+Shipped and usable today:
 
 - Auto-attach to a single session; detach; re-attach
 - Multi-pane splits, kill, focus, click-to-focus
@@ -83,10 +78,14 @@ Working today:
 - Multi-client attach to the same session
 - Full bytes-on-wire pass-through (Kitty keyboard, OSC 8, OSC 133, true colour, images)
 
-Not yet wired: most of L2 Collection lifecycle, most L3 metadata
-commands, federation routing, the agent SDK, predictive local echo,
-most of the `phux <subcommand>` CLI surface. See
-[`docs/QUICKSTART.md`](./docs/QUICKSTART.md) for the full state.
+On the roadmap, with the wire hooks already in place: most of L2
+Collection lifecycle, most L3 metadata commands, federation routing,
+the agent SDK, predictive local echo, and the rest of the `phux
+<subcommand>` CLI surface. The L1 substrate is the part worth building
+against now; the rest is designed and spec'd, not yet wired. If that
+boundary is where you want to work, [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+is the way in. [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) has the
+exact line between the two.
 
 ## Install
 
@@ -147,9 +146,22 @@ libghostty's surface API).
 
 ## Non-goals
 
-No embedded scripting language. No plugin host. No copy-mode
-reinvention. No homegrown crypto. No format-template DSL. Full list
-with rationale in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+Each of these is a "no" that keeps the substrate honest, not a feature
+deferred:
+
+- **No embedded scripting language.** Commands are typed IPC messages.
+  Logic that wants a runtime can shell out to one.
+- **No plugin host.** Hooks are typed events. A plugin contract, if it
+  ever lands, comes after we know what is genuinely pluggable.
+- **No copy-mode reinvention.** Selection and extraction belong to
+  libghostty and the host terminal. phux owns exactly one primitive
+  libghostty doesn't provide: literal search over scrollback.
+- **No homegrown crypto.** SSH and Unix-socket permissions are the
+  trust model.
+- **No format-template DSL.** The status bar takes typed widgets, not a
+  printf dialect to maintain forever.
+
+Full rationale in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 

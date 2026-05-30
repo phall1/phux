@@ -47,10 +47,11 @@ cargo run --bin phux           # auto-spawns a server, then attaches
 ```
 
 Behind that single command: a `phux server` daemon binds to
-`$XDG_RUNTIME_DIR/phux/phux.sock`, a single PTY-backed terminal is
-spawned (your `$SHELL`), and the client attaches and starts rendering.
-Detach with the default prefix (`Ctrl-A d`). Re-running `cargo run
---bin phux` re-attaches to the same session.
+`$XDG_RUNTIME_DIR/phux/phux.sock`, spawns one PTY-backed terminal
+(your `$SHELL`), and the client attaches and starts rendering. Detach
+with the default prefix (`Ctrl-A d`); the server keeps running. Run
+`cargo run --bin phux` again and you re-attach to the same session,
+right where you left it.
 
 ## What works today
 
@@ -75,11 +76,15 @@ Detach with the default prefix (`Ctrl-A d`). Re-running `cargo run
 - Predictive local echo (designed for; gated on a transport whose
   RTT actually needs it).
 
-Open tickets in the `bd` tracker — run `bd ready` from any phux
-checkout to see them.
+Each of these is spec'd before it's built, so the wire hooks are
+already there. Run `bd ready` from any phux checkout to see the open
+tickets.
 
 ## Next
 
-- Conceptual model → [CONCEPTS.md](./CONCEPTS.md)
-- Wire bytes → [`spec/`](./spec/)
-- Contributing → [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+You have a server running and a terminal attached. Where you go from
+here depends on what you came for:
+
+- To understand why the wire is shaped this way → [CONCEPTS.md](./CONCEPTS.md)
+- To read the actual bytes → [`spec/`](./spec/)
+- To build something on it, or fix something in it → [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
