@@ -190,3 +190,6 @@
 {"id":"int-a974d2a4","kind":"field_change","created_at":"2026-05-30T06:47:02.908934Z","actor":"phall1","issue_id":"phux-4li.16","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-847211f9","kind":"field_change","created_at":"2026-05-30T06:55:23.837545Z","actor":"phall1","issue_id":"phux-4li.17","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-53a10dc4","kind":"field_change","created_at":"2026-05-30T06:59:32.477586Z","actor":"phall1","issue_id":"phux-4li.18","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-370e0ed8","kind":"field_change","created_at":"2026-05-30T07:42:03.252675Z","actor":"phall1","issue_id":"phux-ahv.2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-7069c4b5","kind":"field_change","created_at":"2026-05-30T18:32:22.35541Z","actor":"phall1","issue_id":"phux-ahv.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-f7fe8217","kind":"field_change","created_at":"2026-05-30T18:41:16.8342Z","actor":"phall1","issue_id":"phux-ahv.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
