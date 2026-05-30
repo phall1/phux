@@ -18,13 +18,13 @@
 use std::path::Path;
 
 use phux_protocol::TerminalId;
-use phux_protocol::input::InputEvent as WireInputEvent;
+use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{AttachTarget, Command, CommandResult, CommandValue, StateScope};
 use phux_protocol::wire::info::SessionSnapshot;
 
 use crate::attach::AttachError;
 use crate::attach::connection::Connection;
-use crate::attach::input::{InputEvent, StdinParser};
+use crate::attach::input::StdinParser;
 use crate::snapshot::command;
 
 /// Translate one key-spec argument to the bytes a terminal would receive.
@@ -89,20 +89,6 @@ pub fn events_for(args: &[String]) -> Vec<InputEvent> {
     }
     events.extend(parser.flush());
     events
-}
-
-/// Lower a client-side [`InputEvent`] to the protocol's wire input union.
-///
-/// The two enums carry the same four libghostty-backed atoms; this is a
-/// field-for-field rewrap, kept here so `ROUTE_INPUT` need not depend on
-/// the client's parser type.
-fn to_wire_event(event: InputEvent) -> WireInputEvent {
-    match event {
-        InputEvent::Key(e) => WireInputEvent::Key(e),
-        InputEvent::Mouse(e) => WireInputEvent::Mouse(e),
-        InputEvent::Focus(e) => WireInputEvent::Focus(e),
-        InputEvent::Paste(e) => WireInputEvent::Paste(e),
-    }
 }
 
 /// Resolve `target` to the Terminal id of its focused pane, against a
@@ -217,7 +203,7 @@ async fn route_keys(
             request_id,
             Command::RouteInput {
                 terminal_id: pane.clone(),
-                event: to_wire_event(event),
+                event,
             },
         )
         .await?

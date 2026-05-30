@@ -17,6 +17,9 @@ use key::KeyEvent;
 use mouse::MouseEvent;
 use paste::PasteEvent;
 
+use crate::ids::TerminalId;
+use crate::wire::frame::FrameKind;
+
 /// The tagged union of client-to-server input events.
 ///
 /// These are the same four atoms carried by the `INPUT_KEY` / `INPUT_MOUSE`
@@ -38,4 +41,20 @@ pub enum InputEvent {
     Focus(FocusEvent),
     /// A paste payload (`INPUT_PASTE` — `docs/spec/input.md` §5).
     Paste(PasteEvent),
+}
+
+impl InputEvent {
+    /// Wrap this event in the matching per-atom input [`FrameKind`]
+    /// addressed to `terminal_id` (`INPUT_KEY` / `INPUT_MOUSE` /
+    /// `INPUT_FOCUS` / `INPUT_PASTE`). Used by the attach loop to ship a
+    /// parsed event to its focused pane.
+    #[must_use]
+    pub fn into_frame(self, terminal_id: TerminalId) -> FrameKind {
+        match self {
+            Self::Key(event) => FrameKind::InputKey { terminal_id, event },
+            Self::Mouse(event) => FrameKind::InputMouse { terminal_id, event },
+            Self::Focus(event) => FrameKind::InputFocus { terminal_id, event },
+            Self::Paste(event) => FrameKind::InputPaste { terminal_id, event },
+        }
+    }
 }

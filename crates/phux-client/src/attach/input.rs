@@ -101,45 +101,16 @@
 //! parameter buffer) in the [`StdinParser`] struct and resumes on the
 //! next [`StdinParser::feed`] call.
 
-use phux_protocol::ids::TerminalId;
+use phux_protocol::input::InputEvent;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
-use phux_protocol::wire::frame::FrameKind;
 
-/// One client-to-server input event ready to be wrapped in a [`FrameKind`].
-///
-/// Mouse / focus / paste variants are present so the enum reads true to
-/// the SPEC §9 input surface — but the v0 parser only ever yields
-/// [`InputEvent::Key`] from real input bytes, plus
-/// the richer variants populated by mouse / focus / paste parsing.
-#[derive(Debug, Clone, PartialEq)]
-pub enum InputEvent {
-    /// A structured key event. Encodes to `INPUT_KEY` per SPEC §9.1.
-    Key(KeyEvent),
-    /// A structured mouse event. Encodes to `INPUT_MOUSE` per SPEC §9.2.
-    Mouse(MouseEvent),
-    /// A focus state change on the host window. Encodes to `INPUT_FOCUS`
-    /// per SPEC §9.3.
-    Focus(FocusEvent),
-    /// A paste payload. Encodes to `INPUT_PASTE` per SPEC §9.4.
-    Paste(PasteEvent),
-}
-
-impl InputEvent {
-    /// Wrap this event in the appropriate [`FrameKind`] addressed to
-    /// `terminal_id`.
-    #[must_use]
-    pub fn into_frame(self, terminal_id: TerminalId) -> FrameKind {
-        match self {
-            Self::Key(event) => FrameKind::InputKey { terminal_id, event },
-            Self::Mouse(event) => FrameKind::InputMouse { terminal_id, event },
-            Self::Focus(event) => FrameKind::InputFocus { terminal_id, event },
-            Self::Paste(event) => FrameKind::InputPaste { terminal_id, event },
-        }
-    }
-}
+// This module parses stdin VT bytes into the wire-level
+// [`phux_protocol::input::InputEvent`] directly — the parser yields
+// `Key` from real input bytes plus the `Mouse` / `Focus` / `Paste`
+// variants populated by the mouse / focus / paste parsing paths.
 
 /// Internal parser state machine.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1544,6 +1515,9 @@ const fn ascii_letter_to_key_const(b: u8) -> PhysicalKey {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
+    use phux_protocol::ids::TerminalId;
+    use phux_protocol::wire::frame::FrameKind;
+
     use super::*;
 
     fn key_only(evs: &[InputEvent]) -> Vec<&KeyEvent> {

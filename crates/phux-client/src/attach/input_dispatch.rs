@@ -10,12 +10,12 @@
 use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
+use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{FrameKind, Scope};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
-use super::input::InputEvent;
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::overlay::{HelpOverlay, OverlayOutcome, OverlayState, PromptOverlay};
