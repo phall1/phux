@@ -37,7 +37,7 @@ use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
 
-use super::actions::PendingSplit;
+use super::actions::{PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::input::StdinParser;
 use super::input_dispatch::{DispatchCtx, dispatch_input_events, encode_layout_or_log};
@@ -392,6 +392,10 @@ async fn main_loop<W: super::RenderSink>(
     // user-triggered split) so a HashMap is overkill for cap but
     // matches the layout-key request-id pattern.
     let mut pending_splits: HashMap<u32, PendingSplit> = HashMap::new();
+    // phux-4li.15: in-flight `new-window` actions parked by request id,
+    // same lifecycle as `pending_splits`. The TerminalSpawned arm checks
+    // this map first; a hit opens a new window on the spawned pane.
+    let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -450,6 +454,7 @@ async fn main_loop<W: super::RenderSink>(
         &overlay,
         layout_get_request_id,
         &mut pending_splits,
+        &mut pending_windows,
         overlays.is_active(),
     )?;
     if outcome.exit {
@@ -537,6 +542,7 @@ async fn main_loop<W: super::RenderSink>(
                             &overlay,
                             layout_get_request_id,
                             &mut pending_splits,
+                            &mut pending_windows,
                             overlays.is_active(),
                         )?;
                         if outcome.exit {
@@ -648,6 +654,7 @@ async fn main_loop<W: super::RenderSink>(
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
+                    pending_windows: &mut pending_windows,
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
                 };
@@ -701,6 +708,7 @@ async fn main_loop<W: super::RenderSink>(
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
+                    pending_windows: &mut pending_windows,
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
                 };

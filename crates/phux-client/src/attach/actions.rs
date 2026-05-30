@@ -440,6 +440,18 @@ pub(super) struct PendingSplit {
     pub dir: SplitDir,
 }
 
+/// A `new-window` action that emitted a `SPAWN_TERMINAL` and is awaiting
+/// its `TERMINAL_SPAWNED` reply (phux-4li.15). The reply handler adds a
+/// new window named `name` holding the spawned pane as its sole leaf.
+/// Parked separately from [`PendingSplit`] (keyed by the same
+/// `request_id` space) so the reply knows whether it's growing the
+/// active window or opening a new one.
+#[derive(Debug, Clone)]
+pub(super) struct PendingWindow {
+    /// Name for the window the spawned pane will seed.
+    pub name: String,
+}
+
 /// Pure seam for the `TerminalSpawned { Ok }` handler (phux-4li.12).
 ///
 /// Applies a parked [`PendingSplit`] against `state`. The driver side

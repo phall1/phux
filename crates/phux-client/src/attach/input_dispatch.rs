@@ -2,16 +2,17 @@
 //! or layout-action effects.
 //!
 //! Owns the resolver-intercept path (prefix chord → `ResolvedAction` →
-//! mutate `LayoutState`), the predict overlay's keystroke feed, and the
-//! parked-split bookkeeping (`PendingSplit`) that bridges a local
-//! `split-pane` chord to its remote `SPAWN_TERMINAL` reply.
+//! mutate the active window of the `Workspace`), the predict overlay's
+//! keystroke feed, and the parked-spawn bookkeeping (`PendingSplit` /
+//! `PendingWindow`) that bridges a local `split-pane` / `new-window`
+//! chord to its remote `SPAWN_TERMINAL` reply.
 
 use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 use phux_protocol::wire::frame::{FrameKind, Scope};
 
-use super::actions::{self, ActionError, PendingSplit};
+use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::input::InputEvent;
@@ -44,6 +45,10 @@ pub(super) struct DispatchCtx<'a> {
     /// `TERMINAL_SPAWNED` reply. `run_action` inserts;
     /// `handle_server_frame` removes.
     pub pending_splits: &'a mut HashMap<u32, PendingSplit>,
+    /// phux-4li.15: parked `new-window` actions awaiting their
+    /// `TERMINAL_SPAWNED` reply. Same lifecycle as `pending_splits`,
+    /// keyed in the same request-id space.
+    pub pending_windows: &'a mut HashMap<u32, PendingWindow>,
     /// phux-5ke.4: overlay stack. When non-empty the dispatcher routes
     /// key events to the active overlay (no resolver, no predict, no
     /// pane forwarding) and the `show-help` action pushes onto it.
@@ -175,6 +180,13 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     // and remember the intent for the reply handler.
                     if let Some((request_id, pending, frame)) = effects.spawn_terminal {
                         ctx.pending_splits.insert(request_id, pending);
+                        conn.send(&frame).await?;
+                    }
+                    // phux-4li.15: parked new-window — same SPAWN flow as
+                    // a split, but the reply opens a new window instead of
+                    // growing the active one.
+                    if let Some((request_id, pending, frame)) = effects.spawn_window {
+                        ctx.pending_windows.insert(request_id, pending);
                         conn.send(&frame).await?;
                     }
                     // phux-4li.12: kill-pane keystroke sequence. Each
@@ -364,6 +376,12 @@ struct ActionEffects {
     /// caller sends the frame, then inserts the parked entry into the
     /// driver-wide `pending_splits` map.
     spawn_terminal: Option<(u32, PendingSplit, FrameKind)>,
+    /// phux-4li.15: a `new-window` action emitted a `SPAWN_TERMINAL` and
+    /// parked a [`PendingWindow`] keyed by `request_id`. The async caller
+    /// sends the frame and inserts the parked entry into the driver-wide
+    /// `pending_windows` map; the reply opens a new window on the
+    /// spawned pane.
+    spawn_window: Option<(u32, PendingWindow, FrameKind)>,
     /// phux-4li.12: a `kill-pane` action ships a sequence of frames to
     /// the focused Terminal (the "soft-kill via shell-exit" — see
     /// `run_action`). The async caller sends them in order; the
@@ -453,6 +471,44 @@ fn run_action(
                 return effects;
             };
             effects.kill_frames = soft_kill_input_frames(&focused_id);
+        }
+        "new-window" => {
+            // phux-4li.15: open a new window. Spawn a fresh Terminal
+            // (same SPAWN as a split) and park a `PendingWindow`; the
+            // reply (`handle_server_frame`'s TerminalSpawned arm) adds a
+            // window seeded on the spawned pane and makes it active. The
+            // new pane is a bare leaf — the server files it under the
+            // default Collection; the TUI groups it into a window itself
+            // (windows are a client convention, ADR-0017).
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            let name = ctx.workspace.default_window_name();
+            let frame = FrameKind::SpawnTerminal {
+                request_id,
+                collection: DEFAULT_COLLECTION_ID,
+                command: None,
+                cwd: None,
+                env: None,
+            };
+            effects.spawn_window = Some((request_id, PendingWindow { name }, frame));
+        }
+        "kill-window" => {
+            // phux-4li.15: soft-kill every pane in the active window, the
+            // same `exit\n` mechanism as `kill-pane`. As each
+            // TERMINAL_CLOSED lands, `handle_server_frame` folds the pane
+            // out; when the window's tree empties it is pruned and the
+            // new layout broadcast. No synchronous window removal here.
+            let leaves = ctx
+                .workspace
+                .active_window()
+                .and_then(|ls| ls.tree.as_ref().map(crate::layout::leaves))
+                .unwrap_or_default();
+            if leaves.is_empty() {
+                tracing::warn!("kill-window: no active window to kill; dropping action");
+                effects.bell = true;
+                return effects;
+            }
+            effects.kill_frames = leaves.iter().flat_map(soft_kill_input_frames).collect();
         }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
@@ -730,11 +786,95 @@ mod tests {
         assert_eq!(split_dir_arg(&bogus), None);
     }
 
+    /// Build a [`ResolvedAction`] with no args.
+    fn bare_action(name: &str) -> phux_config::keybind::ResolvedAction {
+        phux_config::keybind::ResolvedAction {
+            action: name.to_owned(),
+            args: BTreeMap::new(),
+        }
+    }
+
+    /// Run `action` against `workspace`, returning the resulting effects.
+    fn run(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+        };
+        let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+        run_action(action, &mut ctx, focused.as_ref())
+    }
+
+    #[test]
+    fn new_window_parks_pending_and_emits_spawn() {
+        let mut workspace = Workspace::single(tid(1)); // window "1"
+        let effects = run(&bare_action("new-window"), &mut workspace);
+        let (_req, pending, frame) = effects
+            .spawn_window
+            .expect("new-window should park a PendingWindow + SPAWN");
+        // Default name skips the in-use "1".
+        assert_eq!(pending.name, "2");
+        assert!(matches!(frame, FrameKind::SpawnTerminal { .. }));
+        // No synchronous workspace mutation — the window opens on reply.
+        assert_eq!(workspace.windows.len(), 1);
+    }
+
+    #[test]
+    fn kill_window_emits_one_soft_kill_sequence_per_leaf() {
+        use crate::layout::{LayoutNode, LayoutState, SplitDir, WindowState, split_at};
+        // Active window with three leaves: ((1|2)/3).
+        let tree = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        let tree = split_at(&tree, &tid(2), &tid(3), SplitDir::Vertical, 0.5).unwrap();
+        let mut workspace = Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(1)),
+                },
+            }],
+            active: 0,
+        };
+        let effects = run(&bare_action("kill-window"), &mut workspace);
+        // 3 leaves x 5 frames (e/x/i/t/Enter) each.
+        assert_eq!(effects.kill_frames.len(), 15);
+        // No synchronous removal — TerminalClosed folds + prunes.
+        assert_eq!(workspace.windows.len(), 1);
+    }
+
+    #[test]
+    fn kill_window_on_empty_workspace_bells() {
+        let mut workspace = Workspace::default();
+        let effects = run(&bare_action("kill-window"), &mut workspace);
+        assert!(effects.bell);
+        assert!(effects.kill_frames.is_empty());
+    }
+
     #[test]
     fn detach_action_requests_detach_effect() {
         let mut workspace = Workspace::default();
         let mut next_request_id = 1;
         let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
         let mut ctx = DispatchCtx {
             resolver: None,
@@ -742,6 +882,7 @@ mod tests {
             viewport: (80, 24),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
             overlays: &mut overlays,
             keybindings: None,
         };

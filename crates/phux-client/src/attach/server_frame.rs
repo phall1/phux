@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
 
-use super::actions::{self, PendingSplit, apply_spawned_ok, apply_terminal_closed};
+use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
 use crate::layout::{self, LayoutState, Workspace};
@@ -84,6 +84,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     overlay: &Overlay,
     pending_layout_request: Option<u32>,
     pending_splits: &mut HashMap<u32, PendingSplit>,
+    pending_windows: &mut HashMap<u32, PendingWindow>,
     // phux-5ke.4: when `true` an overlay is on top; pane libghostty
     // mirrors keep ingesting `vt_write` (per ADR-0013) but stdout
     // flushes (render_at, bar paint, predict-overlay paint) are
@@ -438,10 +439,23 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // PendingSplit by request id; on Ok apply the split + seed the
         // new PaneSlot + broadcast the envelope. On Err log + bell.
         FrameKind::TerminalSpawned { request_id, result } => {
+            // phux-4li.15: a parked new-window takes priority — its reply
+            // opens a window on the spawned pane instead of splitting the
+            // active one. Request ids are unique across both maps.
+            if let Some(pending) = pending_windows.remove(&request_id) {
+                return handle_window_spawned(
+                    out,
+                    workspace,
+                    focused_pane,
+                    panes,
+                    &pending,
+                    result,
+                );
+            }
             let Some(pending) = pending_splits.remove(&request_id) else {
                 tracing::debug!(
                     request_id,
-                    "stray TerminalSpawned with no matching pending split; ignoring",
+                    "stray TerminalSpawned with no matching pending split or window; ignoring",
                 );
                 return Ok(FrameOutcome::default());
             };
@@ -608,6 +622,48 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     }
 }
 
+/// phux-4li.15: apply a `TERMINAL_SPAWNED` reply for a parked
+/// `new-window` action. On success it appends a window seeded on the
+/// freshly spawned pane (making it active), seeds the pane's slot, and
+/// re-anchors `focused_pane`. The follow-up flags mirror the split path:
+/// `layout_replaced` triggers a full repaint, `emit_set_metadata`
+/// broadcasts the new workspace to siblings, and `reflow_panes` sizes the
+/// new full-window pane.
+fn handle_window_spawned<W: super::RenderSink>(
+    out: &mut W,
+    workspace: &mut Workspace,
+    focused_pane: &mut Option<TerminalId>,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    pending: &PendingWindow,
+    result: SpawnResult,
+) -> Result<FrameOutcome, AttachError> {
+    match result {
+        SpawnResult::Ok(new_id) => {
+            workspace.add_window(pending.name.clone(), new_id.clone());
+            if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(new_id) {
+                v.insert(PaneSlot::new()?);
+            }
+            *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
+            Ok(FrameOutcome {
+                layout_replaced: true,
+                emit_set_metadata: true,
+                reflow_panes: true,
+                ..FrameOutcome::default()
+            })
+        }
+        SpawnResult::Err(err) => {
+            tracing::warn!(error = ?err, "new-window: server-side spawn failed");
+            let _ = actions::write_bell(out);
+            Ok(FrameOutcome::default())
+        }
+        // SpawnResult is #[non_exhaustive] — tolerate future variants.
+        _ => {
+            tracing::warn!("new-window: unknown SpawnResult variant");
+            Ok(FrameOutcome::default())
+        }
+    }
+}
+
 /// phux-17u: resolve the focused session's display name from an
 /// `ATTACHED` snapshot for the status-bar `session-name` widget.
 ///
@@ -768,6 +824,7 @@ mod tests {
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
         let overlay = Overlay;
         let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
         handle_server_frame(
             out,
             FrameKind::TerminalOutput {
@@ -785,6 +842,7 @@ mod tests {
             &overlay,
             None,
             &mut pending_splits,
+            &mut pending_windows,
             false,
         )
         .expect("handle_server_frame");
@@ -911,6 +969,40 @@ mod tests {
         assert_eq!(cell, Some('o'), "pane 2 mirror should hold the output");
     }
 
+    /// phux-4li.15: a `TERMINAL_SPAWNED` reply for a parked new-window
+    /// opens a new window seeded on the spawned pane, makes it active,
+    /// re-anchors focus, and asks for a broadcast + reflow.
+    #[test]
+    fn window_spawned_opens_active_window_focused_on_new_pane() {
+        use super::handle_window_spawned;
+        use crate::attach::actions::PendingWindow;
+        use phux_protocol::wire::frame::SpawnResult;
+
+        let mut workspace = Workspace::single(tid(1)); // window "1", pane 1
+        let mut focused = Some(tid(1));
+        let mut panes = panes_for(&[&tid(1)]);
+        let mut out: Vec<u8> = Vec::new();
+
+        let outcome = handle_window_spawned(
+            &mut out,
+            &mut workspace,
+            &mut focused,
+            &mut panes,
+            &PendingWindow {
+                name: "2".to_owned(),
+            },
+            SpawnResult::Ok(tid(2)),
+        )
+        .expect("handle_window_spawned");
+
+        assert_eq!(workspace.windows.len(), 2);
+        assert_eq!(workspace.active, 1, "new window is active");
+        assert_eq!(workspace.windows[1].name, "2");
+        assert_eq!(focused, Some(tid(2)), "focus follows the new pane");
+        assert!(panes.contains_key(&tid(2)), "new pane got a slot");
+        assert!(outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes);
+    }
+
     /// A `Bell` frame routes a BEL byte through the injected sink, so a
     /// headless capture (and a future agent surface) can observe it.
     #[test]
@@ -922,6 +1014,7 @@ mod tests {
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
         let overlay = Overlay;
         let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
 
         let mut out: Vec<u8> = Vec::new();
         handle_server_frame(
@@ -939,6 +1032,7 @@ mod tests {
             &overlay,
             None,
             &mut pending_splits,
+            &mut pending_windows,
             false,
         )
         .expect("handle_server_frame");
