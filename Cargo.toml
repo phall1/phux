@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# Browser/wasm consumers (phux-486) live under clients/ and target wasm32 only.
+# They are their own cargo workspaces so the native `cargo build --workspace`
+# (and CI) never tries to build wasm-bindgen crates for the host.
+exclude = ["clients"]
 
 [workspace.package]
 version = "0.0.0"
