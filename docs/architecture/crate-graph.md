@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-27
+last-reviewed: 2026-05-30
 ---
 
 # Crate dependency graph
@@ -58,6 +58,35 @@ for the renderer-side contract on both ends.
 
 `phux-config` is a sibling of `core` and is consumed by the binary and
 the client.
+
+## Browser client crates (standalone wasm workspace)
+
+The browser client lives under `clients/` as its **own cargo workspace**,
+excluded from the native `cargo build --workspace` / CI (`exclude =
+["clients"]` in the root manifest). It targets `wasm32-unknown-unknown` only
+and never builds the native binary.
+
+```
+                    ghostty (Zig) ──zig build──► ghostty-vt.wasm
+                                                      │ include_bytes!
+   phux-protocol ──┐                                  ▼
+   (default feats, ├──────────────►  phux-web ◄── phux-vt-web (engine driver)
+    wasm-safe)     │   wasm-pack          │
+   web-sys ────────┘                      ▼
+                                  phux_web_bg.wasm + phux_web.js
+```
+
+- **`clients/phux-vt-web`** — a safe Rust driver over `ghostty-vt.wasm` (the
+  VT engine, built from ghostty's Zig). Loaded as a **separate** wasm instance,
+  not linked in (ADR-0025). Depends on nothing phux.
+- **`clients/phux-web`** — the browser client: `phux-vt-web` (engine) +
+  `phux-protocol` (the wire codec, **default-features** so it's libghostty-free
+  and wasm-safe per ADR-0024) + `web-sys` (WebSocket/canvas/keyboard).
+
+This is the one place `phux-protocol`'s default-features-off shell pays off: the
+web client compiles the codec to wasm without the `server` feature's
+libghostty-vt git dep. Full architecture + build steps: [the web client
+consumer doc](../consumers/web.md).
 
 ## Protocol layering and this implementation
 
