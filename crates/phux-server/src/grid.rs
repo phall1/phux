@@ -111,6 +111,12 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // 1. Reset target: DECSTR (soft reset) + ED 2 (clear screen) + CUP home.
         out.extend_from_slice(b"\x1b[!p\x1b[2J\x1b[H");
 
+        // 1b. Select the screen buffer BEFORE painting (phux-99n). If the
+        //     terminal is on the alt screen, entering it now (esp. 1049,
+        //     which clears the alt buffer) means the row paint below lands
+        //     on the correct buffer instead of the primary screen.
+        emit_screen_mode(&mut out, terminal)?;
+
         // 2. Walk rows + cells, emitting SGR deltas and graphemes. The
         //    full-snapshot path paints every row unconditionally; the
         //    incremental path consults `Row::dirty()`. The inner cell loop
@@ -414,6 +420,8 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 let mut out: Vec<u8> =
                     Vec::with_capacity(usize::from(cols) * usize::from(rows_n) * 2);
                 out.extend_from_slice(b"\x1b[!p\x1b[2J\x1b[H");
+                // Select the screen buffer before painting (phux-99n).
+                emit_screen_mode(&mut out, terminal)?;
 
                 let mut prev_style: Option<Style> = None;
                 let mut row_iter = self.rows.update(&snapshot)?;
@@ -589,6 +597,17 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // Build the diff: per changed row, CUP to its start then the body.
         // No reset preamble — the mirror's untouched rows stay as they are.
         let mut out: Vec<u8> = Vec::new();
+
+        // If the screen buffer changed since the reference (e.g. a program
+        // entered/left the alt screen mid-session), toggle it FIRST, before
+        // the row paint — same ordering rationale as the full path
+        // (phux-99n). We emit the toggle only on an actual transition: an
+        // unconditional `?1049h` while already on the alt screen would
+        // clear the very buffer we are about to diff into.
+        if reference.cursor_mode.alt_screen_set() != live_cm.alt_screen_set() {
+            emit_screen_mode(&mut out, terminal)?;
+        }
+
         for (row_index, body) in &changed_rows {
             write_cup(&mut out, *row_index, 0);
             // Reset SGR at the start of each emitted row so the row body
@@ -705,7 +724,15 @@ struct ReferenceCursorMode {
     cursor_blinking: bool,
     bracketed_paste: bool,
     focus_event: bool,
+    /// DEC mode 47 (`ALT_SCREEN_LEGACY`).
     alt_screen_legacy: bool,
+    /// DEC mode 1047 (`ALT_SCREEN`).
+    alt_screen: bool,
+    /// DEC mode 1049 (`ALT_SCREEN_SAVE`) — the one vim/less/man/htop use.
+    /// Tracked alongside 47 so a 47<->1049 transition still trips the
+    /// per-tick reference diff (it would be missed if only 47 were
+    /// tracked, since the two are independent bits).
+    alt_screen_save: bool,
 }
 
 impl ReferenceCursorMode {
@@ -728,7 +755,20 @@ impl ReferenceCursorMode {
             bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false),
             focus_event: terminal.mode(Mode::FOCUS_EVENT).unwrap_or(false),
             alt_screen_legacy: terminal.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false),
+            alt_screen: terminal.mode(Mode::ALT_SCREEN).unwrap_or(false),
+            alt_screen_save: terminal.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
         })
+    }
+
+    /// The three alt-screen mode bits as a tuple, for detecting a screen
+    /// transition independent of cursor/paste/focus changes. Used by the
+    /// diff path to decide whether to re-toggle the screen buffer.
+    const fn alt_screen_set(&self) -> (bool, bool, bool) {
+        (
+            self.alt_screen_legacy,
+            self.alt_screen,
+            self.alt_screen_save,
+        )
     }
 }
 
@@ -928,17 +968,37 @@ fn emit_epilogue(
         snapshot.cursor_blinking()?,
     );
 
-    // A small set of mode bits queried from the canonical Terminal.
-    // ALT_SCREEN is the load-bearing one — a snapshot taken while the
-    // alt screen is active must put the receiving Terminal back into
-    // alt-screen mode so subsequent live bytes apply to the right
-    // surface. Bracketed paste and a handful of mouse modes are nice
-    // for fidelity. More modes can land here as needed.
+    // Remaining load-bearing mode bits. Bracketed paste and focus-event
+    // reporting are independent of the screen buffer, so their order
+    // relative to the cursor does not matter. The alt-screen modes are
+    // NOT emitted here — they must precede the row paint (see
+    // [`emit_screen_mode`]), or the content lands on the wrong buffer and
+    // a `?1049h` after it would clear what we just painted.
     emit_mode(out, terminal, Mode::BRACKETED_PASTE, b"2004")?;
     emit_mode(out, terminal, Mode::FOCUS_EVENT, b"1004")?;
-    // Both legacy and modern alt-screen toggles map to libghostty's
-    // ALT_SCREEN_LEGACY (47) and the standard pair lives at 1049.
+    Ok(())
+}
+
+/// Emit the alt-screen DEC mode toggles (47 / 1047 / 1049) that select
+/// which screen buffer subsequent content paints into.
+///
+/// libghostty tracks 47 (`ALT_SCREEN_LEGACY`), 1047 (`ALT_SCREEN`), and
+/// 1049 (`ALT_SCREEN_SAVE`) as three independent bits; a full-screen
+/// program (vim/less/man/htop/tmux) typically sets 1049, which on entry
+/// saves the cursor and clears the alt buffer. Each is queried
+/// independently so the synthesis reproduces the terminal's exact
+/// alt-screen state rather than forcing the primary screen via a stale
+/// `?47l`.
+///
+/// CRITICAL ordering: this MUST be emitted BEFORE the row paint and the
+/// cursor re-establishment. `?1049h` clears the alt buffer and saves the
+/// cursor on entry, so emitting it after painting would wipe the content
+/// and clobber the restored cursor. Both the full-reset prologue and the
+/// per-row diff therefore call this ahead of any cell bytes.
+fn emit_screen_mode(out: &mut Vec<u8>, terminal: &Terminal<'_, '_>) -> Result<(), SynthesisError> {
     emit_mode(out, terminal, Mode::ALT_SCREEN_LEGACY, b"47")?;
+    emit_mode(out, terminal, Mode::ALT_SCREEN, b"1047")?;
+    emit_mode(out, terminal, Mode::ALT_SCREEN_SAVE, b"1049")?;
     Ok(())
 }
 
@@ -1521,5 +1581,166 @@ mod tests {
             "source row 0 should start with 東, got {:?}",
             src_grid[0]
         );
+    }
+
+    /// phux-99n: a snapshot taken while a 1049-alt-screen program
+    /// (vim/less/man/htop/tmux) is running MUST re-establish the alt
+    /// screen via `?1049h` so the receiving mirror lands on the alt
+    /// buffer — and must NOT force the primary screen via a stale `?47l`.
+    ///
+    /// This is the FLIP of the audit pin test
+    /// `audit_snapshot_drops_alt_screen_1049_mode`: the pin asserted the
+    /// buggy status quo (`?1049h` absent, `?47l` emitted); we assert the
+    /// fix. 1049 also saves the cursor + clears on entry, so it must be
+    /// emitted BEFORE the cursor re-establishment — verified by checking
+    /// `?1049h` precedes the cursor-home/CUP in the byte stream.
+    #[test]
+    fn snapshot_reestablishes_alt_screen_1049() {
+        let mut t = fresh(20, 4);
+        t.vt_write(b"\x1b[?1049h");
+        t.vt_write(b"alt-screen body");
+
+        // libghostty keeps 47 and 1049 as distinct bits.
+        assert!(
+            t.mode(Mode::ALT_SCREEN_SAVE).expect("mode 1049"),
+            "?1049h should set ALT_SCREEN_SAVE",
+        );
+        assert!(
+            !t.mode(Mode::ALT_SCREEN_LEGACY).expect("mode 47"),
+            "1049 must not set the legacy-47 bit",
+        );
+
+        let snap = synthesize(&t).expect("synth");
+        let bytes = String::from_utf8_lossy(&snap.bytes);
+
+        assert!(
+            bytes.contains("?1049h"),
+            "snapshot must re-emit ?1049h so the mirror lands on the alt screen; bytes={bytes:?}",
+        );
+        // 47 is off, so the snapshot reports its true (off) state. The bug
+        // was emitting ?47l as the ONLY alt-screen signal; now ?1049h
+        // carries the screen and ?47l is merely the honest 47 state.
+        assert!(
+            !bytes.contains("?47h"),
+            "47 is off; snapshot must not assert ?47h; bytes={bytes:?}",
+        );
+        // Ordering: 1049 saves cursor + clears on entry, so it must come
+        // before the epilogue's cursor re-establishment, else the CUP we
+        // emit to restore the cursor is clobbered by the screen switch.
+        // The epilogue's cursor-visibility CSI (`?25h`/`?25l`) is emitted
+        // immediately after that CUP and only there, so it is a reliable
+        // landmark for "the cursor has been re-established".
+        let pos_1049 = bytes.find("?1049h").expect("?1049h present");
+        let pos_cursor_vis = bytes
+            .find("?25h")
+            .or_else(|| bytes.find("?25l"))
+            .expect("epilogue cursor-visibility present");
+        assert!(
+            pos_1049 < pos_cursor_vis,
+            "?1049h (at {pos_1049}) must precede the epilogue cursor block (at {pos_cursor_vis}); bytes={bytes:?}",
+        );
+    }
+
+    /// phux-99n: the legacy 47 alt-screen mode still round-trips. A
+    /// program that uses bare `?47h` (rare, but valid) must have the
+    /// snapshot re-emit `?47h`, not silently drop it.
+    #[test]
+    fn snapshot_reestablishes_alt_screen_47_legacy() {
+        let mut t = fresh(20, 4);
+        t.vt_write(b"\x1b[?47h");
+        t.vt_write(b"legacy alt");
+        assert!(t.mode(Mode::ALT_SCREEN_LEGACY).expect("mode 47"));
+
+        let snap = synthesize(&t).expect("synth");
+        let bytes = String::from_utf8_lossy(&snap.bytes);
+        assert!(
+            bytes.contains("?47h"),
+            "snapshot must re-emit ?47h for a legacy alt-screen program; bytes={bytes:?}",
+        );
+    }
+
+    /// phux-99n: on the PRIMARY screen the snapshot must report all three
+    /// alt-screen modes as off (`?47l ?1047l ?1049l`) — i.e. it must not
+    /// accidentally assert any alt-screen mode.
+    #[test]
+    fn snapshot_primary_screen_emits_all_alt_modes_off() {
+        let mut t = fresh(20, 4);
+        t.vt_write(b"primary content");
+
+        let snap = synthesize(&t).expect("synth");
+        let bytes = String::from_utf8_lossy(&snap.bytes);
+        assert!(bytes.contains("?47l"), "47 off on primary; bytes={bytes:?}");
+        assert!(
+            bytes.contains("?1047l"),
+            "1047 off on primary; bytes={bytes:?}",
+        );
+        assert!(
+            bytes.contains("?1049l"),
+            "1049 off on primary; bytes={bytes:?}",
+        );
+    }
+
+    /// phux-99n: the per-consumer reference diff trips on a 47<->1049
+    /// transition. The audit noted that tracking only the legacy-47 bit in
+    /// `ReferenceCursorMode` would miss a transition between the two
+    /// distinct alt-screen modes. After priming on 1049, switching to the
+    /// primary screen must produce a non-empty diff that re-emits
+    /// `?1049l`.
+    #[test]
+    fn reference_diff_trips_on_alt_screen_transition() {
+        let mut t = fresh(20, 4);
+        t.vt_write(b"\x1b[?1049h");
+        t.vt_write(b"alt body");
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let mut reference = ConsumerReference::new();
+        synth
+            .prime_reference(&t, &mut reference)
+            .expect("prime_reference");
+
+        // Leave the alt screen: a mode-only change, no row content edits
+        // beyond what 1049's restore does.
+        t.vt_write(b"\x1b[?1049l");
+
+        let diff = synth
+            .synthesize_against_reference(&t, &mut reference)
+            .expect("diff");
+        assert!(
+            !diff.bytes.is_empty(),
+            "a 1049->primary transition must produce a non-empty diff",
+        );
+        let bytes = String::from_utf8_lossy(&diff.bytes);
+        assert!(
+            bytes.contains("?1049l"),
+            "the diff epilogue must re-emit ?1049l on leaving the alt screen; bytes={bytes:?}",
+        );
+    }
+
+    /// phux-4l0 (correctness half): an unchanged terminal diffs to an
+    /// empty body across repeated calls (emit-once / steady state). The
+    /// behavioral idle short-circuit lives in the actor's `tick_emit`
+    /// (see `terminal_actor.rs`); this pins the synthesis-level invariant
+    /// the short-circuit relies on — a clean terminal yields nothing.
+    #[test]
+    fn reference_diff_empty_when_unchanged() {
+        let mut t = fresh(40, 10);
+        t.vt_write(b"steady state line one\r\nand line two");
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let mut reference = ConsumerReference::new();
+        synth
+            .prime_reference(&t, &mut reference)
+            .expect("prime_reference");
+
+        for n in 0..3 {
+            let diff = synth
+                .synthesize_against_reference(&t, &mut reference)
+                .expect("diff");
+            assert!(
+                diff.bytes.is_empty(),
+                "unchanged terminal must diff empty on call {n}, got {:?}",
+                String::from_utf8_lossy(&diff.bytes),
+            );
+        }
     }
 }

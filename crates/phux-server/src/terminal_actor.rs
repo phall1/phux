@@ -97,6 +97,13 @@ pub struct LastAckedCursorMode {
     pub focus_event: bool,
     /// `ALT_SCREEN_LEGACY` (DEC private mode 47).
     pub alt_screen_legacy: bool,
+    /// `ALT_SCREEN` (DEC private mode 1047).
+    pub alt_screen: bool,
+    /// `ALT_SCREEN_SAVE` (DEC private mode 1049) — the mode vim/less/man/
+    /// htop/tmux actually use. Tracked alongside 47 so a 47<->1049
+    /// transition still trips the diff trigger; 47 and 1049 are
+    /// independent bits in libghostty, so tracking only 47 would miss it.
+    pub alt_screen_save: bool,
 }
 
 impl LastAckedCursorMode {
@@ -120,6 +127,8 @@ impl LastAckedCursorMode {
             bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false),
             focus_event: terminal.mode(Mode::FOCUS_EVENT).unwrap_or(false),
             alt_screen_legacy: terminal.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false),
+            alt_screen: terminal.mode(Mode::ALT_SCREEN).unwrap_or(false),
+            alt_screen_save: terminal.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
         }
     }
 }
@@ -183,6 +192,18 @@ pub struct ConsumerSyncState {
     /// mode toggles in the incremental synthesis path. See
     /// [`LastAckedCursorMode`] for the field set rationale.
     pub last_cursor_mode: LastAckedCursorMode,
+    /// Set `true` at registration, cleared after this consumer's first
+    /// pass through the actor's per-tick synthesis (phux-4l0).
+    ///
+    /// The idle short-circuit skips the per-consumer row walk when the
+    /// shared terminal is `Clean` since the previous tick. A consumer
+    /// registered *after* the last write sits on a `Clean` terminal yet
+    /// has never been diffed; its reference is primed (so the diff is
+    /// empty and emit-once still holds), but we must still run its first
+    /// synthesis pass rather than silently skip it — this is the
+    /// "needs prime / has diverged" case the phux-ia4 fix must preserve.
+    /// While any consumer has this set, the short-circuit is suppressed.
+    pub needs_initial_emit: bool,
 }
 
 impl std::fmt::Debug for ConsumerSyncState {
@@ -509,6 +530,24 @@ pub struct TerminalHandle {
 pub struct TerminalActor {
     terminal: RefCell<Terminal<'static, 'static>>,
     synth: RefCell<SnapshotSynthesizer<'static>>,
+    /// Cheap idle short-circuit for [`Self::tick_emit`] (phux-4l0).
+    ///
+    /// `true` whenever the canonical [`Terminal`] has been mutated
+    /// (`vt_write`, resize) since the last `tick_emit`. Set at every
+    /// mutation point, cleared at the top of each `tick_emit`. When this
+    /// is `false` AND no consumer is awaiting its first emission, the
+    /// per-consumer row walk is skipped entirely — an idle pane with N
+    /// consumers then costs O(1) per tick instead of O(N * rows) row
+    /// renders + allocations.
+    ///
+    /// Deliberately independent of libghostty's `RenderState`/`Snapshot`
+    /// dirty bits: those are *consumed* (cleared) by ANY `RenderState::update`
+    /// on the shared terminal (see
+    /// [`crate::grid::SnapshotSynthesizer::synthesize_against_reference`]),
+    /// including the one-shot updates in snapshot/screen/attach handling,
+    /// so probing them here could miss a write a sibling handler already
+    /// consumed. A self-owned flag cannot be clobbered that way.
+    terminal_dirty_since_tick: bool,
     key_enc: RefCell<PerTerminalKeyEncoder>,
     mouse_enc: RefCell<PerTerminalMouseEncoder>,
     focus_enc: RefCell<PerTerminalFocusEncoder>,
@@ -919,6 +958,9 @@ impl TerminalActor {
         let actor = Self {
             terminal: RefCell::new(terminal),
             synth: RefCell::new(synth),
+            // A pane may carry initial content (PTY banner, restored
+            // scrollback); start dirty so the first tick always emits.
+            terminal_dirty_since_tick: true,
             key_enc: RefCell::new(key_enc),
             mouse_enc: RefCell::new(mouse_enc),
             focus_enc: RefCell::new(PerTerminalFocusEncoder::new()),
@@ -1046,6 +1088,9 @@ impl TerminalActor {
                 next_seq: 1,
                 last_acked_seq: 0,
                 last_cursor_mode,
+                // Force one synthesis pass on the next tick even if the
+                // terminal is Clean since the previous tick (phux-4l0).
+                needs_initial_emit: true,
             },
         );
         Ok(())
@@ -1172,6 +1217,17 @@ impl TerminalActor {
         self.consumer_tick_emits = false;
     }
 
+    /// Test-only: write `bytes` into the actor's `Terminal` and mark the
+    /// per-tick dirty flag, mirroring the production PTY-byte path so the
+    /// phux-4l0 idle short-circuit sees the mutation. Tests must use this
+    /// rather than poking `terminal.borrow_mut().vt_write` directly, or
+    /// the next `tick_emit` would short-circuit and skip the write.
+    #[cfg(test)]
+    pub fn vt_write_for_test(&mut self, bytes: &[u8]) {
+        self.terminal.borrow_mut().vt_write(bytes);
+        self.terminal_dirty_since_tick = true;
+    }
+
     /// Synthesize a snapshot of the current `Terminal` state. Exposed
     /// for tests that want to drive the synthesis path synchronously
     /// without going through the actor's `select!` loop.
@@ -1257,6 +1313,9 @@ impl TerminalActor {
                 warn!(?err, cols, rows, "terminal resize failed");
             }
         }
+        // A resize reflows the grid: every consumer reference is rebuilt
+        // on the next diff, so force the next tick to walk (phux-4l0).
+        self.terminal_dirty_since_tick = true;
         if let Some(pty) = &self.pty {
             let size = PtySize {
                 rows,
@@ -1482,6 +1541,9 @@ impl TerminalActor {
                     match evt {
                         Some(PtyEvent::Bytes(chunk)) => {
                             self.terminal.borrow_mut().vt_write(&chunk);
+                            // The grid changed: let the next tick walk
+                            // the rows (phux-4l0 idle short-circuit).
+                            self.terminal_dirty_since_tick = true;
                             // Broadcast send fails only when no
                             // subscribers exist; that's a normal
                             // steady-state (no attached clients) and
@@ -1726,12 +1788,41 @@ impl TerminalActor {
         if !self.consumer_tick_emits {
             return;
         }
+
+        // Idle short-circuit (phux-4l0). The per-consumer reference diff
+        // walks + renders every viewport row into a throwaway `Vec<u8>`
+        // for every consumer, every tick — pure waste when nothing has
+        // changed. Take and reset the "mutated since last tick" flag here;
+        // if the terminal is unchanged AND no consumer is awaiting its
+        // first emission, skip the entire per-consumer loop.
+        //
+        // Correctness: a `Clean` terminal cannot have diverged from any
+        // consumer's last-emitted reference (the reference advanced to the
+        // terminal state on the prior emit, and nothing has mutated the
+        // terminal since), so skipping is sound. The `needs_initial_emit`
+        // carve-out preserves the phux-ia4 multi-consumer guarantee: a
+        // consumer registered *after* the last write sits on a clean
+        // terminal yet has never had a synthesis pass, so it must still be
+        // walked once even though the global flag is clear.
+        let mutated = self.terminal_dirty_since_tick;
+        self.terminal_dirty_since_tick = false;
+        if !mutated && !self.consumer_states.values().any(|s| s.needs_initial_emit) {
+            return;
+        }
+
         // Borrow the terminal + shared synthesizer once per tick. The
         // synthesizer's `RenderState`/iterators are reused across
         // consumers; the per-consumer state lives in each `reference`.
         let terminal = self.terminal.borrow();
         let mut synth = self.synth.borrow_mut();
+        // Consumers whose outbound mailbox is `Closed` (receiver dropped)
+        // are reaped after the loop so a missed detach (phux-ddg) does not
+        // leave a dead `ConsumerReference` to be re-rendered forever.
+        let mut closed: Vec<ClientId> = Vec::new();
         for (client_id, state) in &mut self.consumer_states {
+            // This consumer is being serviced this tick; it no longer needs
+            // a forced first pass.
+            state.needs_initial_emit = false;
             let bytes = match synth.synthesize_against_reference(&terminal, &mut state.reference) {
                 Ok(snap) => snap.bytes,
                 Err(err) => {
@@ -1746,7 +1837,11 @@ impl TerminalActor {
             };
             if bytes.is_empty() {
                 // Byte-identical to this consumer's reference; nothing to
-                // send this tick.
+                // send this tick. Still reap a consumer whose receiver has
+                // gone away so an idle dead consumer does not linger.
+                if state.outbound.is_closed() {
+                    closed.push(*client_id);
+                }
                 continue;
             }
             let seq = state.next_seq;
@@ -1779,14 +1874,25 @@ impl TerminalActor {
                     );
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // The receiver is gone. A `ConsumerDetachRequest` may
+                    // have been dropped (best-effort `try_send` on a full
+                    // detach mailbox, runtime.rs) so `unregister_consumer`
+                    // never ran. Self-heal: reap the entry now so we stop
+                    // re-rendering a dead consumer every tick (phux-ddg).
                     trace!(
                         ?client_id,
                         wire_terminal_id = state.wire_terminal_id,
                         seq,
-                        "state-sync tick: consumer mailbox closed; entry will be reaped on detach",
+                        "state-sync tick: consumer mailbox closed; reaping entry",
                     );
+                    closed.push(*client_id);
                 }
             }
+        }
+        drop(synth);
+        drop(terminal);
+        for client_id in closed {
+            self.consumer_states.remove(&client_id);
         }
     }
 }
@@ -2347,7 +2453,7 @@ mod tests {
         actor.register_consumer(client, tx, 11).expect("register");
         // Make the grid genuinely dirty AFTER register so a non-gated tick
         // would have something to emit — proving the gate, not an empty diff.
-        actor.terminal.borrow_mut().vt_write(b"dirty-content");
+        actor.vt_write_for_test(b"dirty-content");
 
         // Several ticks: the gate must keep every one silent.
         for _ in 0..3 {
@@ -2388,7 +2494,7 @@ mod tests {
         // so deltas are measured "from now." Writing AFTER register is what
         // makes the next tick produce a diff.
         actor.register_consumer(client, tx, 11).expect("register");
-        actor.terminal.borrow_mut().vt_write(b"q0e-marker");
+        actor.vt_write_for_test(b"q0e-marker");
 
         actor.tick_emit();
         let frame = rx
@@ -2424,7 +2530,7 @@ mod tests {
         );
 
         // A fresh write produces a new single emission with the next seq.
-        actor.terminal.borrow_mut().vt_write(b" more");
+        actor.vt_write_for_test(b" more");
         actor.tick_emit();
         let frame = rx
             .try_recv()
@@ -2491,7 +2597,7 @@ mod tests {
             .expect("register b");
 
         // One tick of new output AFTER both are primed.
-        actor.terminal.borrow_mut().vt_write(b"shared-marker");
+        actor.vt_write_for_test(b"shared-marker");
         actor.tick_emit();
 
         // BOTH consumers must receive a TerminalOutput carrying the marker.
@@ -2528,7 +2634,7 @@ mod tests {
         // perturb the other. A fresh write reaches the survivor exactly
         // once.
         actor.unregister_consumer(client_a);
-        actor.terminal.borrow_mut().vt_write(b" again");
+        actor.vt_write_for_test(b" again");
         actor.tick_emit();
         let frame = rx_b.try_recv().expect("consumer B: must get the new write");
         let Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. }) = frame else {
@@ -2543,6 +2649,184 @@ mod tests {
         assert!(
             rx_a.try_recv().is_err(),
             "consumer A detached: must receive nothing further",
+        );
+    }
+
+    /// phux-4l0: an idle tick (no write since the last tick, no consumer
+    /// awaiting its first emission) short-circuits and emits nothing.
+    #[test]
+    fn idle_tick_short_circuits_and_emits_nothing() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        // First tick: the consumer needs its initial pass, so it is walked
+        // (returns empty here — primed against a blank terminal) and the
+        // dirty flag set at construction is consumed.
+        actor.tick_emit();
+        // Drain whatever the first tick produced (expected: nothing, since
+        // the reference was primed to the same blank state).
+        while rx.try_recv().is_ok() {}
+
+        // Now write, tick, drain: the consumer receives the write.
+        actor.vt_write_for_test(b"hello");
+        actor.tick_emit();
+        let got = rx.try_recv().expect("write must reach the consumer");
+        let Outbound::Frame(FrameKind::TerminalOutput { bytes, .. }) = got else {
+            panic!("expected TerminalOutput");
+        };
+        assert!(contains_subslice(&bytes, b"hello"));
+
+        // Many idle ticks (no further writes): the short-circuit must keep
+        // each one silent and must not perturb the consumer entry.
+        for _ in 0..5 {
+            actor.tick_emit();
+            assert!(
+                rx.try_recv().is_err(),
+                "idle tick must emit nothing (short-circuit)",
+            );
+        }
+        assert_eq!(actor.consumer_count(), 1, "consumer entry intact");
+    }
+
+    /// phux-4l0: a consumer registered AFTER the last write sits on a
+    /// terminal that is `Clean` since the previous tick, yet has never had
+    /// a synthesis pass. The `needs_initial_emit` carve-out must keep the
+    /// short-circuit from starving it: the next tick must still walk it
+    /// (here the write predates the attach, so it is already primed and
+    /// the body is empty — the point is the entry is serviced, not
+    /// skipped, preserving the phux-ia4 multi-consumer guarantee).
+    #[test]
+    fn new_consumer_served_even_when_terminal_clean() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        // Consumer A attaches, a write lands, a tick delivers it, then a
+        // steady-state tick clears the dirty flag.
+        let client_a = ClientId(1);
+        let (tx_a, mut rx_a) = dummy_outbound();
+        actor.register_consumer(client_a, tx_a, 11).expect("reg a");
+        actor.vt_write_for_test(b"first");
+        actor.tick_emit();
+        while rx_a.try_recv().is_ok() {}
+        // Steady-state tick: terminal now Clean since last tick.
+        actor.tick_emit();
+        assert!(rx_a.try_recv().is_err(), "A steady-state: nothing");
+
+        // Consumer B attaches with NO intervening write. The terminal is
+        // Clean, but B has needs_initial_emit set, so the short-circuit
+        // must NOT fire — B must be walked. (Primed to current state, so
+        // the body is empty, but the entry is serviced and the flag
+        // cleared.)
+        let client_b = ClientId(2);
+        let (tx_b, mut rx_b) = dummy_outbound();
+        actor.register_consumer(client_b, tx_b, 11).expect("reg b");
+        assert!(
+            actor
+                .consumer_state(client_b)
+                .expect("b present")
+                .needs_initial_emit,
+            "B should be awaiting its first emission",
+        );
+        actor.tick_emit();
+        // B primed to current state ⇒ empty body, but the pass ran:
+        // needs_initial_emit is now cleared.
+        assert!(
+            !actor
+                .consumer_state(client_b)
+                .expect("b present")
+                .needs_initial_emit,
+            "B's first pass must have run despite the Clean terminal",
+        );
+        assert!(rx_b.try_recv().is_err(), "B primed ⇒ empty first pass");
+
+        // A fresh write after both are primed reaches BOTH.
+        actor.vt_write_for_test(b" again");
+        actor.tick_emit();
+        let frame_a = rx_a.try_recv().expect("A gets the new write");
+        let frame_b = rx_b.try_recv().expect("B gets the new write");
+        for (who, frame) in [("A", frame_a), ("B", frame_b)] {
+            let Outbound::Frame(FrameKind::TerminalOutput { bytes, .. }) = frame else {
+                panic!("{who}: expected TerminalOutput");
+            };
+            assert!(
+                contains_subslice(&bytes, b"again"),
+                "{who} must carry the new write",
+            );
+        }
+    }
+
+    /// phux-ddg: a consumer whose outbound receiver has been dropped (a
+    /// detach whose `ConsumerDetachRequest` never reached the actor — full
+    /// mailbox) must be reaped by `tick_emit` rather than re-rendered every
+    /// tick forever. The tick is self-healing: a `Closed` mailbox removes
+    /// the entry.
+    #[test]
+    fn tick_emit_reaps_consumer_with_closed_mailbox() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        let (tx, rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+        assert_eq!(actor.consumer_count(), 1);
+
+        // Simulate the dropped-detach leak: the client's receiver goes
+        // away (disconnect) but the detach request was lost, so the
+        // per-consumer entry is still present.
+        drop(rx);
+
+        // A write makes the tick try to emit to the dead consumer; the
+        // send fails Closed and the entry is reaped.
+        actor.vt_write_for_test(b"content");
+        actor.tick_emit();
+        assert_eq!(
+            actor.consumer_count(),
+            0,
+            "closed-mailbox consumer must be reaped by the tick",
+        );
+
+        // Subsequent ticks are stable no-ops.
+        actor.vt_write_for_test(b"more");
+        actor.tick_emit();
+        assert_eq!(actor.consumer_count(), 0, "stays reaped");
+    }
+
+    /// phux-ddg: a consumer with a closed mailbox is reaped even when the
+    /// diff body is empty (idle dead consumer). Without this, an idle but
+    /// dead consumer would never hit the `try_send` Closed arm and would
+    /// linger until pane teardown.
+    #[test]
+    fn tick_emit_reaps_idle_consumer_with_closed_mailbox() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        let (tx, rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        // Prime past the initial-emit pass with one tick (empty body).
+        actor.tick_emit();
+        assert_eq!(actor.consumer_count(), 1);
+
+        // Receiver drops (disconnect). A write keeps the per-consumer loop
+        // running this tick; whether the diff body is empty or not, the
+        // `is_closed()` probe on the empty-body path and the `Closed` arm
+        // on the send path both reap the entry.
+        drop(rx);
+        actor.vt_write_for_test(b"x");
+        actor.tick_emit();
+        assert_eq!(
+            actor.consumer_count(),
+            0,
+            "dead consumer reaped even though it never acked",
         );
     }
 

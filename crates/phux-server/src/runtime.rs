@@ -628,8 +628,11 @@ async fn on_terminal_exited(state: &SharedState, pane: phux_core::ids::TerminalI
 /// Handles are gathered under-lock (`subscribed_terminal_handles`); the
 /// `consumer_detach` sends happen off-lock to avoid awaiting inside
 /// `with_mut`. `try_send` is non-blocking and best-effort: a full or
-/// closed mailbox just means the actor is gone or saturated, in which
-/// case the per-consumer entry is freed when the actor itself tears down.
+/// closed mailbox just means the actor is gone or saturated. A dropped
+/// detach on a *live* actor is no longer a leak — `state.detach` below
+/// drops the client's outbound receiver, so the actor's `tick_emit`
+/// observes the mailbox as `Closed` on its next tick and reaps the
+/// orphaned per-consumer entry itself (phux-ddg, the self-healing path).
 fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
     let wire_client_id =
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
@@ -644,7 +647,7 @@ fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 trace!(
                     ?client_id,
-                    "consumer_detach mailbox full; per-consumer entry freed on actor teardown",
+                    "consumer_detach mailbox full; entry reaped by tick_emit when its mailbox closes",
                 );
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
