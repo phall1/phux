@@ -37,9 +37,12 @@
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
 
-use phux_config::widget::{Cell as WidgetCell, StatusBar, WidgetContext};
+use std::str::FromStr;
+
+use phux_config::widget::{Cell as WidgetCell, CellStyle, StatusBar, WidgetContext, WindowInfo};
 use ratatui::buffer::{Buffer, Cell as RatatuiCell};
 use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
 
 /// Where the status bar lives in the outer terminal. Defaults to
 /// [`Self::Bottom`] per `docs/consumers/tui.md` §8.5.
@@ -65,11 +68,10 @@ pub struct StatusBarContext<'a> {
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
-    /// phux-4li.17: pre-formatted window/tab strip (`0:bash 1:vim*`),
-    /// drawn left-anchored over the widget row. `""` ⇒ no window bar.
-    /// This is TUI-side state, not a `phux-config` widget, so it lives
-    /// on the context rather than in the widget pipeline.
-    pub window_tabs: &'a str,
+    /// The TUI's windows in display order (active one flagged), consumed
+    /// by the `windows` widget. Empty ⇒ no window bar. TUI-side data fed
+    /// into the widget pipeline via [`Self::as_widget`].
+    pub windows: &'a [WindowInfo],
 }
 
 impl<'a> StatusBarContext<'a> {
@@ -80,40 +82,58 @@ impl<'a> StatusBarContext<'a> {
         WidgetContext {
             now: self.now,
             session_name: self.session_name,
+            windows: self.windows,
         }
     }
 }
 
-/// Build a [`StatusBarContext`] for one render pass. Kept so callers
-/// in `attach/` can construct one without depending on
-/// `phux-config`'s internals directly.
+/// Build a [`StatusBarContext`] for one render pass.
+///
+/// Kept so callers in `attach/` can construct one without depending on
+/// `phux-config`'s internals directly. Window data is injected by the
+/// painter (see [`StatusBarPainter::paint`]); standalone callers pass an
+/// empty slice.
 #[must_use]
-pub const fn make_context<'a>(
-    session_name: &'a str,
-    now: SystemTime,
-    window_tabs: &'a str,
-) -> StatusBarContext<'a> {
+pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarContext<'_> {
     StatusBarContext {
         now,
         session_name,
-        window_tabs,
+        windows: &[],
     }
 }
 
-/// Overwrite the leftmost cells of `buffer` with `tabs`, char-by-char,
-/// truncated at `cols`. Used to anchor the window/tab strip on the left
-/// edge of the status row.
-fn overlay_window_tabs(buffer: &mut Buffer, tabs: &str, cols: u16) {
-    if tabs.is_empty() {
-        return;
+/// Translate a phux-config [`CellStyle`] (plain data) into a ratatui
+/// [`Style`]. Color strings are parsed at this boundary (ADR-0020); an
+/// unparseable color degrades to the terminal default with a warning
+/// rather than failing the paint.
+fn to_ratatui_style(style: &CellStyle) -> Style {
+    let mut s = Style::default();
+    if let Some(fg) = parse_color(style.fg.as_deref()) {
+        s = s.fg(fg);
     }
-    for (col, ch) in tabs.chars().enumerate().take(usize::from(cols)) {
-        let Ok(x) = u16::try_from(col) else {
-            break;
-        };
-        let mut tmp = [0u8; 4];
-        buffer[(x, 0)].set_symbol(ch.encode_utf8(&mut tmp));
+    if let Some(bg) = parse_color(style.bg.as_deref()) {
+        s = s.bg(bg);
     }
+    let mut m = Modifier::empty();
+    m.set(Modifier::BOLD, style.bold);
+    m.set(Modifier::DIM, style.dim);
+    m.set(Modifier::ITALIC, style.italic);
+    m.set(Modifier::UNDERLINED, style.underline);
+    m.set(Modifier::REVERSED, style.reverse);
+    s.add_modifier(m)
+}
+
+/// Parse a color string (`"red"`, `"#cdd6f4"`, `"12"`) into a ratatui
+/// [`Color`]. `None`/unparseable ⇒ `None` (terminal default).
+fn parse_color(spec: Option<&str>) -> Option<Color> {
+    let s = spec?;
+    Color::from_str(s).map_or_else(
+        |_| {
+            tracing::warn!(color = s, "unrecognized status-bar color; using default");
+            None
+        },
+        Some,
+    )
 }
 
 /// Render the composed status row at `row_index` for a viewport of
@@ -138,7 +158,7 @@ pub fn render_status_bar<W: Write>(
 ) -> io::Result<()> {
     // phux-4li.17: paint when there are configured widgets OR a window
     // bar to draw. An empty bar with no windows is still a no-op.
-    if cols == 0 || (bar.is_empty() && ctx.window_tabs.is_empty()) {
+    if cols == 0 || (bar.is_empty() && ctx.windows.is_empty()) {
         return Ok(());
     }
 
@@ -146,18 +166,11 @@ pub fn render_status_bar<W: Write>(
     //    phux-config; we just consume the resulting strip).
     let row = bar.render(&ctx.as_widget(), cols);
 
-    // 2. Lay into a ratatui Buffer of shape `cols × 1`. Using a
-    //    Buffer (rather than emitting straight from `row`) keeps the
-    //    door open for per-segment ratatui styling without churning
-    //    the wire-side composer. The Buffer's coordinate space is
-    //    (0,0)..(cols,1); we never read it back.
+    // 2. Lay into a ratatui Buffer of shape `cols × 1`, carrying each
+    //    cell's style across the boundary. The Buffer's coordinate space
+    //    is (0,0)..(cols,1); we never read it back.
     let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
     fill_buffer(&mut buffer, &row, cols);
-    // phux-4li.17: overlay the window/tab strip on the left edge,
-    // overwriting any left-slot widget cells. The strip is plain text
-    // (`0:bash 1:vim*`, active marked with `*`); reverse-video styling
-    // is deferred until the cell emit path grows per-cell SGR.
-    overlay_window_tabs(&mut buffer, ctx.window_tabs, cols);
 
     // 3. Emit the buffer to VT. Cursor hide for the duration of the
     //    paint; SGR reset on entry and exit so we don't inherit nor
@@ -195,6 +208,11 @@ fn fill_buffer(buffer: &mut Buffer, row: &[WidgetCell], cols: u16) {
             }
             target.set_symbol(&s);
         }
+        // phux-ahv.3: carry per-cell style (fg/bg/attrs) across the
+        // ratatui boundary; `write_buffer` emits it as SGR.
+        if let Some(style) = &cell.style {
+            target.set_style(to_ratatui_style(style));
+        }
     }
 }
 
@@ -218,8 +236,11 @@ fn write_buffer<W: Write>(
     // output). Caller still positions the cursor at the focused pane
     // after this returns.
     write!(out, "\x1b[{one_based_row};1H\x1b[0m")?;
+    let mut prev_styled = false;
     for x in 0..cols {
         let cell = &buffer[(x, 0)];
+        // phux-ahv.3: per-cell SGR (shared with the overlay painter).
+        crate::render::sgr::emit_cell_sgr(out, cell, &mut prev_styled)?;
         let sym = cell.symbol();
         if sym.is_empty() {
             out.write_all(b" ")?;
@@ -248,10 +269,10 @@ pub struct StatusBarPainter {
     /// Last (cols, rows) we painted into. Different dims invalidate
     /// `last_row` and force a fresh paint.
     last_viewport: Option<(u16, u16)>,
-    /// phux-4li.17: pre-formatted window/tab strip, drawn left-anchored
-    /// over the widget row. Updated by the driver from the `Workspace`;
-    /// a change invalidates the paint cache.
-    window_tabs: String,
+    /// phux-ahv.3: the window list fed to the `windows` widget. Updated
+    /// by the driver from the `Workspace` and injected into the render
+    /// context inside [`Self::paint`]; a change invalidates the cache.
+    windows: Vec<WindowInfo>,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -264,7 +285,7 @@ impl std::fmt::Debug for StatusBarPainter {
                 &self.last_row.as_ref().map(|(_, r)| r.len()),
             )
             .field("last_viewport", &self.last_viewport)
-            .field("window_tabs", &self.window_tabs)
+            .field("windows.len", &self.windows.len())
             .finish()
     }
 }
@@ -278,15 +299,16 @@ impl StatusBarPainter {
             position,
             last_row: None,
             last_viewport: None,
-            window_tabs: String::new(),
+            windows: Vec::new(),
         }
     }
 
-    /// Update the window/tab strip. A change forces the next paint to
-    /// redraw (the strip isn't part of the widget-row cache key).
-    pub fn set_window_tabs(&mut self, tabs: String) {
-        if self.window_tabs != tabs {
-            self.window_tabs = tabs;
+    /// Update the window list rendered by the `windows` widget. A change
+    /// forces the next paint to redraw (the list isn't part of the
+    /// widget-row cache key — the widget reads it from the context).
+    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) {
+        if self.windows != windows {
+            self.windows = windows;
             self.invalidate();
         }
     }
@@ -326,7 +348,7 @@ impl StatusBarPainter {
         rows: u16,
         ctx: &StatusBarContext<'_>,
     ) -> io::Result<()> {
-        if cols == 0 || rows == 0 || (self.bar.is_empty() && self.window_tabs.is_empty()) {
+        if cols == 0 || rows == 0 || (self.bar.is_empty() && self.windows.is_empty()) {
             return Ok(());
         }
         let new_row = self.bar.render(&ctx.as_widget(), cols);
@@ -342,11 +364,11 @@ impl StatusBarPainter {
             Position::Bottom => rows.saturating_sub(1),
             Position::Top => 0,
         };
-        // The window/tab strip is owned by the painter (the driver sets
-        // it from the Workspace); inject it into the render context so
+        // The window list is owned by the painter (the driver sets it
+        // from the Workspace); inject it into the render context so
         // callers don't have to thread it through every paint path.
         let ctx = StatusBarContext {
-            window_tabs: &self.window_tabs,
+            windows: &self.windows,
             ..*ctx
         };
         // Delegate to the ratatui-backed renderer. We pre-composed
@@ -380,7 +402,7 @@ mod tests {
         StatusBarContext {
             now: UNIX_EPOCH,
             session_name: session,
-            window_tabs: "",
+            windows: &[],
         }
     }
 
@@ -548,54 +570,99 @@ mod tests {
     #[test]
     fn make_context_helper_exposes_session_and_now() {
         let now = UNIX_EPOCH;
-        let c = make_context("alpha", now, "");
+        let c = make_context("alpha", now);
         assert_eq!(c.session_name, "alpha");
         assert_eq!(c.now, now);
     }
 
+    fn windows_bar() -> StatusBar {
+        let cfg = StatusCfg {
+            left: vec![spec("windows", &[])],
+            ..StatusCfg::default()
+        };
+        build_bar(&cfg)
+    }
+
+    /// Strip CSI escape sequences so a text assertion isn't defeated by
+    /// the per-cell SGR that styled tabs interleave between glyphs.
+    fn strip_csi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' && chars.peek() == Some(&'[') {
+                chars.next();
+                for n in chars.by_ref() {
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            } else if c != '\x1b' {
+                out.push(c);
+            }
+        }
+        out
+    }
+
     #[test]
-    fn window_tab_strip_renders_over_empty_bar() {
-        // No configured widgets, but a window strip ⇒ the bar paints the
-        // strip anyway (relaxed empty gate).
-        let bar = build_bar(&StatusCfg::default());
+    fn windows_widget_renders_tab_strip() {
+        let bar = windows_bar();
+        let windows = [
+            WindowInfo {
+                name: "bash".to_owned(),
+                active: true,
+            },
+            WindowInfo {
+                name: "vim".to_owned(),
+                active: false,
+            },
+        ];
         let ctx = StatusBarContext {
             now: UNIX_EPOCH,
             session_name: "",
-            window_tabs: "0:bash 1:vim*",
+            windows: &windows,
         };
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
         let s = String::from_utf8(buf).unwrap();
+        // The active tab carries an SGR (default preset = bold+reverse),
+        // so glyphs interleave with escapes — strip CSI before the text
+        // assertion.
         assert!(
-            s.contains("0:bash 1:vim*"),
-            "tab strip should render; got {s:?}"
+            s.contains("\x1b[1"),
+            "expected bold SGR for the active tab; got {s:?}"
         );
+        let visible = strip_csi(&s);
+        assert!(visible.contains("0:bash"), "first tab; got {visible:?}");
+        assert!(visible.contains("1:vim"), "second tab; got {visible:?}");
     }
 
     #[test]
-    fn empty_bar_and_empty_strip_is_noop() {
+    fn empty_bar_and_no_windows_is_noop() {
         let bar = build_bar(&StatusCfg::default());
         let ctx = StatusBarContext {
             now: UNIX_EPOCH,
             session_name: "",
-            window_tabs: "",
+            windows: &[],
         };
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
-        assert!(buf.is_empty(), "empty bar + no tabs must not paint");
+        assert!(buf.is_empty(), "empty bar + no windows must not paint");
     }
 
     #[test]
-    fn painter_set_window_tabs_paints_strip() {
-        // A painter built from an empty widget bar still paints once it
-        // has a window strip, and a changed strip forces a repaint.
-        let mut p = StatusBarPainter::new(build_bar(&StatusCfg::default()), Position::Bottom);
-        p.set_window_tabs("0:a*".to_owned());
+    fn painter_set_windows_paints_tab_strip() {
+        // A painter whose bar has the `windows` widget renders the strip
+        // from its injected window list; a changed list forces a repaint.
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+        }]);
         let mut buf = Vec::new();
         p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
-        let s = String::from_utf8(buf).unwrap();
+        let s = strip_csi(&String::from_utf8(buf).unwrap());
         assert!(
-            s.contains("0:a*"),
+            s.contains("0:a"),
             "painter should render the strip; got {s:?}"
         );
     }

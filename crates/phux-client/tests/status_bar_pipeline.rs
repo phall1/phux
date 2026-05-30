@@ -36,7 +36,7 @@ fn both_in_tree_widgets_render_to_bottom_row_from_config() {
             &mut buf,
             cols,
             rows,
-            &make_context("session-x", SystemTime::UNIX_EPOCH, ""),
+            &make_context("session-x", SystemTime::UNIX_EPOCH),
         )
         .expect("paint");
 
@@ -62,12 +62,7 @@ fn default_placement_is_bottom() {
     let mut painter = StatusBarPainter::new(bar, Position::default());
     let mut buf: Vec<u8> = Vec::new();
     painter
-        .paint(
-            &mut buf,
-            40,
-            10,
-            &make_context("s", SystemTime::UNIX_EPOCH, ""),
-        )
+        .paint(&mut buf, 40, 10, &make_context("s", SystemTime::UNIX_EPOCH))
         .expect("paint");
     let s = String::from_utf8(buf).expect("utf8");
     // Row 10 = bottom of a 10-row viewport, 1-based.
@@ -88,7 +83,7 @@ fn empty_status_section_yields_no_paint() {
             &mut buf,
             40,
             10,
-            &make_context("anything", SystemTime::UNIX_EPOCH, ""),
+            &make_context("anything", SystemTime::UNIX_EPOCH),
         )
         .expect("paint");
     assert!(
