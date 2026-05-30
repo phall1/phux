@@ -14,6 +14,7 @@ pub mod grid;
 pub mod id_bridge;
 pub mod input;
 pub mod runtime;
+pub mod search;
 pub mod state;
 pub mod telemetry;
 pub mod terminal_actor;
