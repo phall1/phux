@@ -54,7 +54,7 @@
 
 use std::collections::BTreeMap;
 
-use phux_protocol::input::key::{ModSet, PhysicalKey};
+use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 
 use crate::schema::{Action, KeybindingsCfg};
 
@@ -104,6 +104,37 @@ pub struct KeyChord {
     pub modifiers: ModSet,
     /// The physical key.
     pub key: PhysicalKey,
+}
+
+/// The modifier bits a configured chord can carry. A live [`KeyEvent`]'s
+/// `mods` may additionally report lock state (`CAPS_LOCK`, `NUM_LOCK`)
+/// and left/right side bits (`SHIFT_SIDE`, ...) that chord strings never
+/// spell. Matching masks `KeyEvent::mods` down to these four logical
+/// modifiers so a live `Shift+x` reported with `SHIFT | SHIFT_SIDE`
+/// still matches a chord parsed as `SHIFT`.
+const CHORD_MODS: ModSet = ModSet::SHIFT
+    .union(ModSet::CTRL)
+    .union(ModSet::ALT)
+    .union(ModSet::SUPER);
+
+impl KeyChord {
+    /// Does this configured chord match a live [`KeyEvent`]?
+    ///
+    /// Returns `true` when the event is a key *press* (not release or
+    /// auto-repeat), targets the same [`PhysicalKey`], and carries the
+    /// same logical modifiers once the event's `mods` are masked to
+    /// [`CHORD_MODS`] (lock and side bits ignored — see its docs).
+    ///
+    /// This is the comparison the help-overlay dismiss path wants: feed
+    /// it the chord parsed from the user's `show-help` binding and the
+    /// live event, and dismiss on a match rather than on a hardcoded
+    /// `F1`.
+    #[must_use]
+    pub fn matches_event(self, ev: &KeyEvent) -> bool {
+        matches!(ev.action, KeyAction::Press)
+            && ev.key == self.key
+            && (ev.mods & CHORD_MODS) == self.modifiers
+    }
 }
 
 impl std::hash::Hash for KeyChord {
@@ -472,6 +503,43 @@ pub fn parse_chord_sequence(s: &str) -> Result<KeybindSequence, KeybindError> {
     Ok(KeybindSequence(chords))
 }
 
+/// Parse a single TOML chord string (e.g. `"F1"`, `"C-a"`, `"M-S-Tab"`)
+/// into the [`KeyChord`] a live [`KeyEvent`] can be compared against.
+///
+/// # Return type
+///
+/// This deliberately returns a [`KeyChord`], not a [`KeyEvent`]. A
+/// [`KeyEvent`] carries runtime-only fields a config string cannot
+/// supply — `action` (press/release/repeat), `consumed_mods`,
+/// `composing`, `text`, and `unshifted_codepoint`. Synthesizing a
+/// [`KeyEvent`] would force arbitrary choices for all of them and then
+/// invite a brittle full-struct `==`. The thing a consumer actually
+/// wants is "does this live event match this configured chord?", so the
+/// chord is the comparison-ready value and [`KeyChord::matches_event`]
+/// is the comparison. This is a thin wrapper over [`parse_chord`];
+/// callers that already hold a [`KeyChord`] can skip it.
+///
+/// # Errors
+///
+/// Returns [`KeybindError`] when the string is malformed or names an
+/// unknown key (see [`parse_chord`]).
+pub fn chord_str_to_key_chord(s: &str) -> Result<KeyChord, KeybindError> {
+    parse_chord(s)
+}
+
+/// Does a live [`KeyEvent`] match the chord spelled by `s`?
+///
+/// Convenience wrapper: parses `s` via [`chord_str_to_key_chord`] then
+/// delegates to [`KeyChord::matches_event`]. A parse error yields `false`
+/// — a chord string that doesn't parse can't match any event. Callers
+/// that need to distinguish "no match" from "bad config" should parse
+/// once up front with [`chord_str_to_key_chord`] and keep the
+/// [`KeyChord`].
+#[must_use]
+pub fn chord_str_matches_event(s: &str, ev: &KeyEvent) -> bool {
+    parse_chord(s).is_ok_and(|chord| chord.matches_event(ev))
+}
+
 // ---------------------------------------------------------------------------
 // Resolver
 // ---------------------------------------------------------------------------
@@ -634,6 +702,95 @@ mod tests {
 
     fn ck(s: &str) -> KeyChord {
         parse_chord(s).expect("parses")
+    }
+
+    /// Build a key *press* event with the given physical key and mods and
+    /// runtime-only fields zeroed — enough to exercise the matcher.
+    fn press(key: PhysicalKey, mods: ModSet) -> KeyEvent {
+        KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods,
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: None,
+            unshifted_codepoint: None,
+        }
+    }
+
+    #[test]
+    fn chord_str_to_key_chord_matches_parse_chord() {
+        assert_eq!(
+            chord_str_to_key_chord("C-a").expect("parses"),
+            parse_chord("C-a").expect("parses")
+        );
+    }
+
+    #[test]
+    fn matches_bare_key() {
+        // A bare key with no modifiers.
+        let chord = ck("a");
+        assert!(chord.matches_event(&press(PhysicalKey::A, ModSet::empty())));
+        assert!(chord_str_matches_event(
+            "a",
+            &press(PhysicalKey::A, ModSet::empty())
+        ));
+        // Wrong key does not match.
+        assert!(!chord.matches_event(&press(PhysicalKey::B, ModSet::empty())));
+        // An unexpected modifier on the event does not match a bare chord.
+        assert!(!chord.matches_event(&press(PhysicalKey::A, ModSet::CTRL)));
+    }
+
+    #[test]
+    fn matches_modified_chord() {
+        let chord = ck("C-a");
+        assert!(chord.matches_event(&press(PhysicalKey::A, ModSet::CTRL)));
+        // Same key without the modifier does not match.
+        assert!(!chord.matches_event(&press(PhysicalKey::A, ModSet::empty())));
+        // Extra logical modifier does not match.
+        assert!(!chord.matches_event(&press(PhysicalKey::A, ModSet::CTRL | ModSet::SHIFT)));
+    }
+
+    #[test]
+    fn matches_shift_shortcut() {
+        // Bare uppercase letter implies Shift (see module docs), so the
+        // chord carries SHIFT and must match a Shift-modified press.
+        let chord = ck("A");
+        assert_eq!(chord, ck("S-a"));
+        assert!(chord.matches_event(&press(PhysicalKey::A, ModSet::SHIFT)));
+        // Lock and side bits the OS may also report are ignored by the
+        // mask, so a live Shift press still matches.
+        let live = press(
+            PhysicalKey::A,
+            ModSet::SHIFT | ModSet::SHIFT_SIDE | ModSet::CAPS_LOCK,
+        );
+        assert!(chord.matches_event(&live));
+    }
+
+    #[test]
+    fn matches_function_key() {
+        let chord = ck("F1");
+        assert!(chord.matches_event(&press(PhysicalKey::F1, ModSet::empty())));
+        assert!(!chord.matches_event(&press(PhysicalKey::F2, ModSet::empty())));
+    }
+
+    #[test]
+    fn does_not_match_non_press_actions() {
+        let chord = ck("F1");
+        let mut ev = press(PhysicalKey::F1, ModSet::empty());
+        ev.action = KeyAction::Release;
+        assert!(!chord.matches_event(&ev));
+        ev.action = KeyAction::Repeat;
+        assert!(!chord.matches_event(&ev));
+    }
+
+    #[test]
+    fn chord_str_matches_event_is_false_on_parse_error() {
+        // A malformed chord string can't match any event.
+        assert!(!chord_str_matches_event(
+            "C-",
+            &press(PhysicalKey::A, ModSet::empty())
+        ));
     }
 
     #[test]
