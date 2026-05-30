@@ -16,6 +16,7 @@ pub mod input;
 pub mod runtime;
 pub mod state;
 pub mod telemetry;
+pub mod transport;
 pub mod terminal_actor;
 
 pub use id_bridge::IdBridge;

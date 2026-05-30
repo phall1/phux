@@ -47,7 +47,12 @@ bytes.workspace = true
 # scales with the slowest pane's reply time, not their sum. Already in the
 # dep graph transitively via tokio; declared here for direct use. `std` (the
 # default feature set we want) is implied by leaving `default-features` on.
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# WebSocket transport for browser consumers (phux-486.4). The browser client
+# speaks the identical length-prefixed FrameKind wire inside binary messages.
+# default-features off avoids pulling a TLS stack — ws:// is terminated locally
+# (dev) or at an edge proxy; the daemon only performs the server handshake.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 # Optional: opt-in via the `tokio-console` feature. See the feature
 # comment above for the build incantation.
 console-subscriber = { version = "0.4", optional = true }

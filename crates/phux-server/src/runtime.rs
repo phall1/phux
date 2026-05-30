@@ -35,10 +35,9 @@ use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, MAX_FRAME_LEN,
-    SpawnError, SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
+    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, SpawnError,
+    SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
 use tokio::sync::oneshot;
@@ -47,13 +46,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
+use crate::transport::{FrameReader, FrameWriter, Incoming};
 use crate::terminal_actor::{
     ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
     ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
 };
-
-/// Per-byte-count of the length prefix on every wire frame (see `docs/spec/proto.md` §5).
-const LENGTH_PREFIX: usize = 4;
 
 /// Timeout for the "is the socket still live?" liveness probe used when an
 /// existing socket file is encountered during bind.
@@ -239,7 +236,9 @@ impl ServerRuntime {
         // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
         let state = SharedState::new();
 
-        let listener = UnixListener::bind(&socket_path).map_err(ServerError::Bind)?;
+        let listener = crate::transport::UdsListener::new(
+            UnixListener::bind(&socket_path).map_err(ServerError::Bind)?,
+        );
         info!(path = %socket_path.display(), "phux-server listening on UDS");
 
         // The LocalSet hosts per-client tasks and per-pane actors —
@@ -321,7 +320,39 @@ impl ServerRuntime {
                         );
                     }
                 }
-                accept_loop(&listener, state, root_token).await
+                // Optionally also accept WebSocket connections (phux-486.4) so
+                // browser consumers (`phux-web`) can speak the identical wire.
+                // Opt-in via `PHUX_WS_ADDR` (e.g. "127.0.0.1:8787"); UDS is
+                // always on.
+                let ws_addr = std::env::var("PHUX_WS_ADDR").ok().and_then(|raw| {
+                    match raw.parse::<std::net::SocketAddr>() {
+                        Ok(addr) => Some(addr),
+                        Err(err) => {
+                            warn!(addr = %raw, error = %err, "invalid PHUX_WS_ADDR; WebSocket transport disabled");
+                            None
+                        }
+                    }
+                });
+                match ws_addr {
+                    Some(addr) => match crate::transport::WsListener::bind(addr).await {
+                        Ok(ws) => {
+                            let bound = ws.local_addr().map(|a| a.to_string()).unwrap_or_default();
+                            info!(addr = %bound, "phux-server also listening on WebSocket");
+                            // Both loops run until the root token cancels;
+                            // whichever returns first ends the server (on
+                            // shutdown both observe the cancellation).
+                            tokio::select! {
+                                r = accept_loop(&listener, state.clone(), root_token.clone()) => r,
+                                r = accept_loop(&ws, state, root_token) => r,
+                            }
+                        }
+                        Err(err) => {
+                            warn!(addr = %addr, error = %err, "failed to bind WebSocket; UDS only");
+                            accept_loop(&listener, state, root_token).await
+                        }
+                    },
+                    None => accept_loop(&listener, state, root_token).await,
+                }
             })
             .await;
 
@@ -679,8 +710,12 @@ async fn handle_existing_socket(socket_path: &Path) -> Result<(), ServerError> {
 /// `root_token` is the per-server root cancellation token. Cancellation
 /// drives a clean return from this loop (the `JoinSet` of per-client
 /// tasks then drops, aborting any in-flight client tasks).
-async fn accept_loop(
-    listener: &UnixListener,
+#[allow(
+    clippy::future_not_send,
+    reason = "ADR-0014: the server runs on a LocalSet; per-connection transports (L::Reader/Writer) are !Send by design"
+)]
+async fn accept_loop<L: Incoming>(
+    listener: &L,
     state: SharedState,
     root_token: CancellationToken,
 ) -> Result<(), ServerError> {
@@ -697,8 +732,8 @@ async fn accept_loop(
             }
             accept = listener.accept() => {
                 match accept {
-                    Ok((stream, _addr)) => {
-                        debug!("client connected");
+                    Ok((reader, writer)) => {
+                        debug!(transport = listener.kind(), "client connected");
                         // Allocate the per-client routing id up-front so the
                         // task can detach itself cleanly on EOF.
                         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
@@ -706,7 +741,7 @@ async fn accept_loop(
                         let client_token = root_token.child_token();
                         let task_root_token = root_token.clone();
                         clients.spawn_local(async move {
-                            if let Err(err) = handle_client(stream, task_state.clone(), client_id, client_token, task_root_token).await {
+                            if let Err(err) = handle_client(reader, writer, task_state.clone(), client_id, client_token, task_root_token).await {
                                 warn!(error = %err, "client task ended with error");
                             }
                             // Implicit detach on EOF / error path — matches
@@ -752,15 +787,19 @@ async fn accept_loop(
     clippy::cognitive_complexity,
     reason = "see `clippy::too_many_lines` rationale above: the dispatch shape is one match arm per wire frame variant, where each arm is small and self-contained. Splitting on the arm boundary fragments the wire→state seam; merging arms across variants is what generated the complexity score in the first place."
 )]
-async fn handle_client(
-    stream: UnixStream,
+async fn handle_client<R, W>(
+    mut reader: R,
+    writer: W,
     state: SharedState,
     client_id: ClientId,
     token: CancellationToken,
     root_token: CancellationToken,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    R: FrameReader + 'static,
+    W: FrameWriter + 'static,
+{
     debug!(?client_id, "client task started");
-    let (mut reader, writer) = stream.into_split();
 
     // Allocate the per-client outbound mailbox + spawn the writer task.
     // Both structured frames and pre-encoded raw byte blobs (currently
@@ -777,10 +816,6 @@ async fn handle_client(
     let mut sibling_tasks: JoinSet<()> = JoinSet::new();
     sibling_tasks.spawn_local(writer_task(writer, out_rx, client_id));
 
-    let mut header = [0u8; LENGTH_PREFIX];
-    let mut payload = BytesMut::new();
-    let mut framed = BytesMut::new();
-
     // Per-connection cache of the most-recently-advertised
     // [`ClientCapabilities`] (SPEC §6.2). HELLO populates this; ATTACH
     // consumes it when constructing the `AttachedClient`. Pre-HELLO it
@@ -790,47 +825,28 @@ async fn handle_client(
     let mut negotiated_client_caps = ClientCapabilities::default();
 
     loop {
-        // Read the length prefix. EOF cleanly ends the session; a partial read
-        // is treated as a malformed frame and also ends the session.
-        // Cancellation token wins via biased select so a server-wide
-        // shutdown can preempt a slow client read.
-        let read_result = tokio::select! {
+        // Pull the next complete frame from the transport — length-prefixed on
+        // UDS, one binary message on WebSocket (see `transport.rs`). EOF ends
+        // the session cleanly; cancellation preempts a slow read via the biased
+        // select so a server-wide shutdown isn't blocked behind it.
+        let framed = tokio::select! {
             biased;
             () = token.cancelled() => {
                 debug!(?client_id, "client task cancelled by root token");
                 return Ok(());
             }
-            res = reader.read_exact(&mut header) => res,
+            res = reader.read_frame() => match res {
+                Ok(Some(framed)) => framed,
+                Ok(None) => {
+                    debug!("client disconnected (eof)");
+                    return Ok(());
+                }
+                Err(err) => {
+                    debug!(error = %err, "client read error; closing");
+                    return Ok(());
+                }
+            },
         };
-        match read_result {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                debug!("client disconnected (eof)");
-                return Ok(());
-            }
-            Err(err) => {
-                debug!(error = %err, "client read error on length prefix");
-                return Ok(());
-            }
-        }
-        let body_len = u32::from_be_bytes(header);
-        if !(1..=MAX_FRAME_LEN).contains(&body_len) {
-            warn!(body_len, "client sent oversized/empty frame; closing");
-            return Ok(());
-        }
-        let body_len_usize = body_len as usize;
-
-        payload.clear();
-        payload.resize(body_len_usize, 0);
-        if let Err(err) = reader.read_exact(&mut payload).await {
-            debug!(error = %err, "client read error on body");
-            return Ok(());
-        }
-
-        // Reassemble the wire frame so we can feed the existing decoder.
-        framed.clear();
-        framed.extend_from_slice(&header);
-        framed.extend_from_slice(&payload);
 
         let frame = match FrameKind::decode(&framed) {
             Ok((frame, _rest)) => frame,
@@ -1187,8 +1203,8 @@ fn handle_subscribe_metadata(
 /// sender. The unified `Outbound` enum collapses what used to be two
 /// channels (one for structured frames, one for raw blobs) into a
 /// single ordering domain, so a single `recv()` loop suffices.
-async fn writer_task(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
+async fn writer_task<W: FrameWriter>(
+    mut writer: W,
     mut rx: tokio::sync::mpsc::Receiver<Outbound>,
     client_id: ClientId,
 ) {
@@ -1198,13 +1214,13 @@ async fn writer_task(
             Outbound::Frame(frame) => {
                 buf.clear();
                 frame.encode(&mut buf);
-                if let Err(err) = writer.write_all(&buf).await {
+                if let Err(err) = writer.write_frame(&buf).await {
                     debug!(?client_id, error = %err, "writer error on frame; client task ending");
                     return;
                 }
             }
             Outbound::Raw(bytes) => {
-                if let Err(err) = writer.write_all(&bytes).await {
+                if let Err(err) = writer.write_frame(&bytes).await {
                     debug!(?client_id, error = %err, "writer error on raw; client task ending");
                     return;
                 }
