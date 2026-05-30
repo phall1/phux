@@ -22,23 +22,52 @@ pub use phux_core::screen::{CursorState, SCHEMA_VERSION, ScreenState};
 use crate::attach::AttachError;
 use crate::attach::connection::Connection;
 
-/// Read `terminal_id`'s current screen as structured data.
+/// Read `terminal_id`'s current screen as structured data, viewport only.
+///
+/// Convenience wrapper over [`get_screen_scrollback`] with no scrollback
+/// requested — the poll floor used by `phux wait`/`run`.
+///
+/// # Errors
+///
+/// See [`get_screen_scrollback`].
+pub async fn get_screen(
+    socket: &Path,
+    terminal_id: TerminalId,
+) -> Result<ScreenState, AttachError> {
+    get_screen_scrollback(socket, terminal_id, None).await
+}
+
+/// Read `terminal_id`'s current screen as structured data, optionally
+/// including scrollback history.
 ///
 /// Opens a fresh connection, issues `GET_SCREEN`, and deserializes the
 /// JSON reply. No `HELLO` and no `ATTACH`: the control command stands
 /// alone (matching `phux ls`/`kill`), and the read is side-effect-free.
+///
+/// `request_scrollback` (`phux-o1v`): `None` for viewport only, `Some(0)`
+/// for all retained history, `Some(n)` for the most-recent `n` history
+/// rows. The history lands in [`ScreenState::scrollback`].
 ///
 /// # Errors
 ///
 /// Returns [`AttachError`] on connect/transport failure, when the server
 /// refuses the command (e.g. unknown terminal), or when the reply is not
 /// the expected `OK_WITH(JSON(..))` carrying a valid [`ScreenState`].
-pub async fn get_screen(
+pub async fn get_screen_scrollback(
     socket: &Path,
     terminal_id: TerminalId,
+    request_scrollback: Option<u32>,
 ) -> Result<ScreenState, AttachError> {
     let mut conn = Connection::connect(socket).await?;
-    let result = command(&mut conn, 1, Command::GetScreen { terminal_id }).await?;
+    let result = command(
+        &mut conn,
+        1,
+        Command::GetScreen {
+            terminal_id,
+            request_scrollback,
+        },
+    )
+    .await?;
     match result {
         CommandResult::OkWith(CommandValue::Json(json)) => serde_json::from_str(&json)
             .map_err(|err| AttachError::Protocol(format!("malformed GET_SCREEN JSON: {err}"))),

@@ -36,8 +36,23 @@ use libghostty_vt::{
     render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
     screen::CellWide,
     style::{RgbColor, Style},
-    terminal::Mode,
+    terminal::{Mode, Point, PointCoordinate},
 };
+
+/// "All retained history" sentinel for the scrollback request.
+///
+/// A `Some(0)` scrollback request to
+/// [`SnapshotSynthesizer::screen_state_with_scrollback`] means "all
+/// available history rows" — the bare `--scrollback` flag with no explicit
+/// count (`phux-o1v`). A request of literally zero rows is meaningless, so
+/// this reuse is unambiguous.
+pub const SCROLLBACK_ALL: u32 = 0;
+
+/// Inline grapheme-cluster buffer size for the scrollback walk. Covers the
+/// overwhelming-common case (a base codepoint plus a few combining marks)
+/// without a heap allocation per cell; deeper clusters fall back to a heap
+/// retry on `OutOfSpace`.
+const GRAPHEME_INLINE: usize = 8;
 
 /// Errors that can occur while synthesising a snapshot.
 #[derive(Debug, thiserror::Error)]
@@ -137,6 +152,42 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &Terminal<'alloc, '_>,
         pane: u32,
     ) -> Result<ScreenState, SynthesisError> {
+        self.screen_state_with_scrollback(terminal, pane, None)
+    }
+
+    /// Like [`Self::screen_state`], but additionally projects up to
+    /// `scrollback` rows of history *above* the viewport into the
+    /// [`ScreenState::scrollback`] field (`phux-o1v`).
+    ///
+    /// `scrollback` semantics:
+    /// - `None` — viewport only; `scrollback` is left empty (identical to
+    ///   [`Self::screen_state`]).
+    /// - `Some(0)` (the [`SCROLLBACK_ALL`] sentinel) — every retained
+    ///   history row (the bare `--scrollback` flag).
+    /// - `Some(n)` — the most-recent `n` history rows (those nearest the
+    ///   viewport); fewer if less history exists.
+    ///
+    /// History is read cell-by-cell via [`Terminal::grid_ref`] with
+    /// [`Point::History`] coordinates. That path is side-effect-free: it
+    /// neither scrolls the viewport nor mutates the canonical `Terminal`,
+    /// so the read stays safe to poll against a live pane. The viewport
+    /// walk is unchanged from [`Self::screen_state`] and still uses the
+    /// pooled render iterators.
+    pub fn screen_state_with_scrollback(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        pane: u32,
+        scrollback: Option<u32>,
+    ) -> Result<ScreenState, SynthesisError> {
+        // Read history first, before borrowing `render_state` for the
+        // viewport snapshot: `grid_ref` borrows `terminal` immutably and
+        // its references are invalidated by the next terminal operation,
+        // so we read each row's text eagerly into owned `String`s here.
+        let scrollback_lines = match scrollback {
+            None => Vec::new(),
+            Some(want) => Self::scrollback_lines(terminal, want)?,
+        };
+
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
@@ -178,7 +229,75 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             rows: rows_n,
             cursor,
             lines,
+            scrollback: scrollback_lines,
         })
+    }
+
+    /// Read the history (scrollback) rows above the active viewport into
+    /// owned, right-trimmed strings, oldest first.
+    ///
+    /// `want` follows the [`Self::screen_state_with_scrollback`] convention:
+    /// [`SCROLLBACK_ALL`] (`0`) means every retained history row, any other
+    /// value caps the result to the most-recent `want` rows.
+    ///
+    /// Each cell is read via [`Terminal::grid_ref`] in the
+    /// [`Point::History`] coordinate space, mirroring the viewport walk's
+    /// wide-cell-tail handling (`SpacerTail` cells advance no column and
+    /// are skipped). History coordinates are local to the history region:
+    /// `y = 0` is the oldest retained row, `y = scrollback_rows - 1` is the
+    /// row just above the viewport.
+    fn scrollback_lines(
+        terminal: &Terminal<'alloc, '_>,
+        want: u32,
+    ) -> Result<Vec<String>, SynthesisError> {
+        let total = terminal.scrollback_rows()?;
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let cols = terminal.cols()?;
+
+        // Resolve the [start, total) window of history rows to emit. For a
+        // bounded request we keep the rows nearest the viewport (the most
+        // recent history), which is what an agent reading "the last N lines
+        // of scrollback" expects.
+        let start = if want == SCROLLBACK_ALL {
+            0
+        } else {
+            total.saturating_sub(usize::try_from(want).unwrap_or(usize::MAX))
+        };
+
+        let mut out: Vec<String> = Vec::with_capacity(total - start);
+        for y in start..total {
+            // History `y` is a `u32` in libghostty's coordinate space.
+            // `total` comes from `scrollback_rows()` (also originally a C
+            // count); clamp defensively rather than truncate.
+            let y = u32::try_from(y).unwrap_or(u32::MAX);
+            let mut buf = String::with_capacity(usize::from(cols));
+            for x in 0..cols {
+                let point = Point::History(PointCoordinate { x, y });
+                let grid_ref = terminal.grid_ref(point)?;
+                if matches!(grid_ref.cell()?.wide()?, CellWide::SpacerTail) {
+                    continue;
+                }
+                // Read the grapheme cluster; an empty cluster is a blank
+                // cell, which advances one column with a space. A cluster
+                // longer than the inline buffer (deep combining sequence)
+                // surfaces as `OutOfSpace { required }`; retry on the heap.
+                let mut inline = [char::from(0u8); GRAPHEME_INLINE];
+                match grid_ref.graphemes(&mut inline) {
+                    Ok(0) => buf.push(' '),
+                    Ok(n) => buf.extend(&inline[..n]),
+                    Err(libghostty_vt::Error::OutOfSpace { required }) => {
+                        let mut heap = vec![char::from(0u8); required];
+                        let n = grid_ref.graphemes(&mut heap)?;
+                        buf.extend(&heap[..n]);
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            out.push(buf.trim_end().to_owned());
+        }
+        Ok(out)
     }
 
     /// Mark this consumer's `RenderState` as fully in sync with the
@@ -661,6 +780,88 @@ mod tests {
         // Cursor lands just past "world" on row 1 (0-based).
         let cursor = screen.cursor.expect("cursor resolvable in viewport");
         assert_eq!((cursor.x, cursor.y), (5, 1));
+    }
+
+    #[test]
+    fn screen_state_with_scrollback_collects_history() {
+        // A 3-row viewport with 5 written lines pushes the oldest two into
+        // scrollback. Requesting all history (Some(SCROLLBACK_ALL)) must
+        // surface them above an unchanged viewport (phux-o1v).
+        let mut t = fresh(20, 3);
+        t.vt_write(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
+        // Sanity: libghostty must actually be retaining the two scrolled rows.
+        assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 2);
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 7, Some(SCROLLBACK_ALL))
+            .expect("screen_state_with_scrollback");
+
+        assert_eq!(screen.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            screen.scrollback,
+            vec!["line1".to_owned(), "line2".to_owned()],
+            "all history, oldest first",
+        );
+        assert_eq!(screen.lines.len(), 3, "viewport stays full height");
+        assert_eq!(screen.lines[0], "line3");
+        assert_eq!(screen.lines[1], "line4");
+        assert_eq!(screen.lines[2], "line5");
+    }
+
+    #[test]
+    fn screen_state_with_scrollback_bounds_to_recent_rows() {
+        // A bounded request keeps the rows nearest the viewport (the most
+        // recent history), not the oldest.
+        let mut t = fresh(20, 2);
+        // 5 lines, 2-row viewport -> 3 rows of scrollback (line1..line3).
+        t.vt_write(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
+        assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 3);
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 1, Some(2))
+            .expect("screen_state_with_scrollback");
+
+        assert_eq!(
+            screen.scrollback,
+            vec!["line2".to_owned(), "line3".to_owned()],
+            "the most-recent 2 of 3 history rows, oldest-first",
+        );
+    }
+
+    #[test]
+    fn screen_state_without_scrollback_leaves_history_empty() {
+        // None must reproduce the legacy viewport-only shape exactly.
+        let mut t = fresh(20, 3);
+        t.vt_write(b"a\r\nb\r\nc\r\nd\r\ne");
+        assert!(t.scrollback_rows().expect("scrollback_rows") > 0);
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let none = synth
+            .screen_state_with_scrollback(&t, 0, None)
+            .expect("with None");
+        let legacy = synth.screen_state(&t, 0).expect("screen_state");
+
+        assert!(none.scrollback.is_empty(), "no scrollback requested");
+        assert_eq!(none.lines, legacy.lines, "viewport unchanged by None path");
+        assert!(legacy.scrollback.is_empty());
+    }
+
+    #[test]
+    fn screen_state_with_scrollback_empty_when_no_history() {
+        // Requesting scrollback on a pane with no history yields an empty
+        // vec, not an error.
+        let mut t = fresh(20, 5);
+        t.vt_write(b"only one line");
+        assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 0);
+
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let screen = synth
+            .screen_state_with_scrollback(&t, 0, Some(SCROLLBACK_ALL))
+            .expect("screen_state_with_scrollback");
+        assert!(screen.scrollback.is_empty());
+        assert_eq!(screen.lines[0], "only one line");
     }
 
     #[test]

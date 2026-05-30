@@ -124,6 +124,7 @@ fn get_screen_returns_structured_screen_for_live_pane() {
                 request_id: 5,
                 command: Command::GetScreen {
                     terminal_id: pane_id.clone(),
+                    request_scrollback: None,
                 },
             },
         )
@@ -146,6 +147,10 @@ fn get_screen_returns_structured_screen_for_live_pane() {
                     usize::from(rows),
                     "one line per grid row",
                 );
+                assert!(
+                    screen.scrollback.is_empty(),
+                    "no scrollback requested -> empty scrollback (phux-o1v)",
+                );
             }
             other => panic!("expected Ok_With(Json(..)), got {other:?}"),
         }
@@ -166,6 +171,7 @@ fn get_screen_unknown_id_returns_terminal_not_found() {
                 request_id: 8,
                 command: Command::GetScreen {
                     terminal_id: TerminalId::local(99_999),
+                    request_scrollback: None,
                 },
             },
         )

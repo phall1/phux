@@ -199,6 +199,13 @@ enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Include scrollback history above the viewport (`phux-o1v`).
+        /// Bare `--scrollback` requests all retained history; `--scrollback
+        /// N` requests the most-recent N rows. History appears in the JSON
+        /// `scrollback` field; the boxed view shows it above the viewport.
+        #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0")]
+        scrollback: Option<u32>,
+
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -339,8 +346,9 @@ fn main() -> ExitCode {
         Some(Command::Snapshot {
             session,
             json,
+            scrollback,
             socket,
-        }) => run_snapshot(session.as_deref(), json, socket),
+        }) => run_snapshot(session.as_deref(), json, scrollback, socket),
         Some(Command::SendKeys {
             target,
             keys,
@@ -1032,7 +1040,12 @@ fn pick_target_pane(
 /// the server walks its own grid, so this neither attaches nor resizes the
 /// pane (unlike the old attach-walk path; ADR-0022 §5, `phux-oki`). Emits
 /// JSON or a boxed text view, then exits.
-fn run_snapshot(session: Option<&str>, json: bool, socket: Option<PathBuf>) -> ExitCode {
+fn run_snapshot(
+    session: Option<&str>,
+    json: bool,
+    scrollback: Option<u32>,
+    socket: Option<PathBuf>,
+) -> ExitCode {
     let selector = match parse_selector(session) {
         Ok(sel) => sel,
         Err(code) => return code,
@@ -1049,8 +1062,15 @@ fn run_snapshot(session: Option<&str>, json: bool, socket: Option<PathBuf>) -> E
             Err(code) => return code,
         };
 
-        // Read the screen — side-effect-free, safe to poll.
-        let screen = match phux_client::snapshot::get_screen(&socket_path, terminal_id).await {
+        // Read the screen — side-effect-free, safe to poll. `scrollback`
+        // maps straight onto the wire request: None/Some(0=all)/Some(n).
+        let screen = match phux_client::snapshot::get_screen_scrollback(
+            &socket_path,
+            terminal_id,
+            scrollback,
+        )
+        .await
+        {
             Ok(screen) => screen,
             Err(err @ AttachError::Io(_)) => {
                 return report_no_server(&err, &socket_path, "snapshot");
@@ -1308,12 +1328,28 @@ fn run_send_keys(target: &str, keys: &[String], socket: Option<PathBuf>) -> Exit
 }
 
 /// Human-readable boxed rendering of a captured screen (no tmux, no TTY).
+///
+/// Scrollback history, when present (`--scrollback`), is printed above the
+/// viewport, dimmed and separated by a `╌` rule so it reads as "older
+/// content above the live screen" (`phux-o1v`).
 fn print_screen_box(screen: &phux_client::snapshot::ScreenState) {
     let bar = "─".repeat(usize::from(screen.cols));
-    println!("┌{bar}┐");
-    for line in &screen.lines {
+    let pad_line = |line: &str| {
         let pad = usize::from(screen.cols).saturating_sub(line.chars().count());
-        println!("│{line}{}│", " ".repeat(pad));
+        " ".repeat(pad)
+    };
+    if screen.scrollback.is_empty() {
+        println!("┌{bar}┐");
+    } else {
+        let rule = "╌".repeat(usize::from(screen.cols));
+        println!("┌{rule}┐");
+        for line in &screen.scrollback {
+            println!("┊{line}{}┊", pad_line(line));
+        }
+        println!("├{bar}┤");
+    }
+    for line in &screen.lines {
+        println!("│{line}{}│", pad_line(line));
     }
     println!("└{bar}┘");
     let cursor = screen

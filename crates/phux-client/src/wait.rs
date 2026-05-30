@@ -210,6 +210,7 @@ mod tests {
             rows: u16::try_from(lines.len()).unwrap_or(0),
             cursor: None,
             lines: lines.iter().map(|s| (*s).to_owned()).collect(),
+            scrollback: Vec::new(),
         }
     }
 

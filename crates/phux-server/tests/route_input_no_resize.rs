@@ -127,6 +127,7 @@ async fn screen(
             request_id,
             command: Command::GetScreen {
                 terminal_id: terminal_id.clone(),
+                request_scrollback: None,
             },
         },
     )

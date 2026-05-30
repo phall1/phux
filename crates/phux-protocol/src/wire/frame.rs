@@ -622,6 +622,15 @@ pub enum Command {
     GetScreen {
         /// The Terminal whose screen to project.
         terminal_id: TerminalId,
+        /// Requested scrollback history (`phux-o1v`):
+        /// - `None` — viewport only (the original v0.2.0-draft.6 shape).
+        /// - `Some(0)` — all retained history rows (bare `--scrollback`).
+        /// - `Some(n)` — the most-recent `n` history rows.
+        ///
+        /// Encoded as a trailing presence-byte + `u32` so a decoder reading
+        /// the original `GET_SCREEN` body (which ended after `terminal_id`)
+        /// would see the `0` presence byte: the field is wire-additive.
+        request_scrollback: Option<u32>,
     },
     /// Deliver an already-built input `event` to `terminal_id` without an
     /// attach, subscription, or resize. The write counterpart to the
@@ -1986,9 +1995,13 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u8(COMMAND_TAG_GET_STATE);
             encode_state_scope(scope, enc);
         }
-        Command::GetScreen { terminal_id } => {
+        Command::GetScreen {
+            terminal_id,
+            request_scrollback,
+        } => {
             enc.write_u8(COMMAND_TAG_GET_SCREEN);
             encode_terminal_id(terminal_id, enc);
+            encode_optional_u32(*request_scrollback, enc);
         }
         Command::RouteInput { terminal_id, event } => {
             enc.write_u8(COMMAND_TAG_ROUTE_INPUT);
@@ -2044,6 +2057,7 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
         }),
         COMMAND_TAG_GET_SCREEN => Ok(Command::GetScreen {
             terminal_id: decode_terminal_id(dec)?,
+            request_scrollback: decode_optional_u32(dec)?,
         }),
         COMMAND_TAG_ROUTE_INPUT => Ok(Command::RouteInput {
             terminal_id: decode_terminal_id(dec)?,

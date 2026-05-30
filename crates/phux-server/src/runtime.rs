@@ -1772,7 +1772,10 @@ async fn handle_command(
 ) {
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
-        Command::GetScreen { terminal_id } => handle_get_screen(state, &terminal_id).await,
+        Command::GetScreen {
+            terminal_id,
+            request_scrollback,
+        } => handle_get_screen(state, &terminal_id, request_scrollback).await,
         Command::RouteInput { terminal_id, event } => {
             handle_route_input(state, &terminal_id, event)
         }
@@ -1858,6 +1861,7 @@ fn handle_get_state(state: &SharedState, scope: &StateScope) -> CommandResult {
 async fn handle_get_screen(
     state: &SharedState,
     terminal_id: &phux_protocol::ids::TerminalId,
+    request_scrollback: Option<u32>,
 ) -> CommandResult {
     // Clone the (Send) handle out of the lock; the actor reply is awaited
     // outside the critical section.
@@ -1877,6 +1881,7 @@ async fn handle_get_screen(
         .screen
         .send(ScreenRequest {
             pane,
+            scrollback: request_scrollback,
             reply: reply_tx,
         })
         .await

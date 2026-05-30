@@ -344,6 +344,10 @@ pub struct SnapshotRequest {
 pub struct ScreenRequest {
     /// Wire-local pane id to stamp into the projected `ScreenState`.
     pub pane: u32,
+    /// Requested scrollback history (`phux-o1v`): `None` for viewport only,
+    /// `Some(0)` for all retained history, `Some(n)` for the most-recent
+    /// `n` history rows. Carried from `GET_SCREEN.request_scrollback`.
+    pub scrollback: Option<u32>,
     /// Channel the actor uses to ship the projection back. Dropping the
     /// receiver is benign — the actor discards the reply.
     pub reply: oneshot::Sender<phux_core::screen::ScreenState>,
@@ -1067,10 +1071,11 @@ impl TerminalActor {
     fn screen_state(
         &self,
         pane: u32,
+        scrollback: Option<u32>,
     ) -> Result<phux_core::screen::ScreenState, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
         let mut synth = self.synth.borrow_mut();
-        synth.screen_state(&terminal, pane)
+        synth.screen_state_with_scrollback(&terminal, pane, scrollback)
     }
 
     /// Translate a [`TerminalInput`] into PTY bytes via the per-pane
@@ -1439,7 +1444,7 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.screen_rx.recv() => {
-                    let screen = self.screen_state(req.pane).unwrap_or_else(|err| {
+                    let screen = self.screen_state(req.pane, req.scrollback).unwrap_or_else(|err| {
                         warn!(error = %err, "screen projection failed; replying with empty");
                         phux_core::screen::ScreenState {
                             schema_version: phux_core::screen::SCHEMA_VERSION,
@@ -1448,6 +1453,7 @@ impl TerminalActor {
                             rows: self.rows,
                             cursor: None,
                             lines: Vec::new(),
+                            scrollback: Vec::new(),
                         }
                     });
                     let _ = req.reply.send(screen);
