@@ -42,6 +42,15 @@
             pkgs.cargo-watch
             pkgs.cargo-insta
             pkgs.cargo-mutants
+            # Web client (clients/phux-web, clients/phux-vt-web) toolchain.
+            # wasm-bindgen-cli MUST match the `wasm-bindgen` crate version
+            # pinned in the client manifests (=0.2.121); the test harness
+            # rejects a schema mismatch.
+            pkgs.wasm-pack
+            pkgs.wasm-bindgen-cli
+            pkgs.binaryen
+            pkgs.trunk
+            pkgs.chromedriver
             # Shell linting for scripts/ and examples/agents/ (just shellcheck).
             pkgs.shellcheck
             # Debugging.
