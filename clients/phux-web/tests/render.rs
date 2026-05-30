@@ -37,7 +37,7 @@ async fn renders_engine_grid_to_canvas() {
         cell_h: 16.0,
         font: "14px monospace".to_owned(),
     };
-    render(&ctx, &grid, &m);
+    render(&ctx, &grid, &m, false);
 
     // Sample a pixel inside cell (0,0): it should be the red background.
     let pixel = ctx.get_image_data(3.0, 3.0, 1.0, 1.0).unwrap();

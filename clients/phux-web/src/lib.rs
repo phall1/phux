@@ -23,12 +23,7 @@ use web_sys::CanvasRenderingContext2d;
 /// # Errors
 /// Fails if the canvas element is missing or the connection can't be set up.
 #[wasm_bindgen]
-pub async fn start(
-    ws_url: String,
-    canvas_id: String,
-    cols: u16,
-    rows: u16,
-) -> Result<(), JsValue> {
+pub async fn start(ws_url: String, canvas_id: String, cols: u16, rows: u16) -> Result<(), JsValue> {
     let canvas = web_sys::window()
         .and_then(|w| w.document())
         .and_then(|d| d.get_element_by_id(&canvas_id))
@@ -61,7 +56,9 @@ impl Default for Metrics {
 
 /// Paint a [`Grid`] onto a 2D canvas context: a background rect per cell, then
 /// the glyph in its resolved foreground. Cells fall back to the grid defaults.
-pub fn render(ctx: &CanvasRenderingContext2d, grid: &Grid, m: &Metrics) {
+/// When `cursor_on` is true and the grid's cursor is visible, an inverted block
+/// cursor is drawn over the cursor cell (the caller toggles `cursor_on` to blink).
+pub fn render(ctx: &CanvasRenderingContext2d, grid: &Grid, m: &Metrics, cursor_on: bool) {
     ctx.set_font(&m.font);
     ctx.set_text_baseline("top");
 
@@ -83,6 +80,29 @@ pub fn render(ctx: &CanvasRenderingContext2d, grid: &Grid, m: &Metrics) {
                 ctx.set_fill_style_str(&css(fg));
                 let mut buf = [0u8; 4];
                 let _ = ctx.fill_text(cell.ch.encode_utf8(&mut buf), x, y);
+            }
+        }
+    }
+
+    // Inverted block cursor: fill the cell with the foreground color, then
+    // redraw its glyph in the background color on top.
+    if cursor_on && grid.cursor_visible {
+        let (col, row) = (usize::from(grid.cursor_col), usize::from(grid.cursor_row));
+        if col < cols && row < usize::from(grid.rows) {
+            let x = col as f64 * m.cell_w;
+            let y = row as f64 * m.cell_h;
+            let cell = grid.cells.get(row * cols + col);
+            let fg = cell.and_then(|c| c.fg).unwrap_or(grid.default_fg);
+            ctx.set_fill_style_str(&css(fg));
+            ctx.fill_rect(x, y, m.cell_w, m.cell_h);
+            if let Some(c) = cell
+                && c.ch != ' '
+                && c.ch != '\0'
+            {
+                let bg = c.bg.unwrap_or(grid.default_bg);
+                ctx.set_fill_style_str(&css(bg));
+                let mut buf = [0u8; 4];
+                let _ = ctx.fill_text(c.ch.encode_utf8(&mut buf), x, y);
             }
         }
     }
