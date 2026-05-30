@@ -1098,8 +1098,11 @@ fn unique_session_name(existing: &[String]) -> String {
 }
 
 /// `phux kill TARGET` — resolve the selector client-side, then ask the
-/// server to kill each resolved Terminal. Exit codes: 0 on success,
-/// 1 on a selector miss / no server, 2 on a server-side refusal.
+/// server to tear it down. A whole-session target (`.`, `=`, or a bare
+/// `name`) rides a single `KILL_COLLECTION` round-trip (phux-h9s); a
+/// window / pane / `@id` target falls back to one `KILL_TERMINAL` per
+/// resolved Terminal. Exit codes: 0 on success, 1 on a selector miss /
+/// no server, 2 on a server-side refusal.
 fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
     let selector = match selector::parse(target) {
         Ok(sel) => sel,
@@ -1137,6 +1140,39 @@ fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
             }
             Err(err) => return report_no_server(&err, &socket_path, "kill"),
         };
+
+        // A whole-session target tears down in one round-trip via
+        // KILL_COLLECTION (the teardown counterpart to CREATE_SESSION;
+        // phux-h9s, ADR-0021 §3). Window / pane / @id selectors address a
+        // strict subset and stay on the per-KILL_TERMINAL path below.
+        if let Some(session_name) = selector::whole_session_name(&selector, &snapshot) {
+            return match command_on(
+                &mut conn,
+                1,
+                WireCommand::KillCollection {
+                    collection: phux_protocol::ids::CollectionId::new(1),
+                    name: session_name.clone(),
+                },
+            )
+            .await
+            {
+                // `Ok` is the ack; a clean disconnect means the server
+                // self-exited after its last session was reaped (phux-60s),
+                // so the session is already gone — both are success.
+                Ok(CommandResult::Ok) | Err(AttachError::Disconnected) => ExitCode::SUCCESS,
+                Ok(CommandResult::Error { message, .. }) => {
+                    eprintln!("phux: kill refused for session {session_name:?}: {message}");
+                    ExitCode::from(2)
+                }
+                Ok(other) => {
+                    eprintln!(
+                        "phux: unexpected kill result for session {session_name:?}: {other:?}"
+                    );
+                    ExitCode::from(2)
+                }
+                Err(err) => report_no_server(&err, &socket_path, "kill"),
+            };
+        }
 
         let terminals = selector::resolve(&selector, &snapshot);
         if terminals.is_empty() {

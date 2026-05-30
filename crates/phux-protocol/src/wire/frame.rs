@@ -276,6 +276,15 @@ pub(crate) const COMMAND_TAG_ROUTE_INPUT: u8 = 0x08;
 /// asynchronously correlated by `request_id` — the same shape
 /// `SPAWN_TERMINAL` uses, but session-level. Backs `phux new --json`.
 pub(crate) const COMMAND_TAG_CREATE_SESSION: u8 = 0x09;
+/// Wire tag for [`Command::KillCollection`]. Appended after
+/// `CREATE_SESSION`'s `0x09`; `KILL_COLLECTION` is the additive teardown
+/// counterpart to `CREATE_SESSION` (ADR-0021 §3, `phux-h9s`). It destroys
+/// the named session under a Collection in *one* round-trip — replacing the
+/// N `KILL_TERMINAL` round-trips `phux kill SESSION` issued before. The
+/// reply rides `COMMAND_RESULT { Ok }`, the same ack shape `KILL_TERMINAL`
+/// uses (the async `TERMINAL_CLOSED` frames confirm teardown), but
+/// session-level. Backs `phux kill SESSION`.
+pub(crate) const COMMAND_TAG_KILL_COLLECTION: u8 = 0x0a;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -598,8 +607,9 @@ pub enum StateScope {
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
 /// the ones the CLI needs — `KILL_TERMINAL`, `GET_STATE`, the
 /// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), the appended
-/// `ROUTE_INPUT` write counterpart, and the appended `CREATE_SESSION`
-/// create-without-attach command (`phux-fdh`). Unknown wire tags surface as
+/// `ROUTE_INPUT` write counterpart, the appended `CREATE_SESSION`
+/// create-without-attach command (`phux-fdh`), and its teardown counterpart
+/// `KILL_COLLECTION` (`phux-h9s`). Unknown wire tags surface as
 /// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
 ///
 /// Only `PartialEq` (not `Eq`): `RouteInput` carries a [`MouseEvent`] whose
@@ -684,6 +694,23 @@ pub enum Command {
         command: Option<Vec<String>>,
         /// Working directory for the seed pane, if any.
         cwd: Option<String>,
+    },
+    /// Destroy the session named `name` under `collection`, tearing down
+    /// every Terminal it owns in one round-trip — the teardown counterpart
+    /// to `CreateSession`. The server resolves `name` to its session,
+    /// cancels each pane's actor (the same path a `KILL_TERMINAL` per pane
+    /// would take), and replies `COMMAND_RESULT { Ok }` immediately; the
+    /// per-pane `TERMINAL_CLOSED` frames follow asynchronously as the panes
+    /// reap. An unknown `collection` or an unknown `name` is rejected with
+    /// `Error`. Backs `phux kill SESSION`, collapsing its prior N
+    /// `KILL_TERMINAL` round-trips into one (ADR-0021 §3, `phux-h9s`).
+    KillCollection {
+        /// Collection hosting the session. v0.1 servers accept only the
+        /// default `CollectionId(1)`.
+        collection: CollectionId,
+        /// Name of the session to destroy. An unknown name is rejected
+        /// (`Error`) rather than silently treated as success.
+        name: String,
     },
 }
 
@@ -2062,6 +2089,11 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             encode_optional_string_list(command.as_deref(), enc);
             encode_optional_str(cwd.as_deref(), enc);
         }
+        Command::KillCollection { collection, name } => {
+            enc.write_u8(COMMAND_TAG_KILL_COLLECTION);
+            enc.write_u32_be(collection.get());
+            enc.write_str(name);
+        }
     }
 }
 
@@ -2144,6 +2176,11 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
                 command,
                 cwd,
             })
+        }
+        COMMAND_TAG_KILL_COLLECTION => {
+            let collection = CollectionId::new(dec.read_u32_be()?);
+            let name = dec.read_str()?.to_owned();
+            Ok(Command::KillCollection { collection, name })
         }
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",

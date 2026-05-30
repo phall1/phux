@@ -1677,6 +1677,25 @@ fn command_create_session_round_trips() {
 }
 
 #[test]
+fn command_kill_collection_round_trips() {
+    // KILL_COLLECTION (tag 0x0a): CollectionId + session name. The teardown
+    // counterpart to CREATE_SESSION; reply rides the existing
+    // COMMAND_RESULT { Ok } envelope so only the request frame is new here.
+    let frame = FrameKind::Command {
+        request_id: 32,
+        command: Command::KillCollection {
+            collection: CollectionId::new(1),
+            name: "work".to_owned(),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn command_result_ok_with_json_round_trips() {
     // GET_SCREEN's reply shape: OK_WITH(JSON(serialized ScreenState)).
     let frame = FrameKind::CommandResult {

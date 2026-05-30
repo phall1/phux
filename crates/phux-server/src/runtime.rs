@@ -1907,6 +1907,9 @@ async fn handle_command(
             cwd.as_deref(),
             root_token,
         ),
+        Command::KillCollection { collection, name } => {
+            handle_kill_collection(state, collection, &name)
+        }
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -2049,6 +2052,65 @@ fn handle_create_session(
             }
         }
     }
+}
+
+/// Build the `Ok` reply for `KILL_COLLECTION` — the teardown counterpart to
+/// `CREATE_SESSION` (`phux-h9s`, ADR-0021 §3).
+///
+/// Destroys the session named `name` under `collection` by cancelling every
+/// pane actor it owns, in one round-trip. Each cancellation drops the
+/// actor's `exit_notify`, which the per-pane EOF watcher (phux-it8) treats
+/// like PTY EOF: it broadcasts `TERMINAL_CLOSED` and reaps the pane
+/// (phux-60s), cascading to session removal and — when the last session
+/// empties — server self-exit. So this reuses the exact teardown a per-pane
+/// `KILL_TERMINAL` (or a natural shell exit) takes, but resolves the whole
+/// session's panes in one pass rather than over N client round-trips.
+///
+/// The reply is `Ok` the moment the actors are cancelled; the
+/// `TERMINAL_CLOSED` frames follow asynchronously as the panes reap (SPEC
+/// §5). An unknown `collection` or an unknown `name` is rejected with
+/// `INVALID_COMMAND` — symmetric with `CREATE_SESSION`'s refusals.
+///
+/// Detach is idempotent (cancelling an already-cancelled token is a no-op),
+/// so a pane that exits concurrently with this teardown carries no
+/// double-close risk.
+fn handle_kill_collection(
+    state: &SharedState,
+    collection: CollectionId,
+    name: &str,
+) -> CommandResult {
+    if collection != crate::state::DEFAULT_COLLECTION_ID {
+        return CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: format!("unknown collection: {collection:?}"),
+        };
+    }
+
+    // Resolve the session to the core pane ids it owns, under a single
+    // `with` borrow. `None` means the name is unknown — refuse it rather
+    // than silently ack a no-op teardown.
+    let Some(panes) = state.with(|s| {
+        let session = s.session_by_name(name)?;
+        let panes: Vec<phux_core::ids::TerminalId> = session
+            .windows
+            .iter()
+            .filter_map(|wid| s.registry.window(*wid))
+            .flat_map(|w| w.panes.iter().copied())
+            .collect();
+        Some(panes)
+    }) else {
+        return CommandResult::Error {
+            code: ErrorCode::SessionNotFound,
+            message: format!("no such session: {name:?}"),
+        };
+    };
+
+    state.with_mut(|s| {
+        for pane in panes {
+            s.detach_terminal_actor(pane);
+        }
+    });
+    CommandResult::Ok
 }
 
 /// Build the `OK_WITH(STATE(..))` reply for `GET_STATE`.

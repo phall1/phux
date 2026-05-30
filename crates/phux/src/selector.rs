@@ -6,7 +6,9 @@
 //! duplicate. This module re-exports it under the `selector::` path the
 //! binary already references throughout `main.rs`.
 
-pub(crate) use phux_client::selector::{Selector, parse, pick_target_pane, resolve};
+pub(crate) use phux_client::selector::{
+    Selector, parse, pick_target_pane, resolve, whole_session_name,
+};
 
 // `WindowRef` is re-exported for the binary's tests (parse-grammar
 // assertions); the non-test build references only `Selector`/`parse`/

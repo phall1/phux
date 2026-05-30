@@ -22,6 +22,10 @@
 //!    attaching (the returned id resolves to a live seed pane, GET_STATE
 //!    lists the new session). Plus the duplicate-name and unknown-collection
 //!    refusals (`phux-fdh`, ADR-0021 §3).
+//! 6. **KILL_COLLECTION** → `COMMAND_RESULT { Ok }` tearing down a whole
+//!    named session in one round-trip; a fresh GET_STATE no longer lists it.
+//!    Plus the unknown-session (`SessionNotFound`) and unknown-collection
+//!    (`InvalidCommand`) refusals (`phux-h9s`, ADR-0021 §3).
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -533,6 +537,160 @@ fn create_session_unknown_collection_is_refused() {
         )
         .await;
         match await_command_result(&mut stream, 6).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvalidCommand);
+            }
+            other => panic!("expected Error(InvalidCommand), got {other:?}"),
+        }
+    });
+}
+
+/// KILL_COLLECTION tears down a whole named session in ONE round-trip
+/// (`phux-h9s`). The test creates a session, kills it via KILL_COLLECTION,
+/// then asserts a fresh GET_STATE no longer lists it. The whole path rides
+/// `handle_client` (the production read loop) — the house rule for
+/// wire->dispatch coverage. The kill replies `Ok` (the same ack shape
+/// KILL_TERMINAL uses); the async TERMINAL_CLOSED frames confirm teardown.
+#[test]
+fn kill_collection_tears_down_named_session() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // Pre-seed "work" so the server survives "scratch"'s teardown
+        // (the tmux-model self-exit only fires when the LAST session reaps).
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Create a second session to tear down.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 50,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "scratch".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 50).await {
+            CommandResult::OkWith(CommandValue::TerminalId(_)) => {}
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        }
+
+        // One round-trip teardown.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 51,
+                command: Command::KillCollection {
+                    collection: CollectionId::new(1),
+                    name: "scratch".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 51).await {
+            CommandResult::Ok => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // The reaped session leaves the snapshot. Teardown is asynchronous
+        // (the Ok acks the start, TERMINAL_CLOSED follows), so poll GET_STATE
+        // until "scratch" is gone while "work" remains.
+        let mut request_id = 52;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut gone = false;
+        while tokio::time::Instant::now() < deadline {
+            send_frame(
+                &mut stream,
+                &FrameKind::Command {
+                    request_id,
+                    command: Command::GetState {
+                        scope: StateScope::Server,
+                    },
+                },
+            )
+            .await;
+            if let CommandResult::OkWith(CommandValue::State(snapshot)) =
+                await_command_result(&mut stream, request_id).await
+            {
+                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+                if !names.contains(&"scratch") {
+                    assert!(
+                        names.contains(&"work"),
+                        "KILL_COLLECTION must tear down only the named session; got {names:?}",
+                    );
+                    gone = true;
+                    break;
+                }
+            }
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(
+            gone,
+            "KILL_COLLECTION must remove the named session from GET_STATE",
+        );
+    });
+}
+
+/// KILL_COLLECTION on an unknown session name is refused with
+/// `SESSION_NOT_FOUND` rather than silently acked (`phux-h9s`) — symmetric
+/// with CREATE_SESSION's duplicate-name refusal.
+#[test]
+fn kill_collection_unknown_session_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 60,
+                command: Command::KillCollection {
+                    collection: CollectionId::new(1),
+                    name: "does-not-exist".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 60).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::SessionNotFound);
+            }
+            other => panic!("expected Error(SessionNotFound), got {other:?}"),
+        }
+    });
+}
+
+/// KILL_COLLECTION under an unknown collection is refused with
+/// `INVALID_COMMAND`; v0.1 servers host only the default `CollectionId(1)`.
+#[test]
+fn kill_collection_unknown_collection_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 61,
+                command: Command::KillCollection {
+                    collection: CollectionId::new(99),
+                    name: "work".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 61).await {
             CommandResult::Error { code, .. } => {
                 assert_eq!(code, ErrorCode::InvalidCommand);
             }

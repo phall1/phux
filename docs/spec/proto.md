@@ -402,11 +402,13 @@ The `COMMAND` / `COMMAND_RESULT` envelope (§5, allocated 0.2.0-draft.5
 per [ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips
 through the codec. v0.1 wires the `KILL_TERMINAL` (tag 0x03) and
 `GET_STATE` (tag 0x05) commands, plus the appended agent-surface and
-control commands `GET_SCREEN` (tag 0x07), `ROUTE_INPUT` (tag 0x08), and
-`CREATE_SESSION` (tag 0x09); the remaining §5.1 catalog entries are
-reserved and decode as `UnknownEnumValue` until allocated.
-`CREATE_SESSION` is a full-fledged L1 command (create a session without
-attaching, ADR-0021 §3), not deferred to L2.
+control commands `GET_SCREEN` (tag 0x07), `ROUTE_INPUT` (tag 0x08),
+`CREATE_SESSION` (tag 0x09), and `KILL_COLLECTION` (tag 0x0a); the
+remaining §5.1 catalog entries are reserved and decode as
+`UnknownEnumValue` until allocated. `CREATE_SESSION` is a full-fledged
+L1 command (create a session without attaching, ADR-0021 §3), not
+deferred to L2; `KILL_COLLECTION` is its teardown counterpart, destroying
+a named session in one round-trip (ADR-0021 §3, phux-h9s).
 
 ### 7.2 DETACH / DETACHED
 

@@ -156,6 +156,32 @@ pub fn resolve(selector: &Selector, snapshot: &SessionSnapshot) -> Vec<TerminalI
     }
 }
 
+/// The name of the whole session this selector targets, if any.
+///
+/// Returns `Some(name)` for the three selectors that address an entire
+/// session — `Current` / `Last` (resolved against `snapshot.focused_session`)
+/// and `Session(name)` — and `None` for window / pane / terminal-id
+/// selectors, which address a strict subset and must stay per-Terminal.
+///
+/// This is the seam `phux kill` uses to collapse a whole-session teardown
+/// into a single `KILL_COLLECTION` round-trip while keeping sub-session
+/// targets on the per-`KILL_TERMINAL` path (`phux-h9s`, ADR-0021 §3). The
+/// name is returned only when it resolves to a live session in `snapshot`,
+/// so the caller can rely on it existing server-side.
+#[must_use]
+pub fn whole_session_name(selector: &Selector, snapshot: &SessionSnapshot) -> Option<String> {
+    let session_id = match selector {
+        Selector::Current | Selector::Last => snapshot.focused_session,
+        Selector::Session(name) => session_id_by_name(snapshot, name)?,
+        Selector::Window(..) | Selector::Pane(..) | Selector::TerminalId(_) => return None,
+    };
+    snapshot
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .map(|s| s.name.clone())
+}
+
 /// Choose one pane from a selector's `candidates`.
 ///
 /// Prefers the one equal to the server's `focused` pane (the common "the

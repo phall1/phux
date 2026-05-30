@@ -113,9 +113,13 @@ session or window. This ADR settles how they map.
   the session framing moves fully client-side. The `scope` field is
   the seam that lets that evolve.
 
-- **`kill` of a many-Terminal session is N round-trips** (one
-  `KILL_TERMINAL` per Terminal) until a Collection-teardown command
-  exists. Fine at v0.1 session sizes; revisit with L2.
+- **`kill` of a whole session is one round-trip** via `KILL_COLLECTION
+  { collection, name }` (the teardown counterpart to `CREATE_SESSION`;
+  phux-h9s). The server resolves `name` to its session and tears down
+  every Terminal it owns in a single command. Sub-session targets
+  (a window, a pane, a bare `@id`) still ride one `KILL_TERMINAL` per
+  resolved Terminal — they address a strict subset, so a session-level
+  command would over-kill.
 
 ## Alternatives
 
