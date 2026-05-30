@@ -17,7 +17,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 phux-vt-web = { path = "../phux-vt-web" }
-# The browser client speaks the exact Rust wire codec (ADR-0023 made it wasm-safe).
+# The browser client speaks the exact Rust wire codec (ADR-0024 made it wasm-safe).
 phux-protocol = { path = "../../crates/phux-protocol" }
 bytes = "1"
 wasm-bindgen = "0.2"

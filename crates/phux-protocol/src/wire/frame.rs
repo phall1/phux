@@ -1651,7 +1651,7 @@ pub(super) fn decode_focus_event(tag: u8) -> Result<FocusEvent, DecodeError> {
 }
 
 pub(super) fn encode_key_event(event: &KeyEvent, enc: &mut Encoder<'_>) {
-    // `KeyAction`/`PhysicalKey` are phux-owned `#[repr(u32)]` enums (ADR-0023);
+    // `KeyAction`/`PhysicalKey` are phux-owned `#[repr(u32)]` enums (ADR-0024);
     // cast to the discriminant; the decoder round-trips via `TryFrom<u32>`.
     enc.write_u32_be(event.action as u32);
     enc.write_u32_be(event.key as u32);

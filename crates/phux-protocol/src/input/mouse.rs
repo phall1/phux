@@ -1,6 +1,6 @@
 //! Mouse input — the `MouseEvent` wire type and its atoms.
 //!
-//! Per [ADR-0023] the wire owns its atoms: `MouseAction` and `MouseButton` are
+//! Per [ADR-0024] the wire owns its atoms: `MouseAction` and `MouseButton` are
 //! phux-defined and libghostty-free (their wire discriminants match libghostty's
 //! `mouse::{Action, Button}`). Under the `server` feature they convert to/from
 //! libghostty, and the server-side state handles `MouseProtocol`/`MouseEncoding`
@@ -10,7 +10,7 @@
 //! Coordinates are pane-local surface-space pixels (NOT cells), matching
 //! libghostty's `mouse::Position` shape — see docs/spec/input.md §3.1.
 //!
-//! [ADR-0023]: https://github.com/phall1/phux/blob/main/ADR/0023-wire-owns-input-atoms.md
+//! [ADR-0024]: https://github.com/phall1/phux/blob/main/ADR/0024-wire-owns-input-atoms.md
 
 use super::key::ModSet;
 

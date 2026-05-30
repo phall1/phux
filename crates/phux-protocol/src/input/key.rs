@@ -1,13 +1,13 @@
 //! Key input — the `KeyEvent` wire type and its atoms.
 //!
-//! Per [ADR-0023] the wire owns its input atoms: `KeyAction`, `ModSet`, and
+//! Per [ADR-0024] the wire owns its input atoms: `KeyAction`, `ModSet`, and
 //! `PhysicalKey` are phux-defined and libghostty-free, so the codec builds for
 //! non-native consumers (the wasm browser client). Their wire discriminants
 //! match libghostty-vt's `key::{Action, Mods, Key}` exactly; under the `server`
 //! feature this module provides the `From` conversions the server's encoders
 //! use at the libghostty boundary.
 //!
-//! [ADR-0023]: https://github.com/phall1/phux/blob/main/ADR/0023-wire-owns-input-atoms.md
+//! [ADR-0024]: https://github.com/phall1/phux/blob/main/ADR/0024-wire-owns-input-atoms.md
 
 /// Press, release, or repeat. Wire `u32`; values match libghostty's
 /// `key::Action`.
@@ -77,12 +77,12 @@ bitflags::bitflags! {
 
 /// A physical, layout-independent key (W3C `code`-style).
 ///
-/// Per [ADR-0023] this is a phux-owned copy of libghostty's `key::Key`
+/// Per [ADR-0024] this is a phux-owned copy of libghostty's `key::Key`
 /// discriminants (wire `u32`), so the codec builds for non-native consumers.
 /// Kept in lockstep with libghostty via the `server`-gated conversions + a
 /// round-trip test. Browser consumers map `KeyboardEvent.code` to these.
 ///
-/// [ADR-0023]: https://github.com/phall1/phux/blob/main/ADR/0023-wire-owns-input-atoms.md
+/// [ADR-0024]: https://github.com/phall1/phux/blob/main/ADR/0024-wire-owns-input-atoms.md
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, int_enum::IntEnum)]
 #[non_exhaustive]
@@ -338,7 +338,7 @@ mod libghostty_conv {
 
     impl From<PhysicalKey> for Key {
         fn from(k: PhysicalKey) -> Self {
-            // Same discriminants (ADR-0023); unknown -> Unidentified.
+            // Same discriminants (ADR-0024); unknown -> Unidentified.
             Self::try_from(k as u32).unwrap_or(Self::Unidentified)
         }
     }

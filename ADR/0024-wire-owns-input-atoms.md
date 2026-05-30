@@ -4,7 +4,7 @@ stability: evolving
 last-reviewed: 2026-05-30
 ---
 
-# 0023 — The wire protocol owns its input atoms
+# 0024 — The wire protocol owns its input atoms
 
 **TL;DR.** [ADR-0008] reused libghostty-vt's `Key`/`Action`/`Mods` types
 directly as the wire's input atoms ("no parallel universe of types"). That

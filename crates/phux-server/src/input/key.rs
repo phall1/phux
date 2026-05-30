@@ -138,7 +138,7 @@ mod tests {
         );
     }
 
-    /// ADR-0023: the wire atoms are phux-owned but share libghostty's
+    /// ADR-0024: the wire atoms are phux-owned but share libghostty's
     /// discriminants; the `server`-gated conversions are lossless for known
     /// values, keeping the two in lockstep.
     #[test]

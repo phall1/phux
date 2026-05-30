@@ -25,7 +25,7 @@ server = ["dep:libghostty-vt"]
 thiserror.workspace = true
 bytes.workspace = true
 bitflags = "2"
-# Derives TryFrom<u32> for the wire's PhysicalKey enum (ADR-0023). Pure Rust,
+# Derives TryFrom<u32> for the wire's PhysicalKey enum (ADR-0024). Pure Rust,
 # wasm-safe; the same crate libghostty-vt uses for its key discriminants.
 int-enum = "1.2"
 libghostty-vt = { workspace = true, optional = true }

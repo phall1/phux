@@ -44,6 +44,8 @@ Nygard's template][nygard].
 | [0020](./0020-layered-render.md) | Layered render: ratatui chrome over libghostty pane interiors | Accepted |
 | [0021](./0021-control-plane-commands.md) | Control-plane verbs ride the generic `COMMAND` envelope; selectors resolve client-side; no session/window on the wire | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md)) |
 | [0023](./0023-config-ux-philosophy.md) | Config UX: pure-config; defaults are a live embedded base layer; scaffold is a commented projection that never overwrites | Accepted (TUI-local, builds on [0017](./0017-tui-not-protocol-privileged.md)) |
+| [0024](./0024-wire-owns-input-atoms.md) | The wire protocol owns its input atoms (phux-defined), so the codec builds on wasm32 | Accepted (amends [0008](./0008-use-libghostty-types-directly.md)) |
+| [0025](./0025-browser-web-client.md) | Browser web client over a WebSocket transport; reuses the wire codec + libghostty engine, no reimplementation | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md), [0024](./0024-wire-owns-input-atoms.md)) |
 
 ## When to write an ADR
 
