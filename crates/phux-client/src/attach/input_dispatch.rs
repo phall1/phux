@@ -76,6 +76,18 @@ pub(super) struct DispatchCtx<'a> {
     /// to the current session is a no-op). `None` before the first
     /// snapshot.
     pub focused_session: Option<phux_protocol::ids::SessionId>,
+    /// phux-eb0: the name of the session this client is attached to,
+    /// resolved from the latest ATTACHED snapshot. A `switch-session`
+    /// targeting this name is a no-op (guarded in
+    /// [`apply_action_effects`]) even though the picker already excludes
+    /// the current row. Empty before the first snapshot.
+    pub session_name: &'a str,
+    /// phux-eb0: out-channel for a committed `switch-session { name }`.
+    /// `apply_action_effects` sets this to `Some(target)` when the user
+    /// picks a peer session; the driver's `main_loop` reads it after the
+    /// dispatch batch and returns `LoopExit::SwitchTo(target)` so the
+    /// outer loop re-attaches. Cleared by the driver each iteration.
+    pub switch_request: &'a mut Option<String>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -381,18 +393,24 @@ async fn apply_action_effects<W: super::RenderSink>(
     for frame in effects.kill_frames {
         conn.send(&frame).await?;
     }
-    // phux-4li.20: a `switch-session` request. In-process re-attach is a
-    // scoped-out subsystem (tracked as a follow-up bd issue); for now we
-    // log the requested target and bell so the picker → dispatch path is
-    // exercised without pretending the switch landed. The well-defined
-    // effect (a logged, belled request keyed by session name) is the
-    // seam the re-attach plumbing hooks into.
+    // phux-eb0: a `switch-session` request. Hand the target up to the
+    // driver via `ctx.switch_request`; the driver's `main_loop` reads it
+    // after this dispatch batch and returns `LoopExit::SwitchTo(name)` so
+    // the outer loop tears down the current session and re-attaches.
+    //
+    // Switching to the CURRENT session is a no-op (the picker already
+    // excludes it, but guard here too in case the action is reached via
+    // the command palette or a config-bound chord with an explicit
+    // `name`). A no-op bells so the user gets feedback rather than a
+    // silent re-attach to where they already are.
     if let Some(name) = effects.switch_session {
-        tracing::info!(
-            target_session = %name,
-            "switch-session requested; in-process re-attach not yet implemented (phux-4li.20 follow-up)"
-        );
-        let _ = actions::write_bell(out);
+        if name == ctx.session_name {
+            tracing::debug!(target_session = %name, "switch-session to current session; no-op");
+            let _ = actions::write_bell(out);
+        } else {
+            tracing::info!(target_session = %name, "switch-session requested");
+            *ctx.switch_request = Some(name);
+        }
     }
     Ok(layout_changed)
 }
@@ -475,14 +493,14 @@ struct ActionEffects {
     /// resulting `TERMINAL_CLOSED` from the server folds the pane out
     /// of the layout in [`handle_server_frame`].
     kill_frames: Vec<FrameKind>,
-    /// phux-4li.20: a `switch-session` action requested a re-target to
-    /// the named session. In-process re-attach is not yet implemented
-    /// (the `main_loop` is single-session by construction — tearing down
-    /// and rebuilding the pane mirrors / layout subscription / predict
-    /// queue is its own subsystem, tracked as a follow-up). For now the
-    /// driver logs the request and bells so the action has a
-    /// well-defined effect and the picker → dispatch path is exercised
-    /// end-to-end. Carries the target session name.
+    /// phux-4li.20 / phux-eb0: a `switch-session` action requested a
+    /// re-target to the named session. [`apply_action_effects`] hands the
+    /// target up to the driver via `DispatchCtx::switch_request`; the
+    /// driver's `main_loop` returns `LoopExit::SwitchTo(name)` and the
+    /// outer loop detaches from the current session and re-attaches to the
+    /// named one on the same connection (in-process re-attach). Carries
+    /// the target session name; a request matching the current session is
+    /// a no-op (bells).
     switch_session: Option<String>,
 }
 
@@ -780,12 +798,11 @@ fn run_action(
                 .push(Box::new(SelectList::new("sessions", items, ctx.theme)));
         }
         "switch-session" => {
-            // phux-4li.20: re-target this client to another session.
-            // In-process re-attach is a scoped-out subsystem (see the
-            // `ActionEffects::switch_session` doc and the follow-up bd
-            // issue); for now we surface the request as a well-defined
-            // effect the driver logs + bells on. A bad/absent `name`
-            // arg bells.
+            // phux-4li.20 / phux-eb0: re-target this client to another
+            // session. The effect carries the target name up to
+            // `apply_action_effects`, which routes it to the driver's
+            // outer re-attach loop (in-process re-attach on the same
+            // connection). A bad/absent `name` arg bells.
             if let Some(name) = name_arg(resolved) {
                 effects.switch_session = Some(name);
             } else {
@@ -1150,6 +1167,7 @@ mod tests {
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
+        let mut switch_request = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -1162,6 +1180,8 @@ mod tests {
             theme: &theme,
             sessions: &[],
             focused_session: None,
+            session_name: "",
+            switch_request: &mut switch_request,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1303,6 +1323,7 @@ mod tests {
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
+        let mut switch_request = None;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1316,6 +1337,8 @@ mod tests {
                 theme: &theme,
                 sessions,
                 focused_session,
+                session_name: "",
+                switch_request: &mut switch_request,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -1530,6 +1553,7 @@ mod tests {
         let mut pending_windows = HashMap::new();
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
+        let mut switch_request = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1542,6 +1566,8 @@ mod tests {
             theme: &theme,
             sessions: &[],
             focused_session: None,
+            session_name: "",
+            switch_request: &mut switch_request,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),

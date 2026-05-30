@@ -268,7 +268,88 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     // is global, so we only register it once per process.
     install_panic_hook_once();
 
-    main_loop(&mut conn, attached, predict, out).await
+    // phux-eb0: outer re-attach loop. `main_loop` is single-session by
+    // construction (it builds ~15 session-scoped locals and replays the
+    // ATTACHED frame once on entry). When the user picks another session
+    // via `<leader> a` the loop returns `LoopExit::SwitchTo(name)`; here
+    // we detach from the current session, re-run the ATTACH handshake
+    // against `ByName(name)` on the SAME transport connection (a session
+    // switch is within one server, so the UDS connection — bound to the
+    // server, not to any single session — is reused, not reconnected),
+    // and re-enter `main_loop` with the new ATTACHED frame. The
+    // `RawModeGuard` stays installed across the switch (it lives in this
+    // outer scope) so the alt screen never flickers and the terminal is
+    // never left in a bad state. On `Detached` the loop exits via
+    // `exit_after_detach` (which never returns — see its doc comment).
+    let mut attached = attached;
+    loop {
+        match main_loop(&mut conn, attached, predict, out).await? {
+            LoopExit::Detached => {
+                // The session ended (user detach, server `DETACHED`, or a
+                // detach-intended disconnect). Restore the terminal and
+                // exit now rather than returning up the stack: a returning
+                // `Ok(())` would let the tokio runtime drop block forever
+                // on the uncancellable stdin read thread (see
+                // `exit_after_detach`'s doc comment).
+                exit_after_detach();
+            }
+            LoopExit::SwitchTo(name) => {
+                // Tear down the current session on the server so it frees
+                // our per-consumer reference grid + reaps the detached
+                // consumer (the just-landed per-consumer detach reaping —
+                // don't leak). DETACH does NOT close the connection
+                // server-side (see `phux-server::runtime`'s DETACH arm:
+                // it emits DETACHED and keeps the read loop alive), so the
+                // same `conn` is reusable for the new ATTACH.
+                detach_and_drain(&mut conn).await?;
+                // Re-run the handshake against the new target on the same
+                // connection. No reconnect: one server owns all the
+                // sessions, and the transport is bound to the server, not
+                // to any single session.
+                send_attach(&mut conn, AttachTarget::ByName(name)).await?;
+                attached = wait_for_attached(&mut conn).await?;
+                // Re-enter `main_loop`, which rebuilds ALL session-scoped
+                // state fresh (pane mirrors, workspace, predict, overlays,
+                // pending-spawn maps, layout subscription) from the new
+                // ATTACHED frame, then repaints. A full repaint of the new
+                // session's grid happens via the replayed ATTACHED +
+                // TERMINAL_SNAPSHOT frames inside the loop.
+                let _ = write_terminal_clear(out);
+            }
+        }
+    }
+}
+
+/// phux-eb0: send `DETACH` and drain frames until `DETACHED` arrives, so
+/// the server-side per-consumer state (reference grid, subscriber lists)
+/// is released before the next `ATTACH` on the same connection.
+///
+/// Frames that arrive between our `DETACH` and the server's `DETACHED`
+/// (a `TERMINAL_OUTPUT` already in flight, a late `METADATA_CHANGED`) are
+/// discarded — we are tearing the session down and rebuilding all
+/// session-scoped state on the next attach, so nothing in this window is
+/// worth applying. A server-initiated disconnect during the drain is a
+/// genuine error (the switch can't complete), surfaced as
+/// `AttachError::Disconnected`.
+async fn detach_and_drain(conn: &mut Connection) -> Result<(), AttachError> {
+    conn.send(&FrameKind::Detach).await?;
+    loop {
+        match conn.recv().await? {
+            FrameKind::Detached => return Ok(()),
+            other => {
+                tracing::trace!(kind = ?other, "draining frame during session switch");
+            }
+        }
+    }
+}
+
+/// phux-eb0: clear the alt screen between sessions so the previous
+/// session's grid doesn't briefly show under the new session's first
+/// paint. The new `ATTACHED` + `TERMINAL_SNAPSHOT` repaint lands
+/// immediately after, so this is a one-frame clear, not a flicker.
+fn write_terminal_clear<W: Write>(out: &mut W) -> io::Result<()> {
+    out.write_all(b"\x1b[2J\x1b[H")?;
+    out.flush()
 }
 
 /// Send `HELLO` and (when the server starts sending it) wait for
@@ -338,13 +419,43 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
     }
 }
 
-/// Drive the `tokio::select!` loop until detach.
+/// phux-eb0: how the `main_loop` `select!` loop terminated.
+///
+/// `main_loop` is single-session by construction — it builds all the
+/// session-scoped locals up front and replays one ATTACHED frame. Rather
+/// than tear down and rebuild that state in place, the loop signals its
+/// caller ([`run_with_stdout_predict`]'s outer loop) which way it exited:
+///
+/// * `Detached` — the user detached or the server sent `DETACHED`. The
+///   loop already ran `exit_after_detach` on that path (which never
+///   returns); the outer loop treats a returned `Detached` as a clean
+///   exit too.
+/// * `SwitchTo(name)` — the user committed `switch-session { name }` via
+///   the `<leader> a` picker. The outer loop detaches from the current
+///   session and re-runs the handshake against `ByName(name)`, then
+///   re-enters `main_loop` with the new ATTACHED frame and freshly-rebuilt
+///   session state.
+#[derive(Debug)]
+enum LoopExit {
+    /// The session ended (detach / server DETACHED). The process exits.
+    Detached,
+    /// Re-attach to the named session on the same connection.
+    SwitchTo(String),
+}
+
+/// Drive the `tokio::select!` loop until detach or a session switch.
 ///
 /// `initial_attached` is the `FrameKind::Attached` frame that
 /// [`wait_for_attached`] already pulled off the wire; we replay it
 /// through `handle_server_frame` so the focused-pane bookkeeping lives
 /// in one place. Subsequent `TERMINAL_SNAPSHOT` / `TERMINAL_OUTPUT` frames come
 /// off the wire as usual.
+///
+/// phux-eb0: returns a [`LoopExit`] so the outer loop in
+/// [`run_with_stdout_predict`] can re-attach to another session without
+/// dropping the transport or leaving raw mode. Every session-scoped local
+/// in this function is rebuilt on each entry, so a re-attach starts from a
+/// clean slate (no stale pane mirror, no carried-over predict queue).
 #[allow(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
@@ -362,7 +473,7 @@ async fn main_loop<W: super::RenderSink>(
     initial_attached: FrameKind,
     predict_cfg: PredictiveConfig,
     out: &mut W,
-) -> Result<(), AttachError> {
+) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
     // allocated lazily — the first `TERMINAL_SNAPSHOT` or
@@ -458,6 +569,11 @@ async fn main_loop<W: super::RenderSink>(
     let mut sigterm = signal(SignalKind::terminate()).map_err(AttachError::Io)?;
     let mut sighup = signal(SignalKind::hangup()).map_err(AttachError::Io)?;
     let mut detach_pending = false;
+    // phux-eb0: set by `apply_action_effects` when the user commits a
+    // `switch-session`. Checked after each input-dispatch batch; a value
+    // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
+    // loop re-attaches to the named session on the same connection.
+    let mut switch_request: Option<String> = None;
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place.
@@ -478,7 +594,7 @@ async fn main_loop<W: super::RenderSink>(
         overlays.is_active(),
     )?;
     if outcome.exit {
-        exit_after_detach();
+        return Ok(LoopExit::Detached);
     }
     if let Some((list, focused)) = outcome.sessions {
         sessions = list;
@@ -575,7 +691,7 @@ async fn main_loop<W: super::RenderSink>(
                             overlays.is_active(),
                         )?;
                         if outcome.exit {
-                            exit_after_detach();
+                            return Ok(LoopExit::Detached);
                         }
                         // phux-4li.20: refresh the cached session graph
                         // whenever an ATTACHED snapshot lands so the
@@ -679,7 +795,7 @@ async fn main_loop<W: super::RenderSink>(
                         // frame — treat it as a clean shutdown because
                         // the user requested detach. Otherwise the loop
                         // bubbles the disconnect up unchanged.
-                        exit_after_detach();
+                        return Ok(LoopExit::Detached);
                     }
                     Err(err) => return Err(err),
                 }
@@ -709,6 +825,8 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     focused_session,
+                    session_name: &session_name,
+                    switch_request: &mut switch_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -722,6 +840,12 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                // phux-eb0: a committed `switch-session` ends this loop so
+                // the outer driver re-attaches. Return BEFORE any repaint
+                // — the new session's ATTACHED + snapshot will repaint.
+                if let Some(target) = switch_request.take() {
+                    return Ok(LoopExit::SwitchTo(target));
+                }
                 if layout_changed {
                     if let Some(sb) = status_bar.as_mut() {
                         sb.set_windows(window_infos(&workspace));
@@ -769,6 +893,8 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     focused_session,
+                    session_name: &session_name,
+                    switch_request: &mut switch_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -782,6 +908,12 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                // phux-eb0: same switch-on-commit check as the stdin arm.
+                // A bare-ESC flush can carry the final chord of a
+                // `<leader> a` selection committed via Enter.
+                if let Some(target) = switch_request.take() {
+                    return Ok(LoopExit::SwitchTo(target));
+                }
                 if layout_changed && let Some(sb) = status_bar.as_mut() {
                     sb.set_windows(window_infos(&workspace));
                 }
