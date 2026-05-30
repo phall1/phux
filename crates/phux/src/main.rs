@@ -1126,25 +1126,10 @@ async fn resolve_target(
         Err(err) => return Err(report_no_server(&err, socket_path, verb)),
     };
     let candidates = selector::resolve(selector, &snapshot);
-    pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
+    selector::pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
         eprintln!("phux: no such target");
         ExitCode::FAILURE
     })
-}
-
-/// Choose one pane from a selector's `candidates`: prefer the one equal to
-/// the server's `focused` pane (the common "the session I'm looking at"
-/// case), else the first in snapshot order. `None` only when the selector
-/// matched nothing. Pure so it is unit-testable without a server.
-fn pick_target_pane(
-    candidates: &[phux_protocol::ids::TerminalId],
-    focused: &phux_protocol::ids::TerminalId,
-) -> Option<phux_protocol::ids::TerminalId> {
-    candidates
-        .iter()
-        .find(|id| *id == focused)
-        .or_else(|| candidates.first())
-        .cloned()
 }
 
 /// `phux snapshot [TARGET]` — read a pane as structured data (ADR-0022).
@@ -1687,10 +1672,8 @@ fn maybe_auto_spawn_server(
 
 #[cfg(test)]
 mod tests {
-    use phux_protocol::ids::TerminalId;
-
     use super::selector::{Selector, WindowRef};
-    use super::{parse_selector, pick_target_pane, run_nonce, unique_session_name};
+    use super::{parse_selector, run_nonce, unique_session_name};
 
     #[test]
     fn unique_session_name_starts_at_zero_and_skips_taken() {
@@ -1703,22 +1686,6 @@ mod tests {
         // Non-numeric names (e.g. the auto-spawn "default") don't block
         // the numeric sequence.
         assert_eq!(unique_session_name(&["default".to_owned()]), "0");
-    }
-
-    #[test]
-    fn pick_target_pane_prefers_focused_then_first_then_none() {
-        let a = TerminalId::local(1);
-        let b = TerminalId::local(2);
-        let c = TerminalId::local(3);
-        // Focused is among the candidates -> pick it, not the first.
-        assert_eq!(
-            pick_target_pane(&[a.clone(), b.clone()], &b),
-            Some(b.clone())
-        );
-        // Focused not among candidates -> first in snapshot order.
-        assert_eq!(pick_target_pane(&[a.clone(), c], &b), Some(a));
-        // Empty candidate set -> None (a selector miss).
-        assert_eq!(pick_target_pane(&[], &b), None);
     }
 
     #[test]
