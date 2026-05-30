@@ -1997,7 +1997,7 @@ async fn handle_command(
             cells,
         } => handle_get_screen(state, &terminal_id, request_scrollback, cells).await,
         Command::RouteInput { terminal_id, event } => {
-            handle_route_input(state, &terminal_id, event)
+            handle_route_input(state, client_id, &terminal_id, event)
         }
         Command::CreateSession {
             collection,
@@ -2317,13 +2317,26 @@ async fn handle_get_screen(
 /// never transiently shrinks the pane to the caller's viewport; the live
 /// dimensions are preserved (ADR-0022, `phux-3j3`).
 ///
+/// Input authority is gated per SPEC `input.md` §7 / `L1.md` §7.1:
+/// `ROUTE_INPUT` is PRIMARY-only. There is no materialized per-connection
+/// role map yet, so PRIMARY is approximated by an active subscription —
+/// a client present in `terminal_subscribers[tid]` for the target pane
+/// (phux-nlo, interim Option 1). A caller that is unattached or merely
+/// observing via the read-only `GET_SCREEN` surface has no subscription
+/// and is rejected with `PermissionDenied`, never writing PTY bytes. The
+/// `client_id` argument is an internal lookup only: the call-site shape
+/// stays stable so a later `terminal_roles` map can swap the policy in
+/// place without re-threading callers.
+///
 /// `try_send` is non-blocking for the same single-threaded-runtime reason
 /// as `handle_terminal_input`: input is fire-and-forget per SPEC §9, so a
 /// full mailbox drops the event rather than blocking the read loop. The
-/// command still acks `Ok` (the event was accepted for delivery); only an
-/// unknown Terminal or a gone actor produces an `Error`.
+/// command still acks `Ok` (the event was accepted for delivery); an
+/// unknown Terminal, a non-primary caller, or a gone actor produces an
+/// `Error`.
 fn handle_route_input(
     state: &SharedState,
+    client_id: ClientId,
     terminal_id: &phux_protocol::ids::TerminalId,
     event: InputEvent,
 ) -> CommandResult {
@@ -2335,11 +2348,31 @@ fn handle_route_input(
             message: format!("ROUTE_INPUT to satellite route unsupported: {terminal_id:?}"),
         };
     }
-    // Clone the (Send) handle out of the lock; we never await inside it.
-    let handle = state.with(|s| {
-        s.terminal_from_wire(terminal_id)
-            .and_then(|core| s.terminal_handle(core).cloned())
+    // Resolve the wire id and, in the same lock, evaluate the PRIMARY
+    // gate and clone the (Send) handle out; we never await inside the lock.
+    let resolved = state.with(|s| {
+        let core = s.terminal_from_wire(terminal_id)?;
+        let is_primary = s.subscribers_for_terminal(core).contains(&client_id);
+        let handle = s.terminal_handle(core).cloned();
+        Some((is_primary, handle))
     });
+    let Some((is_primary, handle)) = resolved else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+    if !is_primary {
+        warn!(
+            ?client_id,
+            ?terminal_id,
+            "ROUTE_INPUT from non-primary (unsubscribed) client; rejecting (SPEC input.md §7)"
+        );
+        return CommandResult::Error {
+            code: ErrorCode::PermissionDenied,
+            message: format!("ROUTE_INPUT requires PRIMARY role for terminal: {terminal_id:?}"),
+        };
+    }
     let Some(handle) = handle else {
         return CommandResult::Error {
             code: ErrorCode::TerminalNotFound,

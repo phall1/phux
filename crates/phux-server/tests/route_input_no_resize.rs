@@ -1,25 +1,30 @@
-//! Wire-level integration test for the side-effect-free `ROUTE_INPUT`
-//! command dispatch seam (`phux-3j3`).
+//! Wire-level integration tests for the `ROUTE_INPUT` command dispatch
+//! seam (`phux-3j3`, `phux-nlo`).
 //!
-//! `ROUTE_INPUT` is the write counterpart to `GET_SCREEN`: it delivers an
-//! already-built input event to a Terminal without an `ATTACH`,
-//! subscription, or resize. The bug it closes off is the last disruptive
-//! side effect on the agent surface — `send-keys`/`run` used to `ATTACH`
-//! with an `80x24` viewport, which transiently resized the live pane.
+//! `ROUTE_INPUT` delivers an already-built input event to a Terminal
+//! without advertising a viewport and without resizing. The bug it closes
+//! off is the last disruptive side effect on the agent surface —
+//! `send-keys`/`run` used to `ATTACH` with an `80x24` viewport, which
+//! transiently resized the live pane.
 //!
-//! This test drives the real `handle_client` read loop end-to-end (no
-//! TUI, no tmux) and proves the no-resize invariant empirically:
+//! `ROUTE_INPUT` is also PRIMARY-only input authority (SPEC input.md §7 /
+//! L1.md §7.1). With no materialized per-connection role map yet, PRIMARY
+//! is approximated by an active subscription: a caller that never attached
+//! is a viewer and is rejected with `PERMISSION_DENIED` (phux-nlo).
+//!
+//! These tests drive the real `handle_client` read loop end-to-end (no
+//! TUI, no tmux). The no-resize test proves the dimension invariant:
 //!
 //! 1. Pre-seed a session whose pane is backed by a real PTY running
 //!    `cat` (cooked-mode echo gives a crisp signal).
 //! 2. Resolve the pane id via the side-effect-free `GET_STATE` (no attach).
-//! 3. Size the pane to `120x40` with `TERMINAL_RESIZE` and confirm the
-//!    post-resize dims via `GET_SCREEN`.
-//! 4. `ROUTE_INPUT` a key + Enter — on a fresh connection that never
-//!    attaches and never advertises a viewport.
+//! 3. On a routing connection, `ATTACH` (to gain PRIMARY) then size the
+//!    pane to `120x40` with `TERMINAL_RESIZE` so the explicit live
+//!    dimensions exceed any attach viewport.
+//! 4. `ROUTE_INPUT` a key + Enter — `ROUTE_INPUT` advertises no viewport.
 //! 5. `GET_SCREEN` again: the pane MUST still report `120x40`, not the
-//!    `80x24` the old attach path would have imposed, and the echoed
-//!    byte must have landed.
+//!    `80x24` the attach viewport carried, and the echoed byte must have
+//!    landed.
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -36,7 +41,8 @@ use std::time::Duration;
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, FrameKind, StateScope, TYPE_COMMAND_RESULT,
+    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_ATTACHED,
+    TYPE_COMMAND_RESULT, TYPE_TERMINAL_SNAPSHOT,
 };
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
@@ -44,7 +50,7 @@ use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 use crate::common::{
-    SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, recv_typed, run_local, send_frame,
+    SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
     spawn_server_with_seed_cmd, wait_for_socket,
 };
 
@@ -115,6 +121,26 @@ async fn focused_pane(stream: &mut UnixStream, request_id: u32) -> phux_protocol
     }
 }
 
+/// `ATTACH { ByName(name) }` and drain the opening `ATTACHED` +
+/// `TERMINAL_SNAPSHOT` frames. Attaching subscribes the connection to the
+/// session's active pane, which is the interim PRIMARY proxy `ROUTE_INPUT`
+/// gates on (phux-nlo). The 80x24 attach viewport is intentionally
+/// overridden by a later `TERMINAL_RESIZE`.
+async fn attach_and_drain(stream: &mut UnixStream, name: &str) {
+    send_frame(stream, &attach_by_name(name)).await;
+    let (type_byte, frame) = recv_typed(stream).await;
+    assert_eq!(type_byte, TYPE_ATTACHED, "first frame must be ATTACHED");
+    assert!(
+        matches!(frame, FrameKind::Attached { .. }),
+        "expected Attached, got {frame:?}",
+    );
+    let (type_byte, _snap) = recv_typed(stream).await;
+    assert_eq!(
+        type_byte, TYPE_TERMINAL_SNAPSHOT,
+        "ATTACHED must be followed by a TERMINAL_SNAPSHOT",
+    );
+}
+
 /// `GET_SCREEN` → the pane's current `(cols, rows)` and its joined text.
 async fn screen(
     stream: &mut UnixStream,
@@ -153,9 +179,17 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
         // Resolve the pane id without attaching.
         let pane = focused_pane(&mut stream, 1).await;
 
+        // Route input on a connection that ATTACHes first — `ROUTE_INPUT`
+        // is PRIMARY-only (phux-nlo), and attaching is the interim way to
+        // hold PRIMARY. The 80x24 attach viewport is then overridden by an
+        // explicit TERMINAL_RESIZE, so any reversion to 80x24 would be a
+        // ROUTE_INPUT-induced resize.
+        let mut route_conn = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        attach_and_drain(&mut route_conn, "work").await;
+
         // Size the pane to 120x40 (the dims the agent surface must preserve).
         send_frame(
-            &mut stream,
+            &mut route_conn,
             &FrameKind::TerminalResize {
                 terminal_id: pane.clone(),
                 cols: 120,
@@ -172,9 +206,6 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
             "TERMINAL_RESIZE must size the pane to 120x40 before ROUTE_INPUT",
         );
 
-        // Route input on a FRESH connection that never attaches and never
-        // advertises a viewport — this is the path `send-keys`/`run` take.
-        let mut route_conn = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
         for (i, key) in [ascii_key('z', PhysicalKey::Z), enter_key()]
             .into_iter()
             .enumerate()
@@ -197,9 +228,9 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
             }
         }
 
-        // The pane MUST still be 120x40 — ROUTE_INPUT carries no viewport
-        // and never attaches, so unlike the old attach path it does not
-        // shrink the pane to 80x24. Poll for the echoed byte to confirm the
+        // The pane MUST still be 120x40 — ROUTE_INPUT carries no viewport,
+        // so unlike the attach path it does not shrink the pane to the
+        // attach viewport's 80x24. Poll for the echoed byte to confirm the
         // event actually reached the PTY, then assert the dims held.
         let after = poll_for_echo(&mut stream, &pane, 'z', 40).await;
         assert_eq!(
@@ -213,6 +244,90 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
         assert!(
             joined.contains('z'),
             "routed key must reach the PTY and echo back; screen text: {joined:?}",
+        );
+    });
+}
+
+/// `ROUTE_INPUT` is PRIMARY-only (SPEC input.md §7 / L1.md §7.1). A
+/// connection that never attached holds no subscription — the interim
+/// PRIMARY proxy (phux-nlo) — so it is a viewer and MUST be rejected with
+/// `PERMISSION_DENIED`, never reaching the PTY. The terminal exists, so a
+/// `TERMINAL_NOT_FOUND` rejection would not exercise the role gate.
+#[test]
+fn route_input_from_unsubscribed_viewer_is_permission_denied() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "work", CommandBuilder::new("cat"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Resolve the pane id without attaching — GET_STATE does not
+        // subscribe, so this connection stays a viewer.
+        let pane = focused_pane(&mut stream, 1).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 2,
+                command: Command::RouteInput {
+                    terminal_id: pane.clone(),
+                    event: InputEvent::Key(ascii_key('z', PhysicalKey::Z)),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 2).await {
+            CommandResult::Error { code, .. } => assert_eq!(
+                code,
+                ErrorCode::PermissionDenied,
+                "viewer ROUTE_INPUT must be PERMISSION_DENIED, got {code:?}",
+            ),
+            other => panic!("expected Error(PermissionDenied), got {other:?}"),
+        }
+    });
+}
+
+/// The PRIMARY counterpart to the viewer rejection above: once a
+/// connection ATTACHes (gaining the interim PRIMARY subscription),
+/// `ROUTE_INPUT` for that pane is accepted and acks `Ok` (phux-nlo).
+#[test]
+fn route_input_from_primary_subscriber_succeeds() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "work", CommandBuilder::new("cat"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        let pane = focused_pane(&mut stream, 1).await;
+
+        // ATTACH subscribes this connection to the active pane → PRIMARY.
+        let mut primary = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        attach_and_drain(&mut primary, "work").await;
+
+        send_frame(
+            &mut primary,
+            &FrameKind::Command {
+                request_id: 1,
+                command: Command::RouteInput {
+                    terminal_id: pane.clone(),
+                    event: InputEvent::Key(ascii_key('q', PhysicalKey::Q)),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut primary, 1).await {
+            CommandResult::Ok => {}
+            other => panic!("primary ROUTE_INPUT must ack Ok, got {other:?}"),
+        }
+
+        // Confirm the routed byte actually reached the PTY.
+        let echoed = poll_for_echo(&mut stream, &pane, 'q', 40).await;
+        let joined: String = echoed.lines.join("");
+        assert!(
+            joined.contains('q'),
+            "primary's routed key must reach the PTY and echo back; screen text: {joined:?}",
         );
     });
 }
