@@ -7,12 +7,35 @@
 
 #![deny(missing_docs)]
 
+pub mod client;
 pub mod session;
 
 pub use session::{Outcome, Session};
 
 use phux_vt_web::{Grid, Rgb};
+use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::CanvasRenderingContext2d;
+
+/// JS entry point: connect to `ws_url` and render the attached terminal into the
+/// canvas element with id `canvas_id`, sized `cols`×`rows`.
+///
+/// # Errors
+/// Fails if the canvas element is missing or the connection can't be set up.
+#[wasm_bindgen]
+pub async fn start(
+    ws_url: String,
+    canvas_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), JsValue> {
+    let canvas = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(&canvas_id))
+        .ok_or_else(|| JsValue::from_str("canvas element not found"))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()?;
+    client::run(&ws_url, canvas, cols, rows).await
+}
 
 /// Cell geometry + font for the canvas renderer. A monospace cell grid: every
 /// cell is `cell_w`×`cell_h` device pixels.
