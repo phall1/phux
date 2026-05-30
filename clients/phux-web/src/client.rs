@@ -2,7 +2,7 @@
 //! all driving a [`Session`]. This is the only part that touches the DOM/WS; the
 //! protocol logic lives in [`crate::session`].
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -44,6 +44,7 @@ pub async fn run(
         canvas,
         ctx,
         metrics: Metrics::default(),
+        cursor_on: Cell::new(true),
     }));
 
     // On open: send HELLO + ATTACH.
@@ -98,6 +99,22 @@ pub async fn run(
         onkey.forget();
     }
 
+    // Cursor blink: toggle the phase and repaint on a fixed cadence.
+    {
+        let app = Rc::clone(&app);
+        let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+        let blink = Closure::<dyn FnMut()>::new(move || {
+            let a = app.borrow();
+            a.cursor_on.set(!a.cursor_on.get());
+            a.paint();
+        });
+        window.set_interval_with_callback_and_timeout_and_arguments_0(
+            blink.as_ref().unchecked_ref(),
+            530,
+        )?;
+        blink.forget();
+    }
+
     Ok(Client { app })
 }
 
@@ -126,6 +143,8 @@ struct App {
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
     metrics: Metrics,
+    /// Cursor blink phase; toggled by an interval in `run`.
+    cursor_on: Cell<bool>,
 }
 
 impl App {
@@ -146,7 +165,7 @@ impl App {
         if self.canvas.height() != h {
             self.canvas.set_height(h);
         }
-        render(&self.ctx, &grid, &self.metrics);
+        render(&self.ctx, &grid, &self.metrics, self.cursor_on.get());
     }
 }
 
@@ -175,7 +194,8 @@ fn key_event_from_browser(e: &KeyboardEvent) -> Option<KeyEvent> {
     if produced == "Shift" || produced == "Control" || produced == "Alt" || produced == "Meta" {
         return None;
     }
-    let text = (produced.chars().count() == 1 && !e.ctrl_key() && !e.meta_key()).then_some(produced);
+    let text =
+        (produced.chars().count() == 1 && !e.ctrl_key() && !e.meta_key()).then_some(produced);
 
     Some(KeyEvent {
         action: KeyAction::Press,

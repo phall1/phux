@@ -46,6 +46,11 @@ const RENDER_STATE_DATA_COLOR_BG: f64 = 5.0;
 const RENDER_STATE_DATA_COLOR_FG: f64 = 6.0;
 // RenderStateRowData (per-row reads via ghostty_render_state_row_get)
 const RENDER_STATE_ROW_DATA_CELLS: f64 = 3.0;
+
+// `ghostty_terminal_get` data tags (GhosttyTerminalData in ghostty/vt/terminal.h).
+const TERMINAL_DATA_CURSOR_X: f64 = 3.0;
+const TERMINAL_DATA_CURSOR_Y: f64 = 4.0;
+const TERMINAL_DATA_CURSOR_VISIBLE: f64 = 7.0;
 // RenderStateRowCellsData (per-cell reads via ghostty_render_state_row_cells_get)
 const ROW_CELLS_DATA_GRAPHEMES_LEN: f64 = 3.0;
 const ROW_CELLS_DATA_GRAPHEMES_BUF: f64 = 4.0;
@@ -89,6 +94,12 @@ pub struct Grid {
     pub default_bg: Rgb,
     /// Row-major cells, `cols * rows` entries.
     pub cells: Vec<GridCell>,
+    /// Cursor column (0-indexed) within the active area.
+    pub cursor_col: u16,
+    /// Cursor row (0-indexed) within the active area.
+    pub cursor_row: u16,
+    /// Whether the cursor is visible (DEC mode 25).
+    pub cursor_visible: bool,
 }
 
 /// A loaded ghostty-vt engine instance. Holds the WebAssembly instance, its
@@ -99,6 +110,7 @@ pub struct Vt {
     free: Function,
     terminal_new: Function,
     terminal_free: Function,
+    terminal_get: Function,
     vt_write: Function,
     resize: Function,
     rs_new: Function,
@@ -144,6 +156,7 @@ impl Vt {
             free: f("ghostty_wasm_free_u8_array")?,
             terminal_new: f("ghostty_terminal_new")?,
             terminal_free: f("ghostty_terminal_free")?,
+            terminal_get: f("ghostty_terminal_get")?,
             vt_write: f("ghostty_terminal_vt_write")?,
             resize: f("ghostty_terminal_resize")?,
             rs_new: f("ghostty_render_state_new")?,
@@ -169,7 +182,10 @@ impl Vt {
         self.w_u32(opts + 4, 5_000);
 
         let term_out = self.wasm_alloc(4);
-        let _ = self.call(&self.terminal_new, &[0.0, f64::from(term_out), f64::from(opts)]);
+        let _ = self.call(
+            &self.terminal_new,
+            &[0.0, f64::from(term_out), f64::from(opts)],
+        );
         let term = self.r_u32(term_out);
 
         let state_out = self.wasm_alloc(4);
@@ -204,8 +220,7 @@ impl Vt {
         for a in args {
             arr.push(&JsValue::from_f64(*a));
         }
-        func
-            .apply(&JsValue::NULL, &arr)
+        func.apply(&JsValue::NULL, &arr)
             .ok()
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0)
@@ -247,7 +262,9 @@ impl Vt {
     }
 
     fn w_bytes(&self, ptr: u32, data: &[u8]) {
-        self.bytes().subarray(ptr, ptr + data.len() as u32).copy_from(data);
+        self.bytes()
+            .subarray(ptr, ptr + data.len() as u32)
+            .copy_from(data);
     }
 }
 
@@ -272,10 +289,13 @@ impl Terminal {
         }
         let ptr = self.vt.wasm_alloc(data.len() as u32);
         self.vt.w_bytes(ptr, data);
+        let _ = self.vt.call(
+            &self.vt.vt_write,
+            &[f64::from(self.term), f64::from(ptr), data.len() as f64],
+        );
         let _ = self
             .vt
-            .call(&self.vt.vt_write, &[f64::from(self.term), f64::from(ptr), data.len() as f64]);
-        let _ = self.vt.call(&self.vt.free, &[f64::from(ptr), data.len() as f64]);
+            .call(&self.vt.free, &[f64::from(ptr), data.len() as f64]);
     }
 
     /// Resize the terminal grid to `cols`×`rows` (cell pixel size is advisory).
@@ -297,11 +317,18 @@ impl Terminal {
     #[must_use]
     pub fn rows_text(&self) -> Vec<String> {
         let vt = &*self.vt;
-        let _ = vt.call(&vt.rs_update, &[f64::from(self.state), f64::from(self.term)]);
+        let _ = vt.call(
+            &vt.rs_update,
+            &[f64::from(self.state), f64::from(self.term)],
+        );
         // Bind the row iterator to the current render state (rewrites iter_slot).
         let _ = vt.call(
             &vt.rs_get,
-            &[f64::from(self.state), RENDER_STATE_DATA_ROW_ITERATOR, f64::from(self.iter_slot)],
+            &[
+                f64::from(self.state),
+                RENDER_STATE_DATA_ROW_ITERATOR,
+                f64::from(self.iter_slot),
+            ],
         );
         let iter = vt.r_u32(self.iter_slot);
 
@@ -310,7 +337,11 @@ impl Terminal {
             // Bind the cell container to this row (rewrites cells_slot in place).
             let _ = vt.call(
                 &vt.row_get,
-                &[f64::from(iter), RENDER_STATE_ROW_DATA_CELLS, f64::from(self.cells_slot)],
+                &[
+                    f64::from(iter),
+                    RENDER_STATE_ROW_DATA_CELLS,
+                    f64::from(self.cells_slot),
+                ],
             );
             let cells = vt.r_u32(self.cells_slot);
             let mut line = String::new();
@@ -327,14 +358,22 @@ impl Terminal {
         let vt = &*self.vt;
         let r = vt.call(
             &vt.cells_get,
-            &[f64::from(cells), ROW_CELLS_DATA_GRAPHEMES_LEN, f64::from(self.scratch)],
+            &[
+                f64::from(cells),
+                ROW_CELLS_DATA_GRAPHEMES_LEN,
+                f64::from(self.scratch),
+            ],
         ) as i32;
         if r != GHOSTTY_SUCCESS || vt.r_u32(self.scratch) == 0 {
             return ' ';
         }
         let r2 = vt.call(
             &vt.cells_get,
-            &[f64::from(cells), ROW_CELLS_DATA_GRAPHEMES_BUF, f64::from(self.grapheme_buf)],
+            &[
+                f64::from(cells),
+                ROW_CELLS_DATA_GRAPHEMES_BUF,
+                f64::from(self.grapheme_buf),
+            ],
         ) as i32;
         if r2 != GHOSTTY_SUCCESS {
             return ' ';
@@ -347,20 +386,31 @@ impl Terminal {
     #[must_use]
     pub fn grid(&self) -> Grid {
         let vt = &*self.vt;
-        let _ = vt.call(&vt.rs_update, &[f64::from(self.state), f64::from(self.term)]);
+        let _ = vt.call(
+            &vt.rs_update,
+            &[f64::from(self.state), f64::from(self.term)],
+        );
 
         let cols = self.rs_u32(RENDER_STATE_DATA_COLS) as u16;
         let rows = self.rs_u32(RENDER_STATE_DATA_ROWS) as u16;
-        let default_fg = self
-            .rs_color(RENDER_STATE_DATA_COLOR_FG)
-            .unwrap_or(Rgb { r: 0xd7, g: 0xd7, b: 0xdd });
-        let default_bg = self
-            .rs_color(RENDER_STATE_DATA_COLOR_BG)
-            .unwrap_or(Rgb { r: 0x0b, g: 0x0b, b: 0x0f });
+        let default_fg = self.rs_color(RENDER_STATE_DATA_COLOR_FG).unwrap_or(Rgb {
+            r: 0xd7,
+            g: 0xd7,
+            b: 0xdd,
+        });
+        let default_bg = self.rs_color(RENDER_STATE_DATA_COLOR_BG).unwrap_or(Rgb {
+            r: 0x0b,
+            g: 0x0b,
+            b: 0x0f,
+        });
 
         let _ = vt.call(
             &vt.rs_get,
-            &[f64::from(self.state), RENDER_STATE_DATA_ROW_ITERATOR, f64::from(self.iter_slot)],
+            &[
+                f64::from(self.state),
+                RENDER_STATE_DATA_ROW_ITERATOR,
+                f64::from(self.iter_slot),
+            ],
         );
         let iter = vt.r_u32(self.iter_slot);
 
@@ -368,7 +418,11 @@ impl Terminal {
         while vt.call(&vt.row_iter_next, &[f64::from(iter)]) as i32 != 0 {
             let _ = vt.call(
                 &vt.row_get,
-                &[f64::from(iter), RENDER_STATE_ROW_DATA_CELLS, f64::from(self.cells_slot)],
+                &[
+                    f64::from(iter),
+                    RENDER_STATE_ROW_DATA_CELLS,
+                    f64::from(self.cells_slot),
+                ],
             );
             let cell_iter = vt.r_u32(self.cells_slot);
             let mut n: u16 = 0;
@@ -382,39 +436,85 @@ impl Terminal {
             }
             // Keep the grid rectangular: pad short rows out to `cols`.
             while n < cols {
-                cells.push(GridCell { ch: ' ', fg: None, bg: None });
+                cells.push(GridCell {
+                    ch: ' ',
+                    fg: None,
+                    bg: None,
+                });
                 n += 1;
             }
         }
-        Grid { cols, rows, default_fg, default_bg, cells }
+
+        // Cursor position + visibility, read straight off the terminal.
+        let cursor_col = self.term_u32(TERMINAL_DATA_CURSOR_X) as u16;
+        let cursor_row = self.term_u32(TERMINAL_DATA_CURSOR_Y) as u16;
+        let cursor_visible = self.term_u32(TERMINAL_DATA_CURSOR_VISIBLE) != 0;
+
+        Grid {
+            cols,
+            rows,
+            default_fg,
+            default_bg,
+            cells,
+            cursor_col,
+            cursor_row,
+            cursor_visible,
+        }
+    }
+
+    /// Read a u32-valued terminal data field via `ghostty_terminal_get`.
+    /// Zeroes the scratch first so a narrower write (e.g. a bool) reads cleanly.
+    fn term_u32(&self, tag: f64) -> u32 {
+        let vt = &*self.vt;
+        vt.w_u32(self.scratch, 0);
+        let _ = vt.call(
+            &vt.terminal_get,
+            &[f64::from(self.term), tag, f64::from(self.scratch)],
+        );
+        vt.r_u32(self.scratch)
     }
 
     fn rs_u32(&self, tag: f64) -> u32 {
         let vt = &*self.vt;
-        let _ = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]);
+        let _ = vt.call(
+            &vt.rs_get,
+            &[f64::from(self.state), tag, f64::from(self.scratch)],
+        );
         vt.r_u32(self.scratch)
     }
 
     fn rs_color(&self, tag: f64) -> Option<Rgb> {
         let vt = &*self.vt;
-        let r = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]) as i32;
+        let r = vt.call(
+            &vt.rs_get,
+            &[f64::from(self.state), tag, f64::from(self.scratch)],
+        ) as i32;
         (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
     }
 
     fn cell_color(&self, cells: u32, tag: f64) -> Option<Rgb> {
         let vt = &*self.vt;
-        let r = vt.call(&vt.cells_get, &[f64::from(cells), tag, f64::from(self.scratch)]) as i32;
+        let r = vt.call(
+            &vt.cells_get,
+            &[f64::from(cells), tag, f64::from(self.scratch)],
+        ) as i32;
         (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
     }
 
     fn read_rgb(&self, ptr: u32) -> Rgb {
         let vt = &*self.vt;
-        Rgb { r: vt.r_u8(ptr), g: vt.r_u8(ptr + 1), b: vt.r_u8(ptr + 2) }
+        Rgb {
+            r: vt.r_u8(ptr),
+            g: vt.r_u8(ptr + 1),
+            b: vt.r_u8(ptr + 2),
+        }
     }
 }
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        let _ = self.vt.call(&self.vt.terminal_free, &[f64::from(self.term)]);
+        let _ = self
+            .vt
+            .call(&self.vt.terminal_free, &[f64::from(self.term)]);
     }
 }
