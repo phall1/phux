@@ -1,7 +1,7 @@
 //! Drives the real ghostty-vt.wasm engine through the Rust driver under node:
 //! create a terminal, feed VT bytes, read the grid back as text.
 
-use phux_vt_web::Vt;
+use phux_vt_web::{Rgb, Vt};
 use wasm_bindgen_test::wasm_bindgen_test;
 
 #[wasm_bindgen_test]
@@ -35,4 +35,27 @@ async fn handles_cursor_movement_and_overwrite() {
     term.write(b"W");
     let rows = term.rows_text();
     assert_eq!(rows[0], "World", "CR + overwrite; got {:?}", rows[0]);
+}
+
+#[wasm_bindgen_test]
+async fn reads_truecolor_grid() {
+    let vt = Vt::load().await.expect("load ghostty-vt engine");
+    let term = vt.terminal(20, 3);
+
+    // A red "R" via SGR truecolor, then reset.
+    term.write(b"\x1b[38;2;255;0;0mR\x1b[0m");
+    let grid = term.grid();
+
+    assert_eq!(grid.cols, 20, "cols");
+    assert_eq!(grid.rows, 3, "rows");
+    assert_eq!(grid.cells.len(), 60, "rectangular cols*rows");
+
+    let cell0 = &grid.cells[0];
+    assert_eq!(cell0.ch, 'R', "first cell char");
+    assert_eq!(
+        cell0.fg,
+        Some(Rgb { r: 255, g: 0, b: 0 }),
+        "first cell fg = {:?}",
+        cell0.fg,
+    );
 }

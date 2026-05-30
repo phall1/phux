@@ -36,10 +36,58 @@ pub const fn engine_wasm_len() -> usize {
 
 // ── ABI constants (from include/ghostty/vt.h) ────────────────────────────────
 const GHOSTTY_SUCCESS: i32 = 0;
+// RenderStateData (whole-frame reads via ghostty_render_state_get)
+const RENDER_STATE_DATA_COLS: f64 = 1.0;
+const RENDER_STATE_DATA_ROWS: f64 = 2.0;
 const RENDER_STATE_DATA_ROW_ITERATOR: f64 = 4.0;
+const RENDER_STATE_DATA_COLOR_BG: f64 = 5.0;
+const RENDER_STATE_DATA_COLOR_FG: f64 = 6.0;
+// RenderStateRowData (per-row reads via ghostty_render_state_row_get)
 const RENDER_STATE_ROW_DATA_CELLS: f64 = 3.0;
+// RenderStateRowCellsData (per-cell reads via ghostty_render_state_row_cells_get)
 const ROW_CELLS_DATA_GRAPHEMES_LEN: f64 = 3.0;
 const ROW_CELLS_DATA_GRAPHEMES_BUF: f64 = 4.0;
+const ROW_CELLS_DATA_BG_COLOR: f64 = 5.0;
+const ROW_CELLS_DATA_FG_COLOR: f64 = 6.0;
+
+/// An 8-bit RGB color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rgb {
+    /// Red channel.
+    pub r: u8,
+    /// Green channel.
+    pub g: u8,
+    /// Blue channel.
+    pub b: u8,
+}
+
+/// One rendered cell: its base grapheme and resolved fg/bg (None = use the
+/// grid default).
+#[derive(Clone, Debug)]
+pub struct GridCell {
+    /// Base grapheme (combining marks are dropped for now).
+    pub ch: char,
+    /// Explicit foreground color, if any.
+    pub fg: Option<Rgb>,
+    /// Explicit background color, if any.
+    pub bg: Option<Rgb>,
+}
+
+/// A full styled snapshot of the visible grid, ready for a renderer. `cells` is
+/// row-major, `cols * rows` long.
+#[derive(Clone, Debug)]
+pub struct Grid {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+    /// Default foreground (terminal palette).
+    pub default_fg: Rgb,
+    /// Default background (terminal palette).
+    pub default_bg: Rgb,
+    /// Row-major cells, `cols * rows` entries.
+    pub cells: Vec<GridCell>,
+}
 
 /// A loaded ghostty-vt engine instance. Holds the WebAssembly instance, its
 /// linear memory, and cached handles to the C ABI exports the client uses.
@@ -192,6 +240,10 @@ impl Vt {
             | (u32::from(b.get_index(ptr + 3)) << 24)
     }
 
+    fn r_u8(&self, ptr: u32) -> u8 {
+        self.bytes().get_index(ptr)
+    }
+
     fn w_bytes(&self, ptr: u32, data: &[u8]) {
         self.bytes().subarray(ptr, ptr + data.len() as u32).copy_from(data);
     }
@@ -286,6 +338,76 @@ impl Terminal<'_> {
             return ' ';
         }
         char::from_u32(vt.r_u32(self.grapheme_buf)).unwrap_or(' ')
+    }
+
+    /// Read the full styled grid for rendering: per-cell grapheme + resolved
+    /// fg/bg, plus the terminal's default fg/bg. Rows are padded to `cols`.
+    #[must_use]
+    pub fn grid(&self) -> Grid {
+        let vt = self.vt;
+        let _ = vt.call(&vt.rs_update, &[f64::from(self.state), f64::from(self.term)]);
+
+        let cols = self.rs_u32(RENDER_STATE_DATA_COLS) as u16;
+        let rows = self.rs_u32(RENDER_STATE_DATA_ROWS) as u16;
+        let default_fg = self
+            .rs_color(RENDER_STATE_DATA_COLOR_FG)
+            .unwrap_or(Rgb { r: 0xd7, g: 0xd7, b: 0xdd });
+        let default_bg = self
+            .rs_color(RENDER_STATE_DATA_COLOR_BG)
+            .unwrap_or(Rgb { r: 0x0b, g: 0x0b, b: 0x0f });
+
+        let _ = vt.call(
+            &vt.rs_get,
+            &[f64::from(self.state), RENDER_STATE_DATA_ROW_ITERATOR, f64::from(self.iter_slot)],
+        );
+        let iter = vt.r_u32(self.iter_slot);
+
+        let mut cells = Vec::with_capacity(usize::from(cols) * usize::from(rows));
+        while vt.call(&vt.row_iter_next, &[f64::from(iter)]) as i32 != 0 {
+            let _ = vt.call(
+                &vt.row_get,
+                &[f64::from(iter), RENDER_STATE_ROW_DATA_CELLS, f64::from(self.cells_slot)],
+            );
+            let cell_iter = vt.r_u32(self.cells_slot);
+            let mut n: u16 = 0;
+            while vt.call(&vt.cells_next, &[f64::from(cell_iter)]) as i32 != 0 {
+                cells.push(GridCell {
+                    ch: self.cell_base_char(cell_iter),
+                    fg: self.cell_color(cell_iter, ROW_CELLS_DATA_FG_COLOR),
+                    bg: self.cell_color(cell_iter, ROW_CELLS_DATA_BG_COLOR),
+                });
+                n += 1;
+            }
+            // Keep the grid rectangular: pad short rows out to `cols`.
+            while n < cols {
+                cells.push(GridCell { ch: ' ', fg: None, bg: None });
+                n += 1;
+            }
+        }
+        Grid { cols, rows, default_fg, default_bg, cells }
+    }
+
+    fn rs_u32(&self, tag: f64) -> u32 {
+        let vt = self.vt;
+        let _ = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]);
+        vt.r_u32(self.scratch)
+    }
+
+    fn rs_color(&self, tag: f64) -> Option<Rgb> {
+        let vt = self.vt;
+        let r = vt.call(&vt.rs_get, &[f64::from(self.state), tag, f64::from(self.scratch)]) as i32;
+        (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
+    }
+
+    fn cell_color(&self, cells: u32, tag: f64) -> Option<Rgb> {
+        let vt = self.vt;
+        let r = vt.call(&vt.cells_get, &[f64::from(cells), tag, f64::from(self.scratch)]) as i32;
+        (r == GHOSTTY_SUCCESS).then(|| self.read_rgb(self.scratch))
+    }
+
+    fn read_rgb(&self, ptr: u32) -> Rgb {
+        let vt = self.vt;
+        Rgb { r: vt.r_u8(ptr), g: vt.r_u8(ptr + 1), b: vt.r_u8(ptr + 2) }
     }
 }
 
