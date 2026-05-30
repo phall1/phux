@@ -66,6 +66,16 @@ pub(super) struct DispatchCtx<'a> {
     /// construction (`show-help`, `rename-window`) so their painted
     /// colors flow from a single source of truth.
     pub theme: &'a Theme,
+    /// phux-4li.20: the server's session graph, cached from the latest
+    /// `ATTACHED` snapshot. The `session-picker` action builds its rows
+    /// from this list. Empty until the first snapshot lands (picker then
+    /// bells).
+    pub sessions: &'a [phux_protocol::wire::info::SessionInfo],
+    /// phux-4li.20: id of the session this client is attached to. The
+    /// picker marks this row and excludes it from selection (switching
+    /// to the current session is a no-op). `None` before the first
+    /// snapshot.
+    pub focused_session: Option<phux_protocol::ids::SessionId>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -371,6 +381,19 @@ async fn apply_action_effects<W: super::RenderSink>(
     for frame in effects.kill_frames {
         conn.send(&frame).await?;
     }
+    // phux-4li.20: a `switch-session` request. In-process re-attach is a
+    // scoped-out subsystem (tracked as a follow-up bd issue); for now we
+    // log the requested target and bell so the picker → dispatch path is
+    // exercised without pretending the switch landed. The well-defined
+    // effect (a logged, belled request keyed by session name) is the
+    // seam the re-attach plumbing hooks into.
+    if let Some(name) = effects.switch_session {
+        tracing::info!(
+            target_session = %name,
+            "switch-session requested; in-process re-attach not yet implemented (phux-4li.20 follow-up)"
+        );
+        let _ = actions::write_bell(out);
+    }
     Ok(layout_changed)
 }
 
@@ -452,6 +475,15 @@ struct ActionEffects {
     /// resulting `TERMINAL_CLOSED` from the server folds the pane out
     /// of the layout in [`handle_server_frame`].
     kill_frames: Vec<FrameKind>,
+    /// phux-4li.20: a `switch-session` action requested a re-target to
+    /// the named session. In-process re-attach is not yet implemented
+    /// (the `main_loop` is single-session by construction — tearing down
+    /// and rebuilding the pane mirrors / layout subscription / predict
+    /// queue is its own subsystem, tracked as a follow-up). For now the
+    /// driver logs the request and bells so the action has a
+    /// well-defined effect and the picker → dispatch path is exercised
+    /// end-to-end. Carries the target session name.
+    switch_session: Option<String>,
 }
 
 /// Canonical names of every action `run_action` handles.
@@ -480,6 +512,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "previous-pane",
     "command-palette",
     "window-picker",
+    "session-picker",
+    "switch-session",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -730,6 +764,38 @@ fn run_action(
             ctx.overlays
                 .push(Box::new(SelectList::new("windows", items, ctx.theme)));
         }
+        "session-picker" => {
+            // phux-4li.20: push the `<leader> a` session picker. Each row
+            // is a peer session (name, window/client count as the
+            // secondary) that commits `switch-session { name }` — the
+            // same single dispatch path. The session this client is
+            // attached to is excluded (switching to it is a no-op). With
+            // no peer sessions it bells.
+            let items = session_picker_items(ctx.sessions, ctx.focused_session);
+            if items.is_empty() {
+                effects.bell = true;
+                return effects;
+            }
+            ctx.overlays
+                .push(Box::new(SelectList::new("sessions", items, ctx.theme)));
+        }
+        "switch-session" => {
+            // phux-4li.20: re-target this client to another session.
+            // In-process re-attach is a scoped-out subsystem (see the
+            // `ActionEffects::switch_session` doc and the follow-up bd
+            // issue); for now we surface the request as a well-defined
+            // effect the driver logs + bells on. A bad/absent `name`
+            // arg bells.
+            if let Some(name) = name_arg(resolved) {
+                effects.switch_session = Some(name);
+            } else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "switch-session missing/bad `name` arg",
+                );
+                effects.bell = true;
+            }
+        }
         "detach" => {
             effects.detach = true;
         }
@@ -831,6 +897,47 @@ fn window_picker_items(workspace: &Workspace) -> Vec<SelectItem> {
                 label,
                 phux_config::keybind::ResolvedAction {
                     action: "select-window".to_owned(),
+                    args,
+                },
+            )
+            .secondary(secondary)
+        })
+        .collect()
+}
+
+/// Build the `<leader> a` session picker's rows from the client's cached
+/// session graph (phux-4li.20).
+///
+/// One row per session **other than** `focused` (the session this client
+/// is attached to) — switching to the current session is a no-op, so it
+/// is excluded rather than disabled. Each row's label is the session
+/// name with a window/attached-client summary as the dimmed secondary;
+/// choosing it commits `switch-session { name }`, which `run_action`
+/// routes through the single dispatch path.
+fn session_picker_items(
+    sessions: &[phux_protocol::wire::info::SessionInfo],
+    focused: Option<phux_protocol::ids::SessionId>,
+) -> Vec<SelectItem> {
+    sessions
+        .iter()
+        .filter(|s| Some(s.id) != focused)
+        .map(|s| {
+            let windows = if s.window_count == 1 {
+                "1 window".to_owned()
+            } else {
+                format!("{} windows", s.window_count)
+            };
+            let secondary = if s.attached_client_count == 0 {
+                windows
+            } else {
+                format!("{windows}, {} attached", s.attached_client_count)
+            };
+            let mut args = std::collections::BTreeMap::new();
+            args.insert("name".to_owned(), toml::Value::String(s.name.clone()));
+            SelectItem::new(
+                s.name.clone(),
+                phux_config::keybind::ResolvedAction {
+                    action: "switch-session".to_owned(),
                     args,
                 },
             )
@@ -1053,6 +1160,8 @@ mod tests {
             overlays: &mut overlays,
             keybindings: None,
             theme: &theme,
+            sessions: &[],
+            focused_session: None,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1178,6 +1287,17 @@ mod tests {
         action: &phux_config::keybind::ResolvedAction,
         workspace: &mut Workspace,
     ) -> (ActionEffects, OverlayState) {
+        run_capturing_with_sessions(action, workspace, &[], None)
+    }
+
+    /// Like [`run_capturing`], but seeds the dispatcher's cached session
+    /// graph so `session-picker` tests can drive the picker.
+    fn run_capturing_with_sessions(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+        sessions: &[phux_protocol::wire::info::SessionInfo],
+        focused_session: Option<phux_protocol::ids::SessionId>,
+    ) -> (ActionEffects, OverlayState) {
         let mut next_request_id = 100;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
@@ -1194,6 +1314,8 @@ mod tests {
                 overlays: &mut overlays,
                 keybindings: None,
                 theme: &theme,
+                sessions,
+                focused_session,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -1312,6 +1434,94 @@ mod tests {
         assert!(!effects.set_metadata, "window switch is per-client");
     }
 
+    fn sinfo(id: u32, name: &str) -> phux_protocol::wire::info::SessionInfo {
+        phux_protocol::wire::info::SessionInfo::new(phux_protocol::ids::SessionId::new(id), name)
+            .with_window_count(1)
+    }
+
+    #[test]
+    fn session_picker_items_exclude_focused_and_commit_switch_session() {
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch"), sinfo(3, "logs")];
+        let items = session_picker_items(&sessions, Some(phux_protocol::ids::SessionId::new(1)));
+        // Focused session ("work") is excluded; the two peers remain.
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "scratch");
+        assert_eq!(items[1].label, "logs");
+        // Each row commits switch-session with the session name.
+        assert_eq!(items[0].action.action, "switch-session");
+        assert_eq!(
+            items[0].action.args.get("name"),
+            Some(&toml::Value::String("scratch".to_owned()))
+        );
+        assert_eq!(items[0].secondary.as_deref(), Some("1 window"));
+    }
+
+    #[test]
+    fn session_picker_action_pushes_overlay_with_peer_sessions() {
+        let mut workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        let (effects, overlays) = run_capturing_with_sessions(
+            &bare_action("session-picker"),
+            &mut workspace,
+            &sessions,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        assert!(
+            overlays.is_active(),
+            "session-picker should push an overlay"
+        );
+        assert!(!effects.bell);
+    }
+
+    #[test]
+    fn session_picker_with_only_current_session_bells() {
+        // The client's own session is the only one — nothing to switch to.
+        let mut workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work")];
+        let (effects, overlays) = run_capturing_with_sessions(
+            &bare_action("session-picker"),
+            &mut workspace,
+            &sessions,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        assert!(!overlays.is_active(), "no peers ⇒ no overlay");
+        assert!(effects.bell);
+    }
+
+    #[test]
+    fn session_picker_with_no_sessions_bells() {
+        // Before the first ATTACHED snapshot lands the cache is empty.
+        let mut workspace = Workspace::single(tid(1));
+        let (effects, overlays) =
+            run_capturing_with_sessions(&bare_action("session-picker"), &mut workspace, &[], None);
+        assert!(!overlays.is_active());
+        assert!(effects.bell);
+    }
+
+    #[test]
+    fn session_picker_commit_routes_switch_session_through_run_action() {
+        // The architectural invariant: a picker row commits a
+        // switch-session ResolvedAction that, fed back through run_action,
+        // yields the switch_session effect keyed by the chosen name.
+        let mut workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        let items = session_picker_items(&sessions, Some(phux_protocol::ids::SessionId::new(1)));
+        let effects = run(&items[0].action, &mut workspace);
+        assert_eq!(
+            effects.switch_session.as_deref(),
+            Some("scratch"),
+            "committing the picker row requests a switch to that session"
+        );
+    }
+
+    #[test]
+    fn switch_session_missing_name_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("switch-session"), &mut workspace);
+        assert!(effects.switch_session.is_none());
+        assert!(effects.bell, "a switch-session with no name arg bells");
+    }
+
     #[test]
     fn detach_action_requests_detach_effect() {
         let mut workspace = Workspace::default();
@@ -1330,6 +1540,8 @@ mod tests {
             overlays: &mut overlays,
             keybindings: None,
             theme: &theme,
+            sessions: &[],
+            focused_session: None,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),

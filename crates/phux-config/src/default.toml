@@ -103,9 +103,18 @@ prefix = "C-a"
 ":" = "command-palette"
 
 # Window picker: a filterable list of open windows; choosing one switches
-# to it (phux-4li.19). The <leader> a session switcher is a separate wave
-# (needs server session enumeration) and is left unbound for now.
+# to it (phux-4li.19).
 "w" = "window-picker"
+
+# Session picker (`session-picker`, phux-4li.20): a filterable list of the
+# server's other sessions, built from the ATTACHED snapshot. Choosing a
+# row commits `switch-session { name }` through the single dispatch path.
+# `<leader> a` is intentionally LEFT UNBOUND: in-process re-attach (the
+# tear-down/rebuild of pane mirrors, layout subscription, and predict
+# queue against a new ATTACH target) is not yet implemented, so a bound
+# `a` would open a picker whose selection only logs + bells. The action
+# is reachable from the command palette for discoverability; bind `a`
+# once re-attach lands.
 
 # Detach this client from the session.
 "d" = "detach"

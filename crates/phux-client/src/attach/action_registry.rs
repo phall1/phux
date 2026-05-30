@@ -137,6 +137,11 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "session-picker",
+        description: "Pick a session from a filterable list",
+        args: &[],
+    },
+    ActionSpec {
         name: "rename-window",
         description: "Rename the active window (interactive prompt)",
         args: &[],
@@ -254,7 +259,10 @@ mod tests {
         // `command-palette` and `select-window` are dispatched but
         // intentionally excluded from the palette (no palette UI / opens
         // self), so they are exempt from the registry-side check.
-        const PALETTE_EXEMPT: &[&str] = &["command-palette", "select-window"];
+        // `switch-session` is likewise dispatched-only: it requires a
+        // `name` arg supplied by the session picker, so a bare palette
+        // row would have no target to act on.
+        const PALETTE_EXEMPT: &[&str] = &["command-palette", "select-window", "switch-session"];
 
         // The two source-of-truth sets must be identical: the registry's
         // presentation rows and the dispatcher's handled-action names.

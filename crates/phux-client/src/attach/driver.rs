@@ -434,6 +434,12 @@ async fn main_loop<W: super::RenderSink>(
     let mut viewport_dims: (u16, u16) =
         current_viewport().map_or((80, 24), |v| (v.cols.max(1), v.rows.max(1)));
     let mut session_name = String::new();
+    // phux-4li.20: cache of the server's session graph, refreshed from
+    // every ATTACHED snapshot. The `<leader> a` session picker reads
+    // this to list peer sessions; `focused_session` marks the row the
+    // client is currently attached to (excluded from the picker).
+    let mut sessions: Vec<phux_protocol::wire::info::SessionInfo> = Vec::new();
+    let mut focused_session: Option<phux_protocol::ids::SessionId> = None;
     let mut parser = StdinParser::new();
     // Predictive local echo (phux-9gw.1). State is updated alongside
     // every keystroke and drained on every TERMINAL_OUTPUT; when
@@ -473,6 +479,10 @@ async fn main_loop<W: super::RenderSink>(
     )?;
     if outcome.exit {
         exit_after_detach();
+    }
+    if let Some((list, focused)) = outcome.sessions {
+        sessions = list;
+        focused_session = Some(focused);
     }
     if outcome.subscribe_layout {
         // phux-4li.5: ask the server for any persisted layout, then
@@ -566,6 +576,13 @@ async fn main_loop<W: super::RenderSink>(
                         )?;
                         if outcome.exit {
                             exit_after_detach();
+                        }
+                        // phux-4li.20: refresh the cached session graph
+                        // whenever an ATTACHED snapshot lands so the
+                        // session picker lists the current peer set.
+                        if let Some((list, focused)) = outcome.sessions {
+                            sessions = list;
+                            focused_session = Some(focused);
                         }
                         // phux-3uv / ADR-0018: ack the applied TERMINAL_OUTPUT
                         // so the server's per-consumer SnapshotSynthesizer
@@ -690,6 +707,8 @@ async fn main_loop<W: super::RenderSink>(
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
+                    sessions: &sessions,
+                    focused_session,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -748,6 +767,8 @@ async fn main_loop<W: super::RenderSink>(
                     overlays: &mut overlays,
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
+                    sessions: &sessions,
+                    focused_session,
                 };
                 let layout_changed = dispatch_input_events(
                     out,

@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 
-use phux_protocol::ids::TerminalId;
+use phux_protocol::ids::{SessionId, TerminalId};
 use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
+use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
@@ -62,6 +63,13 @@ pub(super) struct FrameOutcome {
     /// against the acked reference (rather than re-emitting an unbounded
     /// unacked delta forever). Set ONLY by the `TerminalOutput` arm.
     pub(super) ack: Option<(TerminalId, u64)>,
+    /// phux-4li.20: `Some((sessions, focused))` ⇒ ATTACHED just landed
+    /// and carried the server's full session graph. The driver caches
+    /// it so the `<leader> a` session picker can list the other
+    /// sessions without a follow-up request/response frame — the
+    /// `ATTACHED` snapshot is already authoritative at attach time (SPEC
+    /// §13). Set ONLY by the `Attached` arm.
+    pub(super) sessions: Option<(Vec<SessionInfo>, SessionId)>,
 }
 
 /// Process one server-to-client frame. Returns a [`FrameOutcome`]
@@ -135,6 +143,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // focused session somehow isn't in the list (shouldn't
             // happen — the focused session is always one of them).
             *session_name = focused_session_name(&snapshot);
+            // phux-4li.20: hand the driver the full session graph so the
+            // `<leader> a` session picker can list peer sessions. The
+            // snapshot is the authoritative session list at attach time;
+            // a dedicated request/response frame would be redundant.
+            let session_cache = (snapshot.sessions.clone(), snapshot.focused_session);
             // `ATTACHED` per SPEC §13 carries the session/window/pane
             // graph; the per-pane initial cells arrive separately via
             // TERMINAL_SNAPSHOT.
@@ -146,6 +159,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // clients (ADR-0019 decision 2).
             Ok(FrameOutcome {
                 subscribe_layout: true,
+                sessions: Some(session_cache),
                 ..FrameOutcome::default()
             })
         }
