@@ -122,20 +122,19 @@ mod server_side {
 
     impl From<MouseButton> for libghostty_vt::mouse::Button {
         fn from(b: MouseButton) -> Self {
-            use libghostty_vt::mouse::Button as L;
             match b {
-                MouseButton::Unknown => L::Unknown,
-                MouseButton::Left => L::Left,
-                MouseButton::Right => L::Right,
-                MouseButton::Middle => L::Middle,
-                MouseButton::Four => L::Four,
-                MouseButton::Five => L::Five,
-                MouseButton::Six => L::Six,
-                MouseButton::Seven => L::Seven,
-                MouseButton::Eight => L::Eight,
-                MouseButton::Nine => L::Nine,
-                MouseButton::Ten => L::Ten,
-                MouseButton::Eleven => L::Eleven,
+                MouseButton::Unknown => Self::Unknown,
+                MouseButton::Left => Self::Left,
+                MouseButton::Right => Self::Right,
+                MouseButton::Middle => Self::Middle,
+                MouseButton::Four => Self::Four,
+                MouseButton::Five => Self::Five,
+                MouseButton::Six => Self::Six,
+                MouseButton::Seven => Self::Seven,
+                MouseButton::Eight => Self::Eight,
+                MouseButton::Nine => Self::Nine,
+                MouseButton::Ten => Self::Ten,
+                MouseButton::Eleven => Self::Eleven,
             }
         }
     }

@@ -5,6 +5,7 @@
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
+#![allow(clippy::doc_markdown, reason = "tests")]
 #![allow(unused_unsafe, reason = "env::set_var is unsafe only on edition 2024")]
 
 use std::time::Duration;

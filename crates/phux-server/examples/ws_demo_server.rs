@@ -6,6 +6,13 @@
 //!
 //!   PHUX_WS_ADDR=127.0.0.1:47654 cargo run --example ws_demo_server
 
+#![allow(
+    clippy::print_stderr,
+    clippy::expect_used,
+    clippy::doc_markdown,
+    reason = "example/dev tool"
+)]
+
 use phux_server::{ServerConfig, ServerRuntime};
 use portable_pty::CommandBuilder;
 

@@ -99,9 +99,8 @@ fn ws_lifecycle_ping_pong() {
 
         // Expect a PONG binary message: [len(4)][type(1)][nonce(8)].
         let pong = loop {
-            match ws.next().await.expect("ws closed before PONG").unwrap() {
-                Message::Binary(data) => break data,
-                _ => continue,
+            if let Message::Binary(data) = ws.next().await.expect("ws closed before PONG").unwrap() {
+                break data;
             }
         };
         assert!(pong.len() >= 13, "PONG frame too short: {}", pong.len());
