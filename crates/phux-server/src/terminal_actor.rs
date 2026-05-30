@@ -50,7 +50,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-use crate::grid::{SnapshotBytes, SnapshotSynthesizer};
+use crate::grid::{ConsumerReference, SnapshotBytes, SnapshotSynthesizer};
 use crate::input::paste::PasteOutcome;
 use crate::input::{
     PerTerminalFocusEncoder, PerTerminalKeyEncoder, PerTerminalMouseEncoder,
@@ -142,12 +142,22 @@ impl LastAckedCursorMode {
 /// `libghostty-send-sync` bd memory). Lives only inside the actor,
 /// which runs on the `LocalSet` thread that owns the `Terminal`.
 pub struct ConsumerSyncState {
-    /// Per-consumer incremental synthesizer (phux-q0e.3). Owns the
-    /// per-consumer `RenderState` — the dirty cache that drives the
-    /// per-tick diff walk. Each consumer gets its own synthesizer so the
-    /// dirty bookkeeping is isolated; `RowIterator`/`CellIterator`
-    /// allocations are cheap.
-    pub synthesizer: SnapshotSynthesizer<'static>,
+    /// Per-consumer reference grid for the lazy state-sync diff
+    /// (phux-ia4). Holds the last-synced rendered body of every viewport
+    /// row plus the last-synced cursor/mode state. The tick driver diffs
+    /// the live `Terminal` against this (via the actor's shared
+    /// [`SnapshotSynthesizer`]) and advances it on emit.
+    ///
+    /// This replaces the earlier per-consumer `RenderState` dirty cache.
+    /// `RenderState::update` *consumes* the shared `Terminal` dirty bits
+    /// on the first read each tick (libghostty `render.zig`), so a
+    /// per-consumer `RenderState` could not isolate dirty across N
+    /// consumers on one pane: the first consumer's `update` starved the
+    /// rest. The reference grid is fully independent per consumer and
+    /// never reads the shared dirty bits, so every consumer gets its own
+    /// correct diff each tick regardless of attach/ack divergence. See
+    /// [`SnapshotSynthesizer::synthesize_against_reference`].
+    pub reference: ConsumerReference,
     /// Per-consumer outbound mailbox the tick driver pushes
     /// `TERMINAL_OUTPUT` frames into. Cloned from the
     /// [`crate::state::AttachedClient`]'s `tx` at ATTACH time.
@@ -246,13 +256,13 @@ pub struct ConsumerAttachOutcome {
 /// path in response to a [`ConsumerAttachRequest`].
 #[derive(Debug, thiserror::Error)]
 pub enum ConsumerAttachError {
-    /// libghostty refused to allocate the per-consumer `RenderState` /
-    /// iterators backing the `SnapshotSynthesizer`.
+    /// libghostty refused to allocate the one-shot `RenderState` used to
+    /// capture the consumer's initial cursor/mode state.
     #[error("libghostty allocation failed: {0}")]
     Ghostty(#[from] libghostty_vt::Error),
-    /// `SnapshotSynthesizer::new` (or its priming `mark_synced` call)
-    /// failed.
-    #[error("synthesizer setup failed: {0}")]
+    /// Priming the per-consumer reference grid
+    /// (`SnapshotSynthesizer::prime_reference`) failed.
+    #[error("reference priming failed: {0}")]
     Synth(#[from] crate::grid::SynthesisError),
 }
 
@@ -512,58 +522,51 @@ pub struct TerminalActor {
     consumer_detach_rx: mpsc::Receiver<ConsumerDetachRequest>,
     /// Per-consumer state-sync `FRAME_ACK` channel (phux-q0e.4). Drained
     /// by a select! arm that walks `consumer_states[client_id]` and
-    /// clears the dirty cache via `SnapshotSynthesizer::mark_synced`.
+    /// advances `last_acked_seq` (the reference itself advances on emit).
     consumer_ack_rx: mpsc::Receiver<ConsumerAckRequest>,
     /// Per-consumer state-sync cache (ADR-0018, phux-q0e.2). Keyed by
     /// the [`ClientId`] the runtime uses for subscription tracking in
     /// [`crate::state::ServerState`]; entries are inserted by the
-    /// ATTACH handler and removed by DETACH. `!Send` because
-    /// `RenderState` is `!Send` — fine; the whole actor lives on the
+    /// ATTACH handler and removed by DETACH. `!Send` because the actor
+    /// holds the `!Send` `Terminal` — fine; the whole actor lives on the
     /// `LocalSet` thread (ADR-0014).
     consumer_states: HashMap<ClientId, ConsumerSyncState>,
-    /// Whether the per-consumer state-sync tick (phux-q0e.3) is allowed
-    /// to *emit* `TerminalOutput` frames (ADR-0018).
+    /// Whether the per-consumer state-sync tick (phux-q0e.3) is the live
+    /// emitter of `TerminalOutput` frames (ADR-0018).
     ///
-    /// `false` in production. When `true` the tick is the live
-    /// server->client emission path: per attached consumer it walks the
-    /// per-consumer `SnapshotSynthesizer`, diffs the live `Terminal`
-    /// against that consumer's last-synced reference, and pushes only the
-    /// delta with a per-consumer monotonic `seq`; the client acks each
-    /// applied frame and `on_frame_ack` -> `mark_synced` evicts the dirty
-    /// cache.
+    /// `true` in production (phux-ia4). When `true` the tick is the live
+    /// server->client emission path: per attached consumer it diffs the
+    /// live `Terminal` against that consumer's own
+    /// [`crate::grid::ConsumerReference`] (via the actor's shared
+    /// [`SnapshotSynthesizer`]) and pushes only the delta with a
+    /// per-consumer monotonic `seq`. The reference advances on emit
+    /// (emit-once); the runtime suppresses its broadcast pump for any
+    /// tick-managed consumer so exactly one emitter serves each consumer.
     ///
-    /// Three prerequisites gate flipping this on. phux-3uv landed the
-    /// first two; the third is an open blocker that keeps it `false`:
+    /// Three prerequisites had to land before flipping this on; all are
+    /// now met:
     ///
-    /// 1. **Single emitter (DONE, phux-3uv).** The runtime's
-    ///    `handle_attach` suppresses its raw PTY-byte broadcast pump for
-    ///    any consumer this actor reports as tick-managed (via
+    /// 1. **Single emitter (phux-3uv).** The runtime's `handle_attach`
+    ///    suppresses its raw PTY-byte broadcast pump for any consumer this
+    ///    actor reports as tick-managed (via
     ///    [`ConsumerAttachOutcome::tick_managed`]). Without that a
-    ///    tick-emitted `TerminalOutput` and the broadcast pump's would
-    ///    both land on the same consumer mailbox with independent `seq` —
-    ///    double-paint, non-monotonic `seq` (SPEC §12.2).
-    /// 2. **Acked eviction (DONE, phux-3uv).** The client drives the
-    ///    `FRAME_ACK` loop, so `mark_synced` fires on each ack. Without
-    ///    acks the tick would re-diff an ever-larger unacked delta forever
-    ///    (loss tolerance still holds: a dropped ack re-emits a larger diff
-    ///    against the older reference).
-    /// 3. **Per-consumer dirty isolation (BLOCKER, follow-up to
-    ///    phux-3uv).** `RenderState::update` *consumes* the Terminal's
-    ///    dirty state (libghostty `render.rs:307`). With N consumers
-    ///    sharing one pane, the first consumer's `update` in a tick clears
-    ///    the shared dirty bits, so every other consumer that tick reads
-    ///    `Dirty::Clean` and emits nothing — multi-client same-pane attach
-    ///    (byc.6.4/6.5) starves all-but-one consumer. ADR-0018's
-    ///    per-consumer-RenderState diffing assumes isolation this
-    ///    libghostty version does not provide on read; resolving it needs
-    ///    a synthesizer change (e.g. snapshot the dirty set before any
-    ///    consumer walk, or diff against a per-consumer reference grid
-    ///    rather than the shared dirty bits) and is out of phux-3uv's
-    ///    scope.
+    ///    tick-emitted `TerminalOutput` and the broadcast pump's would both
+    ///    land on the same consumer mailbox with independent `seq` —
+    ///    double-paint, non-monotonic `seq` (proto.md §8.2).
+    /// 2. **Client `FRAME_ACK` loop (phux-3uv).** The client drives
+    ///    `FRAME_ACK`, advancing the server's `last_acked_seq` for
+    ///    backpressure accounting (proto.md §8.2).
+    /// 3. **Per-consumer dirty isolation (phux-ia4).** `RenderState::update`
+    ///    *consumes* the shared `Terminal` dirty state on first read each
+    ///    tick (libghostty `render.zig`), which starved all-but-one
+    ///    consumer on a shared pane under the old per-consumer-`RenderState`
+    ///    dirty model. Resolved by diffing each consumer against its own
+    ///    [`crate::grid::ConsumerReference`] (rendered row bodies), which
+    ///    never reads the shared dirty bits — full per-consumer isolation
+    ///    regardless of attach/ack divergence.
     ///
-    /// Set to `true` only by tests that exercise a SINGLE consumer
-    /// (which is correct under prerequisite 3); production and multi-
-    /// consumer paths keep it `false`.
+    /// Tests may set it `false` (e.g. to assert the gated-off path stays
+    /// silent) via the test-only setters; production leaves it `true`.
     consumer_tick_emits: bool,
     /// Bytes streaming in from the PTY reader thread. `None` when this
     /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
@@ -929,20 +932,18 @@ impl TerminalActor {
             consumer_detach_rx,
             consumer_ack_rx,
             consumer_states: HashMap::new(),
-            // phux-3uv: STAYS `false`. The client FRAME_ACK loop and the
-            // per-tick-managed-consumer broadcast suppression (both landed
-            // in phux-3uv) are the two prerequisites for flipping this on,
-            // but a third blocker surfaced: `RenderState::update` *consumes*
-            // the Terminal's dirty state (libghostty render.rs:307 — "This
-            // consumes terminal/screen dirty state"). With N consumers
-            // sharing one pane, the first consumer's `update` in a tick
-            // clears the shared dirty bits, so every other consumer that
-            // tick sees `Dirty::Clean` and emits nothing — multi-client
-            // same-pane attach (byc.6.4/6.5) starves all-but-one consumer.
-            // The per-consumer-RenderState model in ADR-0018 needs dirty
-            // isolation that this libghostty version does not provide on
-            // read. Tracked as the follow-up to phux-3uv. See the field doc.
-            consumer_tick_emits: false,
+            // phux-ia4: flipped ON. The state-sync tick is now the live
+            // server->consumer emitter. All three prerequisites are met:
+            // (1) broadcast suppression per tick-managed consumer landed in
+            // phux-3uv; (2) the client FRAME_ACK loop landed in phux-3uv;
+            // (3) per-consumer dirty isolation is solved here by the
+            // per-consumer reference grid (`ConsumerReference` +
+            // `SnapshotSynthesizer::synthesize_against_reference`), which
+            // diffs each consumer against its own last-synced rows rather
+            // than the shared `Terminal` dirty bits that
+            // `RenderState::update` consumes on first read. See the field
+            // doc.
+            consumer_tick_emits: true,
             pty_rx,
             pty_tx,
             pty,
@@ -1000,15 +1001,13 @@ impl TerminalActor {
     /// Why prime + clear: the runtime's ATTACH path emits a
     /// `TERMINAL_SNAPSHOT` immediately after this call returns, which
     /// brings the consumer's mirror Terminal up to the current
-    /// canonical state. The per-consumer `RenderState` must reflect
-    /// that same reference point — otherwise the first incremental
-    /// emission would treat every row as dirty and re-paint the screen
-    /// the snapshot just installed.
+    /// canonical state. The per-consumer reference must reflect that same
+    /// reference point — otherwise the first incremental emission would
+    /// treat every row as changed and re-paint the screen the snapshot
+    /// just installed.
     ///
-    /// Idempotent: re-attaching the same `client_id` (e.g. on a
-    /// runtime bug) overwrites the prior entry. The old `RenderState`
-    /// is dropped by `HashMap::insert`'s return-value drop, freeing
-    /// the underlying libghostty allocation.
+    /// Idempotent: re-attaching the same `client_id` (e.g. on a runtime
+    /// bug) overwrites the prior entry.
     fn register_consumer(
         &mut self,
         client_id: ClientId,
@@ -1017,26 +1016,28 @@ impl TerminalActor {
     ) -> Result<(), ConsumerAttachError> {
         let terminal = self.terminal.borrow();
         // Cursor + DEC mode capture happens against a one-shot
-        // `RenderState` rather than the synthesizer's internal one, so
-        // we don't conflict with the priming `mark_synced` borrow below.
-        // Allocation cost is one libghostty handle; freed at end of
-        // scope.
+        // `RenderState` so we don't conflict with the shared
+        // synthesizer's borrow used to prime the reference below.
+        // Allocation cost is one libghostty handle; freed at end of scope.
         let last_cursor_mode = {
             let mut render_state = RenderState::new()?;
             let snapshot = render_state.update(&terminal)?;
             LastAckedCursorMode::capture(&terminal, &snapshot)
         };
-        // Allocate the per-consumer synthesizer and prime it against
-        // the live terminal so the next incremental synthesis emits
-        // only deltas from *now*. `mark_synced` is the q0e.1 primitive
-        // that does the walk-and-clear pass (it `update`s, walks rows
-        // clearing each dirty bit, then clears the snapshot-level bit).
-        let mut synthesizer = SnapshotSynthesizer::new()?;
-        synthesizer.mark_synced(&terminal)?;
+        // Prime the per-consumer reference grid against the live terminal
+        // so the next `synthesize_against_reference` emits only deltas
+        // from *now* — the `TERMINAL_SNAPSHOT` the runtime emits right
+        // after this call already brings the consumer's mirror to this
+        // same point. Uses the actor's shared synthesizer (its
+        // `RenderState`/iterators); the reference itself is per-consumer.
+        let mut reference = ConsumerReference::new();
+        self.synth
+            .borrow_mut()
+            .prime_reference(&terminal, &mut reference)?;
         self.consumer_states.insert(
             client_id,
             ConsumerSyncState {
-                synthesizer,
+                reference,
                 outbound,
                 wire_terminal_id,
                 // First emission gets `seq == 1`. `0` is reserved for
@@ -1055,30 +1056,28 @@ impl TerminalActor {
     /// of `ServerState::detach`.
     fn unregister_consumer(&mut self, client_id: ClientId) {
         // `HashMap::remove` returns the entry; dropping it frees the
-        // libghostty `RenderState` via its `Drop` impl.
+        // per-consumer reference grid.
         let _ = self.consumer_states.remove(&client_id);
     }
 
     /// Handle an inbound `FRAME_ACK` from `client_id` carrying cumulative
     /// `seq` (phux-q0e.4, ADR-0018 addendum).
     ///
-    /// Closes the lazy state-synchronization loop:
+    /// Under the v0.1 emit-once model (phux-ia4) the per-consumer
+    /// reference advances on *emit*, not on ack: a given change is shipped
+    /// exactly once and the reference is committed before the frame goes
+    /// out (see
+    /// [`crate::grid::SnapshotSynthesizer::synthesize_against_reference`]).
+    /// `FRAME_ACK` therefore no longer drives cache eviction; it tracks
+    /// `last_acked_seq` for backpressure accounting (proto.md §8.2) and
+    /// refreshes the informational cursor/mode capture. The loss-tolerance
+    /// "re-diff against an older reference on a dropped frame" property is
+    /// a future lossy-transport concern (ADR-0018), not wired on the
+    /// reliable v0.1 transports.
     ///
-    /// 1. tick driver emits `TERMINAL_OUTPUT { seq = N }` against the
-    ///    per-consumer reference state,
-    /// 2. consumer applies the bytes, sends `FRAME_ACK { seq = N }`,
-    /// 3. this method calls `SnapshotSynthesizer::mark_synced` so the
-    ///    consumer's per-consumer dirty cache reflects "everything up to
-    ///    `N` is on the consumer's mirror,"
-    /// 4. the next tick re-diffs against the just-acked reference rather
-    ///    than re-emitting the same bytes.
-    ///
-    /// Per SPEC §12.2 acks are cumulative: an ack for `seq = N` implies
+    /// Per proto.md §8.2 acks are cumulative: an ack for `seq = N` implies
     /// all prior emissions up to `N`. Older / duplicate / out-of-order
-    /// acks (`seq <= last_acked_seq`) are silently dropped — they carry
-    /// no new information about which state the consumer has, and
-    /// applying them would just re-walk the same dirty bits for no
-    /// progress.
+    /// acks (`seq <= last_acked_seq`) are silently dropped.
     ///
     /// Silent no-op if `client_id` is not currently registered. This
     /// races cleanly against detach: the runtime may dispatch an
@@ -1096,10 +1095,8 @@ impl TerminalActor {
             return;
         };
         if seq <= consumer.last_acked_seq {
-            // Older or duplicate ack — SPEC §12.2 makes acks cumulative,
-            // so `seq <= last_acked_seq` strictly carries no new
-            // information. Drop without touching `mark_synced` — that
-            // would re-walk the dirty bits for no progress.
+            // Older or duplicate ack — acks are cumulative (proto.md
+            // §8.2), so `seq <= last_acked_seq` carries no new information.
             trace!(
                 ?client_id,
                 seq,
@@ -1110,26 +1107,9 @@ impl TerminalActor {
         }
         consumer.last_acked_seq = seq;
 
-        // Clear the per-consumer dirty cache so the next tick re-diffs
-        // against the just-acked reference. Per ADR-0018 this is the
-        // ONLY place `mark_synced` is allowed to fire — the tick driver
-        // (phux-q0e.3) deliberately does not, so unacked diffs stay
-        // re-emittable for loss tolerance.
+        // Refresh the informational cursor/mode capture. Uses a one-shot
+        // `RenderState` so it doesn't disturb the per-consumer reference.
         let terminal = self.terminal.borrow();
-        if let Err(err) = consumer.synthesizer.mark_synced(&terminal) {
-            warn!(
-                ?client_id,
-                seq,
-                error = %err,
-                "FRAME_ACK: SnapshotSynthesizer::mark_synced failed; per-consumer dirty cache not cleared",
-            );
-        }
-
-        // Refresh the per-consumer cursor/mode capture so the tick
-        // driver doesn't redundantly re-emit cursor placement / DEC mode
-        // toggles that the just-acked frame already delivered. Use the
-        // same one-shot RenderState pattern as `register_consumer` so we
-        // don't conflict with the synthesizer's internal state above.
         let cursor_mode = match RenderState::new() {
             Ok(mut rs) => match rs.update(&terminal) {
                 Ok(snapshot) => Some(LastAckedCursorMode::capture(&terminal, &snapshot)),
@@ -1159,7 +1139,7 @@ impl TerminalActor {
 
         trace!(
             ?client_id,
-            seq, "FRAME_ACK applied: per-consumer dirty cache cleared"
+            seq, "FRAME_ACK applied: last_acked_seq advanced"
         );
     }
 
@@ -1176,14 +1156,20 @@ impl TerminalActor {
     }
 
     /// Test-only: enable the per-consumer tick emission gate
-    /// (`consumer_tick_emits`). Production keeps this `false` (see the
-    /// field doc — prerequisite 3, per-consumer dirty isolation, is an
-    /// open blocker). Tests flip it on to exercise the single-consumer
-    /// `tick_emit` synthesis-and-emit + `FRAME_ACK` loop, which IS correct
-    /// under that blocker (one `RenderState::update` per tick).
+    /// (`consumer_tick_emits`). Production now defaults this ON (phux-ia4);
+    /// this setter is retained for tests that toggle it back on after
+    /// disabling it.
     #[cfg(test)]
     pub const fn enable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = true;
+    }
+
+    /// Test-only: disable the per-consumer tick emission gate so the
+    /// `tick_emit`-stays-silent path can be asserted. Production defaults
+    /// it ON (phux-ia4).
+    #[cfg(test)]
+    pub const fn disable_tick_emit_for_test(&mut self) {
+        self.consumer_tick_emits = false;
     }
 
     /// Synthesize a snapshot of the current `Terminal` state. Exposed
@@ -1689,11 +1675,11 @@ impl TerminalActor {
                     self.on_frame_ack(client_id, seq);
                 }
 
-                // State-sync tick driver (phux-q0e.3, ADR-0018).
-                // Iterates each attached consumer, walks the per-consumer
-                // incremental synthesizer, and pushes a `TerminalOutput`
-                // frame onto that consumer's outbound mailbox whenever
-                // `synthesize_incremental` returns non-empty bytes.
+                // State-sync tick driver (phux-q0e.3, phux-ia4, ADR-0018).
+                // Iterates each attached consumer, diffs the live terminal
+                // against that consumer's own reference grid, and pushes a
+                // `TerminalOutput` frame onto its outbound mailbox whenever
+                // `synthesize_against_reference` returns non-empty bytes.
                 _ = tick.tick() => {
                     self.tick_emit();
                 }
@@ -1703,61 +1689,64 @@ impl TerminalActor {
         }
     }
 
-    /// One tick of the state-sync emission driver (phux-q0e.3).
+    /// One tick of the state-sync emission driver (phux-q0e.3, phux-ia4).
     ///
     /// Walks every attached consumer in turn. For each:
     ///
-    /// 1. Call [`SnapshotSynthesizer::synthesize_incremental`] against
-    ///    the live `Terminal`. Synthesis errors are logged and that
-    ///    consumer is skipped for this tick (no kill: a transient FFI
-    ///    error on one consumer must not poison the others).
-    /// 2. If the body is empty, skip — there is nothing to send. This
-    ///    is the steady-state path between writes: once a consumer is
-    ///    primed (or just acked) and the terminal has not changed,
-    ///    `Snapshot::dirty()` reads `Clean` and synthesis returns an
-    ///    empty body.
+    /// 1. Call [`SnapshotSynthesizer::synthesize_against_reference`] using
+    ///    the actor's shared synthesizer and the consumer's *own*
+    ///    reference grid. The reference is per-consumer and independent of
+    ///    the shared `Terminal` dirty bits, so every consumer on a shared
+    ///    pane gets its own correct diff this tick — even though
+    ///    libghostty's `RenderState::update` consumes the shared dirty
+    ///    state on the first read (the phux-ia4 fix). Synthesis errors are
+    ///    logged and that consumer is skipped for this tick (no kill: a
+    ///    transient FFI error on one consumer must not poison the others).
+    /// 2. If the body is empty, skip — the viewport is byte-identical to
+    ///    that consumer's reference (steady state between writes).
     /// 3. Stamp the per-consumer monotonic `seq` (starting at `1`,
     ///    incrementing per emission) and ship a `TerminalOutput` frame
     ///    via the per-consumer outbound mailbox.
     ///
-    /// Per ADR-0018: this method **does not** call `mark_synced`. The
-    /// loss-tolerance invariant requires unacked diffs to stay re-
-    /// emittable; `FRAME_ACK` (phux-q0e.4) is the only thing allowed to
-    /// clear dirty bits.
+    /// Emit-once (phux-ia4): `synthesize_against_reference` advances the
+    /// consumer's reference before returning a non-empty body, so a given
+    /// change is emitted exactly once and an unchanged terminal produces no
+    /// re-emission on the next tick. This is the v0.1 reliable-transport
+    /// model (proto.md §8); the loss-tolerance re-diff property is a future
+    /// lossy-transport concern (ADR-0018) and is not wired here.
     fn tick_emit(&mut self) {
-        // Emission gate (phux-0q8 / phux-3uv). Production runs this OFF:
-        // the broadcast pump in `runtime.rs` is the live emitter and the
-        // tick must stay silent or the consumer double-paints. When ON
-        // (single-consumer tests today) the tick is the single emitter and
-        // the runtime suppresses its broadcast pump per tick-managed
-        // consumer (see `ConsumerAttachOutcome`); the multi-consumer flip
-        // is blocked on per-consumer dirty isolation (see the
-        // `consumer_tick_emits` field doc, prerequisite 3). Either way the
-        // per-consumer `RenderState` cache is maintained by
-        // `register_consumer` (prime) and `on_frame_ack` (mark_synced); the
-        // gate only controls *emission*.
+        // Emission gate (phux-0q8 / phux-3uv / phux-ia4). When ON, the
+        // tick is the single server->consumer emitter and the runtime
+        // suppresses its broadcast pump per tick-managed consumer (see
+        // `ConsumerAttachOutcome`). When OFF, the broadcast pump in
+        // `runtime.rs` is the live emitter and the tick stays silent so the
+        // consumer does not double-paint. Either way the per-consumer
+        // reference is maintained by `register_consumer` (prime) and the
+        // tick itself (advance-on-emit); the gate only controls *emission*.
         if !self.consumer_tick_emits {
             return;
         }
-        // Borrow the terminal once per tick. The `synthesize_incremental`
-        // call only reads from it.
+        // Borrow the terminal + shared synthesizer once per tick. The
+        // synthesizer's `RenderState`/iterators are reused across
+        // consumers; the per-consumer state lives in each `reference`.
         let terminal = self.terminal.borrow();
+        let mut synth = self.synth.borrow_mut();
         for (client_id, state) in &mut self.consumer_states {
-            let bytes = match state.synthesizer.synthesize_incremental(&terminal) {
+            let bytes = match synth.synthesize_against_reference(&terminal, &mut state.reference) {
                 Ok(snap) => snap.bytes,
                 Err(err) => {
                     warn!(
                         ?client_id,
                         wire_terminal_id = state.wire_terminal_id,
                         error = %err,
-                        "state-sync tick: synthesize_incremental failed; skipping consumer",
+                        "state-sync tick: synthesize_against_reference failed; skipping consumer",
                     );
                     continue;
                 }
             };
             if bytes.is_empty() {
-                // Clean (or post-mark_synced fast path); nothing to do
-                // for this consumer this tick.
+                // Byte-identical to this consumer's reference; nothing to
+                // send this tick.
                 continue;
             }
             let seq = state.next_seq;
@@ -2341,15 +2330,18 @@ mod tests {
     }
 
     /// phux-0q8 coexistence gate: with a consumer registered but the
-    /// emission gate at its production default (`consumer_tick_emits ==
-    /// false`), `tick_emit` MUST NOT push any frame onto the consumer's
-    /// outbound mailbox — even with dirty seeded content. This is the
-    /// invariant that lets the per-consumer lifecycle run live alongside
-    /// the broadcast pump without double-painting the client.
+    /// emission gate forced OFF (`consumer_tick_emits == false`),
+    /// `tick_emit` MUST NOT push any frame onto the consumer's outbound
+    /// mailbox — even with dirty seeded content. This is the invariant
+    /// that lets the per-consumer lifecycle run live alongside the
+    /// broadcast pump without double-painting the client when the gate is
+    /// off. (Production defaults the gate ON since phux-ia4; this test
+    /// disables it explicitly.)
     #[test]
     fn tick_emit_is_silent_while_gate_is_off() {
         let bundle = TerminalActor::new(20, 5).expect("new");
         let mut actor = bundle.actor;
+        actor.disable_tick_emit_for_test();
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
         actor.register_consumer(client, tx, 11).expect("register");
@@ -2375,31 +2367,33 @@ mod tests {
         );
     }
 
-    /// phux-0q8 / phux-q0e.3 / phux-3uv: with the gate flipped on for a
-    /// SINGLE consumer, `tick_emit` synthesizes the dirty seeded grid and
-    /// ships exactly one `TerminalOutput` carrying the content, stamping
-    /// `seq = 1`. A second tick with no further writes re-emits the unacked
-    /// diff (`seq = 2`); a `FRAME_ACK` then clears the dirty cache so the
-    /// next tick is silent. Proves the single-consumer emission + ack loop
-    /// is correct (the path phux-3uv made solid; multi-consumer remains
-    /// gated off — see the `consumer_tick_emits` field doc, prerequisite 3).
+    /// phux-0q8 / phux-q0e.3 / phux-3uv / phux-ia4: with the gate ON (its
+    /// production default) for a SINGLE consumer, `tick_emit` diffs the
+    /// dirty seeded grid against the consumer's reference and ships exactly
+    /// one `TerminalOutput` carrying the content, stamping `seq = 1`.
+    ///
+    /// Emit-once (phux-ia4): the consumer's reference advances on emit, so
+    /// a second tick with no further writes is SILENT — the change is
+    /// delivered exactly once, not re-emitted every tick. A subsequent
+    /// write produces a fresh single emission (`seq = 2`).
     #[test]
     fn tick_emit_emits_once_when_gate_is_on() {
         let bundle = TerminalActor::new(20, 5).expect("new");
         let mut actor = bundle.actor;
+        // Gate is ON by default (phux-ia4); be explicit for clarity.
         actor.enable_tick_emit_for_test();
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
-        // Register against the (blank) terminal: the synthesizer is primed
+        // Register against the (blank) terminal: the reference is primed
         // so deltas are measured "from now." Writing AFTER register is what
-        // makes the next tick dirty.
+        // makes the next tick produce a diff.
         actor.register_consumer(client, tx, 11).expect("register");
         actor.terminal.borrow_mut().vt_write(b"q0e-marker");
 
         actor.tick_emit();
         let frame = rx
             .try_recv()
-            .expect("gate on: first tick must emit the dirty grid");
+            .expect("gate on: first tick must emit the changed grid");
         let Outbound::Frame(FrameKind::TerminalOutput {
             terminal_id,
             seq,
@@ -2420,31 +2414,135 @@ mod tests {
             String::from_utf8_lossy(&bytes),
         );
 
-        // ADR-0018 loss tolerance: an UNACKED diff stays re-emittable, so
-        // the next tick re-sends it (now seq=2). `tick_emit` deliberately
-        // never calls `mark_synced`.
+        // Emit-once: with no further writes, the reference now matches the
+        // live grid, so the next tick is silent — NO re-emission of the
+        // already-delivered change.
+        actor.tick_emit();
+        assert!(
+            rx.try_recv().is_err(),
+            "gate on: emit-once — an already-emitted change is not re-sent on the next tick",
+        );
+
+        // A fresh write produces a new single emission with the next seq.
+        actor.terminal.borrow_mut().vt_write(b" more");
         actor.tick_emit();
         let frame = rx
             .try_recv()
-            .expect("gate on: unacked diff re-emits next tick");
-        let Outbound::Frame(FrameKind::TerminalOutput { seq, .. }) = frame else {
-            panic!("expected a TerminalOutput frame on re-emit");
+            .expect("gate on: a new write must emit a fresh diff");
+        let Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. }) = frame else {
+            panic!("expected a TerminalOutput frame on the new write");
         };
-        assert_eq!(seq, 2, "re-emission of the unacked diff stamps seq=2");
+        assert_eq!(seq, 2, "second distinct change stamps seq=2");
+        assert!(
+            contains_subslice(&bytes, b"more"),
+            "second emission must carry the newly-written content; got {:?}",
+            String::from_utf8_lossy(&bytes),
+        );
 
-        // FRAME_ACK is the only thing that clears the per-consumer dirty
-        // cache (`mark_synced`). After acking seq=2, the now-clean grid
-        // produces no further emission.
+        // FRAME_ACK advances last_acked_seq but does not itself trigger any
+        // emission; the grid is unchanged so the next tick stays silent.
         actor.on_frame_ack(client, 2);
         actor.tick_emit();
         assert!(
             rx.try_recv().is_err(),
-            "gate on: after FRAME_ACK clears the dirty cache, a clean grid is silent",
+            "gate on: an unchanged grid stays silent after ack",
         );
         assert_eq!(
             actor.consumer_state(client).expect("state").next_seq,
             3,
             "two emissions advanced next_seq to 3; the post-ack tick was silent",
+        );
+        assert_eq!(
+            actor.consumer_state(client).expect("state").last_acked_seq,
+            2,
+            "FRAME_ACK advanced last_acked_seq",
+        );
+    }
+
+    /// phux-ia4 regression: TWO consumers sharing one pane. A single tick
+    /// of new output MUST deliver the incremental to BOTH consumers — not
+    /// just the first one walked.
+    ///
+    /// This is the exact starvation the ticket is about. Under the old
+    /// per-consumer-`RenderState` dirty model, the first consumer's
+    /// `RenderState::update` consumed the shared `Terminal` dirty bits, so
+    /// the second consumer that tick observed `Dirty::Clean` and emitted
+    /// nothing. The per-consumer reference grid removes that coupling: each
+    /// consumer diffs against its own last-synced rows, so both receive the
+    /// change in the same tick regardless of walk order.
+    #[test]
+    fn tick_emit_serves_every_consumer_on_a_shared_pane() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        // Gate ON (production default).
+        actor.enable_tick_emit_for_test();
+
+        // Two consumers on the same pane, primed against the same blank
+        // terminal.
+        let client_a = ClientId(1);
+        let client_b = ClientId(2);
+        let (tx_a, mut rx_a) = dummy_outbound();
+        let (tx_b, mut rx_b) = dummy_outbound();
+        actor
+            .register_consumer(client_a, tx_a, 11)
+            .expect("register a");
+        actor
+            .register_consumer(client_b, tx_b, 11)
+            .expect("register b");
+
+        // One tick of new output AFTER both are primed.
+        actor.terminal.borrow_mut().vt_write(b"shared-marker");
+        actor.tick_emit();
+
+        // BOTH consumers must receive a TerminalOutput carrying the marker.
+        let recv_marker = |rx: &mut mpsc::Receiver<Outbound>, who: &str| {
+            let frame = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("consumer {who} starved: no frame this tick"));
+            let Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. }) = frame else {
+                panic!("consumer {who}: expected a TerminalOutput frame");
+            };
+            assert_eq!(seq, 1, "consumer {who}: first emission stamps seq=1");
+            assert!(
+                contains_subslice(&bytes, b"shared-marker"),
+                "consumer {who}: incremental must carry the shared marker; got {:?}",
+                String::from_utf8_lossy(&bytes),
+            );
+        };
+        recv_marker(&mut rx_a, "A");
+        recv_marker(&mut rx_b, "B");
+
+        // Emit-once per consumer: with no further writes, neither consumer
+        // gets a re-emission on the next tick.
+        actor.tick_emit();
+        assert!(
+            rx_a.try_recv().is_err(),
+            "consumer A: emit-once — no re-emission on an unchanged tick",
+        );
+        assert!(
+            rx_b.try_recv().is_err(),
+            "consumer B: emit-once — no re-emission on an unchanged tick",
+        );
+
+        // Per-consumer independence: a consumer that detaches does not
+        // perturb the other. A fresh write reaches the survivor exactly
+        // once.
+        actor.unregister_consumer(client_a);
+        actor.terminal.borrow_mut().vt_write(b" again");
+        actor.tick_emit();
+        let frame = rx_b.try_recv().expect("consumer B: must get the new write");
+        let Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. }) = frame else {
+            panic!("consumer B: expected a TerminalOutput frame");
+        };
+        assert_eq!(seq, 2, "consumer B: second distinct change stamps seq=2");
+        assert!(
+            contains_subslice(&bytes, b"again"),
+            "consumer B: must carry the second write; got {:?}",
+            String::from_utf8_lossy(&bytes),
+        );
+        assert!(
+            rx_a.try_recv().is_err(),
+            "consumer A detached: must receive nothing further",
         );
     }
 

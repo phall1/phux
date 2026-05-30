@@ -484,6 +484,252 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             }
         }
     }
+
+    /// Synthesize the per-consumer incremental diff by comparing the live
+    /// `terminal` against a caller-owned [`ConsumerReference`] (phux-ia4).
+    ///
+    /// # Why this exists (the per-consumer dirty-isolation fix)
+    ///
+    /// libghostty's `RenderState::update` **consumes** the shared
+    /// `Terminal`'s dirty state: it clears `t.flags.dirty`, the active
+    /// screen's dirty flags, and the per-page / per-row dirty bits
+    /// (`render.zig` `update`, lines ~440-461 and ~647-648 of the pinned
+    /// `acc4b87` checkout). A `RenderState`'s own `Snapshot::dirty()` /
+    /// `Row::dirty()` are only *populated* from those shared bits during
+    /// `update`. So with N consumers sharing one pane, the FIRST
+    /// consumer's `update` in a tick consumes the shared dirty bits and
+    /// every OTHER consumer's `update` that tick observes `Dirty::Clean`
+    /// — starving all-but-one. [`Self::synthesize_incremental`] (which
+    /// reads `Snapshot::dirty()`) is therefore only correct for a single
+    /// consumer per tick.
+    ///
+    /// This method sidesteps the shared dirty bits entirely. It renders
+    /// each viewport row's cell body into bytes and compares it against
+    /// the per-consumer reference's stored row body. Rows whose rendered
+    /// body differs from the reference are re-emitted (CUP + cells);
+    /// unchanged rows are skipped. The reference is independent per
+    /// consumer, so consumers that have diverged (different ack/sync
+    /// points, dropped frames) each get their own correct diff regardless
+    /// of what any other consumer did to the shared `Terminal` this tick.
+    ///
+    /// # Emit-once semantics
+    ///
+    /// On a non-empty diff this advances `reference` to the just-rendered
+    /// state *before returning the bytes* (the caller commits by shipping
+    /// the frame). A given change is therefore emitted exactly once and
+    /// not re-emitted on subsequent ticks until the content changes again.
+    /// This matches the v0.1 reliable-transport emission model (the
+    /// broadcast pump ships each PTY byte once) and keeps a non-acking
+    /// consumer from re-receiving the same diff every tick. The
+    /// loss-tolerance "re-diff against an older reference" property
+    /// (ADR-0018) belongs to the future lossy-transport path and is not
+    /// v0.1 normative (proto.md §8); `FRAME_ACK` remains wired for
+    /// backpressure accounting and forward compatibility.
+    ///
+    /// Returns the synthesized bytes plus the queried `(cols, rows)`. An
+    /// empty body means the viewport is byte-identical to the reference.
+    pub fn synthesize_against_reference(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        reference: &mut ConsumerReference,
+    ) -> Result<SnapshotBytes, SynthesisError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let cols = snapshot.cols()?;
+        let rows_n = snapshot.rows()?;
+
+        // Resize the reference to the current geometry. A dimension change
+        // (reflow) is handled by clearing the reference so every row is
+        // treated as changed: the resize resync path emits a fresh
+        // snapshot, but should this diff run mid-resize the safe behavior
+        // is a full repaint rather than a stale partial diff.
+        if reference.cols != cols || reference.rows != rows_n {
+            reference.reset_geometry(cols, rows_n);
+        }
+
+        // Render each row's body and diff against the reference.
+        let mut changed_rows: Vec<(u16, Vec<u8>)> = Vec::new();
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_n {
+                break;
+            }
+            // Each row body is rendered with a fresh SGR pen so the
+            // per-row byte sequence is self-contained and comparable
+            // across ticks regardless of neighbouring rows.
+            let mut body: Vec<u8> = Vec::with_capacity(usize::from(cols));
+            let mut prev_style: Option<Style> = None;
+            let mut cell_iter = self.cells.update(row)?;
+            while let Some(cell) = cell_iter.next() {
+                emit_cell(cell, &mut body, &mut prev_style)?;
+            }
+            let idx = usize::from(row_index);
+            if reference.rows_body[idx] != body {
+                changed_rows.push((row_index, body));
+            }
+            row_index += 1;
+        }
+
+        // Re-establish cursor + mode bits. Diff them flat against the
+        // reference; cursor placement can move without any row changing
+        // (a bare CUP onto an unchanged cell), so we capture the live
+        // cursor/mode and compare.
+        let live_cm = ReferenceCursorMode::capture(&snapshot, terminal)?;
+        let cursor_mode_changed = reference.cursor_mode != live_cm;
+
+        if changed_rows.is_empty() && !cursor_mode_changed {
+            // Byte-identical to the reference: nothing to ship.
+            return Ok(SnapshotBytes {
+                cols,
+                rows: rows_n,
+                bytes: Vec::new(),
+            });
+        }
+
+        // Build the diff: per changed row, CUP to its start then the body.
+        // No reset preamble — the mirror's untouched rows stay as they are.
+        let mut out: Vec<u8> = Vec::new();
+        for (row_index, body) in &changed_rows {
+            write_cup(&mut out, *row_index, 0);
+            // Reset SGR at the start of each emitted row so the row body
+            // (which itself starts from a fresh pen) lands on a clean pen.
+            out.extend_from_slice(b"\x1b[0m");
+            out.extend_from_slice(body);
+        }
+        // Always re-emit the cursor/mode epilogue on a non-empty tick (the
+        // changed rows moved the cursor as a side effect of painting).
+        emit_epilogue(&mut out, &snapshot, terminal)?;
+
+        // Emit-once: commit the reference to the just-rendered state. A
+        // subsequent unchanged tick will diff clean and ship nothing.
+        for (row_index, body) in changed_rows {
+            reference.rows_body[usize::from(row_index)] = body;
+        }
+        reference.cursor_mode = live_cm;
+
+        Ok(SnapshotBytes {
+            cols,
+            rows: rows_n,
+            bytes: out,
+        })
+    }
+
+    /// Prime `reference` to the current `terminal` state without emitting
+    /// any bytes (phux-ia4). Used at consumer registration so the first
+    /// `synthesize_against_reference` only reports deltas that occur
+    /// *after* attach (the `TERMINAL_SNAPSHOT` already brought the
+    /// consumer's mirror to this same reference point).
+    pub fn prime_reference(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        reference: &mut ConsumerReference,
+    ) -> Result<(), SynthesisError> {
+        let snapshot = self.render_state.update(terminal)?;
+        let cols = snapshot.cols()?;
+        let rows_n = snapshot.rows()?;
+        reference.reset_geometry(cols, rows_n);
+
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_n {
+                break;
+            }
+            let mut body: Vec<u8> = Vec::with_capacity(usize::from(cols));
+            let mut prev_style: Option<Style> = None;
+            let mut cell_iter = self.cells.update(row)?;
+            while let Some(cell) = cell_iter.next() {
+                emit_cell(cell, &mut body, &mut prev_style)?;
+            }
+            reference.rows_body[usize::from(row_index)] = body;
+            row_index += 1;
+        }
+        reference.cursor_mode = ReferenceCursorMode::capture(&snapshot, terminal)?;
+        Ok(())
+    }
+}
+
+/// Per-consumer reference state for the ADR-0018 lazy state-sync diff,
+/// owned by each attached consumer (phux-ia4).
+///
+/// Holds the last-synced rendered body of every viewport row plus the
+/// last-synced cursor/mode state. [`SnapshotSynthesizer::synthesize_against_reference`]
+/// diffs the live terminal against this and advances it on emit. It is
+/// fully independent per consumer, so it does not depend on libghostty's
+/// shared `Terminal` dirty bits (which `RenderState::update` consumes on
+/// the first read each tick — the bug this whole type exists to fix).
+#[derive(Debug, Clone, Default)]
+pub struct ConsumerReference {
+    /// Reference width. A geometry change resets the row bodies.
+    cols: u16,
+    /// Reference height.
+    rows: u16,
+    /// Per-row last-synced rendered cell body (one `Vec<u8>` per viewport
+    /// row, indexed by zero-based row). Compared byte-for-byte against the
+    /// freshly rendered row to decide whether the row changed.
+    rows_body: Vec<Vec<u8>>,
+    /// Last-synced cursor placement + DEC mode bits, diffed flat.
+    cursor_mode: ReferenceCursorMode,
+}
+
+impl ConsumerReference {
+    /// A fresh, empty reference. The first `prime_reference` /
+    /// `synthesize_against_reference` sizes it to the live geometry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resize the reference to `cols x rows`, clearing every row body so
+    /// the next diff treats all rows as changed (full repaint).
+    fn reset_geometry(&mut self, cols: u16, rows: u16) {
+        self.cols = cols;
+        self.rows = rows;
+        self.rows_body = vec![Vec::new(); usize::from(rows)];
+        self.cursor_mode = ReferenceCursorMode::default();
+    }
+}
+
+/// Cursor placement + the DEC mode bits the epilogue re-emits, captured
+/// for the per-consumer reference diff (phux-ia4). Compared flat: any
+/// field change triggers an epilogue re-emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "DEC mode bits are independent flags; a bitfield would obscure the per-flag mapping"
+)]
+struct ReferenceCursorMode {
+    cursor_x: Option<u16>,
+    cursor_y: Option<u16>,
+    cursor_visible: bool,
+    cursor_blinking: bool,
+    bracketed_paste: bool,
+    focus_event: bool,
+    alt_screen_legacy: bool,
+}
+
+impl ReferenceCursorMode {
+    /// Capture the live cursor/mode state. The `CursorVisualStyle` is not
+    /// tracked here (it is re-emitted in the epilogue on every non-empty
+    /// tick regardless); the fields captured are exactly those whose
+    /// change can independently force an epilogue re-emit.
+    fn capture(
+        snapshot: &Snapshot<'_, '_>,
+        terminal: &Terminal<'_, '_>,
+    ) -> Result<Self, SynthesisError> {
+        let (cursor_x, cursor_y) = snapshot
+            .cursor_viewport()?
+            .map_or((None, None), |v| (Some(v.x), Some(v.y)));
+        Ok(Self {
+            cursor_x,
+            cursor_y,
+            cursor_visible: snapshot.cursor_visible()?,
+            cursor_blinking: snapshot.cursor_blinking()?,
+            bracketed_paste: terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false),
+            focus_event: terminal.mode(Mode::FOCUS_EVENT).unwrap_or(false),
+            alt_screen_legacy: terminal.mode(Mode::ALT_SCREEN_LEGACY).unwrap_or(false),
+        })
+    }
 }
 
 /// Convenience wrapper: allocate a fresh [`SnapshotSynthesizer`] for a

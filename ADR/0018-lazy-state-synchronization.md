@@ -328,3 +328,46 @@ one emitter serves each consumer. Until then the lifecycle runs live
 (allocating, priming, ack-evicting, and freeing the per-consumer cache)
 while emission stays pass-through — the two coexist without
 double-painting.
+
+## Addendum — 2026-05-30: emission live; per-consumer reference grid, emit-once (phux-ia4)
+
+`consumer_tick_emits` is now `true`: the state-sync tick is the live
+server→consumer emitter. Two corrections to the 2026-05-26 addendum's
+implementation plan, both forced by empirical reading of the pinned
+libghostty (`acc4b87`):
+
+**The per-consumer cache is NOT `RenderState` dirty bits.** The
+2026-05-26 addendum claimed each consumer's `RenderState` could hold its
+own "dirty-since-last-ack" state independently. That is wrong.
+`RenderState::update` *consumes* the shared `Terminal`'s dirty state: it
+clears `t.flags.dirty`, the active screen's dirty flags, and the
+per-page / per-row dirty bits (`render.zig` `update`, ~lines 440-461 and
+647-648). A `RenderState`'s own `Snapshot::dirty()` / `Row::dirty()` are
+only *populated* from those shared bits during `update`. So with N
+consumers on one pane, the first consumer's `update` consumes the shared
+dirty bits and every other consumer that tick sees `Dirty::Clean` —
+starving all-but-one. The header sentence "the update call does not unset
+dirty state" refers to the `RenderState`'s *own* `self.dirty`, which the
+caller resets via `set_dirty`; it does not describe the shared `Terminal`
+bits, which `update` does clear. The cache is therefore a per-consumer
+**reference grid** (`grid.rs::ConsumerReference`: the last-synced rendered
+body of each viewport row + cursor/mode), diffed by
+`SnapshotSynthesizer::synthesize_against_reference`, which never reads the
+shared dirty bits — full per-consumer isolation regardless of attach/ack
+divergence.
+
+**Reference advances on emit (emit-once), not on ack.** v0.1 transports
+(UDS, SSH stdio, WebSocket) are reliable and ordered. The reference is
+committed to the just-rendered state *before* the frame ships, so a
+change is delivered exactly once and an unchanged terminal produces no
+re-emission. This matches proto.md §8's emit-once model and the prior
+broadcast pump's behavior, and keeps a non-acking consumer from
+re-receiving the same diff every tick. The loss-tolerance "re-diff
+against an older reference on a dropped frame" property (this ADR's
+*Rationale*) is inherent to the reference-grid model but is only wired
+when a lossy transport (QUIC datagrams, satellite forwarding) lands;
+`FRAME_ACK` stays wired for backpressure accounting (proto.md §8.2).
+
+No change to Decision, Rationale, Tradeoffs, or Alternatives. The wire
+shape and framework are unchanged; this revises only the cache primitive
+and the reference-eviction trigger.
