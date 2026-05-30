@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.90.0"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer", "llvm-tools-preview"]
+# wasm32 is needed by the phux-web browser client (phux-486): phux-protocol and
+# phux-client-core compile to wasm; the VT engine is loaded as a separate
+# ghostty-vt.wasm module, so nothing here links zig into the wasm binary.
+targets = ["wasm32-unknown-unknown"]
 profile = "default"
