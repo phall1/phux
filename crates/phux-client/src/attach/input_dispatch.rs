@@ -15,7 +15,7 @@ use super::actions::{self, ActionError, PendingSplit};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::input::InputEvent;
-use crate::layout::{Direction, LayoutState, SplitDir};
+use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::overlay::{HelpOverlay, OverlayState};
 
@@ -28,10 +28,10 @@ pub(super) struct DispatchCtx<'a> {
     /// to parse; the dispatcher then forwards every key to the focused
     /// pane unchanged.
     pub resolver: Option<&'a mut phux_config::keybind::Resolver>,
-    /// Client-side layout mirror. Action helpers in [`super::actions`]
-    /// take `&LayoutState` and return a new state which the dispatcher
-    /// swaps in place.
-    pub layout_state: &'a mut LayoutState,
+    /// Client-side multi-window mirror. Pane actions operate on the
+    /// active window ([`Workspace::active_window_mut`]); the whole
+    /// workspace is what gets serialized to L3 on a `SET_METADATA`.
+    pub workspace: &'a mut Workspace,
     /// Outer-viewport `(cols, rows)`. Used by `apply_resize` to convert
     /// `amount` (cells) to a ratio delta.
     pub viewport: (u16, u16),
@@ -152,7 +152,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         // Encoding can fail only if the state is empty
                         // (we just produced it — should not happen),
                         // but propagate cleanly if it ever does.
-                        if let Some(bytes) = encode_layout_or_log(ctx.layout_state) {
+                        if let Some(bytes) = encode_layout_or_log(ctx.workspace) {
                             let request_id = *ctx.next_request_id;
                             *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
                             conn.send(&FrameKind::SetMetadata {
@@ -197,7 +197,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // event with pane-local coordinates substituted.
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
-            match route_mouse_event(ctx.layout_state, ctx.viewport, mouse) {
+            let Some(active_ls) = ctx.workspace.active_window() else {
+                tracing::debug!("dropping mouse event: no active window");
+                continue;
+            };
+            match route_mouse_event(active_ls, ctx.viewport, mouse) {
                 RouteDecision::Pane {
                     target,
                     pane_x,
@@ -205,7 +209,9 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     focus_changed,
                 } => {
                     if focus_changed {
-                        ctx.layout_state.focus = Some(target.clone());
+                        if let Some(ls) = ctx.workspace.active_window_mut() {
+                            ls.focus = Some(target.clone());
+                        }
                         *focused_pane = Some(target.clone());
                         // The predict overlay is anchored to the old
                         // pane's cursor; dropping the queue avoids a
@@ -249,13 +255,13 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // over; we hand `read_grapheme_at` to the predict layer so it
         // can refuse the prediction when the cell is blank.
         //
-        // phux-4li.6: peek the focused pane's grid via
-        // `layout_state.focus`. The driver also mirrors that id into
-        // its `focused_pane` local (server-frame handlers rely on it);
+        // phux-4li.6: peek the focused pane's grid via the active
+        // window's focus. The driver also mirrors that id into its
+        // `focused_pane` local (server-frame handlers rely on it);
         // either reads the same TerminalId here.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
-            && let Some(fid) = ctx.layout_state.focus.as_ref()
+            && let Some(fid) = ctx.workspace.active_window().and_then(|w| w.focus.as_ref())
             && let Some(slot) = panes.get_mut(fid)
         {
             use crate::predict::PredictionOutcome;
@@ -271,14 +277,14 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         }
         // phux-4li.6: INPUT_KEY / INPUT_FOCUS / INPUT_PASTE all target
         // the client's focused pane (per ADR-0019 decision 6). Focus
-        // is canonically `layout_state.focus`; the driver-side
+        // is canonically the active window's focus; the driver-side
         // `focused_pane` mirror stays in sync for the render path.
         // When focus is unset (pre-ATTACHED), drop the event with a
         // debug log instead of panicking — wave-A's "always Some
         // post-ATTACHED" invariant is enforced by the seed in
         // `handle_server_frame`, but a stray input race during
         // bootstrap shouldn't take the loop down.
-        let Some(pane) = ctx.layout_state.focus.as_ref() else {
+        let Some(pane) = ctx.workspace.active_window().and_then(|w| w.focus.as_ref()) else {
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
@@ -340,11 +346,11 @@ fn consume_chord(
     reason = "action dispatcher returns independent side-effect flags to keep async I/O outside run_action"
 )]
 struct ActionEffects {
-    /// `true` ⇒ `layout_state` was mutated in-place; driver repaints.
+    /// `true` ⇒ the active window was mutated in-place; driver repaints.
     layout_mutated: bool,
     /// `Some(new_focus)` ⇒ swap the driver's `focused_pane` (input
-    /// routing follows). The action helper already updated
-    /// `layout_state.focus`; this carries the new id so the driver
+    /// routing follows). The action helper already updated the active
+    /// window's focus; this carries the new id so the driver
     /// doesn't have to re-read it.
     set_focus: Option<TerminalId>,
     /// `true` ⇒ emit `SET_METADATA` carrying the new layout envelope.
@@ -450,9 +456,11 @@ fn run_action(
         }
         "focus-direction" => {
             if let Some(dir) = direction_arg(resolved) {
-                if let Some(new_state) = actions::apply_focus(ctx.layout_state, dir) {
+                if let Some(ls) = ctx.workspace.active_window_mut()
+                    && let Some(new_state) = actions::apply_focus(ls, dir)
+                {
                     let new_focus = new_state.focus.clone();
-                    *ctx.layout_state = new_state;
+                    *ls = new_state;
                     effects.layout_mutated = true;
                     effects.set_focus = new_focus;
                 }
@@ -465,9 +473,13 @@ fn run_action(
         }
         "resize-pane" => {
             if let (Some(dir), Some(amount)) = (direction_arg(resolved), amount_arg(resolved)) {
-                match actions::apply_resize(ctx.layout_state, dir, amount, ctx.viewport) {
+                let Some(ls) = ctx.workspace.active_window_mut() else {
+                    effects.bell = true;
+                    return effects;
+                };
+                match actions::apply_resize(ls, dir, amount, ctx.viewport) {
                     Ok(Some(new_state)) => {
-                        *ctx.layout_state = new_state;
+                        *ls = new_state;
                         effects.layout_mutated = true;
                         effects.set_metadata = true;
                     }
@@ -503,17 +515,21 @@ fn run_action(
             effects.detach = true;
         }
         "next-pane" => {
-            if let Some(new_state) = actions::apply_next_pane(ctx.layout_state) {
+            if let Some(ls) = ctx.workspace.active_window_mut()
+                && let Some(new_state) = actions::apply_next_pane(ls)
+            {
                 let new_focus = new_state.focus.clone();
-                *ctx.layout_state = new_state;
+                *ls = new_state;
                 effects.layout_mutated = true;
                 effects.set_focus = new_focus;
             }
         }
         "previous-pane" => {
-            if let Some(new_state) = actions::apply_previous_pane(ctx.layout_state) {
+            if let Some(ls) = ctx.workspace.active_window_mut()
+                && let Some(new_state) = actions::apply_previous_pane(ls)
+            {
                 let new_focus = new_state.focus.clone();
-                *ctx.layout_state = new_state;
+                *ls = new_state;
                 effects.layout_mutated = true;
                 effects.set_focus = new_focus;
             }
@@ -551,10 +567,10 @@ fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
     Some(v.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16)
 }
 
-/// Encode `state` for `SET_METADATA`, logging encode failures. Returns
-/// `None` on failure — caller should not emit a frame in that case.
-pub(super) fn encode_layout_or_log(state: &LayoutState) -> Option<Vec<u8>> {
-    match state.encode_cbor() {
+/// Encode the workspace for `SET_METADATA`, logging encode failures.
+/// Returns `None` on failure — caller should not emit a frame in that case.
+pub(super) fn encode_layout_or_log(workspace: &Workspace) -> Option<Vec<u8>> {
+    match workspace.encode_cbor() {
         Ok(bytes) => Some(bytes),
         Err(err) => {
             tracing::warn!(error = %err, "layout CBOR encode failed; SET_METADATA skipped");
@@ -716,13 +732,13 @@ mod tests {
 
     #[test]
     fn detach_action_requests_detach_effect() {
-        let mut layout_state = LayoutState::default();
+        let mut workspace = Workspace::default();
         let mut next_request_id = 1;
         let mut pending_splits = HashMap::new();
         let mut overlays = OverlayState::new();
         let mut ctx = DispatchCtx {
             resolver: None,
-            layout_state: &mut layout_state,
+            workspace: &mut workspace,
             viewport: (80, 24),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,

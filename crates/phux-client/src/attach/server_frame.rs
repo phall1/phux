@@ -13,7 +13,7 @@ use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
 use super::actions::{self, PendingSplit, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
-use crate::layout::{self, LayoutState};
+use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
 use crate::render::chrome::status_bar::StatusBarPainter;
 
@@ -34,7 +34,7 @@ pub(super) struct FrameOutcome {
     /// `GET_METADATA` + `SUBSCRIBE_METADATA` for the layout key so
     /// other clients' mutations broadcast back to us (ADR-0019).
     pub(super) subscribe_layout: bool,
-    /// `true` ⇒ `layout_state` was replaced by a server-side layout
+    /// `true` ⇒ the workspace was replaced by a server-side layout
     /// envelope (`MetadataValue` reply or `MetadataChanged` broadcast).
     /// The driver triggers a full repaint of the multi-pane composition.
     pub(super) layout_replaced: bool,
@@ -75,7 +75,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     out: &mut W,
     frame: FrameKind,
     panes: &mut HashMap<TerminalId, PaneSlot>,
-    layout_state: &mut LayoutState,
+    workspace: &mut Workspace,
     focused_pane: &mut Option<TerminalId>,
     session_name: &mut String,
     status_bar: Option<&mut StatusBarPainter>,
@@ -104,12 +104,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 "ATTACHED: seeding focused_pane from snapshot"
             );
             *focused_pane = Some(bootstrap.clone());
-            // phux-4li.4: seed the layout mirror with a single leaf so
-            // the existing single-pane render path keeps working. The
-            // L3 metadata-fetch path (.2/.3) replaces this with the
-            // server-stored tree when present; until that ticket lands
-            // every attach is single-pane.
-            *layout_state = LayoutState::single(bootstrap.clone());
+            // phux-4li.4: seed the workspace with a single window holding
+            // one leaf so the existing single-pane render path keeps
+            // working. The L3 metadata-fetch path replaces this with the
+            // server-stored layout (possibly multi-window) when present.
+            *workspace = Workspace::single(bootstrap.clone());
             // Ensure the focused pane has a slot ready for output
             // frames; output may race ahead of the snapshot. If
             // libghostty refuses to allocate a Terminal we surface
@@ -156,14 +155,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // layout. Single-pane / no layout: anchor at (0,0).
             let has_bar = status_bar.is_some();
             let pane_dims = pane_viewport(viewport_dims, has_bar);
-            let origin = if layout_state.tree.is_some() {
-                super::multi_pane::compute_layout(layout_state, pane_dims)
-                    .rects
-                    .get(&terminal_id)
-                    .map_or((0, 0), |r| (r.x, r.y))
-            } else {
-                (0, 0)
-            };
+            let origin = workspace
+                .active_window()
+                .filter(|ls| ls.tree.is_some())
+                .and_then(|ls| {
+                    super::multi_pane::compute_layout(ls, pane_dims)
+                        .rects
+                        .get(&terminal_id)
+                        .map(|r| (r.x, r.y))
+                })
+                .unwrap_or((0, 0));
             let slot = match panes.entry(terminal_id) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
@@ -241,20 +242,20 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 };
                 slot.terminal.vt_write(&bytes);
             }
+            // The libghostty mirror is now warm even for panes in a
+            // non-active window (off-screen invariant). Rendering only
+            // applies to the active window's composition; if there's no
+            // active window there's nothing on-screen to repaint.
+            let Some(active_ls) = workspace.active_window() else {
+                return Ok(FrameOutcome::default());
+            };
             if is_focused
                 && !overlay_active
                 && let Some(fid) = focused_pane.as_ref()
             {
                 let has_bar = status_bar.is_some();
-                let focused_cursor = paint_focused_pane(
-                    out,
-                    layout_state,
-                    panes,
-                    fid,
-                    viewport_dims,
-                    has_bar,
-                    false,
-                );
+                let focused_cursor =
+                    paint_focused_pane(out, active_ls, panes, fid, viewport_dims, has_bar, false);
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;
                 // confirmed predictions drop, contradictions drop their
@@ -285,7 +286,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // bar's final write leaves the host terminal cursor
                 // at bottom-right.
                 let pane_dims = pane_viewport(viewport_dims, has_bar);
-                let fallback_origin = super::multi_pane::compute_layout(layout_state, pane_dims)
+                let fallback_origin = super::multi_pane::compute_layout(active_ls, pane_dims)
                     .rects
                     .get(fid)
                     .map(|r| (r.x, r.y))
@@ -309,7 +310,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // typing.
                 let has_bar = status_bar.is_some();
                 let pane_dims = pane_viewport(viewport_dims, has_bar);
-                let rects = super::multi_pane::compute_layout(layout_state, pane_dims).rects;
+                let rects = super::multi_pane::compute_layout(active_ls, pane_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
                         let _ = slot
@@ -366,7 +367,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // `GET_METADATA { request_id }` immediately after ATTACHED;
         // the server replies with `MetadataValue { request_id, value }`.
         // Match by id, decode the v1 CBOR envelope, and replace
-        // `layout_state` in place. `value: None` means "no persisted
+        // the workspace in place. `value: None` means "no persisted
         // layout" — keep the single-pane bootstrap untouched.
         FrameKind::MetadataValue { request_id, value } => {
             if Some(request_id) != pending_layout_request {
@@ -379,10 +380,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             let Some(bytes) = value else {
                 return Ok(FrameOutcome::default());
             };
-            match LayoutState::decode_cbor(&bytes) {
-                Ok(new_state) => {
-                    *layout_state =
-                        reconcile_loaded_layout(new_state, focused_pane.as_ref(), panes);
+            match Workspace::decode_cbor(&bytes) {
+                Ok(new_ws) => {
+                    *workspace = reconcile_loaded_workspace(new_ws, focused_pane.as_ref(), panes);
+                    // Re-anchor the driver's focused-pane mirror onto the
+                    // active window's reconciled focus.
+                    *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                     Ok(FrameOutcome {
                         layout_replaced: true,
                         ..FrameOutcome::default()
@@ -404,10 +407,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 return Ok(FrameOutcome::default());
             }
             if let Some(bytes) = value {
-                match LayoutState::decode_cbor(&bytes) {
-                    Ok(new_state) => {
-                        *layout_state =
-                            reconcile_loaded_layout(new_state, focused_pane.as_ref(), panes);
+                match Workspace::decode_cbor(&bytes) {
+                    Ok(new_ws) => {
+                        *workspace =
+                            reconcile_loaded_workspace(new_ws, focused_pane.as_ref(), panes);
+                        *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                         Ok(FrameOutcome {
                             layout_replaced: true,
                             ..FrameOutcome::default()
@@ -421,9 +425,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             } else {
                 // Tombstone: layout reset. Fall back to single-pane
                 // bootstrap (or empty if there's no focus to anchor on).
-                *layout_state = focused_pane
+                *workspace = focused_pane
                     .clone()
-                    .map_or_else(LayoutState::default, LayoutState::single);
+                    .map_or_else(Workspace::default, Workspace::single);
                 Ok(FrameOutcome {
                     layout_replaced: true,
                     ..FrameOutcome::default()
@@ -443,9 +447,14 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             };
             match result {
                 SpawnResult::Ok(new_id) => {
-                    match apply_spawned_ok(layout_state, new_id.clone(), &pending) {
+                    let Some(active_ls) = workspace.active_window_mut() else {
+                        tracing::warn!("TerminalSpawned: no active window to apply split into");
+                        let _ = actions::write_bell(out);
+                        return Ok(FrameOutcome::default());
+                    };
+                    match apply_spawned_ok(active_ls, new_id.clone(), &pending) {
                         Ok(new_state) => {
-                            *layout_state = new_state;
+                            *active_ls = new_state;
                             // Seed a PaneSlot for the new Terminal so the
                             // first TERMINAL_SNAPSHOT lands on a warm
                             // mirror. Vacant-or-occupied — never overwrite
@@ -460,7 +469,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             // Move focus to the freshly spawned pane —
                             // tmux-compatible (apply_split already sets
                             // focus inside the returned state).
-                            focused_pane.clone_from(&layout_state.focus);
+                            focused_pane.clone_from(
+                                &workspace.active_window().and_then(|ls| ls.focus.clone()),
+                            );
                             Ok(FrameOutcome {
                                 layout_replaced: true,
                                 emit_set_metadata: true,
@@ -536,26 +547,34 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 exit_status = ?exit_status,
                 "TerminalClosed",
             );
-            let tree_leaves: Vec<TerminalId> = layout_state
-                .tree
-                .as_ref()
-                .map(layout::leaves)
-                .unwrap_or_default();
-            let known_leaf = tree_leaves.contains(&terminal_id);
             // Always drop the slot — even for unknown leaves (could be
             // a spawn-failure cleanup race or a stale id from before
             // an attach).
             panes.remove(&terminal_id);
-            if !known_leaf {
+            // Find the window holding this leaf (panes can live in any
+            // window, not just the active one) and fold it out there.
+            let owner = workspace.windows.iter().position(|w| {
+                w.state
+                    .tree
+                    .as_ref()
+                    .map(layout::leaves)
+                    .unwrap_or_default()
+                    .contains(&terminal_id)
+            });
+            let Some(idx) = owner else {
                 return Ok(FrameOutcome::default());
-            }
-            match apply_terminal_closed(layout_state, &terminal_id) {
+            };
+            match apply_terminal_closed(&workspace.windows[idx].state, &terminal_id) {
                 Ok(new_state) => {
-                    *layout_state = new_state;
-                    // Re-anchor `focused_pane`. `apply_terminal_closed`
-                    // (via `apply_kill`) sets the new focus to the
-                    // first DFS leaf, or `None` if the tree is empty.
-                    focused_pane.clone_from(&layout_state.focus);
+                    workspace.windows[idx].state = new_state;
+                    // The fold may have emptied the window; drop any such
+                    // windows and keep `active` valid.
+                    workspace.prune_empty_windows();
+                    // Re-anchor `focused_pane` onto the (possibly new)
+                    // active window's focus. `apply_terminal_closed` sets
+                    // a surviving window's focus to the first DFS leaf;
+                    // a pruned active window hands focus to its successor.
+                    *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                     Ok(FrameOutcome {
                         layout_replaced: true,
                         emit_set_metadata: true,
@@ -566,9 +585,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     })
                 }
                 Err(err) => {
-                    // Closed terminal wasn't a leaf in the tree (race
-                    // we already covered with `known_leaf`, or the
-                    // layout was empty). Drop quietly — slot is gone.
+                    // The leaf vanished from the tree between the lookup
+                    // and the fold (a race), or the window emptied. Drop
+                    // quietly — the slot is already gone.
                     tracing::debug!(
                         error = %err,
                         terminal = ?terminal_id,
@@ -624,6 +643,21 @@ fn is_layout_key(scope: &Scope, key: &str) -> bool {
 /// invariant we can't recover from: if the persisted focused leaf
 /// isn't a member of the tree the renderer would have no focused
 /// pane to draw input chrome on.
+/// Reconcile every window of a freshly decoded [`Workspace`] via
+/// [`reconcile_loaded_layout`], fixing any per-window focus that points
+/// at a leaf no longer in that window's tree.
+fn reconcile_loaded_workspace(
+    mut workspace: Workspace,
+    bootstrap_focus: Option<&TerminalId>,
+    panes: &HashMap<TerminalId, PaneSlot>,
+) -> Workspace {
+    for w in &mut workspace.windows {
+        let reconciled = reconcile_loaded_layout(w.state.clone(), bootstrap_focus, panes);
+        w.state = reconciled;
+    }
+    workspace
+}
+
 fn reconcile_loaded_layout(
     mut state: LayoutState,
     bootstrap_focus: Option<&TerminalId>,
@@ -661,7 +695,7 @@ mod tests {
     use phux_protocol::wire::info::{LayoutNode, SplitDir};
 
     use crate::attach::driver::PaneSlot;
-    use crate::layout::LayoutState;
+    use crate::layout::{LayoutState, Workspace};
     use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 
     /// Strip CSI escape sequences (`ESC [ ... final`) from a captured
@@ -700,11 +734,11 @@ mod tests {
         panes
     }
 
-    /// Two leaves split side-by-side (vertical divider), with `focus` on
-    /// the supplied leaf. Exercises the multi-pane render paths without a
-    /// real tty.
-    fn two_pane_layout(left: &TerminalId, right: &TerminalId, focus: &TerminalId) -> LayoutState {
-        LayoutState {
+    /// A single-window workspace whose window is two leaves split
+    /// side-by-side (vertical divider), with `focus` on the supplied
+    /// leaf. Exercises the multi-pane render paths without a real tty.
+    fn two_pane_workspace(left: &TerminalId, right: &TerminalId, focus: &TerminalId) -> Workspace {
+        let state = LayoutState {
             tree: Some(LayoutNode::Split {
                 dir: SplitDir::Horizontal,
                 ratio: 0.5,
@@ -712,12 +746,19 @@ mod tests {
                 right: Box::new(LayoutNode::Leaf(right.clone())),
             }),
             focus: Some(focus.clone()),
+        };
+        Workspace {
+            windows: vec![crate::layout::WindowState {
+                name: "1".to_owned(),
+                state,
+            }],
+            active: 0,
         }
     }
 
     fn drive_output(
         out: &mut Vec<u8>,
-        layout: &mut LayoutState,
+        layout: &mut Workspace,
         focused: &mut Option<TerminalId>,
         panes: &mut HashMap<TerminalId, PaneSlot>,
         terminal_id: &TerminalId,
@@ -758,7 +799,7 @@ mod tests {
     fn non_focused_pane_repaints_on_output() {
         let left = tid(1);
         let right = tid(2);
-        let mut layout = two_pane_layout(&left, &right, &left);
+        let mut layout = two_pane_workspace(&left, &right, &left);
         let mut focused = Some(left.clone());
         let mut panes = panes_for(&[&left, &right]);
 
@@ -798,7 +839,7 @@ mod tests {
     fn focused_pane_repaints_on_output() {
         let left = tid(1);
         let right = tid(2);
-        let mut layout = two_pane_layout(&left, &right, &left);
+        let mut layout = two_pane_workspace(&left, &right, &left);
         let mut focused = Some(left.clone());
         let mut panes = panes_for(&[&left, &right]);
 
@@ -827,11 +868,54 @@ mod tests {
         }
     }
 
+    /// Off-screen invariant: a `TERMINAL_OUTPUT` for a pane that lives in
+    /// a NON-active window must warm that pane's libghostty mirror but
+    /// paint nothing (it isn't on screen). The pane has no rect in the
+    /// active window's composition, so the renderer emits no CUP.
+    #[test]
+    fn output_for_inactive_window_pane_warms_mirror_but_does_not_paint() {
+        let active_pane = tid(1);
+        let other_pane = tid(2);
+        // Two windows: active window holds pane 1; window 2 holds pane 2.
+        let mut workspace = Workspace::single(active_pane.clone());
+        workspace.add_window("2".to_owned(), other_pane.clone());
+        // Re-select window 0 as active (add_window activated the new one).
+        workspace.select(0);
+        let mut focused = Some(active_pane.clone());
+        let mut panes = panes_for(&[&active_pane, &other_pane]);
+
+        let mut out: Vec<u8> = Vec::new();
+        drive_output(
+            &mut out,
+            &mut workspace,
+            &mut focused,
+            &mut panes,
+            &other_pane,
+            b"offscreen",
+        );
+
+        // Nothing painted: the off-screen pane has no rect in the active
+        // window, so the renderer wrote no bytes at all.
+        assert!(
+            out.is_empty(),
+            "off-screen pane must not paint; out = {:?}",
+            String::from_utf8_lossy(&out),
+        );
+        // The mirror is warm: reading the grapheme grid back shows the
+        // bytes landed in pane 2's libghostty Terminal.
+        let slot = panes.get_mut(&other_pane).expect("pane 2 slot");
+        let cell = slot
+            .renderer
+            .read_grapheme_at(&slot.terminal, 0, 0)
+            .expect("read cell");
+        assert_eq!(cell, Some('o'), "pane 2 mirror should hold the output");
+    }
+
     /// A `Bell` frame routes a BEL byte through the injected sink, so a
     /// headless capture (and a future agent surface) can observe it.
     #[test]
     fn bell_frame_writes_bel_to_sink() {
-        let mut layout = LayoutState::single(tid(1));
+        let mut layout = Workspace::single(tid(1));
         let mut focused = Some(tid(1));
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         let mut session_name = String::new();

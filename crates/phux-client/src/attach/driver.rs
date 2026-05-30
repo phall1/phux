@@ -44,7 +44,7 @@ use super::input_dispatch::{DispatchCtx, dispatch_input_events, encode_layout_or
 use super::paint::{paint_bar_after_pane, paint_full_frame, pane_viewport};
 use super::render::{TerminalRenderer, write_reset};
 use super::server_frame::handle_server_frame;
-use crate::layout::LayoutState;
+use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::status_bar::{Position, StatusBarPainter};
 use crate::render::overlay::OverlayState;
@@ -368,21 +368,19 @@ async fn main_loop<W: super::RenderSink>(
     // allocated lazily — the first `TERMINAL_SNAPSHOT` or
     // `TERMINAL_OUTPUT` carrying a given id seeds it via
     // `panes.entry(id).or_insert_with(PaneSlot::new)`. The
-    // `LayoutState` mirror (initialized as a single-pane fallback when
-    // `ATTACHED` lands; see `handle_server_frame`) is the source of
-    // truth for which leaves should be live and where they sit in the
-    // outer viewport. Sibling-ticket .7's SIGWINCH reflow will use
-    // `layout_state` + `attach::multi_pane::compute_layout` to recompute
-    // every pane's Rect on resize; .5's action dispatch will mutate it
-    // on split/kill. v0.1 only ever sees the single bootstrap leaf, so
-    // the existing single-pane render path keeps working unchanged.
+    // `Workspace` mirror (initialized as a single window holding one
+    // pane when `ATTACHED` lands; see `handle_server_frame`) is the
+    // source of truth for which leaves are live and where they sit in
+    // the outer viewport. The renderer and layout helpers operate on the
+    // active window (`workspace.active_window()`); the workspace
+    // dimension is what gets persisted to L3.
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
-    let mut layout_state = LayoutState::default();
+    let mut workspace = Workspace::default();
     let mut focused_pane: Option<TerminalId> = None;
     // phux-4li.5: keybind resolver + request-id allocator for L3 GET
     // correlation. The resolver consumes `InputEvent::Key` events
     // *before* they would be forwarded to the focused pane; a chord
-    // that resolves to a layout action mutates `layout_state` here
+    // that resolves to a layout action mutates the active window here
     // and never reaches the server's input pipe.
     let mut resolver = build_resolver();
     let mut layout_get_request_id: Option<u32> = None;
@@ -443,7 +441,7 @@ async fn main_loop<W: super::RenderSink>(
         out,
         initial_attached,
         &mut panes,
-        &mut layout_state,
+        &mut workspace,
         &mut focused_pane,
         &mut session_name,
         status_bar.as_mut(),
@@ -517,18 +515,20 @@ async fn main_loop<W: super::RenderSink>(
                         // against them and resize survivors whose dims
                         // changed. Only meaningful in multi-pane mode;
                         // skipped (no cost) on the single-pane hot path.
-                        let prev_rects = layout_state.tree.as_ref().map(|_| {
-                            super::multi_pane::compute_layout(
-                                &layout_state,
-                                pane_viewport(viewport_dims, status_bar.is_some()),
-                            )
-                            .rects
+                        let prev_rects = workspace.active_window().and_then(|ls| {
+                            ls.tree.as_ref().map(|_| {
+                                super::multi_pane::compute_layout(
+                                    ls,
+                                    pane_viewport(viewport_dims, status_bar.is_some()),
+                                )
+                                .rects
+                            })
                         });
                         let outcome = handle_server_frame(
                             out,
                             f,
                             &mut panes,
-                            &mut layout_state,
+                            &mut workspace,
                             &mut focused_pane,
                             &mut session_name,
                             status_bar.as_mut(),
@@ -548,7 +548,7 @@ async fn main_loop<W: super::RenderSink>(
                         // a local action — see `ActionEffects.set_metadata`
                         // for the local-action path.
                         if outcome.emit_set_metadata
-                            && let Some(bytes) = encode_layout_or_log(&layout_state)
+                            && let Some(bytes) = encode_layout_or_log(&workspace)
                         {
                             let request_id = next_request_id;
                             next_request_id = next_request_id.wrapping_add(1);
@@ -571,13 +571,14 @@ async fn main_loop<W: super::RenderSink>(
                         // Sent BEFORE the repaint so the server's resync
                         // snapshot lands after the local mirror has grown.
                         if outcome.reflow_panes
-                            && layout_state.tree.is_some()
                             && let Some(prev_rects) = &prev_rects
+                            && let Some(ls) = workspace.active_window()
+                            && ls.tree.is_some()
                         {
                             let new_pane_dims =
                                 pane_viewport(viewport_dims, status_bar.is_some());
                             let diff = super::reflow::compute_reflow(
-                                &layout_state,
+                                ls,
                                 prev_rects,
                                 new_pane_dims,
                             );
@@ -599,10 +600,12 @@ async fn main_loop<W: super::RenderSink>(
                             // the repaint — the dismiss path always
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
-                            if !overlays.is_active() {
+                            if !overlays.is_active()
+                                && let Some(ls) = workspace.active_window()
+                            {
                                 paint_full_frame(
                                     out,
-                                    &layout_state,
+                                    ls,
                                     &mut panes,
                                     focused_pane.as_ref(),
                                     viewport_dims,
@@ -641,7 +644,7 @@ async fn main_loop<W: super::RenderSink>(
                 let events = parser.feed(&stdin_buf[..n]);
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
-                    layout_state: &mut layout_state,
+                    workspace: &mut workspace,
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
@@ -667,10 +670,12 @@ async fn main_loop<W: super::RenderSink>(
                     // modal. When the overlay is still active (e.g.
                     // a push happened in the same batch) we skip the
                     // pane repaint and go straight to overlay paint.
-                    if !overlays.is_active() {
+                    if !overlays.is_active()
+                        && let Some(ls) = workspace.active_window()
+                    {
                         paint_full_frame(
                             out,
-                            &layout_state,
+                            ls,
                             &mut panes,
                             focused_pane.as_ref(),
                             viewport_dims,
@@ -692,7 +697,7 @@ async fn main_loop<W: super::RenderSink>(
                 let events = parser.flush();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
-                    layout_state: &mut layout_state,
+                    workspace: &mut workspace,
                     viewport: viewport_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
@@ -711,10 +716,13 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
-                if layout_changed && !overlays.is_active() {
+                if layout_changed
+                    && !overlays.is_active()
+                    && let Some(ls) = workspace.active_window()
+                {
                     paint_full_frame(
                         out,
-                        &layout_state,
+                        ls,
                         &mut panes,
                         focused_pane.as_ref(),
                         viewport_dims,
@@ -745,14 +753,16 @@ async fn main_loop<W: super::RenderSink>(
                 // (w, h) actually changed so the server ioctls TIOCSWINSZ
                 // on each PTY. Single-pane: skip the reflow math entirely
                 // (no per-leaf wire emissions to make).
-                if layout_state.tree.is_some() {
+                if let Some(ls) = workspace.active_window()
+                    && ls.tree.is_some()
+                {
                     let has_bar = status_bar.is_some();
                     let prev_pane_dims = pane_viewport(prev_dims, has_bar);
                     let new_pane_dims = pane_viewport(viewport_dims, has_bar);
                     let prev_rects =
-                        super::multi_pane::compute_layout(&layout_state, prev_pane_dims).rects;
+                        super::multi_pane::compute_layout(ls, prev_pane_dims).rects;
                     let diff = super::reflow::compute_reflow(
-                        &layout_state,
+                        ls,
                         &prev_rects,
                         new_pane_dims,
                     );
@@ -780,10 +790,10 @@ async fn main_loop<W: super::RenderSink>(
                 if overlays.is_active() {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
                     let _ = overlays.paint(out, viewport_dims);
-                } else {
+                } else if let Some(ls) = workspace.active_window() {
                     paint_full_frame(
                         out,
-                        &layout_state,
+                        ls,
                         &mut panes,
                         focused_pane.as_ref(),
                         viewport_dims,
@@ -818,10 +828,12 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane
                             .as_ref()
                             .and_then(|fid| {
-                                super::multi_pane::compute_layout(&layout_state, pane_dims)
-                                    .rects
-                                    .get(fid)
-                                    .copied()
+                                workspace.active_window().and_then(|ls| {
+                                    super::multi_pane::compute_layout(ls, pane_dims)
+                                        .rects
+                                        .get(fid)
+                                        .copied()
+                                })
                             })
                             .map_or((0, 0), |r| (r.x, r.y)),
                     );
