@@ -17,7 +17,7 @@ use phux_client::attach::connection::Connection;
 use phux_client::run::RunOutcome;
 use phux_client::selector::{self, Selector};
 use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
-use phux_protocol::ids::TerminalId;
+use phux_protocol::ids::{CollectionId, TerminalId};
 use phux_protocol::wire::frame::{
     Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
 };
@@ -122,6 +122,20 @@ pub(crate) fn catalog() -> Value {
                     "socket": { "type": "string" }
                 }
             }
+        },
+        {
+            "name": "phux_new",
+            "description": "Create a named session on the running server without attaching, returning its name and seed pane id. The server must already be running (this does not auto-spawn one).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Name for the new session. Required; a name already in use is rejected." },
+                    "command": { "type": "array", "items": { "type": "string" }, "description": "Initial command (argv) for the seed pane. Omit or pass an empty array to use the server's default shell." },
+                    "cwd": { "type": "string", "description": "Working directory for the seed pane." },
+                    "socket": { "type": "string" }
+                },
+                "required": ["name"]
+            }
         }
     ])
 }
@@ -141,6 +155,7 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_send_keys" => phux_send_keys(args).await,
         "phux_run" => phux_run(args).await,
         "phux_wait" => phux_wait(args).await,
+        "phux_new" => phux_new(args).await,
         other => Err(ToolError::new(format!("unknown tool: {other}"))),
     }
 }
@@ -262,6 +277,43 @@ async fn phux_wait(args: &Value) -> Result<Value, ToolError> {
     Ok(json!({ "outcome": outcome, "polls": result.polls }))
 }
 
+/// `phux_new` — create a named session via `CREATE_SESSION` (no attach).
+///
+/// Mirrors `phux new --json`: `name` is required (the create-only path never
+/// auto-names), `command`/`cwd` are optional. The server must already be
+/// running; unlike the CLI this never auto-spawns one. Returns
+/// `{session, terminal_id}`, where `terminal_id` is the seed pane's local id
+/// (the same projection the CLI's `run_new_json` uses).
+async fn phux_new(args: &Value) -> Result<Value, ToolError> {
+    let socket = socket::resolve(str_arg(args, "socket"));
+    let name = required_str(args, "name")?.to_owned();
+    let cwd = str_arg(args, "cwd").map(str::to_owned);
+    // Absent or empty `command` ⇒ None (server default shell), mirroring the
+    // CLI's `if command.is_empty() { None }`.
+    let command = string_array_opt(args, "command")?.filter(|c| !c.is_empty());
+
+    let result = create_session(
+        &socket,
+        WireCommand::CreateSession {
+            collection: CollectionId::new(1),
+            name: name.clone(),
+            command,
+            cwd,
+        },
+    )
+    .await?;
+
+    match result {
+        CommandResult::OkWith(CommandValue::TerminalId(id)) => {
+            Ok(json!({ "session": name, "terminal_id": id.local_id() }))
+        }
+        CommandResult::Error { message, .. } => Err(ToolError::new(message)),
+        other => Err(ToolError::new(format!(
+            "unexpected CREATE_SESSION result: {other:?}"
+        ))),
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Shared helpers.
 // -----------------------------------------------------------------------------
@@ -292,6 +344,29 @@ async fn get_state(socket: &std::path::Path) -> Result<SessionSnapshot, ToolErro
                     "unexpected GET_STATE result: {other:?}"
                 ))),
             };
+        }
+    }
+}
+
+/// Open a connection and issue a `CREATE_SESSION` command, returning its
+/// [`CommandResult`]. Self-contained over the low-level [`Connection`] — the
+/// same wire-call pattern as [`get_state`], reaching the daemon without any
+/// `phux-client` agent API.
+async fn create_session(
+    socket: &std::path::Path,
+    command: WireCommand,
+) -> Result<CommandResult, ToolError> {
+    let mut conn = Connection::connect(socket).await?;
+    conn.send(&FrameKind::Command {
+        request_id: 1,
+        command,
+    })
+    .await?;
+    loop {
+        if let FrameKind::CommandResult { request_id, result } = conn.recv().await?
+            && request_id == 1
+        {
+            return Ok(result);
         }
     }
 }
@@ -400,6 +475,27 @@ fn string_array(args: &Value, key: &str) -> Result<Vec<String>, ToolError> {
         .collect()
 }
 
+/// Read an optional array-of-strings argument. Absent ⇒ `None`; present must
+/// be an array whose every element is a string (a non-string element errors).
+/// An empty array yields `Some(vec![])` — callers that treat empty as absent
+/// filter it themselves.
+fn string_array_opt(args: &Value, key: &str) -> Result<Option<Vec<String>>, ToolError> {
+    let Some(value) = args.get(key) else {
+        return Ok(None);
+    };
+    let arr = value
+        .as_array()
+        .ok_or_else(|| ToolError::new(format!("`{key}` must be an array of strings")))?;
+    arr.iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ToolError::new(format!("`{key}` must contain only strings")))
+        })
+        .collect::<Result<Vec<String>, _>>()
+        .map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,7 +503,7 @@ mod tests {
     use phux_protocol::wire::info::{SessionInfo, TerminalInfo, WindowInfo};
 
     #[test]
-    fn catalog_lists_all_five_tools_with_object_schemas() {
+    fn catalog_lists_all_tools_with_object_schemas() {
         let cat = catalog();
         let arr = cat.as_array().expect("catalog is an array");
         let names: Vec<&str> = arr.iter().filter_map(|t| t["name"].as_str()).collect();
@@ -418,13 +514,54 @@ mod tests {
                 "phux_snapshot",
                 "phux_send_keys",
                 "phux_run",
-                "phux_wait"
+                "phux_wait",
+                "phux_new",
             ]
         );
         for tool in arr {
             assert_eq!(tool["inputSchema"]["type"], json!("object"));
             assert!(tool["description"].is_string());
         }
+    }
+
+    /// `phux_new` exposes a required `name` and optional `cwd`/`command`/
+    /// `socket` props, with `command` typed as a string array.
+    #[test]
+    fn catalog_phux_new_requires_name_and_object_schema() {
+        let cat = catalog();
+        let arr = cat.as_array().expect("catalog is an array");
+        let new = arr
+            .iter()
+            .find(|t| t["name"] == json!("phux_new"))
+            .expect("phux_new present");
+
+        assert_eq!(new["inputSchema"]["type"], json!("object"));
+        assert_eq!(new["inputSchema"]["required"], json!(["name"]));
+
+        let props = &new["inputSchema"]["properties"];
+        assert_eq!(props["name"]["type"], json!("string"));
+        assert_eq!(props["cwd"]["type"], json!("string"));
+        assert_eq!(props["socket"]["type"], json!("string"));
+        assert_eq!(props["command"]["type"], json!("array"));
+        assert_eq!(props["command"]["items"]["type"], json!("string"));
+    }
+
+    /// `string_array_opt` maps absent ⇒ None, empty ⇒ Some([]), strings ⇒
+    /// Some(vec), and errors on a non-array or a non-string element.
+    #[test]
+    fn string_array_opt_handles_absent_empty_and_strings() {
+        assert_eq!(string_array_opt(&json!({}), "command").unwrap(), None);
+        assert_eq!(
+            string_array_opt(&json!({ "command": [] }), "command").unwrap(),
+            Some(vec![]),
+        );
+        assert_eq!(
+            string_array_opt(&json!({ "command": ["ssh", "host"] }), "command").unwrap(),
+            Some(vec!["ssh".to_owned(), "host".to_owned()]),
+        );
+        // Non-array and non-string element both error.
+        assert!(string_array_opt(&json!({ "command": "ssh host" }), "command").is_err());
+        assert!(string_array_opt(&json!({ "command": ["ssh", 7] }), "command").is_err());
     }
 
     /// The grown snapshot surface: `scrollback` + `cells` params, plus the
