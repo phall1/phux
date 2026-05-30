@@ -1024,7 +1024,7 @@ async fn handle_client(
                 request_id,
                 command,
             } => {
-                handle_command(&state, client_id, request_id, command, &out_tx).await;
+                handle_command(&state, client_id, request_id, command, &out_tx, &root_token).await;
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -1882,6 +1882,7 @@ async fn handle_command(
     request_id: u32,
     command: Command,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    root_token: &CancellationToken,
 ) {
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
@@ -1893,6 +1894,19 @@ async fn handle_command(
         Command::RouteInput { terminal_id, event } => {
             handle_route_input(state, &terminal_id, event)
         }
+        Command::CreateSession {
+            collection,
+            name,
+            command,
+            cwd,
+        } => handle_create_session(
+            state,
+            collection,
+            &name,
+            command,
+            cwd.as_deref(),
+            root_token,
+        ),
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -1934,6 +1948,107 @@ async fn handle_command(
             result,
         }))
         .await;
+}
+
+/// Build the `OK_WITH(TerminalId(..))` reply for `CREATE_SESSION`
+/// (`phux-fdh`, ADR-0021 §3).
+///
+/// Creates a named session under `collection` and seeds its pane *without*
+/// attaching, subscribing, or resizing — the create-only counterpart to the
+/// always-attaching `ATTACH { CreateIfMissing }`. The existence check and
+/// the seed both run inside this `handle_client`-driven task on the
+/// single-threaded runtime, so the lookup→create sequence is atomic with
+/// respect to other clients: two racing `CREATE_SESSION { name }` callers
+/// cannot both succeed (the second sees the first's session and is rejected),
+/// which is the TOCTOU fix the client-side `GET_STATE`→`ATTACH` always-new
+/// path could not offer.
+///
+/// A name already in use is rejected with `INVALID_COMMAND` (create-only,
+/// never create-or-attach). An unknown `collection` is rejected likewise;
+/// v0.1 servers host only the default [`DEFAULT_COLLECTION_ID`].
+///
+/// The reply carries the seed pane's wire [`TerminalId`] so the caller
+/// (`phux new --json`) can print it without attaching.
+fn handle_create_session(
+    state: &SharedState,
+    collection: CollectionId,
+    name: &str,
+    command: Option<Vec<String>>,
+    cwd: Option<&str>,
+    root_token: &CancellationToken,
+) -> CommandResult {
+    if collection != crate::state::DEFAULT_COLLECTION_ID {
+        return CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: format!("unknown collection: {collection:?}"),
+        };
+    }
+    if state.with(|s| s.session_by_name(name).is_some()) {
+        return CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: format!("session {name:?} already exists"),
+        };
+    }
+
+    let (with_pty, override_cmd, history_limit) = state.with(|s| {
+        (
+            s.attach_create_seeds_pty(),
+            s.attach_create_seed_command(),
+            s.history_limit(),
+        )
+    });
+
+    let seed_result = if with_pty {
+        // Command precedence mirrors `resolve_create_if_missing`: an explicit
+        // server-wide override (set by tests for a deterministic child) wins,
+        // then the wire `command`, then the default shell.
+        let seed_cmd = override_cmd.unwrap_or_else(|| match command {
+            Some(argv) if !argv.is_empty() => {
+                let mut head = argv.into_iter();
+                let program = head.next().unwrap_or_default();
+                let mut builder = portable_pty::CommandBuilder::new(program);
+                for arg in head {
+                    builder.arg(arg);
+                }
+                builder.env("TERM", "xterm-256color");
+                if let Some(path) = cwd {
+                    builder.cwd(path);
+                }
+                builder
+            }
+            _ => {
+                let mut builder = crate::terminal_actor::default_shell_command();
+                if let Some(path) = cwd {
+                    builder.cwd(path);
+                }
+                builder
+            }
+        });
+        seed_session_with_pty(state, name, seed_cmd, history_limit, root_token)
+    } else {
+        // No-PTY path: the wire `command`/`cwd` are meaningless without a
+        // child to exec, but the session+pane still need to exist so the
+        // reply can carry a real seed-pane id.
+        seed_session_with_actor(state, name, history_limit, root_token)
+    };
+
+    match seed_result {
+        Ok(core_terminal) => {
+            let wire = state.with_mut(|s| s.intern_terminal_wire(core_terminal));
+            CommandResult::OkWith(CommandValue::TerminalId(wire))
+        }
+        Err(err) => {
+            warn!(
+                session = %name,
+                error = %err,
+                "CREATE_SESSION: failed to seed pane for new session",
+            );
+            CommandResult::Error {
+                code: ErrorCode::ResourceExhausted,
+                message: format!("failed to create session {name:?}: {err}"),
+            }
+        }
+    }
 }
 
 /// Build the `OK_WITH(STATE(..))` reply for `GET_STATE`.

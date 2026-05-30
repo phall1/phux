@@ -268,6 +268,14 @@ pub(crate) const COMMAND_TAG_GET_SCREEN: u8 = 0x07;
 /// attach, subscription, or resize — the write counterpart to the
 /// side-effect-free `GET_SCREEN` read.
 pub(crate) const COMMAND_TAG_ROUTE_INPUT: u8 = 0x08;
+/// Wire tag for [`Command::CreateSession`]. Appended after `ROUTE_INPUT`'s
+/// `0x08`; `CREATE_SESSION` is an additive control command (ADR-0021 §3,
+/// `phux-fdh`) that creates a named session under a Collection *without*
+/// attaching, subscribing, or resizing. The reply carries the seed pane's
+/// [`TerminalId`] via `COMMAND_RESULT { Ok_With(TerminalId) }`,
+/// asynchronously correlated by `request_id` — the same shape
+/// `SPAWN_TERMINAL` uses, but session-level. Backs `phux new --json`.
+pub(crate) const COMMAND_TAG_CREATE_SESSION: u8 = 0x09;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -589,8 +597,9 @@ pub enum StateScope {
 ///
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
 /// the ones the CLI needs — `KILL_TERMINAL`, `GET_STATE`, the
-/// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), and the
-/// appended `ROUTE_INPUT` write counterpart. Unknown wire tags surface as
+/// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), the appended
+/// `ROUTE_INPUT` write counterpart, and the appended `CREATE_SESSION`
+/// create-without-attach command (`phux-fdh`). Unknown wire tags surface as
 /// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
 ///
 /// Only `PartialEq` (not `Eq`): `RouteInput` carries a [`MouseEvent`] whose
@@ -651,6 +660,30 @@ pub enum Command {
         terminal_id: TerminalId,
         /// The structured input event (key/mouse/focus/paste).
         event: InputEvent,
+    },
+    /// Create a named session under `collection` *without* attaching,
+    /// subscribing, or resizing — the create-only counterpart to
+    /// `ATTACH { CreateIfMissing }`, which always attaches. The server
+    /// allocates the session and its seed pane atomically, so two racing
+    /// `CREATE_SESSION` callers cannot collide (closing the `GET_STATE`→`ATTACH`
+    /// TOCTOU window v0.1's client-side always-new logic carried). The
+    /// reply rides `COMMAND_RESULT { Ok_With(TerminalId) }` carrying the
+    /// seed pane's id (or an `Error` if `name` is already taken or
+    /// `collection` is unknown). Backs `phux new --json` (ADR-0021 §3,
+    /// `phux-fdh`).
+    CreateSession {
+        /// Collection to host the new session under. v0.1 servers accept
+        /// only the default `CollectionId(1)`.
+        collection: CollectionId,
+        /// Name for the new session. A name already in use is rejected
+        /// (`Error`) rather than silently reused — `CREATE_SESSION` is
+        /// create-only, never create-or-attach.
+        name: String,
+        /// Initial command to run in the seed pane. `None` falls back to
+        /// the server's default shell, mirroring `CreateIfMissing`.
+        command: Option<Vec<String>>,
+        /// Working directory for the seed pane, if any.
+        cwd: Option<String>,
     },
 }
 
@@ -1987,9 +2020,9 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 //
 // Command tags follow the SPEC §5.1 catalog order; KILL_TERMINAL (0x03)
 // and GET_STATE (0x05) are wired in v0.1, plus the appended GET_SCREEN
-// (0x07, after RUN_HOOK's reserved 0x06). CommandResult / CommandValue
-// tags use the same `Ok = 0x00` / sequential convention as the rest of the
-// wire.
+// (0x07, after RUN_HOOK's reserved 0x06), ROUTE_INPUT (0x08), and
+// CREATE_SESSION (0x09). CommandResult / CommandValue tags use the same
+// `Ok = 0x00` / sequential convention as the rest of the wire.
 // -----------------------------------------------------------------------------
 
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
@@ -2016,6 +2049,18 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u8(COMMAND_TAG_ROUTE_INPUT);
             encode_terminal_id(terminal_id, enc);
             encode_input_event(event, enc);
+        }
+        Command::CreateSession {
+            collection,
+            name,
+            command,
+            cwd,
+        } => {
+            enc.write_u8(COMMAND_TAG_CREATE_SESSION);
+            enc.write_u32_be(collection.get());
+            enc.write_str(name);
+            encode_optional_string_list(command.as_deref(), enc);
+            encode_optional_str(cwd.as_deref(), enc);
         }
     }
 }
@@ -2088,6 +2133,18 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
             terminal_id: decode_terminal_id(dec)?,
             event: decode_input_event(dec)?,
         }),
+        COMMAND_TAG_CREATE_SESSION => {
+            let collection = CollectionId::new(dec.read_u32_be()?);
+            let name = dec.read_str()?.to_owned();
+            let command = decode_optional_string_list(dec)?;
+            let cwd = decode_optional_str(dec)?.map(str::to_owned);
+            Ok(Command::CreateSession {
+                collection,
+                name,
+                command,
+                cwd,
+            })
+        }
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",
             value: u32::from(other),

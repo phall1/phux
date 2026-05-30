@@ -150,8 +150,16 @@ enum Command {
     /// v0.1 maps to "create the named session if it does not exist, then
     /// attach" (the server's `CreateIfMissing` path). Auto-starts a
     /// server if none is running.
+    ///
+    /// With `--json`, creates the session *without* attaching and prints
+    /// the seed pane's id as JSON instead — the `CREATE_SESSION` control
+    /// command (ADR-0021 §3, `phux-fdh`). This neither attaches nor
+    /// resizes, and the create is atomic server-side (no `GET_STATE`→attach
+    /// race). `--json` requires an explicit `-s NAME`, and a name already
+    /// in use is an error (create-only, never create-or-attach).
     New {
-        /// Session name. Defaults to the standard session name.
+        /// Session name. Defaults to the standard session name. Required
+        /// with `--json`.
         #[arg(short = 's', long = "session")]
         session: Option<String>,
 
@@ -162,6 +170,11 @@ enum Command {
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<PathBuf>,
+
+        /// Create without attaching and print the seed pane's id as JSON
+        /// (the `CREATE_SESSION` command). Requires `-s NAME`.
+        #[arg(long)]
+        json: bool,
 
         /// Command (and arguments) to run in the seed pane instead of the
         /// default shell. Everything after `--` is taken verbatim.
@@ -385,8 +398,9 @@ fn main() -> ExitCode {
             session,
             cwd,
             socket,
+            json,
             command,
-        }) => run_new(session, cwd, socket, command),
+        }) => run_new(session, cwd, socket, json, command),
         Some(Command::Kill { target, socket }) => run_kill(&target, socket),
         Some(Command::Snapshot {
             session,
@@ -910,6 +924,7 @@ fn run_new(
     session: Option<String>,
     cwd: Option<PathBuf>,
     socket: Option<PathBuf>,
+    json: bool,
     command: Vec<String>,
 ) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
@@ -917,6 +932,10 @@ fn run_new(
         Ok(rt) => rt,
         Err(code) => return code,
     };
+
+    if json {
+        return run_new_json(&rt, &socket_path, session, cwd, command);
+    }
 
     // If a server is up, snapshot its session names so we can enforce
     // "new" (reject a duplicate -s, auto-name an omitted one). No server
@@ -984,6 +1003,83 @@ fn run_new(
             print_attach_error(&err, &socket_path, &name);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// `phux new --json` — create a session *without* attaching and print its
+/// seed pane's id as JSON (ADR-0021 §3, `phux-fdh`).
+///
+/// Issues the `CREATE_SESSION` control command rather than
+/// `ATTACH { CreateIfMissing }`: no attach, no subscription, no resize, and
+/// no client-side `GET_STATE`→attach race — the server allocates the session
+/// and its seed pane atomically, so two concurrent `phux new --json -s X`
+/// callers cannot both create `X` (the loser gets an error).
+///
+/// `--json` requires an explicit `-s NAME` (auto-naming is reserved for the
+/// attaching path, where the client already snapshots state). A name already
+/// in use is the server's error, surfaced verbatim — create-only, never
+/// create-or-attach.
+fn run_new_json(
+    rt: &tokio::runtime::Runtime,
+    socket_path: &Path,
+    session: Option<String>,
+    cwd: Option<PathBuf>,
+    command: Vec<String>,
+) -> ExitCode {
+    let Some(name) = session else {
+        eprintln!("phux: `phux new --json` requires an explicit -s NAME");
+        return ExitCode::FAILURE;
+    };
+
+    // A server must be running to host the new session. Auto-spawn seeds a
+    // throwaway session under DEFAULT_SESSION_NAME (kept distinct from the
+    // requested name so the subsequent CREATE_SESSION does not collide with
+    // the seed) and keeps the server alive; the real session is then created
+    // without attaching. If the requested name equals the seed name the
+    // server rejects the duplicate cleanly — no silent reuse.
+    if !socket_path.exists()
+        && let Err(err) = maybe_auto_spawn_server(socket_path, DEFAULT_SESSION_NAME, None)
+    {
+        eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
+    }
+
+    let target = WireCommand::CreateSession {
+        collection: phux_protocol::ids::CollectionId::new(1),
+        name: name.clone(),
+        command: if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        },
+        cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
+    };
+
+    match rt.block_on(request_command(socket_path, target)) {
+        Ok(CommandResult::OkWith(CommandValue::TerminalId(id))) => {
+            let payload = serde_json::json!({
+                "session": name,
+                "terminal_id": id.local_id(),
+            });
+            match serde_json::to_string_pretty(&payload) {
+                Ok(s) => {
+                    println!("{s}");
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("phux: failed to serialize create result as JSON: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Ok(CommandResult::Error { code, message }) => {
+            eprintln!("phux: create-session refused ({code:?}): {message}");
+            ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("phux: unexpected CREATE_SESSION result: {other:?}");
+            ExitCode::FAILURE
+        }
+        Err(err) => report_no_server(&err, socket_path, "new"),
     }
 }
 

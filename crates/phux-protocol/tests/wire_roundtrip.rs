@@ -1652,6 +1652,31 @@ fn command_route_input_round_trips() {
 }
 
 #[test]
+fn command_create_session_round_trips() {
+    // CREATE_SESSION (tag 0x09): CollectionId + name + optional<list<str>>
+    // command + optional<str> cwd. Exercise the present/absent crossings on
+    // both optional tails so the presence bytes round-trip.
+    for command in [None, Some(vec!["vim".to_owned(), "notes.md".to_owned()])] {
+        for cwd in [None, Some("/tmp/work".to_owned())] {
+            let frame = FrameKind::Command {
+                request_id: 31,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "work".to_owned(),
+                    command: command.clone(),
+                    cwd: cwd.clone(),
+                },
+            };
+            let mut buf = BytesMut::new();
+            frame.encode(&mut buf);
+            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+            assert_eq!(decoded, frame);
+            assert!(tail.is_empty());
+        }
+    }
+}
+
+#[test]
 fn command_result_ok_with_json_round_trips() {
     // GET_SCREEN's reply shape: OK_WITH(JSON(serialized ScreenState)).
     let frame = FrameKind::CommandResult {

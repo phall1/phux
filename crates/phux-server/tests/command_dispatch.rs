@@ -17,6 +17,11 @@
 //!    seeded session is the server's only one, the kill also triggers the
 //!    tmux-model self-exit (phux-60s), so the test tolerates the
 //!    connection closing.
+//! 5. **CREATE_SESSION** → `COMMAND_RESULT { Ok_With(TerminalId(..)) }`
+//!    creating a named session under the default collection *without*
+//!    attaching (the returned id resolves to a live seed pane, GET_STATE
+//!    lists the new session). Plus the duplicate-name and unknown-collection
+//!    refusals (`phux-fdh`, ADR-0021 §3).
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -30,7 +35,7 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::ids::TerminalId;
+use phux_protocol::ids::{CollectionId, TerminalId};
 use phux_protocol::wire::frame::{
     Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_COMMAND_RESULT,
     TYPE_TERMINAL_CLOSED,
@@ -337,5 +342,201 @@ fn kill_terminal_live_pane_acks_and_closes() {
             saw_closed,
             "KILL_TERMINAL must drive TERMINAL_CLOSED for the pane"
         );
+    });
+}
+
+/// CREATE_SESSION creates a named session under the default collection
+/// without attaching, and the reply carries the seed pane's id. The whole
+/// path rides `handle_client` (the production read loop) — the test only
+/// speaks wire bytes. Driving it through `handle_client` (not
+/// `handle_create_session` directly) is the house rule for wire→dispatch
+/// coverage.
+#[test]
+fn create_session_creates_without_attaching_and_returns_seed_pane() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 9,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "scratch".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+
+        let created = match await_command_result(&mut stream, 9).await {
+            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        };
+
+        // The new session shows up in a fresh snapshot — proof the create
+        // happened server-side, with no attach (this client never sent
+        // ATTACH and never received an ATTACHED frame).
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 10,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 10).await {
+            CommandResult::OkWith(CommandValue::State(snapshot)) => {
+                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+                assert!(
+                    names.contains(&"scratch"),
+                    "CREATE_SESSION must register the session; got {names:?}",
+                );
+            }
+            other => panic!("expected Ok_With(State(..)), got {other:?}"),
+        }
+
+        // The returned id resolves to a live pane: GET_SCREEN on it succeeds
+        // (the side-effect-free read path needs a real actor behind the id).
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 11,
+                command: Command::GetScreen {
+                    terminal_id: created.clone(),
+                    request_scrollback: None,
+                    cells: false,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 11).await {
+            CommandResult::OkWith(CommandValue::Json(_)) => {}
+            other => panic!("seed pane id must back a live pane; got {other:?}"),
+        }
+    });
+}
+
+/// CREATE_SESSION run twice with distinct names yields two distinct seed
+/// panes — the always-new guarantee, without a client-side GET_STATE round
+/// trip. Distinct ids prove no silent reuse.
+#[test]
+fn create_session_twice_yields_distinct_panes() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 1,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "a".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        let first = match await_command_result(&mut stream, 1).await {
+            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        };
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 2,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "b".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        let second = match await_command_result(&mut stream, 2).await {
+            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        };
+
+        assert_ne!(
+            first, second,
+            "two CREATE_SESSION calls must seed distinct panes"
+        );
+    });
+}
+
+/// CREATE_SESSION with a name already in use is refused — create-only, never
+/// create-or-attach (unlike `ATTACH { CreateIfMissing }`).
+#[test]
+fn create_session_duplicate_name_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 4,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "work".to_owned(), // the seeded session's name
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 4).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvalidCommand);
+            }
+            other => panic!("expected Error(InvalidCommand), got {other:?}"),
+        }
+    });
+}
+
+/// CREATE_SESSION under an unknown collection is refused; v0.1 servers host
+/// only the default `CollectionId(1)`.
+#[test]
+fn create_session_unknown_collection_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 6,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(99),
+                    name: "other".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 6).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvalidCommand);
+            }
+            other => panic!("expected Error(InvalidCommand), got {other:?}"),
+        }
     });
 }
