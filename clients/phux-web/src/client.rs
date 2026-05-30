@@ -23,7 +23,12 @@ use crate::{Metrics, render};
 /// # Errors
 /// Fails if the engine can't load, the canvas has no 2D context, or the
 /// WebSocket can't be opened.
-pub async fn run(ws_url: &str, canvas: HtmlCanvasElement, cols: u16, rows: u16) -> Result<(), JsValue> {
+pub async fn run(
+    ws_url: &str,
+    canvas: HtmlCanvasElement,
+    cols: u16,
+    rows: u16,
+) -> Result<Client, JsValue> {
     let vt = Vt::load().await?;
     let ctx: CanvasRenderingContext2d = canvas
         .get_context("2d")?
@@ -93,7 +98,26 @@ pub async fn run(ws_url: &str, canvas: HtmlCanvasElement, cols: u16, rows: u16) 
         onkey.forget();
     }
 
-    Ok(())
+    Ok(Client { app })
+}
+
+/// A live connection handle. The event handlers run for the connection's
+/// lifetime; this lets a caller (or test) inspect the rendered grid.
+pub struct Client {
+    app: Rc<RefCell<App>>,
+}
+
+impl Client {
+    /// The current styled grid as one `String` per row (for inspection/tests).
+    #[must_use]
+    pub fn rows_text(&self) -> Vec<String> {
+        let grid = self.app.borrow().session.grid();
+        let cols = usize::from(grid.cols);
+        grid.cells
+            .chunks(cols.max(1))
+            .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+            .collect()
+    }
 }
 
 struct App {

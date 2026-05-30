@@ -59,7 +59,13 @@ impl Session {
             client_caps: ClientCapabilities::default(),
         };
         let attach = FrameKind::Attach {
-            target: AttachTarget::Last,
+            // The web client owns one session named "default": attach to it, or
+            // create it if the server has none yet.
+            target: AttachTarget::CreateIfMissing {
+                name: "default".to_owned(),
+                command: None,
+                cwd: None,
+            },
             viewport: ViewportInfo::new(self.cols, self.rows),
             request_scrollback: false,
             scrollback_limit_lines: 0,
