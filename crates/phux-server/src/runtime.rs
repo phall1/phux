@@ -46,11 +46,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
-use crate::transport::{FrameReader, FrameWriter, Incoming};
 use crate::terminal_actor::{
     ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
     ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
 };
+use crate::transport::{FrameReader, FrameWriter, Incoming};
 
 /// Timeout for the "is the socket still live?" liveness probe used when an
 /// existing socket file is encountered during bind.

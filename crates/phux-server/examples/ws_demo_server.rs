@@ -17,16 +17,14 @@ use phux_server::{ServerConfig, ServerRuntime};
 use portable_pty::CommandBuilder;
 
 fn main() {
-    let addr =
-        std::env::var("PHUX_WS_ADDR").unwrap_or_else(|_| "127.0.0.1:47654".to_owned());
+    let addr = std::env::var("PHUX_WS_ADDR").unwrap_or_else(|_| "127.0.0.1:47654".to_owned());
     // The transport reads this env var; make sure it's set even if defaulted.
     // SAFETY: single-threaded startup, before any server thread exists.
     unsafe {
         std::env::set_var("PHUX_WS_ADDR", &addr);
     }
 
-    let socket_path =
-        std::env::temp_dir().join(format!("phux-e2e-{}.sock", std::process::id()));
+    let socket_path = std::env::temp_dir().join(format!("phux-e2e-{}.sock", std::process::id()));
 
     // A PTY session that emits a deterministic marker, then stays alive.
     let mut cmd = CommandBuilder::new("sh");

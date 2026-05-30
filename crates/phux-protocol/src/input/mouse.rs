@@ -149,7 +149,11 @@ mod tests {
 
     #[test]
     fn mouse_atoms_round_trip_wire_discriminants() {
-        for a in [MouseAction::Press, MouseAction::Release, MouseAction::Motion] {
+        for a in [
+            MouseAction::Press,
+            MouseAction::Release,
+            MouseAction::Motion,
+        ] {
             assert_eq!(MouseAction::try_from(a as u32), Ok(a));
         }
         for b in [MouseButton::Left, MouseButton::Middle, MouseButton::Eleven] {

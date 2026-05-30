@@ -16,8 +16,8 @@ pub mod input;
 pub mod runtime;
 pub mod state;
 pub mod telemetry;
-pub mod transport;
 pub mod terminal_actor;
+pub mod transport;
 
 pub use id_bridge::IdBridge;
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};

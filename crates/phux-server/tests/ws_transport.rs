@@ -99,7 +99,8 @@ fn ws_lifecycle_ping_pong() {
 
         // Expect a PONG binary message: [len(4)][type(1)][nonce(8)].
         let pong = loop {
-            if let Message::Binary(data) = ws.next().await.expect("ws closed before PONG").unwrap() {
+            if let Message::Binary(data) = ws.next().await.expect("ws closed before PONG").unwrap()
+            {
                 break data;
             }
         };
