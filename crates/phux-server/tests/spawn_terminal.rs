@@ -560,7 +560,11 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
         let cwd_path = cwd_dir.path().canonicalize().expect("canonicalize cwd");
         let mut seed = CommandBuilder::new("/bin/sh");
         seed.arg("-c");
-        seed.arg(format!("cd '{}' && exec read _", cwd_path.display()));
+        // `read _` (a builtin) blocks the shell on the PTY, keeping the pane
+        // alive in its cwd. NOT `exec read _` — `exec` needs an external
+        // program, so it dies immediately (status 1), which raced the ATTACH
+        // and flaked on fast CI.
+        seed.arg(format!("cd '{}' && read _", cwd_path.display()));
         let (shutdown_tx, server_handle) =
             spawn_server_with_seed_cmd(socket_path.clone(), "focused", seed);
 
@@ -592,7 +596,8 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
-                    "pwd; exec read _".to_owned(),
+                    // `read _` blocks (a builtin); `exec read _` would die.
+                    "pwd; read _".to_owned(),
                 ]),
                 cwd: None,
                 env: None,
