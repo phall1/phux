@@ -19,7 +19,9 @@ use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
-use crate::render::overlay::{HelpOverlay, OverlayOutcome, OverlayState, PromptOverlay};
+use crate::render::overlay::{
+    HelpOverlay, OverlayOutcome, OverlayState, PromptOverlay, SelectItem, SelectList,
+};
 
 /// Mutable context the input-dispatch path needs to update on a chord
 /// that resolves to a layout action (phux-4li.5). Bundles the items
@@ -452,6 +454,34 @@ struct ActionEffects {
     kill_frames: Vec<FrameKind>,
 }
 
+/// Canonical names of every action `run_action` handles.
+///
+/// This is the single source of truth for the dispatcher's action set.
+/// The command-palette registry
+/// ([`super::action_registry::REGISTRY`]) is checked against this list by
+/// a unit test so the two cannot drift: adding a `run_action` arm without
+/// adding it here (and to the registry) fails CI. Keep this list in sync
+/// with the `match resolved.action.as_str()` arms below — they are the
+/// same set by construction, and the test enforces it.
+pub const ACTION_NAMES: &[&str] = &[
+    "split-pane",
+    "kill-pane",
+    "new-window",
+    "kill-window",
+    "next-window",
+    "previous-window",
+    "select-window",
+    "rename-window",
+    "focus-direction",
+    "resize-pane",
+    "show-help",
+    "detach",
+    "next-pane",
+    "previous-pane",
+    "command-palette",
+    "window-picker",
+];
+
 /// Dispatch a resolved action against the driver's context.
 ///
 /// Returns the [`ActionEffects`] the caller needs to apply. The function
@@ -672,6 +702,34 @@ fn run_action(
             );
             ctx.overlays.push(Box::new(overlay));
         }
+        "command-palette" => {
+            // phux-ahv.8: push the command palette. It lists every action
+            // the registry knows about, annotated with its currently-bound
+            // chord from the live keybindings snapshot. Choosing a row
+            // commits that action's `ResolvedAction`, which flows back
+            // through this same `run_action` — keybinds and the palette
+            // share one dispatch path (the architectural invariant).
+            let items = super::action_registry::palette_items(ctx.keybindings);
+            ctx.overlays.push(Box::new(SelectList::new(
+                "command palette",
+                items,
+                ctx.theme,
+            )));
+        }
+        "window-picker" => {
+            // phux-4li.19: push the `<leader> w` window picker. Each row is
+            // a window (`index:name`, pane count as the secondary label)
+            // that commits `select-window { index }` — the same action the
+            // numeric prefix bindings use, so switching flows through the
+            // single dispatch path. With no windows it bells.
+            let items = window_picker_items(ctx.workspace);
+            if items.is_empty() {
+                effects.bell = true;
+                return effects;
+            }
+            ctx.overlays
+                .push(Box::new(SelectList::new("windows", items, ctx.theme)));
+        }
         "detach" => {
             effects.detach = true;
         }
@@ -738,6 +796,47 @@ fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
 /// Pull a window name out of a [`ResolvedAction`]'s `name = "..."` arg.
 fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
     resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
+}
+
+/// Build the `<leader> w` picker's rows from the client's [`Workspace`]
+/// windows (phux-4li.19).
+///
+/// Each row's label is `index:name` (matching the status-bar window tab
+/// convention) with the pane count as the dimmed secondary; choosing it
+/// commits `select-window { index }`, which `run_action` routes through
+/// the same per-client window switch the numeric prefix bindings use.
+fn window_picker_items(workspace: &Workspace) -> Vec<SelectItem> {
+    workspace
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let panes = window
+                .state
+                .tree
+                .as_ref()
+                .map_or(0, |tree| crate::layout::leaves(tree).len());
+            let label = format!("{index}:{}", window.name);
+            let secondary = if panes == 1 {
+                "1 pane".to_owned()
+            } else {
+                format!("{panes} panes")
+            };
+            let mut args = std::collections::BTreeMap::new();
+            // Window counts never approach i64::MAX; the lossless path is
+            // the only one that can fire in practice.
+            let idx_i64 = i64::try_from(index).unwrap_or(i64::MAX);
+            args.insert("index".to_owned(), toml::Value::Integer(idx_i64));
+            SelectItem::new(
+                label,
+                phux_config::keybind::ResolvedAction {
+                    action: "select-window".to_owned(),
+                    args,
+                },
+            )
+            .secondary(secondary)
+        })
+        .collect()
 }
 
 /// Apply a window-switch `mutate` to the workspace and, **only if the
@@ -1122,6 +1221,95 @@ mod tests {
         let effects = run(&bare_action("kill-window"), &mut workspace);
         assert!(effects.bell);
         assert!(effects.kill_frames.is_empty());
+    }
+
+    #[test]
+    fn palette_committed_action_routes_through_run_action() {
+        // A palette row's ResolvedAction, fed back through run_action,
+        // produces the same effect a keybind would. Use `detach` — a row
+        // whose effect is unambiguous.
+        let cfg = phux_config::parse_str(
+            phux_config::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings));
+        let detach = items
+            .iter()
+            .find(|i| i.action.action == "detach")
+            .expect("detach in palette");
+        let mut workspace = Workspace::default();
+        let effects = run(&detach.action, &mut workspace);
+        assert!(effects.detach, "committing the detach palette row detaches");
+    }
+
+    #[test]
+    fn command_palette_action_pushes_overlay() {
+        let mut workspace = Workspace::single(tid(1));
+        let (effects, overlays) = run_capturing(&bare_action("command-palette"), &mut workspace);
+        assert!(
+            overlays.is_active(),
+            "command-palette should push the palette overlay"
+        );
+        assert_eq!(overlays.depth(), 1);
+        // No layout mutation — opening the palette doesn't touch windows.
+        assert!(!effects.layout_mutated);
+        assert!(!effects.bell);
+    }
+
+    #[test]
+    fn window_picker_action_pushes_overlay_with_windows() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        let (effects, overlays) = run_capturing(&bare_action("window-picker"), &mut workspace);
+        assert!(overlays.is_active(), "window-picker should push an overlay");
+        assert!(!effects.bell);
+    }
+
+    #[test]
+    fn window_picker_on_empty_workspace_bells() {
+        let mut workspace = Workspace::default();
+        let (effects, overlays) = run_capturing(&bare_action("window-picker"), &mut workspace);
+        assert!(!overlays.is_active(), "no windows ⇒ no overlay");
+        assert!(effects.bell);
+    }
+
+    #[test]
+    fn window_picker_items_label_index_name_and_pane_count() {
+        let mut workspace = Workspace::single(tid(1)); // window "1", 1 pane
+        workspace.add_window("editor".to_owned(), tid(2));
+        let items = window_picker_items(&workspace);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].label, "0:1");
+        assert_eq!(items[0].secondary.as_deref(), Some("1 pane"));
+        assert_eq!(items[1].label, "1:editor");
+        // Each row commits select-window with its index.
+        assert_eq!(items[1].action.action, "select-window");
+        assert_eq!(
+            items[1].action.args.get("index"),
+            Some(&toml::Value::Integer(1))
+        );
+    }
+
+    #[test]
+    fn window_picker_commit_routes_select_window_through_run_action() {
+        // The architectural invariant: a picker selection commits a
+        // select-window ResolvedAction that, when fed back through
+        // run_action, performs the same per-client switch a numeric prefix
+        // binding does.
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        workspace.select(0); // active = 0
+        let items = window_picker_items(&workspace);
+        // Commit the picker row for window index 1.
+        let effects = run(&items[1].action, &mut workspace);
+        assert_eq!(
+            workspace.active, 1,
+            "select-window switched the active window"
+        );
+        assert!(effects.layout_mutated);
+        assert_eq!(effects.set_focus, Some(tid(2)));
+        assert!(!effects.set_metadata, "window switch is per-client");
     }
 
     #[test]

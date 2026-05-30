@@ -10,6 +10,7 @@
 //! up the new bindings. This avoids the overlay holding any reference
 //! into the live config, which keeps `Box<dyn RenderOverlay>` `'static`.
 
+use phux_config::keybind::chord_str_matches_event;
 use phux_config::{Action, KeybindingsCfg};
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
@@ -149,14 +150,23 @@ impl RenderOverlay for HelpOverlay {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
-        // Esc → dismiss. F1 → dismiss (matches the default global binding
-        // to open it; pressing the same key again is the universal "toggle"
-        // even when the overlay only models "show" + "dismiss"). Anything
-        // else is absorbed.
-        match key.key {
-            PhysicalKey::Escape | PhysicalKey::F1 => OverlayCommand::Dismiss,
-            _ => OverlayCommand::Stay,
+        // Esc always dismisses. So does the chord the user actually bound
+        // to `show-help` — pressing the open-help key again is the
+        // universal toggle, even when the overlay only models "show" +
+        // "dismiss". We match the *configured* chord (via
+        // `chord_str_matches_event`) rather than a hardcoded F1, so a user
+        // who rebound `show-help` to e.g. `?` closes it with `?`
+        // (phux-ahv.7). When no `show-help` binding exists, only Esc
+        // closes it.
+        if key.key == PhysicalKey::Escape {
+            return OverlayCommand::Dismiss;
         }
+        if let Some(chord) = &self.show_help_chord
+            && chord_str_matches_event(chord, key)
+        {
+            return OverlayCommand::Dismiss;
+        }
+        OverlayCommand::Stay
     }
 }
 
@@ -304,6 +314,41 @@ mod tests {
         assert_eq!(
             overlay.handle_key(&key(PhysicalKey::A)),
             OverlayCommand::Stay
+        );
+    }
+
+    #[test]
+    fn dismisses_on_rebound_show_help_chord_not_just_f1() {
+        // phux-ahv.7: a user who rebinds `show-help` to `?` must be able
+        // to dismiss with `?`, and F1 (no longer bound) must NOT dismiss.
+        let mut c = cfg();
+        c.global.clear();
+        c.global
+            .insert("?".to_owned(), Action::Bare("show-help".to_owned()));
+        let mut overlay = HelpOverlay::from_config(&c, &Theme::default());
+        assert_eq!(overlay.show_help_chord.as_deref(), Some("?"));
+
+        // `?` is Shift+/ on US ANSI (the chord parser decomposes it), so
+        // build the live event accordingly.
+        let mut question = key(PhysicalKey::Slash);
+        question.mods = ModSet::SHIFT;
+        assert_eq!(
+            overlay.handle_key(&question),
+            OverlayCommand::Dismiss,
+            "the rebound show-help chord should dismiss"
+        );
+
+        // F1 is no longer the help binding: it must be absorbed, not
+        // treated as a dismiss.
+        assert_eq!(
+            overlay.handle_key(&key(PhysicalKey::F1)),
+            OverlayCommand::Stay,
+            "F1 should no longer dismiss once show-help is rebound off it"
+        );
+        // Esc still always dismisses.
+        assert_eq!(
+            overlay.handle_key(&key(PhysicalKey::Escape)),
+            OverlayCommand::Dismiss
         );
     }
 

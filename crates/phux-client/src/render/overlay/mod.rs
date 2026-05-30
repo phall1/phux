@@ -30,10 +30,12 @@ use ratatui::layout::Rect;
 
 pub mod help;
 pub mod prompt;
+pub mod select_list;
 pub mod widgets;
 
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
+pub use select_list::{SelectItem, SelectList};
 
 /// A chrome-layer overlay rendered above pane interiors.
 ///

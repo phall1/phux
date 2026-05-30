@@ -29,6 +29,7 @@
 //!   handled by [`input::StdinParser`]; mouse reports and bracketed
 //!   paste are deferred follow-ups (see the input module docs).
 
+pub mod action_registry;
 pub mod actions;
 pub mod connection;
 pub mod driver;

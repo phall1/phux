@@ -93,9 +93,19 @@ prefix = "C-a"
 
 # Rename the active window. With an explicit name it renames immediately,
 # e.g. "," = { action = "rename-window", name = "build" }. The bare
-# binding auto-labels with the next free number for now; an interactive
-# type-a-name prompt is a follow-up (phux-ahv).
+# binding opens an interactive type-a-name prompt pre-filled with the
+# current name (phux-ahv.1).
 "," = "rename-window"
+
+# Command palette: a filterable list of every action, each annotated with
+# its bound chord. Choosing one runs it through the same path a keybind
+# takes (phux-ahv.8).
+":" = "command-palette"
+
+# Window picker: a filterable list of open windows; choosing one switches
+# to it (phux-4li.19). The <leader> a session switcher is a separate wave
+# (needs server session enumeration) and is left unbound for now.
+"w" = "window-picker"
 
 # Detach this client from the session.
 "d" = "detach"
