@@ -35,6 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::BytesMut;
@@ -284,6 +285,18 @@ pub struct ServerState {
     /// ([`phux_config::CwdInheritance::InheritFocused`]) so tests that
     /// never call the setter exercise the tmux-default behavior.
     cwd_inheritance: phux_config::CwdInheritance,
+    /// Frozen session-creation directory per session (phux-nyx,
+    /// `defaults.cwd-inheritance = session-root`). Captured the first time
+    /// a `session-root` spawn resolves a session's seed-pane CWD and reused
+    /// thereafter, so later `cd`s in the seed pane do not move the root.
+    /// Cleared with the rest of a session's bookkeeping on teardown.
+    session_root: HashMap<SessionId, PathBuf>,
+    /// Most-recent observed working directory per window (phux-nyx,
+    /// `defaults.cwd-inheritance = last-cwd-per-window`). Updated whenever a
+    /// `last-cwd-per-window` spawn resolves the window's active-pane CWD;
+    /// new panes in that window inherit the latest value. Cleared with the
+    /// window's bookkeeping on teardown.
+    window_last_cwd: HashMap<WindowId, PathBuf>,
     /// Whether any client has ever attached to this server.
     ///
     /// Gates the tmux-model self-exit (phux-60s): the server only exits
@@ -490,6 +503,8 @@ impl ServerState {
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
+            session_root: HashMap::new(),
+            window_last_cwd: HashMap::new(),
             has_served_client: false,
         }
     }
@@ -556,6 +571,53 @@ impl ServerState {
     #[must_use]
     pub const fn cwd_inheritance(&self) -> phux_config::CwdInheritance {
         self.cwd_inheritance
+    }
+
+    /// Read the frozen session-creation directory recorded for `session`
+    /// under the `session-root` cwd-inheritance policy (phux-nyx), if one
+    /// has been captured.
+    #[must_use]
+    pub fn session_root(&self, session: SessionId) -> Option<&PathBuf> {
+        self.session_root.get(&session)
+    }
+
+    /// Freeze `root` as `session`'s creation directory the first time it is
+    /// observed; later calls are no-ops so a `cd` in the seed pane cannot
+    /// move an already-recorded root (phux-nyx, `session-root`). Returns the
+    /// effective recorded root.
+    pub fn record_session_root(&mut self, session: SessionId, root: PathBuf) -> &PathBuf {
+        self.session_root.entry(session).or_insert(root)
+    }
+
+    /// Read the most-recent working directory recorded for `window` under
+    /// the `last-cwd-per-window` cwd-inheritance policy (phux-nyx), if any.
+    #[must_use]
+    pub fn window_last_cwd(&self, window: WindowId) -> Option<&PathBuf> {
+        self.window_last_cwd.get(&window)
+    }
+
+    /// Record `cwd` as `window`'s most-recent working directory, overwriting
+    /// any prior value (phux-nyx, `last-cwd-per-window`).
+    pub fn record_window_last_cwd(&mut self, window: WindowId, cwd: PathBuf) {
+        self.window_last_cwd.insert(window, cwd);
+    }
+
+    /// Resolve the window that owns `session`'s active pane, if any. The
+    /// `last-cwd-per-window` policy keys its ledger on this window.
+    #[must_use]
+    pub fn active_window_of_session(&self, session: SessionId) -> Option<WindowId> {
+        self.registry.session(session)?.active
+    }
+
+    /// Resolve the seed (oldest) pane of `session` — the first pane of its
+    /// first window. The `session-root` policy reads this pane's CWD to
+    /// establish the session's creation directory.
+    #[must_use]
+    pub fn seed_pane_of_session(&self, session: SessionId) -> Option<TerminalId> {
+        let session = self.registry.session(session)?;
+        let window_id = *session.windows.first()?;
+        let window = self.registry.window(window_id)?;
+        window.panes.first().copied()
     }
 
     /// Borrow the L3 metadata store.
@@ -908,12 +970,18 @@ impl ServerState {
         if let Some(wire) = self.window_wire_forward.remove(&window) {
             self.window_wire_reverse.remove(&wire);
         }
+        // Drop the last-cwd-per-window ledger entry (phux-nyx) so a reused
+        // window id can never inherit a dead window's directory.
+        self.window_last_cwd.remove(&window);
     }
 
     /// Forget a removed session's wire id and last-touch ordering entry.
     fn forget_session_bookkeeping(&mut self, session: SessionId) {
         self.session_id_bridge.forget(session);
         self.session_last_touched.remove(&session);
+        // Drop the frozen session-root entry (phux-nyx) alongside the rest
+        // of the session's bookkeeping.
+        self.session_root.remove(&session);
     }
 
     /// Subscribers (snapshot) for `pane`. Returns an empty slice if no

@@ -54,7 +54,8 @@ use tokio::time::timeout;
 
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
-    spawn_server, spawn_server_with_seed_cmd, wait_for_socket,
+    spawn_server, spawn_server_with_seed_cmd, spawn_server_with_seed_cmd_and_cwd_mode,
+    wait_for_socket,
 };
 
 /// Drain frames until a `TERMINAL_SPAWNED` arrives whose `request_id`
@@ -617,6 +618,177 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
             acc.windows(needle.len()).any(|w| w == needle),
             "spawned pane must inherit the focused pane's live CWD ({}); got output: {body:?}",
             cwd_path.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-nyx acceptance: with `defaults.cwd-inheritance = session-root`, a
+/// `SPAWN_TERMINAL` with `cwd` unset opens the new pane in the *session's
+/// seed-pane* directory.
+///
+/// The seed pane sits in `root_dir` and blocks. A spawn under session-root
+/// reads the seed pane's live CWD (`root_dir`), freezes it as the session
+/// root, and seeds the new pane there. The decisive assertion is that the
+/// new pane reports `root_dir`, not `$HOME` and not the server's CWD.
+#[test]
+fn spawn_terminal_session_root_inherits_seed_pane_dir() {
+    use phux_protocol::wire::frame::TYPE_ATTACHED;
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // Seed pane: a shell sitting in a known temp dir (the session root).
+        // Canonicalize so the expected path matches the kernel CWD query
+        // (macOS resolves /var → /private/var).
+        let root_dir = TempDir::new().unwrap();
+        let root_path = root_dir.path().canonicalize().expect("canonicalize root");
+        let mut seed = CommandBuilder::new("/bin/sh");
+        seed.arg("-c");
+        seed.arg(format!("cd '{}' && read _", root_path.display()));
+        let (shutdown_tx, server_handle) = spawn_server_with_seed_cmd_and_cwd_mode(
+            socket_path.clone(),
+            "rooted",
+            seed,
+            phux_config::CwdInheritance::SessionRoot,
+        );
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut stream, &attach_by_name("rooted")).await;
+        let (type_byte, _attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        let (type_byte, _snap) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte,
+            phux_protocol::wire::frame::TYPE_TERMINAL_SNAPSHOT,
+            "expected TERMINAL_SNAPSHOT",
+        );
+
+        // Give the seed shell a beat to run its `cd`.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // SPAWN_TERMINAL, cwd unset, command prints its CWD. Under
+        // session-root the server seeds the new pane from the seed pane's
+        // directory (root_path).
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 1,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "pwd; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 1).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = root_path.to_str().expect("utf8 root").as_bytes();
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "session-root spawn must inherit the seed pane's dir ({}); got output: {body:?}",
+            root_path.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-nyx acceptance: with `defaults.cwd-inheritance = last-cwd-per-window`,
+/// a `SPAWN_TERMINAL` with `cwd` unset opens the new pane in the most-recent
+/// working directory observed for the spawning client's active window — the
+/// active pane's live CWD.
+///
+/// The seed pane sits in `win_dir` and blocks. A spawn under
+/// last-cwd-per-window resolves the active pane's live CWD (`win_dir`),
+/// records it against the window, and seeds the new pane there. The
+/// decisive assertion is that the new pane reports `win_dir`.
+#[test]
+fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
+    use phux_protocol::wire::frame::TYPE_ATTACHED;
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        let win_dir = TempDir::new().unwrap();
+        let win_path = win_dir.path().canonicalize().expect("canonicalize win");
+        let mut seed = CommandBuilder::new("/bin/sh");
+        seed.arg("-c");
+        seed.arg(format!("cd '{}' && read _", win_path.display()));
+        let (shutdown_tx, server_handle) = spawn_server_with_seed_cmd_and_cwd_mode(
+            socket_path.clone(),
+            "windowed",
+            seed,
+            phux_config::CwdInheritance::LastCwdPerWindow,
+        );
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut stream, &attach_by_name("windowed")).await;
+        let (type_byte, _attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        let (type_byte, _snap) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte,
+            phux_protocol::wire::frame::TYPE_TERMINAL_SNAPSHOT,
+            "expected TERMINAL_SNAPSHOT",
+        );
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 1,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "pwd; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 1).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = win_path.to_str().expect("utf8 win").as_bytes();
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "last-cwd-per-window spawn must inherit the active pane's live dir ({}); \
+             got output: {body:?}",
+            win_path.display(),
         );
 
         drop(stream);

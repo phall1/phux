@@ -118,6 +118,36 @@ pub fn spawn_server_with_seed_cmd(
     (tx, handle)
 }
 
+/// Like [`spawn_server_with_seed_cmd`] but also sets the
+/// `defaults.cwd-inheritance` policy. Used by the phux-nyx tests to
+/// exercise the `session-root` and `last-cwd-per-window` modes against a
+/// deterministic seed-pane fixture.
+pub fn spawn_server_with_seed_cmd_and_cwd_mode(
+    socket_path: PathBuf,
+    pre_seeded: &str,
+    cmd: portable_pty::CommandBuilder,
+    cwd_inheritance: phux_config::CwdInheritance,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    let (tx, rx) = oneshot::channel::<()>();
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: Some(pre_seeded.to_owned()),
+        seed_with_pty: true,
+        seed_command: Some(cmd),
+        cwd_inheritance,
+        ..ServerConfig::with_default_socket()
+    };
+    let handle = tokio::task::spawn_local(async move {
+        let server = ServerRuntime::new(cfg);
+        server
+            .run_async(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (tx, handle)
+}
+
 /// Spawn a [`ServerRuntime`] that seeds panes with a *real PTY* but no
 /// server-wide override command (`seed_with_pty = true`, `seed_command =
 /// None`). Under this config a `CREATE_SESSION` carrying a non-empty wire

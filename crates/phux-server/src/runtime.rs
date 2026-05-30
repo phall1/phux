@@ -1451,11 +1451,19 @@ async fn resolve_create_if_missing(
 ///   unsupported/denied — each falls through to no override.
 /// * [`Home`](phux_config::CwdInheritance::Home) — `$HOME`, or `None`
 ///   when unset.
-/// * [`SessionRoot`](phux_config::CwdInheritance::SessionRoot) /
-///   [`LastCwdPerWindow`](phux_config::CwdInheritance::LastCwdPerWindow)
-///   — not yet wired (the server does not record a session-creation
-///   directory or per-window last-CWD); they fall through to no
-///   override. Tracked as follow-ups under phux-cs6.
+/// * [`SessionRoot`](phux_config::CwdInheritance::SessionRoot) — the
+///   session's creation directory: the live CWD of the session's seed
+///   (oldest) pane, captured once and frozen in
+///   [`crate::state::ServerState::record_session_root`] so a later `cd`
+///   in the seed pane does not move the root. `None` when the client is
+///   not attached, the session has no live seed pane, or the query is
+///   unsupported/denied (with no previously frozen value to fall back on).
+/// * [`LastCwdPerWindow`](phux_config::CwdInheritance::LastCwdPerWindow) —
+///   the most-recent CWD observed in the spawning client's active window.
+///   Resolved from the active pane's live CWD, recorded into
+///   [`crate::state::ServerState::record_window_last_cwd`], and reused as
+///   the fallback when a subsequent live query fails. `None` when there is
+///   no active window and nothing was ever recorded.
 async fn resolve_inherited_cwd(state: &SharedState, client_id: ClientId) -> Option<String> {
     let mode = state.with(crate::state::ServerState::cwd_inheritance);
     match mode {
@@ -1469,14 +1477,95 @@ async fn resolve_inherited_cwd(state: &SharedState, client_id: ClientId) -> Opti
                 let focused = s.active_pane_of_session(session)?;
                 s.terminal_handle(focused).cloned()
             })?;
-            let (reply, rx) = tokio::sync::oneshot::channel();
-            handle.pwd.send(PwdRequest { reply }).await.ok()?;
-            rx.await.ok().flatten()
+            query_pane_cwd(handle).await
         }
         phux_config::CwdInheritance::Home => std::env::var("HOME").ok().filter(|h| !h.is_empty()),
-        phux_config::CwdInheritance::SessionRoot
-        | phux_config::CwdInheritance::LastCwdPerWindow => None,
+        phux_config::CwdInheritance::SessionRoot => {
+            // The session root is the seed pane's directory at session
+            // creation, frozen on first observation. Query the seed pane
+            // live; if a root was already frozen, reuse it (and the live
+            // query is redundant). The freeze happens in `with_mut` after
+            // the off-lock query so a concurrent spawn cannot move it.
+            let (session, handle) = state.with(|s| {
+                let session = s.attached.get(&client_id)?.session;
+                if let Some(root) = s.session_root(session) {
+                    // Already frozen — return it without a live query.
+                    return Some((session, FrozenOrQuery::Frozen(path_to_string(root)?)));
+                }
+                let seed = s.seed_pane_of_session(session)?;
+                let handle = s.terminal_handle(seed).cloned()?;
+                Some((session, FrozenOrQuery::Query(handle)))
+            })?;
+            match handle {
+                FrozenOrQuery::Frozen(root) => Some(root),
+                FrozenOrQuery::Query(handle) => {
+                    let resolved = query_pane_cwd(handle).await?;
+                    // Freeze the first observed root; reuse any value a
+                    // racing spawn already inserted.
+                    let frozen = state.with_mut(|s| {
+                        path_to_string(
+                            s.record_session_root(session, std::path::PathBuf::from(&resolved)),
+                        )
+                    });
+                    frozen.or(Some(resolved))
+                }
+            }
+        }
+        phux_config::CwdInheritance::LastCwdPerWindow => {
+            // Resolve the active window and its active pane's handle. If the
+            // window has no live active pane, fall back to the last value we
+            // recorded for that window.
+            let (window, handle) = state.with(|s| {
+                let session = s.attached.get(&client_id)?.session;
+                let window = s.active_window_of_session(session)?;
+                let handle = s
+                    .active_pane_of_session(session)
+                    .and_then(|p| s.terminal_handle(p).cloned());
+                Some((window, handle))
+            })?;
+            let resolved = match handle {
+                Some(handle) => query_pane_cwd(handle).await,
+                None => None,
+            };
+            if let Some(cwd) = resolved {
+                // Record the freshly observed CWD and seed the new pane with
+                // it.
+                state.with_mut(|s| {
+                    s.record_window_last_cwd(window, std::path::PathBuf::from(&cwd));
+                });
+                return Some(cwd);
+            }
+            // Live query unavailable — reuse the most recent recorded value
+            // for this window, if any.
+            state.with(|s| s.window_last_cwd(window).and_then(|p| path_to_string(p)))
+        }
     }
+}
+
+/// Either a directory already frozen as a session root or the actor handle
+/// to query for it. Lets `resolve_inherited_cwd` decide whether a live PTY
+/// query is needed inside a single `with` critical section without holding
+/// the lock across the `await`.
+enum FrozenOrQuery {
+    Frozen(String),
+    Query(crate::terminal_actor::TerminalHandle),
+}
+
+/// Render `path` as a UTF-8 string, or `None` if it is not valid UTF-8 — the
+/// wire `cwd` and `CommandBuilder.cwd` plumbing are string-based, so a
+/// non-UTF-8 directory simply yields no override.
+fn path_to_string(path: &std::path::Path) -> Option<String> {
+    path.to_str().map(ToOwned::to_owned)
+}
+
+/// Ask `handle`'s actor for its live PTY child CWD (a kernel query, see
+/// [`crate::cwd_query`]). `None` when the actor has gone away or the query
+/// is unsupported/denied. The handle must be cloned out of state before the
+/// call: `with` must not be held across the `await`.
+async fn query_pane_cwd(handle: crate::terminal_actor::TerminalHandle) -> Option<String> {
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    handle.pwd.send(PwdRequest { reply }).await.ok()?;
+    rx.await.ok().flatten()
 }
 
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
