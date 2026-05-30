@@ -7,7 +7,7 @@ members = ["crates/*"]
 exclude = ["clients"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -39,11 +39,11 @@ missing_errors_doc = "allow"
 [workspace.dependencies]
 # Internal.
 phux-protocol = { path = "crates/phux-protocol", version = "0.0.1" }
-phux-core = { path = "crates/phux-core", version = "0.0.0" }
-phux-server = { path = "crates/phux-server", version = "0.0.0" }
-phux-client = { path = "crates/phux-client", version = "0.0.0" }
-phux-config = { path = "crates/phux-config", version = "0.0.0" }
-phux-mcp = { path = "crates/phux-mcp", version = "0.0.0" }
+phux-core = { path = "crates/phux-core", version = "0.0.1" }
+phux-server = { path = "crates/phux-server", version = "0.0.1" }
+phux-client = { path = "crates/phux-client", version = "0.0.1" }
+phux-config = { path = "crates/phux-config", version = "0.0.1" }
+phux-mcp = { path = "crates/phux-mcp", version = "0.0.1" }
 
 # External.
 thiserror = "2"

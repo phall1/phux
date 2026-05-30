@@ -88,6 +88,20 @@ commands, federation routing, the agent SDK, predictive local echo,
 most of the `phux <subcommand>` CLI surface. See
 [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) for the full state.
 
+## Install
+
+Prebuilt binaries via Homebrew (macOS arm64/x86_64, Linux x86_64):
+
+```sh
+brew install phall1/phux/phux
+```
+
+To hack on it instead, build from source — see Quickstart below. The
+binary is not on crates.io (it needs zig to build `libghostty-vt`); only
+the [`phux-protocol`](https://crates.io/crates/phux-protocol) wire crate
+publishes there. Release mechanics live in
+[`docs/RELEASING.md`](./docs/RELEASING.md).
+
 ## Quickstart
 
 ```sh

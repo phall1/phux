@@ -1,0 +1,184 @@
+# phux release — build distributable binaries on a version tag, publish a
+# GitHub release, and refresh the Homebrew tap formula.
+#
+# Trigger: push a tag matching `v*` (e.g. `v0.1.0`), or run manually via
+# workflow_dispatch with a `tag` input.
+#
+# Like ci.yml, every cargo invocation runs inside `nix develop -c` so the
+# build uses the exact toolchain from rust-toolchain.toml + flake.nix —
+# crucially zig_0_15, which libghostty-vt's build.rs needs to compile its
+# static lib. That is also why `phux` ships as a prebuilt binary here rather
+# than via `cargo install` from crates.io: the binary crate is publish=false
+# and carries a git dependency that crates.io would reject.
+#
+# CPU baseline caveat: libghostty-vt's build.rs lets zig auto-detect the host
+# CPU for native builds, so x86_64 release artifacts may carry instructions
+# specific to the runner generation. aarch64-apple-darwin has a uniform
+# baseline and is unaffected; the x86_64 targets are best-effort until a
+# pinned baseline is wired through libghostty-vt's build.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Must already exist."
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          ref="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
+          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: nix develop -c cargo build --release --bin phux --bin phux-mcp
+
+      - name: Package tarball
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          target="${{ matrix.target }}"
+          stage="phux-${tag}-${target}"
+          mkdir "${stage}"
+          cp target/release/phux target/release/phux-mcp "${stage}/"
+          cp README.md LICENSE-MIT LICENSE-APACHE "${stage}/"
+          tar -czf "${stage}.tar.gz" "${stage}"
+          # Portable sha256 (shasum on macOS, sha256sum on Linux).
+          if command -v sha256sum >/dev/null; then
+            sha=$(sha256sum "${stage}.tar.gz" | cut -d' ' -f1)
+          else
+            sha=$(shasum -a 256 "${stage}.tar.gz" | cut -d' ' -f1)
+          fi
+          echo "${sha}  ${stage}.tar.gz" > "${stage}.tar.gz.sha256"
+          echo "artifact=${stage}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            phux-*.tar.gz
+            phux-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    # Publish whatever built: a single failed target shouldn't block the
+    # release of the others. download-artifact below just collects what exists.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Resolve version
+        id: version
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: phux ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
+          # A partial matrix still publishes whatever built — don't fail if a
+          # target is missing (the glob still matches the ones that succeeded).
+          fail_on_unmatched_files: false
+          files: |
+            dist/phux-*.tar.gz
+            dist/phux-*.tar.gz.sha256
+
+  homebrew:
+    name: update homebrew tap
+    needs: release
+    runs-on: ubuntu-latest
+    # Pushes Formula/phux.rb to phall1/homebrew-phux via an SSH deploy key
+    # (HOMEBREW_TAP_DEPLOY_KEY: a private key whose public half is a
+    # write-enabled deploy key on the tap repo). Skipped automatically if the
+    # secret is unset, so the release still succeeds without it.
+    steps:
+      - name: Gate on deploy key
+        id: gate
+        run: |
+          if [ -n "${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY not set — skipping tap update."
+          fi
+
+      - name: Checkout phux (for the generator script)
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checkout tap
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: phall1/homebrew-phux
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Regenerate + push formula
+        if: steps.gate.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.release.outputs.tag }}"
+          mkdir -p tap/Formula
+          bash scripts/gen-formula.sh "$tag" dist tap/Formula/phux.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/phux.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date."
+          else
+            git commit -m "phux ${tag}"
+            git push
+          fi

@@ -1,0 +1,44 @@
+# Publish phux-protocol to crates.io.
+#
+# Only phux-protocol is publishable: every other workspace crate is
+# publish=false (the binary carries a git dependency on libghostty-vt that
+# crates.io rejects, and the rest are internal). phux-protocol's default
+# feature set is a near-empty shell with no git deps, so it packages cleanly
+# (ADR-0011); its `server` feature's optional libghostty-vt resolves to the
+# crates.io release (>=0.1.1) for external consumers.
+#
+# Manual-only: publishing is irreversible (versions cannot be reused, names
+# cannot be reclaimed), so this never fires on push. Requires the
+# CARGO_REGISTRY_TOKEN secret (a crates.io API token). Dispatch it after the
+# matching `v*` tag is pushed and `docs/spec` + the version are settled.
+
+name: publish-crate
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package + verify only; do not upload."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish phux-protocol
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Package + verify (always)
+        run: nix develop -c cargo publish --dry-run -p phux-protocol
+
+      - name: Publish to crates.io
+        if: ${{ inputs.dry_run == false }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: nix develop -c cargo publish -p phux-protocol
