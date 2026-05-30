@@ -8,13 +8,19 @@
 //! a `TERMINAL_OUTPUT` repaint. On dismiss, the driver triggers a full
 //! repaint to restore pane content.
 //!
-//! v1 carries a single active overlay ([`OverlayState`]). Multi-overlay
-//! stacking (palette-on-top-of-help, etc.) is intentionally future work;
-//! the type signature is `Option<Box<dyn RenderOverlay>>`, not a real
-//! stack.
+//! [`OverlayState`] carries a *stack* of overlays. The top of the stack
+//! captures input ([`RenderOverlay::handle_key`]); rendering walks the
+//! stack bottom-up so stacked overlays compose (e.g. a command palette
+//! painted on top of an open help modal). A single active overlay is the
+//! one-element case — the common path is unchanged from a UX standpoint.
 //!
 //! Submodules:
 //! - [`help`] — keybindings reference modal (phux-5ke.4)
+//! - [`prompt`] — single-line text-input modal (phux-ahv.1)
+//! - [`widgets`] — reusable themed primitives ([`Modal`], [`KeyChordTable`])
+//!
+//! [`Modal`]: widgets::Modal
+//! [`KeyChordTable`]: widgets::KeyChordTable
 
 use std::io::{self, Write};
 
@@ -24,6 +30,7 @@ use ratatui::layout::Rect;
 
 pub mod help;
 pub mod prompt;
+pub mod widgets;
 
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
@@ -75,18 +82,22 @@ pub enum OverlayOutcome {
     RunAction(phux_config::keybind::ResolvedAction),
 }
 
-/// One-slot overlay state. v1 carries at most one active overlay; the
-/// `Option<Box<…>>` shape leaves room for a future stack without forcing
-/// every call site through `Vec` indexing.
+/// Stacked overlay state.
+///
+/// The top of the stack captures input; rendering walks the stack
+/// bottom-up so stacked overlays compose (palette painted on top of
+/// help). A single active overlay is the one-element case.
 #[derive(Default)]
 pub struct OverlayState {
-    active: Option<Box<dyn RenderOverlay>>,
+    /// Bottom-to-top overlay stack. The last element is the top — it
+    /// receives input and is painted last (on top of the others).
+    stack: Vec<Box<dyn RenderOverlay>>,
 }
 
 impl std::fmt::Debug for OverlayState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OverlayState")
-            .field("active", &self.active.is_some())
+            .field("depth", &self.stack.len())
             .finish()
     }
 }
@@ -95,42 +106,45 @@ impl OverlayState {
     /// Empty state — no overlay active.
     #[must_use]
     pub const fn new() -> Self {
-        Self { active: None }
+        Self { stack: Vec::new() }
     }
 
-    /// `true` when an overlay is currently capturing input + pausing pane
-    /// stdout. The driver loop reads this *only* via this accessor — it
-    /// must not see ratatui types directly (CI grep guard enforces).
+    /// `true` when at least one overlay is active (capturing input +
+    /// pausing pane stdout). The driver loop reads this *only* via this
+    /// accessor — it must not see ratatui types directly (CI grep guard
+    /// enforces).
     #[must_use]
     pub const fn is_active(&self) -> bool {
-        self.active.is_some()
+        !self.stack.is_empty()
     }
 
-    /// Push `overlay` as the active one. v1: silently replaces any
-    /// previous overlay; logged as a debug because the only path that
-    /// can hit this is the user binding two `show-*` chords without
-    /// dismissing in between.
+    /// Number of overlays currently stacked (0 when inactive).
+    #[must_use]
+    pub fn depth(&self) -> usize {
+        self.stack.len()
+    }
+
+    /// Push `overlay` onto the top of the stack. It becomes the input
+    /// target and is painted last (above any overlays beneath it).
     pub fn push(&mut self, overlay: Box<dyn RenderOverlay>) {
-        if self.active.is_some() {
-            tracing::debug!("replacing active overlay (v1 has no real stack)");
-        }
-        self.active = Some(overlay);
+        self.stack.push(overlay);
     }
 
-    /// Dismiss the active overlay (if any).
+    /// Dismiss (pop) the top overlay, revealing whatever was beneath it.
+    /// No-op when the stack is empty.
     pub fn dismiss(&mut self) {
-        self.active = None;
+        self.stack.pop();
     }
 
-    /// Dispatch a key event to the active overlay. Auto-dismisses on
+    /// Dispatch a key event to the top overlay. Auto-dismisses (pops) on
     /// [`OverlayCommand::Dismiss`] and [`OverlayCommand::Commit`]; the
     /// latter also returns the action for the dispatcher to run. No-op
     /// (returns [`OverlayOutcome::None`]) when no overlay is active.
     pub fn handle_key(&mut self, key: &KeyEvent) -> OverlayOutcome {
-        let Some(active) = self.active.as_mut() else {
+        let Some(top) = self.stack.last_mut() else {
             return OverlayOutcome::None;
         };
-        match active.handle_key(key) {
+        match top.handle_key(key) {
             OverlayCommand::Stay => OverlayOutcome::None,
             OverlayCommand::Dismiss => {
                 self.dismiss();
@@ -143,19 +157,23 @@ impl OverlayState {
         }
     }
 
-    /// Paint the active overlay into a fresh full-viewport buffer and
-    /// emit it to `out` as VT bytes. No-op when no overlay is active.
+    /// Paint the overlay stack into a fresh full-viewport buffer and emit
+    /// it to `out` as VT bytes. No-op when no overlay is active.
     ///
-    /// The overlay paint is a from-scratch render, not a diff: callers
-    /// should clear-screen before invoking so leftover pane content
-    /// doesn't bleed through the overlay's blank cells.
+    /// Overlays paint bottom-up into one shared buffer (top last), so a
+    /// stacked overlay composes over the ones beneath it. The paint is a
+    /// from-scratch render, not a diff: callers should clear-screen
+    /// before invoking so leftover pane content doesn't bleed through the
+    /// overlays' blank cells.
     pub fn paint(&self, out: &mut impl Write, viewport_dims: (u16, u16)) -> io::Result<()> {
-        let Some(active) = self.active.as_ref() else {
+        if self.stack.is_empty() {
             return Ok(());
-        };
+        }
         let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
         let mut buf = Buffer::empty(area);
-        active.render(area, &mut buf);
+        for overlay in &self.stack {
+            overlay.render(area, &mut buf);
+        }
         emit_buffer(out, &buf)
     }
 }
@@ -259,6 +277,80 @@ mod tests {
         s.push(Box::new(EscDismiss));
         s.handle_key(&key(PhysicalKey::A));
         assert!(s.is_active(), "non-Esc should not dismiss");
+    }
+
+    #[test]
+    fn dismiss_pops_only_the_top() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(EscDismiss));
+        s.push(Box::new(EscDismiss));
+        assert_eq!(s.depth(), 2);
+        s.dismiss();
+        assert_eq!(s.depth(), 1, "dismiss pops one, not clear-all");
+        assert!(s.is_active());
+        s.dismiss();
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn handle_key_targets_only_the_top_overlay() {
+        // A stay-forever overlay on top must shield the Esc-dismiss
+        // overlay beneath it: keys go to the top only.
+        struct StayForever;
+        impl RenderOverlay for StayForever {
+            fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+            fn handle_key(&mut self, _key: &KeyEvent) -> OverlayCommand {
+                OverlayCommand::Stay
+            }
+        }
+        let mut s = OverlayState::new();
+        s.push(Box::new(EscDismiss));
+        s.push(Box::new(StayForever));
+        s.handle_key(&key(PhysicalKey::Escape));
+        assert_eq!(
+            s.depth(),
+            2,
+            "Esc reached the StayForever top, not the EscDismiss beneath"
+        );
+        // Pop the top; now Esc reaches the EscDismiss overlay.
+        s.dismiss();
+        s.handle_key(&key(PhysicalKey::Escape));
+        assert!(!s.is_active());
+    }
+
+    #[test]
+    fn paint_composes_stack_bottom_up() {
+        // Two overlays writing to distinct cells: both appear. The top
+        // overlay overwrites the bottom on any shared cell because it
+        // paints last.
+        struct WriteAt(u16, &'static str);
+        impl RenderOverlay for WriteAt {
+            fn render(&self, area: Rect, buf: &mut Buffer) {
+                buf.set_string(
+                    area.x,
+                    area.y + self.0,
+                    self.1,
+                    ratatui::style::Style::default(),
+                );
+            }
+            fn handle_key(&mut self, _key: &KeyEvent) -> OverlayCommand {
+                OverlayCommand::Stay
+            }
+        }
+        let mut s = OverlayState::new();
+        s.push(Box::new(WriteAt(0, "bottom")));
+        s.push(Box::new(WriteAt(1, "topp")));
+        let mut out = Vec::new();
+        s.paint(&mut out, (20, 5)).expect("paint");
+        let txt = String::from_utf8_lossy(&out);
+        assert!(
+            txt.contains("bottom"),
+            "bottom overlay should be painted:\n{txt}"
+        );
+        assert!(
+            txt.contains("topp"),
+            "top overlay should be painted:\n{txt}"
+        );
     }
 
     #[test]

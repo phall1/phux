@@ -107,11 +107,13 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     let mut predicted_any = false;
     let mut layout_changed = false;
     for ev in events {
-        // phux-5ke.4: while an overlay is active it captures all input.
-        // Key events flow to `OverlayState::handle_key` (which may
-        // dismiss); mouse / paste / focus events are dropped so they
-        // don't reach the pane underneath. Detach remains a resolver
-        // bypass so the user can always bail out cleanly.
+        // phux-5ke.4: while any overlay is active the stack captures all
+        // input. Key events flow to `OverlayState::handle_key`, which
+        // routes them to the *top* overlay (which may dismiss, popping
+        // back to whatever is beneath it); mouse / paste / focus events
+        // are dropped so they don't reach the pane underneath. Detach
+        // remains a resolver bypass so the user can always bail out
+        // cleanly.
         if ctx.overlays.is_active() {
             if let InputEvent::Key(ref key_event) = ev {
                 if let Some(outcome) = consume_chord(ctx, key_event) {

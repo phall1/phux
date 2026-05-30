@@ -14,11 +14,11 @@ use std::collections::BTreeMap;
 use phux_config::keybind::ResolvedAction;
 use phux_protocol::input::key::{KeyAction, KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
+use super::widgets::{Modal, centered};
 use super::{OverlayCommand, RenderOverlay};
 use crate::render::Theme;
 
@@ -78,31 +78,23 @@ impl PromptOverlay {
         }
     }
 
-    /// A small centered modal: full width-fraction, fixed 3 rows (border
+    /// A small centered modal: 60% width (min 20), fixed 3 rows (border
     /// + one input line).
     fn modal_area(outer: Rect) -> Rect {
-        let w = outer.width.saturating_mul(6) / 10;
-        let w = w.clamp(20.min(outer.width), outer.width);
+        // Reuse the shared centering for width/x, then pin height to 3
+        // rows (border + one input line) and re-center vertically against
+        // that fixed height — the fraction-based height a `Modal`-style
+        // box would otherwise get is wrong for a one-line prompt.
+        let wide = centered(outer, 6, 20, 3);
         let h = 3.min(outer.height);
-        let x = outer.x + (outer.width.saturating_sub(w)) / 2;
         let y = outer.y + (outer.height.saturating_sub(h)) / 2;
-        Rect::new(x, y, w, h)
+        Rect::new(wide.x, y, wide.width, h)
     }
 }
 
 impl RenderOverlay for PromptOverlay {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let modal = Self::modal_area(area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .title(Span::styled(
-                format!(" {} ", self.title),
-                Style::default()
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .title_alignment(Alignment::Center);
+        let modal_area = Self::modal_area(area);
         // Input line + a reverse-video cursor block so the caret is
         // visible without driving the host terminal cursor (the overlay
         // paint hides it).
@@ -110,7 +102,7 @@ impl RenderOverlay for PromptOverlay {
             Span::raw(self.input.clone()),
             Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
         ]);
-        Paragraph::new(line).block(block).render(modal, buf);
+        Modal::new(&self.theme, self.title.clone(), vec![line]).render_into(modal_area, buf);
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {

@@ -13,11 +13,9 @@
 use phux_config::{Action, KeybindingsCfg};
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::layout::Rect;
 
+use super::widgets::{ChordRow, ChordSection, KeyChordTable, Modal, centered};
 use super::{OverlayCommand, RenderOverlay};
 use crate::render::Theme;
 
@@ -34,9 +32,8 @@ struct Entry {
 /// Help overlay — keybindings reference modal.
 ///
 /// Built from a [`KeybindingsCfg`] snapshot via [`Self::from_config`].
-/// Rendering is a single centered [`Paragraph`] inside a bordered
-/// [`Block`]; bindings are grouped into prefix-table vs global vs
-/// hardcoded sections.
+/// Rendering composes a [`KeyChordTable`] (sections grouped prefix-table
+/// → global → hardcoded) into a centered [`Modal`].
 #[derive(Debug)]
 pub struct HelpOverlay {
     /// Pretty-printed prefix chord (e.g. `"C-a"`), or empty if no
@@ -109,113 +106,46 @@ impl HelpOverlay {
         }
     }
 
-    /// Compute a centered Rect inside `outer`. ~70% width and ~70%
-    /// height, clamped to a sensible min (40x10) so tiny terminals still
-    /// show something, and clamped to `outer` so we never overflow.
-    fn centered(outer: Rect) -> Rect {
-        let w = outer.width.saturating_mul(7) / 10;
-        let h = outer.height.saturating_mul(7) / 10;
-        let w = w.clamp(40.min(outer.width), outer.width);
-        let h = h.clamp(10.min(outer.height), outer.height);
-        let x = outer.x + (outer.width.saturating_sub(w)) / 2;
-        let y = outer.y + (outer.height.saturating_sub(h)) / 2;
-        Rect::new(x, y, w, h)
+    /// Group the snapshotted entries into the [`KeyChordTable`]'s
+    /// sections (prefix → global → hardcoded). Empty sections are dropped
+    /// by the table itself.
+    fn chord_table(&self) -> KeyChordTable {
+        let to_rows = |entries: &[Entry]| {
+            entries
+                .iter()
+                .map(|e| ChordRow::new(e.chord.clone(), e.action.clone()))
+                .collect::<Vec<_>>()
+        };
+        let sections = vec![
+            ChordSection::new(
+                format!("Prefix bindings ({})", self.prefix),
+                to_rows(&self.prefix_entries),
+            ),
+            ChordSection::new("Global bindings", to_rows(&self.global_entries)),
+            ChordSection::new("Hardcoded", to_rows(&self.hardcoded_entries)),
+        ];
+        KeyChordTable::new(&self.theme, sections).empty_notice("No keybindings configured.")
     }
 
-    /// Build the body lines: section headers + chord→action rows.
-    fn body_lines(&self) -> Vec<Line<'_>> {
-        let mut lines: Vec<Line<'_>> = Vec::new();
-        // Chord column is widened to the longest chord across ALL
-        // sections so the action column lines up vertically through
-        // section boundaries (prefix → global → hardcoded). Keeps
-        // long chords like `Ctrl-b d` from squashing the prefix
-        // section.
-        let chord_width = self
-            .prefix_entries
-            .iter()
-            .chain(self.global_entries.iter())
-            .chain(self.hardcoded_entries.iter())
-            .map(|e| e.chord.len())
-            .max()
-            .unwrap_or(8);
-        if !self.prefix_entries.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("Prefix bindings ({})", self.prefix),
-                Style::default()
-                    .fg(self.theme.section_header)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for e in &self.prefix_entries {
-                lines.push(entry_line(e, chord_width, self.theme.chord));
-            }
-        }
-        if !self.global_entries.is_empty() {
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(
-                "Global bindings",
-                Style::default()
-                    .fg(self.theme.section_header)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for e in &self.global_entries {
-                lines.push(entry_line(e, chord_width, self.theme.chord));
-            }
-        }
-        if !self.hardcoded_entries.is_empty() {
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
-            }
-            lines.push(Line::from(Span::styled(
-                "Hardcoded",
-                Style::default()
-                    .fg(self.theme.section_header)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for e in &self.hardcoded_entries {
-                lines.push(entry_line(e, chord_width, self.theme.chord));
-            }
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "No keybindings configured.",
-                Style::default().fg(self.theme.dim),
-            )));
-        }
-        lines.push(Line::from(""));
-        let footer = self.show_help_chord.as_deref().map_or_else(
+    /// The dismiss-hint footer, reflecting the user-bound `show-help`
+    /// chord when present.
+    fn footer(&self) -> String {
+        self.show_help_chord.as_deref().map_or_else(
             || "Press Esc to close".to_owned(),
             |chord| format!("Press {chord} or Esc to close"),
-        );
-        lines.push(Line::from(Span::styled(
-            footer,
-            Style::default()
-                .fg(self.theme.dim)
-                .add_modifier(Modifier::ITALIC),
-        )));
-        lines
+        )
     }
 }
 
 impl RenderOverlay for HelpOverlay {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let modal = Self::centered(area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(self.theme.border))
-            .title(Span::styled(
-                " phux help ",
-                Style::default()
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ))
-            .title_alignment(Alignment::Center);
-        let lines = self.body_lines();
-        let para = Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false });
-        para.render(modal, buf);
+        // ~70% of the viewport, min 40x10, clamped to the outer rect.
+        let modal_area = centered(area, 7, 40, 10);
+        let body = self.chord_table().body_lines();
+        Modal::new(&self.theme, "phux help", body)
+            .footer(self.footer())
+            .wrap(true)
+            .render_into(modal_area, buf);
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -228,24 +158,6 @@ impl RenderOverlay for HelpOverlay {
             _ => OverlayCommand::Stay,
         }
     }
-}
-
-/// One row in the help body — chord left-aligned, padded to `width`,
-/// then a separator and the action name.
-fn entry_line(e: &Entry, width: usize, chord_color: ratatui::style::Color) -> Line<'_> {
-    let pad = width.saturating_sub(e.chord.len());
-    let padding = " ".repeat(pad);
-    Line::from(vec![
-        Span::styled(
-            e.chord.clone(),
-            Style::default()
-                .fg(chord_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(padding),
-        Span::raw("  "),
-        Span::raw(e.action.clone()),
-    ])
 }
 
 /// Human-readable label for an [`Action`]. Bare actions show the name;
@@ -481,12 +393,16 @@ mod tests {
     }
 
     #[test]
-    fn centered_clamps_to_outer() {
-        let outer = Rect::new(0, 0, 20, 8);
-        let inner = HelpOverlay::centered(outer);
-        assert!(inner.width <= outer.width);
-        assert!(inner.height <= outer.height);
-        assert!(inner.x + inner.width <= outer.x + outer.width);
-        assert!(inner.y + inner.height <= outer.y + outer.height);
+    fn render_centers_within_tiny_viewport() {
+        // Regression for the prior `centered` clamp: a viewport smaller
+        // than the modal's preferred size must still render without
+        // overflowing (the shared `centered` helper clamps to the outer
+        // rect). Just assert it paints something without panicking.
+        let overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
+        let text = render_to_string(&overlay, 20, 8);
+        assert!(
+            text.contains("phux help"),
+            "title in tiny viewport:\n{text}"
+        );
     }
 }
