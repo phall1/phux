@@ -28,5 +28,9 @@ fn ws_from_query(search: &str) -> Option<String> {
         .trim_start_matches('?')
         .split('&')
         .find_map(|kv| kv.strip_prefix("ws="))
-        .map(|v| v.replace("%3A", ":").replace("%2F", "/").replace("%2f", "/"))
+        .map(|v| {
+            v.replace("%3A", ":")
+                .replace("%2F", "/")
+                .replace("%2f", "/")
+        })
 }

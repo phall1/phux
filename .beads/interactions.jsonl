@@ -193,3 +193,4 @@
 {"id":"int-370e0ed8","kind":"field_change","created_at":"2026-05-30T07:42:03.252675Z","actor":"phall1","issue_id":"phux-ahv.2","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-7069c4b5","kind":"field_change","created_at":"2026-05-30T18:32:22.35541Z","actor":"phall1","issue_id":"phux-ahv.3","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-f7fe8217","kind":"field_change","created_at":"2026-05-30T18:41:16.8342Z","actor":"phall1","issue_id":"phux-ahv.1","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-fdb7c6f0","kind":"field_change","created_at":"2026-05-30T19:11:51.436832Z","actor":"phall1","issue_id":"phux-e0d","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}

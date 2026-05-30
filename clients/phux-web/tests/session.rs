@@ -59,5 +59,8 @@ async fn handshake_emits_hello_then_attach() {
     let (hello, _) = FrameKind::decode(&frames[0]).expect("decode hello");
     assert!(matches!(hello, FrameKind::Hello { .. }), "first is HELLO");
     let (attach, _) = FrameKind::decode(&frames[1]).expect("decode attach");
-    assert!(matches!(attach, FrameKind::Attach { .. }), "second is ATTACH");
+    assert!(
+        matches!(attach, FrameKind::Attach { .. }),
+        "second is ATTACH"
+    );
 }
