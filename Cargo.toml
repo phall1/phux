@@ -65,6 +65,18 @@ tempfile = "3"
 # used by `ratatui`, `crossterm`, and `tui-rs`. No alternative ships
 # both EAW and emoji presentation tables in a single lookup.
 unicode-width = "0.2"
+# Grapheme-cluster segmentation for the predict layer (phux-9gw.1.6).
+# Multi-codepoint graphemes (flag emoji, ZWJ family sequences, base +
+# combining mark) arrive in a key event's `text` as several scalars; the
+# predictive-echo state must split that text into clusters with
+# `unicode-segmentation`'s `Graphemes` iterator before it can queue and
+# later reconcile them as single visual cells. `unicode-width` answers
+# "how wide is one scalar"; it does not group scalars into clusters, so
+# the two crates are complementary. `unicode-segmentation` is the
+# canonical UAX #29 implementation (used by `ratatui`, `bat`, `helix`),
+# is pure-safe Rust with no C deps, and is already present in Cargo.lock
+# transitively — adding it as a direct dep compiles no new crate.
+unicode-segmentation = "1"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }

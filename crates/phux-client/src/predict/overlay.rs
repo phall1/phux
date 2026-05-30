@@ -63,8 +63,11 @@ impl Overlay {
             // because we paint after it; what we emit here is a fresh
             // SGR scope owned by the prediction layer.
             out.write_all(b"\x1b[0m\x1b[4m")?;
-            let mut buf = [0u8; 4];
-            out.write_all(p.ch.encode_utf8(&mut buf).as_bytes())?;
+            // `text` is the full grapheme cluster — a single scalar in the
+            // common case, but a flag emoji, ZWJ sequence, or base plus
+            // combining marks span several scalars (phux-9gw.1.6). Emit
+            // the whole cluster so the painted cell matches the prediction.
+            out.write_all(p.text.as_bytes())?;
             // Reset after each cell so a partial overlay never leaks
             // underline into adjacent authoritative cells if the next
             // render skips them.

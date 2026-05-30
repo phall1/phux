@@ -31,7 +31,7 @@
 //!
 //! | `PredictionKind` | Confirmed when | Pending when | Contradicted when |
 //! |---|---|---|---|
-//! | `Insert` | cell base grapheme == `ch` | cell is blank (no grapheme or `' '`) | cell has any other grapheme |
+//! | `Insert` | cell grapheme cluster == `text` | cell is blank (no grapheme or `" "`) | cell has any other grapheme |
 //! | `BackspaceEol` | cell is blank | cell is blank | cell has any grapheme |
 //! | `Newline` | `cursor.row > pred.row` | never (instantaneous) | `cursor.row <= pred.row` |
 //! | `CursorLeft` / `CursorRight` | `cursor == (pred.row, pred.col)` | cursor is still on `pred.row` and (Left: `cursor.col > pred.col`, Right: `cursor.col < pred.col`) — server hasn't caught up | otherwise |
@@ -79,9 +79,12 @@ pub fn reconcile_terminal_output(
 /// authoritative cell grid (read via the `read_cell` closure) and the
 /// fresh cursor position.
 ///
-/// `read_cell(row, col)` returns the base grapheme of the cell at the
-/// given coordinates, or `None` if the cell is blank (no grapheme or a
-/// `' '` placeholder — callers may treat those equivalently).
+/// `read_cell(row, col)` returns the full grapheme cluster of the cell at
+/// the given coordinates, or `None` if the cell is blank (no grapheme or a
+/// `" "` placeholder — callers may treat those equivalently). Returning
+/// the whole cluster (not just the base scalar) lets `Insert` reconcile
+/// confirm multi-codepoint predictions — flag emoji, ZWJ sequences, base
+/// plus combining marks (phux-9gw.1.6).
 ///
 /// The cursor estimate is resynced to `(cursor_row, cursor_col)` if and
 /// only if the queue is fully drained. If predictions remain (i.e. the
@@ -95,27 +98,35 @@ pub fn reconcile_terminal_output_per_cell<F>(
     mut read_cell: F,
 ) -> ReconcileStats
 where
-    F: FnMut(u16, u16) -> Option<char>,
+    F: FnMut(u16, u16) -> Option<String>,
 {
     let mut summary = ReconcileStats::default();
 
     loop {
-        let Some(front) = state.front() else {
-            break;
-        };
-        let row = front.row;
-        let col = front.col;
-        let kind = front.kind;
-        let ch = front.ch;
+        let row;
+        let col;
+        let kind;
+        let predicted;
+        {
+            let Some(front) = state.front() else {
+                break;
+            };
+            row = front.row;
+            col = front.col;
+            kind = front.kind;
+            // Clone the predicted cluster so the `read_cell` closure (which
+            // mutably borrows the grid) can run without holding `front`.
+            predicted = front.text.clone();
+        }
 
         let verdict = match kind {
             PredictionKind::Insert => {
                 let actual = read_cell(row, col);
-                classify_insert(ch, actual)
+                classify_insert(&predicted, actual.as_deref())
             }
             PredictionKind::BackspaceEol => {
                 let actual = read_cell(row, col);
-                classify_backspace(actual)
+                classify_backspace(actual.as_deref())
             }
             PredictionKind::Newline => classify_newline(row, cursor_row),
             PredictionKind::CursorLeft => classify_cursor_left(row, col, cursor_row, cursor_col),
@@ -157,17 +168,17 @@ enum Verdict {
     Contradicted,
 }
 
-const fn classify_insert(predicted: char, actual: Option<char>) -> Verdict {
+fn classify_insert(predicted: &str, actual: Option<&str>) -> Verdict {
     match actual {
         Some(c) if c == predicted => Verdict::Confirmed,
-        Some(' ') | None => Verdict::Pending,
+        Some(" ") | None => Verdict::Pending,
         Some(_) => Verdict::Contradicted,
     }
 }
 
-const fn classify_backspace(actual: Option<char>) -> Verdict {
+fn classify_backspace(actual: Option<&str>) -> Verdict {
     match actual {
-        Some(' ') | None => Verdict::Confirmed,
+        Some(" ") | None => Verdict::Confirmed,
         Some(_) => Verdict::Contradicted,
     }
 }
@@ -300,13 +311,18 @@ mod tests {
     // -- per-cell match game ---------------------------------------------
 
     /// Build a row read closure backed by an associative slice of
-    /// `((row, col), char)` mappings. Cells not in the slice are blank.
-    fn row_reader(cells: &'static [((u16, u16), char)]) -> impl FnMut(u16, u16) -> Option<char> {
+    /// `((row, col), &str)` mappings. The `&str` is the cell's full
+    /// grapheme cluster (a single scalar in the common case, a flag /
+    /// ZWJ / combining cluster otherwise). Cells not in the slice are
+    /// blank.
+    fn row_reader<'a>(
+        cells: &'a [((u16, u16), &'a str)],
+    ) -> impl FnMut(u16, u16) -> Option<String> + 'a {
         move |r, c| {
             cells
                 .iter()
                 .find(|((rr, cc), _)| *rr == r && *cc == c)
-                .map(|(_, ch)| *ch)
+                .map(|(_, s)| (*s).to_owned())
         }
     }
 
@@ -322,7 +338,7 @@ mod tests {
             &mut s,
             0,
             2,
-            row_reader(&[((0, 0), 'h'), ((0, 1), 'i')]),
+            row_reader(&[((0, 0), "h"), ((0, 1), "i")]),
         );
         assert_eq!(summary.confirmed, 2);
         assert_eq!(summary.contradicted, 0);
@@ -343,7 +359,7 @@ mod tests {
             &mut s,
             0,
             2,
-            row_reader(&[((0, 0), 'h'), ((0, 1), 'e')]),
+            row_reader(&[((0, 0), "h"), ((0, 1), "e")]),
         );
         assert_eq!(summary.confirmed, 2);
         assert_eq!(summary.pending, 3);
@@ -370,7 +386,7 @@ mod tests {
             &mut s,
             0,
             1,
-            row_reader(&[((0, 0), 'a'), ((0, 1), 'X')]),
+            row_reader(&[((0, 0), "a"), ((0, 1), "X")]),
         );
         // 'a' confirmed, 'b' contradicted (cell is 'X'), 'c' dropped as
         // suffix. The contradicted counter records the size of the
@@ -380,6 +396,88 @@ mod tests {
         assert_eq!(summary.pending, 0);
         assert_eq!(s.pending_len(), 0);
         assert_eq!(s.cursor(), (0, 1));
+    }
+
+    // -- multi-codepoint grapheme reconcile (phux-9gw.1.6) ---------------
+
+    #[test]
+    fn per_cell_flag_emoji_confirmed_against_full_cluster() {
+        // 🇺🇸 = U+1F1FA U+1F1F8, predicted as one width-2 insert. The
+        // server paints the full cluster into the base cell; reconcile
+        // must compare the whole cluster, not just the base scalar.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let flag = "\u{1F1FA}\u{1F1F8}";
+        assert_eq!(s.predict_key(&key_text(flag)), PredictionOutcome::Predicted);
+        assert_eq!(s.pending_len(), 1);
+        let summary =
+            reconcile_terminal_output_per_cell(&mut s, 0, 2, row_reader(&[((0, 0), flag)]));
+        assert_eq!(summary.confirmed, 1);
+        assert_eq!(summary.contradicted, 0);
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(s.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn per_cell_zwj_family_emoji_confirmed_against_full_cluster() {
+        // 👨‍👩‍👧 — man + ZWJ + woman + ZWJ + girl, one width-2 cell.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(
+            s.predict_key(&key_text(family)),
+            PredictionOutcome::Predicted
+        );
+        let summary =
+            reconcile_terminal_output_per_cell(&mut s, 0, 2, row_reader(&[((0, 0), family)]));
+        assert_eq!(summary.confirmed, 1);
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(s.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn per_cell_combining_mark_cluster_confirmed_against_full_cluster() {
+        // "e\u{0301}" — base 'e' plus COMBINING ACUTE ACCENT, one width-1
+        // cell. Reconcile confirms only when the cell carries the full
+        // two-scalar cluster, not a bare 'e'.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let accented = "e\u{0301}";
+        assert_eq!(
+            s.predict_key(&key_text(accented)),
+            PredictionOutcome::Predicted
+        );
+        let summary =
+            reconcile_terminal_output_per_cell(&mut s, 0, 1, row_reader(&[((0, 0), accented)]));
+        assert_eq!(summary.confirmed, 1);
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(s.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn per_cell_combining_mark_cluster_contradicted_by_bare_base() {
+        // Prediction is the full "e\u{0301}" cluster, but the server
+        // painted only a bare 'e' (combining mark not yet applied). The
+        // clusters differ → contradiction, not confirmation.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let accented = "e\u{0301}";
+        assert_eq!(
+            s.predict_key(&key_text(accented)),
+            PredictionOutcome::Predicted
+        );
+        let summary =
+            reconcile_terminal_output_per_cell(&mut s, 0, 1, row_reader(&[((0, 0), "e")]));
+        assert_eq!(summary.confirmed, 0);
+        assert_eq!(summary.contradicted, 1);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn per_cell_grapheme_pending_when_cell_blank() {
+        // Server hasn't echoed the flag yet — cell blank → keep pending.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let flag = "\u{1F1FA}\u{1F1F8}";
+        s.predict_key(&key_text(flag));
+        let summary = reconcile_terminal_output_per_cell(&mut s, 0, 0, row_reader(&[]));
+        assert_eq!(summary.pending, 1);
+        assert_eq!(s.pending_len(), 1);
     }
 
     #[test]
@@ -425,7 +523,7 @@ mod tests {
         // Server painted 'q' there instead — the shell wasn't ready for
         // backspace (e.g. the line had no input to delete).
         let summary =
-            reconcile_terminal_output_per_cell(&mut s, 0, 6, row_reader(&[((0, 5), 'q')]));
+            reconcile_terminal_output_per_cell(&mut s, 0, 6, row_reader(&[((0, 5), "q")]));
         assert_eq!(summary.contradicted, 1);
         assert_eq!(s.pending_len(), 0);
     }
@@ -444,7 +542,7 @@ mod tests {
             &mut s,
             1,
             0,
-            row_reader(&[((0, 0), 'h'), ((0, 1), 'i')]),
+            row_reader(&[((0, 0), "h"), ((0, 1), "i")]),
         );
         assert_eq!(summary.confirmed, 3);
         assert_eq!(s.pending_len(), 0);
@@ -465,7 +563,7 @@ mod tests {
             &mut s,
             0,
             2,
-            row_reader(&[((0, 0), 'h'), ((0, 1), 'i')]),
+            row_reader(&[((0, 0), "h"), ((0, 1), "i")]),
         );
         // First two predictions confirmed; Newline contradicted → drop.
         assert_eq!(summary.confirmed, 2);

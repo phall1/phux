@@ -265,8 +265,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 if let Some((row, col)) = focused_cursor {
                     let _stats = reconcile_terminal_output_per_cell(predict, row, col, |r, c| {
                         panes.get_mut(fid).and_then(|s| {
+                            // Read the full grapheme cluster, not just the
+                            // base scalar, so multi-codepoint Insert
+                            // predictions (flag emoji, ZWJ sequences, base
+                            // plus combining marks) reconcile against the
+                            // whole painted cluster (phux-9gw.1.6).
                             s.renderer
-                                .read_grapheme_at(&s.terminal, r, c)
+                                .read_grapheme_string_at(&s.terminal, r, c)
                                 .ok()
                                 .flatten()
                         })

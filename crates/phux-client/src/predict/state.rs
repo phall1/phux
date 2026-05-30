@@ -14,7 +14,8 @@
 use std::collections::VecDeque;
 
 use phux_protocol::input::key::{KeyEvent, ModSet, PhysicalKey};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Per-client knob for predictive echo.
 ///
@@ -55,14 +56,17 @@ pub struct Prediction {
     /// cursor has been moved there already and reconcile confirms when
     /// the authoritative cursor catches up to it.
     pub col: u16,
-    /// What the prediction wants the cell to display. For backspace
-    /// predictions this is a single space (`' '`) — visually "erase".
-    /// For cursor-motion predictions this is a placeholder space; the
-    /// overlay paints no cell for them.
-    pub ch: char,
-    /// Cell width of [`Self::ch`], in columns. `1` for ASCII and most
-    /// scripts, `2` for CJK / wide emoji (phux-9gw.1.4). Cursor-motion
-    /// and `Newline` predictions store `0` — they paint no cell.
+    /// What the prediction wants the cell to display. Usually a single
+    /// scalar, but may be a multi-codepoint grapheme cluster — a flag
+    /// emoji, a ZWJ family sequence, or a base plus combining marks
+    /// (phux-9gw.1.6). For backspace predictions this is a single space
+    /// (`" "`) — visually "erase". For cursor-motion predictions this is
+    /// a placeholder space; the overlay paints no cell for them.
+    pub text: String,
+    /// Cell width of [`Self::text`], in columns. `1` for ASCII and most
+    /// scripts, `2` for CJK / wide emoji and many ZWJ clusters
+    /// (phux-9gw.1.4, phux-9gw.1.6). Cursor-motion and `Newline`
+    /// predictions store `0` — they paint no cell.
     pub width: u8,
     /// Kind of prediction, for reconciliation diagnostics + the
     /// per-class confirm/contradict bookkeeping.
@@ -74,9 +78,9 @@ pub struct Prediction {
 /// the sibling `reconcile` module for the match table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PredictionKind {
-    /// A printable byte: forward cursor, paint the char. Reconcile
-    /// confirms when the authoritative cell at `(row, col)` has `ch` as
-    /// its base grapheme.
+    /// A printable grapheme cluster: forward cursor, paint the cluster.
+    /// Reconcile confirms when the authoritative cell at `(row, col)`
+    /// has `text` as its grapheme cluster.
     Insert,
     /// A backspace at end-of-line: cursor back one column, blank the cell.
     /// Reconcile confirms when the authoritative cell at `(row, col)` is
@@ -234,10 +238,11 @@ impl PredictionState {
     ///
     /// Safe classes (see module docs):
     ///
-    /// - Single-Unicode-scalar `text` payload (any printable code point
-    ///   with cell width 1 or 2 per `unicode-width`), no Ctrl / Alt /
-    ///   Super modifier active. SHIFT is fine (it's part of producing the
-    ///   character).
+    /// - A `text` payload that is exactly one grapheme cluster (a single
+    ///   printable scalar, or a multi-scalar cluster such as a flag emoji,
+    ///   a ZWJ family sequence, or a base plus combining marks) with cell
+    ///   width 1 or 2 per `unicode-width`, no Ctrl / Alt / Super modifier
+    ///   active. SHIFT is fine (it's part of producing the character).
     /// - `PhysicalKey::Backspace`, no modifier, when the cursor is past
     ///   column 0 and below the last column.
     /// - `PhysicalKey::Enter`, no modifier, past column 0 and on a row
@@ -296,23 +301,28 @@ impl PredictionState {
             return self.predict_arrow_right(&mut read_cell);
         }
 
-        // Printable single-char insert.
+        // Printable insert. The `text` payload is one grapheme cluster in
+        // the common case, but may carry several Unicode scalars that form
+        // a single visual cell: a flag emoji (U+1F1FA U+1F1F8), a ZWJ
+        // family sequence, or a base plus combining marks (phux-9gw.1.6).
+        // Split into clusters and predict only when the payload is exactly
+        // one cluster — a multi-cluster payload is paste-like and outside
+        // the single-keystroke model we predict.
         let Some(text) = event.text.as_deref() else {
             return PredictionOutcome::Skipped;
         };
-        let mut chars = text.chars();
-        let (Some(ch), None) = (chars.next(), chars.next()) else {
-            // Multi-codepoint grapheme (ZWJ sequence, combining marks).
-            // Deferred — phux-9gw.1.4 ships single-scalar only.
+        let mut clusters = text.graphemes(true);
+        let (Some(cluster), None) = (clusters.next(), clusters.next()) else {
+            // Empty `text`, or more than one grapheme cluster (paste-like).
             return PredictionOutcome::Skipped;
         };
-        if !is_safe_predictable(ch) {
+        if !is_safe_predictable_cluster(cluster) {
             return PredictionOutcome::Skipped;
         }
-        let Some(width) = grapheme_width(ch) else {
+        let Some(width) = cluster_width(cluster) else {
             return PredictionOutcome::Skipped;
         };
-        self.predict_insert(ch, width)
+        self.predict_insert(cluster, width)
     }
 
     /// Predict an Enter keystroke as a cursor jump to `(row+1, 0)`.
@@ -340,7 +350,7 @@ impl PredictionState {
         self.pending.push_back(Prediction {
             row: pred_row,
             col: self.cursor_col,
-            ch: '\n',
+            text: "\n".to_owned(),
             width: 0,
             kind: PredictionKind::Newline,
         });
@@ -351,7 +361,7 @@ impl PredictionState {
         PredictionOutcome::Predicted
     }
 
-    fn predict_insert(&mut self, ch: char, width: u8) -> PredictionOutcome {
+    fn predict_insert(&mut self, cluster: &str, width: u8) -> PredictionOutcome {
         if self.cols == 0 || self.rows == 0 || self.cursor_row >= self.rows {
             return PredictionOutcome::Skipped;
         }
@@ -370,7 +380,7 @@ impl PredictionState {
         self.pending.push_back(Prediction {
             row: self.cursor_row,
             col: self.cursor_col,
-            ch,
+            text: cluster.to_owned(),
             width,
             kind: PredictionKind::Insert,
         });
@@ -391,7 +401,7 @@ impl PredictionState {
         self.pending.push_back(Prediction {
             row: self.cursor_row,
             col: new_col,
-            ch: ' ',
+            text: " ".to_owned(),
             width: 1,
             kind: PredictionKind::BackspaceEol,
         });
@@ -440,7 +450,7 @@ impl PredictionState {
         self.pending.push_back(Prediction {
             row: self.cursor_row,
             col: new_col,
-            ch: ' ',
+            text: " ".to_owned(),
             width: 0,
             kind: PredictionKind::CursorLeft,
         });
@@ -482,7 +492,7 @@ impl PredictionState {
         self.pending.push_back(Prediction {
             row: self.cursor_row,
             col: new_col,
-            ch: ' ',
+            text: " ".to_owned(),
             width: 0,
             kind: PredictionKind::CursorRight,
         });
@@ -516,12 +526,43 @@ const fn is_safe_predictable(ch: char) -> bool {
 /// Width is capped at 2 — `unicode-width` never returns more than 2
 /// for a single scalar, but the explicit cap defends against a future
 /// crate-rev change.
+///
+/// Used by the cursor-motion arrow predictions, which step over a single
+/// cell whose base scalar is read from the authoritative grid. Multi-
+/// scalar inserts go through [`cluster_width`] instead.
 fn grapheme_width(ch: char) -> Option<u8> {
     let w = UnicodeWidthChar::width(ch)?;
     if w == 0 {
-        // Combining marks, zero-width joiners, variation selectors —
-        // these need a base grapheme cluster, which is a multi-scalar
-        // case we defer (phux-9gw.1.4 ships single-scalar only).
+        // A lone combining mark, zero-width joiner, or variation selector
+        // has no base to attach to — refuse rather than paint at width 0.
+        return None;
+    }
+    Some(u8::try_from(w.min(2)).unwrap_or(1))
+}
+
+/// Whether a grapheme cluster is safe to predict. Rejects clusters whose
+/// first scalar is an ASCII control code or DEL — the shell may or may
+/// not echo those depending on `stty`, so we never guess. Everything
+/// else (printable ASCII, Latin-1, CJK, emoji and ZWJ sequences) is
+/// delegated to [`cluster_width`] for the width decision.
+fn is_safe_predictable_cluster(cluster: &str) -> bool {
+    cluster.chars().next().is_some_and(is_safe_predictable)
+}
+
+/// Cell width of a whole grapheme cluster, in terminal columns.
+///
+/// A cluster may span several scalars (flag emoji, ZWJ family sequence,
+/// base plus combining marks) whose combined display width is not the
+/// width of any single scalar: `UnicodeWidthStr::width` measures the
+/// string, so a base-plus-combining cluster stays width 1 while a flag
+/// or ZWJ emoji is width 2. Returns `None` when the measured width is 0
+/// (a cluster with no advancing scalar — nothing to anchor a prediction
+/// to). Width is capped at 2: the terminal renders any wider cluster as
+/// a width-2 emoji cell, and predicting more columns than the grid will
+/// paint risks a contradicting reconcile.
+fn cluster_width(cluster: &str) -> Option<u8> {
+    let w = UnicodeWidthStr::width(cluster);
+    if w == 0 {
         return None;
     }
     Some(u8::try_from(w.min(2)).unwrap_or(1))
@@ -572,7 +613,7 @@ mod tests {
         assert_eq!(r, PredictionOutcome::Predicted);
         assert_eq!(s.pending_len(), 1);
         let p = s.pending().next().expect("one prediction");
-        assert_eq!(p.ch, 'a');
+        assert_eq!(p.text, "a");
         assert_eq!(p.col, 0);
         assert_eq!(p.row, 0);
         assert_eq!(p.kind, PredictionKind::Insert);
@@ -682,7 +723,7 @@ mod tests {
         let last = s.pending().last().expect("two predictions");
         assert_eq!(last.kind, PredictionKind::BackspaceEol);
         assert_eq!(last.col, 0);
-        assert_eq!(last.ch, ' ');
+        assert_eq!(last.text, " ");
     }
 
     #[test]
@@ -733,7 +774,7 @@ mod tests {
         let ev = key_text("é");
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
         let p = s.pending().next().expect("one prediction");
-        assert_eq!(p.ch, 'é');
+        assert_eq!(p.text, "é");
         assert_eq!(p.width, 1);
         assert_eq!(s.cursor(), (0, 1));
     }
@@ -745,7 +786,7 @@ mod tests {
         let ev = key_text("中");
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
         let p = s.pending().next().expect("one prediction");
-        assert_eq!(p.ch, '中');
+        assert_eq!(p.text, "中");
         assert_eq!(p.width, 2);
         // Width-2 grapheme advances the cursor by two columns.
         assert_eq!(s.cursor(), (0, 2));
@@ -765,20 +806,63 @@ mod tests {
 
     #[test]
     fn combining_mark_alone_is_not_predicted() {
-        // U+0301 COMBINING ACUTE ACCENT — width 0, no base grapheme on
-        // its own. We defer multi-scalar graphemes; reject this case.
+        // U+0301 COMBINING ACUTE ACCENT — a one-cluster payload of width
+        // 0, no base to anchor on. Reject: there is nothing to paint.
         let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let ev = key_text("\u{0301}");
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
     }
 
     #[test]
-    fn multi_scalar_grapheme_is_not_predicted() {
-        // "👨\u{200D}💻" — ZWJ-joined emoji sequence. Two scalars in
-        // `text` → we reject (single-scalar only for now).
+    fn base_plus_combining_mark_is_predicted_width_one() {
+        // "e\u{0301}" — base 'e' plus COMBINING ACUTE ACCENT, one
+        // grapheme cluster of cell width 1 (phux-9gw.1.6). Predict it as
+        // a single-cell insert carrying the full two-scalar cluster.
         let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let ev = key_text("e\u{0301}");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.text, "e\u{0301}");
+        assert_eq!(p.width, 1);
+        assert_eq!(s.cursor(), (0, 1));
+    }
+
+    #[test]
+    fn flag_emoji_is_predicted_width_two() {
+        // 🇺🇸 — U+1F1FA REGIONAL INDICATOR U + U+1F1F8 REGIONAL
+        // INDICATOR S, one grapheme cluster of cell width 2
+        // (phux-9gw.1.6). Two scalars, single visual cell pair.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_text("\u{1F1FA}\u{1F1F8}");
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.text, "\u{1F1FA}\u{1F1F8}");
+        assert_eq!(p.width, 2);
+        assert_eq!(s.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn zwj_family_emoji_is_predicted_width_two() {
+        // 👨‍👩‍👧 — man + ZWJ + woman + ZWJ + girl, one grapheme cluster
+        // rendered as a single width-2 emoji cell (phux-9gw.1.6).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let cluster = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let ev = key_text(cluster);
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(p.text, cluster);
+        assert_eq!(p.width, 2);
+        assert_eq!(s.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn two_grapheme_clusters_in_text_are_not_predicted() {
+        // A paste-like `text` payload carrying two distinct clusters
+        // ("ab") is outside the single-keystroke model — refuse.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let ev = key_text("ab");
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
     }
 
     #[test]

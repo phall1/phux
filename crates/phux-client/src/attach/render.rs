@@ -93,6 +93,50 @@ impl<'alloc> TerminalRenderer<'alloc> {
         row: u16,
         col: u16,
     ) -> Result<Option<char>, RenderError> {
+        Ok(self
+            .read_cell_graphemes(terminal, row, col)?
+            .and_then(|g| g.first().copied()))
+    }
+
+    /// Read the full grapheme cluster of the cell at `(row, col)` as a
+    /// `String`, joining every scalar in the cell.
+    ///
+    /// Returns `Some(s)` if the cell has any grapheme (`s` may be a
+    /// multi-codepoint cluster — a flag emoji, a ZWJ family sequence, or
+    /// a base plus combining marks), `None` if the cell is blank
+    /// (no grapheme, wide-tail placeholder, or out of range). Unlike
+    /// [`Self::read_grapheme_at`], which truncates to the base scalar,
+    /// this preserves the whole cluster so the predict-layer reconcile
+    /// (phux-9gw.1.6) can compare it against a predicted multi-codepoint
+    /// cluster.
+    ///
+    /// Same snapshot semantics as [`Self::read_grapheme_at`]: takes a
+    /// fresh snapshot of `terminal`; the `&mut self` receiver guarantees
+    /// it is not called concurrently with [`Self::render`].
+    pub fn read_grapheme_string_at(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        row: u16,
+        col: u16,
+    ) -> Result<Option<String>, RenderError> {
+        Ok(self.read_cell_graphemes(terminal, row, col)?.and_then(|g| {
+            if g.is_empty() {
+                None
+            } else {
+                Some(g.into_iter().collect())
+            }
+        }))
+    }
+
+    /// Shared cell-grapheme lookup backing [`Self::read_grapheme_at`] and
+    /// [`Self::read_grapheme_string_at`]. Returns the cell's scalar vec,
+    /// or `None` when `(row, col)` is out of range.
+    fn read_cell_graphemes(
+        &mut self,
+        terminal: &Terminal<'alloc, '_>,
+        row: u16,
+        col: u16,
+    ) -> Result<Option<Vec<char>>, RenderError> {
         let snapshot = self.state.update(terminal)?;
         let rows_total = snapshot.rows()?;
         let cols_total = snapshot.cols()?;
@@ -105,8 +149,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
             if row_index == row {
                 let mut cell_iter = self.cells.update(this_row)?;
                 cell_iter.select(col)?;
-                let graphemes = cell_iter.graphemes()?;
-                return Ok(graphemes.first().copied());
+                return Ok(Some(cell_iter.graphemes()?));
             }
             row_index = row_index.saturating_add(1);
             if row_index >= rows_total {

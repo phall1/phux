@@ -60,6 +60,16 @@ rustix = { version = "0.38", default-features = false, features = ["std", "termi
 # this (Unicode 16, single small table); no alternative ships both
 # EAW and emoji presentation tables.
 unicode-width = { workspace = true }
+# phux-9gw.1.6: multi-codepoint grapheme prediction. A key event's `text`
+# payload may carry several Unicode scalars that form one visual cell
+# (flag emoji U+1F1FA+U+1F1F8, ZWJ family emoji, base + combining mark).
+# The predict layer splits `text` into grapheme clusters via
+# `unicode-segmentation`'s `Graphemes` iterator so it can queue a single
+# Insert prediction per cluster and reconcile it against the cell's full
+# grapheme string. `unicode-width` reports per-scalar width but does not
+# group scalars; the two crates are complementary. Already transitively
+# in Cargo.lock; no new compiled crate.
+unicode-segmentation = { workspace = true }
 # phux-4li.3: the client-side layout mirror persists itself server-side
 # via the L3 metadata key `phux.tui.layout/v1` (ADR-0019 decision 1).
 # SPEC §7.4 recommends CBOR for metadata values, and the layout
