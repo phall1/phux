@@ -1,12 +1,12 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-05-30
 ---
 
-# 0010 — phux is frontend-agnostic; tmux control mode reserved as compat option
+# 0010 — phux is TUI-first, non-TUI not precluded; tmux control mode reserved as compat option
 
-**TL;DR.** phux's native wire is the primary and only required frontend protocol; tmux control mode is not on the roadmap. The architecture must not preclude a second frontend — domain code is frontend-agnostic, rendering goes through one seam, and a future CC adapter is purely additive. ADR-0017 later reclaims the `CC_FRONTEND` capability bit reserved here.
+**TL;DR.** phux is TUI-first: the reference TUI is the only consumer that has ever exercised the wire. The architecture must not preclude a non-TUI frontend — domain code carries no frontend-specific assumption and rendering goes through one seam — but that property is structural, derivable from the wire on paper, not validated by a second consumer. tmux control mode is not on the roadmap. ADR-0017 later reclaims the `CC_FRONTEND` capability bit reserved here.
 
 > **Post-ADR-0013 note (2026-05-25):** ADR-0013 supersedes ADR-0002 —
 > pane content moves from structured cell diffs to VT bytes on the
@@ -88,15 +88,21 @@ It's tempting. It's also the wrong default. CC is fundamentally a
 
 ## Decision
 
-**phux's native wire protocol (SPEC §8; bytes-on-wire for pane
-content + structured envelopes for everything else, per ADR-0013) is
-the primary and only required frontend wire format. CC is reserved
-as an optional future adapter — no implementation, no roadmap
-commitment, no v0.2+ promise.**
+**phux is TUI-first. The native wire protocol (SPEC §8; bytes-on-wire
+for pane content + structured envelopes for everything else, per
+ADR-0013) is the primary and only required frontend wire format, and
+the reference TUI is the only consumer that has ever exercised it. CC
+is reserved as an optional future adapter — no implementation, no
+roadmap commitment, no v0.2+ promise.**
 
 But: phux-server, phux-protocol, and phux-client MUST NOT preclude a
-second frontend. The architecture is frontend-agnostic from day one;
-adding CC later is purely additive work, not a refactor.
+non-TUI frontend. The invariants below keep domain code free of
+frontend-specific assumptions so that adding a second consumer later
+is purely additive work, not a refactor. This is a *structural*
+property — derivable from the wire format on paper — **not a
+validated** one: no non-TUI consumer has been built, so subtle
+TUI-coupling could survive undetected until one is. See "Validation
+status" below.
 
 ## Why native > CC
 
@@ -269,7 +275,7 @@ Two things future contributors will propose. Both are rejected.
   (a wire-format break) is non-zero. ADR-0007 set the precedent for
   this asymmetry.
 
-## Validation status (as of 2026-05-25)
+## Validation status (resolved 2026-05-30, path (b))
 
 The "Decision" above is a claim about what the wire protocol permits.
 It is not a claim about what has been demonstrated. Be honest about
@@ -317,17 +323,22 @@ things to watch:
   type carrying structured cells or higher-level intent. Nothing in
   this ADR says we ship one in v0.1, but the absence is a tell.
 
-Commitment: before tagging v0.1, **either** (a) ship a minimal
-non-TUI reference consumer — the cheapest credible candidate is a
-structured-output exporter or a recording/replay viewer, not a full
-GUI client — and fix whatever it surfaces, **or** (b) downgrade the
-Decision above from "frontend-agnostic" to "TUI-first with non-TUI
-not precluded." Both options are honest. The current text is honest
-only if we eventually do (a).
+Resolution (phux-3dj): path (b). The earlier text deferred a choice
+between (a) shipping a minimal non-TUI reference consumer before v0.1
+— a structured-output exporter or a recording/replay viewer — and (b)
+downgrading the Decision from "frontend-agnostic (validated)" to
+"TUI-first, non-TUI not precluded." Nobody is building a non-TUI
+consumer this pass, and (a) without follow-through would be theater,
+so the Decision above is now stated as TUI-first. The must-not-preclude
+invariants are retained in full; only the implication that they have
+been *validated* is dropped.
 
-The choice between (a) and (b) is deliberately deferred. This
-section exists so the deferral is visible rather than silent.
-Tracked in `bd show phux-3dj`.
+The four risks listed above (VtReplay / non-VT renderers, grid-op
+assumptions in `PaneDiff::ops`, lossiness of input-atom translation,
+and ANSI-vs-structured status-bar output) remain **unvalidated**.
+Revisit this section and re-open the question if a non-TUI consumer
+is ever built; the structural invariants are the entire investment
+until then.
 
 ## Related
 
