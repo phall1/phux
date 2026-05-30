@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>phux — web client</title>
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0b0b0f;
+        color: #d7d7dd;
+        font: 13px ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace;
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        padding: 24px;
+      }
+      /* The wasm client sizes the canvas to the terminal grid. */
+      #phux-term {
+        background: #0b0b0f;
+        outline: 1px solid #232329;
+        image-rendering: pixelated;
+      }
+      .hint {
+        color: #6a6a73;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="hint">
+        phux in the browser — the same libghostty engine, over the wire. Click and type.
+      </div>
+      <canvas id="phux-term" tabindex="0" width="640" height="384"></canvas>
+    </main>
+  </body>
+</html>
