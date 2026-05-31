@@ -64,14 +64,25 @@ impl HelpOverlay {
     /// dropped immediately after construction.
     #[must_use]
     pub fn from_config(cfg: &KeybindingsCfg, theme: &Theme) -> Self {
-        let prefix_entries: Vec<Entry> = cfg
-            .prefix_table
-            .iter()
-            .map(|(chord, action)| Entry {
-                chord: format!("{} {chord}", cfg.prefix),
-                action: action_label(action),
-            })
-            .collect();
+        // The numeric window-jump keys (0-9, each `select-window {index}`)
+        // would otherwise be ten near-identical rows. Collect them aside
+        // and render a single `C-a 0-9  select window by number` line so
+        // the list stays scannable and the capability reads clearly.
+        let mut prefix_entries: Vec<Entry> = Vec::new();
+        let mut window_jump_keys: Vec<String> = Vec::new();
+        for (chord, action) in &cfg.prefix_table {
+            if is_indexed_select_window(action) {
+                window_jump_keys.push(chord.clone());
+            } else {
+                prefix_entries.push(Entry {
+                    chord: format!("{} {chord}", cfg.prefix),
+                    action: action_label(action),
+                });
+            }
+        }
+        if let Some(entry) = compact_window_jump(&cfg.prefix, &window_jump_keys) {
+            prefix_entries.push(entry);
+        }
         let global_entries: Vec<Entry> = cfg
             .global
             .iter()
@@ -196,6 +207,33 @@ fn value_label(v: &toml::Value) -> String {
         toml::Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// `true` for a `select-window` binding carrying an explicit `index` —
+/// the numeric 0-9 window-jump keys, which the overlay collapses into one
+/// row rather than listing individually.
+fn is_indexed_select_window(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Parameterized(p) if p.action == "select-window" && p.args.contains_key("index")
+    )
+}
+
+/// Collapse the numeric window-jump keys into a single help row, e.g.
+/// `C-a 0-9   select window by number`. `keys` arrive sorted (`BTreeMap`
+/// iteration). Returns `None` when no such keys are bound.
+fn compact_window_jump(prefix: &str, keys: &[String]) -> Option<Entry> {
+    let first = keys.first()?;
+    let last = keys.last()?;
+    let chord = if keys.len() == 1 {
+        format!("{prefix} {first}")
+    } else {
+        format!("{prefix} {first}-{last}")
+    };
+    Some(Entry {
+        chord,
+        action: "select window by number".to_owned(),
+    })
 }
 
 /// `true` when `action` resolves to `show-help` (bare or parameterized).
@@ -349,6 +387,52 @@ mod tests {
         assert_eq!(
             overlay.handle_key(&key(PhysicalKey::Escape)),
             OverlayCommand::Dismiss
+        );
+    }
+
+    #[test]
+    fn numeric_window_jumps_collapse_to_one_row() {
+        // phux UX: ten `select-window {index}` bindings (0-9) must render
+        // as a single compact row, not ten near-identical lines.
+        let mut c = cfg();
+        for i in 0..10u8 {
+            let mut args = BTreeMap::new();
+            args.insert("index".to_owned(), toml::Value::Integer(i.into()));
+            c.prefix_table.insert(
+                i.to_string(),
+                Action::Parameterized(ParamAction {
+                    action: "select-window".to_owned(),
+                    args,
+                }),
+            );
+        }
+        let overlay = HelpOverlay::from_config(&c, &Theme::default());
+        // Exactly one entry carries the collapsed label, and the individual
+        // C-a 0 / C-a 9 rows are gone.
+        let collapsed = overlay
+            .prefix_entries
+            .iter()
+            .filter(|e| e.action == "select window by number")
+            .count();
+        assert_eq!(
+            collapsed, 1,
+            "expected exactly one collapsed window-jump row"
+        );
+        assert!(
+            overlay
+                .prefix_entries
+                .iter()
+                .all(|e| e.chord != "C-a 0" && e.chord != "C-a 9"),
+            "individual numeric jump rows should be collapsed away"
+        );
+        let text = render_to_string(&overlay, 80, 24);
+        assert!(
+            text.contains("C-a 0-9"),
+            "expected compacted `C-a 0-9` row:\n{text}"
+        );
+        assert!(
+            text.contains("select window by number"),
+            "compacted row should make window selection clear:\n{text}"
         );
     }
 
