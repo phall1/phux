@@ -90,7 +90,7 @@ unicode-segmentation = "1"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }
-portable-pty = "0.8"
+portable-pty = "0.9"
 # Chrome-layer TUI toolkit for phux-client (status bar, dividers, overlays).
 # Confined to `crates/phux-client/src/render/` by a CI grep guard
 # (`scripts/check-ratatui-boundary.sh`); pane interiors stay on libghostty.
