@@ -212,6 +212,20 @@ server must already be running (this tool does not auto-spawn one).
 
 Result: the new session's name and seed pane id.
 
+### 3.7 Event stream (`phux watch`) — not yet an MCP tool
+
+The push half of the agent surface — a subscribed stream of tagged
+lifecycle / activity events (`title_changed`, `bell`, `dirty`, `idle`,
+`pane_spawned`, `pane_closed`; SPEC §7.5) — ships today as the CLI verb
+[`phux watch`](./agents.md#1-the-structured-cli-surface-verb-catalog),
+the latency-cutting accelerator of `phux_wait`'s poll floor. It is **not**
+exposed as an MCP tool in this pass: MCP `tools/call` is request/response,
+whereas the event stream is a long-lived push, so a streaming `phux_watch`
+tool needs an MCP notification/streaming shape that is a separate ticket.
+The `phux_wait` polling tool remains the MCP-native way to block on a pane
+condition; the event stream is available to MCP hosts that shell out to
+`phux watch --json` in the meantime.
+
 ---
 
 ## 4. A worked `tools/call` example

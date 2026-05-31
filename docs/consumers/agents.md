@@ -92,6 +92,27 @@ into the agent verbs and their JSON. Exit codes are collected in §4.2.
   must precede `TARGET`; and `--until` matches *any* visible row,
   including the shell's echo of the command you just typed — match on
   text that appears only in command *output*, never the command itself.
+- **`phux watch [TARGET] [--json] [--socket P]`** — stream a pane's live
+  events (the push half of the agent surface, SPEC §7.5). Subscribes to
+  the server's `EVENT` stream scoped to the resolved pane and prints one
+  event per line until EOF (server gone) or Ctrl-C; the subscription
+  neither attaches nor resizes the pane. With `--json`, each line is a
+  JSON object `{ "event": <name>, "terminal"?: "@id", … }` and stdout
+  stays pure JSON (diagnostics on stderr); otherwise a compact
+  tab-separated human line. Event names: `title_changed` (carries
+  `title`), `bell`, `dirty`, `idle`, `pane_spawned`, `pane_closed`
+  (carries `exit_status`), plus the deferred `command_started` /
+  `command_finished` (carries a nullable `exit_code` — see the gap note
+  below). This is the latency-cutting accelerator of `wait`'s poll floor:
+  a `watch` consumer wakes the instant an event fires rather than on the
+  next poll tick. It is additive — `wait` still works without it, and a
+  dropped event (full mailbox) just falls back to polling. **Deferred:**
+  `command_started` / `command_finished` are wire-allocated but NOT
+  emitted by the current server (the OSC-133 command boundary isn't
+  cleanly observable without disturbing the per-consumer state-sync
+  synthesizer); `command_finished.exit_code` is likewise always null until
+  that shell-integration plumbing lands. The mechanism and the
+  lifecycle/title/bell/dirty/idle events ship today.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a **new** session. Without `--json` it creates *and attaches*:
   an explicit `-s NAME` that already exists is an error (like tmux's
