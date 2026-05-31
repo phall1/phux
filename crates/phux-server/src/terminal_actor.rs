@@ -213,6 +213,19 @@ pub struct ConsumerSyncState {
     /// consumer is successfully served — either a delta ships or the diff is
     /// empty (reference caught up to the grid).
     pub behind: bool,
+    /// Smoothed RTT estimate for the RTT-adaptive tick cadence (phux-q0e.5).
+    /// Fed one sample per `FRAME_ACK`; drives this consumer's desired tick
+    /// interval. See [`RttEstimator`].
+    pub rtt: RttEstimator,
+    /// Emit timestamps for in-flight (emitted, not-yet-acked) `seq`s, used to
+    /// measure RTT server-side when the matching `FRAME_ACK` arrives
+    /// (phux-q0e.5). Keyed by the `seq` stamped on each `TERMINAL_OUTPUT`;
+    /// the value is the `tokio::time::Instant` the frame was handed to the
+    /// outbound mailbox. Pruned up to the acked `seq` on every ack so it
+    /// stays bounded by the number of frames in flight within one RTT (a
+    /// handful at the clamped cadence). No wire change: the RTT round-trip
+    /// rides the `seq` that `FRAME_ACK` already echoes.
+    pub emit_instants: std::collections::BTreeMap<u64, tokio::time::Instant>,
 }
 
 impl std::fmt::Debug for ConsumerSyncState {
@@ -359,12 +372,114 @@ const PTY_READ_CHUNK: usize = 4096;
 /// `defaults.history-limit` via [`TerminalActor::build_with_token`].
 const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 
-/// Tick interval for the state-sync emission driver (phux-q0e.3).
+/// Default tick interval for the state-sync emission driver, used until a
+/// consumer's RTT has been measured (phux-q0e.3, phux-q0e.5).
 ///
 /// 30 ms ≈ 33 Hz; per ADR-0018 / `research/archive/2026-05-26-state-sync-algorithm.md`
-/// §"tick scheduler" first-cut. An RTT-adaptive cadence is the follow-up
-/// `phux-q0e.5` and lives outside this ticket's scope.
+/// §"tick scheduler" first-cut. Once a consumer's RTT is known the cadence
+/// becomes RTT-adaptive (see [`adaptive_tick_interval`] and
+/// [`RttEstimator`]); this value is the cold-start cadence before the first
+/// `FRAME_ACK` round-trip lands, and the steady-state cadence on transports
+/// (no-PTY test actors, never-acking peers) that produce no RTT samples.
 pub const DEFAULT_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Lower clamp on the RTT-adaptive tick interval (phux-q0e.5).
+///
+/// 20 ms ≈ 50 Hz. Mosh (`research/archive/2026-05-26-state-sync-algorithm.md`
+/// §"tick scheduler") clamps the `RTT/2` cadence to `[20 ms, 200 ms]`; we
+/// adopt the same band. The floor is deliberately *below* the 30 ms cold-start
+/// default so a near-zero local-UDS RTT clamps here (50 Hz) — snappier than,
+/// and never slower than, today's fixed 33 Hz. High-RTT transports back off
+/// toward the ceiling.
+pub const MIN_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Upper clamp on the RTT-adaptive tick interval (phux-q0e.5).
+///
+/// 200 ms = 5 Hz. The Mosh ceiling: past this a high-RTT/satellite link is
+/// shipping state nobody can ack in time, so we stop spending CPU + bandwidth
+/// synthesizing diffs faster than the link can drain them.
+pub const MAX_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// EMA smoothing factor for the per-consumer smoothed RTT (phux-q0e.5).
+///
+/// `srtt = (1 - α)·srtt + α·sample`. `α = 1/8 = 0.125` is TCP's RTO
+/// estimator constant (RFC 6298 §2); it weights ~8 recent samples, so a
+/// single spurious RTT spike nudges the cadence rather than yanking it.
+/// "Adjust slowly" (Mosh §3) is exactly this slow convergence. The factor is
+/// a documented default; real-traffic tuning (the ticket's deferred data) can
+/// revisit it without touching the surrounding machinery.
+pub const RTT_EMA_ALPHA: f64 = 0.125;
+
+/// Smallest tick-interval change (in either direction) that triggers a
+/// rebuild of the shared `tokio::time::Interval` (phux-q0e.5).
+///
+/// Rebuilding the shared timer on every sub-millisecond EMA wobble would churn
+/// the scheduler for no observable benefit. A 5 ms deadband means the cadence
+/// only re-arms on a meaningful RTT shift, and the steady state is stable.
+const TICK_RESET_DEADBAND: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Per-consumer smoothed round-trip-time estimator (phux-q0e.5, Mosh §3).
+///
+/// Feeds one RTT sample per `FRAME_ACK` (measured server-side as
+/// `now − emit_instant` for the acked `seq`; no wire change — `seq` already
+/// round-trips on `FRAME_ACK`) into a TCP-RTO-style EMA. The smoothed value
+/// drives the adaptive tick cadence via [`adaptive_tick_interval`].
+///
+/// `None` smoothed value means "no sample yet": the consumer runs at the
+/// [`DEFAULT_TICK_INTERVAL`] cold-start cadence and contributes that to the
+/// shared-tick minimum (the actor takes the per-consumer minimum to drive
+/// one shared timer).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RttEstimator {
+    /// Smoothed RTT (`srtt`). `None` until the first sample lands.
+    srtt: Option<std::time::Duration>,
+}
+
+impl RttEstimator {
+    /// Fold one RTT `sample` into the smoothed estimate.
+    ///
+    /// First sample seeds `srtt` directly (RFC 6298 §2.2 initial assignment);
+    /// later samples blend via `srtt = (1 − α)·srtt + α·sample` with
+    /// `α` is [`RTT_EMA_ALPHA`]. Saturating, f64-internal math: a wild sample
+    /// can only move `srtt` toward it, never panic or overflow.
+    pub fn observe(&mut self, sample: std::time::Duration) {
+        let sample_s = sample.as_secs_f64();
+        let next = self.srtt.map_or(sample_s, |prev| {
+            let prev_s = prev.as_secs_f64();
+            RTT_EMA_ALPHA.mul_add(sample_s, (1.0 - RTT_EMA_ALPHA) * prev_s)
+        });
+        // `from_secs_f64` panics on negative/NaN/overflow; clamp the input to
+        // a sane non-negative range first so a degenerate sample is inert.
+        self.srtt = Some(std::time::Duration::from_secs_f64(next.clamp(0.0, 3600.0)));
+    }
+
+    /// The current smoothed RTT, or `None` if no sample has landed yet.
+    #[must_use]
+    pub const fn smoothed(&self) -> Option<std::time::Duration> {
+        self.srtt
+    }
+
+    /// This consumer's desired tick interval: `clamp(srtt/2, MIN, MAX)`, or
+    /// [`DEFAULT_TICK_INTERVAL`] while no sample exists. See
+    /// [`adaptive_tick_interval`].
+    #[must_use]
+    pub fn desired_tick_interval(&self) -> std::time::Duration {
+        self.srtt
+            .map_or(DEFAULT_TICK_INTERVAL, adaptive_tick_interval)
+    }
+}
+
+/// Map a smoothed RTT to a tick interval: `RTT/2` clamped to the
+/// [`MIN_TICK_INTERVAL`]..=[`MAX_TICK_INTERVAL`] band (phux-q0e.5, Mosh §3).
+///
+/// Half-RTT is the Mosh target: a tick every half round-trip keeps the
+/// emission cadence matched to how fast the consumer can actually ack. A
+/// near-zero local RTT clamps to the 20 ms floor (50 Hz); a 400 ms satellite
+/// RTT clamps to the 200 ms ceiling (5 Hz).
+#[must_use]
+pub fn adaptive_tick_interval(srtt: std::time::Duration) -> std::time::Duration {
+    (srtt / 2).clamp(MIN_TICK_INTERVAL, MAX_TICK_INTERVAL)
+}
 
 /// Debounce window for the post-resize client resync (phux-8v1).
 ///
@@ -1103,6 +1218,10 @@ impl TerminalActor {
                 // Fresh consumer is not behind; `needs_initial_emit` already
                 // guarantees its first pass runs.
                 behind: false,
+                // No RTT sample yet — runs at the cold-start default until the
+                // first FRAME_ACK round-trip lands (phux-q0e.5).
+                rtt: RttEstimator::default(),
+                emit_instants: std::collections::BTreeMap::new(),
             },
         );
         Ok(())
@@ -1140,7 +1259,13 @@ impl TerminalActor {
     /// races cleanly against detach: the runtime may dispatch an
     /// in-flight ack just as the consumer is being torn down, and the
     /// ack should evaporate rather than recreate a dropped entry.
-    fn on_frame_ack(&mut self, client_id: ClientId, seq: u64) {
+    ///
+    /// Returns `true` when this ack folded a fresh RTT sample into the
+    /// consumer's [`RttEstimator`] (phux-q0e.5) — the `run` loop uses that as
+    /// a cue to recompute the shared adaptive tick cadence. `false` when no
+    /// sample was produced (no matching emit instant, older/duplicate ack,
+    /// or unregistered consumer).
+    fn on_frame_ack(&mut self, client_id: ClientId, seq: u64) -> bool {
         let Some(consumer) = self.consumer_states.get_mut(&client_id) else {
             // Race against detach (or an ack for an unknown client). No
             // bookkeeping; no warning — this is a steady-state event,
@@ -1149,7 +1274,7 @@ impl TerminalActor {
                 ?client_id,
                 seq, "FRAME_ACK for unregistered consumer; dropping"
             );
-            return;
+            return false;
         };
         if seq <= consumer.last_acked_seq {
             // Older or duplicate ack — acks are cumulative (proto.md
@@ -1160,9 +1285,40 @@ impl TerminalActor {
                 last_acked_seq = consumer.last_acked_seq,
                 "FRAME_ACK older/duplicate; dropping",
             );
-            return;
+            return false;
         }
         consumer.last_acked_seq = seq;
+
+        // RTT sample (phux-q0e.5). Acks are cumulative, so `seq` acknowledges
+        // every emission up to and including it. Find the emit instant for
+        // the highest emitted seq that is `<= seq` (the most recent frame
+        // this ack covers) and time it against now. Then prune every emit
+        // instant `<= seq`: those frames are acked and can never produce a
+        // future sample, so the map stays bounded by the in-flight window.
+        let now = tokio::time::Instant::now();
+        let rtt_sample = consumer
+            .emit_instants
+            .range(..=seq)
+            .next_back()
+            .map(|(_, &emitted_at)| now.saturating_duration_since(emitted_at));
+        // `split_off(&(seq + 1))` keeps only the strictly-greater keys; the
+        // returned (acked) half is dropped. `seq + 1` cannot overflow in
+        // practice (u64 seq at the clamped cadence) but saturate for safety.
+        let still_in_flight = consumer.emit_instants.split_off(&seq.saturating_add(1));
+        consumer.emit_instants = still_in_flight;
+        let sampled = if let Some(sample) = rtt_sample {
+            consumer.rtt.observe(sample);
+            trace!(
+                ?client_id,
+                seq,
+                rtt_ms = sample.as_secs_f64() * 1000.0,
+                srtt_ms = consumer.rtt.smoothed().map(|d| d.as_secs_f64() * 1000.0),
+                "FRAME_ACK: RTT sample folded into EMA",
+            );
+            true
+        } else {
+            false
+        };
 
         // Refresh the informational cursor/mode capture. Uses a one-shot
         // `RenderState` so it doesn't disturb the per-consumer reference.
@@ -1198,6 +1354,49 @@ impl TerminalActor {
             ?client_id,
             seq, "FRAME_ACK applied: last_acked_seq advanced"
         );
+        sampled
+    }
+
+    /// The shared adaptive tick interval for this actor: the minimum over
+    /// every attached consumer's desired interval (phux-q0e.5).
+    ///
+    /// One `tokio::time::Interval` drives the whole pane, but RTT is
+    /// per-consumer. Taking the *minimum* means the most-demanding (lowest
+    /// half-RTT) consumer sets the cadence: a fast local peer keeps its 50 Hz
+    /// feel even when sharing the pane with a slow satellite peer, and the
+    /// slow peer simply sees more empty/short diffs per tick (harmless — the
+    /// per-consumer reference advances only on a real delta). With no
+    /// consumers, or none yet sampled, this is [`DEFAULT_TICK_INTERVAL`].
+    fn adaptive_tick_interval(&self) -> std::time::Duration {
+        self.consumer_states
+            .values()
+            .map(|s| s.rtt.desired_tick_interval())
+            .min()
+            .unwrap_or(DEFAULT_TICK_INTERVAL)
+    }
+
+    /// Rebuild the shared state-sync timer to fire at `desired` if it differs
+    /// from the currently-armed `current` by more than [`TICK_RESET_DEADBAND`]
+    /// (phux-q0e.5).
+    ///
+    /// The deadband keeps a steady RTT from churning the scheduler on every
+    /// sub-millisecond EMA wobble. `tokio::time::Interval::reset_after`
+    /// re-anchors only the next deadline; the recurring `period` is fixed at
+    /// construction, so changing the cadence means rebuilding the interval.
+    /// The first new tick is anchored one full `desired` out so the cadence
+    /// change doesn't fire a tick immediately.
+    fn rearm_tick(
+        tick: &mut tokio::time::Interval,
+        current: &mut std::time::Duration,
+        desired: std::time::Duration,
+    ) {
+        if current.abs_diff(desired) < TICK_RESET_DEADBAND {
+            return;
+        }
+        *current = desired;
+        let mut next = tokio::time::interval_at(tokio::time::Instant::now() + desired, desired);
+        next.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        *tick = next;
     }
 
     /// Test-only: number of consumers currently registered.
@@ -1210,6 +1409,22 @@ impl TerminalActor {
     #[cfg(test)]
     pub fn consumer_state(&self, client_id: ClientId) -> Option<&ConsumerSyncState> {
         self.consumer_states.get(&client_id)
+    }
+
+    /// Test-only: this actor's current shared adaptive tick interval
+    /// (phux-q0e.5). Exposes [`Self::adaptive_tick_interval`] so tests can
+    /// assert the cadence the `run` loop would arm without driving real time.
+    #[cfg(test)]
+    pub fn adaptive_tick_interval_for_test(&self) -> std::time::Duration {
+        self.adaptive_tick_interval()
+    }
+
+    /// Test-only: drive `on_frame_ack` synchronously and report whether it
+    /// produced a fresh RTT sample (phux-q0e.5). The `run` loop uses the
+    /// return value to decide whether to re-arm the shared tick.
+    #[cfg(test)]
+    pub fn on_frame_ack_for_test(&mut self, client_id: ClientId, seq: u64) -> bool {
+        self.on_frame_ack(client_id, seq)
     }
 
     /// Test-only: enable the per-consumer tick emission gate
@@ -1522,14 +1737,19 @@ impl TerminalActor {
             "TerminalActor started",
         );
 
-        // State-sync tick driver (phux-q0e.3). Fixed 33 Hz first cut;
-        // the RTT-adaptive cadence is `phux-q0e.5`. `MissedTickBehavior::Delay`
-        // — if the actor falls behind under heavy PTY traffic we want
-        // subsequent ticks spaced by the interval from when they ran,
-        // not bunched up to "catch up" (which would defeat the rate
-        // limit's purpose). `Burst` (the default) would spam emissions
+        // State-sync tick driver (phux-q0e.3 / phux-q0e.5). RTT-adaptive
+        // cadence: starts at the `DEFAULT_TICK_INTERVAL` cold-start value and
+        // is rebuilt toward each consumer's measured `RTT/2` (clamped to
+        // [`MIN_TICK_INTERVAL`, `MAX_TICK_INTERVAL`]) as `FRAME_ACK`
+        // round-trips land. The shared timer runs at the minimum desired
+        // interval across consumers (see [`Self::adaptive_tick_interval`]).
+        // `MissedTickBehavior::Delay` — if the actor falls behind under heavy
+        // PTY traffic we want subsequent ticks spaced by the interval from
+        // when they ran, not bunched up to "catch up" (which would defeat the
+        // rate limit's purpose). `Burst` (the default) would spam emissions
         // when a long PTY chunk delays us past several tick boundaries.
-        let mut tick = tokio::time::interval(DEFAULT_TICK_INTERVAL);
+        let mut tick_interval = DEFAULT_TICK_INTERVAL;
+        let mut tick = tokio::time::interval(tick_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // Eat the first immediate tick (Interval fires synchronously on
         // first poll). Without this, the very first iteration would
@@ -1754,6 +1974,10 @@ impl TerminalActor {
                     let ConsumerDetachRequest { client_id, reply } = req;
                     self.unregister_consumer(client_id);
                     trace!(?client_id, "consumer detached: per-consumer RenderState freed");
+                    // phux-q0e.5: losing a consumer can raise the minimum
+                    // desired interval (e.g. the fastest peer left), so
+                    // re-evaluate the shared cadence.
+                    Self::rearm_tick(&mut tick, &mut tick_interval, self.adaptive_tick_interval());
                     let _ = reply.send(());
                 }
 
@@ -1765,7 +1989,13 @@ impl TerminalActor {
                 // retransmit machinery here.
                 Some(req) = self.consumer_ack_rx.recv() => {
                     let ConsumerAckRequest { client_id, seq } = req;
-                    self.on_frame_ack(client_id, seq);
+                    // phux-q0e.5: a fresh RTT sample may shift the adaptive
+                    // cadence. Rebuild the shared tick only when the new
+                    // minimum-desired interval moves beyond the deadband, so
+                    // a steady RTT does not churn the scheduler.
+                    if self.on_frame_ack(client_id, seq) {
+                        Self::rearm_tick(&mut tick, &mut tick_interval, self.adaptive_tick_interval());
+                    }
                 }
 
                 // State-sync tick driver (phux-q0e.3, phux-ia4, ADR-0018).
@@ -1993,6 +2223,12 @@ impl TerminalActor {
             // invariant (the tick arm never yields the loop) while keeping
             // emit-once consistent — a synthesized delta always ships.
             permit.send(Outbound::Frame(frame));
+            // Stamp the emit instant for this seq so the matching FRAME_ACK
+            // can be turned into an RTT sample (phux-q0e.5). Recorded only
+            // for shipped frames — empty/skipped ticks have no round-trip to
+            // measure. Pruned on ack, so the map stays as small as the
+            // in-flight window.
+            state.emit_instants.insert(seq, tokio::time::Instant::now());
             emitted += 1;
             total_out_bytes += out_bytes;
             trace!(
@@ -3382,5 +3618,207 @@ mod tests {
     /// Naive subsequence search for test assertions on VT byte streams.
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    // ---- phux-q0e.5: RTT-adaptive tick interval ----
+
+    /// The EMA seeds on the first sample and converges toward a steady RTT
+    /// across a handful of samples (TCP-RTO-style `α = 0.125`).
+    #[test]
+    fn rtt_estimator_seeds_then_converges() {
+        let mut est = RttEstimator::default();
+        assert_eq!(est.smoothed(), None, "no sample yet");
+
+        // First sample seeds srtt directly.
+        est.observe(std::time::Duration::from_millis(100));
+        assert_eq!(
+            est.smoothed(),
+            Some(std::time::Duration::from_millis(100)),
+            "first sample seeds srtt exactly",
+        );
+
+        // Feed a steady 100ms stream; srtt must stay put (no drift).
+        for _ in 0..20 {
+            est.observe(std::time::Duration::from_millis(100));
+        }
+        let srtt = est.smoothed().expect("has srtt");
+        assert!(
+            srtt.abs_diff(std::time::Duration::from_millis(100))
+                < std::time::Duration::from_millis(1),
+            "steady 100ms stream keeps srtt ~100ms, got {srtt:?}",
+        );
+
+        // Step the RTT up to 300ms; the EMA moves slowly (one step folds in
+        // only α of the gap), then converges over many samples.
+        let before = est.smoothed().expect("has srtt");
+        est.observe(std::time::Duration::from_millis(300));
+        let after_one = est.smoothed().expect("has srtt");
+        assert!(
+            after_one > before && after_one < std::time::Duration::from_millis(150),
+            "one 300ms sample nudges srtt but does not jump to it: {before:?} -> {after_one:?}",
+        );
+        for _ in 0..100 {
+            est.observe(std::time::Duration::from_millis(300));
+        }
+        let converged = est.smoothed().expect("has srtt");
+        assert!(
+            converged.abs_diff(std::time::Duration::from_millis(300))
+                < std::time::Duration::from_millis(2),
+            "srtt converges toward the new 300ms RTT, got {converged:?}",
+        );
+    }
+
+    /// The adaptive interval is `RTT/2` clamped to [20ms, 200ms]: a near-zero
+    /// RTT clamps to the 20ms floor (snappier than the 30ms default), and a
+    /// huge RTT clamps to the 200ms ceiling.
+    #[test]
+    fn adaptive_interval_clamps_both_ends() {
+        // Near-zero local RTT -> floor (50 Hz), strictly faster than the
+        // fixed 33 Hz default this replaces.
+        assert_eq!(
+            adaptive_tick_interval(std::time::Duration::from_micros(10)),
+            MIN_TICK_INTERVAL,
+            "near-zero RTT clamps to the 20ms floor",
+        );
+        assert!(
+            MIN_TICK_INTERVAL < DEFAULT_TICK_INTERVAL,
+            "the floor must be snappier than the old fixed cadence",
+        );
+
+        // Mid-band: 80ms RTT -> 40ms tick (unclamped RTT/2).
+        assert_eq!(
+            adaptive_tick_interval(std::time::Duration::from_millis(80)),
+            std::time::Duration::from_millis(40),
+            "mid-band RTT maps to exactly RTT/2",
+        );
+
+        // Satellite-class RTT -> ceiling (5 Hz).
+        assert_eq!(
+            adaptive_tick_interval(std::time::Duration::from_millis(2000)),
+            MAX_TICK_INTERVAL,
+            "huge RTT clamps to the 200ms ceiling",
+        );
+    }
+
+    /// An estimator with no sample reports the cold-start default; once a
+    /// sample lands, `desired_tick_interval` tracks the clamped RTT/2.
+    #[test]
+    fn desired_interval_defaults_then_adapts() {
+        let mut est = RttEstimator::default();
+        assert_eq!(
+            est.desired_tick_interval(),
+            DEFAULT_TICK_INTERVAL,
+            "no sample -> cold-start default",
+        );
+        est.observe(std::time::Duration::from_millis(120));
+        assert_eq!(
+            est.desired_tick_interval(),
+            std::time::Duration::from_millis(60),
+            "after a 120ms sample -> 60ms tick",
+        );
+    }
+
+    /// End-to-end through the actor: a `FRAME_ACK` measured against a large
+    /// simulated transit time backs the shared cadence off toward the 200ms
+    /// ceiling; a near-zero transit time pins it to the 20ms floor. Uses
+    /// paused tokio time so the emit->ack gap is exact and deterministic.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn actor_cadence_backs_off_on_high_rtt_and_floors_on_low() {
+        let bundle = TerminalActor::new(80, 24).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        // Slow peer: a write + tick emits seq=1 and stamps its emit instant.
+        let slow = ClientId(1);
+        let (tx_slow, _rx_slow) = mpsc::channel::<Outbound>(16);
+        actor
+            .register_consumer(slow, tx_slow, 11)
+            .expect("register slow");
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            DEFAULT_TICK_INTERVAL,
+            "no sample yet -> cold-start cadence",
+        );
+
+        actor.vt_write_for_test(b"hello\r\n");
+        actor.tick_emit();
+        // Simulate a 400ms round trip before the client acks seq=1.
+        tokio::time::advance(std::time::Duration::from_millis(400)).await;
+        assert!(
+            actor.on_frame_ack_for_test(slow, 1),
+            "ack of an emitted seq produces an RTT sample",
+        );
+        // 400ms RTT -> 200ms RTT/2 -> clamps to the 200ms ceiling.
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            MAX_TICK_INTERVAL,
+            "high-RTT consumer backs the cadence off to the ceiling",
+        );
+
+        // Fast peer joins; the shared cadence is the MINIMUM desired, so the
+        // near-zero-RTT peer pulls it back down to the floor regardless of
+        // the slow peer.
+        let fast = ClientId(2);
+        let (tx_fast, _rx_fast) = mpsc::channel::<Outbound>(16);
+        actor
+            .register_consumer(fast, tx_fast, 12)
+            .expect("register fast");
+        actor.vt_write_for_test(b"world\r\n");
+        actor.tick_emit();
+        // Near-instant ack: advance time by a sub-millisecond sliver.
+        tokio::time::advance(std::time::Duration::from_micros(50)).await;
+        // Both consumers were emitted to on the tick above; the fast peer's
+        // first emitted seq is 1.
+        assert!(
+            actor.on_frame_ack_for_test(fast, 1),
+            "fast peer ack produces a sample",
+        );
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            MIN_TICK_INTERVAL,
+            "the fastest consumer pins the shared cadence to the floor",
+        );
+
+        // The slow peer leaving must not regress the floor (fast peer still
+        // present), and dropping the fast peer reverts to the cold-start
+        // default (no samples left to consult).
+        actor.unregister_consumer(slow);
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            MIN_TICK_INTERVAL,
+            "fast peer still present -> still at the floor",
+        );
+        actor.unregister_consumer(fast);
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            DEFAULT_TICK_INTERVAL,
+            "no consumers left -> cold-start default",
+        );
+    }
+
+    /// An ack that matches no recorded emit instant (e.g. the consumer never
+    /// had a frame shipped) yields no RTT sample and leaves the cadence at
+    /// the default — the round-trip machinery is inert without an emission.
+    #[test]
+    fn ack_without_emit_instant_produces_no_sample() {
+        let bundle = TerminalActor::new(80, 24).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        let (tx, _rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        // No tick_emit ran, so no emit instant was stamped. An ack here
+        // advances last_acked_seq but cannot time a round trip.
+        assert!(
+            !actor.on_frame_ack_for_test(client, 5),
+            "ack with no matching emit instant produces no RTT sample",
+        );
+        assert_eq!(
+            actor.adaptive_tick_interval_for_test(),
+            DEFAULT_TICK_INTERVAL,
+            "cadence stays at the default without a sample",
+        );
     }
 }
