@@ -66,6 +66,50 @@ the substrate is real, not the product the substrate exists to serve.
 Everything that doesn't make terminals more spawnable, observable, or
 addressable is out of scope on purpose — see Non-goals below.
 
+## See it in action
+
+[**Demo video coming soon.** See the spec below for exactly what will be recorded.]
+
+**Demo Spec: 10-15 second recording**
+
+- **Platform:** macOS or Linux terminal
+- **Recording tool:** asciinema (or GIF from screen recording)
+- **Resolution:** 80 cols × 24 rows (or native terminal, normalize in post)
+- **Framerate:** 30fps (if GIF)
+
+**Script to execute:**
+
+1. **Start (1s):** Blank terminal, show `$ phux`
+2. **Spawn server (2-3s):** Type `phux` and press Enter
+   - Shows auto-spawning server + attaching to default session
+   - Status bar appears at bottom (time, session name)
+3. **Split horizontally (2-3s):** Press `Ctrl-A |` (split pane)
+   - Shows two panes side-by-side
+4. **Activity in split (2-3s):** Type in second pane, e.g., `echo "pane 2"` and press Enter
+   - Shows output in the split pane
+5. **Show help (1-2s):** Press `Ctrl-A ?`
+   - Displays keybinding help overlay
+6. **Detach (1-2s):** Press `Ctrl-A d`
+   - Closes TUI, returns to shell
+   - Shows `$` prompt again
+7. **Re-attach (1-2s):** Type `phux` and press Enter
+   - Attaches to the same session
+   - Both panes and content still there (state persisted)
+   - Status bar visible
+
+**Total duration:** ~12-15 seconds
+
+**Output format:** MP4 or GIF (asciinema.org rec then convert)
+
+**What to highlight:**
+- No setup needed (phux auto-spawns server)
+- Keybindings visible (help overlay)
+- State persists across detach + reattach
+- Status bar shows session info
+- Clean, minimal TUI chrome
+
+Want to help? Recording and uploading this is a great first contribution — [see CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow.
+
 ## When to use phux
 
 **You are a tmux user wanting a modern replacement:**
