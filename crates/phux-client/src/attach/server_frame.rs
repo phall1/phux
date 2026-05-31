@@ -280,6 +280,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         session_name,
                         focused_cursor,
                         Some(origin),
+                        // The pane render stays above the bar row; let the
+                        // painter's cache decide whether a re-emit is needed.
+                        false,
                     );
                 }
             }
@@ -388,6 +391,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     session_name,
                     focused_cursor,
                     fallback_origin,
+                    // Hot path: pane render stays above the bar row, so the
+                    // painter's cache makes an unchanged bar a zero-byte
+                    // no-op (incremental-paint win).
+                    false,
                 );
             } else if !overlay_active {
                 // phux-2x9: repaint a NON-focused pane on its own output
@@ -425,6 +432,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             session_name,
                             focused_cursor,
                             fallback,
+                            // Non-focused pane render stays above the bar
+                            // row; cache decides whether to re-emit.
+                            false,
                         );
                     } else if let Some((row, col)) = focused_cursor {
                         let _ = write!(

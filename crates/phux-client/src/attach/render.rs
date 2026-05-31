@@ -468,4 +468,79 @@ mod tests {
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains('a') && s.contains('b'));
     }
+
+    /// Incremental-paint baseline: a second `render` of a terminal with no
+    /// new input is `Dirty::Clean` and emits ZERO bytes. This is what the
+    /// status-bar cache change leans on — the focused pane render is
+    /// already a no-op on a steady screen, so the per-frame paint cost
+    /// collapses toward zero when nothing changed.
+    #[test]
+    fn second_render_of_unchanged_terminal_emits_nothing() {
+        let mut terminal = fresh(10, 3);
+        terminal.vt_write(b"hello");
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut first = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut first)
+            .expect("first render");
+        assert!(!first.is_empty(), "first render must emit content");
+
+        // No new vt_write — the grid is unchanged, so render is Clean.
+        let mut second = Vec::new();
+        let dirty = renderer
+            .render(&terminal, &mut second)
+            .expect("second render");
+        assert!(
+            matches!(dirty, Dirty::Clean),
+            "unchanged terminal must report Clean, got {dirty:?}"
+        );
+        assert!(
+            second.is_empty(),
+            "unchanged repaint must emit zero bytes; got {:?}",
+            String::from_utf8_lossy(&second)
+        );
+    }
+
+    /// A single changed row repaints only that row: the emitted CUP
+    /// targets the touched row and the untouched row's content is absent.
+    #[test]
+    fn single_row_change_repaints_only_that_row() {
+        let mut terminal = fresh(10, 3);
+        // Row 0 = "top", row 1 = "mid" (CRLF between).
+        terminal.vt_write(b"top\r\nmid");
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut first = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut first)
+            .expect("first render");
+
+        // Park the cursor on row 1 (CUP row 2, col 1) and overwrite it.
+        terminal.vt_write(b"\x1b[2;1HNEW");
+        let mut second = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut second)
+            .expect("second render");
+        let s = String::from_utf8_lossy(&second);
+        // The changed row (row index 1 ⇒ CUP row 2) must be re-emitted with
+        // its new content. The renderer interleaves an SGR reset between
+        // cells, so "NEW" is not contiguous — assert on each glyph.
+        assert!(
+            s.contains("\x1b[2;1H"),
+            "changed row CUP missing; out = {s:?}"
+        );
+        assert!(
+            s.contains('N') && s.contains('E') && s.contains('W'),
+            "changed row content missing; out = {s:?}"
+        );
+        // The unchanged row 0 ("top") must NOT be re-emitted: no CUP to
+        // row 1 (1-based) and no "top" text on the wire.
+        assert!(
+            !s.contains("\x1b[1;1H"),
+            "unchanged row 0 should not be repainted (CUP leaked); out = {s:?}"
+        );
+        assert!(
+            !s.contains("top"),
+            "unchanged row 0 content should not be repainted; out = {s:?}"
+        );
+    }
 }

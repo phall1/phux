@@ -147,7 +147,17 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
         }
     }
     let _ = crate::render::chrome::dividers::render_dividers(out, &multi, focused_pane);
-    paint_bar_after_pane(status_bar, out, viewport_dims, session_name, None, None);
+    // The ED2 above cleared the bar row, so force a re-emit even if the
+    // bar's content is byte-identical to the previous frame.
+    paint_bar_after_pane(
+        status_bar,
+        out,
+        viewport_dims,
+        session_name,
+        None,
+        None,
+        true,
+    );
     // Paint the focused pane LAST so its render_at owns final cursor
     // placement. But render_at may be a no-op (slot missing, or the
     // libghostty Terminal grid has no diffs to emit), in which case
@@ -216,6 +226,16 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
 /// Pass `fallback_origin = None` at call sites where a subsequent
 /// pane render is guaranteed to own final cursor placement (e.g.
 /// `paint_full_frame`, which paints the focused pane LAST).
+///
+/// `bar_row_clobbered` controls whether the painter's content cache is
+/// bypassed. Pane rendering is confined to the rows ABOVE the reserved
+/// bar row (see [`pane_viewport`]), so on the steady-state hot path
+/// (`TERMINAL_OUTPUT`) the focused pane render never overwrites the bar
+/// row — the painter's own cache then makes an unchanged bar a zero-byte
+/// no-op (the win in phux's incremental-paint pass). Pass `true` only
+/// from callers that physically cleared the bar row (the `paint_full_frame`
+/// `ED2`), where the on-screen row must be re-emitted even if its content
+/// is identical to last frame.
 pub(super) fn paint_bar_after_pane<W: Write>(
     status_bar: Option<&mut StatusBarPainter>,
     out: &mut W,
@@ -223,13 +243,18 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     session_name: &str,
     restore_cursor: Option<(u16, u16)>,
     fallback_origin: Option<(u16, u16)>,
+    bar_row_clobbered: bool,
 ) {
     let Some(painter) = status_bar else {
         return;
     };
-    // The pane renderer wrote into the bottom row — invalidate so the
-    // painter unconditionally re-emits.
-    painter.invalidate();
+    // Force a re-emit only when the bar row was physically overwritten
+    // (e.g. the full-frame `ED2`). On the incremental path the pane
+    // render stays above the bar row, so the painter's content/dims
+    // cache decides: an unchanged bar emits zero bytes.
+    if bar_row_clobbered {
+        painter.invalidate();
+    }
     let _ = painter.paint(
         out,
         viewport_dims.0,
@@ -376,6 +401,7 @@ mod tests {
             "demo",
             None,
             Some((3, 5)),
+            true,
         );
         let s = String::from_utf8_lossy(&out);
         // Pane origin (3, 5) ⇒ 1-based CUP `\x1b[6;4H`.
@@ -408,6 +434,7 @@ mod tests {
             "demo",
             Some((4, 7)),
             Some((0, 0)),
+            true,
         );
         let s = String::from_utf8_lossy(&out);
         // (row, col) = (4, 7) ⇒ 1-based CUP `\x1b[5;8H`.
@@ -429,7 +456,15 @@ mod tests {
     fn paint_bar_after_pane_parks_at_top_left_hidden_when_both_none() {
         let mut painter = build_painter();
         let mut out = Vec::new();
-        paint_bar_after_pane(Some(&mut painter), &mut out, (80, 24), "demo", None, None);
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut out,
+            (80, 24),
+            "demo",
+            None,
+            None,
+            true,
+        );
         let s = String::from_utf8_lossy(&out);
         // Bar CUP to row 24 must be present (the bar still paints).
         assert!(s.contains("\x1b[24;1H"), "bar CUP missing; out = {s:?}");
@@ -442,6 +477,93 @@ mod tests {
         assert!(
             !s.contains("\x1b[?25h"),
             "unexpected ?25h in both-none path; out = {s:?}"
+        );
+    }
+
+    /// Incremental-paint win: on the hot path (`bar_row_clobbered = false`)
+    /// a repaint whose bar content + dims are unchanged emits NO status-bar
+    /// row bytes. Only the (cheap) cursor-restore CUP is written. This is
+    /// the steady-state cost reduction: the prior unconditional
+    /// `painter.invalidate()` re-emitted the entire bar row on every
+    /// `TERMINAL_OUTPUT` frame.
+    #[test]
+    fn paint_bar_after_pane_skips_unchanged_bar_when_not_clobbered() {
+        let mut painter = build_painter();
+        // First paint primes the painter's cache (emits the bar row once).
+        let mut first = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut first,
+            (80, 24),
+            "demo",
+            Some((4, 7)),
+            None,
+            false,
+        );
+        let first_s = String::from_utf8_lossy(&first);
+        assert!(
+            first_s.contains("\x1b[24;1H"),
+            "first paint must emit the bar row CUP; out = {first_s:?}"
+        );
+
+        // Second paint, same dims + same widget inputs, NOT clobbered:
+        // the bar row must NOT be re-emitted.
+        let mut second = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut second,
+            (80, 24),
+            "demo",
+            Some((4, 7)),
+            None,
+            false,
+        );
+        let second_s = String::from_utf8_lossy(&second);
+        assert!(
+            !second_s.contains("\x1b[24;1H"),
+            "unchanged bar must not re-emit its row CUP; out = {second_s:?}"
+        );
+        // The only bytes are the cursor restore to (4,7) ⇒ \x1b[5;8H.
+        assert!(
+            second_s.contains("\x1b[5;8H"),
+            "cursor restore CUP still expected; out = {second_s:?}"
+        );
+    }
+
+    /// Correctness guard: when the bar row WAS clobbered
+    /// (`bar_row_clobbered = true`, the `paint_full_frame` ED2 path), the
+    /// bar re-emits even if its content is byte-identical to the previous
+    /// frame — otherwise the cleared row would stay blank.
+    #[test]
+    fn paint_bar_after_pane_re_emits_when_clobbered_even_if_unchanged() {
+        let mut painter = build_painter();
+        let mut first = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut first,
+            (80, 24),
+            "demo",
+            Some((4, 7)),
+            None,
+            true,
+        );
+        assert!(String::from_utf8_lossy(&first).contains("\x1b[24;1H"));
+
+        // Same inputs, but clobbered: must force a re-emit of the bar row.
+        let mut second = Vec::new();
+        paint_bar_after_pane(
+            Some(&mut painter),
+            &mut second,
+            (80, 24),
+            "demo",
+            Some((4, 7)),
+            None,
+            true,
+        );
+        let second_s = String::from_utf8_lossy(&second);
+        assert!(
+            second_s.contains("\x1b[24;1H"),
+            "clobbered bar must re-emit its row even when unchanged; out = {second_s:?}"
         );
     }
 }

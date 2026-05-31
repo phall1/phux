@@ -1079,6 +1079,10 @@ async fn main_loop<W: super::RenderSink>(
                         &session_name,
                         focused_cursor,
                         fallback_origin,
+                        // Idle tick: nothing clobbered the bar row. The
+                        // painter's content cache repaints only when a
+                        // widget (e.g. the clock) actually changed.
+                        false,
                     );
                 }
             }
