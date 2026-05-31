@@ -44,7 +44,7 @@ use libghostty_vt::{
     terminal::Mode,
 };
 use phux_protocol::ClientId;
-use phux_protocol::wire::frame::FrameKind;
+use phux_protocol::wire::frame::{AgentEvent, FrameKind};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -768,6 +768,28 @@ pub struct TerminalActor {
     /// (this is intentional; the prior `oneshot::Sender::drop` semantics
     /// were a hidden lifecycle coupling we want gone).
     token: CancellationToken,
+    /// Optional sink for agent events the actor sources from the PTY
+    /// stream (SPEC §7.5, phux-y2t): `bell`, `title_changed`, `dirty`,
+    /// `idle`, and the OSC-133-sourced `command_started` / `command_finished`.
+    /// `None` for actors that no one watches (most tests); set by the
+    /// runtime's spawn path via [`Self::set_event_sink`]. The runtime
+    /// drains this channel and fans each event out to event-stream
+    /// subscribers scoped to this pane (it owns the wire `TerminalId`,
+    /// which the actor does not know).
+    ///
+    /// `try_send` semantics: a full sink drops the event rather than
+    /// stalling the hot PTY-pump loop — the event stream is an
+    /// accelerator, not a guarantee (a dropped event just falls back to
+    /// the CLI poll floor).
+    event_sink: Option<mpsc::Sender<AgentEvent>>,
+    /// Last terminal title observed (OSC 0 / OSC 2), for change detection.
+    /// `title_changed` fires only when the polled title differs from this.
+    last_title: String,
+    /// Whether the pane is currently in an active output "burst": a
+    /// `dirty` event has been emitted and no settling `idle` has followed.
+    /// Drives the dirty/idle coalescing — at most one `dirty` per burst,
+    /// then one `idle` when a tick observes the grid has settled.
+    in_output_burst: bool,
     cols: u16,
     rows: u16,
 }
@@ -1142,6 +1164,9 @@ impl TerminalActor {
             output_tx: output_tx.clone(),
             exit_notify: Some(exit_tx),
             token,
+            event_sink: None,
+            last_title: String::new(),
+            in_output_burst: false,
             cols,
             rows,
         };
@@ -1435,6 +1460,81 @@ impl TerminalActor {
     #[cfg(test)]
     pub fn consumer_state(&self, client_id: ClientId) -> Option<&ConsumerSyncState> {
         self.consumer_states.get(&client_id)
+    }
+
+    /// Wire an agent-event sink (SPEC §7.5, phux-y2t). The actor emits
+    /// `bell` / `title_changed` / `dirty` / `idle` / `command_*` events to
+    /// `sink`; the runtime drains it and fans each event out to
+    /// event-stream subscribers scoped to this pane. Called by the spawn
+    /// path before the actor is handed to `spawn_local`.
+    pub fn set_event_sink(&mut self, sink: mpsc::Sender<AgentEvent>) {
+        self.event_sink = Some(sink);
+    }
+
+    /// Best-effort agent-event emission (SPEC §7.5). `try_send` so a full
+    /// sink drops the event rather than stalling the actor — the event
+    /// stream is an accelerator, never a guarantee. No-op when no sink is
+    /// wired (the common test path).
+    fn emit_event(&self, event: AgentEvent) {
+        if let Some(sink) = self.event_sink.as_ref() {
+            let _ = sink.try_send(event);
+        }
+    }
+
+    /// Source agent events from a freshly-applied PTY chunk (phux-y2t),
+    /// called right after `vt_write`. Sources, in order:
+    ///
+    /// - `bell` — a BEL (`0x07`) anywhere in the chunk. Emitted once per
+    ///   chunk even if several BELs arrive together (a burst of bells is
+    ///   one alert from the consumer's perspective).
+    /// - `title_changed` — the libghostty-tracked OSC 0 / OSC 2 title now
+    ///   differs from the last observed value.
+    /// - `dirty` — the chunk mutated the grid (a new output burst began).
+    ///   Coalesced: at most one `dirty` per burst; the settling `idle`
+    ///   fires from the tick arm.
+    ///
+    /// `command_started` / `command_finished` are NOT sourced here — see
+    /// the wire spec (SPEC §7.5.1) and the bead for the deferral: the
+    /// OSC-133 command boundary is not cleanly observable from the actor
+    /// without disturbing the per-consumer state-sync synthesizer's
+    /// dirty-consumption model. The wire tags are allocated so a future
+    /// server can emit them without a wire change.
+    fn source_events_from_chunk(&mut self, chunk: &[u8]) {
+        if self.event_sink.is_none() {
+            return;
+        }
+        if chunk.contains(&0x07) {
+            self.emit_event(AgentEvent::Bell);
+        }
+        // Title: poll libghostty's tracked title and emit on change. The
+        // borrow is released before `emit_event` (which doesn't touch the
+        // terminal) to keep the RefCell discipline simple.
+        let current_title = self.terminal.borrow().title().unwrap_or("").to_owned();
+        if current_title != self.last_title {
+            self.last_title = current_title.clone();
+            self.emit_event(AgentEvent::TitleChanged {
+                title: current_title,
+            });
+        }
+        // Dirty: a chunk arrived, so the grid mutated. Coalesce to one
+        // `dirty` per burst; `idle` (from the tick arm) closes the burst.
+        if !self.in_output_burst {
+            self.in_output_burst = true;
+            self.emit_event(AgentEvent::Dirty);
+        }
+    }
+
+    /// Emit `idle` when an output burst has settled (phux-y2t), called from
+    /// the tick arm. A burst is "settled" when a tick fires and the grid
+    /// has not been mutated since the previous tick
+    /// (`!terminal_dirty_since_tick`). Idempotent: only the first settled
+    /// tick after a `dirty` emits `idle`; subsequent idle ticks are silent
+    /// until the next burst.
+    fn maybe_emit_idle(&mut self) {
+        if self.in_output_burst && !self.terminal_dirty_since_tick {
+            self.in_output_burst = false;
+            self.emit_event(AgentEvent::Idle);
+        }
     }
 
     /// Test-only: this actor's current shared adaptive tick interval
@@ -1821,6 +1921,10 @@ impl TerminalActor {
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).
                             self.terminal_dirty_since_tick = true;
+                            // phux-y2t: source agent events (bell, title,
+                            // dirty) from the just-applied chunk for any
+                            // event-stream subscriber. No-op without a sink.
+                            self.source_events_from_chunk(&chunk);
                             // Broadcast send fails only when no
                             // subscribers exist; that's a normal
                             // steady-state (no attached clients) and
@@ -2030,6 +2134,12 @@ impl TerminalActor {
                 // `TerminalOutput` frame onto its outbound mailbox whenever
                 // `synthesize_against_reference` returns non-empty bytes.
                 _ = tick.tick() => {
+                    // phux-y2t: close an output burst with an `idle` event
+                    // when the grid has settled since the previous tick.
+                    // MUST run before `tick_emit`, which consumes the
+                    // `terminal_dirty_since_tick` flag `maybe_emit_idle`
+                    // reads. No-op without an event sink.
+                    self.maybe_emit_idle();
                     self.tick_emit();
                 }
 

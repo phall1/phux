@@ -450,16 +450,49 @@ pub fn seed_session_with_pty(
     let bundle =
         TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
     let crate::terminal_actor::TerminalActorBundle {
-        actor,
+        mut actor,
         handle,
         exit_notify,
         ..
     } = bundle;
-    state.with_mut(|s| {
+    // phux-y2t: wire the actor's agent-event sink and spawn a drain task
+    // that fans bell / title / dirty / idle events out to event-stream
+    // subscribers scoped to this pane. The wire `TerminalId` is interned
+    // up front (stable for the pane's lifetime) and captured by the drain.
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_SINK_CAPACITY);
+    actor.set_event_sink(event_tx);
+    let wire_terminal_id = state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
+        s.intern_terminal_wire(terminal)
     });
+    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     Ok(terminal)
+}
+
+/// Bounded capacity of the per-pane agent-event sink (SPEC §7.5,
+/// phux-y2t). Small: events are coalesced (one `dirty` per burst, one
+/// `idle` to close it) and the stream tolerates loss — a full sink drops
+/// the event rather than stalling the actor's hot PTY-pump loop.
+const EVENT_SINK_CAPACITY: usize = 64;
+
+/// Drain a pane actor's agent-event channel and fan each event out to
+/// event-stream subscribers scoped to `wire_terminal_id` (SPEC §7.5,
+/// phux-y2t). Runs until the actor drops its event sender (pane gone).
+///
+/// `spawn_local` to co-locate with the actor on the `LocalSet` (the
+/// cancellation story rides the root-token `JoinSet` cascade, same as the
+/// EOF watcher).
+fn spawn_pane_event_drain(
+    state: SharedState,
+    wire_terminal_id: phux_protocol::ids::TerminalId,
+    mut event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+) {
+    tokio::task::spawn_local(async move {
+        while let Some(event) = event_rx.recv().await {
+            broadcast_event(&state, Some(wire_terminal_id.clone()), event).await;
+        }
+    });
 }
 
 /// Spawn the per-pane EOF watcher task (phux-it8, reshaped by phux-4r1).
