@@ -354,6 +354,39 @@ enum Command {
         socket: Option<PathBuf>,
     },
 
+    /// Stream a pane's live events (the push half of the agent surface).
+    ///
+    /// Subscribes to the server's `EVENT` stream (SPEC §7.5, ADR-0022
+    /// 'events') and prints one event per line until EOF or Ctrl-C. The
+    /// subscription neither attaches nor resizes the pane — safe to watch
+    /// a pane a human or another agent is actively using. This is the
+    /// latency-cutting accelerator of `phux wait`'s poll floor: events
+    /// (bell, title change, output dirty/idle, pane spawn/close) arrive as
+    /// they happen rather than on a poll tick.
+    ///
+    /// TARGET is a selector (see the top-level help); omit it for the
+    /// most-recently-focused session. With `--json`, each line is a JSON
+    /// object (stdout stays pure JSON); otherwise each line is a compact
+    /// human form.
+    ///
+    ///   phux watch build
+    ///   phux watch --json work:1.0
+    #[command(about = "Stream a pane's live events (bell, title, dirty/idle, lifecycle)")]
+    Watch {
+        /// Target selector. Omit for the most-recently-focused session.
+        #[arg(value_name = "TARGET")]
+        session: Option<String>,
+
+        /// Emit one JSON object per line instead of the human form. stdout
+        /// stays pure JSON (diagnostics go to stderr).
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
     /// Run a command in a pane and capture its exit code.
     ///
     /// Reports the command's exit code, output, and duration (ADR-0022
@@ -549,6 +582,11 @@ fn main() -> ExitCode {
             json,
             socket,
         }) => run_wait(session.as_deref(), until, idle, timeout, json, socket),
+        Some(Command::Watch {
+            session,
+            json,
+            socket,
+        }) => run_watch(session.as_deref(), json, socket),
         Some(Command::Run {
             target,
             command,
@@ -1566,6 +1604,142 @@ fn run_wait(
             }
         }
     })
+}
+
+/// `phux watch [TARGET]` — stream a pane's live events (SPEC §7.5,
+/// ADR-0022 'events', `phux-y2t`).
+///
+/// Resolves `TARGET` (a selector; default: the focused session) to a pane
+/// client-side, subscribes to the server's `EVENT` stream scoped to that
+/// pane, and prints one event per line until EOF (server gone) or Ctrl-C.
+/// The subscription neither attaches nor resizes the pane.
+///
+/// `--json` emits one JSON object per line and keeps stdout pure (the
+/// resolved-target diagnostics and connect errors go to stderr); the
+/// human form is a compact one-liner.
+fn run_watch(session: Option<&str>, json: bool, socket: Option<PathBuf>) -> ExitCode {
+    let selector = match parse_selector(session) {
+        Ok(sel) => sel,
+        Err(code) => return code,
+    };
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    rt.block_on(async move {
+        let terminal_id = match resolve_target(&socket_path, &selector, "watch").await {
+            Ok(id) => id,
+            Err(code) => return code,
+        };
+
+        // Stream until EOF or Ctrl-C. `tokio::select!` races the event
+        // stream against the interrupt so Ctrl-C exits cleanly (exit 0 —
+        // the user asked to stop, not a failure).
+        let stream = phux_client::watch::watch_events(&socket_path, Some(terminal_id), |ev| {
+            print_watch_event(&ev, json);
+            true
+        });
+        tokio::pin!(stream);
+        tokio::select! {
+            result = &mut stream => match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err @ AttachError::Io(_)) => report_no_server(&err, &socket_path, "watch"),
+                Err(err) => {
+                    eprintln!("phux: watch failed: {err}");
+                    ExitCode::FAILURE
+                }
+            },
+            _ = tokio::signal::ctrl_c() => ExitCode::SUCCESS,
+        }
+    })
+}
+
+/// Render one [`phux_client::watch::WatchEvent`] to stdout — one line, as
+/// JSON (`--json`) or a compact human form. Keeps stdout pure JSON under
+/// `--json` (no human framing). A serialization failure is reported to
+/// stderr and the line skipped rather than aborting the stream.
+fn print_watch_event(ev: &phux_client::watch::WatchEvent, json: bool) {
+    use phux_protocol::wire::frame::AgentEvent;
+
+    // A stable, scriptable name for each event kind (matches the spec
+    // taxonomy in §7.5.1).
+    let kind = match &ev.event {
+        AgentEvent::CommandStarted => "command_started",
+        AgentEvent::CommandFinished { .. } => "command_finished",
+        AgentEvent::TitleChanged { .. } => "title_changed",
+        AgentEvent::Bell => "bell",
+        AgentEvent::PaneSpawned => "pane_spawned",
+        AgentEvent::PaneClosed { .. } => "pane_closed",
+        AgentEvent::Dirty => "dirty",
+        AgentEvent::Idle => "idle",
+        AgentEvent::Unknown { .. } => "unknown",
+        // `AgentEvent` is `#[non_exhaustive]`: a future server may push a
+        // kind this client predates. Render it generically rather than
+        // failing the stream.
+        _ => "unknown",
+    };
+    let terminal = ev.terminal.as_ref().map(format_wire_terminal_id);
+
+    if json {
+        let mut obj = serde_json::Map::new();
+        obj.insert("event".to_owned(), serde_json::Value::from(kind));
+        if let Some(t) = &terminal {
+            obj.insert("terminal".to_owned(), serde_json::Value::from(t.clone()));
+        }
+        match &ev.event {
+            AgentEvent::TitleChanged { title } => {
+                obj.insert("title".to_owned(), serde_json::Value::from(title.clone()));
+            }
+            AgentEvent::CommandFinished { exit_code } => {
+                obj.insert(
+                    "exit_code".to_owned(),
+                    exit_code.map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+            }
+            AgentEvent::PaneClosed { exit_status } => {
+                obj.insert(
+                    "exit_status".to_owned(),
+                    exit_status.map_or(serde_json::Value::Null, serde_json::Value::from),
+                );
+            }
+            AgentEvent::Unknown { tag, .. } => {
+                obj.insert("tag".to_owned(), serde_json::Value::from(*tag));
+            }
+            _ => {}
+        }
+        match serde_json::to_string(&serde_json::Value::Object(obj)) {
+            Ok(s) => println!("{s}"),
+            Err(err) => eprintln!("phux: failed to serialize event: {err}"),
+        }
+    } else {
+        let scope = terminal.as_deref().unwrap_or("server");
+        let detail = match &ev.event {
+            AgentEvent::TitleChanged { title } => format!(" {title:?}"),
+            AgentEvent::CommandFinished { exit_code } => {
+                exit_code.map_or_else(String::new, |c| format!(" exit={c}"))
+            }
+            AgentEvent::PaneClosed { exit_status } => {
+                exit_status.map_or_else(String::new, |c| format!(" exit={c}"))
+            }
+            AgentEvent::Unknown { tag, .. } => format!(" tag={tag}"),
+            _ => String::new(),
+        };
+        println!("{scope}\t{kind}{detail}");
+    }
+}
+
+/// Render a wire [`phux_protocol::ids::TerminalId`] as the `@id` selector
+/// form the rest of the CLI uses (e.g. `@3`). Satellite ids carry their
+/// host (`host/@id`) so a federated event is still legible.
+fn format_wire_terminal_id(id: &phux_protocol::ids::TerminalId) -> String {
+    match id {
+        phux_protocol::ids::TerminalId::Local { id } => format!("@{id}"),
+        phux_protocol::ids::TerminalId::Satellite { host, id } => {
+            format!("{}/@{id}", host.as_str())
+        }
+    }
 }
 
 /// `phux run TARGET CMD...` — run a command in a pane and report its exit

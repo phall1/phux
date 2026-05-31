@@ -36,6 +36,7 @@ pub mod selector;
 pub mod send_keys;
 pub mod snapshot;
 pub mod wait;
+pub mod watch;
 
 // Pane-interior substrate, re-exported from `phux-client-core` so the
 // `ratatui`-free boundary is compiler-enforced (ADR-0020) while consumers
