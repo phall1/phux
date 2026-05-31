@@ -80,6 +80,14 @@ pub struct SnapshotSynthesizer<'alloc> {
     render_state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
+    /// Reusable per-row scratch buffer for the per-consumer diff
+    /// ([`Self::synthesize_against_reference`]). Each tick renders every
+    /// row's body into this buffer and compares it against the consumer's
+    /// reference; a fresh `Vec<u8>` per row would allocate `rows` times per
+    /// consumer per tick under heavy output. The buffer is `clear()`-ed
+    /// (capacity retained) between rows, so steady-state ticks allocate
+    /// nothing here.
+    row_scratch: Vec<u8>,
 }
 
 impl<'alloc> SnapshotSynthesizer<'alloc> {
@@ -89,6 +97,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
+            row_scratch: Vec::new(),
         })
     }
 
@@ -554,28 +563,51 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             reference.reset_geometry(cols, rows_n);
         }
 
-        // Render each row's body and diff against the reference.
-        let mut changed_rows: Vec<(u16, Vec<u8>)> = Vec::new();
-        let mut row_iter = self.rows.update(&snapshot)?;
-        let mut row_index: u16 = 0;
-        while let Some(row) = row_iter.next() {
-            if row_index >= rows_n {
-                break;
+        // Render each row's body into the reusable scratch buffer and diff
+        // against the reference. A changed row's index is recorded and its
+        // freshly-rendered body is committed into the reference immediately
+        // by swapping the scratch buffer with the reference's stored body
+        // (so the reference's old allocation becomes the next row's scratch
+        // — no per-row heap allocation under churn). The `out` diff is then
+        // built from the just-committed reference bodies. Emit-once still
+        // holds: the reference reflects the rendered state before the frame
+        // ships. The walk is scoped so the disjoint `&mut` borrows of the
+        // reference's fields (so the per-row swap and the changed-index push
+        // don't alias each other through `reference`) drop before the
+        // cursor/mode reads below.
+        {
+            let ConsumerReference {
+                rows_body,
+                changed_scratch: changed,
+                ..
+            } = &mut *reference;
+            changed.clear();
+            let row_scratch = &mut self.row_scratch;
+            let mut row_iter = self.rows.update(&snapshot)?;
+            let mut row_index: u16 = 0;
+            while let Some(row) = row_iter.next() {
+                if row_index >= rows_n {
+                    break;
+                }
+                // Each row body is rendered with a fresh SGR pen so the
+                // per-row byte sequence is self-contained and comparable
+                // across ticks regardless of neighbouring rows.
+                row_scratch.clear();
+                let mut prev_style: Option<Style> = None;
+                let mut cell_iter = self.cells.update(row)?;
+                while let Some(cell) = cell_iter.next() {
+                    emit_cell(cell, row_scratch, &mut prev_style)?;
+                }
+                let idx = usize::from(row_index);
+                if rows_body[idx] != *row_scratch {
+                    // Commit the new body into the reference by swapping; the
+                    // displaced (old) buffer is reused as the next row's
+                    // scratch.
+                    std::mem::swap(&mut rows_body[idx], row_scratch);
+                    changed.push(row_index);
+                }
+                row_index += 1;
             }
-            // Each row body is rendered with a fresh SGR pen so the
-            // per-row byte sequence is self-contained and comparable
-            // across ticks regardless of neighbouring rows.
-            let mut body: Vec<u8> = Vec::with_capacity(usize::from(cols));
-            let mut prev_style: Option<Style> = None;
-            let mut cell_iter = self.cells.update(row)?;
-            while let Some(cell) = cell_iter.next() {
-                emit_cell(cell, &mut body, &mut prev_style)?;
-            }
-            let idx = usize::from(row_index);
-            if reference.rows_body[idx] != body {
-                changed_rows.push((row_index, body));
-            }
-            row_index += 1;
         }
 
         // Re-establish cursor + mode bits. Diff them flat against the
@@ -585,7 +617,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         let live_cm = ReferenceCursorMode::capture(&snapshot, terminal)?;
         let cursor_mode_changed = reference.cursor_mode != live_cm;
 
-        if changed_rows.is_empty() && !cursor_mode_changed {
+        if reference.changed_scratch.is_empty() && !cursor_mode_changed {
             // Byte-identical to the reference: nothing to ship.
             return Ok(SnapshotBytes {
                 cols,
@@ -608,22 +640,28 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             emit_screen_mode(&mut out, terminal)?;
         }
 
-        for (row_index, body) in &changed_rows {
-            write_cup(&mut out, *row_index, 0);
+        // The reference bodies already hold the just-rendered state (swapped
+        // in above), so read them back for the changed indices. Disjoint
+        // immutable borrows of the two fields so the index iteration and the
+        // body read don't alias through `reference`.
+        let ConsumerReference {
+            rows_body,
+            changed_scratch: changed,
+            ..
+        } = &*reference;
+        for &ri in changed {
+            write_cup(&mut out, ri, 0);
             // Reset SGR at the start of each emitted row so the row body
             // (which itself starts from a fresh pen) lands on a clean pen.
             out.extend_from_slice(b"\x1b[0m");
-            out.extend_from_slice(body);
+            out.extend_from_slice(&rows_body[usize::from(ri)]);
         }
         // Always re-emit the cursor/mode epilogue on a non-empty tick (the
         // changed rows moved the cursor as a side effect of painting).
         emit_epilogue(&mut out, &snapshot, terminal)?;
 
-        // Emit-once: commit the reference to the just-rendered state. A
-        // subsequent unchanged tick will diff clean and ship nothing.
-        for (row_index, body) in changed_rows {
-            reference.rows_body[usize::from(row_index)] = body;
-        }
+        // Emit-once: the reference row bodies were committed during the
+        // walk above (swap); commit the cursor/mode too.
         reference.cursor_mode = live_cm;
 
         Ok(SnapshotBytes {
@@ -689,6 +727,12 @@ pub struct ConsumerReference {
     rows_body: Vec<Vec<u8>>,
     /// Last-synced cursor placement + DEC mode bits, diffed flat.
     cursor_mode: ReferenceCursorMode,
+    /// Reusable scratch for the indices of rows that changed this tick,
+    /// owned here (rather than freshly allocated per
+    /// [`SnapshotSynthesizer::synthesize_against_reference`] call) so a
+    /// steady stream of diffs reuses its capacity instead of allocating a
+    /// fresh `Vec` each tick.
+    changed_scratch: Vec<u16>,
 }
 
 impl ConsumerReference {
@@ -812,8 +856,15 @@ fn emit_cell(
         return Ok(());
     }
 
-    let graphemes = cell.graphemes()?;
-    if graphemes.is_empty() {
+    // Read the grapheme cluster into a stack buffer rather than the
+    // allocating [`CellIteration::graphemes`] (`vec!['\0'; len]` per cell).
+    // The emit path visits every cell of every changed row each tick under
+    // heavy output; a heap allocation per cell dominated the hot path
+    // (~50 allocations per row in the bursty-colored-output stress probe).
+    // `GRAPHEME_INLINE` covers the common base-codepoint-plus-a-few-marks
+    // case; deeper clusters fall back to a one-shot heap retry.
+    let len = cell.graphemes_len()?;
+    if len == 0 {
         // Genuinely blank cell — emit a space so the column advances.
         // (Wide-tail case was handled above.)
         out.push(b' ');
@@ -826,11 +877,24 @@ fn emit_cell(
     emit_sgr_delta(out, prev_style.as_ref(), &style, fg, bg);
     *prev_style = Some(style);
 
-    for ch in &graphemes {
+    let mut inline = [char::from(0u8); GRAPHEME_INLINE];
+    if len <= GRAPHEME_INLINE {
+        cell.graphemes_buf(&mut inline[..len])?;
+        encode_graphemes(out, &inline[..len]);
+    } else {
+        let mut heap = vec![char::from(0u8); len];
+        cell.graphemes_buf(&mut heap)?;
+        encode_graphemes(out, &heap);
+    }
+    Ok(())
+}
+
+/// UTF-8 encode a grapheme cluster's codepoints into `out`.
+fn encode_graphemes(out: &mut Vec<u8>, graphemes: &[char]) {
+    for ch in graphemes {
         let mut buf = [0u8; 4];
         out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
     }
-    Ok(())
 }
 
 /// Project one viewport cell into a [`CellInfo`], or `None` when the cell
