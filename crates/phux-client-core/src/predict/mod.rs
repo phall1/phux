@@ -37,7 +37,7 @@
 //! survives a decade of field use. We follow suit for two reasons specific
 //! to phux:
 //!
-//! 1. The renderer in [`crate::attach::render`] already emits
+//! 1. The renderer in `phux_client::attach::render` already emits
 //!    `Style::faint` (SGR 2) for any program that asks for dim text —
 //!    using dim for predictions would collide with `man`, `less`, vim
 //!    "concealed" regions, and any TUI that paints a dimmed status line.
@@ -115,7 +115,7 @@
 //! # Off by default
 //!
 //! Predictive echo is gated behind [`PredictiveConfig::enabled`], wired
-//! through [`crate::attach::run_with_predict`]. The default is `false`
+//! through `phux_client::attach::run_with_predict`. The default is `false`
 //! until the feature has miles on it. Wiring the TOML `[experimental]
 //! predictive-echo = true` knob into `phux-config` is deferred to a
 //! follow-up — the Rust-level toggle is what the test plan exercises.

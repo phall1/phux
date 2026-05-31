@@ -20,7 +20,7 @@
 //! The output is a [`PaneLayout`] carrying both the per-pane [`Rect`]s
 //! (which `attach::driver` hands to each `TerminalRenderer`) and the
 //! list of [`DividerCell`]s (which the chrome layer at
-//! [`crate::render::chrome::dividers`] composites onto stdout via
+//! `phux_client::render::chrome::dividers` composites onto stdout via
 //! ratatui, with pane interiors marked `Cell::skip` so libghostty's
 //! direct VT output is not stomped — see ADR-0020).
 //!
@@ -130,7 +130,7 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
 }
 
 // -----------------------------------------------------------------------------
-// Divider painting moved to `crate::render::chrome::dividers` (phux-5ke.3,
+// Divider painting moved to `phux_client::render::chrome::dividers` (phux-5ke.3,
 // ADR-0020). This module stays pure data: `compute_layout` yields the
 // `PaneLayout`, and the chrome layer composites its `DividerCell`s with
 // skip-cell carve-outs over the pane interiors. No VT-byte path here.

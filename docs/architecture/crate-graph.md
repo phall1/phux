@@ -20,16 +20,19 @@ ADR-0015.
                 └─┬──────────┬───────────┬─────────┘
                   │          │           │
             ┌─────▼───┐  ┌───▼────┐  ┌───▼────┐
-            │ server  │  │ client │  │ config │
-            └──┬────┬─┘  └─┬──┬───┘  └────────┘
-               │    │      │  │
-               │    │      │  └─────────────────┐
-       ┌───────▼─┐  │   ┌──▼────────────┐       │
-       │  core   │  └──►│   protocol    │──► libghostty-vt ◄┘
-       └─────────┘      │ (codec, input │       (client also links;
-                        │  events, wire │        runs a local Terminal
-                        │  envelopes)   │        per attached pane —
-                        └───────────────┘        ADR-0013)
+            │ server  │  │ client │  │ config │   client = chrome (ratatui)
+            └──┬────┬─┘  └─┬──┬──┬─┘  └────────┘         + attach loop
+               │    │      │  │  └────────┐
+               │    │      │  │      ┌────▼───────┐  pane-interior substrate:
+               │    │      │  │      │ client-core│  layout, multi-pane,
+               │    │      │  │      └────┬───────┘  predict — NO ratatui
+               │    │      │  └───────────┤          dep (ADR-0020, phux-0fv)
+       ┌───────▼─┐  │   ┌──▼──────────────▼─┐    │
+       │  core   │  └──►│     protocol      │──► libghostty-vt ◄┘
+       └─────────┘      │ (codec, input     │     (client also links;
+                        │  events, wire     │      runs a local Terminal
+                        │  envelopes)       │      per attached pane —
+                        └───────────────────┘      ADR-0013)
 ```
 
 Two boundaries are load-bearing:
@@ -58,6 +61,17 @@ for the renderer-side contract on both ends.
 
 `phux-config` is a sibling of `core` and is consumed by the binary and
 the client.
+
+3. **`phux-client` is split from `phux-client-core` so the ratatui
+   boundary is compiler-enforced** (ADR-0020, phux-0fv). The chrome
+   toolkit (`ratatui`) lives only in `phux-client`; the pane-interior
+   substrate — layout math, multi-pane composition, predictive echo —
+   lives in `phux-client-core`, which declares no `ratatui` dependency.
+   A `use ratatui` in the substrate cannot resolve, so it fails to
+   compile. The attach loop stays in `phux-client` because it
+   composites chrome over panes and depends on both. `phux-client`
+   re-exports `phux_client_core::{layout, multi_pane, predict}` so
+   consumers keep stable `phux_client::…` paths.
 
 ## Browser client crates (standalone wasm workspace)
 

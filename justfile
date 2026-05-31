@@ -118,18 +118,18 @@ doc:
 watch:
     cargo watch -x check -x 'nextest run --workspace'
 
-# Boundary guard: ratatui imports must stay under phux-client/src/render/.
-# See epic phux-5ke and ARCHITECTURE.md.
-check-ratatui-boundary:
-    bash scripts/check-ratatui-boundary.sh
-
 # Doc system gates: frontmatter, TL;DR, dead links, ADR status, spec version.
 # See docs/CONVENTIONS.md.
 docs-check:
     bash scripts/check-docs.sh
 
 # Everything CI must pass.
-ci: fmt-check lint check-ratatui-boundary docs-check test deny doc
+#
+# The ratatui-confinement boundary (ADR-0020) used to be a grep guard
+# (`check-ratatui-boundary`); phux-0fv replaced it with a crate split, so
+# `cargo build`/`lint` now enforce it structurally — `phux-client-core` has
+# no `ratatui` dependency.
+ci: fmt-check lint docs-check test deny doc
     @echo "ok"
 
 # Print the toolchain we are pinned to.

@@ -1734,9 +1734,9 @@ name = "phux-client"
 version = "0.0.1"
 dependencies = [
  "bytes",
- "ciborium",
  "insta",
  "libghostty-vt",
+ "phux-client-core",
  "phux-config",
  "phux-core",
  "phux-protocol",
@@ -1751,6 +1751,18 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "phux-client-core"
+version = "0.0.1"
+dependencies = [
+ "ciborium",
+ "insta",
+ "phux-protocol",
+ "proptest",
+ "serde",
+ "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-width",
 ]

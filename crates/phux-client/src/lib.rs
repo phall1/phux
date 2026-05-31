@@ -9,25 +9,35 @@
 //! `research/2026-05-25-libghostty-renderstate.md` for the renderer-side
 //! contract this crate implements.
 //!
-//! # Render layering (epic phux-5ke)
+//! # Render layering (epic phux-5ke, ADR-0020)
 //!
 //! Pane interiors are painted by libghostty (VT bytes → `Terminal` →
 //! stdout). Chrome — status bar, pane dividers, borders, overlays — is
 //! painted by `ratatui` from the [`render`] module. The two layers
 //! composite over disjoint screen regions, never interleaved. `ratatui`
-//! is allowed only under `render/`; a CI grep guard
-//! (`scripts/check-ratatui-boundary.sh`, hooked into `just ci`) enforces
-//! the boundary. See (TBD) `ADR-0020`.
+//! lives only in this crate; the pane-interior substrate (layout math,
+//! multi-pane composition, predictive echo) lives in the `phux-client-core`
+//! crate, which carries no `ratatui` dependency. The boundary is therefore
+//! enforced by the compiler — a stray `use ratatui` in the substrate fails
+//! to build — rather than by the retired `check-ratatui-boundary.sh` grep.
+//! See ADR-0020.
+//!
+//! The substrate modules are re-exported here ([`layout`], [`multi_pane`],
+//! [`predict`]) so consumers keep their `phux_client::{layout, predict, …}`
+//! paths.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod attach;
-pub mod layout;
-pub mod predict;
 pub mod render;
 pub mod run;
 pub mod selector;
 pub mod send_keys;
 pub mod snapshot;
 pub mod wait;
+
+// Pane-interior substrate, re-exported from `phux-client-core` so the
+// `ratatui`-free boundary is compiler-enforced (ADR-0020) while consumers
+// keep stable `phux_client::{layout, multi_pane, predict}` paths.
+pub use phux_client_core::{layout, multi_pane, predict};

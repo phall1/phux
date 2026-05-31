@@ -35,13 +35,19 @@ pub mod connection;
 pub mod driver;
 pub mod input;
 pub mod input_dispatch;
-pub mod multi_pane;
 pub mod paint;
 pub mod reflow;
 pub mod render;
 pub mod server_frame;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
+
+// Multi-pane composition moved to `phux-client-core` with phux-0fv
+// (ADR-0020): the pure layout-tree → pane-rects + divider-cells compute is
+// ratatui-free pane-interior code. Re-exported here so the established
+// `crate::attach::multi_pane` / `phux_client::attach::multi_pane` paths
+// keep resolving for the driver, paint, and server-frame handler.
+pub use crate::multi_pane;
 
 /// The output sink the attach driver composites into.
 ///

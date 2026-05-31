@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-05-31
 ---
 
 # 0020 — Layered render: ratatui chrome over libghostty pane interiors
@@ -68,12 +68,16 @@ regions, layered (not interleaved):
 
 The invariants that hold the two renderers together:
 
-1. **Dependency boundary.** `ratatui` and `crossterm` imports are
-   allowed only under `crates/phux-client/src/render/`. The attach
-   loop (`attach/`), the pane mirror, predictive echo, layout math
-   (`layout.rs`), and the server-frame handler stay ratatui-free.
-   Enforced by `scripts/check-ratatui-boundary.sh` (added by
-   `phux-5ke.1`), wired into `just ci`.
+1. **Dependency boundary.** `ratatui` and `crossterm` live only in the
+   `phux-client` crate (imports confined to its `src/render/`). The
+   pane-interior substrate — the pane mirror, predictive echo, layout
+   math, and multi-pane composition — lives in `phux-client-core`, which
+   has no `ratatui` dependency, so a stray `use ratatui` there fails to
+   compile. Originally enforced by `scripts/check-ratatui-boundary.sh`
+   (added by `phux-5ke.1`); phux-0fv replaced the grep with the crate
+   split so the compiler enforces it. The attach loop stays in
+   `phux-client` because it composites chrome over panes and so depends
+   on both the chrome and the substrate.
 
 2. **Region disjointness.** In any rendered frame, the set of cells
    ratatui writes to and the set of cells libghostty pane renderers
@@ -239,18 +243,22 @@ features, exactly when we want it to grow sub-linearly.
 
 ## Boundary enforcement
 
-`scripts/check-ratatui-boundary.sh` (introduced by `phux-5ke.1`)
-greps the workspace for `ratatui::` and `use ratatui` outside of
-`crates/phux-client/src/render/` and exits non-zero on any match.
-It runs in `just ci` and gates merges.
+The boundary is a crate split (phux-0fv). The pane-interior
+substrate — pane mirror, predictive echo, layout math, and
+multi-pane composition — lives in `phux-client-core`, which declares
+no `ratatui` dependency. A `use ratatui` there cannot resolve, so it
+fails to compile; `cargo build`/`lint` enforce the boundary. This
+replaced the original `scripts/check-ratatui-boundary.sh` grep guard
+(introduced by `phux-5ke.1`). The attach loop and server-frame
+handler stay in `phux-client` because they composite chrome over
+panes; the pure substrate they delegate to is the portable part.
 
-The reason this matters is not aesthetic. The multiplexer logic
-(attach loop, server frame handling, pane mirror, predictive echo,
-layout math) needs to remain portable to renderers that aren't
-ratatui — a future GUI consumer, a headless smoke-test client, or
-an inspection tool. If ratatui types leak into those modules, the
-extraction stops being mechanical and becomes a rewrite. Holding
-the line in CI keeps the extraction price flat as the client grows.
+The reason this matters is not aesthetic. That substrate needs to
+remain portable to renderers that aren't ratatui — a future GUI
+consumer, a headless smoke-test client, or an inspection tool. If
+ratatui types leaked into it, the extraction would stop being
+mechanical and become a rewrite. The crate boundary keeps the
+extraction price flat as the client grows.
 
 ## Implementation epic
 
@@ -290,11 +298,14 @@ layered render. Children:
   `paint_full_frame` / `paint_focused_pane`. The pane-interior side
   of the boundary stays here; the chrome side migrates to
   `crates/phux-client/src/render/` over `phux-5ke.2..4`.
-- `crates/phux-client/src/attach/multi_pane.rs` — current divider
-  drawing; migrates under `phux-5ke.3`.
-- `crates/phux-client/src/attach/status_bar.rs` — current status
-  bar; migrates under `phux-5ke.2`.
+- `crates/phux-client-core/src/multi_pane.rs` — divider compute
+  (`PaneLayout`, `DividerCell`); moved to `phux-client-core` under
+  phux-0fv. The chrome side rasterizes its cells in
+  `crates/phux-client/src/render/chrome/dividers.rs`.
+- `crates/phux-client/src/attach/status_bar.rs` — original status
+  bar; migrated to `render/chrome/status_bar.rs` under `phux-5ke.2`.
 - Commits `34bfc07` (paint-path collapse) and `ed84431` (status-bar
   row reservation fix) — the precedents that motivated this ADR.
-- `scripts/check-ratatui-boundary.sh` — the CI guard (added by
-  `phux-5ke.1`).
+- The boundary was originally a `scripts/check-ratatui-boundary.sh`
+  CI guard (added by `phux-5ke.1`); phux-0fv replaced it with the
+  `phux-client` / `phux-client-core` crate split.

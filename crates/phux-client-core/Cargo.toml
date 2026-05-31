@@ -1,0 +1,41 @@
+[package]
+name = "phux-client-core"
+description = "phux TUI client substrate: pane-geometry layout, multi-pane composition, and predictive local echo. The ratatui-free pane-interior layer (ADR-0020)."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Stable IDs (`TerminalId`, `CollectionId`), the input atoms (`KeyEvent`,
+# `MouseEvent`), and the wire `ViewportInfo` the layout math reasons about.
+# The `server` feature activates the full type surface (input atoms + wire
+# codec) every in-workspace consumer enables.
+phux-protocol = { workspace = true, features = ["server"] }
+# phux-9gw.1.4: width-aware UTF-8 prediction. The predict layer must know
+# how many terminal cells a Unicode scalar consumes before queueing a
+# prediction. `unicode-width` is the canonical zero-dep crate (Unicode 16).
+unicode-width = { workspace = true }
+# phux-9gw.1.6: multi-codepoint grapheme prediction. Splits a key event's
+# `text` into grapheme clusters so the predict layer queues one Insert per
+# visual cell. Complementary to `unicode-width`.
+unicode-segmentation = { workspace = true }
+# phux-4li.3: the client-side layout mirror persists itself server-side via
+# the L3 metadata key `phux.tui.layout/v1` (ADR-0019 decision 1). CBOR
+# envelope encode/decode for the `{version, root, focus}` layout shape.
+ciborium = "0.2"
+# phux-4li.3: serde-derive shims for the CBOR envelope; the wire-side
+# `LayoutNode`/`TerminalId` don't derive serde (phux-protocol stays a
+# near-empty shell per ADR-0011), so this crate mirrors the shapes locally.
+serde = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+insta.workspace = true

@@ -19,7 +19,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Per-client knob for predictive echo.
 ///
-/// Wire to [`crate::attach::run_with_predict`]. Default is `enabled: false`
+/// Wire to `phux_client::attach::run_with_predict`. Default is `enabled: false`
 /// — predictive echo is off until field-proven. Future config keys
 /// (timeout, decoration choice, RTT-adaptive predict policy) belong here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

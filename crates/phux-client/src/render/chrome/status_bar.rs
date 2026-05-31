@@ -3,8 +3,9 @@
 //! Replaces the hand-painted cell positioning from
 //! `attach::status_bar::StatusBarPainter` with a ratatui-based composer
 //! for the reserved bottom (or top) row of the outer terminal. The
-//! composer is the *only* place under `phux-client` that imports
-//! `ratatui` (CI guard: `scripts/check-ratatui-boundary.sh`).
+//! composer lives in the chrome layer, the only place that imports
+//! `ratatui`; the pane-interior substrate is in the `phux-client-core`
+//! crate, which has no `ratatui` dependency (ADR-0020).
 //!
 //! Pipeline:
 //!

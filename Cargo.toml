@@ -42,6 +42,7 @@ phux-protocol = { path = "crates/phux-protocol", version = "0.0.1" }
 phux-core = { path = "crates/phux-core", version = "0.0.1" }
 phux-server = { path = "crates/phux-server", version = "0.0.1" }
 phux-client = { path = "crates/phux-client", version = "0.0.1" }
+phux-client-core = { path = "crates/phux-client-core", version = "0.0.1" }
 phux-config = { path = "crates/phux-config", version = "0.0.1" }
 phux-mcp = { path = "crates/phux-mcp", version = "0.0.1" }
 
@@ -92,10 +93,12 @@ dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }
 portable-pty = "0.9"
 # Chrome-layer TUI toolkit for phux-client (status bar, dividers, overlays).
-# Confined to `crates/phux-client/src/render/` by a CI grep guard
-# (`scripts/check-ratatui-boundary.sh`); pane interiors stay on libghostty.
-# See epic phux-5ke. Default features only — no backend selection yet, the
-# render layer drives stdout directly alongside the libghostty pane painter.
+# The boundary (ADR-0020) is now compiler-enforced by the crate split: only
+# `phux-client` declares `ratatui`; the pane-interior substrate lives in
+# `phux-client-core`, which has no `ratatui` dependency, so a stray
+# `use ratatui` there fails to compile. See epic phux-5ke. Default features
+# only — the render layer drives stdout directly alongside the libghostty
+# pane painter.
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

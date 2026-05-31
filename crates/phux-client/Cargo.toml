@@ -15,6 +15,12 @@ workspace = true
 [dependencies]
 phux-protocol = { workspace = true, features = ["server"] }
 phux-core.workspace = true
+# phux-0fv (ADR-0020): the ratatui-free pane-interior substrate — layout
+# math, multi-pane composition, predictive echo. This crate (the chrome +
+# attach loop) depends on it; never the reverse. The split makes the
+# `ratatui`-confinement boundary compiler-enforced: `phux-client-core` has
+# no `ratatui` dependency, so a stray `use ratatui` there fails to build.
+phux-client-core.workspace = true
 # `phux snapshot` deserializes the `GET_SCREEN` JSON contract
 # (`phux_core::ScreenState`, ADR-0022 §2) returned by the server.
 serde_json.workspace = true
@@ -30,10 +36,10 @@ toml = { workspace = true }
 # server feature) so the client can construct and drive a Terminal +
 # RenderState without depending on protocol-internal modules.
 libghostty-vt.workspace = true
-# Chrome-layer TUI toolkit (status bar, dividers, overlays). Confined to
-# `src/render/` per epic phux-5ke; a CI grep guard
-# (`scripts/check-ratatui-boundary.sh`) fails the build if `ratatui`
-# imports leak outside that module.
+# Chrome-layer TUI toolkit (status bar, dividers, overlays). Lives only in
+# this crate; the pane-interior substrate is in `phux-client-core`, which
+# has no `ratatui` dependency, so the boundary (ADR-0020) is enforced by the
+# compiler rather than the retired grep guard. See epic phux-5ke.
 ratatui = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
@@ -52,43 +58,11 @@ bytes.workspace = true
 # pulls its own event loop we don't use). Only the `termios` feature group
 # is enabled; rustix's default crate-feature set is opt-in beyond that.
 rustix = { version = "0.38", default-features = false, features = ["std", "termios"] }
-# phux-9gw.1.4: width-aware UTF-8 prediction. The predict layer must
-# know how many terminal cells a Unicode scalar consumes before
-# queueing a prediction — width 0 (combining) is skipped, width 1
-# advances the cursor by one column, width 2 (CJK / wide emoji)
-# advances by two. `unicode-width` is the canonical zero-dep crate for
-# this (Unicode 16, single small table); no alternative ships both
-# EAW and emoji presentation tables.
-unicode-width = { workspace = true }
-# phux-9gw.1.6: multi-codepoint grapheme prediction. A key event's `text`
-# payload may carry several Unicode scalars that form one visual cell
-# (flag emoji U+1F1FA+U+1F1F8, ZWJ family emoji, base + combining mark).
-# The predict layer splits `text` into grapheme clusters via
-# `unicode-segmentation`'s `Graphemes` iterator so it can queue a single
-# Insert prediction per cluster and reconcile it against the cell's full
-# grapheme string. `unicode-width` reports per-scalar width but does not
-# group scalars; the two crates are complementary. Already transitively
-# in Cargo.lock; no new compiled crate.
-unicode-segmentation = { workspace = true }
-# phux-4li.3: the client-side layout mirror persists itself server-side
-# via the L3 metadata key `phux.tui.layout/v1` (ADR-0019 decision 1).
-# SPEC §7.4 recommends CBOR for metadata values, and the layout
-# envelope is `{version, root: LayoutNode, focus: TerminalId}`.
-# `ciborium` is already transitively in Cargo.lock (criterion pulls it
-# in for dev), it is pure-safe Rust with no C deps, serde-native, and
-# under active maintenance — unlike `serde_cbor`, which has been
-# unmaintained since 2021 and is not in the lock file. `ciborium`'s
-# direct deps (`ciborium-io`, `ciborium-ll`, `half`) are all small and
-# already present in our tree, so adding it as a direct dep costs no
-# new compiled crates.
-ciborium = "0.2"
-# phux-4li.3: serde-derive shims for the CBOR envelope (`CborEnvelope`,
-# `CborLayoutNode`, `CborTerminalId`). The wire-side `LayoutNode` and
-# `TerminalId` don't derive Serialize/Deserialize (phux-protocol
-# avoids the serde dependency to keep its near-empty-shell publish
-# profile per ADR-0011), so the layout module mirrors the shapes
-# locally with serde derives and converts via `From`. Already a
-# workspace dep (used by phux-config, phux-server, etc.).
+# `phux run` / `phux snapshot` deserialize the server's JSON contracts
+# (run result, `GET_SCREEN` screen state) via serde derives. The layout
+# CBOR envelope and the predict layer (which also needed serde, ciborium,
+# unicode-width, and unicode-segmentation) moved to `phux-client-core` with
+# phux-0fv, so those deps are declared there now, not here.
 serde = { workspace = true }
 
 [dev-dependencies]

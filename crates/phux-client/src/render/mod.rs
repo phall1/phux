@@ -14,9 +14,11 @@
 //! rectangles for pane rects so libghostty owns those cells exclusively;
 //! cursor and SGR state are explicitly handed off at the boundary.
 //!
-//! `ratatui` is allowed *only* under this module. A CI grep guard
-//! (`scripts/check-ratatui-boundary.sh`, wired into `just ci`) enforces the
-//! invariant. See epic `phux-5ke` and (TBD) `ADR-0020`.
+//! `ratatui` is confined to this crate (`phux-client`); the pane-interior
+//! substrate lives in `phux-client-core`, which has no `ratatui`
+//! dependency, so the boundary is compiler-enforced rather than grep-checked
+//! (ADR-0020 replaced `scripts/check-ratatui-boundary.sh` with the crate
+//! split in phux-0fv). See epic `phux-5ke` and `ADR-0020`.
 
 pub mod chrome;
 pub mod overlay;
