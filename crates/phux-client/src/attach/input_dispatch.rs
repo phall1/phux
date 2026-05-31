@@ -87,7 +87,7 @@ pub(super) struct DispatchCtx<'a> {
     /// picks a peer session; the driver's `main_loop` reads it after the
     /// dispatch batch and returns `LoopExit::SwitchTo(target)` so the
     /// outer loop re-attaches. Cleared by the driver each iteration.
-    pub switch_request: &'a mut Option<String>,
+    pub switch_request: &'a mut Option<ReattachTarget>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -393,23 +393,30 @@ async fn apply_action_effects<W: super::RenderSink>(
     for frame in effects.kill_frames {
         conn.send(&frame).await?;
     }
-    // phux-eb0: a `switch-session` request. Hand the target up to the
-    // driver via `ctx.switch_request`; the driver's `main_loop` reads it
-    // after this dispatch batch and returns `LoopExit::SwitchTo(name)` so
-    // the outer loop tears down the current session and re-attaches.
+    // phux-eb0 / new-session: an in-process re-attach request. Hand the
+    // target up to the driver via `ctx.switch_request`; `main_loop` reads
+    // it after this dispatch batch and returns a `SwitchTo` exit so the
+    // outer loop tears down the current session and re-attaches.
     //
-    // Switching to the CURRENT session is a no-op (the picker already
-    // excludes it, but guard here too in case the action is reached via
-    // the command palette or a config-bound chord with an explicit
-    // `name`). A no-op bells so the user gets feedback rather than a
-    // silent re-attach to where they already are.
-    if let Some(name) = effects.switch_session {
-        if name == ctx.session_name {
-            tracing::debug!(target_session = %name, "switch-session to current session; no-op");
-            let _ = actions::write_bell(out);
-        } else {
-            tracing::info!(target_session = %name, "switch-session requested");
-            *ctx.switch_request = Some(name);
+    // Switching to the CURRENT session is a no-op (the picker excludes it,
+    // but guard here too in case `switch-session { name }` is reached via
+    // the command palette or a config-bound chord naming it); it bells so
+    // the user gets feedback. `new-session` is never a no-op — naming an
+    // existing session just attaches to it.
+    if let Some(target) = effects.reattach {
+        match target {
+            ReattachTarget::Existing(name) if name == ctx.session_name => {
+                tracing::debug!(target_session = %name, "switch-session to current session; no-op");
+                let _ = actions::write_bell(out);
+            }
+            ReattachTarget::Existing(name) => {
+                tracing::info!(target_session = %name, "switch-session requested");
+                *ctx.switch_request = Some(ReattachTarget::Existing(name));
+            }
+            ReattachTarget::Create(name) => {
+                tracing::info!(session = %name, "new-session requested");
+                *ctx.switch_request = Some(ReattachTarget::Create(name));
+            }
         }
     }
     Ok(layout_changed)
@@ -493,15 +500,29 @@ struct ActionEffects {
     /// resulting `TERMINAL_CLOSED` from the server folds the pane out
     /// of the layout in [`handle_server_frame`].
     kill_frames: Vec<FrameKind>,
-    /// phux-4li.20 / phux-eb0: a `switch-session` action requested a
-    /// re-target to the named session. [`apply_action_effects`] hands the
-    /// target up to the driver via `DispatchCtx::switch_request`; the
-    /// driver's `main_loop` returns `LoopExit::SwitchTo(name)` and the
-    /// outer loop detaches from the current session and re-attaches to the
-    /// named one on the same connection (in-process re-attach). Carries
-    /// the target session name; a request matching the current session is
-    /// a no-op (bells).
-    switch_session: Option<String>,
+    /// phux-4li.20 / phux-eb0 / new-session: an in-process re-attach the
+    /// driver should perform after this batch — either switch to an
+    /// existing session or create a new one. [`apply_action_effects`]
+    /// hands it up via `DispatchCtx::switch_request`; the driver's
+    /// `main_loop` returns a `SwitchTo` exit and the outer loop detaches
+    /// and re-attaches on the same connection. An `Existing` request
+    /// matching the current session is a no-op (bells).
+    reattach: Option<ReattachTarget>,
+}
+
+/// An in-process re-attach request raised by a dispatched action.
+///
+/// Produced by `switch-session` / `new-session` (phux-eb0) and carried up
+/// to the driver via `DispatchCtx::switch_request`; `main_loop` returns a
+/// `SwitchTo` exit and the outer loop detaches and re-attaches on the same
+/// connection without dropping the transport or leaving raw mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReattachTarget {
+    /// Switch to an existing session by name (`switch-session`).
+    Existing(String),
+    /// Create — or attach to, if it already exists — a session by name
+    /// (`new-session`).
+    Create(String),
 }
 
 /// Canonical names of every action `run_action` handles.
@@ -532,6 +553,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "window-picker",
     "session-picker",
     "switch-session",
+    "new-session",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -789,28 +811,43 @@ fn run_action(
             // same single dispatch path. The session this client is
             // attached to is excluded (switching to it is a no-op). With
             // no peer sessions it bells.
-            let items = session_picker_items(ctx.sessions, ctx.focused_session);
-            if items.is_empty() {
-                effects.bell = true;
-                return effects;
-            }
+            // Peer sessions (current excluded) plus a trailing
+            // "+ New session" row, so a session can always be created from
+            // here. Each session row commits `switch-session { name }`; the
+            // new-session row opens the name prompt. Always opens — even
+            // with no peers you can still create one.
+            let mut items = session_picker_items(ctx.sessions, ctx.focused_session);
+            items.push(new_session_item());
             ctx.overlays
                 .push(Box::new(SelectList::new("sessions", items, ctx.theme)));
         }
         "switch-session" => {
             // phux-4li.20 / phux-eb0: re-target this client to another
-            // session. The effect carries the target name up to
+            // session. The effect carries the target up to
             // `apply_action_effects`, which routes it to the driver's
             // outer re-attach loop (in-process re-attach on the same
             // connection). A bad/absent `name` arg bells.
             if let Some(name) = name_arg(resolved) {
-                effects.switch_session = Some(name);
+                effects.reattach = Some(ReattachTarget::Existing(name));
             } else {
                 tracing::warn!(
                     args = ?resolved.args,
                     "switch-session missing/bad `name` arg",
                 );
                 effects.bell = true;
+            }
+        }
+        "new-session" => {
+            // Create a fresh session (or attach to one already named) and
+            // switch this client to it in-process. An explicit `name`
+            // creates it directly; with no name we open a prompt to type
+            // one, which commits `new-session { name }` back through this
+            // same path. Either way the re-attach uses CreateIfMissing.
+            match name_arg(resolved) {
+                Some(name) => effects.reattach = Some(ReattachTarget::Create(name)),
+                None => ctx
+                    .overlays
+                    .push(Box::new(PromptOverlay::new_session(ctx.theme))),
             }
         }
         "detach" => {
@@ -961,6 +998,21 @@ fn session_picker_items(
             .secondary(secondary)
         })
         .collect()
+}
+
+/// The trailing "+ New session" row for the session picker. Committing it
+/// runs the bare `new-session` action, which opens the name prompt — so a
+/// new session is always reachable from `<leader> a`, even when this is
+/// the only session.
+fn new_session_item() -> SelectItem {
+    SelectItem::new(
+        "+ New session…".to_owned(),
+        phux_config::keybind::ResolvedAction {
+            action: "new-session".to_owned(),
+            args: std::collections::BTreeMap::new(),
+        },
+    )
+    .secondary("create".to_owned())
 }
 
 /// Apply a window-switch `mutate` to the workspace and, **only if the
@@ -1497,8 +1549,10 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_with_only_current_session_bells() {
-        // The client's own session is the only one — nothing to switch to.
+    fn session_picker_with_only_current_session_still_opens_for_new() {
+        // Even when the client's own session is the only one, the picker
+        // opens so the user can create a new session via the "+ New
+        // session" row — it no longer bells into a dead end.
         let mut workspace = Workspace::single(tid(1));
         let sessions = [sinfo(1, "work")];
         let (effects, overlays) = run_capturing_with_sessions(
@@ -1507,32 +1561,33 @@ mod tests {
             &sessions,
             Some(phux_protocol::ids::SessionId::new(1)),
         );
-        assert!(!overlays.is_active(), "no peers ⇒ no overlay");
-        assert!(effects.bell);
+        assert!(overlays.is_active(), "picker opens to offer + New session");
+        assert!(!effects.bell);
     }
 
     #[test]
-    fn session_picker_with_no_sessions_bells() {
-        // Before the first ATTACHED snapshot lands the cache is empty.
+    fn session_picker_with_no_sessions_still_opens_for_new() {
+        // Before the first ATTACHED snapshot lands the cache is empty; the
+        // picker still opens with the "+ New session" row.
         let mut workspace = Workspace::single(tid(1));
         let (effects, overlays) =
             run_capturing_with_sessions(&bare_action("session-picker"), &mut workspace, &[], None);
-        assert!(!overlays.is_active());
-        assert!(effects.bell);
+        assert!(overlays.is_active());
+        assert!(!effects.bell);
     }
 
     #[test]
     fn session_picker_commit_routes_switch_session_through_run_action() {
         // The architectural invariant: a picker row commits a
         // switch-session ResolvedAction that, fed back through run_action,
-        // yields the switch_session effect keyed by the chosen name.
+        // yields the reattach effect keyed by the chosen name.
         let mut workspace = Workspace::single(tid(1));
         let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
         let items = session_picker_items(&sessions, Some(phux_protocol::ids::SessionId::new(1)));
         let effects = run(&items[0].action, &mut workspace);
         assert_eq!(
-            effects.switch_session.as_deref(),
-            Some("scratch"),
+            effects.reattach,
+            Some(ReattachTarget::Existing("scratch".to_owned())),
             "committing the picker row requests a switch to that session"
         );
     }
@@ -1541,8 +1596,39 @@ mod tests {
     fn switch_session_missing_name_bells() {
         let mut workspace = Workspace::single(tid(1));
         let effects = run(&bare_action("switch-session"), &mut workspace);
-        assert!(effects.switch_session.is_none());
+        assert!(effects.reattach.is_none());
         assert!(effects.bell, "a switch-session with no name arg bells");
+    }
+
+    #[test]
+    fn new_session_with_name_requests_create_reattach() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut args = BTreeMap::new();
+        args.insert("name".to_owned(), toml::Value::String("scratch".to_owned()));
+        let action = phux_config::keybind::ResolvedAction {
+            action: "new-session".to_owned(),
+            args,
+        };
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Create("scratch".to_owned())),
+            "new-session with a name requests a create-and-switch"
+        );
+    }
+
+    #[test]
+    fn new_session_without_name_opens_prompt() {
+        let mut workspace = Workspace::single(tid(1));
+        let (effects, overlays) = run_capturing(&bare_action("new-session"), &mut workspace);
+        assert!(
+            overlays.is_active(),
+            "new-session with no name opens the name prompt"
+        );
+        assert!(
+            effects.reattach.is_none(),
+            "the prompt commit drives the re-attach later"
+        );
     }
 
     #[test]

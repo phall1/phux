@@ -40,7 +40,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use super::actions::{PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::input::StdinParser;
-use super::input_dispatch::{DispatchCtx, dispatch_input_events, encode_layout_or_log};
+use super::input_dispatch::{
+    DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
+};
 use super::paint::{paint_bar_after_pane, paint_full_frame, pane_viewport};
 use super::render::{TerminalRenderer, write_reset};
 use super::server_frame::handle_server_frame;
@@ -293,7 +295,7 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
                 // `exit_after_detach`'s doc comment).
                 exit_after_detach();
             }
-            LoopExit::SwitchTo(name) => {
+            LoopExit::SwitchTo(target) => {
                 // Tear down the current session on the server so it frees
                 // our per-consumer reference grid + reaps the detached
                 // consumer (the just-landed per-consumer detach reaping —
@@ -305,8 +307,18 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
                 // Re-run the handshake against the new target on the same
                 // connection. No reconnect: one server owns all the
                 // sessions, and the transport is bound to the server, not
-                // to any single session.
-                send_attach(&mut conn, AttachTarget::ByName(name)).await?;
+                // to any single session. An existing session re-attaches
+                // by name; a new-session request creates it (or attaches if
+                // the name is already taken) via CreateIfMissing.
+                let attach_target = match target {
+                    ReattachTarget::Existing(name) => AttachTarget::ByName(name),
+                    ReattachTarget::Create(name) => AttachTarget::CreateIfMissing {
+                        name,
+                        command: None,
+                        cwd: None,
+                    },
+                };
+                send_attach(&mut conn, attach_target).await?;
                 attached = wait_for_attached(&mut conn).await?;
                 // Re-enter `main_loop`, which rebuilds ALL session-scoped
                 // state fresh (pane mirrors, workspace, predict, overlays,
@@ -430,17 +442,19 @@ async fn wait_for_attached(conn: &mut Connection) -> Result<FrameKind, AttachErr
 ///   loop already ran `exit_after_detach` on that path (which never
 ///   returns); the outer loop treats a returned `Detached` as a clean
 ///   exit too.
-/// * `SwitchTo(name)` — the user committed `switch-session { name }` via
-///   the `<leader> a` picker. The outer loop detaches from the current
-///   session and re-runs the handshake against `ByName(name)`, then
-///   re-enters `main_loop` with the new ATTACHED frame and freshly-rebuilt
-///   session state.
+/// * `SwitchTo(target)` — the user committed `switch-session { name }`
+///   (via the `<leader> a` picker / palette) or `new-session`. The outer
+///   loop detaches from the current session and re-runs the handshake
+///   against the target (`ByName` for an existing session, `CreateIfMissing`
+///   for a new one), then re-enters `main_loop` with the new ATTACHED frame
+///   and freshly-rebuilt session state.
 #[derive(Debug)]
 enum LoopExit {
     /// The session ended (detach / server DETACHED). The process exits.
     Detached,
-    /// Re-attach to the named session on the same connection.
-    SwitchTo(String),
+    /// Re-attach on the same connection — to an existing session or a
+    /// newly-created one.
+    SwitchTo(ReattachTarget),
 }
 
 /// Drive the `tokio::select!` loop until detach or a session switch.
@@ -573,7 +587,7 @@ async fn main_loop<W: super::RenderSink>(
     // `switch-session`. Checked after each input-dispatch batch; a value
     // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
     // loop re-attaches to the named session on the same connection.
-    let mut switch_request: Option<String> = None;
+    let mut switch_request: Option<ReattachTarget> = None;
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place.

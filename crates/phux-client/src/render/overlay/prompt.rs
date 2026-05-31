@@ -66,6 +66,14 @@ impl PromptOverlay {
         )
     }
 
+    /// The `new-session` prompt: type a name for a brand-new session.
+    /// Committing it re-attaches this client to the freshly-created
+    /// session (via the same in-process re-attach path as switch-session).
+    #[must_use]
+    pub fn new_session(theme: &Theme) -> Self {
+        Self::new("new session", "new-session", "name", "", theme)
+    }
+
     fn committed_action(&self) -> ResolvedAction {
         let mut args = BTreeMap::new();
         args.insert(

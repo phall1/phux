@@ -117,6 +117,12 @@ prefix = "C-a"
 # session-scoped state, and repaints — no reconnect, no flicker.
 "a" = "session-picker"
 
+# New session: C (Shift-c) creates a fresh session and switches this
+# client to it in-process. With no name it opens a prompt; the session
+# picker (a) also offers a "+ New session" row. (Lowercase c is
+# new-window; capital is the session-level peer.)
+"C" = "new-session"
+
 # Detach this client from the session.
 "d" = "detach"
 

@@ -142,6 +142,11 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "new-session",
+        description: "Create a new session and switch to it",
+        args: &[],
+    },
+    ActionSpec {
         name: "rename-window",
         description: "Rename the active window (interactive prompt)",
         args: &[],
