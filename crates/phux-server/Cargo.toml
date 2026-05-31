@@ -35,6 +35,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# Non-blocking file sink for the telemetry foundation: `PHUX_LOG` tees
+# server logs to a file, and the client (which shares this module) logs
+# to a file only. See the workspace dep for the full justification.
+tracing-appender.workspace = true
 tokio.workspace = true
 # tokio-util gives us `CancellationToken` (hierarchical cancellation,
 # replacing the per-actor / per-loop `oneshot::Sender<()>` shutdown

@@ -447,6 +447,21 @@ fn print_banner() {
     );
 }
 
+/// Whether this invocation will enter the interactive TUI (raw mode +
+/// alt screen) and therefore MUST keep logs off stderr.
+///
+/// The alt-screen-entering paths are: `phux attach`, naked `phux` (attach
+/// fallback), and `phux new` *without* `--json` (which attaches after
+/// creating). `phux new --json` creates without attaching, so it stays on
+/// the stderr path like every other one-shot verb.
+fn is_interactive_client(cli: &Cli) -> bool {
+    match &cli.command {
+        Some(Command::Attach { .. }) | None => true,
+        Some(Command::New { json, .. }) => !json,
+        _ => false,
+    }
+}
+
 fn main() -> ExitCode {
     // Heap profiler must outlive everything else in `main` — its Drop
     // is what flushes `dhat-heap.json`. Bind to `_dhat` (NOT `_`, which
@@ -454,16 +469,45 @@ fn main() -> ExitCode {
     #[cfg(feature = "dhat-heap")]
     let _dhat = dhat::Profiler::new_heap();
 
+    let cli = Cli::parse();
+
     // Install the process-global tracing subscriber once, before any
     // runtime spins up. Without this, every `tracing::{info,debug,...}`
-    // call site is a no-op. An init failure is non-fatal: we want the
-    // binary to keep working even if a future test harness or library
-    // has already installed its own subscriber.
-    if let Err(err) = phux_server::telemetry::init() {
-        eprintln!("phux: tracing init failed (continuing): {err}");
-    }
+    // call site is a no-op.
+    //
+    // The choice of sink depends on whether this invocation will enter
+    // the TUI (raw mode + alt screen). An interactive client owns the
+    // alt screen, so it MUST log to a file only — a stray stderr line
+    // corrupts the display. Every other command (foreground server,
+    // one-shot control verbs, `--json` paths) keeps the historical
+    // stderr layer (plus an optional `PHUX_LOG` file tee).
+    //
+    // The returned `WorkerGuard` (when a file sink is involved) keeps
+    // the non-blocking writer's background thread alive; bind it for the
+    // lifetime of `main` so logs flush on exit. An init failure is
+    // non-fatal: the binary should keep working even if a future test
+    // harness or library already installed its own subscriber.
+    let _log_guard: Option<phux_server::telemetry::WorkerGuard> = if is_interactive_client(&cli) {
+        match phux_server::telemetry::init_client() {
+            Ok(guard) => Some(guard),
+            Err(err) => {
+                // The client never logs to stderr, but a one-line init
+                // failure on the cooked terminal (before alt screen) is
+                // acceptable and beats a silent no-op subscriber.
+                eprintln!("phux: client tracing init failed (continuing): {err}");
+                None
+            }
+        }
+    } else {
+        match phux_server::telemetry::init() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("phux: tracing init failed (continuing): {err}");
+                None
+            }
+        }
+    };
 
-    let cli = Cli::parse();
     match cli.command {
         Some(Command::Attach { session, socket }) => run_attach(session, socket),
         Some(Command::Server {

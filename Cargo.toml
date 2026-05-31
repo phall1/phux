@@ -48,7 +48,17 @@ phux-mcp = { path = "crates/phux-mcp", version = "0.0.1" }
 # External.
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# Non-blocking, file-backed `tracing` sink. The telemetry foundation needs
+# to write logs to a file off the hot path — for the client (which must
+# never touch stderr while the alt screen is up) and for a daemonized
+# server whose crash must be durable on disk. `tracing-appender` is the
+# canonical companion to `tracing-subscriber` (same maintainers, same
+# repo), pure-safe Rust, and its `non_blocking` writer offloads file I/O
+# to a background thread so a slow disk never stalls a render/PTY-pump
+# thread. No alternative in the ecosystem pairs a non-blocking writer with
+# the `MakeWriter` trait `tracing-subscriber` expects.
+tracing-appender = "0.2"
 clap = { version = "4", features = ["derive"] }
 bytes = "1"
 slotmap = "1"

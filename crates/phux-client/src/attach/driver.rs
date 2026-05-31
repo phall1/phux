@@ -1510,23 +1510,50 @@ fn exit_after_detach() -> ! {
     std::process::exit(0);
 }
 
-/// Install a global panic hook that runs [`write_terminal_reset`]
-/// before the previous (default) hook prints the panic. Idempotent —
-/// repeated calls after the first are no-ops.
+/// Install a global panic hook that first records the panic to the
+/// `tracing` file sink, then runs [`write_terminal_reset`], then chains
+/// the previous (default) hook. Idempotent — repeated calls after the
+/// first are no-ops.
 ///
-/// Without this, a panic deep inside the renderer or libghostty would
-/// unwind through `main_loop`, but the default hook would print the
-/// backtrace into the alt screen — the user sees nothing because we're
-/// about to leave the alt screen, and then on cooked-terminal restore
-/// the panic message is already gone. The hook flips the cleanup
-/// BEFORE the panic message lands.
+/// Ordering matters and is deliberate:
+///
+/// 1. **Log first.** The client's `tracing` subscriber writes to a file
+///    (never stderr — the alt screen is up), so we emit the panic message
+///    plus a captured [`std::backtrace::Backtrace`] there BEFORE touching
+///    the terminal. This is the durable record: even though the next step
+///    restores the cooked terminal and the default hook's stderr backtrace
+///    lands on a screen the user may not be watching, the crash is fully
+///    recoverable from the log file.
+/// 2. **Restore the terminal.** Without this, a panic deep inside the
+///    renderer or libghostty would unwind through `main_loop` and the
+///    default hook would print into the alt screen we're about to leave —
+///    so the user would see nothing.
+/// 3. **Chain the previous hook** (the default backtrace printer).
 fn install_panic_hook_once() {
     if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
         return;
     }
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // (1) Durable capture to the file sink before the terminal is
+        // touched. `Backtrace::capture` honors `RUST_BACKTRACE`: it is
+        // `Disabled` (rendered as a hint) unless the env var is set, so
+        // there's no symbolication cost in the common case while a full
+        // trace is available when the operator asks for one.
+        let backtrace = std::backtrace::Backtrace::capture();
+        let location = info
+            .location()
+            .map_or_else(|| "<unknown>".to_owned(), ToString::to_string);
+        tracing::error!(
+            panic.location = %location,
+            panic.message = %info,
+            panic.backtrace = %backtrace,
+            "client panic",
+        );
+        // (2) Restore the outer terminal so the chained hook's output
+        // doesn't vanish into the dead alt screen.
         terminal_reset_on_signal();
+        // (3) Default hook: prints the panic + backtrace to stderr.
         previous(info);
     }));
 }

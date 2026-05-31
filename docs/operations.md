@@ -41,13 +41,49 @@ a `message: str`. The mapping from internal Rust errors to wire
 
 ## Logging and observability
 
-`tracing` is the structured logging substrate. Server logs go to
-`~/.local/state/phux/log/server.log`, rotated daily via
-`tracing-appender`'s file rolling writer. Filter precedence:
+`tracing` is the structured logging substrate, bootstrapped in
+`phux_server::telemetry`. Two entry points share one layer builder:
 
-1. Config file (`log_filter = "phux=info,phux_server=debug"`).
-2. `PHUX_LOG` environment variable (overrides config).
-3. Default: `phux=info`.
+- **Server / foreground** (`phux server`, one-shot control verbs, any
+  `--json` path) — `telemetry::init()`. Always logs human-or-JSON text to
+  **stderr**; the binary's stdout is reserved for protocol/PTY traffic.
+- **Client / TUI** (`phux attach`, naked `phux`, `phux new` without
+  `--json`) — `telemetry::init_client()`. Logs to a **file only**, never
+  stdout/stderr: the attach loop owns the alt screen, so a stray log line
+  would corrupt the display.
+
+Both fmt layers emit span-close timing (`FmtSpan::CLOSE`), so any
+`#[instrument]` span reports its elapsed duration when it closes.
+
+### Environment knobs
+
+| Variable | Effect |
+|---|---|
+| `RUST_LOG` | Filter directives. Default `phux=info,warn`. |
+| `PHUX_LOG=<path>` | Write logs to `<path>` via a non-blocking file writer. The **server** tees to this file *in addition to* stderr; the **client** writes here *instead of* its per-pid default. The parent directory is created if missing. |
+| `PHUX_LOG_FORMAT=text\|json` | `text` (default) is the human single-line layer; `json` emits one JSON object per line for `jq`/`grep`. Applies to both stderr and file sinks. |
+
+The **client default log path** (when `PHUX_LOG` is unset) is
+`$XDG_STATE_HOME/phux/client-<pid>.log` (falling back to
+`$HOME/.local/state/phux/` when `XDG_STATE_HOME` is unset). The pid scope
+keeps concurrent clients from interleaving and makes "which log is this
+crash in?" answerable from the client's own pid. The level defaults to
+`phux=info,warn`, so crashes and warnings are always captured without
+flooding the file.
+
+The non-blocking file writer offloads I/O to a background thread; its
+`WorkerGuard` is held for the lifetime of `main` and flushes on exit.
+
+### Crash capture
+
+Panics are durable on both sides. The **client** panic hook logs the
+panic message plus a captured `std::backtrace::Backtrace` to its file
+sink *before* it restores the terminal — so a crash survives even though
+the default hook's stderr backtrace would otherwise vanish into the dead
+alt screen. The **server** panic hook (installed by `telemetry::init()`)
+logs task/actor panics with their backtrace through `tracing`, so a
+daemonized server's crash lands in the log file. Both honor
+`RUST_BACKTRACE` for the trace's verbosity.
 
 Spans by convention:
 
