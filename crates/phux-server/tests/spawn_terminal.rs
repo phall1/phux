@@ -290,6 +290,114 @@ fn spawn_terminal_in_default_collection_round_trips_input() {
     });
 }
 
+/// phux-ign Part 2: a `SPAWN_TERMINAL` whose wire `env` carries a `TERM`
+/// entry MUST have that value reach the spawned PTY, overriding the
+/// server's `defaults.term` baseline. The wire frame is authoritative for
+/// the Terminal it creates.
+///
+/// The spawned command prints `$TERM` and blocks; the value comes back as
+/// TERMINAL_OUTPUT. The override is a sentinel string distinct from any
+/// real terminfo entry so the assertion can't pass by accident.
+#[test]
+fn spawn_terminal_env_term_overrides_default() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 7,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    // `read _` (a builtin) blocks so the pane stays alive
+                    // after printing; `exec read _` would die immediately.
+                    "printf 'TERMIS=%s\\n' \"$TERM\"; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: Some(vec![("TERM".to_owned(), "phux-spawn-override".to_owned())]),
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 7).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = b"TERMIS=phux-spawn-override";
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "spawn-supplied TERM must override the default; got output: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-ign Part 2: a `SPAWN_TERMINAL` whose wire `env` does NOT carry
+/// `TERM` (here `env = None`) falls back to the server's `defaults.term`.
+/// The test server runs with the schema default, so the spawned pane sees
+/// `TERM=xterm-256color` (the safe baseline, phux-7vx). This is the
+/// load-bearing assertion that the config default actually flows to the
+/// PTY env — a regression here would silently change the advertised
+/// terminfo for every spawned pane.
+#[test]
+fn spawn_terminal_default_term_is_xterm_256color() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 8,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'TERMIS=%s\\n' \"$TERM\"; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 8).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = b"TERMIS=xterm-256color";
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "spawn with env=None must inherit defaults.term (xterm-256color); \
+             got output: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
 #[test]
 fn spawn_terminal_unknown_collection_returns_collection_not_found() {
     run_local(async {

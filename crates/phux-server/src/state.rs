@@ -285,6 +285,17 @@ pub struct ServerState {
     /// ([`phux_config::CwdInheritance::InheritFocused`]) so tests that
     /// never call the setter exercise the tmux-default behavior.
     cwd_inheritance: phux_config::CwdInheritance,
+    /// `TERM` advertised to the inner program of every server-spawned pane
+    /// (`defaults.term`, phux-ign). Mirrors
+    /// [`crate::runtime::ServerConfig::term`] so the attach-time creation
+    /// path and `SPAWN_TERMINAL` apply it as the PTY's `TERM` baseline
+    /// without an extra channel to the runtime. A per-spawn
+    /// `SPAWN_TERMINAL.env` entry for `TERM` overrides it. Set by the
+    /// runtime via [`Self::set_term`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default (`xterm-256color`) so
+    /// tests that never call the setter get the safe baseline.
+    term: String,
     /// Frozen session-creation directory per session (phux-nyx,
     /// `defaults.cwd-inheritance = session-root`). Captured the first time
     /// a `session-root` spawn resolves a session's seed-pane CWD and reused
@@ -517,6 +528,7 @@ impl ServerState {
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
+            term: phux_config::DefaultsCfg::default().term,
             session_root: HashMap::new(),
             window_last_cwd: HashMap::new(),
             has_served_client: false,
@@ -585,6 +597,20 @@ impl ServerState {
     #[must_use]
     pub const fn cwd_inheritance(&self) -> phux_config::CwdInheritance {
         self.cwd_inheritance
+    }
+
+    /// Set the default `TERM` (`defaults.term`) advertised to
+    /// server-spawned panes. Called once at server startup to mirror
+    /// [`crate::runtime::ServerConfig::term`] into state.
+    pub fn set_term(&mut self, term: String) {
+        self.term = term;
+    }
+
+    /// Read the default `TERM` set by [`Self::set_term`]. A per-spawn
+    /// `SPAWN_TERMINAL.env` entry for `TERM` overrides this baseline.
+    #[must_use]
+    pub fn term(&self) -> &str {
+        &self.term
     }
 
     /// Read the frozen session-creation directory recorded for `session`

@@ -948,8 +948,34 @@ fn exit_status_to_wire(status: &portable_pty::ExitStatus) -> Option<i32> {
 pub fn default_shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
     let mut cmd = CommandBuilder::new(shell);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", DEFAULT_TERM);
     cmd
+}
+
+/// The baseline `TERM` baked into [`default_shell_command`] and
+/// [`shell_command`].
+///
+/// Matches `phux_config`'s `defaults.term` schema default. The runtime
+/// overrides this per-server with the configured `defaults.term` via
+/// [`apply_term`]; this constant is the value used when a `CommandBuilder`
+/// is built without server config in scope (tests,
+/// [`TerminalActor::new_with_default_shell`]).
+///
+/// `xterm-256color` is the universally-recognised safe baseline (phux-7vx
+/// / phux-ign): 256 colours and the standard xterm key vocabulary, no
+/// kitty-keyboard advertisement — so ncurses TUIs like htop keep working.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Override the `TERM` env on `cmd` with `term`, the server's configured
+/// `defaults.term`.
+///
+/// `CommandBuilder::env` overwrites, so this cleanly replaces the baseline
+/// set by [`default_shell_command`] / [`shell_command`]. Callers in the
+/// runtime apply this after building the command from the wire/config so a
+/// single server-wide `TERM` default flows to the seed session,
+/// attach-time creation, and `SPAWN_TERMINAL`.
+pub fn apply_term(cmd: &mut CommandBuilder, term: &str) {
+    cmd.env("TERM", term);
 }
 
 /// Build a [`CommandBuilder`] that runs a user-supplied command line as a
@@ -966,7 +992,7 @@ pub fn shell_command(command: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(shell);
     cmd.arg("-c");
     cmd.arg(command);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", DEFAULT_TERM);
     cmd
 }
 

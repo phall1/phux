@@ -69,6 +69,24 @@ pub struct DefaultsCfg {
     #[serde(default)]
     pub shell: Option<String>,
 
+    /// `TERM` advertised to the inner program of every server-spawned pane
+    /// (the seed session, attach-time `CreateIfMissing`, and a
+    /// `SPAWN_TERMINAL` whose wire `env` does not itself carry `TERM`).
+    ///
+    /// Default: `xterm-256color`. The baseline is the
+    /// universally-recognised safe value — 256 colours and the standard
+    /// xterm key vocabulary, no kitty-keyboard advertisement (phux-7vx /
+    /// phux-ign). Set explicitly to e.g. `"ghostty"` to opt into ghostty's
+    /// extended terminfo (sixel, kitty-graphics advertisement, the ghostty
+    /// SGR extensions) once the host's apps are known to round-trip the
+    /// kitty keyboard protocol.
+    ///
+    /// A per-spawn `SPAWN_TERMINAL.env` entry for `TERM` always wins over
+    /// this default — the wire frame is authoritative for the Terminal it
+    /// creates; this is only the fallback when the frame is silent.
+    #[serde(default = "default_term")]
+    pub term: String,
+
     /// Lines of scrollback retained per pane.
     ///
     /// The TOML key is `history-limit` — the tmux-shaped name kept since
@@ -129,6 +147,7 @@ impl Default for DefaultsCfg {
     fn default() -> Self {
         Self {
             shell: None,
+            term: default_term(),
             history_limit: default_history_limit(),
             refresh_rate: default_refresh_rate(),
             log_filter: None,
@@ -140,6 +159,11 @@ impl Default for DefaultsCfg {
     }
 }
 
+/// Default `TERM` for server-spawned panes: the safe xterm baseline
+/// (phux-7vx / phux-ign). See [`DefaultsCfg::term`].
+fn default_term() -> String {
+    "xterm-256color".to_owned()
+}
 const fn default_history_limit() -> u32 {
     50_000
 }

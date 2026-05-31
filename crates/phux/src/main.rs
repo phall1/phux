@@ -1850,6 +1850,14 @@ fn run_server(
         |cfg| cfg.defaults.cwd_inheritance,
     );
 
+    // `defaults.term` is the `TERM` advertised to every server-spawned
+    // pane (a per-spawn `SPAWN_TERMINAL.env` entry for `TERM` overrides
+    // it). Same fallback-on-error policy as the other config reads here.
+    let term = config_loader::load().map_or_else(
+        |_| phux_config::DefaultsCfg::default().term,
+        |cfg| cfg.defaults.term,
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
@@ -1857,6 +1865,7 @@ fn run_server(
         seed_command,
         history_limit,
         cwd_inheritance,
+        term,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

@@ -19,6 +19,14 @@
 
 [defaults]
 # shell = unset → honor $SHELL (fallback /bin/sh).
+# TERM advertised to the inner program of every server-spawned pane. The
+# xterm-256color baseline is the safe universal value (phux-7vx): it gives
+# 256 colours and the standard xterm keys with no kitty-keyboard
+# advertisement, so ncurses TUIs like htop keep working. A per-spawn
+# SPAWN_TERMINAL env override for TERM always wins over this. Set to
+# "ghostty" to opt into ghostty's extended terminfo once your apps are
+# known to round-trip the kitty keyboard protocol.
+term = "xterm-256color"
 history-limit = 50000
 refresh-rate = 60
 mouse = true

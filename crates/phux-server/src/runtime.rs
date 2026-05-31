@@ -109,6 +109,14 @@ pub struct ServerConfig {
     /// `phux_config`'s `defaults.cwd-inheritance`;
     /// [`Self::with_default_socket`] uses the schema default.
     pub cwd_inheritance: phux_config::CwdInheritance,
+    /// `TERM` advertised to the inner program of every server-spawned pane
+    /// (`defaults.term`, phux-ign). Threaded into shared state so the seed
+    /// session, attach-time `CreateIfMissing`, and `SPAWN_TERMINAL` apply
+    /// it as the PTY's `TERM` baseline. A per-spawn `SPAWN_TERMINAL.env`
+    /// entry for `TERM` overrides it. The binary populates this from
+    /// `phux_config`'s `defaults.term`; [`Self::with_default_socket`] uses
+    /// the schema default (`xterm-256color`).
+    pub term: String,
 }
 
 impl ServerConfig {
@@ -123,6 +131,7 @@ impl ServerConfig {
             seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
+            term: phux_config::DefaultsCfg::default().term,
         }
     }
 }
@@ -270,6 +279,11 @@ impl ServerRuntime {
         // from the configured policy.
         let cwd_inheritance = self.cfg.cwd_inheritance;
         state.with_mut(|s| s.set_cwd_inheritance(cwd_inheritance));
+        // Mirror `defaults.term` into shared state so the seed session,
+        // attach-time `CreateIfMissing`, and `SPAWN_TERMINAL` apply the
+        // configured `TERM` baseline.
+        let term = self.cfg.term.clone();
+        state.with_mut(|s| s.set_term(term));
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -300,8 +314,13 @@ impl ServerRuntime {
                 // `Send` futures — exactly what `TerminalActor` is not.
                 if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
-                        let cmd = seed_command
+                        let mut cmd = seed_command
                             .unwrap_or_else(crate::terminal_actor::default_shell_command);
+                        // Apply the configured `defaults.term` over the
+                        // builder's baseline so the seed pane advertises the
+                        // server-wide `TERM` (phux-ign).
+                        let term = state.with(|s| s.term().to_owned());
+                        crate::terminal_actor::apply_term(&mut cmd, &term);
                         seed_session_with_pty(&state, name, cmd, history_limit, &root_token)
                     } else {
                         seed_session_with_actor(&state, name, history_limit, &root_token)
@@ -1329,11 +1348,12 @@ async fn resolve_create_if_missing(
     // Slow path: create the session + seed pane. Snapshot the server's
     // configured PTY mode and (optional) override command before
     // releasing the state borrow.
-    let (with_pty, override_cmd, history_limit) = state.with(|s| {
+    let (with_pty, override_cmd, history_limit, term) = state.with(|s| {
         (
             s.attach_create_seeds_pty(),
             s.attach_create_seed_command(),
             s.history_limit(),
+            s.term().to_owned(),
         )
     });
 
@@ -1348,7 +1368,7 @@ async fn resolve_create_if_missing(
         //      use to spawn (e.g.) `phux new -- vim foo.txt`.
         //   3. `default_shell_command()` (the user's `$SHELL`, or
         //      `/bin/sh`) — same fallback the pre-seed path uses.
-        let cmd = override_cmd.unwrap_or_else(|| match command {
+        let mut cmd = override_cmd.unwrap_or_else(|| match command {
             Some(argv) if !argv.is_empty() => {
                 let mut head = argv.into_iter();
                 // Safe: argv is non-empty here.
@@ -1357,11 +1377,13 @@ async fn resolve_create_if_missing(
                 for arg in head {
                     builder.arg(arg);
                 }
-                builder.env("TERM", "xterm-256color");
                 builder
             }
             _ => crate::terminal_actor::default_shell_command(),
         });
+        // Apply the server-wide `defaults.term` (phux-ign); this overrides
+        // whatever baseline the builder carried.
+        crate::terminal_actor::apply_term(&mut cmd, &term);
         seed_session_with_pty(state, &name, cmd, history_limit, root_token)
     } else {
         // No-PTY path: the wire `command` is meaningless without a
@@ -1620,15 +1642,21 @@ async fn handle_spawn_terminal(
             for arg in head {
                 b.arg(arg);
             }
-            // Match `default_shell_command`'s baseline so terminfo
-            // resolution doesn't silently degrade for explicit-command
-            // spawns. Callers that want a different TERM can override
-            // it via `env`.
-            b.env("TERM", "xterm-256color");
             b
         }
         _ => crate::terminal_actor::default_shell_command(),
     };
+    // TERM precedence (phux-ign): the server-wide `defaults.term` is the
+    // baseline for every spawn (overriding `default_shell_command`'s
+    // compiled-in default so explicit-command spawns don't silently
+    // degrade); a per-spawn `SPAWN_TERMINAL.env` entry for `TERM` then
+    // wins, because the wire `env` loop below runs last and
+    // `CommandBuilder::env` overwrites. So the order is:
+    //   1. compiled-in DEFAULT_TERM (from `default_shell_command`)
+    //   2. server `defaults.term` (here)
+    //   3. wire `env` (below) — authoritative for the Terminal it creates.
+    let term = state.with(|s| s.term().to_owned());
+    crate::terminal_actor::apply_term(&mut builder, &term);
     // Working directory precedence (phux-cs6): an explicit wire `cwd`
     // always wins; otherwise fall back to `defaults.cwd-inheritance`. The
     // inherit-focused policy reads the spawning client's focused pane's
@@ -2093,11 +2121,12 @@ fn handle_create_session(
         };
     }
 
-    let (with_pty, override_cmd, history_limit) = state.with(|s| {
+    let (with_pty, override_cmd, history_limit, term) = state.with(|s| {
         (
             s.attach_create_seeds_pty(),
             s.attach_create_seed_command(),
             s.history_limit(),
+            s.term().to_owned(),
         )
     });
 
@@ -2105,7 +2134,7 @@ fn handle_create_session(
         // Command precedence mirrors `resolve_create_if_missing`: an explicit
         // server-wide override (set by tests for a deterministic child) wins,
         // then the wire `command`, then the default shell.
-        let seed_cmd = override_cmd.unwrap_or_else(|| match command {
+        let mut seed_cmd = override_cmd.unwrap_or_else(|| match command {
             Some(argv) if !argv.is_empty() => {
                 let mut head = argv.into_iter();
                 let program = head.next().unwrap_or_default();
@@ -2113,7 +2142,6 @@ fn handle_create_session(
                 for arg in head {
                     builder.arg(arg);
                 }
-                builder.env("TERM", "xterm-256color");
                 if let Some(path) = cwd {
                     builder.cwd(path);
                 }
@@ -2127,6 +2155,8 @@ fn handle_create_session(
                 builder
             }
         });
+        // Apply the server-wide `defaults.term` (phux-ign).
+        crate::terminal_actor::apply_term(&mut seed_cmd, &term);
         seed_session_with_pty(state, name, seed_cmd, history_limit, root_token)
     } else {
         // No-PTY path: the wire `command`/`cwd` are meaningless without a

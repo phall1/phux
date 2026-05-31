@@ -236,6 +236,31 @@ fn defaults_spawn_knobs_default_when_absent() {
 }
 
 #[test]
+fn defaults_term_defaults_to_xterm_256color() {
+    // phux-ign: the `defaults.term` baseline is the safe xterm value when
+    // the key is absent. A regression here would silently change the TERM
+    // advertised to every server-spawned pane.
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert_eq!(cfg.defaults.term, "xterm-256color");
+}
+
+#[test]
+fn defaults_term_round_trips_user_value() {
+    // phux-ign: a user can opt into ghostty's extended terminfo by setting
+    // `defaults.term`. The value must survive parse + re-serialize.
+    let input = r#"
+[defaults]
+term = "ghostty"
+"#;
+    let cfg = parse_str(input, &path()).expect("term parses");
+    assert_eq!(cfg.defaults.term, "ghostty");
+
+    let reser = toml::to_string(&cfg).expect("reserialize");
+    let reparsed = parse_str(&reser, &path()).expect("reparse");
+    assert_eq!(cfg, reparsed);
+}
+
+#[test]
 fn defaults_spawn_knobs_round_trip_user_values() {
     let input = r#"
 [defaults]
