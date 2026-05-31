@@ -142,23 +142,22 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // input. Key events flow to `OverlayState::handle_key`, which
         // routes them to the *top* overlay (which may dismiss, popping
         // back to whatever is beneath it); mouse / paste / focus events
-        // are dropped so they don't reach the pane underneath. Detach
-        // remains a resolver bypass so the user can always bail out
-        // cleanly.
+        // are dropped so they don't reach the pane underneath.
+        //
+        // The keybind resolver is bypassed entirely while an overlay is
+        // up: the overlay owns every keystroke, exactly as tmux's command
+        // prompt and menus consume the prefix key as literal input rather
+        // than firing prefix bindings. This keeps a prefix chord (e.g. the
+        // leader `C-a`) from being swallowed by the resolver before it can
+        // reach the overlay — a name typed into the rename prompt that
+        // starts with the leader key must land verbatim. Detach while a
+        // modal is open is reachable by dismissing first (Esc), then
+        // chording. The resolver is reset on entry so a partial chord begun
+        // before the overlay opened cannot leak into post-dismiss input.
         if ctx.overlays.is_active() {
             if let InputEvent::Key(ref key_event) = ev {
-                if let Some(outcome) = consume_chord(ctx, key_event) {
-                    match outcome {
-                        ChordOutcome::Partial => continue,
-                        ChordOutcome::Resolved(resolved) if resolved.action == "detach" => {
-                            if !*detach_pending {
-                                conn.send(&FrameKind::Detach).await?;
-                                *detach_pending = true;
-                            }
-                            continue;
-                        }
-                        ChordOutcome::Resolved(_) => {}
-                    }
+                if let Some(resolver) = ctx.resolver.as_deref_mut() {
+                    resolver.reset();
                 }
                 let was_active = ctx.overlays.is_active();
                 // phux-ahv.1: an overlay may commit an action (e.g. the
@@ -1852,5 +1851,129 @@ mod tests {
             Some("notes"),
             "the committed prompt action yields the rename effect with the typed name",
         );
+    }
+
+    // -- overlay input routing (regression: prefix key swallowed) ---------
+
+    /// An overlay that records every key it is handed and never dismisses.
+    /// Lets a test assert exactly which keystrokes reached the overlay.
+    #[derive(Default)]
+    struct RecordingOverlay {
+        keys: std::rc::Rc<std::cell::RefCell<Vec<phux_protocol::input::key::KeyEvent>>>,
+    }
+
+    impl crate::render::overlay::RenderOverlay for RecordingOverlay {
+        fn render(&self, _area: ratatui::layout::Rect, _buf: &mut ratatui::buffer::Buffer) {}
+        fn handle_key(
+            &mut self,
+            key: &phux_protocol::input::key::KeyEvent,
+        ) -> crate::render::overlay::OverlayCommand {
+            self.keys.borrow_mut().push(key.clone());
+            crate::render::overlay::OverlayCommand::Stay
+        }
+    }
+
+    /// Regression (wave-hunt/client-tui): while an overlay is active the
+    /// keybind resolver must be bypassed, so the leader prefix key (and any
+    /// mid-chord key) reaches the overlay as literal input instead of being
+    /// swallowed by the resolver.
+    ///
+    /// Pre-fix: feeding `C-a` (the default leader) while an overlay was up
+    /// returned `ChordOutcome::Partial`, hit `continue`, and the key never
+    /// reached the overlay — *and* left the resolver mid-chord so it
+    /// intercepted the next key too. A user typing a name into the rename
+    /// prompt that contained the leader chord lost characters.
+    #[tokio::test]
+    async fn overlay_active_prefix_key_reaches_overlay_not_resolver() {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
+        let cfg = phux_config::parse_str(
+            phux_config::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        let mut resolver =
+            phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+
+        // Record what the overlay receives.
+        let keys = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(RecordingOverlay { keys: keys.clone() }));
+
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+
+        // The default leader is `C-a`. Feed it, then a printable key.
+        let leader = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::A,
+            mods: ModSet::CTRL,
+            consumed_mods: ModSet::CTRL,
+            composing: false,
+            text: None,
+            unshifted_codepoint: Some(u32::from(b'a')),
+        };
+        let letter = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::X,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: Some("x".to_owned()),
+            unshifted_codepoint: Some(u32::from(b'x')),
+        };
+
+        let mut ctx = DispatchCtx {
+            resolver: Some(&mut resolver),
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+        };
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            vec![InputEvent::Key(leader), InputEvent::Key(letter)],
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+
+        let received = keys.borrow();
+        assert_eq!(
+            received.len(),
+            2,
+            "both the leader chord and the following key must reach the overlay; got {received:?}",
+        );
+        assert_eq!(received[0].key, PhysicalKey::A);
+        assert!(received[0].mods.contains(ModSet::CTRL));
+        assert_eq!(received[1].key, PhysicalKey::X);
     }
 }

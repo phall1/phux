@@ -77,6 +77,28 @@ impl Connection {
         })
     }
 
+    /// Build a `Connection` from an already-connected [`UnixStream`].
+    ///
+    /// Test-only seam: lets the dispatcher unit tests drive a real framed
+    /// transport over an in-process `UnixStream::pair` without a server
+    /// socket on disk. Mirrors the wiring [`Self::connect`] does after the
+    /// connect resolves.
+    #[cfg(test)]
+    pub(crate) fn from_stream(stream: UnixStream) -> Self {
+        let (read, write) = stream.into_split();
+        Self {
+            reader: FrameReader {
+                inner: read,
+                framed: BytesMut::with_capacity(4096),
+                body: BytesMut::with_capacity(4096),
+            },
+            writer: FrameWriter {
+                inner: write,
+                out: BytesMut::with_capacity(4096),
+            },
+        }
+    }
+
     /// Split into independent read and write halves.
     ///
     /// Useful when the attach loop wants to `tokio::select!` on the read
