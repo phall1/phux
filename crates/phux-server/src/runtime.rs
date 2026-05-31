@@ -1040,7 +1040,7 @@ where
                 handle_subscribe_metadata(&state, client_id, scope, key);
             }
             FrameKind::SubscribeEvents { terminal } => {
-                handle_subscribe_events(&state, client_id, terminal);
+                handle_subscribe_events(&state, client_id, terminal, &out_tx);
             }
             FrameKind::SpawnTerminal {
                 request_id,
@@ -1237,9 +1237,13 @@ fn handle_subscribe_events(
     state: &SharedState,
     client_id: ClientId,
     terminal: Option<phux_protocol::ids::TerminalId>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
     debug!(?client_id, ?terminal, "SUBSCRIBE_EVENTS");
-    state.with_mut(|s| s.subscribe_events(client_id, terminal));
+    // Capture the client's mailbox in the subscription so event fanout
+    // reaches it even without an ATTACH (a pure `watch` client never
+    // attaches).
+    state.with_mut(|s| s.subscribe_events(client_id, terminal, out_tx.clone()));
 }
 
 /// Push an [`AgentEvent`] to every client subscribed to events scoped to
