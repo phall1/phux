@@ -550,6 +550,18 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &Terminal<'alloc, '_>,
         reference: &mut ConsumerReference,
     ) -> Result<SnapshotBytes, SynthesisError> {
+        // Where the per-tick, per-consumer CPU goes (row walk + cell render
+        // + diff). Debug level so the default `phux=info` filter leaves it
+        // disabled and free; when `phux=debug` is captured, the span's CLOSE
+        // duration is the headline server-side lag signal, and the recorded
+        // `changed_row_count` / `out_bytes` say how much this tick repainted.
+        // Declared `Empty` and filled before each return.
+        let synth_ref_span = tracing::debug_span!(
+            "synthesize_against_reference",
+            changed_row_count = tracing::field::Empty,
+            out_bytes = tracing::field::Empty,
+        )
+        .entered();
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
@@ -619,12 +631,15 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
 
         if reference.changed_scratch.is_empty() && !cursor_mode_changed {
             // Byte-identical to the reference: nothing to ship.
+            synth_ref_span.record("changed_row_count", 0_usize);
+            synth_ref_span.record("out_bytes", 0_usize);
             return Ok(SnapshotBytes {
                 cols,
                 rows: rows_n,
                 bytes: Vec::new(),
             });
         }
+        let changed_row_count = reference.changed_scratch.len();
 
         // Build the diff: per changed row, CUP to its start then the body.
         // No reset preamble — the mirror's untouched rows stay as they are.
@@ -664,6 +679,8 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // walk above (swap); commit the cursor/mode too.
         reference.cursor_mode = live_cm;
 
+        synth_ref_span.record("changed_row_count", changed_row_count);
+        synth_ref_span.record("out_bytes", out.len());
         Ok(SnapshotBytes {
             cols,
             rows: rows_n,

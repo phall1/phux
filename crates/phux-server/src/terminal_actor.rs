@@ -1540,6 +1540,12 @@ impl TerminalActor {
                 evt = recv_or_pending(self.pty_rx.as_mut()) => {
                     match evt {
                         Some(PtyEvent::Bytes(chunk)) => {
+                            // One event per PTY chunk drained into the canonical
+                            // Terminal. Trace level: per-chunk volume is the raw
+                            // input rate, useful for "what was the PTY doing
+                            // right before a stall" but far too chatty for the
+                            // default filter — off unless `phux=trace`.
+                            trace!(bytes = chunk.len(), "vt_write: PTY chunk -> Terminal");
                             self.terminal.borrow_mut().vt_write(&chunk);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).
@@ -1777,6 +1783,26 @@ impl TerminalActor {
     /// model (proto.md §8); the loss-tolerance re-diff property is a future
     /// lossy-transport concern (ADR-0018) and is not wired here.
     fn tick_emit(&mut self) {
+        // Per-tick observation span (hot path, so debug level: the default
+        // `phux=info` filter leaves it disabled and effectively free —
+        // `tracing` skips a disabled span without evaluating its fields).
+        // The correlation fields a trace reader greps for to localize
+        // server-side lag: how many consumers this tick must serve and
+        // whether the grid is dirty. `consumer_count` is read before the
+        // gate so the span is consistent on the gated-off / idle-skip
+        // return paths too; `emitted` + `total_out_bytes` are recorded at
+        // the end of a productive tick.
+        let tick_span = tracing::debug_span!(
+            "tick_emit",
+            consumer_count = self.consumer_states.len(),
+            dirty = self.terminal_dirty_since_tick,
+            // Filled in at the end of a productive tick via `record`; declared
+            // `Empty` so they exist on the span for later assignment.
+            emitted = tracing::field::Empty,
+            total_out_bytes = tracing::field::Empty,
+        )
+        .entered();
+
         // Emission gate (phux-0q8 / phux-3uv / phux-ia4). When ON, the
         // tick is the single server->consumer emitter and the runtime
         // suppresses its broadcast pump per tick-managed consumer (see
@@ -1819,10 +1845,25 @@ impl TerminalActor {
         // are reaped after the loop so a missed detach (phux-ddg) does not
         // leave a dead `ConsumerReference` to be re-rendered forever.
         let mut closed: Vec<ClientId> = Vec::new();
+        // Per-tick emission tally recorded onto the tick span on the way out
+        // (frames actually shipped + their total byte volume) — the headline
+        // "frame N for terminal T was Y bytes" reconstruction signal.
+        let mut emitted: u64 = 0;
+        let mut total_out_bytes: usize = 0;
         for (client_id, state) in &mut self.consumer_states {
             // This consumer is being serviced this tick; it no longer needs
             // a forced first pass.
             state.needs_initial_emit = false;
+            // Per-consumer synthesis span (debug; the per-tick CPU sink —
+            // its duration is the key server-side lag signal). Carries the
+            // consumer correlation fields; the diff size lands in
+            // `synthesize_against_reference`'s own child span.
+            let _synth_span = tracing::debug_span!(
+                "synthesize",
+                ?client_id,
+                wire_terminal_id = state.wire_terminal_id,
+            )
+            .entered();
             let bytes = match synth.synthesize_against_reference(&terminal, &mut state.reference) {
                 Ok(snap) => snap.bytes,
                 Err(err) => {
@@ -1845,6 +1886,7 @@ impl TerminalActor {
                 continue;
             }
             let seq = state.next_seq;
+            let out_bytes = bytes.len();
             // Wrapping_add for paranoia; `u64` will not realistically
             // roll over at 33 Hz, but the existing `runtime.rs` pump
             // uses the same idiom and we match it.
@@ -1864,12 +1906,30 @@ impl TerminalActor {
             // continue, and the next tick re-diffs against the same
             // unacked reference so the consumer catches up naturally.
             match state.outbound.try_send(Outbound::Frame(frame)) {
-                Ok(()) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                Ok(()) => {
+                    // A frame actually shipped to this consumer this tick.
+                    // Per-frame detail at trace (off by default); the tick
+                    // span's aggregate `emitted` / `total_out_bytes` carry
+                    // the headline at debug.
+                    emitted += 1;
+                    total_out_bytes += out_bytes;
                     trace!(
                         ?client_id,
                         wire_terminal_id = state.wire_terminal_id,
                         seq,
+                        out_bytes,
+                        "state-sync tick: TERMINAL_OUTPUT emitted",
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    // Backpressure signal: the consumer mailbox is wedged.
+                    // At debug (not trace) so a leak/stall is visible at the
+                    // recommended `phux=debug` capture level.
+                    debug!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        seq,
+                        out_bytes,
                         "state-sync tick: consumer mailbox full; dropping (will retry next tick)",
                     );
                 }
@@ -1879,7 +1939,8 @@ impl TerminalActor {
                     // detach mailbox, runtime.rs) so `unregister_consumer`
                     // never ran. Self-heal: reap the entry now so we stop
                     // re-rendering a dead consumer every tick (phux-ddg).
-                    trace!(
+                    // At debug: a closed mailbox is the consumer-leak signal.
+                    debug!(
                         ?client_id,
                         wire_terminal_id = state.wire_terminal_id,
                         seq,
@@ -1891,6 +1952,11 @@ impl TerminalActor {
         }
         drop(synth);
         drop(terminal);
+        // Record the per-tick emission tally on the tick span so a reader
+        // can reconstruct "tick served N consumers, shipped M frames /
+        // B bytes" without re-deriving it from the per-consumer trace lines.
+        tick_span.record("emitted", emitted);
+        tick_span.record("total_out_bytes", total_out_bytes);
         for client_id in closed {
             self.consumer_states.remove(&client_id);
         }

@@ -488,8 +488,17 @@ fn consume_chord(
     };
     match resolver.feed(chord) {
         phux_config::keybind::Feed::NoMatch => None,
-        phux_config::keybind::Feed::Partial => Some(ChordOutcome::Partial),
-        phux_config::keybind::Feed::Resolved(r) => Some(ChordOutcome::Resolved(r)),
+        phux_config::keybind::Feed::Partial => {
+            // Mid-chord: the user is partway through a multi-chord binding.
+            // Debug (not info) — chord progress is finer-grained than the
+            // resolved-action lifecycle event in `run_action`.
+            tracing::debug!("chord: partial match, awaiting next chord");
+            Some(ChordOutcome::Partial)
+        }
+        phux_config::keybind::Feed::Resolved(r) => {
+            tracing::debug!(action = %r.action, "chord: resolved to action");
+            Some(ChordOutcome::Resolved(r))
+        }
     }
 }
 
@@ -620,6 +629,13 @@ fn run_action(
     focused: Option<&TerminalId>,
 ) -> ActionEffects {
     let _ = focused;
+    // One event per resolved action the user triggered. Info level: a
+    // keybinding firing is a user-lifecycle event a trace reader wants under
+    // the default filter, and it is human-paced (not per-frame), so it costs
+    // nothing meaningful on the hot path. The action name is the key field;
+    // any render-triggering effect is captured by the resulting repaint /
+    // frame spans downstream.
+    tracing::info!(action = %resolved.action, "input: running resolved action");
     let mut effects = ActionEffects::default();
     match resolved.action.as_str() {
         "split-pane" => {

@@ -36,6 +36,7 @@ use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
+use tracing::Instrument as _;
 
 use super::actions::{PendingSplit, PendingWindow};
 use super::connection::Connection;
@@ -254,9 +255,17 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     // user's terminal stays in its original state and `Err(_)` carries
     // the actionable cause up to the CLI.
     let mut conn = Connection::connect(socket).await?;
-    handshake(&mut conn).await?;
-    send_attach(&mut conn, target).await?;
-    let attached = wait_for_attached(&mut conn).await?;
+    // Attach-handshake timing (info): HELLO -> ATTACH -> ATTACHED. The
+    // span's CLOSE duration is the end-to-end attach latency a trace reader
+    // wants for "why was the first paint slow." Lifecycle-rate, so info.
+    let handshake_span = tracing::info_span!("attach_handshake", ?target);
+    let attached = async {
+        handshake(&mut conn).await?;
+        send_attach(&mut conn, target).await?;
+        wait_for_attached(&mut conn).await
+    }
+    .instrument(handshake_span)
+    .await?;
 
     // STAGE 2 — server accepted the attach. Now and only now do we flip
     // the outer terminal into raw + alt screen. The guard's Drop runs
@@ -287,6 +296,8 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     loop {
         match main_loop(&mut conn, attached, predict, out).await? {
             LoopExit::Detached => {
+                // Lifecycle transition (info): the attach loop is exiting.
+                tracing::info!("attach loop: DETACHED; exiting");
                 // The session ended (user detach, server `DETACHED`, or a
                 // detach-intended disconnect). Restore the terminal and
                 // exit now rather than returning up the stack: a returning
@@ -296,6 +307,9 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
                 exit_after_detach();
             }
             LoopExit::SwitchTo(target) => {
+                // Lifecycle transition (info): switching sessions on the
+                // same connection. `?target` names the destination.
+                tracing::info!(?target, "attach loop: SWITCH_TO; re-attaching");
                 // Tear down the current session on the server so it frees
                 // our per-consumer reference grid + reaps the detached
                 // consumer (the just-landed per-consumer detach reaping —
@@ -320,6 +334,7 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
                 };
                 send_attach(&mut conn, attach_target).await?;
                 attached = wait_for_attached(&mut conn).await?;
+                tracing::info!("attach loop: re-attach handshake complete");
                 // Re-enter `main_loop`, which rebuilds ALL session-scoped
                 // state fresh (pane mirrors, workspace, predict, overlays,
                 // pending-spawn maps, layout subscription) from the new

@@ -61,6 +61,17 @@ fn main() {
 }
 
 async fn run() {
+    // Install the process-global tracing subscriber so the hot-path spans
+    // (`tick_emit`, `synthesize_against_reference`, `handle_attach`,
+    // `handle_command`) actually emit. Honors `PHUX_LOG` / `PHUX_LOG_FORMAT`
+    // / `RUST_LOG` exactly like the server binary: run this example with
+    // `PHUX_LOG=/tmp/phux-repro.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug`
+    // to capture a jq-able trace with span-close durations. The returned
+    // `WorkerGuard` must outlive the run to keep the file writer flushing;
+    // bind it for the body. `init` only errs if a subscriber is already
+    // installed — benign here, so we ignore that.
+    let _log_guard = phux_server::telemetry::init().ok().flatten();
+
     // Artifacts go under /tmp/phux-repro-<ts>/.
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

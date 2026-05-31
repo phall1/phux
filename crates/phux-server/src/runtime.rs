@@ -932,7 +932,10 @@ where
                 .await;
             }
             FrameKind::Detach => {
-                debug!(?client_id, "DETACH");
+                // Lifecycle event at info so it shows under the default
+                // capture filter — DETACH is a per-client lifecycle edge a
+                // trace reader wants to see without enabling debug.
+                info!(?client_id, "DETACH");
                 // SPEC §7.3: server responds with DETACHED, then closes.
                 // For byc.8 we emit DETACHED and let the read loop
                 // continue — actual transport close lands when the
@@ -1984,6 +1987,35 @@ fn prepare_attach(
 /// `kill` verbs. Per SPEC §5 a command is asynchronous: the result MAY
 /// follow other frames the command triggered (e.g. `KILL_TERMINAL`'s
 /// `TERMINAL_CLOSED`).
+/// Stable, payload-free label for a [`Command`] variant — the `kind` field
+/// on the `handle_command` lifecycle span. A hand-written map (rather than
+/// `?command`) keeps the trace line small and free of user payloads
+/// (session names, env, input bytes) while still localizing which control
+/// command ran. `Command` is `#[non_exhaustive]`, hence the wildcard; a new
+/// variant logs as `"other"` until an arm is added here.
+const fn command_kind(command: &Command) -> &'static str {
+    match command {
+        Command::KillTerminal { .. } => "kill_terminal",
+        Command::GetState { .. } => "get_state",
+        Command::GetScreen { .. } => "get_screen",
+        Command::RouteInput { .. } => "route_input",
+        Command::CreateSession { .. } => "create_session",
+        Command::KillCollection { .. } => "kill_collection",
+        Command::RenameSession { .. } => "rename_session",
+        _ => "other",
+    }
+}
+
+// Lifecycle span (info): one per L2 COMMAND. `kind` is a payload-free
+// label so the trace localizes which control command ran without leaking
+// session names / env / input bytes; the CLOSE duration times the command
+// (some, e.g. GET_SCREEN, round-trip to an actor).
+#[tracing::instrument(
+    level = "info",
+    name = "handle_command",
+    skip_all,
+    fields(?client_id, request_id, kind = command_kind(&command)),
+)]
 async fn handle_command(
     state: &SharedState,
     client_id: ClientId,
@@ -2482,6 +2514,16 @@ const fn empty_session_snapshot() -> phux_protocol::wire::info::SessionSnapshot 
 #[allow(
     clippy::too_many_arguments,
     reason = "the ATTACH branch in handle_client pre-decomposes the FrameKind::Attach payload (target/viewport/request_scrollback/scrollback_limit_lines) and threads the negotiated ColorSupport alongside the SharedState + client_id + out_tx; rebundling into a struct would just move the arity from the call site to a builder"
+)]
+// Lifecycle span (info): one ATTACH per client. Its CLOSE duration is the
+// attach-handshake timing (snapshot fan-out is the slow part); the fields
+// correlate it to a client + target + requested dims. `skip_all` keeps the
+// large arg list (state handle, channels, token) out of the span.
+#[tracing::instrument(
+    level = "info",
+    name = "handle_attach",
+    skip_all,
+    fields(?client_id, target = ?target, cols = viewport.cols, rows = viewport.rows),
 )]
 async fn handle_attach(
     state: &SharedState,

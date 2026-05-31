@@ -85,13 +85,45 @@ logs task/actor panics with their backtrace through `tracing`, so a
 daemonized server's crash lands in the log file. Both honor
 `RUST_BACKTRACE` for the trace's verbosity.
 
-Spans by convention:
+### Reading a trace to localize lag
 
-- `attach` (client_id, session_id) — wraps an attachment for its
-  lifetime.
-- `pane` (terminal_id) — wraps PTY pump and `TERMINAL_OUTPUT` fanout
-  per terminal.
-- `command` (request_id, kind) — wraps a `COMMAND` dispatch.
+The hot paths carry `tracing` spans whose `CLOSE` event reports the span's
+duration (`time.busy`/`time.idle`), so a captured session shows where time
+went before a stall. Per-frame / per-tick spans are at **debug** so the
+default `phux=info` filter leaves them disabled and effectively free; turn
+them up only while diagnosing.
+
+Capture a session:
+
+```sh
+PHUX_LOG=/tmp/phux.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug phux ...
+# headless repro that exercises the same server paths:
+PHUX_LOG=/tmp/phux.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug \
+  cargo run -p phux-server --example e2e-repro
+```
+
+Spans to grep for, by signal (`jq -c 'select(.fields.message=="close")'`
+narrows to the timed events):
+
+| Span (`span.name`) | Side | Level | Key fields | Localizes |
+|---|---|---|---|---|
+| `tick_emit` | server | debug | `consumer_count`, `dirty`, `emitted`, `total_out_bytes` | per-tick fan-out cost + how much was shipped |
+| `synthesize` | server | debug | `client_id`, `wire_terminal_id` | per-consumer diff (parent of the row walk) |
+| `synthesize_against_reference` | server | debug | `changed_row_count`, `out_bytes` | the per-tick CPU sink — its duration is **the** server lag signal |
+| `handle_attach` | server | info | `client_id`, `target`, `cols`, `rows` | attach-handshake latency |
+| `handle_command` | server | info | `client_id`, `request_id`, `kind` | control-command latency |
+| `handle_server_frame` | client | debug | `kind`, `terminal_id`, `seq`, `bytes` | per-frame client apply+paint cost — **the** client lag signal (grep `kind=terminal_output`) |
+| `attach_handshake` | client | info | `target` | client-side end-to-end attach latency |
+
+Per-PTY-chunk volume (`vt_write`) and per-frame emit detail are at
+**trace** (`RUST_LOG=phux=trace`) — useful for "what was the PTY doing
+right before the stall," off by default. A wedged or leaked consumer shows
+as `consumer mailbox full` / `consumer mailbox closed` at debug. Example
+close line (server, full-screen repaint): a `synthesize_against_reference`
+span with `time.busy:586µs`, `changed_row_count:39`, `out_bytes:4359`,
+nested under `synthesize{client_id, wire_terminal_id}` and
+`tick_emit{consumer_count, dirty}` — i.e. "this tick painted 39 changed
+rows / 4359 bytes for that consumer in 586µs."
 
 Runtime introspection ships as `phux server status --json`: number of
 sessions / windows / terminals / clients, per-terminal refresh rate,

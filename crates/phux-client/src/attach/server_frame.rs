@@ -72,6 +72,27 @@ pub(super) struct FrameOutcome {
     pub(super) sessions: Option<(Vec<SessionInfo>, SessionId)>,
 }
 
+/// Payload-free label for the inbound `FrameKind` — the `kind` field on
+/// the per-frame dispatch span. Keeps the trace line small and free of
+/// content bytes / session names; the heavy content frames additionally
+/// record `terminal_id` / `seq` / `bytes`. `FrameKind` is large and
+/// `#[non_exhaustive]`, so this covers the S->C arms this handler acts on
+/// and folds the rest into `"other"`.
+const fn frame_kind_label(frame: &FrameKind) -> &'static str {
+    match frame {
+        FrameKind::Attached { .. } => "attached",
+        FrameKind::TerminalSnapshot { .. } => "terminal_snapshot",
+        FrameKind::TerminalOutput { .. } => "terminal_output",
+        FrameKind::Detached => "detached",
+        FrameKind::Bell { .. } => "bell",
+        FrameKind::MetadataValue { .. } => "metadata_value",
+        FrameKind::MetadataChanged { .. } => "metadata_changed",
+        FrameKind::TerminalSpawned { .. } => "terminal_spawned",
+        FrameKind::TerminalClosed { .. } => "terminal_closed",
+        _ => "other",
+    }
+}
+
 /// Process one server-to-client frame. Returns a [`FrameOutcome`]
 /// describing any follow-up the async driver needs to perform.
 ///
@@ -109,6 +130,21 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     // triggers a full repaint on overlay dismiss.
     overlay_active: bool,
 ) -> Result<FrameOutcome, AttachError> {
+    // Per-inbound-frame dispatch span (debug; off under the default
+    // `phux=info` filter and free when disabled). For the content frames
+    // this function also paints (TERMINAL_SNAPSHOT / TERMINAL_OUTPUT) the
+    // span's CLOSE duration is the client-side apply+paint cost — the
+    // client lag signal the flywheel reads. `kind` is a payload-free label;
+    // `terminal_id` / `seq` / `bytes` are recorded inside the content arms
+    // below. Declared `Empty` so they exist for later `record`.
+    let frame_span = tracing::debug_span!(
+        "handle_server_frame",
+        kind = frame_kind_label(&frame),
+        terminal_id = tracing::field::Empty,
+        seq = tracing::field::Empty,
+        bytes = tracing::field::Empty,
+    )
+    .entered();
     match frame {
         FrameKind::Attached {
             snapshot,
@@ -170,6 +206,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             vt_replay_bytes,
             scrollback_bytes,
         } => {
+            // Correlate this apply with the pane + payload size; the span's
+            // CLOSE duration is the client-side snapshot-apply (vt_write +
+            // render) cost.
+            frame_span.record("terminal_id", tracing::field::debug(&terminal_id));
+            frame_span.record("bytes", vt_replay_bytes.len());
             // phux-4li.4: route per-pane snapshots into per-pane slots.
             // Allocate a fresh slot on first sight so output frames for
             // pre-split panes don't drop on the floor.
@@ -258,6 +299,14 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // (see `LastAckedCursorMode`); never acking it keeps
             // `last_acked_seq` at its `0` initial value, which is correct.
             let ack = (seq != 0).then(|| (terminal_id.clone(), seq));
+            // Correlate this apply: which pane, which seq, how many bytes.
+            // The span's CLOSE duration is the per-frame client paint cost
+            // (vt_write + render_at for the focused pane) — the headline
+            // client lag signal a trace reader greps `handle_server_frame`
+            // with `kind=terminal_output` for.
+            frame_span.record("terminal_id", tracing::field::debug(&terminal_id));
+            frame_span.record("seq", seq);
+            frame_span.record("bytes", bytes.len());
             // phux-4li.4: ingest output into the matching pane's
             // libghostty Terminal even when it's not focused, so the
             // mirror stays warm for when the user focuses it. Render +
