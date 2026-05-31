@@ -120,6 +120,63 @@ it's a TUI feature stored in L3, not a wire message.
 
 ---
 
+## Identity is federation-ready from day 1
+
+Every terminal in phux is addressed by a `TerminalId` — a tagged union
+that lives in the wire protocol from release v0.1:
+
+```
+TerminalId = LOCAL     { id: u32 }
+           | SATELLITE { host: String, id: u32 }
+```
+
+v0.1 constructs only `LOCAL` terminals. A v0.1 server is a single-machine
+control plane. But the wire *accepts* both shapes from byte zero. This
+matters because it means the protocol itself is federation-ready; it does
+not need to evolve to support remote terminals.
+
+Here's the concrete difference: a client can write `SATELLITE{host:
+"prod-box-3", id: 42}` as a command *today*. v0.1 will reject it with
+`UnsupportedSatelliteRoute` rather than crash. When v0.2 lands with real
+satellite routing — servers on other machines that manage their own
+terminals — the wire protocol does not change. The bytes are identical.
+Clients and servers do not upgrade the protocol layer. The exact same
+command that got rejected in v0.1 just works in v0.2.
+
+This is the forward-compatible federation hook. It exists now, before
+there are satellites to route to.
+
+### Why this is radically different from tmux
+
+tmux can SSH into a remote box and attach to a session there, but that
+happens *client-side*. The client logs into the remote machine, spawns
+the tmux client binary, and talks to the remote server — it's a local
+attachment, not a wire-level federation concept. If you wanted tmux to
+spawn a terminal on a remote machine and have a control plane observe it
+from another machine entirely, tmux cannot do it directly. Its wire does
+not know about remote identity. The control plane would have to speak
+different protocols to different servers.
+
+phux's wire knows about remote identity from the start. A single control
+plane can address terminals uniformly across all machines it manages, and
+the addressing is baked into L1, the terminal substrate. When you build a
+multi-host system, you do not reinvent the addressing scheme — it was
+always there.
+
+This is why phux is a control plane from the first byte, not a
+single-machine tool with remote attach retrofitted. The load-bearing case
+is a fleet of agents working across a fleet of cloud boxes: terminals as
+addressable, persistent, observable resources, reachable from one place.
+
+See [ADR-0007 (Mosh-class transport and
+satellites)](../ADR/0007-mosh-class-transport-and-satellites.md) and
+[ADR-0016 (TerminalId as the wire
+primary)](../ADR/0016-terminal-id-as-wire-primary.md). The transport
+between hub and satellites (SSH, QUIC, etc.) is pluggable via a `Transport`
+trait; see [`architecture/transport.md`](./architecture/transport.md).
+
+---
+
 ## How phux compares to other multiplexers
 
 | Feature | phux | tmux | zellij | screen | zmx | rmux | cmux |
