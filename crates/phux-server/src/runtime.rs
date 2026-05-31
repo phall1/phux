@@ -602,41 +602,37 @@ async fn broadcast_terminal_closed(
             })
             .collect()
     });
+    // The wire id is stable for the pane's lifetime; intern it once so
+    // both the L1 `TERMINAL_CLOSED` fanout and the `pane_closed` agent
+    // event below carry the same id the client saw on spawn/snapshot.
+    let wire_terminal_id = state.with_mut(|s| s.intern_terminal_wire(pane));
     if targets.is_empty() {
-        debug!(?pane, "TERMINAL_CLOSED: no subscribed clients to notify");
-        return;
-    }
-    debug!(
-        ?pane,
-        count = targets.len(),
-        ?exit_status,
-        "TERMINAL_CLOSED: broadcasting to subscribed clients",
-    );
-    let mut event_wire_id = None;
-    for (wire_terminal_id, tx) in targets {
-        event_wire_id.get_or_insert_with(|| wire_terminal_id.clone());
-        let _ = tx
-            .send(Outbound::Frame(FrameKind::TerminalClosed {
-                terminal_id: wire_terminal_id,
-                exit_status,
-            }))
-            .await;
-    }
-    // phux-y2t: also fan a `pane_closed` agent event to event-stream
-    // subscribers (SPEC §7.5). Separate from the `TERMINAL_CLOSED`
-    // L1-subscriber fanout above so a `watch`-only client that never
-    // attached still learns the pane died.
-    if let Some(wire_terminal_id) = event_wire_id.or_else(|| {
-        // No L1 subscribers, but there may still be event-stream
-        // subscribers (a `watch` without an attach). Intern the wire id.
-        Some(state.with_mut(|s| s.intern_terminal_wire(pane)))
-    }) {
-        broadcast_event(
-            state,
-            Some(&wire_terminal_id),
-            &AgentEvent::PaneClosed { exit_status },
+        debug!(?pane, "TERMINAL_CLOSED: no L1-subscribed clients to notify");
+    } else {
+        debug!(
+            ?pane,
+            count = targets.len(),
+            ?exit_status,
+            "TERMINAL_CLOSED: broadcasting to subscribed clients",
         );
+        for (wire_terminal_id, tx) in targets {
+            let _ = tx
+                .send(Outbound::Frame(FrameKind::TerminalClosed {
+                    terminal_id: wire_terminal_id,
+                    exit_status,
+                }))
+                .await;
+        }
     }
+    // phux-y2t: fan a `pane_closed` agent event to event-stream
+    // subscribers (SPEC §7.5) regardless of L1 subscribers — a
+    // `watch`-only client that never attached must still learn the pane
+    // died, so this MUST run even when the L1 fanout above was empty.
+    broadcast_event(
+        state,
+        Some(&wire_terminal_id),
+        &AgentEvent::PaneClosed { exit_status },
+    );
 }
 
 /// Free the per-consumer state-sync entries (ADR-0018, phux-0q8) this

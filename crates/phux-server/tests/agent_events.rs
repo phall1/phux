@@ -140,3 +140,47 @@ fn subscribed_client_receives_title_bell_and_pane_closed_events() {
             .expect("server run_async ok");
     });
 }
+
+/// A client that SUBSCRIBES *without* attaching still receives events
+/// (SPEC §7.5, phux-y2t). This pins the `phux watch` path — `watch`
+/// connects and subscribes but never sends `ATTACH`, so event fanout MUST
+/// resolve the client's mailbox from the subscription registry rather than
+/// from the `attached` map (the regression the mailbox-in-subscription fix
+/// closed). Here the unattached watcher subscribes server-wide and must
+/// observe the seed pane's `pane_closed` when it exits.
+#[test]
+fn unattached_subscriber_receives_events() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // A seed shell that lives long enough for the watcher to subscribe,
+        // then exits → PTY EOF → pane_closed.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 0.3; exit 0");
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // NO ATTACH. Subscribe server-wide straight away.
+        send_frame(&mut stream, &FrameKind::SubscribeEvents { terminal: None }).await;
+
+        let events = collect_events(&mut stream, Duration::from_secs(3)).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::PaneClosed { .. })),
+            "an unattached subscriber must still receive pane_closed; got {events:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
