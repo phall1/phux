@@ -2018,6 +2018,11 @@ async fn handle_command(
         Command::KillCollection { collection, name } => {
             handle_kill_collection(state, collection, &name)
         }
+        Command::RenameSession {
+            collection,
+            name,
+            new_name,
+        } => handle_rename_session(state, collection, &name, &new_name),
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -2219,6 +2224,48 @@ fn handle_kill_collection(
         }
     });
     CommandResult::Ok
+}
+
+/// Build the reply for `RENAME_SESSION` — the rename counterpart to
+/// `CREATE_SESSION` (ADR-0021 §3).
+///
+/// Resolves the session named `name` under `collection` (the same registry
+/// scan `KILL_COLLECTION` uses for name resolution) and reassigns its
+/// human-readable name to `new_name` in one pass. The rename is a single
+/// field write on the registry's `Session`; there is no name-keyed side
+/// index to update — every lookup scans the registry directly
+/// (`ServerState::find_session_by_name`).
+///
+/// An unknown `collection` or `new_name` already in use is refused with
+/// `INVALID_COMMAND` (symmetric with `CREATE_SESSION`); an unknown `name`
+/// with `SESSION_NOT_FOUND` (symmetric with `KILL_COLLECTION`). On success
+/// the reply is `Ok` — the server is authoritative, and each attached
+/// client reconciles the new name on its next `ATTACHED` snapshot (a live
+/// `SESSION_RENAMED` push to other clients is out of scope for this pass).
+fn handle_rename_session(
+    state: &SharedState,
+    collection: CollectionId,
+    name: &str,
+    new_name: &str,
+) -> CommandResult {
+    if collection != crate::state::DEFAULT_COLLECTION_ID {
+        return CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: format!("unknown collection: {collection:?}"),
+        };
+    }
+
+    match state.with_mut(|s| s.rename_session(name, new_name)) {
+        crate::state::RenameOutcome::Renamed => CommandResult::Ok,
+        crate::state::RenameOutcome::NotFound => CommandResult::Error {
+            code: ErrorCode::SessionNotFound,
+            message: format!("no such session: {name:?}"),
+        },
+        crate::state::RenameOutcome::NameTaken => CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: format!("session {new_name:?} already exists"),
+        },
+    }
 }
 
 /// Build the `OK_WITH(STATE(..))` reply for `GET_STATE`.

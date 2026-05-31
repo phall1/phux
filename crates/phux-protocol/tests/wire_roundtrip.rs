@@ -1696,6 +1696,26 @@ fn command_kill_collection_round_trips() {
 }
 
 #[test]
+fn command_rename_session_round_trips() {
+    // RENAME_SESSION (tag 0x0b): CollectionId + current name + new name. The
+    // rename counterpart to CREATE_SESSION; reply rides the existing
+    // COMMAND_RESULT { Ok } envelope so only the request frame is new here.
+    let frame = FrameKind::Command {
+        request_id: 33,
+        command: Command::RenameSession {
+            collection: CollectionId::new(1),
+            name: "work".to_owned(),
+            new_name: "notes".to_owned(),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn command_result_ok_with_json_round_trips() {
     // GET_SCREEN's reply shape: OK_WITH(JSON(serialized ScreenState)).
     let frame = FrameKind::CommandResult {

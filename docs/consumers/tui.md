@@ -83,6 +83,7 @@ phux ls                       # list sessions (alias: list)              shipped
 phux windows [-s SESSION]     # list windows                             spec-only
 phux panes [-w WINDOW]        # list panes                               spec-only
 phux kill TARGET              # kill session/window/pane by selector     shipped
+phux rename SESSION NEW-NAME  # rename a session                         shipped
 phux send-keys TARGET KEYS... # send keys to a pane (scripting)          shipped
 phux run TARGET CMD...        # run a command in a pane, capture $?      shipped
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)    shipped

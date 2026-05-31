@@ -99,6 +99,15 @@ prefix = "C-a"
 # current name (phux-ahv.1).
 "," = "rename-window"
 
+# Rename the current session (tmux convention: $ renames the session, ,
+# renames the window). With an explicit name it renames immediately, e.g.
+# "$" = { action = "rename-session", name = "notes" }. The bare binding
+# opens an interactive type-a-name prompt pre-filled with the current
+# session name; on commit the client sends the RENAME_SESSION command and
+# optimistically updates its own status bar. The server is authoritative,
+# so other attached clients pick up the new name on their next snapshot.
+"$" = "rename-session"
+
 # Command palette: a filterable list of every action, each annotated with
 # its bound chord. Choosing one runs it through the same path a keybind
 # takes (phux-ahv.8).

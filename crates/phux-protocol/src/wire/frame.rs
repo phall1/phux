@@ -285,6 +285,18 @@ pub(crate) const COMMAND_TAG_CREATE_SESSION: u8 = 0x09;
 /// uses (the async `TERMINAL_CLOSED` frames confirm teardown), but
 /// session-level. Backs `phux kill SESSION`.
 pub(crate) const COMMAND_TAG_KILL_COLLECTION: u8 = 0x0a;
+/// Wire tag for [`Command::RenameSession`]. Appended after
+/// `KILL_COLLECTION`'s `0x0a`; `RENAME_SESSION` is the additive rename
+/// counterpart to `CREATE_SESSION` (ADR-0021 §3). It resolves the named
+/// session under a Collection and reassigns its human-readable name in
+/// one round-trip. The reply rides `COMMAND_RESULT { Ok }`, the same ack
+/// shape `KILL_COLLECTION` uses; the server is authoritative and the next
+/// `ATTACHED` snapshot reconciles the new name to attached clients. An
+/// unknown `name` is rejected with `SESSION_NOT_FOUND`; a `new_name`
+/// already in use is rejected with `INVALID_COMMAND` (the same code
+/// `CREATE_SESSION` uses for a taken name). Backs `phux rename SESSION
+/// NEW-NAME` and the TUI `rename-session` action.
+pub(crate) const COMMAND_TAG_RENAME_SESSION: u8 = 0x0b;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -608,8 +620,9 @@ pub enum StateScope {
 /// the ones the CLI needs — `KILL_TERMINAL`, `GET_STATE`, the
 /// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), the appended
 /// `ROUTE_INPUT` write counterpart, the appended `CREATE_SESSION`
-/// create-without-attach command (`phux-fdh`), and its teardown counterpart
-/// `KILL_COLLECTION` (`phux-h9s`). Unknown wire tags surface as
+/// create-without-attach command (`phux-fdh`), its teardown counterpart
+/// `KILL_COLLECTION` (`phux-h9s`), and the rename counterpart
+/// `RENAME_SESSION`. Unknown wire tags surface as
 /// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
 ///
 /// Only `PartialEq` (not `Eq`): `RouteInput` carries a [`MouseEvent`] whose
@@ -711,6 +724,29 @@ pub enum Command {
         /// Name of the session to destroy. An unknown name is rejected
         /// (`Error`) rather than silently treated as success.
         name: String,
+    },
+    /// Rename the session named `name` under `collection` to `new_name`,
+    /// reassigning its human-readable name in one round-trip — the rename
+    /// counterpart to `CreateSession`. The server resolves `name` to its
+    /// session (the same resolution `KillCollection` uses), rejects an
+    /// unknown `name` with `SESSION_NOT_FOUND` and a `new_name` already in
+    /// use with `INVALID_COMMAND` (the same rule `CreateSession` applies to
+    /// a taken name), then reassigns the name and replies
+    /// `COMMAND_RESULT { Ok }`. The server is authoritative: each attached
+    /// client reconciles the new name on its next `ATTACHED` snapshot. A
+    /// live `SESSION_RENAMED` push to other clients is out of scope for this
+    /// pass. Backs `phux rename SESSION NEW-NAME` and the TUI
+    /// `rename-session` action (ADR-0021 §3).
+    RenameSession {
+        /// Collection hosting the session. v0.1 servers accept only the
+        /// default `CollectionId(1)`.
+        collection: CollectionId,
+        /// Name of the session to rename. An unknown name is rejected
+        /// (`SESSION_NOT_FOUND`).
+        name: String,
+        /// New name for the session. A name already in use is rejected
+        /// (`INVALID_COMMAND`) rather than silently merging sessions.
+        new_name: String,
     },
 }
 
@@ -2093,6 +2129,16 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u32_be(collection.get());
             enc.write_str(name);
         }
+        Command::RenameSession {
+            collection,
+            name,
+            new_name,
+        } => {
+            enc.write_u8(COMMAND_TAG_RENAME_SESSION);
+            enc.write_u32_be(collection.get());
+            enc.write_str(name);
+            enc.write_str(new_name);
+        }
     }
 }
 
@@ -2180,6 +2226,16 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
             let collection = CollectionId::new(dec.read_u32_be()?);
             let name = dec.read_str()?.to_owned();
             Ok(Command::KillCollection { collection, name })
+        }
+        COMMAND_TAG_RENAME_SESSION => {
+            let collection = CollectionId::new(dec.read_u32_be()?);
+            let name = dec.read_str()?.to_owned();
+            let new_name = dec.read_str()?.to_owned();
+            Ok(Command::RenameSession {
+                collection,
+                name,
+                new_name,
+            })
         }
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",

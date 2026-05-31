@@ -89,6 +89,7 @@ const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
+          rename     Rename a session\n  \
           send-keys  Send keys to a pane\n  \
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n\n\
@@ -220,6 +221,24 @@ enum Command {
     Kill {
         /// What to kill (selector).
         target: String,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Rename a session.
+    ///
+    /// Reassigns `SESSION`'s human-readable name to `NEW_NAME` in one
+    /// `RENAME_SESSION` round-trip (ADR-0021). The server is authoritative;
+    /// attached clients pick up the new name on their next snapshot. An
+    /// unknown `SESSION` or a `NEW_NAME` already in use is an error.
+    Rename {
+        /// Current session name.
+        session: String,
+
+        /// New session name.
+        new_name: String,
 
         /// Override the UDS path.
         #[arg(long)]
@@ -462,6 +481,11 @@ fn main() -> ExitCode {
             command,
         }) => run_new(session, cwd, socket, json, command),
         Some(Command::Kill { target, socket }) => run_kill(&target, socket),
+        Some(Command::Rename {
+            session,
+            new_name,
+            socket,
+        }) => run_rename(&session, &new_name, socket),
         Some(Command::Snapshot {
             session,
             json,
@@ -1145,6 +1169,41 @@ fn run_new_json(
             ExitCode::FAILURE
         }
         Err(err) => report_no_server(&err, socket_path, "new"),
+    }
+}
+
+/// `phux rename SESSION NEW_NAME` — reassign a session's name in one
+/// `RENAME_SESSION` round-trip (ADR-0021 §3). The server is authoritative;
+/// attached clients reconcile the new name on their next snapshot. Exit
+/// codes mirror `phux kill`: 0 on success, 1 on no server, 2 on a
+/// server-side refusal (unknown session or a name already in use).
+fn run_rename(session: &str, new_name: &str, socket: Option<PathBuf>) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    let command = WireCommand::RenameSession {
+        collection: phux_protocol::ids::CollectionId::new(1),
+        name: session.to_owned(),
+        new_name: new_name.to_owned(),
+    };
+
+    match rt.block_on(request_command(&socket_path, command)) {
+        Ok(CommandResult::Ok) => {
+            println!("renamed {session:?} to {new_name:?}");
+            ExitCode::SUCCESS
+        }
+        Ok(CommandResult::Error { message, .. }) => {
+            eprintln!("phux: rename refused for session {session:?}: {message}");
+            ExitCode::from(2)
+        }
+        Ok(other) => {
+            eprintln!("phux: unexpected RENAME_SESSION result: {other:?}");
+            ExitCode::from(2)
+        }
+        Err(err) => report_no_server(&err, &socket_path, "rename"),
     }
 }
 

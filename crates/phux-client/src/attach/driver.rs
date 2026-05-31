@@ -839,7 +839,7 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     focused_session,
-                    session_name: &session_name,
+                    session_name: &mut session_name,
                     switch_request: &mut switch_request,
                 };
                 let layout_changed = dispatch_input_events(
@@ -907,7 +907,7 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     focused_session,
-                    session_name: &session_name,
+                    session_name: &mut session_name,
                     switch_request: &mut switch_request,
                 };
                 let layout_changed = dispatch_input_events(

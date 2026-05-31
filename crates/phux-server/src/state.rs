@@ -356,6 +356,20 @@ pub enum MetadataSetOutcome {
     Unchanged,
 }
 
+/// Outcome of [`ServerState::rename_session`], mapping the three terminal
+/// cases of a `RENAME_SESSION` to the wire replies the server issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    /// The session was renamed (or already bore the requested name); reply
+    /// `COMMAND_RESULT { Ok }`.
+    Renamed,
+    /// No session matched the current name; reply `SESSION_NOT_FOUND`.
+    NotFound,
+    /// Another live session already holds the requested name; reply
+    /// `INVALID_COMMAND` (the code `CREATE_SESSION` uses for a taken name).
+    NameTaken,
+}
+
 impl MetadataStore {
     /// Get the value at `(scope, key)`, if any.
     #[must_use]
@@ -1044,6 +1058,36 @@ impl ServerState {
             .sessions()
             .find(|(_, s)| s.name == name)
             .map(|(id, _)| id)
+    }
+
+    /// Rename the session named `current` to `new_name`, in place.
+    ///
+    /// Mirrors `CREATE_SESSION`'s uniqueness rule: names are unique within
+    /// the registry, so a `new_name` already in use is rejected. Resolution
+    /// uses the same registry scan as every other name lookup (no side
+    /// ledger, per [`Registry::sessions`]), so there is nothing else to keep
+    /// in sync. The server is authoritative once this returns
+    /// [`RenameOutcome::Renamed`]; the next `ATTACHED` snapshot each client
+    /// builds carries the new name.
+    ///
+    /// Returns a [`RenameOutcome`] distinguishing the two refusal cases the
+    /// wire surfaces (`SESSION_NOT_FOUND` vs `INVALID_COMMAND`) from success.
+    pub fn rename_session(&mut self, current: &str, new_name: &str) -> RenameOutcome {
+        let Some(id) = self.find_session_by_name(current) else {
+            return RenameOutcome::NotFound;
+        };
+        // A no-op rename (current == new_name) resolves to the same session,
+        // so the duplicate check would otherwise reject it. Treat it as
+        // success: the name already is what was asked for.
+        if current != new_name && self.find_session_by_name(new_name).is_some() {
+            return RenameOutcome::NameTaken;
+        }
+        // Resolution above guarantees the id is live, so `session_mut` is
+        // `Some`; the rename is a single field write.
+        if let Some(session) = self.registry.session_mut(id) {
+            new_name.clone_into(&mut session.name);
+        }
+        RenameOutcome::Renamed
     }
 
     /// Seed a session+window+pane. Returns the new

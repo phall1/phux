@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
-use phux_protocol::wire::frame::{FrameKind, Scope};
+use phux_protocol::wire::frame::{Command as WireCommand, FrameKind, Scope};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
@@ -81,7 +81,14 @@ pub(super) struct DispatchCtx<'a> {
     /// targeting this name is a no-op (guarded in
     /// [`apply_action_effects`]) even though the picker already excludes
     /// the current row. Empty before the first snapshot.
-    pub session_name: &'a str,
+    ///
+    /// Mutable so the `rename-session` action can optimistically update it
+    /// the moment the user commits a rename: the client sends the
+    /// `RENAME_SESSION` command and reflects the new name in its own status
+    /// bar immediately, rather than waiting a round-trip. The server is
+    /// authoritative — the next `ATTACHED` snapshot overwrites this with the
+    /// server's value (and is how other attached clients learn the rename).
+    pub session_name: &'a mut String,
     /// phux-eb0: out-channel for a committed `switch-session { name }`.
     /// `apply_action_effects` sets this to `Some(target)` when the user
     /// picks a peer session; the driver's `main_loop` reads it after the
@@ -405,7 +412,7 @@ async fn apply_action_effects<W: super::RenderSink>(
     // existing session just attaches to it.
     if let Some(target) = effects.reattach {
         match target {
-            ReattachTarget::Existing(name) if name == ctx.session_name => {
+            ReattachTarget::Existing(name) if &name == ctx.session_name => {
                 tracing::debug!(target_session = %name, "switch-session to current session; no-op");
                 let _ = actions::write_bell(out);
             }
@@ -419,7 +426,35 @@ async fn apply_action_effects<W: super::RenderSink>(
             }
         }
     }
-    Ok(layout_changed)
+    // rename-session: send RENAME_SESSION for the current session and
+    // optimistically reflect the new name locally. The server is
+    // authoritative — the next ATTACHED snapshot overwrites `session_name`
+    // (which is also how other attached clients learn the rename; a live
+    // SESSION_RENAMED push is out of scope for this pass). A no-op rename
+    // (new == current) is dropped: nothing to send, nothing to repaint.
+    let renamed = if let Some(new_name) = effects.rename_session.filter(|n| n != &*ctx.session_name)
+    {
+        let request_id = *ctx.next_request_id;
+        *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+        conn.send(&FrameKind::Command {
+            request_id,
+            command: WireCommand::RenameSession {
+                collection: DEFAULT_COLLECTION_ID,
+                name: ctx.session_name.clone(),
+                new_name: new_name.clone(),
+            },
+        })
+        .await?;
+        tracing::info!(new_name = %new_name, "rename-session sent; optimistically updating local name");
+        *ctx.session_name = new_name;
+        true
+    } else {
+        false
+    };
+    // A rename repaints the status bar (it carries the session name) the
+    // same way a layout mutation does; fold it into the caller's repaint
+    // signal so the new name shows immediately.
+    Ok(layout_changed || renamed)
 }
 
 /// Result of feeding a key event through the resolver.
@@ -508,6 +543,18 @@ struct ActionEffects {
     /// and re-attaches on the same connection. An `Existing` request
     /// matching the current session is a no-op (bells).
     reattach: Option<ReattachTarget>,
+    /// rename-session: a committed rename. Carries the new name. The async
+    /// caller ([`apply_action_effects`]) sends a `RENAME_SESSION` command
+    /// for the *current* session over the existing connection and
+    /// optimistically updates the client's own cached `session_name` +
+    /// repaints its status bar. The server is authoritative: the next
+    /// `ATTACHED` snapshot reconciles the name (and is how other attached
+    /// clients learn of it — a live `SESSION_RENAMED` push is out of scope
+    /// for this pass). A refusal (unknown session / name taken) arrives as a
+    /// `COMMAND_RESULT { Error }`; this pass logs it and lets the next
+    /// snapshot correct the optimistic name rather than blocking the input
+    /// loop on the reply.
+    rename_session: Option<String>,
 }
 
 /// An in-process re-attach request raised by a dispatched action.
@@ -543,6 +590,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "previous-window",
     "select-window",
     "rename-window",
+    "rename-session",
     "focus-direction",
     "resize-pane",
     "show-help",
@@ -716,6 +764,25 @@ fn run_action(
                     .unwrap_or_default();
                 ctx.overlays
                     .push(Box::new(PromptOverlay::rename_window(&current, ctx.theme)));
+                effects.layout_mutated = true;
+            }
+        }
+        "rename-session" => {
+            // Rename the session this client is attached to. With an explicit
+            // `name` it renames directly; with no name it opens a prompt
+            // pre-filled with the current session name, which commits
+            // `rename-session { name }` back through this same path (the
+            // rename-window precedent). The actual `RENAME_SESSION` send +
+            // optimistic local-name update happen in `apply_action_effects`
+            // (the connection is async, run_action is sync — the `detach`
+            // model).
+            if let Some(name) = name_arg(resolved) {
+                effects.rename_session = Some(name);
+            } else {
+                ctx.overlays.push(Box::new(PromptOverlay::rename_session(
+                    ctx.session_name,
+                    ctx.theme,
+                )));
                 effects.layout_mutated = true;
             }
         }
@@ -1220,6 +1287,7 @@ mod tests {
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
         let mut switch_request = None;
+        let mut session_name = String::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -1232,7 +1300,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             focused_session: None,
-            session_name: "",
+            session_name: &mut session_name,
             switch_request: &mut switch_request,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
@@ -1376,6 +1444,7 @@ mod tests {
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
         let mut switch_request = None;
+        let mut session_name = String::new();
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1389,7 +1458,7 @@ mod tests {
                 theme: &theme,
                 sessions,
                 focused_session,
-                session_name: "",
+                session_name: &mut session_name,
                 switch_request: &mut switch_request,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
@@ -1640,6 +1709,7 @@ mod tests {
         let mut overlays = OverlayState::new();
         let theme = Theme::default();
         let mut switch_request = None;
+        let mut session_name = String::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1652,7 +1722,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             focused_session: None,
-            session_name: "",
+            session_name: &mut session_name,
             switch_request: &mut switch_request,
         };
         let action = phux_config::keybind::ResolvedAction {
@@ -1664,5 +1734,107 @@ mod tests {
 
         assert!(effects.detach);
         assert!(!effects.layout_mutated);
+    }
+
+    #[test]
+    fn rename_session_with_name_arg_requests_rename_effect() {
+        // An explicit `name` produces the rename-session effect carrying the
+        // new name; no prompt is opened. The send + local-name update happen
+        // in `apply_action_effects` (async), so run_action only sets the
+        // effect.
+        let mut workspace = Workspace::single(tid(1));
+        let mut args = BTreeMap::new();
+        args.insert("name".to_owned(), toml::Value::String("notes".to_owned()));
+        let action = phux_config::keybind::ResolvedAction {
+            action: "rename-session".to_owned(),
+            args,
+        };
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.rename_session.as_deref(),
+            Some("notes"),
+            "rename-session with a name requests the rename effect",
+        );
+    }
+
+    #[test]
+    fn rename_session_without_name_opens_prompt_prefilled() {
+        // No `name` arg opens the prompt pre-filled with the current session
+        // name; the rename itself is deferred to the prompt commit.
+        let mut workspace = Workspace::single(tid(1));
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = "work".to_owned();
+        let effects = {
+            let mut ctx = DispatchCtx {
+                resolver: None,
+                workspace: &mut workspace,
+                viewport: (80, 24),
+                next_request_id: &mut next_request_id,
+                pending_splits: &mut pending_splits,
+                pending_windows: &mut pending_windows,
+                overlays: &mut overlays,
+                keybindings: None,
+                theme: &theme,
+                sessions: &[],
+                focused_session: None,
+                session_name: &mut session_name,
+                switch_request: &mut switch_request,
+            };
+            run_action(&bare_action("rename-session"), &mut ctx, None)
+        };
+        assert!(
+            overlays.is_active(),
+            "no-arg rename-session opens the name prompt",
+        );
+        assert!(
+            effects.rename_session.is_none(),
+            "the prompt commit drives the rename later",
+        );
+    }
+
+    #[test]
+    fn rename_session_prompt_commits_rename_session_action() {
+        // The prompt the bare action opens must commit a
+        // `rename-session { name }` ResolvedAction, so feeding it back
+        // through run_action yields the rename effect (the same single
+        // dispatch path rename-window uses).
+        use crate::render::overlay::{OverlayCommand, RenderOverlay};
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
+        let mut prompt = PromptOverlay::rename_session("work", &Theme::default());
+        let press = |key: PhysicalKey, text: Option<&str>| KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: text.map(ToOwned::to_owned),
+            unshifted_codepoint: None,
+        };
+        // Clear the prefilled "work" and type "notes".
+        for _ in 0..4 {
+            let _ = prompt.handle_key(&press(PhysicalKey::Backspace, None));
+        }
+        for ch in ['n', 'o', 't', 'e', 's'] {
+            let _ = prompt.handle_key(&press(PhysicalKey::A, Some(&ch.to_string())));
+        }
+        let OverlayCommand::Commit(resolved) = prompt.handle_key(&press(PhysicalKey::Enter, None))
+        else {
+            panic!("Enter on a non-empty prompt should commit");
+        };
+        assert_eq!(resolved.action, "rename-session");
+
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&resolved, &mut workspace);
+        assert_eq!(
+            effects.rename_session.as_deref(),
+            Some("notes"),
+            "the committed prompt action yields the rename effect with the typed name",
+        );
     }
 }

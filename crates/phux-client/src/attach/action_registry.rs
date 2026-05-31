@@ -152,6 +152,11 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "rename-session",
+        description: "Rename the current session (interactive prompt)",
+        args: &[],
+    },
+    ActionSpec {
         name: "focus-direction",
         description: "Move focus to the pane on the left",
         args: &[("direction", ArgValue::Str("left"))],

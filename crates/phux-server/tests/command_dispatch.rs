@@ -782,3 +782,142 @@ fn kill_collection_unknown_collection_is_refused() {
         }
     });
 }
+
+/// RENAME_SESSION reassigns a session's name in one round-trip; a
+/// subsequent GET_STATE snapshot shows the new name and not the old one.
+#[test]
+fn rename_session_renames_and_snapshot_reflects_new_name() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 70,
+                command: Command::RenameSession {
+                    collection: CollectionId::new(1),
+                    name: "work".to_owned(),
+                    new_name: "notes".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 70).await {
+            CommandResult::Ok => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+
+        // The rename is synchronous server-side (a single field write), so the
+        // very next snapshot must already carry the new name.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 71,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 71).await {
+            CommandResult::OkWith(CommandValue::State(snapshot)) => {
+                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+                assert!(
+                    names.contains(&"notes"),
+                    "RENAME_SESSION must surface the new name in GET_STATE; got {names:?}",
+                );
+                assert!(
+                    !names.contains(&"work"),
+                    "RENAME_SESSION must drop the old name; got {names:?}",
+                );
+            }
+            other => panic!("expected Ok_With(State(..)), got {other:?}"),
+        }
+    });
+}
+
+/// RENAME_SESSION on an unknown current name is refused with
+/// `SESSION_NOT_FOUND` — symmetric with KILL_COLLECTION's refusal.
+#[test]
+fn rename_session_unknown_name_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 72,
+                command: Command::RenameSession {
+                    collection: CollectionId::new(1),
+                    name: "does-not-exist".to_owned(),
+                    new_name: "notes".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 72).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::SessionNotFound);
+            }
+            other => panic!("expected Error(SessionNotFound), got {other:?}"),
+        }
+    });
+}
+
+/// RENAME_SESSION to a name already in use is refused with `INVALID_COMMAND`
+/// — the same code CREATE_SESSION uses for a taken name. Names are unique
+/// within a collection, so a rename never silently merges two sessions.
+#[test]
+fn rename_session_duplicate_new_name_is_refused() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Create a second session whose name "work" already owns.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 73,
+                command: Command::CreateSession {
+                    collection: CollectionId::new(1),
+                    name: "scratch".to_owned(),
+                    command: None,
+                    cwd: None,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 73).await {
+            CommandResult::OkWith(CommandValue::TerminalId(_)) => {}
+            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        }
+
+        // Renaming "scratch" to the taken "work" must be refused.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 74,
+                command: Command::RenameSession {
+                    collection: CollectionId::new(1),
+                    name: "scratch".to_owned(),
+                    new_name: "work".to_owned(),
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 74).await {
+            CommandResult::Error { code, .. } => {
+                assert_eq!(code, ErrorCode::InvalidCommand);
+            }
+            other => panic!("expected Error(InvalidCommand), got {other:?}"),
+        }
+    });
+}

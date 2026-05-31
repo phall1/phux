@@ -66,6 +66,22 @@ impl PromptOverlay {
         )
     }
 
+    /// The `rename-session` prompt, pre-filled with the current session's
+    /// name and styled with `theme`. Committing it renames the session this
+    /// client is attached to (via the `RENAME_SESSION` command); the server
+    /// is authoritative and the next `ATTACHED` snapshot reconciles the name
+    /// across every attached client.
+    #[must_use]
+    pub fn rename_session(current_name: &str, theme: &Theme) -> Self {
+        Self::new(
+            "rename session",
+            "rename-session",
+            "name",
+            current_name,
+            theme,
+        )
+    }
+
     /// The `new-session` prompt: type a name for a brand-new session.
     /// Committing it re-attaches this client to the freshly-created
     /// session (via the same in-process re-attach path as switch-session).
