@@ -488,16 +488,15 @@ fn main() -> ExitCode {
     // non-fatal: the binary should keep working even if a future test
     // harness or library already installed its own subscriber.
     let _log_guard: Option<phux_server::telemetry::WorkerGuard> = if is_interactive_client(&cli) {
-        match phux_server::telemetry::init_client() {
-            Ok(guard) => Some(guard),
-            Err(err) => {
-                // The client never logs to stderr, but a one-line init
-                // failure on the cooked terminal (before alt screen) is
-                // acceptable and beats a silent no-op subscriber.
-                eprintln!("phux: client tracing init failed (continuing): {err}");
-                None
-            }
+        // The client uses a synchronous file writer (no guard) so its trace
+        // survives the `process::exit` detach path; see `init_client`.
+        if let Err(err) = phux_server::telemetry::init_client() {
+            // The client never logs to stderr, but a one-line init failure
+            // on the cooked terminal (before alt screen) is acceptable and
+            // beats a silent no-op subscriber.
+            eprintln!("phux: client tracing init failed (continuing): {err}");
         }
+        None
     } else {
         match phux_server::telemetry::init() {
             Ok(guard) => guard,

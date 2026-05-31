@@ -109,6 +109,17 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     status_bar: Option<&mut StatusBarPainter>,
     session_name: &str,
 ) {
+    // The full screen paint (ratatui chrome + per-pane libghostty render).
+    // Its close-duration is the client-side render-lag signal the flywheel
+    // reads; debug-level so it is free at the default filter, and kept here
+    // (not at the 4 call sites) so every repaint is timed.
+    let _paint = tracing::debug_span!(
+        "paint_full_frame",
+        cols = viewport_dims.0,
+        rows = viewport_dims.1,
+        panes = panes.len()
+    )
+    .entered();
     let has_bar = status_bar.is_some();
     let pane_dims = pane_viewport(viewport_dims, has_bar);
     let multi = super::multi_pane::compute_layout(layout_state, pane_dims);

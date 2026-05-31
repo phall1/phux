@@ -22,9 +22,10 @@
 //!
 //! * `RUST_LOG` — the filter. Defaults to `phux=info,warn`. Same
 //!   precedence for both entry points.
-//! * `PHUX_LOG=<path>` — write logs to this file (via a non-blocking
-//!   [`tracing_appender`] writer). For the server this is *in addition to*
-//!   stderr; for the client it overrides the per-pid default path.
+//! * `PHUX_LOG=<path>` — write logs to this file (via a [`tracing_appender`]
+//!   writer — non-blocking for the server, synchronous for the client). For
+//!   the server this is *in addition to* stderr; for the client it overrides
+//!   the per-pid default path.
 //! * `PHUX_LOG_FORMAT=text|json` — choose the human fmt layer (`text`,
 //!   the default) or a structured JSON fmt layer (one JSON object per
 //!   line, `jq`/`grep`-able).
@@ -33,10 +34,12 @@
 //! `#[instrument]` span reports its duration on close — the substrate the
 //! lag/crash flywheel reads to find hot paths.
 //!
-//! The non-blocking file writer needs its [`WorkerGuard`] kept alive for
-//! the lifetime of the process; both entry points return it and the caller
-//! in `main` binds it for the duration of `main`. Dropping the guard
-//! flushes and stops the background writer thread.
+//! [`init`] (server) uses a NON-blocking file writer and returns a
+//! [`WorkerGuard`] that `main` must keep alive for the process lifetime;
+//! dropping it flushes and stops the background writer thread. [`init_client`]
+//! instead uses a SYNCHRONOUS writer and returns no guard: the client exits
+//! via `std::process::exit` (which skips guard Drop), so a buffered tail
+//! would be lost — synchronous writes have none to lose.
 //!
 //! Each entry point is **idempotent at the type level only** — call at
 //! most once per process. Subsequent calls return `Err` via `try_init`'s
@@ -280,21 +283,40 @@ pub fn init() -> Result<Option<WorkerGuard>, Box<dyn std::error::Error + Send + 
 ///
 /// Returns `Err` if a subscriber was already installed or the log file
 /// could not be opened.
-pub fn init_client() -> Result<WorkerGuard, Box<dyn std::error::Error + Send + Sync>> {
+pub fn init_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let format = LogFormat::from_env();
     let path = std::env::var_os(ENV_LOG_PATH)
         .filter(|v| !v.is_empty())
         .map_or_else(default_client_log_path, PathBuf::from);
 
-    let (writer, guard) = file_writer(&path)?;
-    let file_layer = fmt_layer(format, writer, false);
+    // BLOCKING (synchronous) writer, NOT the server's non-blocking appender.
+    // The client leaves its detach/signal paths via `std::process::exit`,
+    // which skips a `WorkerGuard`'s flush-on-Drop and would silently drop the
+    // buffered trace tail — exactly when you detach right after reproducing a
+    // lag/crash. A synchronous appender has no buffered tail to lose, so no
+    // guard is needed; the client log path is not latency-critical.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "PHUX_LOG path has no file name: {}",
+            path.display()
+        ))
+    })?;
+    let appender = tracing_appender::rolling::never(
+        dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf),
+        file_name,
+    );
+    let file_layer = fmt_layer(format, appender, false);
 
     tracing_subscriber::registry()
         .with(env_filter())
         .with(file_layer)
         .try_init()?;
 
-    Ok(guard)
+    Ok(())
 }
 
 /// Whether the server panic hook has already been installed. The hook is
