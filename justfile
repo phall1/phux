@@ -63,6 +63,25 @@ e2e:
 e2e-repro:
     cargo run -p phux-server --example e2e-repro
 
+# Capture a REAL traced client session for the debugging flywheel. Attaches
+# with JSON tracing to a timestamped log, then prints the path to hand off
+# for analysis. Reproduce the lag/crash during the session (and a crash's
+# backtrace lands in the same log), then detach. An auto-spawned server
+# inherits the same tracing env, so the log holds both sides (filter by the
+# `target` field: phux_client::* vs phux_server::*).
+#   just trace-attach                 # session "default"
+#   just trace-attach work            # a named session
+#   just trace-attach work phux=trace # crank the level
+trace-attach session="default" level="phux=debug":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log="/tmp/phux-trace-$(date +%s).json"
+    echo "[trace] -> $log  (PHUX_LOG_FORMAT=json, RUST_LOG={{level}}); reproduce the issue, then detach"
+    PHUX_LOG="$log" PHUX_LOG_FORMAT=json RUST_LOG="{{level}}" cargo run -q -p phux -- attach {{session}} || true
+    echo "[trace] session ended -> hand off this file: $log"
+    echo "[trace] quick peek at the slowest renders:"
+    jq -rc 'select(.fields.message=="close" and (.span.name|test("render|handle_server_frame|synthesize|tick_emit"))) | [.fields["time.busy"], .span.name, (.span.changed_row_count//.span.out_bytes//"")] | @tsv' "$log" 2>/dev/null | sort -h | tail -15 || true
+
 # Smoke-test the examples/agents/ scripts against a throwaway server, so
 # they cannot rot silently against CLI changes (phux-wiv). Builds `phux`
 # once, pins SHELL=/bin/sh for a banner-free seed pane (no p10k/direnv
