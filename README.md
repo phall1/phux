@@ -142,6 +142,7 @@ Detach with the default prefix (`Ctrl-A d`). Walk-through in
 |---|---|
 | Understand the model | [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) |
 | Run it | [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) |
+| Customize config and keybindings | [`docs/CONFIG.md`](./docs/CONFIG.md) |
 | Read the wire spec | [`docs/spec/`](./docs/spec/) |
 | Understand how it's built | [`docs/architecture/`](./docs/architecture/) |
 | Read the TUI surface | [`docs/consumers/tui.md`](./docs/consumers/tui.md) |
