@@ -443,17 +443,22 @@ pub fn seed_session_with_pty(
     Ok(terminal)
 }
 
-/// Spawn the per-pane EOF watcher task (phux-it8).
+/// Spawn the per-pane EOF watcher task (phux-it8, reshaped by phux-4r1).
 ///
 /// Awaits the `TerminalActor`'s `exit_notify` oneshot. When the actor
 /// observes PTY EOF (the child process has exited — typically the
-/// shell typed `exit`), this watcher walks the attached-client table
-/// and sends `FrameKind::Detached` to every client whose attached
-/// session's currently-focused pane is the now-dead pane, then
-/// detaches them server-side via [`ServerState::detach`]. Without
-/// this signal the client sits in its `tokio::select!` waiting for
-/// frames that never come and the user is stranded in an alt-screen
-/// guard with no way out (the bug phux-it8 fixes).
+/// shell typed `exit`), this watcher broadcasts the L1 lifecycle event
+/// `FrameKind::TerminalClosed { terminal_id, exit_status }` to every
+/// client subscribed to the now-dead pane, then reaps the pane's
+/// server-side state.
+///
+/// The watcher does NOT decide whether any client should detach:
+/// "no Terminals left in my attached collection ⇒ detach" is a
+/// *consumer* policy (ADR-0015 L1: lifecycle events are facts, detach
+/// is interpretation), now owned by the TUI's `attach::driver`
+/// main loop, which folds the closed pane out of its layout and
+/// detaches itself when the last pane closes. The server stops
+/// sending `FrameKind::Detached` on EOF.
 ///
 /// The watcher is `spawn_local` because `SharedState` is `Send` but
 /// we want the task to live on the same `LocalSet` that owns the
@@ -467,8 +472,8 @@ pub fn seed_session_with_pty(
 /// oneshot recv side are treated identically to "EOF observed":
 /// they only happen if the sender was dropped without firing, which
 /// in current code means the actor was dropped without going through
-/// the EOF branch — i.e. the pane is going away too. Detaching is
-/// still the right response.
+/// the EOF branch — i.e. the pane is going away too. Broadcasting
+/// `TERMINAL_CLOSED` is still the right response.
 fn spawn_terminal_exit_watcher(
     state: SharedState,
     pane: phux_core::ids::TerminalId,
@@ -481,17 +486,16 @@ fn spawn_terminal_exit_watcher(
     tokio::task::spawn_local(async move {
         // Recv error (sender dropped without firing) is treated the
         // same as a fired EOF with unknown exit status: in both cases
-        // the pane is dead and every attached client focused on it
-        // needs to be detached.
+        // the pane is dead and every subscribed client must be told.
         let exit_status = rx.await.unwrap_or(None);
-        // phux-4li.11: broadcast TERMINAL_CLOSED to every client that
-        // has the dying pane in its subscription set before running
-        // the legacy detach-on-EOF path. The two are stacked: clients
-        // first learn the pane died (structured frame for L1
-        // consumers); then the byc.8/it8 detach cascade fires for any
-        // client whose focused pane was this one.
+        // phux-4li.11 / phux-4r1: broadcast the L1 lifecycle event
+        // TERMINAL_CLOSED to every client subscribed to the dying pane.
+        // The server's job ends here — it reports the fact. The detach
+        // policy ("no Terminals left in my collection ⇒ detach") is the
+        // consumer's (the TUI driver folds the pane out of its layout and
+        // detaches itself when the last pane closes); the server no longer
+        // sends `Detached` on EOF (ADR-0015 L1).
         broadcast_terminal_closed(&state, pane, exit_status).await;
-        on_terminal_exited(&state, pane).await;
         // phux-60s: reap the dead pane, cascading to its window and
         // session when they empty. When the last session is gone the
         // server has nothing left to serve, so fire the root token —
@@ -525,8 +529,8 @@ fn spawn_terminal_exit_watcher(
 /// so the frame carries the same id the client saw on
 /// `TERMINAL_SPAWNED` / `TERMINAL_SNAPSHOT`. The send is best-effort:
 /// a client whose mailbox has closed (it dropped the socket) is
-/// silently skipped — the downstream `on_terminal_exited` path
-/// handles state cleanup.
+/// silently skipped — the `reap_terminal` call in the caller handles
+/// server-side state cleanup.
 async fn broadcast_terminal_closed(
     state: &SharedState,
     pane: phux_core::ids::TerminalId,
@@ -563,55 +567,6 @@ async fn broadcast_terminal_closed(
                 exit_status,
             }))
             .await;
-    }
-}
-
-/// Notify every client focused on `pane` that the session is closing,
-/// then detach them. Idempotent: safe to call once per pane EOF.
-///
-/// We gather the doomed clients (id, outbound sender) inside one
-/// `with_mut` critical section to avoid holding the state lock across
-/// `await` points. Each client is then handed a `FrameKind::Detached`
-/// asynchronously; on send failure (the writer task already exited)
-/// we silently drop — the client is already gone.
-///
-/// The final `state.with_mut(|s| s.detach(id))` removes the client
-/// from `attached` and clears its `pane_subscribers` entries, mirroring
-/// the existing explicit-detach path in `handle_client`'s
-/// `FrameKind::Detach` arm.
-async fn on_terminal_exited(state: &SharedState, pane: phux_core::ids::TerminalId) {
-    // Gather under-lock: which clients have this pane as their
-    // currently-focused pane? See SPEC §13 — focused pane is the only
-    // pane a single-pane session has, so this matches the practical
-    // 1:1 case today and TODO(phux-9gw) extends to multi-pane.
-    let doomed: Vec<(ClientId, tokio::sync::mpsc::Sender<Outbound>)> = state.with(|s| {
-        s.attached
-            .values()
-            .filter_map(|client| {
-                let active_pane = s.active_pane_of_session(client.session)?;
-                if active_pane == pane {
-                    Some((client.id, client.tx.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    });
-    if doomed.is_empty() {
-        debug!(?pane, "TerminalActor EOF: no attached clients to detach");
-        return;
-    }
-    debug!(
-        ?pane,
-        count = doomed.len(),
-        "TerminalActor EOF: broadcasting DETACHED to attached clients",
-    );
-    for (client_id, tx) in doomed {
-        // Best-effort: the writer task may already be gone if the
-        // socket died. The subsequent detach() call covers state
-        // cleanup either way.
-        let _ = tx.send(Outbound::Frame(FrameKind::Detached)).await;
-        detach_and_release_consumer_state(state, client_id);
     }
 }
 

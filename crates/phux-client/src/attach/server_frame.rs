@@ -29,7 +29,10 @@ use crate::render::chrome::status_bar::StatusBarPainter;
 )]
 #[derive(Debug, Clone, Default)]
 pub(super) struct FrameOutcome {
-    /// `true` ⇒ the loop should exit cleanly (server sent `DETACHED`).
+    /// `true` ⇒ the loop should exit cleanly: either the server sent
+    /// `DETACHED`, or a `TERMINAL_CLOSED` folded the last pane out of the
+    /// layout and the consumer-owned detach policy (phux-4r1) decided to
+    /// leave (nothing left to render or route input to).
     pub(super) exit: bool,
     /// `true` ⇒ ATTACHED just landed; the driver should emit
     /// `GET_METADATA` + `SUBSCRIBE_METADATA` for the layout key so
@@ -720,6 +723,23 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // The fold may have emptied the window; drop any such
                     // windows and keep `active` valid.
                     workspace.prune_empty_windows();
+                    // phux-4r1: consumer-owned detach policy (ADR-0015 L1).
+                    // The server reports the fact (TERMINAL_CLOSED) and stops
+                    // there; deciding whether *this* client detaches is the
+                    // TUI's call. When the last pane closed there is nothing
+                    // left to render or to route input to, so detach. For
+                    // v0.1 single-pane this is behaviorally identical to the
+                    // old server-baked "EOF ⇒ DETACHED" (the seed pane closes
+                    // ⇒ client exits), but now multi-Terminal-ready: closing
+                    // one of several panes folds it out and keeps the attach
+                    // alive.
+                    if workspace.windows.is_empty() {
+                        tracing::info!("TerminalClosed folded the last pane; detaching");
+                        return Ok(FrameOutcome {
+                            exit: true,
+                            ..FrameOutcome::default()
+                        });
+                    }
                     // Re-anchor `focused_pane` onto the (possibly new)
                     // active window's focus. `apply_terminal_closed` sets
                     // a surviving window's focus to the first DFS leaf;
@@ -1320,6 +1340,107 @@ mod tests {
         .expect("handle_server_frame");
 
         assert_eq!(&out, b"\x07", "bell must emit a single BEL byte");
+    }
+
+    /// Drive a `TERMINAL_CLOSED { terminal_id, exit_status }` through
+    /// [`handle_server_frame`] and return the resulting [`FrameOutcome`]
+    /// so the consumer-side detach policy (phux-4r1) can be asserted.
+    fn drive_closed(
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        exit_status: Option<i32>,
+    ) -> FrameOutcome {
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            &mut out,
+            FrameKind::TerminalClosed {
+                terminal_id: terminal_id.clone(),
+                exit_status,
+            },
+            panes,
+            layout,
+            focused,
+            &mut session_name,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-4r1: the detach policy is consumer-owned. When the LAST pane
+    /// closes there is nothing left to render or route input to, so the
+    /// TUI detaches itself — the `TerminalClosed` arm returns
+    /// `FrameOutcome { exit: true }`. This is the consumer-side half of
+    /// the EOF reshape: the server emits `TERMINAL_CLOSED` (an L1
+    /// lifecycle fact) and the client decides to leave.
+    #[test]
+    fn last_pane_closed_detaches_the_client() {
+        let pane = tid(1);
+        let mut workspace = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+
+        let outcome = drive_closed(&mut workspace, &mut focused, &mut panes, &pane, Some(0));
+
+        assert!(
+            outcome.exit,
+            "closing the only pane must make the consumer detach (exit: true)",
+        );
+        assert!(
+            workspace.windows.is_empty(),
+            "the workspace must have no windows left after the last pane closes",
+        );
+        assert!(
+            !panes.contains_key(&pane),
+            "the closed pane's slot must be dropped",
+        );
+    }
+
+    /// phux-4r1: closing one of several panes is NOT a detach. The
+    /// survivor stays attached — the `TerminalClosed` arm folds the
+    /// closed leaf out, re-anchors focus, and asks for a repaint +
+    /// reflow + broadcast, with `exit: false`.
+    #[test]
+    fn closing_one_of_several_panes_keeps_the_client_attached() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut workspace = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let outcome = drive_closed(&mut workspace, &mut focused, &mut panes, &left, Some(0));
+
+        assert!(
+            !outcome.exit,
+            "a surviving pane means the client stays attached (exit: false)",
+        );
+        assert_eq!(
+            workspace.windows.len(),
+            1,
+            "the window survives with the remaining pane",
+        );
+        assert_eq!(
+            focused,
+            Some(right),
+            "focus re-anchors onto the surviving leaf",
+        );
+        assert!(
+            outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes,
+            "the fold triggers repaint + sibling broadcast + survivor reflow",
+        );
     }
 }
 
