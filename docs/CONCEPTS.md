@@ -93,20 +93,47 @@ See [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-tran
 
 ---
 
-## Comparison to other multiplexers
+## Comparison to other tools
 
-| Feature | phux | tmux | zellij | screen | zmx | rmux | cmux |
-|---|---|---|---|---|---|---|---|
-| Modern terminal protocol support[^1] | ✓ | ◐ | ◐ | ✗ | ✗ | ✗ | ✗ |
-| Federation-ready addressing[^2] | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| libghostty canonical parser | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Structured input types | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| End-to-end passthrough (no re-parse) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
-| Agent/programmatic first-class | ✓ | ◐ | ◐ | ✗ | ✗ | ✗ | ✓ |
-| Production-proven maturity | ✗ | ✓ | ◐ | ✓ | ✗ | ✗ | ✗ |
+phux is not competing with every terminal tool. Different tools solve different problems. Here's where phux stands.
+
+### Traditional multiplexers
+
+These are human-first session managers: tmux, zellij, screen. They arrange terminals on screen with windows, panes, and splits. phux aims to be in this category but rethought from libghostty up.
+
+| Dimension | phux | tmux | zellij | screen |
+|---|---|---|---|---|
+| Modern terminal protocol support[^1] | ✓ | ◐ | ◐ | ✗ |
+| Federation-ready addressing[^2] | ✓ | ✗ | ✗ | ✗ |
+| libghostty canonical parser | ✓ | ✗ | ✗ | ✗ |
+| Structured input types | ✓ | ✗ | ✓ | ✗ |
+| End-to-end passthrough (no re-parse) | ✓ | ✗ | ✗ | ✗ |
+| Production-proven maturity | ✗ | ✓ | ◐ | ✓ |
+
+**What's different:** phux parses once (libghostty), routes VT bytes losslessly, and bakes federated addressing into the wire from day 1. tmux and zellij re-parse in-path and bolt on remote attach via SSH. screen is the oldest and simplest.
+
+### Agent-focused tools
+
+These solve agent automation and control, not primary human use. They're in a different category than traditional multiplexers.
+
+| Dimension | phux | zmx | cmux | rmux |
+|---|---|---|---|---|
+| Agent SDK or programmatic API | ✓ (planned L1 SDK) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
+| Primary use case | Human multiplexer + control plane | Minimal session persistence | Agent UI (git, PR, notifications) | Agent automation |
+| Cross-platform | ✓ | ✗ (implied) | ✗ (macOS only) | ✓ |
+| Maturity | Pre-release v0.1 | Minimal scope, SSH bugs | Production (20k+ stars) | Public preview (v0.3.1) |
+| Wire protocol published | ✓ (phux-proto in docs/spec/) | ✗ | Proprietary | ✓ (rmux-proto crate) |
+
+**What's going on here:** These are not multiplexer competitors.
+
+- **zmx** is deliberately minimal: session persistence only, delegates window/split logic to the OS. Known terminal state bugs in nested SSH. No agent SDK.
+- **cmux** is Swift + AppKit, macOS-only, focused on agent coordination (Claude, Cursor). Shows git branches, PRs, agent notifications. Not a tmux replacement.
+- **rmux** is a fresh public preview agent SDK (Rust, Playwright-style async). All 90 tmux commands available. No federation.
+
+phux is *both* a human multiplexer *and* a federation-ready control plane. The agent SDK is one consumer of the same wire that the TUI rides. See [ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md).
 
 [^1]: Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse. phux passes through unchanged (libghostty parses once, bytes forward). Others re-parse mid-path and degrade fidelity.
-[^2]: phux wire knows remote identity from day 1. Others treat remote attach as client-side (SSH + local connect). phux can build a fleet control plane with uniform addressing from the start.
+[^2]: phux wire knows remote identity from day 1. Design in [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md). Traditional multiplexers treat remote attach as client-side (SSH + local connect).
 
 ---
 
