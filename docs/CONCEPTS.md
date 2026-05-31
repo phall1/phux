@@ -6,25 +6,25 @@ last-reviewed: 2026-05-28
 
 # Concepts
 
-**TL;DR.** phux is a libghostty-backed terminal control plane. The unit of work is the *terminal* — spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, and panes are one consumer's way to arrange terminals on screen. The wire is layered so that a consumer speaks only the tiers it needs and federation is in the addressing, not bolted on.
+**TL;DR.** phux is a libghostty-backed terminal control plane. The terminal is the model: spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, panes are the TUI's way to arrange them. The wire is layered; federation is in the addressing, not bolted on.
 
 ---
 
-## The unit of work is the terminal
+## Terminals, not panes
 
-A terminal is stateful: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
+A terminal: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
 
-Everything else — sessions, windows, panes, splits, status bars — is one way to arrange terminals on screen. Not load-bearing.
+Sessions, windows, panes, splits — the entire tmux vocabulary — live in the TUI layer. Not on the wire. Not load-bearing for agents or control planes.
 
-Why frame it this way? The consumer category widened:
-- Humans want the tmux experience.
-- Agents want to spawn, observe, and tear down terminals.
-- CI fleets want stable event streams.
-- Control planes want addressable resources.
+Why? The consumer category expanded beyond humans:
+- Humans want windows and splits (the TUI layer handles this)
+- Agents want to spawn, observe, tear down terminals
+- CI fleets want event streams
+- Control planes want addressable resources across machines
 
-The terminal is the greatest common factor.
+The terminal is what everyone needs. Everything else is optional.
 
-The reference TUI ships in-tree because the substrate is only real if a real consumer rides it. The substrate is the point.
+The reference TUI ships in-tree because the substrate is only real if someone rides it.
 
 ---
 
