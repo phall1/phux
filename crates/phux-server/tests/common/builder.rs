@@ -533,6 +533,26 @@ impl ClientHandle {
         .await;
     }
 
+    /// Send a `VIEWPORT_RESIZE` with the EXACT requested dimensions over
+    /// the wire (including degenerate `0`/extreme values) WITHOUT rebuilding
+    /// the oracle to those dims — the oracle has no concept of a
+    /// zero-dimension grid, so it is clamped to a 1-cell minimum here. Use
+    /// this in crash-hunt scenarios that need to push pathological viewports
+    /// at the server; use [`Self::resize`] for normal geometry where the
+    /// oracle should track the new size.
+    pub async fn resize_raw(&mut self, cols: u16, rows: u16) {
+        self.viewport = ViewportInfo::new(cols, rows);
+        self.screen =
+            Screen::new(cols.max(1), rows.max(1)).expect("Screen::new on raw resize (clamped)");
+        send_frame(
+            &mut self.stream,
+            &FrameKind::ViewportResize {
+                viewport: self.viewport,
+            },
+        )
+        .await;
+    }
+
     /// Detach by dropping the wire stream (a hard client departure). The
     /// server reaps the connection on EOF. Consumes the handle's stream;
     /// call [`Self::reattach`]-style flows via the [`Harness`] instead, or

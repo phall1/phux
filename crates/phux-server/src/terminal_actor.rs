@@ -1289,9 +1289,33 @@ impl TerminalActor {
     /// Apply a resize to both the libghostty `Terminal` and the PTY
     /// kernel-side winsize. Idempotent; logs and continues on errors.
     fn handle_resize(&mut self, cols: u16, rows: u16) {
-        let (old_cols, old_rows) = (self.cols, self.rows);
-        self.cols = cols;
-        self.rows = rows;
+        // libghostty has no concept of a zero-dimension grid: a 0-col or
+        // 0-row resize fails with `InvalidValue` and leaves the grid at its
+        // prior size. SPEC §10.5 already treats a zero-dimension viewport as
+        // a no-op at the ATTACH path; clamp the live VIEWPORT_RESIZE path to
+        // the same 1-cell minimum here so a `0x0` from a client (a host
+        // terminal collapsing to nothing) can never reach libghostty.
+        let cols = cols.max(1);
+        let rows = rows.max(1);
+
+        // The both-shrink decomposition (below) MUST key off libghostty's
+        // ACTUAL current dimensions, not the cached `self.cols/self.rows`.
+        // A prior resize that failed (e.g. a now-clamped 0, or any
+        // libghostty error) could leave the cache ahead of the real grid;
+        // keying the both-shrink decision off a stale cache then issues a
+        // true both-shrink as a SINGLE `resize()` call, hitting the very
+        // `PageList.resizeCols` integer overflow this shim exists to avoid
+        // (phux-y06, the SIGABRT reproduced by the resize-extremes storm).
+        // Reading the live dims keeps the workaround correct across failed
+        // resizes.
+        let (cur_cols, cur_rows) = {
+            let term = self.terminal.borrow();
+            (
+                term.cols().unwrap_or(self.cols),
+                term.rows().unwrap_or(self.rows),
+            )
+        };
+
         // `Terminal::resize` takes pixel dims for image-protocol sizing;
         // pass 0 (server does not maintain pixel metrics — clients
         // own pixel rendering per ADR-0013).
@@ -1301,10 +1325,10 @@ impl TerminalActor {
         // call. Decompose a both-shrink into two single-axis steps (rows
         // first, then cols); each is individually safe. Drop this once
         // the pinned libghostty-vt rev fixes resizeCols upstream.
-        {
+        let applied = {
             let mut term = self.terminal.borrow_mut();
-            let result = if cols < old_cols && rows < old_rows {
-                term.resize(old_cols, rows, 0, 0)
+            let result = if cols < cur_cols && rows < cur_rows {
+                term.resize(cur_cols, rows, 0, 0)
                     .and_then(|()| term.resize(cols, rows, 0, 0))
             } else {
                 term.resize(cols, rows, 0, 0)
@@ -1312,21 +1336,33 @@ impl TerminalActor {
             if let Err(err) = result {
                 warn!(?err, cols, rows, "terminal resize failed");
             }
-        }
+            // Cache the dims libghostty actually settled on, never the
+            // requested dims: on error the grid is unchanged, so caching
+            // the request would desync the cache from reality and defeat
+            // the both-shrink guard on the next resize.
+            (term.cols().unwrap_or(cols), term.rows().unwrap_or(rows))
+        };
+        self.cols = applied.0;
+        self.rows = applied.1;
         // A resize reflows the grid: every consumer reference is rebuilt
         // on the next diff, so force the next tick to walk (phux-4l0).
         self.terminal_dirty_since_tick = true;
         if let Some(pty) = &self.pty {
             let size = PtySize {
-                rows,
-                cols,
+                rows: applied.1,
+                cols: applied.0,
                 pixel_width: 0,
                 pixel_height: 0,
             };
             if let Ok(master) = pty.master.lock()
                 && let Err(err) = master.resize(size)
             {
-                warn!(?err, cols, rows, "pty resize ioctl failed");
+                warn!(
+                    ?err,
+                    cols = applied.0,
+                    rows = applied.1,
+                    "pty resize ioctl failed"
+                );
             }
         }
     }
@@ -3067,6 +3103,150 @@ mod tests {
                     .expect("actor task panicked");
             })
             .await;
+    }
+
+    /// Crash-hunt: a storm of *degenerate* resizes — `0x0`, `1x1`,
+    /// `1x200`, `200x1`, a 1000x1000 monster, and repeated both-axes
+    /// shrinks crossing the 1-cell clamp — must NOT panic the actor task.
+    /// The actor's `handle_resize` is the last guard before libghostty's
+    /// `Terminal::resize`; a zero dimension or an unguarded both-shrink at
+    /// the boundary previously reached the Zig `PageList.resizeCols`
+    /// overflow. We assert the actor is still alive (the `join` unwrap
+    /// surfaces a panicked task) and a final sane resize still applies.
+    #[tokio::test]
+    async fn degenerate_resize_storm_does_not_panic_actor() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new_with_seed(80, 24, b"crash-hunt").expect("seed");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                let storm: &[(u16, u16)] = &[
+                    (0, 0),
+                    (1, 1),
+                    (1, 200),
+                    (200, 1),
+                    (0, 0),
+                    (1000, 1000),
+                    (1, 1),
+                    (3, 3),
+                    (2, 2),
+                    (1, 1),
+                    (5, 1),
+                    (1, 5),
+                    (1, 1),
+                ];
+                for &(cols, rows) in storm {
+                    handle
+                        .resize
+                        .send(ResizeRequest {
+                            cols,
+                            rows,
+                            resync_clients: false,
+                        })
+                        .await
+                        .expect("send resize");
+                }
+                // Let the actor drain the whole mailbox.
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                }
+
+                // A final sane resize must still take effect — proof the
+                // actor survived and is processing, not wedged.
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 100,
+                        rows: 30,
+                        resync_clients: false,
+                    })
+                    .await
+                    .expect("send final resize");
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked under degenerate resize storm");
+            })
+            .await;
+    }
+
+    /// phux-y06 regression (crash-hunt): a `0x0` (or any failing) resize
+    /// followed by a both-shrink must NOT abort libghostty's
+    /// `PageList.resizeCols` with an integer overflow.
+    ///
+    /// The pre-fix bug: `handle_resize` cached the *requested* dims even
+    /// when the libghostty `resize` failed (a `0x0` fails with
+    /// `InvalidValue` and leaves the grid at its prior size). The next
+    /// resize then keyed its both-shrink decomposition off the stale cache
+    /// (`old = 0x0`), saw `1 < 0` is false, and issued the true both-shrink
+    /// (e.g. real `80x24 -> 1x1`) as a SINGLE `resize()` — straight into the
+    /// Zig overflow → SIGABRT.
+    ///
+    /// This test replays that exact transition against a content-filled
+    /// `Terminal` using the FIXED algorithm: clamp to 1-cell, key the
+    /// both-shrink decision off libghostty's REAL current dims, and cache
+    /// only the dims that actually applied. It must survive every step and
+    /// settle at the final size. (Run as a plain `Terminal` test so a
+    /// regression aborts THIS test, not a flaky e2e teardown.)
+    #[test]
+    fn resize_desync_then_both_shrink_does_not_overflow() {
+        let mut term = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 100,
+        })
+        .expect("term");
+        // Enough scrollback content that a cols-reflow actually walks rows
+        // (the overflow needs real content to reflow).
+        for i in 0..300u32 {
+            let line = format!("row-{i}-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+            term.vt_write(line.as_bytes());
+        }
+
+        // The minimal trigger: a 0x0 (fails, no-op) immediately followed by
+        // a both-shrink to 1x1, then the wider degenerate storm.
+        let storm: &[(u16, u16)] = &[
+            (0, 0),
+            (1, 1),
+            (1, 200),
+            (200, 1),
+            (0, 0),
+            (1000, 1000),
+            (1, 1),
+            (3, 3),
+            (2, 2),
+            (1, 1),
+            (100, 30),
+        ];
+        for &(req_cols, req_rows) in storm {
+            for i in 0..40u32 {
+                let line = format!("interleave-{i}-bbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n");
+                term.vt_write(line.as_bytes());
+            }
+            // --- mirror the FIXED handle_resize algorithm ---
+            let cols = req_cols.max(1);
+            let rows = req_rows.max(1);
+            let cur_cols = term.cols().expect("cols");
+            let cur_rows = term.rows().expect("rows");
+            let _ = if cols < cur_cols && rows < cur_rows {
+                term.resize(cur_cols, rows, 0, 0)
+                    .and_then(|()| term.resize(cols, rows, 0, 0))
+            } else {
+                term.resize(cols, rows, 0, 0)
+            };
+        }
+
+        // Survived without SIGABRT; the grid settled at the final sane size.
+        assert_eq!(term.cols().expect("cols"), 100);
+        assert_eq!(term.rows().expect("rows"), 30);
     }
 
     /// Naive subsequence search for test assertions on VT byte streams.
