@@ -10,11 +10,14 @@
 //!   (the binary's stdout is reserved for protocol/PTY traffic on the
 //!   `--stdio` future path; never pollute it with log lines). The
 //!   filter is read from `RUST_LOG`, defaulting to `phux=info,warn`.
-//! * Opt-in: when this crate is built with `--features tokio-console`
-//!   (and Tokio is built with `--cfg tokio_unstable`), a
-//!   `console_subscriber` layer is also installed so an operator can
-//!   attach the `tokio-console` CLI for live actor introspection
-//!   (broadcast lag, task stalls, poll counts).
+//! * Opt-in: the `console_subscriber` layer for the `tokio-console` CLI
+//!   is installed only when BOTH `--features tokio-console` and
+//!   `--cfg tokio_unstable` are set at build time. `console_subscriber`
+//!   panics at runtime if Tokio lacks `tokio_unstable`, so gating on the
+//!   cfg (not the feature alone) keeps a `--all-features` build — which
+//!   turns the feature on but not the cfg — from producing a binary that
+//!   aborts on every invocation. With the feature but no cfg, we fall
+//!   back to the plain stderr subscriber.
 //!
 //! The function is **idempotent at the type level only** — `init()`
 //! must be called at most once per process. Subsequent calls will
@@ -63,9 +66,12 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The `tokio-console` integration is purely additive: it adds a
     // second layer that publishes runtime task instrumentation to a
     // gRPC server (default 127.0.0.1:6669) that the `tokio-console`
-    // CLI connects to. Requires `--cfg tokio_unstable` to be set when
-    // building Tokio itself; see this module's docs.
-    #[cfg(feature = "tokio-console")]
+    // CLI connects to. `console_subscriber::spawn()` PANICS unless Tokio
+    // was built with `--cfg tokio_unstable`, so we gate on the cfg too
+    // (not the feature alone) — otherwise a `--all-features` build would
+    // produce a binary that aborts on startup. The `tokio_unstable` cfg
+    // name is declared expected in this crate's build.rs.
+    #[cfg(all(feature = "tokio-console", tokio_unstable))]
     {
         let console_layer = console_subscriber::ConsoleLayer::builder()
             .with_default_env()
@@ -73,7 +79,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         registry.with(console_layer).try_init()?;
     }
 
-    #[cfg(not(feature = "tokio-console"))]
+    #[cfg(not(all(feature = "tokio-console", tokio_unstable)))]
     {
         registry.try_init()?;
     }
