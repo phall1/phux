@@ -22,45 +22,58 @@
 //! text, VT, or HTML back out. This module owns *finding* only; it does not
 //! highlight, maintain a cursor, or (yet) extract — see the note below.
 //!
-//! ## Selection + extraction: the delegation boundary, and the pin gap
+//! ## Selection + extraction: the delegation boundary, and the unblocked bridge
 //!
 //! Per CONTRIBUTING ("A homegrown selection engine"), word/line/output
 //! *boundary* logic and text *extraction* belong to the host terminal and to
 //! libghostty. phux owns exactly one copy-mode-adjacent primitive: the
-//! literal find-in-scrollback below. The plan was to also ship a thin,
+//! literal find-in-scrollback below. The remaining piece is a thin,
 //! fully-safe extraction bridge — turn a [`Match`]'s coordinate span into a
-//! [`libghostty_vt::screen::Selection`] and run a
-//! [`libghostty_vt::fmt::Formatter`] over it.
+//! [`libghostty_vt::selection::Selection`] and format just that range to text.
 //!
-//! The *types* for that bridge are all public at pin `acc4b87`: `Selection`
-//! has public [`GridRef`](libghostty_vt::screen::GridRef) endpoints,
-//! [`Terminal::grid_ref`] yields them, and `Formatter` accepts an
-//! `Option<Selection>`. The OSC-133-aware boundary helpers
-//! (`ghostty_terminal_select_word` / `_line` / `_output`) are *not* wrapped
-//! — they need the raw terminal handle, which the safe crate seals
-//! `pub(crate)` — but that is the boundary engine we deliberately refuse to
-//! reimplement, so its absence is correct, not a gap.
+//! The *types* for that bridge are all public at pin `8e1b0f7`: `Selection`
+//! is built from two [`GridRef`](libghostty_vt::screen::GridRef) endpoints via
+//! [`Selection::new`](libghostty_vt::selection::Selection::new),
+//! [`Terminal::grid_ref`] yields them, and the one-shot
+//! [`Terminal::format_selection_alloc`](libghostty_vt::Terminal::format_selection_alloc)
+//! formats a borrowed selection to bytes. The OSC-133-aware boundary helpers
+//! (`select_word` / `select_line` / `select_output`) now have safe wrappers on
+//! `Terminal`, but those are the boundary engine we deliberately refuse to
+//! reimplement, so phux leaving them to the host terminal is by choice.
 //!
-//! The real blocker is narrower and is upstream: the safe crate's
-//! `Formatter::new_inner` builds the FFI options with
-//! `selection: match selection.map(Into::into) { Some(s) => &raw const s, .. }`,
-//! taking the address of a match-arm-local copy of the `ffi::Selection`
-//! (which is `Copy`). That temporary is dropped before
-//! `ghostty_formatter_terminal_new` reads through the pointer, so the
-//! `selection: Some(..)` path passes a dangling pointer and libghostty
-//! returns `InvalidValue`. The no-selection (whole-screen) path is sound and
-//! works. Until a libghostty-rs pin fixes that, there is no *sound* way to
-//! format a selection through the safe API, and phux will not reach into
-//! `-sys` to reconstruct the raw handle ourselves. The coordinate-producing
-//! half — fully under our control — ships here; the extraction wrapper waits
-//! on the upstream fix. `safe_api_selection_formatter_bridge_is_broken_at_pin`
-//! pins the gap and will fail loudly when the pin moves.
+//! Use the one-shot API, not `Formatter { selection: Some(_) }`. At pin
+//! `acc4b87` the only selection-aware entry was `Formatter::new` with
+//! `FormatterOptions::selection: Some(_)`, and `Formatter::new_inner` stored
+//! `&raw const s` — the address of a match-arm-local copy of the
+//! (`Copy`) `ffi::Selection` — which dropped before
+//! `ghostty_formatter_terminal_new` read through it, so libghostty returned
+//! `InvalidValue`. Pin `8e1b0f7` *adds* the sound one-shot selection API
+//! ([`Terminal::format_selection_alloc`] / `format_selection_buf` /
+//! `FormatOptions`), which holds the `Selection` *by borrow* across the FFI
+//! call. That path round-trips; the extraction bridge uses it.
+//! `safe_api_selection_formatter_bridge_round_trips_at_pin` proves it.
+//!
+//! The `Formatter::new` selection path is still unsound at `8e1b0f7` (it now
+//! stores `&s.inner` where `s` is moved out of the by-value `Option` in the
+//! match arm, so the borrow still dangles); phux must not use it. Fixing it
+//! upstream — or porting phux to the one-shot API throughout — is tracked as a
+//! follow-up.
+//!
+//! What remains for the extraction bridge itself is *coordinate translation*,
+//! not API soundness: a [`Match`]'s `col`/`len` are `char` offsets into the
+//! right-trimmed projected text row, while [`Terminal::grid_ref`] wants a
+//! [`Point`](libghostty_vt::terminal::Point) in grid columns within a
+//! [`PointSpace`](libghostty_vt::terminal::PointSpace) — and wide glyphs make
+//! the two diverge (3sy's caveat). Mapping a `(Region, row, char-col)` triple
+//! back onto the terminal's grid coordinate space is the next deliberate step
+//! (phux-3sy / phux-97w follow-up); it is not built here to avoid shipping a
+//! half-correct wide-glyph mapping.
 
 use crate::grid::{SnapshotSynthesizer, SynthesisError};
 use libghostty_vt::Terminal;
 // `Selection`, `Formatter`, `Point`, and friends are imported only inside the
-// test module that pins the upstream extraction-bridge gap; see
-// `safe_api_selection_formatter_bridge_is_broken_at_pin`.
+// test module that proves the selection -> Formatter extraction path is sound;
+// see `safe_api_selection_formatter_bridge_round_trips_at_pin`.
 
 /// Which region of the mirrored screen a [`Match`] falls in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +261,7 @@ mod tests {
     use libghostty_vt::{
         Terminal, TerminalOptions,
         fmt::{Format, Formatter, FormatterOptions},
-        screen::Selection,
+        selection::{FormatOptions, Selection},
         terminal::{Point, PointCoordinate},
     };
 
@@ -394,26 +407,35 @@ mod tests {
     }
 
     #[test]
-    fn safe_api_selection_formatter_bridge_is_broken_at_pin() {
-        // Pins the upstream gap that blocks the extraction wrapper
-        // (phux-3sy). The safe `libghostty_vt` crate at pin acc4b87 *does*
-        // expose every type the bridge needs — `screen::Selection` has
-        // public `GridRef` endpoints, `Terminal::grid_ref` yields them, and
-        // `fmt::Formatter` accepts an `Option<Selection>`. But
-        // `Formatter::new_inner` takes the address of a match-arm-local copy
-        // of the `ffi::Selection` (`&raw const s`) that is dropped before the
-        // FFI call reads through it, so the `selection: Some(..)` path passes
-        // a dangling pointer and libghostty rejects it.
+    fn safe_api_selection_formatter_bridge_round_trips_at_pin() {
+        // Confirms the sound, selection-restricted text-extraction path that
+        // unblocks the extraction wrapper (phux-3sy / phux-97w): build a
+        // `selection::Selection` from two `Terminal::grid_ref` endpoints and
+        // format just that sub-range back to text.
         //
-        // This test asserts both halves: the no-selection (whole-screen)
-        // path works, and the selection path fails. When a future
-        // libghostty-rs pin fixes `new_inner`, the second assertion flips and
-        // this test fails loudly — the signal to wire up the extraction
-        // bridge (see the module note and `phux-3sy` follow-up).
+        // Pin history. At acc4b87 the only selection-aware formatter entry was
+        // `Formatter::new` with `FormatterOptions::selection: Some(_)`, and
+        // `Formatter::new_inner` took the address of a match-arm-local copy of
+        // the `ffi::Selection` (`&raw const s`) that dropped before the FFI
+        // call read through it — a dangling pointer, so libghostty returned
+        // `InvalidValue`. Pin 8e1b0f7 ships the dedicated one-shot selection
+        // API (`Terminal::format_selection_alloc` + `FormatOptions`), which
+        // holds the `Selection` *by borrow* across the FFI call and is sound.
+        // That is the path phux's extraction bridge will use, and the one this
+        // test pins.
+        //
+        // CAVEAT (still-broken sibling path). `Formatter::new` with
+        // `selection: Some(_)` is still unsound at 8e1b0f7: `new_inner` now
+        // writes `&s.inner` where `s` is the `Selection` moved out of the
+        // by-value `Option` in the match arm, so the borrow still dangles
+        // before `opts.into()` runs. phux therefore extracts via
+        // `format_selection_alloc`, never via `Formatter { selection: Some }`.
+        // See the upstream follow-up note in the structured report.
         let mut t = fresh(40, 3);
         t.vt_write(b"the quick brown fox");
 
-        // Whole-screen format: works.
+        // Whole-screen format (selection: None): works — this path never
+        // builds a selection pointer.
         let mut whole = Formatter::new(
             &t,
             FormatterOptions {
@@ -430,33 +452,32 @@ mod tests {
             "the no-selection formatter path is functional",
         );
 
-        // Selection-restricted format: broken at this pin. Build a linear
-        // selection over "brown" (cols 10..=14 of the only viewport row).
-        let selection = Selection {
-            start: t
-                .grid_ref(Point::Viewport(PointCoordinate { x: 10, y: 0 }))
+        // Selection-restricted format via the sound one-shot API. Build a
+        // linear selection over "brown" (cols 10..=14 of the only row) and
+        // extract just that sub-range.
+        let selection = Selection::new(
+            t.grid_ref(Point::Active(PointCoordinate { x: 10, y: 0 }))
                 .expect("start grid_ref"),
-            end: t
-                .grid_ref(Point::Viewport(PointCoordinate { x: 14, y: 0 }))
+            t.grid_ref(Point::Active(PointCoordinate { x: 14, y: 0 }))
                 .expect("end grid_ref"),
-            rectangle: false,
-        };
-        let restricted = Formatter::new(
-            &t,
-            FormatterOptions {
-                format: Format::Plain,
-                trim: true,
-                unwrap: true,
-                selection: Some(selection),
-            },
-        )
-        .and_then(|mut f| f.format_alloc(None).map(|b| b.to_vec()));
-        assert!(
-            restricted.is_err(),
-            "selection-restricted formatting is expected to fail at pin \
-             acc4b87 (dangling selection pointer in Formatter::new_inner); \
-             if this now succeeds, wire up the extraction bridge, got {:?}",
-            restricted.map(|b| String::from_utf8_lossy(&b).into_owned()),
+            false,
+        );
+        let extracted = t
+            .format_selection_alloc(
+                None,
+                FormatOptions::new()
+                    .with_emit_format(Format::Plain)
+                    .with_trim(true)
+                    .with_unwrap(true)
+                    .with_selection(&selection),
+            )
+            .expect("selection-restricted formatting succeeds at pin 8e1b0f7")
+            .expect("a non-empty selection yields Some(bytes)");
+        assert_eq!(
+            String::from_utf8_lossy(&extracted).trim(),
+            "brown",
+            "the selection-restricted extraction path round-trips the \
+             sub-range text (cols 10..=14 -> \"brown\")",
         );
     }
 }
