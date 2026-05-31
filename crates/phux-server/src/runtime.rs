@@ -35,8 +35,8 @@ use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, SpawnError,
-    SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
+    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
+    SpawnError, SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
@@ -579,13 +579,31 @@ async fn broadcast_terminal_closed(
         ?exit_status,
         "TERMINAL_CLOSED: broadcasting to subscribed clients",
     );
+    let mut event_wire_id = None;
     for (wire_terminal_id, tx) in targets {
+        event_wire_id.get_or_insert_with(|| wire_terminal_id.clone());
         let _ = tx
             .send(Outbound::Frame(FrameKind::TerminalClosed {
                 terminal_id: wire_terminal_id,
                 exit_status,
             }))
             .await;
+    }
+    // phux-y2t: also fan a `pane_closed` agent event to event-stream
+    // subscribers (SPEC §7.5). Separate from the `TERMINAL_CLOSED`
+    // L1-subscriber fanout above so a `watch`-only client that never
+    // attached still learns the pane died.
+    if let Some(wire_terminal_id) = event_wire_id.or_else(|| {
+        // No L1 subscribers, but there may still be event-stream
+        // subscribers (a `watch` without an attach). Intern the wire id.
+        Some(state.with_mut(|s| s.intern_terminal_wire(pane)))
+    }) {
+        broadcast_event(
+            state,
+            Some(wire_terminal_id),
+            AgentEvent::PaneClosed { exit_status },
+        )
+        .await;
     }
 }
 
@@ -989,6 +1007,9 @@ where
             FrameKind::SubscribeMetadata { scope, key } => {
                 handle_subscribe_metadata(&state, client_id, scope, key);
             }
+            FrameKind::SubscribeEvents { terminal } => {
+                handle_subscribe_events(&state, client_id, terminal);
+            }
             FrameKind::SpawnTerminal {
                 request_id,
                 collection,
@@ -1172,6 +1193,52 @@ fn handle_subscribe_metadata(
         debug!(?client_id, ?scope, %key, "SUBSCRIBE_METADATA");
         s.metadata_subscribe(client_id, scope, key);
     });
+}
+
+/// Record an agent-event subscription for `client_id` (SPEC §7.5,
+/// phux-y2t). `terminal = None` subscribes server-wide; `Some(id)`
+/// subscribes per-pane. Idempotent (the per-client scope set absorbs
+/// duplicates) and connection-scoped (cleared on detach). Unlike the L3
+/// metadata path this is not tier-gated — the event stream is part of L1
+/// and any consumer may opt in.
+fn handle_subscribe_events(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal: Option<phux_protocol::ids::TerminalId>,
+) {
+    debug!(?client_id, ?terminal, "SUBSCRIBE_EVENTS");
+    state.with_mut(|s| s.subscribe_events(client_id, terminal));
+}
+
+/// Push an [`AgentEvent`] to every client subscribed to events scoped to
+/// `terminal` (SPEC §7.5, phux-y2t).
+///
+/// `terminal` is the wire id the event concerns, or `None` for a
+/// server-scoped event with no owning Terminal. Fan-out uses
+/// [`ServerState::event_targets`], which matches server-wide subscribers
+/// plus (when `terminal` is `Some`) per-pane subscribers for that id.
+/// Best-effort: a client whose mailbox is full or closed is silently
+/// skipped — the event stream is an accelerator, never a guarantee
+/// (a dropped event just means the consumer falls back to the poll floor).
+async fn broadcast_event(
+    state: &SharedState,
+    terminal: Option<phux_protocol::ids::TerminalId>,
+    event: AgentEvent,
+) {
+    let targets = state.with(|s| s.event_targets(terminal.as_ref()));
+    if targets.is_empty() {
+        return;
+    }
+    trace!(?terminal, ?event, count = targets.len(), "EVENT: broadcasting");
+    for tx in targets {
+        // `try_send` is non-blocking: a full mailbox drops the event
+        // rather than stalling the emitter. The accelerator contract
+        // tolerates loss (the CLI poll floor still converges).
+        let _ = tx.try_send(Outbound::Frame(FrameKind::Event {
+            terminal: terminal.clone(),
+            event: event.clone(),
+        }));
+    }
 }
 
 /// Writer task: drain the per-client outbound channel and write each
@@ -1793,9 +1860,14 @@ async fn handle_spawn_terminal(
         let _ = out_tx
             .send(Outbound::Frame(FrameKind::TerminalSpawned {
                 request_id,
-                result: SpawnResult::Ok(wire_terminal_id),
+                result: SpawnResult::Ok(wire_terminal_id.clone()),
             }))
             .await;
+        // phux-y2t: fan a `pane_spawned` agent event to event-stream
+        // subscribers (SPEC §7.5). The new pane's wire id rides the
+        // `EVENT` envelope; server-wide subscribers and any per-pane
+        // subscribers for this id receive it.
+        broadcast_event(state, Some(wire_terminal_id), AgentEvent::PaneSpawned).await;
     } else {
         // Defensive: seed_session_with_pty succeeded but the handle
         // somehow vanished before we could clone it. Treat as a spawn

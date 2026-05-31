@@ -151,6 +151,22 @@ pub enum AttachError {
     AlreadyAttached(ClientId),
 }
 
+/// Scope of an agent-event subscription (SPEC §7.5, phux-y2t).
+///
+/// A client subscribes with [`Self::Server`] (every event the server
+/// emits, including server-scoped events with no owning Terminal) or
+/// [`Self::Terminal`] (only that Terminal's events). The two are stored
+/// in a per-client `HashSet`, so a client MAY watch the whole server and
+/// a specific pane simultaneously — fan-out de-duplicates by client.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EventScope {
+    /// Every event the server emits for any Terminal the client may
+    /// observe, plus server-scoped events (`terminal: None`).
+    Server,
+    /// Only events concerning this specific Terminal.
+    Terminal(WireTerminalId),
+}
+
 /// Single owner of all server-side state.
 ///
 /// See the module-level doc for the concurrency model. Wrap this in
@@ -247,6 +263,13 @@ pub struct ServerState {
     /// scaffolding) is [`LayerSet::all`] — the most-permissive default
     /// keeps test setups simple; production clients always advertise.
     client_layers: HashMap<ClientId, LayerSet>,
+    /// Per-client agent-event subscriptions (SPEC §7.5, phux-y2t). Each
+    /// subscribed client maps to the set of scopes it watches:
+    /// `EventScope::Server` (every event) or one or more
+    /// `EventScope::Terminal(id)` (per-pane). The push half of the agent
+    /// surface; an additive accelerator of the CLI poll-floor `wait`.
+    /// Cleared on detach, matching the L3 metadata subscription lifecycle.
+    event_subscriptions: HashMap<ClientId, HashSet<EventScope>>,
     /// Whether `AttachTarget::CreateIfMissing` (phux-k61.3) should spawn
     /// a real PTY-backed actor for the newly created session's seed
     /// pane. Mirrors [`crate::runtime::ServerConfig::seed_with_pty`] so
@@ -524,6 +547,7 @@ impl ServerState {
             next_touch_timestamp: 1,
             metadata: MetadataStore::default(),
             client_layers: HashMap::new(),
+            event_subscriptions: HashMap::new(),
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
@@ -928,6 +952,49 @@ impl ServerState {
         // negotiation. Keeps the maps bounded across attach churn.
         self.metadata.drop_client(client_id);
         self.client_layers.remove(&client_id);
+        // Agent-event subscriptions are connection-scoped (SPEC §7.5),
+        // same as L3 metadata subscriptions above. Drop them so the map
+        // stays bounded across attach churn.
+        self.event_subscriptions.remove(&client_id);
+    }
+
+    /// Record an agent-event subscription for `client_id` at `scope`
+    /// (SPEC §7.5, phux-y2t). Idempotent: re-subscribing the same scope
+    /// is a no-op (the per-client scope set absorbs the duplicate). A
+    /// `terminal: None` `SUBSCRIBE_EVENTS` maps to [`EventScope::Server`];
+    /// a `Some(id)` maps to [`EventScope::Terminal`].
+    pub fn subscribe_events(&mut self, client_id: ClientId, terminal: Option<WireTerminalId>) {
+        let scope = terminal.map_or(EventScope::Server, EventScope::Terminal);
+        self.event_subscriptions
+            .entry(client_id)
+            .or_default()
+            .insert(scope);
+    }
+
+    /// Collect the outbound mailbox of every attached client subscribed to
+    /// an agent event scoped to `terminal` (SPEC §7.5, phux-y2t).
+    ///
+    /// A client receives the event when it subscribed [`EventScope::Server`]
+    /// (server-wide) OR, when `terminal` is `Some(id)`, it subscribed
+    /// [`EventScope::Terminal`] for that same id. A server-scoped event
+    /// (`terminal == None`) reaches only the server-wide subscribers — it
+    /// has no single owning Terminal to match a per-pane subscription.
+    /// Order is unspecified; callers MUST NOT rely on it.
+    #[must_use]
+    pub fn event_targets(
+        &self,
+        terminal: Option<&WireTerminalId>,
+    ) -> Vec<mpsc::Sender<Outbound>> {
+        self.event_subscriptions
+            .iter()
+            .filter(|(_, scopes)| {
+                scopes.contains(&EventScope::Server)
+                    || terminal.is_some_and(|tid| {
+                        scopes.contains(&EventScope::Terminal(tid.clone()))
+                    })
+            })
+            .filter_map(|(client_id, _)| self.attached.get(client_id).map(|c| c.tx.clone()))
+            .collect()
     }
 
     /// Whether any client has ever attached (arms the phux-60s self-exit).
