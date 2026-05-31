@@ -44,14 +44,20 @@
 //! # Point space
 //!
 //! A [`Region::Viewport`] match maps to [`Point::Active`] coordinates (the
-//! viewport walk projects active-area rows top-first, `y = row`), so the
-//! viewport/active case is implemented fully and tested. The
-//! [`Region::Scrollback`] (history) case is reported precisely in the
-//! structured handoff rather than shipped, because the history row index the
-//! search layer reports (oldest-first, bounded by a possible `RecentHistory`
-//! window) does not have an unambiguous one-to-one mapping onto a
-//! [`Point::History`] `y` from this module's inputs alone — see
-//! [`extract_match`]'s error path and the module-level note in the report.
+//! viewport walk projects active-area rows top-first, `y = row`).
+//!
+//! A [`Region::Scrollback`] match maps to [`Point::History`] coordinates. The
+//! search layer reports the history `row` oldest-first into the *projected
+//! window* it searched, which is the full retained history for
+//! [`Scope::AllHistory`] and the most-recent slice for
+//! [`Scope::RecentHistory`]. That window offset is one-to-one with an absolute
+//! [`Point::History`] `y` once the [`Scope`] (and the live retained-row count)
+//! are known, so [`extract_match_in_scope`] threads the scope and resolves it;
+//! the scope-free [`extract_match`] rejects a scrollback match with
+//! [`ExtractError::ScrollbackNeedsScope`] rather than guessing. The history and
+//! viewport walks share one point-space-generic cell walk, so the
+//! wide-glyph / combining-mark `char`-col-to-grid-col inversion is identical in
+//! both.
 
 use libghostty_vt::{
     Terminal,
@@ -62,7 +68,7 @@ use libghostty_vt::{
 };
 
 use crate::grid::{GRAPHEME_INLINE, SynthesisError};
-use crate::search::{Match, Region};
+use crate::search::{Match, Region, Scope};
 
 /// Errors from translating a [`Match`] to a selection and extracting its text.
 #[derive(Debug, thiserror::Error)]
@@ -86,24 +92,38 @@ pub enum ExtractError {
         /// The `char` column that fell past the row's last non-tail cell.
         col: usize,
     },
-    /// Extraction for a [`Region::Scrollback`] match is not implemented: the
-    /// search layer's history row index has no unambiguous mapping onto a
-    /// [`Point::History`] coordinate from this primitive's inputs alone (see
-    /// the module-level note). Callers wanting scrollback extraction must
-    /// resolve the absolute history `y` themselves and call
-    /// [`extract_active_span`].
+    /// A [`Region::Scrollback`] match was handed to the scope-free
+    /// [`extract_match`], which cannot resolve the history row index to an
+    /// absolute [`Point::History`] `y` without knowing the search
+    /// [`Scope`] that produced it. Use
+    /// [`extract_match_in_scope`] (which threads the scope) or resolve the
+    /// absolute history `y` yourself and call [`extract_history_span`].
     #[error(
-        "scrollback (history) extraction is not implemented; resolve the absolute history y and use extract_active_span"
+        "scrollback (history) extraction needs the search scope; use extract_match_in_scope or extract_history_span"
     )]
-    ScrollbackUnsupported,
+    ScrollbackNeedsScope,
+    /// The history row the match referenced is no longer retained — the
+    /// terminal's scrollback shrank (rows aged out, a resize/reflow, or an
+    /// alt-screen clear) between [`search`](crate::search) and extraction, so
+    /// the resolved absolute `y` is at or past the current
+    /// [`Terminal::scrollback_rows`] count.
+    #[error("history row {history_y} is past the current scrollback ({total} rows)")]
+    HistoryRowOutOfRange {
+        /// The absolute history `y` that fell outside the live scrollback.
+        history_y: u32,
+        /// The current retained-history row count.
+        total: u32,
+    },
 }
 
-/// Extract the text under a [`Match`] as a plain-text `String`.
+/// Extract the text under a [`Region::Viewport`] [`Match`] as a plain-text
+/// `String`.
 ///
-/// Only [`Region::Viewport`] matches are supported here, mapping the match's
-/// `row` directly onto [`Point::Active`] `y`. A [`Region::Scrollback`] match
-/// returns [`ExtractError::ScrollbackUnsupported`] — see the module docs for
-/// why the history `y` is ambiguous from a [`Match`] alone.
+/// This is the scope-free entry. A [`Region::Viewport`] match maps its `row`
+/// directly onto [`Point::Active`] `y`. A [`Region::Scrollback`] match returns
+/// [`ExtractError::ScrollbackNeedsScope`]: the history row index is *relative*
+/// to the search window, so resolving it to an absolute [`Point::History`] `y`
+/// requires the [`Scope`] the search ran under — use [`extract_match_in_scope`].
 ///
 /// The match's `char`-offset `col`/`len` are translated to grid columns via
 /// the private `char_col_to_grid_x` (handling wide glyphs and multi-`char`
@@ -114,28 +134,98 @@ pub fn extract_match(terminal: &Terminal<'_, '_>, m: Match) -> Result<String, Ex
     match m.region {
         Region::Viewport => {
             let y = u32::try_from(m.row).unwrap_or(u32::MAX);
-            extract_active_span(terminal, y, m.col, m.len).map_err(|e| match e {
-                // Re-stamp the region/row so the error names the viewport
-                // match the caller passed, not the raw active-space inputs.
-                ExtractError::ColumnOutOfRange { col, .. } => ExtractError::ColumnOutOfRange {
-                    region: Region::Viewport,
-                    row: m.row,
-                    col,
-                },
-                other => other,
-            })
+            extract_active_span(terminal, y, m.col, m.len).map_err(|e| restamp_viewport(e, m.row))
         }
-        Region::Scrollback => Err(ExtractError::ScrollbackUnsupported),
+        Region::Scrollback => Err(ExtractError::ScrollbackNeedsScope),
     }
+}
+
+/// Extract the text under a [`Match`] as a plain-text `String`.
+///
+/// Unlike [`extract_match`], this resolves a [`Region::Scrollback`] match's
+/// history row against the [`Scope`] the search ran under (`phux-3sy` /
+/// `phux-97w`, the scrollback half of the bridge).
+///
+/// # The history-`y` resolution (why the scope is needed)
+///
+/// The search layer reports a scrollback `Match.row` as an index into the
+/// *projected history window*, oldest-first — the exact rows
+/// [`screen_state_with_scrollback`](crate::grid::SnapshotSynthesizer::screen_state_with_scrollback)
+/// built. For [`Scope::AllHistory`] that window is every retained row
+/// (`start = 0`), so `row` *is* the absolute [`Point::History`] `y`. For
+/// [`Scope::RecentHistory(n)`] the window is the most-recent `n` rows, the
+/// slice `[total - min(n, total), total)`, so the absolute `y` is
+/// `start + row`. Both starts mirror the
+/// [`SnapshotSynthesizer`](crate::grid::SnapshotSynthesizer) scrollback walk
+/// exactly, so the inversion is one-to-one given the scope and the live
+/// `scrollback_rows()`.
+///
+/// `scrollback_rows()` is queried *now*, so a row that aged out of history
+/// between search and extraction surfaces as
+/// [`ExtractError::HistoryRowOutOfRange`] rather than a wrong selection.
+pub fn extract_match_in_scope(
+    terminal: &Terminal<'_, '_>,
+    m: Match,
+    scope: Scope,
+) -> Result<String, ExtractError> {
+    match m.region {
+        Region::Viewport => {
+            let y = u32::try_from(m.row).unwrap_or(u32::MAX);
+            extract_active_span(terminal, y, m.col, m.len).map_err(|e| restamp_viewport(e, m.row))
+        }
+        Region::Scrollback => {
+            let history_y = resolve_history_y(terminal, m.row, scope)?;
+            extract_history_span(terminal, history_y, m.col, m.len)
+        }
+    }
+}
+
+/// Re-stamp a [`ExtractError::ColumnOutOfRange`] from active-space inputs back
+/// onto the viewport match the caller passed, so the error names that match's
+/// region/row rather than the raw active-area coordinates.
+const fn restamp_viewport(e: ExtractError, row: usize) -> ExtractError {
+    match e {
+        ExtractError::ColumnOutOfRange { col, .. } => ExtractError::ColumnOutOfRange {
+            region: Region::Viewport,
+            row,
+            col,
+        },
+        other => other,
+    }
+}
+
+/// Map a scrollback [`Match::row`] (an index into the search's projected
+/// history window, oldest-first) onto an absolute [`Point::History`] `y`,
+/// using the live retained-history count to anchor a bounded window.
+///
+/// See [`extract_match_in_scope`] for the window math. Returns
+/// [`ExtractError::HistoryRowOutOfRange`] if the resolved `y` is past the
+/// current scrollback (the row aged out since the search).
+fn resolve_history_y(
+    terminal: &Terminal<'_, '_>,
+    row: usize,
+    scope: Scope,
+) -> Result<u32, ExtractError> {
+    let total = u32::try_from(terminal.scrollback_rows()?).unwrap_or(u32::MAX);
+    let row = u32::try_from(row).unwrap_or(u32::MAX);
+    // Window start mirrors `SnapshotSynthesizer::scrollback_lines`: all-history
+    // starts at 0; a bounded request keeps the most-recent `n` rows.
+    let start = match scope {
+        Scope::AllHistory => 0,
+        Scope::RecentHistory(n) => total.saturating_sub(n.min(total)),
+    };
+    let history_y = start.saturating_add(row);
+    if history_y >= total {
+        return Err(ExtractError::HistoryRowOutOfRange { history_y, total });
+    }
+    Ok(history_y)
 }
 
 /// Extract the text spanning `len` `char`s starting at `char` column
 /// `char_col` of active-area row `y`, as plain text.
 ///
 /// This is the point-space-explicit primitive [`extract_match`] delegates to
-/// for the viewport case, and the entry a caller with a resolved history `y`
-/// would use after translating the [`Point::History`] coordinate into
-/// active space themselves. `char_col`/`len` are `char` offsets into the same
+/// for the viewport case. `char_col`/`len` are `char` offsets into the same
 /// right-trimmed projected text row the search layer reports; they are
 /// translated to grid columns here.
 ///
@@ -147,12 +237,76 @@ pub fn extract_active_span(
     char_col: usize,
     len: usize,
 ) -> Result<String, ExtractError> {
+    extract_span(terminal, PointSpace::Active, y, char_col, len)
+}
+
+/// Extract the text spanning `len` `char`s starting at `char` column
+/// `char_col` of *history* (scrollback) row `history_y`, as plain text.
+///
+/// This is the [`Point::History`] analog of [`extract_active_span`]. `history_y`
+/// is an absolute index into the retained scrollback in libghostty's history
+/// coordinate space (`y = 0` is the oldest retained row), the same space the
+/// [`SnapshotSynthesizer`](crate::grid::SnapshotSynthesizer) scrollback walk
+/// reads — see [`extract_match_in_scope`] for how a search's relative
+/// scrollback `row` resolves to this absolute `y`. `char_col`/`len` are `char`
+/// offsets into the right-trimmed projected history row text the search layer
+/// reports.
+///
+/// A zero `len` extracts nothing and returns an empty string without touching
+/// libghostty's selection path.
+pub fn extract_history_span(
+    terminal: &Terminal<'_, '_>,
+    history_y: u32,
+    char_col: usize,
+    len: usize,
+) -> Result<String, ExtractError> {
+    extract_span(terminal, PointSpace::History, history_y, char_col, len)
+}
+
+/// Which point space [`extract_span`] walks/selects in. Active is the live
+/// viewport; History is the scrollback above it.
+#[derive(Clone, Copy)]
+enum PointSpace {
+    Active,
+    History,
+}
+
+impl PointSpace {
+    /// Build the [`Point`] for `(x, y)` in this space.
+    const fn point(self, x: u16, y: u32) -> Point {
+        let coord = PointCoordinate { x, y };
+        match self {
+            Self::Active => Point::Active(coord),
+            Self::History => Point::History(coord),
+        }
+    }
+
+    /// The [`Region`] this space corresponds to, for error stamping.
+    const fn region(self) -> Region {
+        match self {
+            Self::Active => Region::Viewport,
+            Self::History => Region::Scrollback,
+        }
+    }
+}
+
+/// Shared span extraction over a [`PointSpace`]: translate `char` offsets to
+/// grid columns, build a linear [`Selection`] over `[start_x, end_x]` of row
+/// `y`, and format it with the sound one-shot
+/// [`Terminal::format_selection_alloc`] API.
+fn extract_span(
+    terminal: &Terminal<'_, '_>,
+    space: PointSpace,
+    y: u32,
+    char_col: usize,
+    len: usize,
+) -> Result<String, ExtractError> {
     if len == 0 {
         return Ok(String::new());
     }
 
     let out_of_range = |col: usize| ExtractError::ColumnOutOfRange {
-        region: Region::Viewport,
+        region: space.region(),
         row: usize::try_from(y).unwrap_or(usize::MAX),
         col,
     };
@@ -161,13 +315,13 @@ pub fn extract_active_span(
     // columns. The selection endpoints are inclusive (see `Selection::new`),
     // so the end maps the last char, `char_col + len - 1`.
     let start_x =
-        char_col_to_grid_x(terminal, y, char_col)?.ok_or_else(|| out_of_range(char_col))?;
+        char_col_to_grid_x(terminal, space, y, char_col)?.ok_or_else(|| out_of_range(char_col))?;
     let last_char = char_col + len - 1;
-    let end_x =
-        char_col_to_grid_x(terminal, y, last_char)?.ok_or_else(|| out_of_range(last_char))?;
+    let end_x = char_col_to_grid_x(terminal, space, y, last_char)?
+        .ok_or_else(|| out_of_range(last_char))?;
 
-    let start = terminal.grid_ref(Point::Active(PointCoordinate { x: start_x, y }))?;
-    let end = terminal.grid_ref(Point::Active(PointCoordinate { x: end_x, y }))?;
+    let start = terminal.grid_ref(space.point(start_x, y))?;
+    let end = terminal.grid_ref(space.point(end_x, y))?;
     let selection = Selection::new(start, end, false);
 
     let bytes = terminal
@@ -187,8 +341,9 @@ pub fn extract_active_span(
     Ok(bytes)
 }
 
-/// Map a `char` offset into active-area row `y`'s right-trimmed projected
-/// text to the grid column of the cell that contains it.
+/// Map a `char` offset into row `y`'s right-trimmed projected text (in the
+/// given [`PointSpace`] — viewport active area or scrollback history) to the
+/// grid column of the cell that contains it.
 ///
 /// Walks the row's cells in grid order exactly as the text projection does:
 /// skip [`CellWide::SpacerTail`] cells (they emit no `char` and own no
@@ -209,6 +364,7 @@ pub fn extract_active_span(
 /// projection's `buf.push(' ')`.
 fn char_col_to_grid_x(
     terminal: &Terminal<'_, '_>,
+    space: PointSpace,
     y: u32,
     target: usize,
 ) -> Result<Option<u16>, ExtractError> {
@@ -217,7 +373,7 @@ fn char_col_to_grid_x(
     let mut grid_x = 0u16;
 
     while grid_x < cols {
-        let point = Point::Active(PointCoordinate { x: grid_x, y });
+        let point = space.point(grid_x, y);
         let grid_ref = terminal.grid_ref(point)?;
         let wide = grid_ref.cell()?.wide()?;
         if matches!(wide, CellWide::SpacerTail) {
@@ -327,7 +483,7 @@ mod tests {
         assert_eq!(m.col, 3, "char offset of TODO is 3 (你, 好, x precede it)");
 
         // Direct grid-column translation: char offset 3 -> grid column 5.
-        let start_x = char_col_to_grid_x(&t, 0, 3)
+        let start_x = char_col_to_grid_x(&t, PointSpace::Active, 0, 3)
             .expect("translate")
             .expect("in range");
         assert_eq!(
@@ -386,16 +542,128 @@ mod tests {
     }
 
     #[test]
-    fn scrollback_match_reports_unsupported() {
-        // A history match returns the precise "not implemented" error rather
-        // than a wrong mapping (the deliberate scope boundary).
+    fn scope_free_extract_rejects_scrollback() {
+        // The scope-free entry cannot resolve a history row without the
+        // search scope, so it returns the precise ScrollbackNeedsScope error
+        // rather than guessing a y.
         let mut t = fresh(20, 2);
         t.vt_write(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\necho");
         let hits = search_oneshot(&t, "bravo", Scope::AllHistory, vp()).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].region, Region::Scrollback);
-        let err = extract_match(&t, hits[0]).expect_err("scrollback is unsupported");
-        assert!(matches!(err, ExtractError::ScrollbackUnsupported));
+        let err = extract_match(&t, hits[0]).expect_err("scrollback needs scope");
+        assert!(matches!(err, ExtractError::ScrollbackNeedsScope));
+    }
+
+    #[test]
+    fn scrollback_match_extracts_all_history() {
+        // The scrollback half of the bridge: an AllHistory search hit in
+        // scrollback round-trips its text via extract_match_in_scope. "bravo"
+        // is history row 1 (alpha=0, bravo=1, charlie=2 above a 2-row vp).
+        let mut t = fresh(20, 2);
+        t.vt_write(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\necho");
+        let hits = search_oneshot(&t, "bravo", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].region, Region::Scrollback);
+        let text =
+            extract_match_in_scope(&t, hits[0], Scope::AllHistory).expect("scrollback extract");
+        assert_eq!(text, "bravo", "history match round-trips its text");
+    }
+
+    #[test]
+    fn scrollback_match_extracts_under_recent_window() {
+        // A bounded RecentHistory search reports the row as an offset into the
+        // most-recent window; the absolute history y must be reconstructed
+        // from the window start (a naive `y = row` would read from the wrong,
+        // older row). 3 history rows (mark1,mark2,mark3); bound to the last 2
+        // so the window is {mark2 at window-row 0 -> abs y=1, mark3 at
+        // window-row 1 -> abs y=2}. Searching for each distinct full token and
+        // extracting it back proves the window offset resolves to the right
+        // absolute history row (not to mark1 at abs y=0).
+        let mut t = fresh(20, 2);
+        t.vt_write(b"mark1\r\nmark2\r\nmark3\r\nplain4\r\nplain5");
+        assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 3);
+        let scope = Scope::RecentHistory(2);
+        let opts = SearchOptions {
+            case_insensitive: false,
+            include_viewport: false,
+        };
+
+        // mark2 is at window-row 0 (abs y=1). The hit's char span is the full
+        // "mark2", so extraction must return exactly that — and reading abs
+        // y=1 (not y=0, where "mark1" lives) is what proves the offset.
+        let hits2 = search_oneshot(&t, "mark2", scope, opts).expect("search mark2");
+        assert_eq!(hits2.len(), 1, "mark2 is in the recent window");
+        assert_eq!(hits2[0].region, Region::Scrollback);
+        assert_eq!(hits2[0].row, 0, "mark2 is window-row 0 of the recent slice");
+        assert_eq!(
+            extract_match_in_scope(&t, hits2[0], scope).expect("extract mark2"),
+            "mark2",
+            "window-row 0 resolves to abs history y=1 (mark2), not y=0 (mark1)",
+        );
+
+        // mark3 is at window-row 1 (abs y=2).
+        let hits3 = search_oneshot(&t, "mark3", scope, opts).expect("search mark3");
+        assert_eq!(hits3.len(), 1, "mark3 is in the recent window");
+        assert_eq!(hits3[0].row, 1, "mark3 is window-row 1 of the recent slice");
+        assert_eq!(
+            extract_match_in_scope(&t, hits3[0], scope).expect("extract mark3"),
+            "mark3",
+            "window-row 1 resolves to abs history y=2 (mark3)",
+        );
+
+        // mark1 is OUTSIDE the recent-2 window, so it is not found at all —
+        // the bound really excludes the oldest row.
+        let hits1 = search_oneshot(&t, "mark1", scope, opts).expect("search mark1");
+        assert!(hits1.is_empty(), "mark1 is outside the recent-2 window");
+    }
+
+    #[test]
+    fn scrollback_match_with_wide_glyph_round_trips() {
+        // The history walk must apply the same wide-glyph char-col->grid-col
+        // inversion as the viewport. Row "你好xKEEP" in scrollback: "KEEP" is
+        // char offset 3 but grid column 5 (two wide glyphs precede). The
+        // history extraction must use the grid column, not the char offset.
+        let mut t = fresh(20, 2);
+        // Push the wide-glyph row into scrollback with two more lines.
+        t.vt_write("你好xKEEP\r\n".as_bytes());
+        t.vt_write(b"filler-a\r\nfiller-b");
+        let hits = search_oneshot(&t, "KEEP", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].region,
+            Region::Scrollback,
+            "the wide row is history"
+        );
+        assert_eq!(hits[0].col, 3, "KEEP is char offset 3 (你,好,x precede)");
+        let text =
+            extract_match_in_scope(&t, hits[0], Scope::AllHistory).expect("scrollback extract");
+        assert_eq!(
+            text, "KEEP",
+            "wide-glyph-aware history mapping extracts the right text",
+        );
+    }
+
+    #[test]
+    fn scrollback_row_aged_out_errors() {
+        // If history shrinks between search and extraction, an absolute y
+        // past the live scrollback surfaces HistoryRowOutOfRange rather than
+        // a wrong selection. row 100 in an AllHistory scope is far past the
+        // 3 retained rows.
+        let mut t = fresh(20, 2);
+        t.vt_write(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\necho");
+        let stale = Match {
+            region: Region::Scrollback,
+            row: 100,
+            col: 0,
+            len: 1,
+        };
+        let err =
+            extract_match_in_scope(&t, stale, Scope::AllHistory).expect_err("aged-out history");
+        assert!(matches!(
+            err,
+            ExtractError::HistoryRowOutOfRange { total: 3, .. }
+        ));
     }
 
     #[test]
