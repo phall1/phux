@@ -143,6 +143,24 @@ pub struct PredictionState {
     /// last column to avoid guessing wrap behaviour.
     cols: u16,
     rows: u16,
+    /// Client-side prompt-boundary heuristic (phux-9gw.1.5).
+    ///
+    /// `(row, col)` marks the column on `row` at which the *user's* typed
+    /// input begins — everything to the left is prompt (or earlier output)
+    /// that the predict layer must never erase. It is set to the cursor
+    /// column at the moment of the first [`PredictionKind::Insert`] on a
+    /// fresh input row, i.e. "the column where the user's first input
+    /// landed". Backspace and Ctrl-U erasure predictions are clamped to
+    /// stop *at* this column, never below it.
+    ///
+    /// `None` means the boundary is unknown for the current input row
+    /// (nothing typed yet, or it was invalidated by a row change /
+    /// viewport resize / contradiction). In that case the conservative
+    /// fallbacks apply: single end-of-line backspace stays predicted, but
+    /// full-line Ctrl-U erasure is refused rather than risk eating the
+    /// prompt. Without OSC-133 shell integration this typed-input anchor
+    /// is the safe signal available entirely client-side.
+    prompt_boundary: Option<(u16, u16)>,
 }
 
 impl PredictionState {
@@ -157,6 +175,7 @@ impl PredictionState {
             cursor_col: 0,
             cols,
             rows,
+            prompt_boundary: None,
         }
     }
 
@@ -179,6 +198,9 @@ impl PredictionState {
         self.pending.clear();
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
+        // A resize reflows the grid; the typed-input anchor no longer
+        // describes the new layout. Forget it (phux-9gw.1.5).
+        self.prompt_boundary = None;
     }
 
     /// Re-anchor the cursor estimate from authoritative state. Called
@@ -186,7 +208,22 @@ impl PredictionState {
     /// applied to the libghostty Terminal — the renderer's `RenderState`
     /// has the post-apply cursor, and we copy it here.
     pub fn set_cursor(&mut self, row: u16, col: u16) {
-        self.cursor_row = row.min(self.rows.saturating_sub(1));
+        let new_row = row.min(self.rows.saturating_sub(1));
+        // The prompt-boundary anchor (phux-9gw.1.5) is bound to a single
+        // input row. A same-row resync (the common "server echoed the
+        // bytes we just typed" case, which drains the queue and lands
+        // here) keeps the anchor alive so a follow-up backspace/Ctrl-U
+        // still knows where the prompt ends. A row change means a new
+        // input context — forget the anchor and re-learn it from the next
+        // insert. Holding a stale anchor for a row we are not on is the
+        // dangerous case, so we drop it.
+        if self
+            .prompt_boundary
+            .is_some_and(|(brow, _)| brow != new_row)
+        {
+            self.prompt_boundary = None;
+        }
+        self.cursor_row = new_row;
         self.cursor_col = col.min(self.cols.saturating_sub(1));
     }
 
@@ -216,8 +253,22 @@ impl PredictionState {
     }
 
     /// Drop every pending prediction. Called by the reconcile path.
+    ///
+    /// A `clear` from the reconcile path means the server contradicted our
+    /// guesses: the queue suffix is suspect, so the typed-input anchor we
+    /// derived from those guesses is suspect too. Forget it rather than
+    /// erase to a column the server may not agree with (phux-9gw.1.5).
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.prompt_boundary = None;
+    }
+
+    /// Current prompt-boundary anchor `(row, col)`, if known for the
+    /// current input row. Exposed for diagnostics and tests
+    /// (phux-9gw.1.5).
+    #[must_use]
+    pub const fn prompt_boundary(&self) -> Option<(u16, u16)> {
+        self.prompt_boundary
     }
 
     /// Drop the prediction at the front of the queue. Used by the
@@ -280,6 +331,15 @@ impl PredictionState {
         // their own server-side echo path we don't model yet.
         if !matches!(event.action, phux_protocol::input::key::KeyAction::Press) {
             return PredictionOutcome::Skipped;
+        }
+        // Ctrl-U (kill-to-start-of-line) is the one CTRL chord we predict
+        // (phux-9gw.1.5). It carries CTRL, so it must be handled *before*
+        // the generic command-modifier reject below. We only predict it
+        // when the prompt boundary is known for the current row — the
+        // full-line erase is exactly the case that risks eating the
+        // prompt, so an unknown boundary means refuse.
+        if event.key == PhysicalKey::U && event.mods == ModSet::CTRL {
+            return self.predict_kill_to_boundary();
         }
         // Reject keystrokes with any "command-y" modifier active. SHIFT
         // is OK because it's already baked into `text` for letters.
@@ -355,9 +415,12 @@ impl PredictionState {
             kind: PredictionKind::Newline,
         });
         // Advance the cursor estimate so subsequent inserts queue on the
-        // next row at column 0.
+        // next row at column 0. The next line is a new input context, so
+        // forget the current prompt-boundary anchor (phux-9gw.1.5) — it
+        // is re-learned from the first insert on the new row.
         self.cursor_row = self.cursor_row.saturating_add(1);
         self.cursor_col = 0;
+        self.prompt_boundary = None;
         PredictionOutcome::Predicted
     }
 
@@ -376,6 +439,17 @@ impl PredictionState {
         let end_col = self.cursor_col.saturating_add(advance);
         if end_col >= self.cols {
             return PredictionOutcome::Skipped;
+        }
+        // Learn the prompt boundary (phux-9gw.1.5): the column where the
+        // user's first input lands on this row marks where typed input
+        // begins. Everything to the left is prompt that erasure must never
+        // touch. Record it only when there is no anchor yet for this row —
+        // later inserts on the same line must not advance it.
+        if self
+            .prompt_boundary
+            .is_none_or(|(brow, _)| brow != self.cursor_row)
+        {
+            self.prompt_boundary = Some((self.cursor_row, self.cursor_col));
         }
         self.pending.push_back(Prediction {
             row: self.cursor_row,
@@ -397,6 +471,19 @@ impl PredictionState {
         if self.rows == 0 || self.cursor_row >= self.rows {
             return PredictionOutcome::Skipped;
         }
+        // Prompt-boundary guard (phux-9gw.1.5): if we know where the
+        // user's typed input begins on this row, never predict erasing at
+        // or below it — that cell is the prompt. When the boundary is
+        // unknown we keep the conservative end-of-line behaviour (erase
+        // one cell): without OSC-133 there is no safer signal, and this
+        // single-cell case is the "typing then immediately deleting" path
+        // that motivated the feature.
+        if let Some((brow, bcol)) = self.prompt_boundary
+            && brow == self.cursor_row
+            && self.cursor_col <= bcol
+        {
+            return PredictionOutcome::Skipped;
+        }
         let new_col = self.cursor_col - 1;
         self.pending.push_back(Prediction {
             row: self.cursor_row,
@@ -406,6 +493,57 @@ impl PredictionState {
             kind: PredictionKind::BackspaceEol,
         });
         self.cursor_col = new_col;
+        PredictionOutcome::Predicted
+    }
+
+    /// Predict Ctrl-U (kill-to-start-of-line) by erasing every typed cell
+    /// from the prompt boundary up to the cursor (phux-9gw.1.5).
+    ///
+    /// This is the full-line backspace the ticket targets. It is only safe
+    /// when we know where the user's typed input begins on this row: the
+    /// prompt-boundary anchor learned from the first insert. Each erased
+    /// cell becomes a [`PredictionKind::BackspaceEol`] prediction (a blank
+    /// paint), and the cursor estimate retreats to the boundary column —
+    /// exactly the row's prompt-end, never past it.
+    ///
+    /// Refuses (falls back to no prediction) when:
+    /// - the boundary is unknown for the current row — without OSC-133 we
+    ///   cannot tell prompt from typed input, so guessing would risk
+    ///   erasing the prompt;
+    /// - the cursor is already at or left of the boundary — nothing typed
+    ///   to erase;
+    /// - the viewport is degenerate.
+    ///
+    /// Note this does not model Ctrl-U's full readline semantics (some
+    /// shells kill to start-of-line regardless of cursor position, others
+    /// kill from the cursor backwards). We predict the conservative
+    /// "erase the typed run we know about" subset; the per-cell reconcile
+    /// drops any cell the server disagrees with.
+    fn predict_kill_to_boundary(&mut self) -> PredictionOutcome {
+        if self.rows == 0 || self.cursor_row >= self.rows {
+            return PredictionOutcome::Skipped;
+        }
+        let Some((brow, bcol)) = self.prompt_boundary else {
+            // Unknown boundary: refuse rather than risk eating the prompt.
+            return PredictionOutcome::Skipped;
+        };
+        if brow != self.cursor_row || self.cursor_col <= bcol {
+            return PredictionOutcome::Skipped;
+        }
+        // Erase typed cells right-to-left, blanking each column from the
+        // cursor down to (but not below) the boundary.
+        let mut col = self.cursor_col;
+        while col > bcol {
+            col -= 1;
+            self.pending.push_back(Prediction {
+                row: self.cursor_row,
+                col,
+                text: " ".to_owned(),
+                width: 1,
+                kind: PredictionKind::BackspaceEol,
+            });
+        }
+        self.cursor_col = bcol;
         PredictionOutcome::Predicted
     }
 
@@ -724,6 +862,193 @@ mod tests {
         assert_eq!(last.kind, PredictionKind::BackspaceEol);
         assert_eq!(last.col, 0);
         assert_eq!(last.text, " ");
+    }
+
+    // ---- phux-9gw.1.5: prompt-boundary heuristic + Ctrl-U -------------
+
+    fn key_ctrl_u() -> KeyEvent {
+        let mut ev = key_named(PhysicalKey::U, ModSet::CTRL);
+        ev.text = None;
+        ev
+    }
+
+    #[test]
+    fn first_insert_records_prompt_boundary_at_cursor() {
+        // The user starts typing at col 5 (a prompt occupies cols 0..5).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        assert_eq!(s.prompt_boundary(), None);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 5)));
+        // A second insert on the same row does not advance the anchor.
+        s.predict_key(&key_text("b"));
+        assert_eq!(s.prompt_boundary(), Some((0, 5)));
+    }
+
+    #[test]
+    fn backspace_predicts_within_typed_input() {
+        // Prompt ends at col 3; type two chars (cols 3, 4), then backspace.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        s.predict_key(&key_text("x"));
+        s.predict_key(&key_text("y"));
+        assert_eq!(s.cursor(), (0, 5));
+        let bs = key_named(PhysicalKey::Backspace, ModSet::empty());
+        assert_eq!(s.predict_key(&bs), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 4));
+        // Second backspace lands on the boundary (col 3) — still typed.
+        assert_eq!(s.predict_key(&bs), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn backspace_stops_at_prompt_boundary() {
+        // Prompt ends at col 3; type one char then backspace twice. The
+        // first backspace lands on the boundary (col 3); the second would
+        // erase the prompt cell at col 2 — it must be refused.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        s.predict_key(&key_text("x"));
+        assert_eq!(s.cursor(), (0, 4));
+        let bs = key_named(PhysicalKey::Backspace, ModSet::empty());
+        assert_eq!(s.predict_key(&bs), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 3));
+        // Now at the boundary: cursor_col (3) <= bcol (3) → refuse.
+        assert_eq!(s.predict_key(&bs), PredictionOutcome::Skipped);
+        assert_eq!(s.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn backspace_without_known_boundary_keeps_eol_fallback() {
+        // No typed input recorded yet (boundary unknown). The cursor sits
+        // past col 0 — the conservative single end-of-line backspace is
+        // still predicted (the shipped behaviour the feature must not
+        // regress).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 6);
+        assert_eq!(s.prompt_boundary(), None);
+        let bs = key_named(PhysicalKey::Backspace, ModSet::empty());
+        assert_eq!(s.predict_key(&bs), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 5));
+    }
+
+    #[test]
+    fn ctrl_u_erases_typed_run_down_to_boundary() {
+        // Prompt ends at col 4; type "hi" (cols 4, 5). Ctrl-U erases both
+        // typed cells and parks the cursor on the boundary.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 4);
+        s.predict_key(&key_text("h"));
+        s.predict_key(&key_text("i"));
+        assert_eq!(s.cursor(), (0, 6));
+        let before = s.pending_len();
+        assert_eq!(s.predict_key(&key_ctrl_u()), PredictionOutcome::Predicted);
+        assert_eq!(s.cursor(), (0, 4));
+        // Two erase predictions appended (cols 5 then 4), blanking the
+        // typed run, never the prompt.
+        let erased: Vec<(u16, &str)> = s
+            .pending()
+            .skip(before)
+            .map(|p| (p.col, p.text.as_str()))
+            .collect();
+        assert_eq!(erased, vec![(5, " "), (4, " ")]);
+        for p in s.pending().skip(before) {
+            assert_eq!(p.kind, PredictionKind::BackspaceEol);
+            assert!(p.col >= 4, "never erase below the prompt boundary");
+        }
+    }
+
+    #[test]
+    fn ctrl_u_without_known_boundary_is_not_predicted() {
+        // Boundary unknown: predicting a full-line erase risks eating the
+        // prompt. Refuse — fall through to the server (phux-9gw.1.5).
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 8);
+        assert_eq!(s.prompt_boundary(), None);
+        assert_eq!(s.predict_key(&key_ctrl_u()), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
+        assert_eq!(s.cursor(), (0, 8));
+    }
+
+    #[test]
+    fn ctrl_u_at_boundary_with_nothing_typed_is_not_predicted() {
+        // Boundary known but cursor already sits on it (the typed run was
+        // already erased). Nothing left to kill → refuse.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 5);
+        s.predict_key(&key_text("a"));
+        let bs = key_named(PhysicalKey::Backspace, ModSet::empty());
+        s.predict_key(&bs); // back to boundary col 5
+        assert_eq!(s.cursor(), (0, 5));
+        assert_eq!(s.predict_key(&key_ctrl_u()), PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn prompt_boundary_survives_same_row_reconcile_resync() {
+        // The server echoes what we typed; reconcile resyncs the cursor on
+        // the same row. The anchor must persist so a follow-up Ctrl-U
+        // still knows where the prompt ends.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 3)));
+        // Same-row resync (e.g. drain after server echo at col 4).
+        s.set_cursor(0, 4);
+        assert_eq!(s.prompt_boundary(), Some((0, 3)));
+    }
+
+    #[test]
+    fn prompt_boundary_forgotten_on_row_change() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 3);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 3)));
+        s.set_cursor(2, 0); // different row → new input context
+        assert_eq!(s.prompt_boundary(), None);
+    }
+
+    #[test]
+    fn enter_resets_prompt_boundary() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 2);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 2)));
+        let enter = key_named(PhysicalKey::Enter, ModSet::empty());
+        assert_eq!(s.predict_key(&enter), PredictionOutcome::Predicted);
+        assert_eq!(s.prompt_boundary(), None);
+    }
+
+    #[test]
+    fn set_viewport_clears_prompt_boundary() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 2);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 2)));
+        s.set_viewport(100, 30);
+        assert_eq!(s.prompt_boundary(), None);
+    }
+
+    #[test]
+    fn clear_forgets_prompt_boundary() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 2);
+        s.predict_key(&key_text("a"));
+        assert_eq!(s.prompt_boundary(), Some((0, 2)));
+        s.clear();
+        assert_eq!(s.prompt_boundary(), None);
+    }
+
+    #[test]
+    fn ctrl_u_with_other_modifier_is_not_predicted() {
+        // Ctrl-Shift-U or Ctrl-Alt-U is not the kill-line chord — only a
+        // bare CTRL+U is handled. Anything else falls to the generic
+        // command-modifier reject.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.set_cursor(0, 4);
+        s.predict_key(&key_text("h"));
+        let mut ev = key_named(PhysicalKey::U, ModSet::CTRL | ModSet::ALT);
+        ev.text = None;
+        assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
     }
 
     #[test]

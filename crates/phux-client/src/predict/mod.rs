@@ -65,7 +65,30 @@
 //!   the prompt, or after a programmatic SGR change would diverge
 //!   visibly. End-of-line is the conservative subset that covers the
 //!   "typing then immediately deleting" case which is the bulk of why
-//!   users notice latency.
+//!   users notice latency. A backspace is additionally refused if it
+//!   would erase at or below the prompt-boundary anchor (below).
+//! - Ctrl-U (`PhysicalKey::U` + CTRL, kill-to-start-of-line) **only when
+//!   the prompt boundary is known** for the current row (phux-9gw.1.5).
+//!   Erases the typed run from the boundary up to the cursor as a batch
+//!   of blank predictions. With an unknown boundary it is refused — the
+//!   full-line erase is exactly the case that would otherwise eat the
+//!   prompt.
+//!
+//! ## Prompt boundary (client-side heuristic, phux-9gw.1.5)
+//!
+//! The predict layer has no OSC-133 shell integration, so it does not
+//! know where the prompt ends. Instead it learns a *prompt-boundary
+//! anchor* purely from typed input: the column where the user's first
+//! [`state::PredictionKind::Insert`] lands on a row marks where typed
+//! input begins; everything to the left is prompt (or prior output) that
+//! erasure must never touch. The anchor survives a same-row reconcile
+//! resync (the server echoing what we typed) but is forgotten on a row
+//! change, an Enter, a viewport resize, or a contradicting reconcile —
+//! any of which means the typed-input context is no longer trustworthy.
+//! This is the strictly-safe subset that ships without server-side
+//! plumbing; full prompt-aware Ctrl-U across re-painted prompts would
+//! need OSC-133 (`FinalTerm`) shell integration through the server parser,
+//! which is out of this layer's scope.
 //! - Enter (`PhysicalKey::Enter`) **past column 0**, on any row except
 //!   the last. Models a pure cursor jump to `(row+1, 0)` — no cell
 //!   paint, just a forward anchor so subsequent inserts queue on the
@@ -81,10 +104,11 @@
 //!   overlay paint — reconcile confirms when the authoritative cursor
 //!   matches the predicted target column.
 //!
-//! Everything else — arrow keys at line boundaries, control chords,
-//! function keys, Tab, Alt-chords, IME composition, multi-codepoint
-//! graphemes (ZWJ sequences, combining marks), full-line backspace
-//! from a known prompt — is not predicted. They are still sent upstream
+//! Everything else — arrow keys at line boundaries, control chords other
+//! than Ctrl-U, function keys, Tab, Alt-chords, IME composition,
+//! multi-codepoint graphemes (ZWJ sequences, combining marks), and
+//! full-line erasure when the prompt boundary is unknown — is not
+//! predicted. They are still sent upstream
 //! as normal; only the local echo is skipped. Follow-up tickets widen
 //! the safe set further once the reconcile path has miles on it.
 //!
