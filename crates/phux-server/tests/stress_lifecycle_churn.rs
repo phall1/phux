@@ -35,7 +35,7 @@ use tokio::time::timeout;
 use crate::common::builder::E2eBuilder;
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, run_local, send_frame, tracing_capture::TracingCapture,
-    try_recv_typed, wait_for_socket,
+    try_connect_socket, try_recv_typed,
 };
 
 /// Up to 10 concurrent clients attached while a pane streams output, then
@@ -143,11 +143,15 @@ fn attach_racing_pty_eof_does_not_panic() {
         // garbled frame (decode panics inside `try_recv_typed`).
         for attempt in 0..8u32 {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            let connect = timeout(
-                SOCKET_CONNECT_DEADLINE,
-                wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE),
-            );
-            let Ok(mut stream) = connect.await else {
+            // Connect with a non-panicking poll: this test deliberately races
+            // a session that is reaping itself, so "couldn't connect within
+            // the deadline" is a *clean* outcome (the server already reaped +
+            // exited), not a failure. Using the panicking `wait_for_socket`
+            // here would turn that legitimate race outcome — or mere
+            // scheduler latency on a contended runner — into a spurious
+            // "socket never became connectable" panic.
+            let Some(mut stream) = try_connect_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await
+            else {
                 // Socket gone => server already reaped + exited. Clean.
                 cap.attach_screen(format!("attempt {attempt}: socket gone (clean reap)"));
                 break;

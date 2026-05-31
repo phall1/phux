@@ -58,10 +58,14 @@ use tokio::time::{sleep, timeout};
 /// deadline only elapses on an actual fault.
 pub const WIRE_RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Deadline for the per-test socket-connect bootstrap. Two seconds matches
-/// the byc.8 `attach_lifecycle` helper and is a comfortable margin for the
-/// `bind() + LocalSet::run_until` ramp on a busy CI box.
-pub const SOCKET_CONNECT_DEADLINE: Duration = Duration::from_secs(2);
+/// Deadline for the per-test socket-connect bootstrap. The margin is
+/// generous on purpose, mirroring [`WIRE_RECV_TIMEOUT`]'s philosophy: under
+/// full-parallel `just e2e` the server's `bind() + LocalSet::run_until` ramp
+/// contends with every other PTY-backed test for CPU, so a tight deadline
+/// turns scheduler latency into a spurious "socket never became connectable"
+/// panic. The happy path connects in milliseconds, so this ceiling only
+/// elapses on an actual fault (a server that genuinely never bound).
+pub const SOCKET_CONNECT_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Spawn a [`ServerRuntime`] on the current `LocalSet`, optionally pre-
 /// seeding a session by name. Returns the shutdown sender and the join
@@ -213,6 +217,25 @@ pub async fn wait_for_socket(path: &Path, deadline: Duration) -> UnixStream {
         path.display(),
         last_err,
     );
+}
+
+/// Non-panicking sibling of [`wait_for_socket`]: poll
+/// `UnixStream::connect(path)` until success and return `Some(stream)`, or
+/// return `None` once `deadline` elapses without a connect. Unlike
+/// [`wait_for_socket`], a never-connectable socket is a *valid outcome* here,
+/// not a panic — use this when the test is racing a server that may have
+/// already reaped itself and torn the socket down (so "couldn't connect" is
+/// indistinguishable from, and as acceptable as, "server gone"). The retry
+/// cadence and connect semantics are identical to [`wait_for_socket`].
+pub async fn try_connect_socket(path: &Path, deadline: Duration) -> Option<UnixStream> {
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        if let Ok(s) = UnixStream::connect(path).await {
+            return Some(s);
+        }
+        sleep(Duration::from_millis(5)).await;
+    }
+    None
 }
 
 /// Read exactly one length-prefixed wire frame and return the full
