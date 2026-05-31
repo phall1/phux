@@ -17,6 +17,7 @@ What you read to understand *how* phux is built.
 
 | File | Owns |
 |---|---|
+| [DIAGRAM.md](./DIAGRAM.md) | System shape: PTY, server libghostty, transport, client libghostty, TUI — one-glance overview |
 | [process-model.md](./process-model.md) | Per-user server, single process, current-thread runtime; supervision (ADR-0003, ADR-0014) |
 | [threading.md](./threading.md) | `!Send`/`!Sync` constraints, LocalSet, why this matters for libghostty |
 | [transport.md](./transport.md) | The Transport trait, UDS today, QUIC + SSH-stdio later (ADR-0007) |
