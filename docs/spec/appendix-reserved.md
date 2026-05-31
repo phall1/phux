@@ -27,7 +27,9 @@ For implementers extending the protocol:
   `0x22..=0x23` C→S and `0xA1..=0xA2` S→C from these ranges).
 - Message IDs `0x31..=0x3F` and `0xC2..=0xCF`: reserved for control
   plane.
-- Message IDs `0x41..=0x4F` and `0xB3..=0xBF`: reserved for events.
+- Message IDs `0x41..=0x4F` and `0xB3..=0xBF`: reserved for events
+  (phux-y2t allocated `SUBSCRIBE_EVENTS = 0x41` C→S and `EVENT = 0xB3`
+  S→C from these ranges; `0x42..=0x4F` and `0xB4..=0xBF` remain open).
 
 ## 2. Reserved enum ranges
 
