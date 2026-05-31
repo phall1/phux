@@ -6,17 +6,11 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-# RUSTSEC-2017-0008: `serial` crate is unmaintained. Pulled in transitively
-# by portable-pty (the canonical Rust PTY library; see phux-bc1.2). Not a
-# known vulnerability — just no upstream activity. Tracked; revisit if
-# portable-pty drops the dep or we move to a different PTY backend.
-#
-# RUSTSEC-2024-0436: `paste` crate is unmaintained (author archived the
-# repo). Pulled in transitively by `ratatui` (chrome-layer dep, epic
-# phux-5ke). Not a known vulnerability — declarative macro helper, no
-# unsafe surface. Revisit when ratatui migrates to `pastey` or drops the
-# dep.
-ignore = ["RUSTSEC-2017-0008", "RUSTSEC-2024-0436"]
+# No advisories are currently ignored. The previous ignores
+# (RUSTSEC-2017-0008 for the unmaintained `serial` crate, RUSTSEC-2024-0436
+# for the unmaintained `paste` crate) are no longer needed: portable-pty 0.9
+# uses the maintained `serial2` crate, and ratatui 0.30 dropped `paste`.
+ignore = []
 
 [licenses]
 allow = [
