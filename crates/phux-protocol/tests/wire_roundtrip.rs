@@ -22,8 +22,8 @@ use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{
-    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, Scope, SpawnError, SpawnResult,
-    StateScope, ViewportInfo,
+    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, Scope, SpawnError,
+    SpawnResult, StateScope, ViewportInfo,
 };
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
@@ -1868,6 +1868,107 @@ fn terminal_closed_exit_status_negative_round_trips() {
     let frame = FrameKind::TerminalClosed {
         terminal_id: TerminalId::local(7),
         exit_status: Some(-1),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+// -----------------------------------------------------------------------------
+// Agent-event frames — SPEC §7.5 (phux-y2t).
+// -----------------------------------------------------------------------------
+
+fn arb_agent_event() -> impl Strategy<Value = AgentEvent> {
+    prop_oneof![
+        Just(AgentEvent::CommandStarted),
+        proptest::option::of(any::<i32>())
+            .prop_map(|exit_code| AgentEvent::CommandFinished { exit_code }),
+        ".{0,128}".prop_map(|title| AgentEvent::TitleChanged { title }),
+        Just(AgentEvent::Bell),
+        Just(AgentEvent::PaneSpawned),
+        proptest::option::of(any::<i32>())
+            .prop_map(|exit_status| AgentEvent::PaneClosed { exit_status }),
+        Just(AgentEvent::Dirty),
+        Just(AgentEvent::Idle),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// `SUBSCRIBE_EVENTS` round-trips for both per-Terminal and
+    /// server-scoped (`None`) subscriptions.
+    #[test]
+    fn roundtrip_subscribe_events(terminal in proptest::option::of(arb_terminal_id())) {
+        let frame = FrameKind::SubscribeEvents { terminal };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+
+    /// `EVENT` round-trips across the full event taxonomy and both scope
+    /// shapes.
+    #[test]
+    fn roundtrip_event(
+        terminal in proptest::option::of(arb_terminal_id()),
+        event in arb_agent_event(),
+    ) {
+        let frame = FrameKind::Event { terminal, event };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        prop_assert_eq!(decoded, frame);
+        prop_assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn event_unknown_tag_decodes_as_unknown_and_skips() {
+    // Forward-compat: an EVENT frame whose event tag this version does not
+    // know MUST decode as `AgentEvent::Unknown` (preserving the body
+    // verbatim) rather than failing the frame parse — so an older client
+    // skips a newer server's event kinds cleanly. Hand-roll the frame:
+    // type 0xB3, optional-terminal None (0x00), event tag 0x7F (unknown),
+    // length-prefixed body bytes.
+    let body_bytes = [0xDEu8, 0xAD, 0xBE, 0xEF];
+    let mut body = vec![0xB3u8]; // TYPE_EVENT
+    body.push(0x00); // Option<TerminalId>::None
+    body.push(0x7F); // unknown event tag
+    body.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
+    body.extend_from_slice(&body_bytes);
+
+    let mut bytes = vec![];
+    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(&body);
+
+    let (decoded, tail) = FrameKind::decode(&bytes).unwrap();
+    assert_eq!(
+        decoded,
+        FrameKind::Event {
+            terminal: None,
+            event: AgentEvent::Unknown {
+                tag: 0x7F,
+                body: body_bytes.to_vec(),
+            },
+        }
+    );
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn event_unknown_tag_reencodes_verbatim() {
+    // A relay that decodes an unknown event and re-encodes it MUST produce
+    // byte-identical output — `Unknown` is a lossless passthrough.
+    let frame = FrameKind::Event {
+        terminal: None,
+        event: AgentEvent::Unknown {
+            tag: 0x55,
+            body: vec![1, 2, 3, 4, 5],
+        },
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
