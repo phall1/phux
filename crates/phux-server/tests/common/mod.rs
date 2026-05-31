@@ -32,7 +32,9 @@
 // keep `pub`.
 #![allow(unreachable_pub, reason = "tests/common shared-helpers pattern")]
 
+pub mod builder;
 pub mod screen;
+pub mod tracing_capture;
 
 use std::future::Future;
 use std::path::{Path, PathBuf};

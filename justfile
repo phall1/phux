@@ -39,13 +39,28 @@ lint:
 test:
     cargo nextest run --workspace --all-features
 
-# End-to-end tests that spawn real PTY-backed `phux server` subprocesses
-# (crates/phux/tests/run_wait_e2e.rs). They are `#[ignore]`d so the default
-# `test`/`ci` run stays deterministic — in the full parallel pool the server
-# spawns starve and the socket-bind wait trips. Run on demand (they pass
-# reliably one binary at a time, ~2s). CI may invoke this as a separate step.
+# They are `#[ignore]`d so the default `test`/`ci` run stays deterministic
+# — in the full parallel pool the server spawns starve and the socket-bind
+# wait trips. Run on demand (they pass reliably one binary at a time, ~2s).
+# CI may invoke this as a separate step.
+#
+# NOTE: the in-process e2e flywheel suite (the `E2eBuilder` harness, the
+# resize-storm / attach-churn stress tests, and the wall-clock
+# `perf_latency` gate in crates/phux-server/tests/) runs in the normal
+# `just test` / `just ci` pool — it is fast and does not spawn subprocesses.
+#
+# Binary-level e2e tests that spawn real PTY-backed `phux server` subprocesses.
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all
+
+# Spins a real `phux` server + session, drives a scripted scenario (heavy
+# colored output, a 2nd client attach, a resize storm, an input line) and
+# writes screen snapshots + a summary to /tmp/phux-repro-<ts>/ for
+# inspection. See crates/phux-server/examples/e2e-repro.rs.
+#
+# One-command real-server repro of a lag/crash edge case.
+e2e-repro:
+    cargo run -p phux-server --example e2e-repro
 
 # Smoke-test the examples/agents/ scripts against a throwaway server, so
 # they cannot rot silently against CLI changes (phux-wiv). Builds `phux`
