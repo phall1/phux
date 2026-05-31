@@ -59,15 +59,17 @@
 //! upstream — or porting phux to the one-shot API throughout — is tracked as a
 //! follow-up.
 //!
-//! What remains for the extraction bridge itself is *coordinate translation*,
-//! not API soundness: a [`Match`]'s `col`/`len` are `char` offsets into the
-//! right-trimmed projected text row, while [`Terminal::grid_ref`] wants a
-//! [`Point`](libghostty_vt::terminal::Point) in grid columns within a
-//! [`PointSpace`](libghostty_vt::terminal::PointSpace) — and wide glyphs make
-//! the two diverge (3sy's caveat). Mapping a `(Region, row, char-col)` triple
-//! back onto the terminal's grid coordinate space is the next deliberate step
-//! (phux-3sy / phux-97w follow-up); it is not built here to avoid shipping a
-//! half-correct wide-glyph mapping.
+//! The remaining piece — *coordinate translation* from a [`Match`]'s
+//! `char`-offset `col`/`len` (into the right-trimmed projected text row) onto
+//! the terminal's grid columns within a
+//! [`Point`](libghostty_vt::terminal::Point) space — now lives in
+//! [`crate::extract`]. Wide glyphs make the `char` offset and the grid column
+//! diverge (3sy's caveat); `extract::char_col_to_grid_x` re-walks the row's
+//! cells to invert that mapping, and `extract::extract_match` builds the
+//! [`Selection`](libghostty_vt::selection::Selection) and formats it. The
+//! viewport/active case is complete; the
+//! scrollback (history) point-space mapping is reported there as
+//! unimplemented rather than shipped with a guessed `y`.
 
 use crate::grid::{SnapshotSynthesizer, SynthesisError};
 use libghostty_vt::Terminal;

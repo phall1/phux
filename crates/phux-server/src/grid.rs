@@ -54,7 +54,7 @@ pub const SCROLLBACK_ALL: u32 = 0;
 /// overwhelming-common case (a base codepoint plus a few combining marks)
 /// without a heap allocation per cell; deeper clusters fall back to a heap
 /// retry on `OutOfSpace`.
-const GRAPHEME_INLINE: usize = 8;
+pub(crate) const GRAPHEME_INLINE: usize = 8;
 
 /// Errors that can occur while synthesising a snapshot.
 #[derive(Debug, thiserror::Error)]

@@ -10,6 +10,7 @@
 
 pub mod cwd_query;
 pub mod downsample;
+pub mod extract;
 pub mod grid;
 pub mod id_bridge;
 pub mod input;
