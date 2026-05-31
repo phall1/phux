@@ -37,6 +37,26 @@ pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};
 
+/// Test double: a [`RenderOverlay`] that records every key handed to it and
+/// never dismisses, so a test can assert exactly which keystrokes reached
+/// the overlay. Lives here (not in `attach/`) because implementing
+/// `RenderOverlay::render` names ratatui types, which the boundary guard
+/// confines to `render/`. Used by the `attach::input_dispatch` overlay-input
+/// routing regression test.
+#[cfg(test)]
+pub(crate) struct RecordingOverlay {
+    pub(crate) keys: std::rc::Rc<std::cell::RefCell<Vec<KeyEvent>>>,
+}
+
+#[cfg(test)]
+impl RenderOverlay for RecordingOverlay {
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+    fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
+        self.keys.borrow_mut().push(key.clone());
+        OverlayCommand::Stay
+    }
+}
+
 /// A chrome-layer overlay rendered above pane interiors.
 ///
 /// Implementors paint into a ratatui [`Buffer`] sized to the outer

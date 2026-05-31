@@ -1854,24 +1854,9 @@ mod tests {
     }
 
     // -- overlay input routing (regression: prefix key swallowed) ---------
-
-    /// An overlay that records every key it is handed and never dismisses.
-    /// Lets a test assert exactly which keystrokes reached the overlay.
-    #[derive(Default)]
-    struct RecordingOverlay {
-        keys: std::rc::Rc<std::cell::RefCell<Vec<phux_protocol::input::key::KeyEvent>>>,
-    }
-
-    impl crate::render::overlay::RenderOverlay for RecordingOverlay {
-        fn render(&self, _area: ratatui::layout::Rect, _buf: &mut ratatui::buffer::Buffer) {}
-        fn handle_key(
-            &mut self,
-            key: &phux_protocol::input::key::KeyEvent,
-        ) -> crate::render::overlay::OverlayCommand {
-            self.keys.borrow_mut().push(key.clone());
-            crate::render::overlay::OverlayCommand::Stay
-        }
-    }
+    // The `RecordingOverlay` test double lives in `crate::render::overlay`
+    // because implementing `RenderOverlay::render` names ratatui types, which
+    // the boundary guard confines to `render/`.
 
     /// Regression (wave-hunt/client-tui): while an overlay is active the
     /// keybind resolver must be bypassed, so the leader prefix key (and any
@@ -1898,7 +1883,9 @@ mod tests {
         // Record what the overlay receives.
         let keys = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut overlays = OverlayState::new();
-        overlays.push(Box::new(RecordingOverlay { keys: keys.clone() }));
+        overlays.push(Box::new(crate::render::overlay::RecordingOverlay {
+            keys: keys.clone(),
+        }));
 
         let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
         let mut conn = Connection::from_stream(a);
