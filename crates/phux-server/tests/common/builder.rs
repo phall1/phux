@@ -568,6 +568,58 @@ fn default_shell() -> String {
     "/bin/sh".to_owned()
 }
 
+/// A scripted, deterministic HEAVY-COLORED-output seed command — the
+/// repro for the user's actual lag symptom (zsh completion menu /
+/// syntax-highlighted scroll: many full-width SGR-laden rows rewritten
+/// every frame).
+///
+/// Shape: `gens` repaints of a `rows`-tall screen, where every row is a
+/// full `cols`-wide line built from per-cell `\033[38;5;Nm` 256-color
+/// SGR runs — i.e. an SGR change roughly every other column, the
+/// worst-case churn for the per-consumer diff and the client's VT apply +
+/// per-cell render. Each repaint homes the cursor (`\033[H`) so the whole
+/// grid is rewritten in place (no scroll), matching a live completion
+/// menu redrawing on each keystroke. The shell sleeps briefly first so
+/// clients attach before the burst lands as a live delta, prints
+/// `COLORDONE` as a settle marker, then idles so the connection stays
+/// open for teardown.
+///
+/// Deterministic: no RNG, fixed iteration counts, color index a pure
+/// function of `(row, col, gen)`. Two runs emit identical bytes, so the
+/// gate's settle assertion is reproducible.
+#[must_use]
+pub fn colored_burst_command(cols: u16, rows: u16, gens: u16) -> CommandBuilder {
+    // Each row: for each cell column, switch to a 256-color foreground
+    // then print one visible glyph. `printf` in a tight inner loop is too
+    // slow at this density, so build each row's bytes once per (row,gen)
+    // with a column loop that appends to a shell variable, then print the
+    // whole row in one `printf`. Color index cycles through the 216-color
+    // cube (16..=231) as a function of column+row+gen so adjacent cells
+    // differ (forcing an SGR delta per cell, the heavy case).
+    let script = format!(
+        "sleep 0.3; \
+         cols={cols}; rows={rows}; \
+         for g in $(seq 1 {gens}); do \
+           printf '\\033[H'; \
+           r=1; \
+           while [ \"$r\" -le \"$rows\" ]; do \
+             line=''; c=1; \
+             while [ \"$c\" -le \"$cols\" ]; do \
+               n=$(( 16 + (c + r + g) % 216 )); \
+               line=\"$line\\033[38;5;${{n}}mX\"; \
+               c=$(( c + 1 )); \
+             done; \
+             printf \"%b\\033[0m\\r\\n\" \"$line\"; \
+             r=$(( r + 1 )); \
+           done; \
+         done; \
+         printf '\\033[0mCOLORDONE\\r\\n'; sleep 30"
+    );
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.args(["-c", &script]);
+    cmd
+}
+
 /// A named key for [`ClientHandle::send_keys`]. Covers the keys a repro
 /// actually drives; falls through to [`Key::Char`] for printables. The
 /// mapping to a [`KeyEvent`] mirrors the `ascii_key`/`enter_key` helpers

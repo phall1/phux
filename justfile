@@ -52,7 +52,8 @@ test:
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all
     cargo nextest run -p phux-server --run-ignored ignored-only \
-      --test perf_latency --test stress_resize_storm --test stress_attach_churn
+      --test perf_latency --test perf_colored_output \
+      --test stress_resize_storm --test stress_attach_churn
 
 # Spins a real `phux` server + session, drives a scripted scenario (heavy
 # colored output, a 2nd client attach, a resize storm, an input line) and

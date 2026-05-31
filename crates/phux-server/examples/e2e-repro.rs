@@ -87,14 +87,24 @@ async fn run() {
     // The scripted scenario, all in one seed pane: a heavy colored burst,
     // then echo the kernel winsize on a loop (so the resize storm is
     // observable), then a marker, then idle.
+    //
+    // The burst is the WORST-case colored shape — the user's actual lag
+    // symptom (zsh completion menu / syntax highlight): every cell of
+    // every row carries its own 256-color SGR, so an SGR change roughly
+    // every other column, rewritten in place (`\033[H`) each generation.
+    // This is the same shape the `perf_colored_output` gate drives and the
+    // heaviest churn for the per-consumer diff + client VT apply/render.
+    // Keep it in sync with `tests/common/builder::colored_burst_command`.
     let mut script = String::new();
-    script.push_str("sleep 0.2; ");
-    script.push_str("for g in 1 2 3 4 5 6 7 8 9 10; do ");
+    script.push_str("sleep 0.2; cols=80; rows=40; ");
+    script.push_str("for g in $(seq 1 10); do ");
     script.push_str("printf '\\033[H'; ");
-    script.push_str("for r in $(seq 1 40); do ");
-    script.push_str("printf '\\033[38;5;%dmrow %02d gen%d colored-chunk colored\\r\\n' ");
-    script.push_str("$((16 + r % 200)) $r $g; done; done; ");
-    script.push_str("printf 'BURST_DONE\\r\\n'; ");
+    script.push_str("r=1; while [ \"$r\" -le \"$rows\" ]; do ");
+    script.push_str("line=''; c=1; while [ \"$c\" -le \"$cols\" ]; do ");
+    script.push_str("n=$(( 16 + (c + r + g) % 216 )); ");
+    script.push_str("line=\"$line\\033[38;5;${n}mX\"; c=$(( c + 1 )); done; ");
+    script.push_str("printf \"%b\\033[0m\\r\\n\" \"$line\"; r=$(( r + 1 )); done; done; ");
+    script.push_str("printf '\\033[0mBURST_DONE\\r\\n'; ");
     // Resize observability: loop stty size so we catch post-resize dims.
     script.push_str("for i in $(seq 1 60); do stty size; sleep 0.05; done; ");
     script.push_str("printf 'SCRIPT_DONE\\r\\n'; sleep 30");

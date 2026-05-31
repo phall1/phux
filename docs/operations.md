@@ -77,7 +77,9 @@ Spans to grep for (use `jq -c 'select(.fields.message=="close")'` to narrow to t
 | `synthesize_against_reference` | server | debug | `changed_row_count`, `out_bytes` | per-tick CPU sink — **the** server lag signal |
 | `handle_attach` | server | info | `client_id`, `target`, `cols`, `rows` | attach-handshake latency |
 | `handle_command` | server | info | `client_id`, `request_id`, `kind` | control-command latency |
-| `handle_server_frame` | client | debug | `kind`, `terminal_id`, `seq`, `bytes` | per-frame client apply+paint cost — **the** client lag signal |
+| `handle_server_frame` | client | debug | `kind`, `terminal_id`, `seq`, `bytes` | per-frame client apply+paint cost — **the** client lag signal (grep `kind=terminal_output`) |
+| `vt_apply` | client | debug | `bytes` | child of `handle_server_frame`: the libghostty VT parse alone (feeding bytes into the pane mirror) |
+| `paint_trigger` | client | debug | `rows` | child of `handle_server_frame`: the render alone (pane `render_at` + bar). Compare its `time.busy` against `vt_apply`'s to attribute client lag to parse vs paint |
 | `attach_handshake` | client | info | `target` | client-side end-to-end attach latency |
 
 Per-PTY-chunk volume (`vt_write`) and per-frame emit detail are at **trace** (`RUST_LOG=phux=trace`) — useful for "what was the PTY doing right before the stall," off by default. A wedged or leaked consumer shows as `consumer mailbox full` / `consumer mailbox closed` at debug.

@@ -95,3 +95,9 @@ serde = { workspace = true }
 phux-server.workspace = true
 proptest.workspace = true
 insta.workspace = true
+# Test-only: capture the apply-vs-paint child spans `handle_server_frame`
+# emits into an in-memory buffer to prove the split is observable (the
+# flywheel's apply-ms vs paint-ms signal). A scoped `set_default`
+# subscriber, never the production `telemetry::init`. Workspace dep, no
+# new external surface.
+tracing-subscriber = { workspace = true }

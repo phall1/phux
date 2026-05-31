@@ -235,12 +235,22 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
             };
             super::paint::safe_resize(&mut slot.terminal, cols, rows)?;
-            // Apply scrollback first (if any), then the visible-state
-            // replay — order per SPEC §8.4 / §13.
-            if let Some(sb) = scrollback_bytes {
-                slot.terminal.vt_write(&sb);
+            // phux-flywheel: time the snapshot VT-apply (scrollback +
+            // visible replay into the libghostty mirror) under its own
+            // child span, distinct from the render trigger below — same
+            // apply-vs-paint split as the `TerminalOutput` hot path. The
+            // `bytes` field counts the replay payload (the dominant term;
+            // scrollback is rarely present in the live attach path).
+            {
+                let _apply =
+                    tracing::debug_span!("vt_apply", bytes = vt_replay_bytes.len()).entered();
+                // Apply scrollback first (if any), then the visible-state
+                // replay — order per SPEC §8.4 / §13.
+                if let Some(sb) = scrollback_bytes {
+                    slot.terminal.vt_write(&sb);
+                }
+                slot.terminal.vt_write(&vt_replay_bytes);
             }
-            slot.terminal.vt_write(&vt_replay_bytes);
             if is_focused {
                 // A fresh snapshot replaces the world — drop any
                 // outstanding predictions and resize the predict layer.
@@ -254,6 +264,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 if overlay_active {
                     let _ = overlay;
                 } else {
+                    // phux-flywheel: the snapshot paint trigger, timed
+                    // separately from the `vt_apply` above.
+                    let _paint_trigger =
+                        tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
                     let _ = slot.renderer.render_at(&slot.terminal, out, origin);
                     if let Some((row, col)) = slot.renderer.last_cursor() {
                         predict.set_cursor(row, col);
@@ -320,7 +334,18 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // render path re-borrows it via `paint_focused_pane`. Clone
             // the id into the entry so `terminal_id` survives for the
             // non-focused repaint below.
+            //
+            // phux-flywheel: this VT-apply (feeding bytes into the
+            // libghostty mirror) is timed by its OWN child span, distinct
+            // from the paint trigger below. The parent
+            // `handle_server_frame` close-duration is apply+paint fused;
+            // splitting them lets a trace attribute client lag to the
+            // libghostty parse (`vt_apply`) versus the render
+            // (`paint_full_frame`, opened inside `paint_focused_pane`)
+            // separately. Debug-level + a lazy `bytes` field ⇒ free at the
+            // default `phux=info` filter.
             {
+                let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
                 let slot = match panes.entry(terminal_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                     std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
@@ -341,6 +366,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 && !overlay_active
                 && let Some(fid) = focused_pane.as_ref()
             {
+                // phux-flywheel: the paint trigger — render the focused
+                // pane (this enters `paint_full_frame`'s span inside
+                // `paint_focused_pane`), reconcile predictions, repaint the
+                // bar. Its OWN child span isolates paint cost from the
+                // `vt_apply` above so a trace shows apply-ms vs paint-ms
+                // separately. Debug-level + lazy `rows` field ⇒ free at the
+                // default filter.
+                let _paint_trigger =
+                    tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
                 let has_bar = status_bar.is_some();
                 let focused_cursor =
                     paint_focused_pane(out, active_ls, panes, fid, viewport_dims, has_bar, false);
@@ -1171,6 +1205,84 @@ mod tests {
         assert_eq!(focused, Some(tid(2)), "focus follows the new pane");
         assert!(panes.contains_key(&tid(2)), "new pane got a slot");
         assert!(outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes);
+    }
+
+    /// phux-flywheel: the apply-vs-paint split is observable. Driving a
+    /// `TERMINAL_OUTPUT` for the focused pane under a debug-level capturing
+    /// subscriber must close BOTH child spans — `vt_apply` (libghostty
+    /// parse) and `paint_trigger` (render) — so a trace can attribute
+    /// client lag to apply-ms vs paint-ms separately. We assert on
+    /// span-close events (the parse + render each report their own busy
+    /// time) rather than the fused parent `handle_server_frame` close.
+    #[test]
+    fn output_emits_separate_apply_and_paint_spans() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::fmt::MakeWriter;
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("lock").extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> MakeWriter<'a> for Buf {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::{EnvFilter, Registry, fmt};
+        let buf = Buf::default();
+        let layer = fmt::layer()
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .with_span_events(fmt::format::FmtSpan::CLOSE);
+        let subscriber = Registry::default()
+            .with(EnvFilter::new("phux_client=debug"))
+            .with(layer);
+
+        {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let left = tid(1);
+            let right = tid(2);
+            let mut layout = two_pane_workspace(&left, &right, &left);
+            let mut focused = Some(left.clone());
+            let mut panes = panes_for(&[&left, &right]);
+            let mut out: Vec<u8> = Vec::new();
+            // Drive the focused pane so the paint trigger fires.
+            drive_output(
+                &mut out,
+                &mut layout,
+                &mut focused,
+                &mut panes,
+                &left,
+                b"hi",
+            );
+        }
+
+        let log = String::from_utf8(buf.0.lock().expect("lock").clone()).expect("utf8");
+        // Both child spans must have closed (FmtSpan::CLOSE prints a
+        // `close` line carrying `time.busy` per span name).
+        assert!(
+            log.contains("vt_apply"),
+            "vt_apply span never closed; log:\n{log}"
+        );
+        assert!(
+            log.contains("paint_trigger"),
+            "paint_trigger span never closed; log:\n{log}"
+        );
+        // And the parent fused span is still present (apply+paint).
+        assert!(
+            log.contains("handle_server_frame"),
+            "parent span missing; log:\n{log}"
+        );
     }
 
     /// A `Bell` frame routes a BEL byte through the injected sink, so a
