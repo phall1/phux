@@ -39,6 +39,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use bytes::BytesMut;
+use libghostty_vt::terminal::{Point, PointCoordinate};
 use phux_core::ids::{SessionId, TerminalId, WindowId};
 use phux_core::registry::Registry;
 use phux_core::session::Session;
@@ -114,6 +115,55 @@ pub enum Outbound {
     Frame(phux_protocol::wire::frame::FrameKind),
     /// A pre-encoded byte blob; the writer writes it as-is.
     Raw(BytesMut),
+}
+
+/// Selection span data for a client on a terminal (phux-dh4).
+///
+/// Stores the coordinate endpoints of a selection in either the active
+/// (viewport) or history (scrollback) point space. The actual [`Selection`]
+/// type from libghostty holds borrowed references to grid cells and cannot
+/// be stored long-term; this struct captures the span metadata needed to
+/// reconstruct it on-demand.
+///
+/// [`Selection`]: libghostty_vt::selection::Selection
+#[derive(Debug, Clone)]
+pub struct SelectionSpan {
+    /// Start point: either Active (viewport) or History (scrollback).
+    pub start: Point,
+    /// End point: must be in the same point space as start.
+    pub end: Point,
+    /// Whether the selection is rectangular (false = linear).
+    /// Currently only linear selections are used; rectangular is deferred.
+    pub rectangular: bool,
+}
+
+impl SelectionSpan {
+    /// Create a new selection span from start and end points.
+    pub fn new(start: Point, end: Point) -> Self {
+        Self {
+            start,
+            end,
+            rectangular: false,
+        }
+    }
+
+    /// Create a selection span in the active (viewport) point space.
+    pub fn active(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
+        Self {
+            start: Point::Active(PointCoordinate { x: start_x, y: start_y }),
+            end: Point::Active(PointCoordinate { x: end_x, y: end_y }),
+            rectangular: false,
+        }
+    }
+
+    /// Create a selection span in the history (scrollback) point space.
+    pub fn history(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
+        Self {
+            start: Point::History(PointCoordinate { x: start_x, y: start_y }),
+            end: Point::History(PointCoordinate { x: end_x, y: end_y }),
+            rectangular: false,
+        }
+    }
 }
 
 /// An attached client: routing identity plus outbound mailbox.
@@ -203,6 +253,13 @@ pub struct ServerState {
     /// accumulates and tests inspect it via
     /// [`Self::terminal_input_log_for`].
     terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
+    /// Per-client, per-Terminal selection spans (phux-dh4).
+    ///
+    /// Stores the coordinate endpoints of text selections for each client
+    /// on each terminal they have attached to. The key is (ClientId, TerminalId)
+    /// and the value is the [`SelectionSpan`] metadata. Selections are cleaned up
+    /// when a client detaches from a terminal or a terminal exits.
+    client_selections: HashMap<(ClientId, TerminalId), SelectionSpan>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
@@ -555,6 +612,7 @@ impl ServerState {
             attached: HashMap::new(),
             terminal_subscribers: HashMap::new(),
             terminal_inputs: HashMap::new(),
+            client_selections: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
             terminal_tokens: HashMap::new(),
@@ -979,6 +1037,8 @@ impl ServerState {
         // same as L3 metadata subscriptions above. Drop them so the map
         // stays bounded across attach churn.
         self.event_subscriptions.remove(&client_id);
+        // Clear all selections this client held on all terminals (phux-dh4).
+        self.clear_client_selections(client_id);
     }
 
     /// Record an agent-event subscription for `client_id` at `scope`
@@ -1322,6 +1382,8 @@ impl ServerState {
         if let Some(token) = self.terminal_tokens.remove(&terminal) {
             token.cancel();
         }
+        // Clear all selections on this terminal across all clients (phux-dh4).
+        self.clear_terminal_selections(terminal);
     }
 
     /// Look up the [`TerminalHandle`] for `pane`, if registered.
@@ -1478,6 +1540,42 @@ impl ServerState {
                 .with_windows(windows)
                 .with_panes(panes),
         )
+    }
+
+    /// Store a selection span for a client on a terminal (phux-dh4).
+    pub fn set_selection(
+        &mut self,
+        client_id: ClientId,
+        terminal_id: TerminalId,
+        span: SelectionSpan,
+    ) {
+        self.client_selections.insert((client_id, terminal_id), span);
+    }
+
+    /// Retrieve a selection span for a client on a terminal, if one exists.
+    pub fn get_selection(
+        &self,
+        client_id: ClientId,
+        terminal_id: TerminalId,
+    ) -> Option<SelectionSpan> {
+        self.client_selections.get(&(client_id, terminal_id)).cloned()
+    }
+
+    /// Clear a specific client's selection on a terminal.
+    pub fn clear_selection(&mut self, client_id: ClientId, terminal_id: TerminalId) {
+        self.client_selections.remove(&(client_id, terminal_id));
+    }
+
+    /// Clear all selections for a client (called on detach).
+    pub fn clear_client_selections(&mut self, client_id: ClientId) {
+        self.client_selections
+            .retain(|(c, _t)| *c != client_id);
+    }
+
+    /// Clear all selections for a terminal (called when terminal exits).
+    pub fn clear_terminal_selections(&mut self, terminal_id: TerminalId) {
+        self.client_selections
+            .retain(|(_c, t)| *t != terminal_id);
     }
 }
 
@@ -2030,5 +2128,201 @@ mod tests {
         assert_eq!(s.metadata().get(&scope, "missing"), None);
         // Wrong scope: same key returns None.
         assert_eq!(s.metadata().get(&Scope::Global, "k"), None);
+    }
+
+    #[test]
+    fn selection_span_active_creates_correct_points() {
+        let span = SelectionSpan::active(10, 5, 20, 5);
+        assert_eq!(span.rectangular, false);
+        match span.start {
+            Point::Active(coord) => {
+                assert_eq!(coord.x, 10);
+                assert_eq!(coord.y, 5);
+            }
+            _ => panic!("Expected Point::Active"),
+        }
+        match span.end {
+            Point::Active(coord) => {
+                assert_eq!(coord.x, 20);
+                assert_eq!(coord.y, 5);
+            }
+            _ => panic!("Expected Point::Active"),
+        }
+    }
+
+    #[test]
+    fn selection_span_history_creates_correct_points() {
+        let span = SelectionSpan::history(5, 100, 15, 100);
+        assert_eq!(span.rectangular, false);
+        match span.start {
+            Point::History(coord) => {
+                assert_eq!(coord.x, 5);
+                assert_eq!(coord.y, 100);
+            }
+            _ => panic!("Expected Point::History"),
+        }
+    }
+
+    #[test]
+    fn set_and_get_selection() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let tid = TerminalId::from(0usize);
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Initially no selection
+        assert_eq!(s.get_selection(cid, tid), None);
+
+        // Set selection
+        s.set_selection(cid, tid, span.clone());
+        let retrieved = s.get_selection(cid, tid);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().rectangular, false);
+    }
+
+    #[test]
+    fn per_terminal_isolation() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let tid1 = TerminalId::from(0usize);
+        let tid2 = TerminalId::from(1usize);
+        let span1 = SelectionSpan::active(10, 5, 20, 5);
+        let span2 = SelectionSpan::active(0, 0, 5, 0);
+
+        // Set different selections on different terminals
+        s.set_selection(cid, tid1, span1.clone());
+        s.set_selection(cid, tid2, span2.clone());
+
+        // Verify isolation
+        let sel1 = s.get_selection(cid, tid1).unwrap();
+        let sel2 = s.get_selection(cid, tid2).unwrap();
+        assert_eq!(sel1.rectangular, false);
+        assert_eq!(sel2.rectangular, false);
+        // They have different start x coordinates
+        match sel1.start {
+            Point::Active(c) => assert_eq!(c.x, 10),
+            _ => panic!(),
+        }
+        match sel2.start {
+            Point::Active(c) => assert_eq!(c.x, 0),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn per_client_isolation() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let tid = TerminalId::from(0usize);
+        let span1 = SelectionSpan::active(10, 5, 20, 5);
+        let span2 = SelectionSpan::active(0, 0, 5, 0);
+
+        // Different clients set different selections on same terminal
+        s.set_selection(c1, tid, span1.clone());
+        s.set_selection(c2, tid, span2.clone());
+
+        // Verify isolation
+        let sel1 = s.get_selection(c1, tid).unwrap();
+        let sel2 = s.get_selection(c2, tid).unwrap();
+        match sel1.start {
+            Point::Active(c) => assert_eq!(c.x, 10),
+            _ => panic!(),
+        }
+        match sel2.start {
+            Point::Active(c) => assert_eq!(c.x, 0),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn clear_selection_removes_specific_entry() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let tid = TerminalId::from(0usize);
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        s.set_selection(cid, tid, span);
+        assert!(s.get_selection(cid, tid).is_some());
+
+        s.clear_selection(cid, tid);
+        assert_eq!(s.get_selection(cid, tid), None);
+    }
+
+    #[test]
+    fn clear_client_selections_removes_all_for_client() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let tid1 = TerminalId::from(0usize);
+        let tid2 = TerminalId::from(1usize);
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Set selections on multiple terminals for same client
+        s.set_selection(cid, tid1, span.clone());
+        s.set_selection(cid, tid2, span.clone());
+
+        // Clear all for this client
+        s.clear_client_selections(cid);
+
+        // Both should be gone
+        assert_eq!(s.get_selection(cid, tid1), None);
+        assert_eq!(s.get_selection(cid, tid2), None);
+    }
+
+    #[test]
+    fn clear_terminal_selections_removes_all_for_terminal() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let tid = TerminalId::from(0usize);
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Two clients have selections on same terminal
+        s.set_selection(c1, tid, span.clone());
+        s.set_selection(c2, tid, span.clone());
+
+        // Clear all for this terminal
+        s.clear_terminal_selections(tid);
+
+        // Both clients' selections should be gone
+        assert_eq!(s.get_selection(c1, tid), None);
+        assert_eq!(s.get_selection(c2, tid), None);
+    }
+
+    #[test]
+    fn clear_client_selections_does_not_affect_other_clients() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let tid = TerminalId::from(0usize);
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        s.set_selection(c1, tid, span.clone());
+        s.set_selection(c2, tid, span.clone());
+
+        // Clear only c1's selections
+        s.clear_client_selections(c1);
+
+        // c1 gone, c2 remains
+        assert_eq!(s.get_selection(c1, tid), None);
+        assert!(s.get_selection(c2, tid).is_some());
+    }
+
+    #[test]
+    fn detach_cleans_up_selections() {
+        let mut s = ServerState::new();
+        let (sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+
+        let span = SelectionSpan::active(10, 5, 20, 5);
+        s.set_selection(cid, pid, span);
+        assert!(s.get_selection(cid, pid).is_some());
+
+        // Detach
+        s.detach(cid);
+
+        // Selection should be cleaned up
+        assert_eq!(s.get_selection(cid, pid), None);
     }
 }
