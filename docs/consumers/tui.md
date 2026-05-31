@@ -75,28 +75,48 @@ spawning it if it isn't running.
 
 ```
 phux                          # attach to default session, autostart server shipped
-phux attach [session]         # attach explicitly; session optional      shipped
+phux attach [SESSION]         # attach explicitly; session optional (alias: a) shipped
 phux server  [--session N]    # run server in foreground (incl. for SSH) shipped (no --stdio yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
-                              # create a session                         spec-only
-phux ls                       # list sessions (alias: list-sessions)     spec-only
+                              # create a session                         shipped
+phux ls                       # list sessions (alias: list)              shipped
 phux windows [-s SESSION]     # list windows                             spec-only
 phux panes [-w WINDOW]        # list panes                               spec-only
 phux kill TARGET              # kill session/window/pane by selector     shipped
 phux send-keys TARGET KEYS... # send keys to a pane (scripting)          shipped
 phux run TARGET CMD...        # run a command in a pane, capture $?      shipped
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)    shipped
-phux wait [TARGET]            # poll a pane until a condition holds      shipped
+phux wait [TARGET]            # poll a pane until a condition holds       shipped
 phux config <init|path|show>  # scaffold + inspect config                init/path/show shipped; edit spec-only
 phux messages                 # recent server-emitted messages           spec-only
-phux version                  # print version                            spec-only
-phux help [COMMAND]                                                       spec-only
+phux --version                # print version                            shipped
+phux help [COMMAND]                                                       shipped
 ```
 
-All subcommands accept `--target` / `-t` consistently where applicable.
-Output is human-readable by default and JSON with `--json` where it
-makes sense (`ls`, `windows`, `panes`, `capture`, `config show`,
-`server status`).
+**The target convention.** The verbs that address an existing pane —
+`kill`, `snapshot`, `send-keys`, `run`, `wait` — take the selector as a
+**positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
+focused/last session). `attach` likewise takes its `[SESSION]` name
+positionally. `new` is the exception: because its trailing `[COMMAND...]`
+is a positional var-arg, the *new* session's name is the `-s`/`--session`
+flag instead, keeping the command words unambiguous. So: positional target
+to act on something that exists; `-s` to name something you are creating.
+
+**Flags before the target.** `send-keys`, `run`, and `wait` take a
+trailing var-arg (the keys / command / nothing), so every flag —
+`--json`, `--timeout`, `--until`, `--idle`, `--socket` — MUST precede the
+positional `TARGET`; anything after it is swallowed into the trailing
+words. Each command's `--help` calls this out.
+
+**Output hygiene (for scripts and agents).** One-shot verbs print no
+banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
+document (`ls`, `snapshot`, `wait`, `run`, `new`); diagnostics go to
+stderr with a nonzero exit, never interleaved into the JSON. Exit codes
+are stable: `ls` exits nonzero with no server (like `tmux ls`); `wait`
+exits `124` on `--timeout`; `run` mirrors the command's own exit code, or
+`125` when `phux` itself gives up on `--timeout`. Output is human-readable
+by default and JSON with `--json` where it makes sense (`ls`, `snapshot`,
+`wait`, `run`, `new`, `windows`, `panes`, `capture`, `config show`).
 
 ---
 

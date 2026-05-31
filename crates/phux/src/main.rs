@@ -71,9 +71,33 @@ const AUTO_SPAWN_SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
 /// that the typical happy path resolves in a single poll.
 const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
-/// phux — terminal multiplexer built on libghostty-vt.
+/// phux — a libghostty-backed terminal multiplexer and control plane.
 #[derive(Debug, Parser)]
-#[command(version, about, long_about = None)]
+#[command(
+    version,
+    about = "A terminal multiplexer you can drive by hand or script.",
+    long_about = "phux — a libghostty-backed terminal multiplexer and control plane.\n\n\
+        Run `phux` with no arguments to attach to your session (auto-starting a\n\
+        server if needed). The control verbs below read and drive panes without a\n\
+        TTY, and most accept `--json` for clean, scriptable output.\n\n\
+        ATTACH / SERVE\n  \
+          attach     Attach to a session (interactive)\n  \
+          server     Run a server in the foreground\n\n\
+        INSPECT\n  \
+          ls         List sessions\n  \
+          snapshot   Capture a pane's screen as JSON or a boxed view\n\n\
+        DRIVE\n  \
+          new        Create a session\n  \
+          kill       Kill a session, window, or pane\n  \
+          send-keys  Send keys to a pane\n  \
+          run        Run a command in a pane and capture its exit code\n  \
+          wait       Block until a pane meets a condition\n\n\
+        CONFIG\n  \
+          config     Inspect and scaffold the config file\n\n\
+        TARGET is the selector grammar: a session name, `name:window`,\n\
+        `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
+        grammar works across kill/snapshot/send-keys/run/wait."
+)]
 struct Cli {
     /// Subcommand. Defaults to attaching to the last session if omitted.
     #[command(subcommand)]
@@ -82,7 +106,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Attach to a session by name.
+    /// Attach to a session (interactive).
+    ///
+    /// With no name, attaches to the most-recently-focused session,
+    /// auto-spawning a server if none is running. Requires a TTY.
+    #[command(visible_alias = "a")]
     Attach {
         /// Session name (matches the name used at creation time).
         ///
@@ -134,6 +162,7 @@ enum Command {
     /// server running it reports as much and exits non-zero (like
     /// `tmux ls`). Pass `--json` for the stable, versioned machine shape
     /// (ADR-0022) instead of the human text.
+    #[command(visible_alias = "list")]
     Ls {
         /// Emit the session list as stable, versioned JSON
         /// (`SessionListJson`, ADR-0022) instead of human text.
@@ -197,15 +226,20 @@ enum Command {
         socket: Option<PathBuf>,
     },
 
-    /// Capture a session's focused pane as structured data (ADR-0022).
+    /// Capture a pane's screen as JSON or a boxed text view.
     ///
     /// The agent "floor": read what's on screen as JSON (`--json`) or a
     /// boxed text view, without a TTY or tmux. Issues the side-effect-free
-    /// `GET_SCREEN` command — the server walks its own grid, so this
-    /// neither attaches nor resizes the pane, and is safe to poll against a
-    /// pane another client is using.
+    /// `GET_SCREEN` command (ADR-0022) — the server walks its own grid, so
+    /// this neither attaches nor resizes the pane, and is safe to poll
+    /// against a pane another client is using.
+    ///
+    /// TARGET is a selector (see the top-level help); omit it for the
+    /// most-recently-focused session.
+    #[command(about = "Capture a pane's screen as JSON or a boxed text view")]
     Snapshot {
-        /// Session name. Omit for the most-recently-focused session.
+        /// Target selector. Omit for the most-recently-focused session.
+        #[arg(value_name = "TARGET")]
         session: Option<String>,
 
         /// Emit JSON (stable schema) instead of the human boxed view.
@@ -231,16 +265,20 @@ enum Command {
         socket: Option<PathBuf>,
     },
 
-    /// Send input to a pane (ADR-0022). tmux-shaped: each KEY is a named
-    /// key (`Enter`, `Tab`, `Escape`, `Up`, `C-c`, `M-x`, …) or a literal
-    /// string sent character by character. TARGET is the full selector
-    /// grammar (`session`, `session:window`, `session:window.pane`, `@id`,
-    /// `.`, `=`); it resolves client-side to one pane and the events route
-    /// to it by id, so the live pane is neither attached nor resized.
+    /// Send keys to a pane.
+    ///
+    /// tmux-shaped: each KEY is a named key (`Enter`, `Tab`, `Escape`,
+    /// `Up`, `C-c`, `M-x`, …) or a literal string sent character by
+    /// character. TARGET is a selector (see the top-level help); it
+    /// resolves client-side to one pane and the events route to it by id,
+    /// so the live pane is neither attached nor resized (ADR-0022).
+    ///
+    /// Flags (`--socket`) MUST precede TARGET: KEYS is a trailing var-arg,
+    /// so anything after TARGET is taken as a key to send.
     ///
     ///   phux send-keys demo "echo hi" Enter
     ///   phux send-keys work:1.0 C-c
-    #[command(name = "send-keys")]
+    #[command(name = "send-keys", about = "Send keys to a pane")]
     SendKeys {
         /// Target selector: session, session:window, session:window.pane,
         /// @id, `.` (focused), or `=` (last-focused).
@@ -255,15 +293,22 @@ enum Command {
         socket: Option<PathBuf>,
     },
 
-    /// Wait until a pane meets a condition, polling the side-effect-free
-    /// screen read (ADR-0022 §4). The poll floor of the event surface:
-    /// always works, no shell integration. Exit 0 when met, 124 on timeout.
-    /// Flags must precede the target.
+    /// Block until a pane meets a condition.
+    ///
+    /// Polls the side-effect-free screen read (ADR-0022 §4) — the poll
+    /// floor of the event surface: always works, no shell integration.
+    /// Exits 0 when met, 124 on `--timeout`. TARGET is a selector (see the
+    /// top-level help); omit it for the most-recently-focused session.
+    ///
+    /// Flags (`--until`, `--idle`, `--timeout`, `--json`, `--socket`) MUST
+    /// precede TARGET if you give one.
     ///
     ///   phux wait build --until "BUILD SUCCESSFUL"
     ///   phux wait repl --idle 750
+    #[command(about = "Block until a pane meets a condition")]
     Wait {
         /// Target selector. Omit for the most-recently-focused session.
+        #[arg(value_name = "TARGET")]
         session: Option<String>,
 
         /// Succeed once any visible line contains this substring. NOTE: this
@@ -290,17 +335,22 @@ enum Command {
         socket: Option<PathBuf>,
     },
 
-    /// Run a command in a pane and report its exit code, output, and
-    /// duration (ADR-0022 §3). Brackets the command with sentinels to
-    /// capture `$?`, so it assumes a POSIX shell (sh/bash/zsh). The process
-    /// exit code mirrors the command's. TARGET is the full selector grammar
-    /// (`session`, `session:window`, `session:window.pane`, `@id`, `.`,
-    /// `=`), resolved client-side to one pane; the command routes to it by
-    /// id (no attach, no resize). Flags (--timeout/--json) MUST precede the
-    /// command, or they are swallowed into it.
+    /// Run a command in a pane and capture its exit code.
+    ///
+    /// Reports the command's exit code, output, and duration (ADR-0022
+    /// §3). Brackets the command with sentinels to capture `$?`, so it
+    /// assumes a POSIX shell (sh/bash/zsh). The process exit code mirrors
+    /// the command's (125 if `phux` gives up on `--timeout`), so
+    /// `phux run … && next` composes like a shell. TARGET is a selector
+    /// (see the top-level help), resolved client-side to one pane; the
+    /// command routes to it by id (no attach, no resize).
+    ///
+    /// Flags (`--timeout`, `--json`, `--socket`) MUST precede TARGET, or
+    /// they are swallowed into the trailing command.
     ///
     ///   phux run build "cargo test"
     ///   phux run --timeout 30 work:1.0 "cargo test"
+    #[command(about = "Run a command in a pane and capture its exit code")]
     Run {
         /// Target selector: session, session:window, session:window.pane,
         /// @id, `.` (focused), or `=` (last-focused).
@@ -363,17 +413,27 @@ enum ConfigAction {
     },
 }
 
+/// Print the one-line build banner to stderr.
+///
+/// Reserved for the two long-running, human-watched entry points: a
+/// foreground `phux server` and the naked-`phux` auto-spawn. It is
+/// deliberately NOT printed before a one-shot control verb (`ls`,
+/// `snapshot`, `send-keys`, `run`, `wait`, `new`, `kill`, `config`) so
+/// those leave stderr clean for scripts and agents, and never before a
+/// `--json` path. `phux --version` reports the version on stdout.
+fn print_banner() {
+    eprintln!(
+        "phux {} (pre-alpha; see docs/spec/)",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
 fn main() -> ExitCode {
     // Heap profiler must outlive everything else in `main` — its Drop
     // is what flushes `dhat-heap.json`. Bind to `_dhat` (NOT `_`, which
     // would drop immediately) so the guard lives until `main` returns.
     #[cfg(feature = "dhat-heap")]
     let _dhat = dhat::Profiler::new_heap();
-
-    eprintln!(
-        "phux {} (pre-alpha; see docs/spec/)",
-        env!("CARGO_PKG_VERSION")
-    );
 
     // Install the process-global tracing subscriber once, before any
     // runtime spins up. Without this, every `tracing::{info,debug,...}`
@@ -525,6 +585,11 @@ fn run_config(action: &ConfigAction) -> ExitCode {
 ///
 /// The shared cascade lives in [`attach_default_with_fallback`].
 fn run_naked() -> ExitCode {
+    // The naked invocation is a human launching their session and
+    // watching it come up (possibly auto-spawning a server). One line of
+    // build identity is welcome here; one-shot verbs stay silent.
+    print_banner();
+
     let socket_path = default_socket_path();
 
     // phux-4li.1: name the auto-created default session from
@@ -1641,6 +1706,13 @@ fn run_server(
     seed_command: Option<&str>,
 ) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
+
+    // Banner only for a hand-started foreground server (a human watching
+    // a long-running process). The `--daemonize` child of the auto-spawn
+    // path nulls its stdio and logs to a file, so a banner there is noise.
+    if !daemonize {
+        print_banner();
+    }
 
     // Auto-spawn path: detach from the launching client's controlling
     // terminal so closing that terminal (SIGHUP to its session) can't
