@@ -2399,23 +2399,25 @@ async fn handle_get_screen(
 /// never transiently shrinks the pane to the caller's viewport; the live
 /// dimensions are preserved (ADR-0022, `phux-3j3`).
 ///
-/// Input authority is gated per SPEC `input.md` §7 / `L1.md` §7.1:
-/// `ROUTE_INPUT` is PRIMARY-only. There is no materialized per-connection
-/// role map yet, so PRIMARY is approximated by an active subscription —
-/// a client present in `terminal_subscribers[tid]` for the target pane
-/// (phux-nlo, interim Option 1). A caller that is unattached or merely
-/// observing via the read-only `GET_SCREEN` surface has no subscription
-/// and is rejected with `PermissionDenied`, never writing PTY bytes. The
-/// `client_id` argument is an internal lookup only: the call-site shape
-/// stays stable so a later `terminal_roles` map can swap the policy in
-/// place without re-threading callers.
+/// `ROUTE_INPUT` is the side-effect-free agent path (ADR-0022): it
+/// delivers input to a Terminal WITHOUT an attach or subscription, which is
+/// exactly how `phux run` / `send-keys` drive a pane headlessly. It must
+/// therefore NOT require the caller to be a subscriber. An earlier interim
+/// gate (phux-nlo) approximated "PRIMARY" by subscription and rejected any
+/// unsubscribed caller — but that is precisely the headless agent, so it
+/// broke the agent surface; it is removed. v0.1 is single-trust-domain (one
+/// server per user, ADR-0003), so there is no untrusted observer to fence
+/// off here. Genuine viewer-vs-primary authority (SPEC `input.md` §7 /
+/// `L1.md` §7.1) returns when per-connection roles are materialized, and
+/// must gate an *attached read-only viewer*, never the headless
+/// control-plane caller. `client_id` is kept for that future policy and for
+/// the observability trace below.
 ///
 /// `try_send` is non-blocking for the same single-threaded-runtime reason
 /// as `handle_terminal_input`: input is fire-and-forget per SPEC §9, so a
 /// full mailbox drops the event rather than blocking the read loop. The
 /// command still acks `Ok` (the event was accepted for delivery); an
-/// unknown Terminal, a non-primary caller, or a gone actor produces an
-/// `Error`.
+/// unknown Terminal or a gone actor produces an `Error`.
 fn handle_route_input(
     state: &SharedState,
     client_id: ClientId,
@@ -2430,37 +2432,21 @@ fn handle_route_input(
             message: format!("ROUTE_INPUT to satellite route unsupported: {terminal_id:?}"),
         };
     }
-    // Resolve the wire id and, in the same lock, evaluate the PRIMARY
-    // gate and clone the (Send) handle out; we never await inside the lock.
-    let resolved = state.with(|s| {
+    // Resolve the wire id to its (Send) Terminal handle in one lock; we
+    // never await inside the lock. No subscription/role gate: ROUTE_INPUT is
+    // the headless agent path (see the doc comment) and must work without an
+    // attach.
+    let handle = state.with(|s| {
         let core = s.terminal_from_wire(terminal_id)?;
-        let is_primary = s.subscribers_for_terminal(core).contains(&client_id);
-        let handle = s.terminal_handle(core).cloned();
-        Some((is_primary, handle))
+        s.terminal_handle(core).cloned()
     });
-    let Some((is_primary, handle)) = resolved else {
-        return CommandResult::Error {
-            code: ErrorCode::TerminalNotFound,
-            message: format!("no such terminal: {terminal_id:?}"),
-        };
-    };
-    if !is_primary {
-        warn!(
-            ?client_id,
-            ?terminal_id,
-            "ROUTE_INPUT from non-primary (unsubscribed) client; rejecting (SPEC input.md §7)"
-        );
-        return CommandResult::Error {
-            code: ErrorCode::PermissionDenied,
-            message: format!("ROUTE_INPUT requires PRIMARY role for terminal: {terminal_id:?}"),
-        };
-    }
     let Some(handle) = handle else {
         return CommandResult::Error {
             code: ErrorCode::TerminalNotFound,
             message: format!("no such terminal: {terminal_id:?}"),
         };
     };
+    debug!(?client_id, ?terminal_id, "ROUTE_INPUT delivering input");
     let input = match event {
         InputEvent::Key(event) => TerminalInput::Key(event),
         InputEvent::Mouse(event) => TerminalInput::Mouse(event),

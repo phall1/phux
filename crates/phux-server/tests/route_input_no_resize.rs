@@ -41,7 +41,7 @@ use std::time::Duration;
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_ATTACHED,
+    Command, CommandResult, CommandValue, FrameKind, StateScope, TYPE_ATTACHED,
     TYPE_COMMAND_RESULT, TYPE_TERMINAL_SNAPSHOT,
 };
 use portable_pty::CommandBuilder;
@@ -248,13 +248,17 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
     });
 }
 
-/// `ROUTE_INPUT` is PRIMARY-only (SPEC input.md §7 / L1.md §7.1). A
-/// connection that never attached holds no subscription — the interim
-/// PRIMARY proxy (phux-nlo) — so it is a viewer and MUST be rejected with
-/// `PERMISSION_DENIED`, never reaching the PTY. The terminal exists, so a
-/// `TERMINAL_NOT_FOUND` rejection would not exercise the role gate.
+/// `ROUTE_INPUT` is the side-effect-free agent path (ADR-0022): `phux run`
+/// / `send-keys` resolve a pane via `GET_STATE` and inject input WITHOUT
+/// ever attaching or subscribing. So an unsubscribed control-plane caller
+/// MUST be accepted (`Ok`) — not rejected. (A prior interim gate, phux-nlo,
+/// keyed "PRIMARY" off subscription and rejected exactly this headless
+/// path, breaking the agent surface; this pins the corrected behavior.)
+/// Genuine viewer-vs-primary authority returns with materialized
+/// per-connection roles and must gate an *attached* read-only viewer, never
+/// this headless caller.
 #[test]
-fn route_input_from_unsubscribed_viewer_is_permission_denied() {
+fn route_input_from_unsubscribed_agent_is_accepted() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
@@ -263,7 +267,7 @@ fn route_input_from_unsubscribed_viewer_is_permission_denied() {
         let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
 
         // Resolve the pane id without attaching — GET_STATE does not
-        // subscribe, so this connection stays a viewer.
+        // subscribe, so this connection is the headless agent surface.
         let pane = focused_pane(&mut stream, 1).await;
 
         send_frame(
@@ -278,12 +282,8 @@ fn route_input_from_unsubscribed_viewer_is_permission_denied() {
         )
         .await;
         match await_command_result(&mut stream, 2).await {
-            CommandResult::Error { code, .. } => assert_eq!(
-                code,
-                ErrorCode::PermissionDenied,
-                "viewer ROUTE_INPUT must be PERMISSION_DENIED, got {code:?}",
-            ),
-            other => panic!("expected Error(PermissionDenied), got {other:?}"),
+            CommandResult::Ok => {}
+            other => panic!("headless ROUTE_INPUT must be accepted (Ok), got {other:?}"),
         }
     });
 }
