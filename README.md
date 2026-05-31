@@ -68,24 +68,26 @@ addressable is out of scope on purpose — see Non-goals below.
 
 ## Status
 
-**Pre-alpha. The wire spec leads; the implementation follows it.**
+**v0.1: L1 Terminal substrate, stable and shipped.**
 
-Shipped and usable today:
+**L1 — Terminal control plane (stable, shipped today):**
+- Single-session auto-attach, detach, re-attach
+- Multi-pane splits with full terminal protocol support (Kitty keyboard, OSC 8, images)
+- Status bar, keybindings, multi-client attach
+- libghostty-backed wire protocol (VT bytes server→client, structured input client→server)
 
-- Auto-attach to a single session; detach; re-attach
-- Multi-pane splits, kill, focus, click-to-focus
-- Status bar with typed widgets; keybindings (prefix + global chords); help overlay
-- Multi-client attach to the same session
-- Full bytes-on-wire pass-through (Kitty keyboard, OSC 8, OSC 133, true colour, images)
+**L2 & L3 — Collections and metadata (roadmapped, spec'd, wire hooks in place):**
+- Named session lifecycle (CREATE_SESSION, KILL_COLLECTION)
+- TUI layout persistence, window management, metadata storage
+- Full `phux` CLI surface (new, ls, kill, rename, send-keys, run, snapshot, wait)
 
-On the roadmap, with the wire hooks already in place: most of L2
-Collection lifecycle, most L3 metadata commands, federation routing,
-the agent SDK, predictive local echo, and the rest of the `phux
-<subcommand>` CLI surface. The L1 substrate is the part worth building
-against now; the rest is designed and spec'd, not yet wired. If that
-boundary is where you want to work, [`CONTRIBUTING.md`](./CONTRIBUTING.md)
-is the way in. [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) has the
-exact line between the two.
+**Federation and agent SDK (v0.2+, addressing ready from day 1):**
+- Control plane routing across satellites (SATELLITE{host, id} TerminalIds already accepted)
+- Agent SDK with structured L1 interface (wire hooks in place, implementation pending)
+- Predictive local echo and lazy state sync
+
+The L1 substrate is the part worth building against now. For contributors,
+[`CONTRIBUTING.md`](./CONTRIBUTING.md) has the exact roadmap and constraints.
 
 ## Install
 
