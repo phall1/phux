@@ -103,7 +103,7 @@ toml = "1"
 # libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "8e1b0f775932d9018fd9a641cb261f5867cb2e68", version = "0.1", default-features = false }
+libghostty-vt = { git = "https://github.com/phall1/libghostty-rs.git", rev = "6d49dfdeeb4915237615e0cd6e03046b6f96dfa3", version = "0.1", default-features = false }
 
 [profile.release]
 lto = "fat"

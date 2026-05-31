@@ -1298,48 +1298,25 @@ impl TerminalActor {
         let cols = cols.max(1);
         let rows = rows.max(1);
 
-        // The both-shrink decomposition (below) MUST key off libghostty's
-        // ACTUAL current dimensions, not the cached `self.cols/self.rows`.
-        // A prior resize that failed (e.g. a now-clamped 0, or any
-        // libghostty error) could leave the cache ahead of the real grid;
-        // keying the both-shrink decision off a stale cache then issues a
-        // true both-shrink as a SINGLE `resize()` call, hitting the very
-        // `PageList.resizeCols` integer overflow this shim exists to avoid
-        // (phux-y06, the SIGABRT reproduced by the resize-extremes storm).
-        // Reading the live dims keeps the workaround correct across failed
-        // resizes.
-        let (cur_cols, cur_rows) = {
-            let term = self.terminal.borrow();
-            (
-                term.cols().unwrap_or(self.cols),
-                term.rows().unwrap_or(self.rows),
-            )
-        };
-
         // `Terminal::resize` takes pixel dims for image-protocol sizing;
         // pass 0 (server does not maintain pixel metrics — clients
         // own pixel rendering per ADR-0013).
         //
-        // phux-y06: libghostty's `PageList.resizeCols` overflows (panics
-        // in Zig) when cols AND rows both shrink in a single resize()
-        // call. Decompose a both-shrink into two single-axis steps (rows
-        // first, then cols); each is individually safe. Drop this once
-        // the pinned libghostty-vt rev fixes resizeCols upstream.
+        // A both-axes shrink in a single resize() call once overflowed
+        // libghostty's `PageList.resizeCols` (phux-y06, the SIGABRT
+        // reproduced by the resize-extremes storm); the fix now lives in
+        // the vendored ghostty (phall1/ghostty 6d89054f3, "fix: resize
+        // overflow"), so a both-shrink is a single safe call.
         let applied = {
             let mut term = self.terminal.borrow_mut();
-            let result = if cols < cur_cols && rows < cur_rows {
-                term.resize(cur_cols, rows, 0, 0)
-                    .and_then(|()| term.resize(cols, rows, 0, 0))
-            } else {
-                term.resize(cols, rows, 0, 0)
-            };
+            let result = term.resize(cols, rows, 0, 0);
             if let Err(err) = result {
                 warn!(?err, cols, rows, "terminal resize failed");
             }
             // Cache the dims libghostty actually settled on, never the
-            // requested dims: on error the grid is unchanged, so caching
-            // the request would desync the cache from reality and defeat
-            // the both-shrink guard on the next resize.
+            // requested dims: on error (e.g. a clamped 0 that still failed)
+            // the grid is unchanged, so caching the request would desync
+            // the cache from the real grid size.
             (term.cols().unwrap_or(cols), term.rows().unwrap_or(rows))
         };
         self.cols = applied.0;
@@ -3108,10 +3085,10 @@ mod tests {
     /// Crash-hunt: a storm of *degenerate* resizes — `0x0`, `1x1`,
     /// `1x200`, `200x1`, a 1000x1000 monster, and repeated both-axes
     /// shrinks crossing the 1-cell clamp — must NOT panic the actor task.
-    /// The actor's `handle_resize` is the last guard before libghostty's
-    /// `Terminal::resize`; a zero dimension or an unguarded both-shrink at
-    /// the boundary previously reached the Zig `PageList.resizeCols`
-    /// overflow. We assert the actor is still alive (the `join` unwrap
+    /// `handle_resize` clamps to a 1-cell minimum so a zero dimension never
+    /// reaches libghostty; the both-axes-shrink overflow in the Zig
+    /// `PageList.resizeCols` is fixed in the vendored ghostty (phall1/ghostty
+    /// 6d89054f3). We assert the actor is still alive (the `join` unwrap
     /// surfaces a panicked task) and a final sane resize still applies.
     #[tokio::test]
     async fn degenerate_resize_storm_does_not_panic_actor() {
@@ -3178,24 +3155,21 @@ mod tests {
             .await;
     }
 
-    /// phux-y06 regression (crash-hunt): a `0x0` (or any failing) resize
-    /// followed by a both-shrink must NOT abort libghostty's
+    /// phux-y06 regression (crash-hunt): a degenerate resize storm that
+    /// includes both-axes shrinks (e.g. real `80x24 -> 1x1`) issued as
+    /// BARE single `resize()` calls must NOT abort libghostty's
     /// `PageList.resizeCols` with an integer overflow.
     ///
-    /// The pre-fix bug: `handle_resize` cached the *requested* dims even
-    /// when the libghostty `resize` failed (a `0x0` fails with
-    /// `InvalidValue` and leaves the grid at its prior size). The next
-    /// resize then keyed its both-shrink decomposition off the stale cache
-    /// (`old = 0x0`), saw `1 < 0` is false, and issued the true both-shrink
-    /// (e.g. real `80x24 -> 1x1`) as a SINGLE `resize()` — straight into the
-    /// Zig overflow → SIGABRT.
-    ///
-    /// This test replays that exact transition against a content-filled
-    /// `Terminal` using the FIXED algorithm: clamp to 1-cell, key the
-    /// both-shrink decision off libghostty's REAL current dims, and cache
-    /// only the dims that actually applied. It must survive every step and
-    /// settle at the final size. (Run as a plain `Terminal` test so a
-    /// regression aborts THIS test, not a flaky e2e teardown.)
+    /// libghostty's `PageList.resizeCols` once overflowed (panic in Zig →
+    /// SIGABRT) when cols AND rows shrank in one `resize()` call. The fix
+    /// lives in the vendored ghostty (phall1/ghostty 6d89054f3, "fix:
+    /// resize overflow"); this test proves THAT fix — not any phux-side
+    /// axis decomposition — carries the load. It feeds reflowable content,
+    /// then drives the storm with a 1-cell clamp only (the same input
+    /// hygiene `handle_resize` keeps), issuing each step as one direct
+    /// `resize()`. It must survive every step and settle at the final
+    /// size. (Run as a plain `Terminal` test so a regression aborts THIS
+    /// test, not a flaky e2e teardown.)
     #[test]
     fn resize_desync_then_both_shrink_does_not_overflow() {
         let mut term = Terminal::new(TerminalOptions {
@@ -3231,17 +3205,13 @@ mod tests {
                 let line = format!("interleave-{i}-bbbbbbbbbbbbbbbbbbbbbbbbbbbb\r\n");
                 term.vt_write(line.as_bytes());
             }
-            // --- mirror the FIXED handle_resize algorithm ---
+            // Mirror `handle_resize`: 1-cell clamp (input hygiene) only,
+            // then a BARE single resize() per step — no axis decomposition.
+            // The vendored ghostty fix is what keeps the both-shrink steps
+            // from overflowing.
             let cols = req_cols.max(1);
             let rows = req_rows.max(1);
-            let cur_cols = term.cols().expect("cols");
-            let cur_rows = term.rows().expect("rows");
-            let _ = if cols < cur_cols && rows < cur_rows {
-                term.resize(cur_cols, rows, 0, 0)
-                    .and_then(|()| term.resize(cols, rows, 0, 0))
-            } else {
-                term.resize(cols, rows, 0, 0)
-            };
+            let _ = term.resize(cols, rows, 0, 0);
         }
 
         // Survived without SIGABRT; the grid settled at the final sane size.

@@ -49,9 +49,10 @@ fn resize_degenerate_viewports_do_not_panic() {
 
                 // Degenerate sizes, fired with no inter-send delay. The
                 // server must absorb every one without panicking the pane
-                // actor. `0x0` exercises the zero-dimension path; the
+                // actor. `0x0` exercises the zero-dimension clamp path; the
                 // mixed 1-cell / huge sizes exercise the resize-clamp and
-                // both-shrink decomposition at the boundary.
+                // the both-axes-shrink path (overflow-fixed in the vendored
+                // ghostty) at the boundary.
                 let storm: &[(u16, u16)] = &[
                     (0, 0),
                     (1, 1),
@@ -92,8 +93,9 @@ fn resize_degenerate_viewports_do_not_panic() {
 /// A both-axes-shrink storm under live output. Every step shrinks BOTH
 /// cols and rows from the previous, repeatedly crossing the 1-cell
 /// clamp boundary, while a colored burst floods the grid. This is the
-/// worst case for the `PageList.resizeCols` both-shrink workaround: the
-/// decomposition must hold at every step including the clamp to 1.
+/// worst case for the `PageList.resizeCols` both-shrink overflow: the
+/// vendored ghostty fix (phall1/ghostty 6d89054f3) must hold at every
+/// step including the clamp to 1.
 #[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn both_axes_shrink_storm_under_output_does_not_panic() {

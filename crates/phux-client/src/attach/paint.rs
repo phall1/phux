@@ -20,19 +20,15 @@ use super::driver::PaneSlot;
 use crate::layout::LayoutState;
 use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 
-/// Resize a libghostty [`Terminal`], working around a `PageList.resizeCols`
-/// integer overflow (phux-y06) that panics — inside libghostty's Zig — when
-/// **both** the column and row counts shrink in a single `resize()` call.
-/// Shrinking a single axis, or growing, is safe.
+/// Resize a libghostty [`Terminal`] to `cols`x`rows`, clamping each axis to
+/// a 1-cell minimum (libghostty has no concept of a zero-dimension grid, so
+/// a `0`-col or `0`-row request fails with `InvalidValue` and leaves the
+/// grid unchanged).
 ///
-/// When both axes shrink versus the Terminal's current `cols()`/`rows()`,
-/// we decompose the resize into two single-axis steps (rows first, then
-/// cols), each of which is individually safe. Otherwise we resize in one
-/// call. `cols`/`rows` are clamped to a 1-cell minimum (libghostty has no
-/// concept of a zero-dimension grid).
-///
-/// The proper fix is upstream in libghostty's `PageList.resizeCols`; drop
-/// this shim once the pinned `libghostty-vt` rev carries it.
+/// The both-axes-shrink overflow in libghostty's `PageList.resizeCols`
+/// (phux-y06) is fixed in the vendored ghostty (phall1/ghostty 6d89054f3,
+/// "fix: resize overflow"), so a both-shrink is a single safe `resize()`
+/// call — no axis decomposition needed.
 pub(super) fn safe_resize(
     terminal: &mut Terminal<'_, '_>,
     cols: u16,
@@ -40,15 +36,6 @@ pub(super) fn safe_resize(
 ) -> libghostty_vt::error::Result<()> {
     let cols = cols.max(1);
     let rows = rows.max(1);
-    // If we can't read the current size, fall back to a direct resize —
-    // we only special-case the proven-bad both-shrink transition.
-    let cur_cols = terminal.cols().unwrap_or(cols);
-    let cur_rows = terminal.rows().unwrap_or(rows);
-    if cols < cur_cols && rows < cur_rows {
-        // Shrink rows alone first (cols unchanged → single-axis, safe),
-        // then the call below shrinks cols alone (rows already at target).
-        terminal.resize(cur_cols, rows, 0, 0)?;
-    }
     terminal.resize(cols, rows, 0, 0)
 }
 

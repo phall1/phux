@@ -70,15 +70,12 @@ impl Oracle {
         self.terminal.vt_write(bytes);
     }
 
-    /// Mimic a host terminal reflowing its grid on resize. Uses the same
-    /// two-step shrink that `terminal_actor::handle_resize` uses to dodge
-    /// the libghostty `resizeCols` overflow on both-axis shrink (phux-y06).
+    /// Mimic a host terminal reflowing its grid on resize. A single
+    /// `resize()` mirrors `terminal_actor::handle_resize`: the both-axes
+    /// shrink that once overflowed libghostty's `resizeCols` (phux-y06) is
+    /// fixed in the vendored ghostty (phall1/ghostty 6d89054f3).
     fn resize(&mut self, cols: u16, n_rows: u16) {
-        let old_cols = self.cols;
-        let _ = self
-            .terminal
-            .resize(old_cols, n_rows, 0, 0)
-            .and_then(|()| self.terminal.resize(cols, n_rows, 0, 0));
+        let _ = self.terminal.resize(cols, n_rows, 0, 0);
         self.cols = cols;
         self.n_rows = n_rows;
     }
