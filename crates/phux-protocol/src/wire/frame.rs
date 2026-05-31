@@ -248,6 +248,50 @@ pub const TYPE_COMMAND: u8 = 0x31;
 /// Discriminant for `COMMAND_RESULT` (server to client, `docs/spec/L1.md` §5).
 pub const TYPE_COMMAND_RESULT: u8 = 0xC2;
 
+// -----------------------------------------------------------------------------
+// Agent-event frame discriminants — SPEC §7.5 (phux-y2t / ADR-0022 'events').
+//
+// The push half of the agent surface: a client SUBSCRIBES to a stream of
+// extensible tagged lifecycle/activity events, and the server PUSHES `EVENT`
+// frames as those events occur. This is an *additive accelerator* of the
+// CLI-side poll-floor `wait` (which already shipped over `GET_SCREEN`):
+// conditions stay matched client-side; events just cut polling latency.
+//
+// Allocated from the events reserved ranges in Appendix B: `0x41..=0x4F`
+// (C→S) and `0xB3..=0xBF` (S→C). `SUBSCRIBE_EVENTS` takes the first C→S
+// slot; `EVENT` takes the first S→C slot.
+// -----------------------------------------------------------------------------
+
+/// Discriminant for `SUBSCRIBE_EVENTS` (client to server, `docs/spec/L1.md` §7.5).
+pub const TYPE_SUBSCRIBE_EVENTS: u8 = 0x41;
+/// Discriminant for `EVENT` (server to client, `docs/spec/L1.md` §7.5).
+pub const TYPE_EVENT: u8 = 0xB3;
+
+// Wire tags for the `AgentEvent` tagged union (SPEC §7.5 / §10.3).
+//
+// Each event rides inside the `EVENT` frame as a `tag: u8` followed by a
+// length-prefixed `body: bytes`. The length prefix is what makes the
+// taxonomy forward-compatible: a decoder that does not recognise `tag`
+// reads (and skips) the declared body length and yields
+// [`AgentEvent::Unknown`], so a v0.2.x server may add event kinds without
+// breaking an older client's frame parse. Tags are allocated sequentially.
+/// Wire tag for [`AgentEvent::CommandStarted`].
+pub(crate) const EVENT_TAG_COMMAND_STARTED: u8 = 0x00;
+/// Wire tag for [`AgentEvent::CommandFinished`].
+pub(crate) const EVENT_TAG_COMMAND_FINISHED: u8 = 0x01;
+/// Wire tag for [`AgentEvent::TitleChanged`].
+pub(crate) const EVENT_TAG_TITLE_CHANGED: u8 = 0x02;
+/// Wire tag for [`AgentEvent::Bell`].
+pub(crate) const EVENT_TAG_BELL: u8 = 0x03;
+/// Wire tag for [`AgentEvent::PaneSpawned`].
+pub(crate) const EVENT_TAG_PANE_SPAWNED: u8 = 0x04;
+/// Wire tag for [`AgentEvent::PaneClosed`].
+pub(crate) const EVENT_TAG_PANE_CLOSED: u8 = 0x05;
+/// Wire tag for [`AgentEvent::Dirty`].
+pub(crate) const EVENT_TAG_DIRTY: u8 = 0x06;
+/// Wire tag for [`AgentEvent::Idle`].
+pub(crate) const EVENT_TAG_IDLE: u8 = 0x07;
+
 // Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
 // spec catalog order so the allocation is stable as later verbs land:
 // SPAWN=0x00, ATTACH_TERMINAL=0x01, DETACH_TERMINAL=0x02, KILL_TERMINAL=0x03,
@@ -790,6 +834,90 @@ pub enum CommandResult {
     },
 }
 
+/// A server-pushed agent event carried by [`FrameKind::Event`] (SPEC §7.5 /
+/// §10.3, phux-y2t).
+///
+/// The push half of the agent surface: an extensible taxonomy of terminal
+/// lifecycle / activity events the server emits to clients that opted in via
+/// [`FrameKind::SubscribeEvents`]. This is an *additive accelerator* of the
+/// CLI-side poll-floor `wait` (which already shipped over `GET_SCREEN`) —
+/// conditions stay matched client-side, events just cut polling latency.
+///
+/// # Forward compatibility
+///
+/// `#[non_exhaustive]`, and the wire encoding is TLV: each event is a `tag:
+/// u8` followed by a length-prefixed `body: bytes`. A decoder that does not
+/// recognise `tag` reads the declared body length and yields
+/// [`AgentEvent::Unknown`] rather than failing the whole frame parse — so a
+/// v0.2.x server may add event kinds and an older client skips them
+/// cleanly. [`AgentEvent::Unknown`] is *only ever produced by the decoder*;
+/// encoders never emit it (encoding it is a no-op-shaped contradiction and
+/// is rejected at the match arm).
+///
+/// Only `PartialEq` / `Eq`: every variant body is a primitive or a `String`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentEvent {
+    /// A shell command began executing in the scoped Terminal. Sourced
+    /// from OSC-133 `B`/`C` prompt marks (the shell-integration
+    /// command-start boundary). Carries no payload — the command text is
+    /// not extracted server-side.
+    CommandStarted,
+    /// A shell command finished in the scoped Terminal. Sourced from the
+    /// OSC-133 `D` prompt mark. `exit_code` is `Some(n)` when the shell's
+    /// integration reported one (`OSC 133 ; D ; n ST`) and `None`
+    /// otherwise — see the wire-spec note on the exit-code gap.
+    CommandFinished {
+        /// Process exit code reported by the shell's OSC-133 `D` mark, or
+        /// `None` when the shell did not include one.
+        exit_code: Option<i32>,
+    },
+    /// The scoped Terminal's title changed (OSC 0 / OSC 2). Carries the
+    /// new title as libghostty tracks it.
+    TitleChanged {
+        /// The new terminal title.
+        title: String,
+    },
+    /// The scoped Terminal received a BEL (`0x07`). The control-plane
+    /// counterpart to the `BELL` frame (`0xB0`), delivered on the event
+    /// stream so a subscriber need not also attach.
+    Bell,
+    /// A new Terminal (pane) was spawned. The carried `terminal_id` is on
+    /// the [`FrameKind::Event`] envelope's `terminal_id` field; this
+    /// variant body is empty (the id is the scope).
+    PaneSpawned,
+    /// A Terminal (pane) closed. Mirrors the L1 `TERMINAL_CLOSED` frame
+    /// (`0xA1`); the closed Terminal is the envelope's `terminal_id` and
+    /// `exit_status` carries the process exit code (or `None` for signal /
+    /// unknown), matching `TERMINAL_CLOSED.exit_status`.
+    PaneClosed {
+        /// Process exit code (`_exit(n)`), or `None` for signals / unknown.
+        exit_status: Option<i32>,
+    },
+    /// The scoped Terminal's grid mutated since the last `Idle` (output
+    /// arrived). Sourced from the per-pane tick's dirty flag; coalesced —
+    /// the server emits at most one `Dirty` per active burst, then one
+    /// [`AgentEvent::Idle`] when the burst settles.
+    Dirty,
+    /// The scoped Terminal went quiet: no grid mutation across an idle
+    /// window after a `Dirty`. The "output has settled" signal a `wait`
+    /// consumer keys on.
+    Idle,
+    /// An event whose `tag` this protocol version does not recognise.
+    ///
+    /// Produced **only by the decoder** when it reads an `EVENT` frame
+    /// whose event tag is outside the known set; the length-prefixed body
+    /// is preserved verbatim so a curious consumer can inspect it, but the
+    /// common path simply ignores unknown events. Never constructed by an
+    /// encoder.
+    Unknown {
+        /// The unrecognised event tag.
+        tag: u8,
+        /// The event's opaque body bytes, preserved verbatim.
+        body: Vec<u8>,
+    },
+}
+
 /// Decoded wire frame.
 ///
 /// The phux-6yl.4 scaffold populated `Hello`, `Ping`, and `PaneDiff`. The
@@ -1313,6 +1441,49 @@ pub enum FrameKind {
         /// The command's outcome.
         result: CommandResult,
     },
+
+    // -------------------------------------------------------------------------
+    // Agent-event frames — SPEC §7.5 / §10.3 (phux-y2t / ADR-0022 'events').
+    // The push half of the agent surface; an additive accelerator of the
+    // CLI poll-floor `wait`. `SUBSCRIBE_EVENTS` (C→S `0x41`) opts a client
+    // into the stream; `EVENT` (S→C `0xB3`) carries each extensible tagged
+    // event. The taxonomy is forward-compat (TLV body) — see [`AgentEvent`].
+    // -------------------------------------------------------------------------
+    /// `SUBSCRIBE_EVENTS` — client opts into the server-pushed
+    /// [`AgentEvent`] stream (`docs/spec/L1.md` §7.5).
+    ///
+    /// `terminal` scopes the subscription:
+    /// - `Some(id)` — only events for that Terminal (per-pane).
+    /// - `None` — every event the server emits for any Terminal the
+    ///   client may observe (server-scoped), e.g. `pane_spawned` /
+    ///   `pane_closed` across the session.
+    ///
+    /// Idempotent: re-subscribing the same scope is a no-op. Unsubscription
+    /// is implicit on detach (matching `SUBSCRIBE_METADATA`); a future
+    /// `UNSUBSCRIBE_EVENTS` ticket may add explicit teardown. The
+    /// subscription does NOT itself attach, resize, or send a snapshot —
+    /// it is purely a push registration, so an agent can `watch` a Terminal
+    /// without disturbing the live session.
+    SubscribeEvents {
+        /// Per-Terminal scope, or `None` for every Terminal the client may
+        /// observe.
+        terminal: Option<TerminalId>,
+    },
+
+    /// `EVENT` — server pushes one [`AgentEvent`] to a subscribed client
+    /// (`docs/spec/L1.md` §7.5).
+    ///
+    /// `terminal` identifies the Terminal the event concerns, or `None`
+    /// for a server-scoped event with no single owning Terminal. The
+    /// `event` body is TLV-encoded (`tag: u8` + length-prefixed bytes) so
+    /// an older client skips unrecognised event kinds via
+    /// [`AgentEvent::Unknown`] rather than failing the parse.
+    Event {
+        /// The Terminal this event concerns, or `None` if server-scoped.
+        terminal: Option<TerminalId>,
+        /// The event payload.
+        event: AgentEvent,
+    },
 }
 
 impl FrameKind {
@@ -1350,6 +1521,8 @@ impl FrameKind {
             Self::TerminalResize { .. } => TYPE_TERMINAL_RESIZE,
             Self::Command { .. } => TYPE_COMMAND,
             Self::CommandResult { .. } => TYPE_COMMAND_RESULT,
+            Self::SubscribeEvents { .. } => TYPE_SUBSCRIBE_EVENTS,
+            Self::Event { .. } => TYPE_EVENT,
         }
     }
 
@@ -1580,6 +1753,13 @@ impl FrameKind {
             Self::CommandResult { request_id, result } => {
                 enc.write_u32_be(*request_id);
                 encode_command_result(result, &mut enc);
+            }
+            Self::SubscribeEvents { terminal } => {
+                encode_optional_terminal_id(terminal.as_ref(), &mut enc);
+            }
+            Self::Event { terminal, event } => {
+                encode_optional_terminal_id(terminal.as_ref(), &mut enc);
+                encode_agent_event(event, &mut enc);
             }
         }
 
@@ -1831,6 +2011,37 @@ pub(super) fn decode_terminal_id(dec: &mut Decoder<'_>) -> Result<TerminalId, De
         }
         other => Err(DecodeError::UnknownEnumValue {
             field: "TerminalId",
+            value: u32::from(other),
+        }),
+    }
+}
+
+/// Encode an `Option<TerminalId>` with the standard `0 = None / 1 = Some`
+/// presence tag, then the tagged [`TerminalId`] body for the `Some` arm.
+///
+/// Used by the agent-event frames (`SUBSCRIBE_EVENTS`, `EVENT`) where the
+/// Terminal scope is optional (`None` = server-scoped).
+pub(super) fn encode_optional_terminal_id(id: Option<&TerminalId>, enc: &mut Encoder<'_>) {
+    match id {
+        None => enc.write_u8(0),
+        Some(id) => {
+            enc.write_u8(1);
+            encode_terminal_id(id, enc);
+        }
+    }
+}
+
+/// Decode an `Option<TerminalId>` previously written by
+/// [`encode_optional_terminal_id`].
+pub(super) fn decode_optional_terminal_id(
+    dec: &mut Decoder<'_>,
+) -> Result<Option<TerminalId>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(decode_terminal_id(dec)?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<TerminalId> tag",
             value: u32::from(other),
         }),
     }
@@ -2438,4 +2649,101 @@ pub(super) fn decode_optional_env(
             value: u32::from(other),
         }),
     }
+}
+
+// -----------------------------------------------------------------------------
+// AgentEvent codec — SPEC §7.5 / §10.3 (phux-y2t).
+//
+// TLV layout: `tag: u8`, then a length-prefixed `body: bytes`. The
+// length prefix is the forward-compat lever — a decoder that doesn't
+// recognise `tag` reads the body length, captures the bytes verbatim as
+// `AgentEvent::Unknown { tag, body }`, and moves on without failing the
+// frame. Known bodies decode from a sub-`Decoder` over the captured body
+// slice, so a body that declares more fields than this version knows is
+// still bounded by its own length (trailing additive fields inside a
+// known event are likewise skippable).
+//
+// Body shapes by tag:
+//   COMMAND_STARTED  (0x00) → empty
+//   COMMAND_FINISHED (0x01) → optional<i32> exit_code
+//   TITLE_CHANGED    (0x02) → str title
+//   BELL             (0x03) → empty
+//   PANE_SPAWNED     (0x04) → empty (the id rides the EVENT envelope)
+//   PANE_CLOSED      (0x05) → optional<i32> exit_status
+//   DIRTY            (0x06) → empty
+//   IDLE             (0x07) → empty
+// -----------------------------------------------------------------------------
+
+pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
+    // Encode the variant body into a scratch buffer first, then write the
+    // tag + the body as a single length-prefixed block. Keeping the body
+    // length-delimited is what lets an older decoder skip an unknown tag.
+    let mut body = BytesMut::new();
+    let tag = {
+        let mut body_enc = Encoder::new(&mut body);
+        match event {
+            AgentEvent::CommandStarted => EVENT_TAG_COMMAND_STARTED,
+            AgentEvent::CommandFinished { exit_code } => {
+                encode_optional_i32(*exit_code, &mut body_enc);
+                EVENT_TAG_COMMAND_FINISHED
+            }
+            AgentEvent::TitleChanged { title } => {
+                body_enc.write_str(title);
+                EVENT_TAG_TITLE_CHANGED
+            }
+            AgentEvent::Bell => EVENT_TAG_BELL,
+            AgentEvent::PaneSpawned => EVENT_TAG_PANE_SPAWNED,
+            AgentEvent::PaneClosed { exit_status } => {
+                encode_optional_i32(*exit_status, &mut body_enc);
+                EVENT_TAG_PANE_CLOSED
+            }
+            AgentEvent::Dirty => EVENT_TAG_DIRTY,
+            AgentEvent::Idle => EVENT_TAG_IDLE,
+            // `Unknown` is decoder-only: an encoder that reaches here has
+            // round-tripped an event this version did not understand.
+            // Re-emit the captured body verbatim so a relay (a hub
+            // forwarding a satellite's event, say) is lossless rather than
+            // dropping the event or panicking. The raw bytes are appended
+            // after this block to sidestep the `body`/`body_enc` borrow.
+            AgentEvent::Unknown { tag, .. } => *tag,
+        }
+    };
+    if let AgentEvent::Unknown { body: raw, .. } = event {
+        body.extend_from_slice(raw);
+    }
+    enc.write_u8(tag);
+    enc.write_bytes(&body);
+}
+
+pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, DecodeError> {
+    let tag = dec.read_u8()?;
+    let body = dec.read_bytes()?;
+    // Sub-decoder over just this event's body. A known body that declares
+    // fewer bytes than expected errors with `UnexpectedEof`; an unknown
+    // tag is captured verbatim and skipped.
+    let mut body_dec = Decoder::new(body);
+    let event = match tag {
+        EVENT_TAG_COMMAND_STARTED => AgentEvent::CommandStarted,
+        EVENT_TAG_COMMAND_FINISHED => AgentEvent::CommandFinished {
+            exit_code: decode_optional_i32(&mut body_dec)?,
+        },
+        EVENT_TAG_TITLE_CHANGED => AgentEvent::TitleChanged {
+            title: body_dec.read_str()?.to_owned(),
+        },
+        EVENT_TAG_BELL => AgentEvent::Bell,
+        EVENT_TAG_PANE_SPAWNED => AgentEvent::PaneSpawned,
+        EVENT_TAG_PANE_CLOSED => AgentEvent::PaneClosed {
+            exit_status: decode_optional_i32(&mut body_dec)?,
+        },
+        EVENT_TAG_DIRTY => AgentEvent::Dirty,
+        EVENT_TAG_IDLE => AgentEvent::Idle,
+        // Unknown event tag: preserve the body verbatim and skip. This is
+        // the forward-compat path — a v0.2.x server may add event kinds an
+        // older client does not know.
+        other => AgentEvent::Unknown {
+            tag: other,
+            body: body.to_vec(),
+        },
+    };
+    Ok(event)
 }

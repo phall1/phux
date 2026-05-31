@@ -7,16 +7,17 @@
 use super::error::DecodeError;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_COMMAND,
-    TYPE_COMMAND_RESULT, TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR,
+    TYPE_COMMAND_RESULT, TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_EVENT,
     TYPE_FRAME_ACK, TYPE_GET_METADATA, TYPE_HELLO, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY,
     TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED,
     TYPE_METADATA_KEYS, TYPE_METADATA_VALUE, TYPE_PING, TYPE_SET_METADATA, TYPE_SPAWN_TERMINAL,
-    TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_RESIZE,
-    TYPE_TERMINAL_SNAPSHOT, TYPE_TERMINAL_SPAWNED, TYPE_VIEWPORT_RESIZE, decode_attach_target,
-    decode_command, decode_command_result, decode_focus_event, decode_key_event,
-    decode_mouse_event, decode_optional_bytes, decode_optional_env, decode_optional_i32,
-    decode_optional_str, decode_optional_string_list, decode_optional_u32, decode_paste_event,
-    decode_scope, decode_spawn_result, decode_terminal_id, decode_viewport_info,
+    TYPE_SUBSCRIBE_EVENTS, TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT,
+    TYPE_TERMINAL_RESIZE, TYPE_TERMINAL_SNAPSHOT, TYPE_TERMINAL_SPAWNED, TYPE_VIEWPORT_RESIZE,
+    decode_agent_event, decode_attach_target, decode_command, decode_command_result,
+    decode_focus_event, decode_key_event, decode_mouse_event, decode_optional_bytes,
+    decode_optional_env, decode_optional_i32, decode_optional_str, decode_optional_string_list,
+    decode_optional_terminal_id, decode_optional_u32, decode_paste_event, decode_scope,
+    decode_spawn_result, decode_terminal_id, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
 use crate::ids::CollectionId;
@@ -483,6 +484,15 @@ impl<'a> Decoder<'a> {
                 let request_id = self.read_u32_be()?;
                 let result = decode_command_result(self)?;
                 FrameKind::CommandResult { request_id, result }
+            }
+            TYPE_SUBSCRIBE_EVENTS => {
+                let terminal = decode_optional_terminal_id(self)?;
+                FrameKind::SubscribeEvents { terminal }
+            }
+            TYPE_EVENT => {
+                let terminal = decode_optional_terminal_id(self)?;
+                let event = decode_agent_event(self)?;
+                FrameKind::Event { terminal, event }
             }
             // `HELLO_OK` / `PONG` and the deferred message-catalog variants
             // (`TerminalEvent`, `Alert`, `InputRaw`, resize/ack/command/etc.)
