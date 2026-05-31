@@ -2,4 +2,4 @@
 source: crates/phux-config/tests/parse.rs
 expression: normalized
 ---
-config.toml: 3:<col>: invalid basic string
+config.toml: 3:<col>: invalid basic string, expected `"`

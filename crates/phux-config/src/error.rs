@@ -10,7 +10,7 @@ pub enum ConfigError {
     ///
     /// `line` and `col` are 1-indexed and point at the start of the
     /// offending token (or `1:1` if the underlying error carried no
-    /// span — vanishingly rare for `toml = "0.8"`).
+    /// span — vanishingly rare for the `toml` crate's parse errors).
     #[error("{}: {line}:{col}: {message}", path.display())]
     Parse {
         /// Source path, used only for display.

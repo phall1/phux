@@ -159,7 +159,7 @@ fn malformed_input_reports_line_col_and_snapshots() {
 
     // The error must point inside the broken line (line 3) — not at the
     // start of the file. We assert the line and a generous col window
-    // so the test isn't brittle against `toml = "0.8"` minor bumps.
+    // so the test isn't brittle against `toml` crate minor bumps.
     assert_eq!(*line, 3, "error should point at the broken line");
     assert!(*col >= 1, "col must be 1-indexed");
 
