@@ -75,6 +75,38 @@ impl<'a> Decoder<'a> {
         &self.input[self.pos..]
     }
 
+    /// Count of bytes remaining before the current frame-body boundary (or
+    /// the input end when decoding outside a framed context).
+    ///
+    /// Used to bound pre-allocation: a length-prefixed list cannot contain
+    /// more elements than there are remaining bytes, because every element
+    /// occupies at least one byte on the wire. Reserving capacity larger than
+    /// this is always wasted — and lets an attacker drive an unbounded
+    /// `Vec::with_capacity` from a tiny frame (a decode-path denial of
+    /// service). Callers
+    /// clamp their declared element count to this value before reserving;
+    /// the read loop still errors with [`DecodeError::UnexpectedEof`] if the
+    /// declared count overshoots the bytes actually present.
+    #[must_use]
+    pub fn remaining_in_body(&self) -> usize {
+        self.body_end
+            .unwrap_or(self.input.len())
+            .saturating_sub(self.pos)
+    }
+
+    /// Reserve capacity for a length-prefixed collection without trusting the
+    /// declared `count` past what the remaining frame bytes could justify.
+    ///
+    /// Returns a `Vec` whose capacity is `min(count, remaining_bytes)`. The
+    /// caller's read loop runs `count` iterations and surfaces
+    /// [`DecodeError::UnexpectedEof`] when the input runs out, so an
+    /// over-declared `count` still errors cleanly — it just no longer
+    /// pre-reserves gigabytes for elements that cannot possibly be present.
+    #[must_use]
+    pub(crate) fn bounded_capacity<T>(&self, count: usize) -> Vec<T> {
+        Vec::with_capacity(count.min(self.remaining_in_body()))
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], DecodeError> {
         let end = self.pos.checked_add(n).ok_or(DecodeError::LengthOverflow)?;
         if end > self.input.len() {
@@ -391,7 +423,9 @@ impl<'a> Decoder<'a> {
                 let count = self.read_u32_be()?;
                 let count_usize =
                     usize::try_from(count).map_err(|_| DecodeError::LengthOverflow)?;
-                let mut keys = Vec::with_capacity(count_usize);
+                // Bound pre-reservation by remaining bytes: an over-declared
+                // count must error on EOF, not pre-allocate gigabytes.
+                let mut keys = self.bounded_capacity(count_usize);
                 for _ in 0..count_usize {
                     keys.push(self.read_str()?.to_owned());
                 }

@@ -58,6 +58,19 @@ pub enum DecodeError {
         value: u32,
     },
 
+    /// A [`crate::wire::info::LayoutNode`] tree nested deeper than the
+    /// decoder's recursion bound (see
+    /// [`crate::wire::info::MAX_LAYOUT_DEPTH`]).
+    ///
+    /// The codec is recursive; without a bound, attacker-controlled bytes
+    /// describing a pathologically deep split tree would overflow the stack
+    /// and abort the process. Real layouts nest only a handful of levels, so
+    /// the bound is far above any legitimate value. Surfacing this as a clean
+    /// decode error keeps a malformed `ATTACHED` / `COMMAND_RESULT` from
+    /// crashing the peer.
+    #[error("layout tree nested deeper than the decoder bound")]
+    LayoutTooDeep,
+
     /// A [`crate::wire::info::LayoutNode::Split`] carried a `ratio` outside
     /// the closed interval `[0.0, 1.0]` or one that was NaN / infinite.
     ///

@@ -440,9 +440,33 @@ pub(super) fn encode_layout_node(node: &LayoutNode, enc: &mut Encoder<'_>) {
     }
 }
 
+/// Maximum nesting depth the layout-tree decoder will follow before
+/// rejecting the input with [`DecodeError::LayoutTooDeep`].
+///
+/// The codec is recursive (`Split` carries two child subtrees), so an
+/// unbounded tree of attacker-controlled bytes would overflow the stack and
+/// abort the process — a 16 MiB frame admits millions of `Split` levels at
+/// roughly six bytes each. A real terminal layout nests only as deep as the
+/// user has split panes (tens at the very most); `64` is comfortably above
+/// any legitimate value while keeping the worst-case decode recursion shallow
+/// enough to never approach the stack limit.
+pub const MAX_LAYOUT_DEPTH: usize = 64;
+
 /// Decode a layout subtree. Validates `Split.ratio` to reject NaN, infinite,
-/// or out-of-range values that would otherwise round-trip but be useless.
+/// or out-of-range values that would otherwise round-trip but be useless, and
+/// bounds recursion at [`MAX_LAYOUT_DEPTH`] so a pathologically deep tree
+/// errors cleanly instead of overflowing the stack.
 pub(super) fn decode_layout_node(dec: &mut Decoder<'_>) -> Result<LayoutNode, DecodeError> {
+    decode_layout_node_depth(dec, 0)
+}
+
+fn decode_layout_node_depth(
+    dec: &mut Decoder<'_>,
+    depth: usize,
+) -> Result<LayoutNode, DecodeError> {
+    if depth >= MAX_LAYOUT_DEPTH {
+        return Err(DecodeError::LayoutTooDeep);
+    }
     let tag = dec.read_u8()?;
     match tag {
         LAYOUT_TAG_LEAF => {
@@ -455,8 +479,8 @@ pub(super) fn decode_layout_node(dec: &mut Decoder<'_>) -> Result<LayoutNode, De
             if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
                 return Err(DecodeError::MalformedLayoutRatio { ratio });
             }
-            let left = Box::new(decode_layout_node(dec)?);
-            let right = Box::new(decode_layout_node(dec)?);
+            let left = Box::new(decode_layout_node_depth(dec, depth + 1)?);
+            let right = Box::new(decode_layout_node_depth(dec, depth + 1)?);
             Ok(LayoutNode::Split {
                 dir,
                 ratio,
@@ -594,18 +618,23 @@ pub(super) fn encode_session_snapshot(snap: &SessionSnapshot, enc: &mut Encoder<
 pub(super) fn decode_session_snapshot(
     dec: &mut Decoder<'_>,
 ) -> Result<SessionSnapshot, DecodeError> {
+    // Clamp each list's reservation to the bytes remaining in the frame
+    // body. Every element occupies multiple bytes on the wire, so remaining
+    // bytes is a safe upper bound on element count; an over-declared length
+    // errors on EOF in the read loop rather than pre-allocating gigabytes
+    // (a decode-path DoS otherwise).
     let sessions_len = decode_list_len(dec)?;
-    let mut sessions = Vec::with_capacity(sessions_len);
+    let mut sessions = dec.bounded_capacity(sessions_len);
     for _ in 0..sessions_len {
         sessions.push(decode_session_info(dec)?);
     }
     let windows_len = decode_list_len(dec)?;
-    let mut windows = Vec::with_capacity(windows_len);
+    let mut windows = dec.bounded_capacity(windows_len);
     for _ in 0..windows_len {
         windows.push(decode_window_info(dec)?);
     }
     let panes_len = decode_list_len(dec)?;
-    let mut panes = Vec::with_capacity(panes_len);
+    let mut panes = dec.bounded_capacity(panes_len);
     for _ in 0..panes_len {
         panes.push(decode_terminal_info(dec)?);
     }

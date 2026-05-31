@@ -1936,7 +1936,10 @@ pub(super) fn decode_optional_string_list(
         1 => {
             let len = dec.read_u32_be()?;
             let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
-            let mut out = Vec::with_capacity(len_usize);
+            // Clamp reservation to remaining bytes (each element is >=1 byte):
+            // an over-declared length errors on EOF below rather than driving
+            // an unbounded `Vec::with_capacity`.
+            let mut out = dec.bounded_capacity(len_usize);
             for _ in 0..len_usize {
                 out.push(dec.read_str()?.to_owned());
             }
@@ -2419,7 +2422,10 @@ pub(super) fn decode_optional_env(
         1 => {
             let len = dec.read_u32_be()?;
             let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
-            let mut out = Vec::with_capacity(len_usize);
+            // Clamp reservation to remaining bytes (each (k, v) pair is
+            // >=8 bytes on the wire, so remaining bytes is a safe upper
+            // bound): an over-declared length errors on EOF below.
+            let mut out = dec.bounded_capacity(len_usize);
             for _ in 0..len_usize {
                 let k = dec.read_str()?.to_owned();
                 let v = dec.read_str()?.to_owned();
