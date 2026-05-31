@@ -204,6 +204,15 @@ pub struct ConsumerSyncState {
     /// "needs prime / has diverged" case the phux-ia4 fix must preserve.
     /// While any consumer has this set, the short-circuit is suppressed.
     pub needs_initial_emit: bool,
+    /// Set when a tick skipped this consumer because its outbound mailbox
+    /// was full (backpressure), so its reference is *behind* the live grid
+    /// even though the grid has not mutated since. The idle short-circuit
+    /// must not skip the per-consumer loop while any consumer is behind, or
+    /// the held-back delta would never be retried once the client drains
+    /// (the terminal can stay `Clean` indefinitely). Cleared the moment this
+    /// consumer is successfully served — either a delta ships or the diff is
+    /// empty (reference caught up to the grid).
+    pub behind: bool,
 }
 
 impl std::fmt::Debug for ConsumerSyncState {
@@ -1091,6 +1100,9 @@ impl TerminalActor {
                 // Force one synthesis pass on the next tick even if the
                 // terminal is Clean since the previous tick (phux-4l0).
                 needs_initial_emit: true,
+                // Fresh consumer is not behind; `needs_initial_emit` already
+                // guarantees its first pass runs.
+                behind: false,
             },
         );
         Ok(())
@@ -1838,14 +1850,26 @@ impl TerminalActor {
         // Correctness: a `Clean` terminal cannot have diverged from any
         // consumer's last-emitted reference (the reference advanced to the
         // terminal state on the prior emit, and nothing has mutated the
-        // terminal since), so skipping is sound. The `needs_initial_emit`
-        // carve-out preserves the phux-ia4 multi-consumer guarantee: a
-        // consumer registered *after* the last write sits on a clean
-        // terminal yet has never had a synthesis pass, so it must still be
-        // walked once even though the global flag is clear.
+        // terminal since), so skipping is sound. Two carve-outs suppress the
+        // short-circuit even on a `Clean` terminal:
+        //
+        // - `needs_initial_emit` preserves the phux-ia4 multi-consumer
+        //   guarantee: a consumer registered *after* the last write sits on a
+        //   clean terminal yet has never had a synthesis pass, so it must be
+        //   walked once even though the global flag is clear.
+        // - `behind` preserves the backpressure retry: a consumer skipped on
+        //   a prior tick because its mailbox was full has a reference behind
+        //   the live grid. The grid can stay `Clean` indefinitely, so without
+        //   this the held-back delta would never be retried once the client
+        //   drains (the wave-hunt/server-lifecycle backpressure leak).
         let mutated = self.terminal_dirty_since_tick;
         self.terminal_dirty_since_tick = false;
-        if !mutated && !self.consumer_states.values().any(|s| s.needs_initial_emit) {
+        if !mutated
+            && !self
+                .consumer_states
+                .values()
+                .any(|s| s.needs_initial_emit || s.behind)
+        {
             return;
         }
 
@@ -1867,6 +1891,61 @@ impl TerminalActor {
             // This consumer is being serviced this tick; it no longer needs
             // a forced first pass.
             state.needs_initial_emit = false;
+            // Reserve an outbound permit BEFORE synthesizing
+            // (phux-wave-hunt/server-lifecycle). `synthesize_against_reference`
+            // commits the per-consumer reference to the just-rendered grid
+            // *before* it returns the bytes (emit-once, grid.rs), so once we
+            // synthesize the delta is the only copy and the reference has
+            // moved past it. If the send then failed `Full` we would drop the
+            // delta and never re-emit it (the next tick diffs against the
+            // already-advanced reference), silently losing content and
+            // diverging the client mirror forever.
+            //
+            // Reserving first inverts the ordering: a `Full` mailbox means we
+            // skip this consumer entirely this tick WITHOUT synthesizing, so
+            // the reference (and `next_seq`) stay put and the delta is
+            // re-diffed intact on the next tick once the client drains. A
+            // `Closed` mailbox reaps the entry (phux-ddg self-heal). Only when
+            // we hold a permit — which guarantees the subsequent send cannot
+            // fail — do we synthesize, advance the reference, and ship.
+            let permit = match state.outbound.try_reserve() {
+                Ok(permit) => permit,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                    // Backpressure: the consumer mailbox is wedged. Skip
+                    // without advancing the reference so no content is lost;
+                    // the next tick retries the same delta. Mark `behind` so
+                    // the idle short-circuit keeps walking this consumer even
+                    // if the grid goes `Clean` before the client drains — the
+                    // retry must not depend on a fresh write. At debug so a
+                    // stall is visible at the recommended `phux=debug` level.
+                    state.behind = true;
+                    debug!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        "state-sync tick: consumer mailbox full; skipping (reference held, retries next tick)",
+                    );
+                    continue;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                    // The receiver is gone. A `ConsumerDetachRequest` may have
+                    // been dropped (best-effort `try_send` on a full detach
+                    // mailbox, runtime.rs) so `unregister_consumer` never ran.
+                    // Self-heal: reap the entry now so we stop re-rendering a
+                    // dead consumer every tick (phux-ddg).
+                    debug!(
+                        ?client_id,
+                        wire_terminal_id = state.wire_terminal_id,
+                        "state-sync tick: consumer mailbox closed; reaping entry",
+                    );
+                    closed.push(*client_id);
+                    continue;
+                }
+            };
+            // We hold a permit: the mailbox has room, so this consumer is
+            // about to be fully serviced this tick (a delta ships, or the
+            // diff is empty and the reference is already at the live grid).
+            // Either way it is no longer behind.
+            state.behind = false;
             // Per-consumer synthesis span (debug; the per-tick CPU sink —
             // its duration is the key server-side lag signal). Carries the
             // consumer correlation fields; the diff size lands in
@@ -1886,16 +1965,16 @@ impl TerminalActor {
                         error = %err,
                         "state-sync tick: synthesize_against_reference failed; skipping consumer",
                     );
+                    // The held `permit` drops here, releasing the reserved
+                    // slot back to the mailbox — nothing was shipped.
                     continue;
                 }
             };
             if bytes.is_empty() {
                 // Byte-identical to this consumer's reference; nothing to
-                // send this tick. Still reap a consumer whose receiver has
-                // gone away so an idle dead consumer does not linger.
-                if state.outbound.is_closed() {
-                    closed.push(*client_id);
-                }
+                // send this tick. The reserved permit drops unused. A closed
+                // mailbox was already reaped by the `try_reserve` arm above,
+                // so no extra liveness probe is needed here.
                 continue;
             }
             let seq = state.next_seq;
@@ -1909,59 +1988,20 @@ impl TerminalActor {
                 seq,
                 bytes,
             };
-            // `try_send` (non-blocking) preserves the actor's single-
-            // poll-budget invariant: the tick arm must not yield the
-            // loop, otherwise a slow consumer's full mailbox would
-            // hold up every other consumer's emission this tick. A
-            // `Full` error means the consumer is wedged — the
-            // per-client backpressure / disconnect machinery
-            // (`docs/spec/proto.md` §8.3) lives in the runtime; we just drop and
-            // continue, and the next tick re-diffs against the same
-            // unacked reference so the consumer catches up naturally.
-            match state.outbound.try_send(Outbound::Frame(frame)) {
-                Ok(()) => {
-                    // A frame actually shipped to this consumer this tick.
-                    // Per-frame detail at trace (off by default); the tick
-                    // span's aggregate `emitted` / `total_out_bytes` carry
-                    // the headline at debug.
-                    emitted += 1;
-                    total_out_bytes += out_bytes;
-                    trace!(
-                        ?client_id,
-                        wire_terminal_id = state.wire_terminal_id,
-                        seq,
-                        out_bytes,
-                        "state-sync tick: TERMINAL_OUTPUT emitted",
-                    );
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Backpressure signal: the consumer mailbox is wedged.
-                    // At debug (not trace) so a leak/stall is visible at the
-                    // recommended `phux=debug` capture level.
-                    debug!(
-                        ?client_id,
-                        wire_terminal_id = state.wire_terminal_id,
-                        seq,
-                        out_bytes,
-                        "state-sync tick: consumer mailbox full; dropping (will retry next tick)",
-                    );
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // The receiver is gone. A `ConsumerDetachRequest` may
-                    // have been dropped (best-effort `try_send` on a full
-                    // detach mailbox, runtime.rs) so `unregister_consumer`
-                    // never ran. Self-heal: reap the entry now so we stop
-                    // re-rendering a dead consumer every tick (phux-ddg).
-                    // At debug: a closed mailbox is the consumer-leak signal.
-                    debug!(
-                        ?client_id,
-                        wire_terminal_id = state.wire_terminal_id,
-                        seq,
-                        "state-sync tick: consumer mailbox closed; reaping entry",
-                    );
-                    closed.push(*client_id);
-                }
-            }
+            // Infallible: we hold a reserved permit, so this cannot block,
+            // drop, or fail. This preserves the actor's single-poll-budget
+            // invariant (the tick arm never yields the loop) while keeping
+            // emit-once consistent — a synthesized delta always ships.
+            permit.send(Outbound::Frame(frame));
+            emitted += 1;
+            total_out_bytes += out_bytes;
+            trace!(
+                ?client_id,
+                wire_terminal_id = state.wire_terminal_id,
+                seq,
+                out_bytes,
+                "state-sync tick: TERMINAL_OUTPUT emitted",
+            );
         }
         drop(synth);
         drop(terminal);
@@ -3217,6 +3257,126 @@ mod tests {
         // Survived without SIGABRT; the grid settled at the final sane size.
         assert_eq!(term.cols().expect("cols"), 100);
         assert_eq!(term.rows().expect("rows"), 30);
+    }
+
+    /// Drain every `TerminalOutput` currently queued on `rx`, returning the
+    /// concatenated payload bytes and the ordered list of `seq`s.
+    fn drain_terminal_output(rx: &mut mpsc::Receiver<Outbound>) -> (Vec<u8>, Vec<u64>) {
+        let mut bytes = Vec::new();
+        let mut seqs = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            if let Outbound::Frame(FrameKind::TerminalOutput {
+                seq, bytes: body, ..
+            }) = frame
+            {
+                seqs.push(seq);
+                bytes.extend_from_slice(&body);
+            }
+        }
+        (bytes, seqs)
+    }
+
+    /// wave-hunt/server-lifecycle: a consumer whose outbound mailbox fills up
+    /// under sustained output MUST NOT lose grid content. Once the client
+    /// drains, every written marker must still be reconstructable from the
+    /// delivered stream.
+    ///
+    /// Pre-fix this failed: `tick_emit` synthesized the delta (which commits
+    /// the per-consumer reference to the just-rendered grid, emit-once) and
+    /// THEN dropped the frame on a `Full` mailbox. The reference had already
+    /// advanced past the dropped delta, so the next tick diffed against a
+    /// reference that already included the dropped content and never
+    /// re-emitted it — silent permanent content loss / mirror divergence.
+    /// The fix reserves the outbound permit BEFORE synthesizing, so a full
+    /// mailbox skips the consumer without advancing its reference.
+    #[test]
+    fn backpressured_consumer_loses_no_content_after_draining() {
+        // More rounds than the mailbox holds so the tick's send hits `Full`.
+        const ROUNDS: usize = 12;
+        let bundle = TerminalActor::new(80, 24).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        // Tiny mailbox so a few ticks saturate it — same shape as the
+        // production `DEFAULT_CLIENT_MAILBOX` pressure, smaller and faster.
+        let (tx, mut rx) = mpsc::channel::<Outbound>(2);
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        // Write a distinct marker on its own line and tick to emit it,
+        // WITHOUT draining the receiver. Every marker must survive.
+        let markers: Vec<String> = (0..ROUNDS).map(|i| format!("MARK{i:03}=")).collect();
+        for marker in &markers {
+            actor.vt_write_for_test(format!("{marker}\r\n").as_bytes());
+            actor.tick_emit();
+        }
+
+        // Drain, then keep ticking + draining so any content held back under
+        // backpressure flows once there is room.
+        let mut delivered = Vec::new();
+        let (chunk, _seqs) = drain_terminal_output(&mut rx);
+        delivered.extend_from_slice(&chunk);
+        for _ in 0..ROUNDS * 2 {
+            actor.tick_emit();
+            let (chunk, _seqs) = drain_terminal_output(&mut rx);
+            delivered.extend_from_slice(&chunk);
+        }
+
+        for marker in &markers {
+            assert!(
+                contains_subslice(&delivered, marker.as_bytes()),
+                "marker {marker:?} never reached the consumer: content was lost \
+                 under mailbox backpressure (reference advanced past a dropped \
+                 frame). delivered={:?}",
+                String::from_utf8_lossy(&delivered),
+            );
+        }
+    }
+
+    /// wave-hunt/server-lifecycle: the per-consumer monotonic `seq` must have
+    /// no gaps in the delivered stream. A frame that is NOT shipped must NOT
+    /// consume a `seq`. Pre-fix, `tick_emit` incremented `next_seq` and then
+    /// dropped the frame on `Full`, burning a seq for a frame the consumer
+    /// never saw — the client would observe a hole in the otherwise
+    /// contiguous reliable-transport stream (SPEC §12.2) and could not
+    /// distinguish loss from reorder.
+    #[test]
+    fn backpressured_consumer_sees_contiguous_seq_stream() {
+        const ROUNDS: usize = 10;
+        let bundle = TerminalActor::new(80, 24).expect("new");
+        let mut actor = bundle.actor;
+        actor.enable_tick_emit_for_test();
+
+        let client = ClientId(1);
+        let (tx, mut rx) = mpsc::channel::<Outbound>(2);
+        actor.register_consumer(client, tx, 11).expect("register");
+
+        for i in 0..ROUNDS {
+            actor.vt_write_for_test(format!("seqmark{i:03}\r\n").as_bytes());
+            actor.tick_emit();
+        }
+
+        let mut all_seqs = Vec::new();
+        let (_b, seqs) = drain_terminal_output(&mut rx);
+        all_seqs.extend(seqs);
+        for _ in 0..ROUNDS * 2 {
+            actor.tick_emit();
+            let (_b, seqs) = drain_terminal_output(&mut rx);
+            all_seqs.extend(seqs);
+        }
+
+        assert!(
+            !all_seqs.is_empty(),
+            "expected at least one delivered frame"
+        );
+        for (idx, seq) in all_seqs.iter().enumerate() {
+            let expected = u64::try_from(idx).expect("fits") + 1;
+            assert_eq!(
+                *seq, expected,
+                "delivered seq stream must be contiguous from 1 with no gaps; \
+                 a dropped-but-seq-burned frame leaves a hole. got={all_seqs:?}",
+            );
+        }
     }
 
     /// Naive subsequence search for test assertions on VT byte streams.
