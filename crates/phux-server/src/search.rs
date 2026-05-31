@@ -94,19 +94,44 @@ pub enum Region {
 ///
 /// Coordinates are in the [`Region`]'s own row space. `col` and `len` are
 /// measured in Unicode scalar values (`char`s) within the right-trimmed row
-/// text, not grid columns or bytes — they index the same `String` rows
+/// text, **not grid columns** or bytes — they index the same `String` rows
 /// [`SnapshotSynthesizer::screen_state_with_scrollback`] projects, so a
-/// consumer can slice the row directly or translate to grid columns via the
-/// row's own walk.
+/// consumer can slice the row directly.
+///
+/// # `col`/`len` are char offsets, not grid columns (`phux-4xi`)
+///
+/// A `char` offset and a grid column diverge whenever a row holds a wide glyph
+/// (CJK / emoji, which occupies two grid columns) or a multi-`char` grapheme
+/// cluster *before* the match: each preceding wide glyph shifts the grid column
+/// one past the `char` offset. A consumer that builds a libghostty
+/// [`Selection`](libghostty_vt::selection::Selection) — which is **grid-column**
+/// based — must therefore re-walk the row's cells to invert the mapping rather
+/// than passing `col` straight through as a grid `x`.
+///
+/// That inversion is the *consumer's* job, and the in-tree consumer already
+/// does it: [`crate::extract`] (`char_col_to_grid_x` /
+/// [`extract_match`](crate::extract::extract_match)) re-walks the same cells in
+/// the same grid order the projection used, skipping wide-glyph spacer tails and
+/// advancing by display width, so a hit on a row with a wide glyph before it
+/// extracts the correct text. `Match` deliberately does **not** carry a
+/// redundant grid column: the only consumer already remaps at the extraction
+/// boundary (and proves it — see `extract`'s
+/// `wide_glyph_before_match_shifts_grid_column` and
+/// `scrollback_match_with_wide_glyph_round_trips`), so a second field would be
+/// dead weight to keep in sync. Add one only if a consumer appears that needs
+/// the raw grid column without the cell walk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Match {
     /// Region the match falls in.
     pub region: Region,
     /// Row index within `region`.
     pub row: usize,
-    /// Start column of the match, in `char` offsets into the row.
+    /// Start column of the match, in `char` offsets into the right-trimmed row
+    /// text — **not** a grid column. Remap via the row's cell walk (see the
+    /// type-level note and [`crate::extract`]) before using it as a libghostty
+    /// grid `x`.
     pub col: usize,
-    /// Length of the match, in `char`s.
+    /// Length of the match, in `char`s (not grid columns).
     pub len: usize,
 }
 
@@ -406,6 +431,47 @@ mod tests {
         let hits = search_oneshot(&t, "scrollback", Scope::AllHistory, vp()).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].region, Region::Viewport);
+    }
+
+    #[test]
+    fn wide_glyph_before_scrollback_match_keeps_char_offset_and_extracts_correctly() {
+        // Regression for phux-4xi: pins the search-layer contract that
+        // `Match.col` is a CHAR offset into the right-trimmed projected row,
+        // not a grid column, AND proves that contract holds end-to-end through
+        // the extraction consumer that remaps char-col -> grid-col.
+        //
+        // Row "你好xNEEDLE" has two wide glyphs (你, 好) before the needle.
+        // Its projected text is "你好xNEEDLE", so "NEEDLE" sits at CHAR offset
+        // 3 (你=0, 好=1, x=2). But its GRID column is 5 (你 cols 0-1, 好 cols
+        // 2-3, x col 4). If search reported a grid column it would say 5; it
+        // must report the char offset 3. Pushing two more lines drives the
+        // wide row into scrollback so this exercises the history path.
+        let mut t = fresh(20, 2);
+        t.vt_write("你好xNEEDLE\r\n".as_bytes());
+        t.vt_write(b"filler-a\r\nfiller-b");
+
+        let hits = search_oneshot(&t, "NEEDLE", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1);
+        let m = hits[0];
+        assert_eq!(m.region, Region::Scrollback, "the wide row is in history");
+        assert_eq!(
+            m.col, 3,
+            "Match.col is the CHAR offset (你,好,x precede), not the grid column 5",
+        );
+        assert_eq!(m.len, 6, "len counts chars in NEEDLE");
+
+        // End-to-end: the extraction consumer remaps char-col 3 -> grid-col 5
+        // (wide-glyph aware) and pulls back the correct text. This proves the
+        // documented char->grid mapping is the consumer's job and that it
+        // holds through search + extract even with a wide glyph before the
+        // match.
+        let text = crate::extract::extract_match_in_scope(&t, m, Scope::AllHistory)
+            .expect("extract scrollback match");
+        assert_eq!(
+            text, "NEEDLE",
+            "char-offset Match.col round-trips correct text through the \
+             grid-column remap in extract.rs, despite preceding wide glyphs",
+        );
     }
 
     #[test]
