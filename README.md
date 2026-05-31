@@ -8,12 +8,7 @@ last-reviewed: 2026-05-28
 
 **A libghostty-backed terminal control plane.** Spawn, observe, control, persist, and address terminals — locally or across a fleet — with a tmux-shaped TUI riding on top as one consumer among several.
 
-The gap it fills, in the words of libghostty's author:
-
-> "Need to replace tmux with a libghostty-based multiplexer so it can understand KIP."
-> — Mitchell Hashimoto
-
-## What it is
+## How it works
 
 The unit of work is the **terminal**, not the session or the pane. Both ends of the wire run [`libghostty_vt::Terminal`][lghv]: the server's is the canonical state; the client's is a local mirror for rendering. Nothing in the middle re-parses VT. Kitty keyboard, true colour, OSC 8, OSC 133, images — they all pass through end-to-end because the parser is identical on both ends.
 
@@ -41,28 +36,6 @@ For the full mental model, read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md). For th
 phux solves one problem and refuses to grow a second: spawn, observe, control, persist, and address libghostty terminals — locally or across a fleet — over a layered wire whose tiers a consumer can target without inheriting everything else. The terminal is the substrate; a consumer is anything that rides it. The reference TUI is the proof that the substrate is real, not the product the substrate exists to serve.
 
 Everything that doesn't make terminals more spawnable, observable, or addressable is out of scope on purpose — see Non-goals below.
-
-## When to use phux
-
-**You are a tmux user wanting a modern replacement:**
-✅ Yes. The TUI is tmux-shaped and the underlying substrate is stronger: libghostty instead of VT re-parse, federation-ready addressing, and a clean wire contract for agents. Tradeoff: L2 Collection (named sessions) and full CLI surface land in v0.2. Read [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) to get started.
-
-**You are SSHing into one box and want an ephemeral multiplexer:**
-⚠️ Maybe not yet. phux assumes a persistent server-per-user; one-off SSH + detach-on-disconnect works but isn't a first-class use case. tmux remains the practical choice for "I just logged in and want to split panes."
-
-**You are an agent (Claude, Cursor, etc.) orchestrating terminals:**
-✅ Yes, eventually. L1's wire protocol is stable and publishable today; the agent SDK is coming in v0.2. For now, use L1 directly — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) §"Building on phux" for examples. Your code will work unchanged when the SDK ships.
-
-**You are a fleet orchestrator managing terminals across 10+ machines:**
-✅ Yes, this is the 10-year vision. Federation (v0.2+) isn't here yet, but the addressing is ready from day 1. `SATELLITE { host, id }` TerminalIds already live on the wire. Start building on L1 now; your code will route end-to-end when satellites land.
-
-**You want to script and automate everything:**
-✅ Yes. phux refuses an embedded scripting language (see Non-goals), so you shell out to a real runtime. Typed L1 wire messages are far better than string-scraping terminal output. See [`docs/spec/TUTORIAL.md`](./docs/spec/TUTORIAL.md) for wire examples.
-
-**You want tmux key bindings unchanged or a drop-in replacement:**
-⚠️ We are not tmux. We will be better in some places and different in others. Read [`docs/consumers/tui.md`](./docs/consumers/tui.md) to learn the surface before committing.
-
-**Not sure which box you check?** Read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) — it explains the design philosophy and mental model. That will tell you if this is aligned with how you think about terminals.
 
 ## Status
 
