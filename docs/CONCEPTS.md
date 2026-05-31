@@ -120,6 +120,50 @@ it's a TUI feature stored in L3, not a wire message.
 
 ---
 
+## How phux compares to other multiplexers
+
+| Feature | phux | tmux | zellij | screen | zmx | rmux | cmux |
+|---|---|---|---|---|---|---|---|
+| Full modern terminal protocol support[^1] | ✓ | ◐ | ◐ | ✗ | ✗ | ✗ | ✗ |
+| Federation-ready addressing from day 1[^2] | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| libghostty-backed canonical parser | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Structured input types (not string-based) | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| No re-parse in middle (end-to-end passthrough) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Agent/programmatic first-class support | ✓ | ◐ | ◐ | ✗ | ✗ | ✗ | ✓ |
+| Production-proven maturity | ✗ | ✓ | ◐ | ✓ | ✗ | ✗ | ✗ |
+
+### What "federation-ready from day 1" means
+
+In phux, every Terminal is addressed by a `TerminalId` — a tagged union
+that can represent either a local terminal (`LOCAL { id: u32 }`) or a
+satellite terminal on a remote host (`SATELLITE { host: str, id: u32 }`).
+This addressing scheme is baked into the wire protocol from the first
+release. When a multi-host control plane arrives (phux v0.2+), the bytes
+on the wire do not change — only the server's routing logic expands to
+forward SATELLITE ids to satellite servers. A v0.1 server accepts
+SATELLITE-tagged ids and replies `UnsupportedSatelliteRoute` if it
+cannot route them, ensuring forward-compatible federation from day one.
+
+This is radically different from tmux, zellij, and other multiplexers,
+which treat attachment to a remote machine as a client-side problem
+(SSH into the box, attach locally). Federation in phux is in the
+addressing and domain model, not bolted onto a single-machine tool
+after the fact. A fleet of agents spawning terminals across cloud boxes
+can address them uniformly as first-class resources on a stable wire.
+
+[^1]: Full modern protocol support includes Kitty keyboard, true colour,
+      OSC 8 hyperlinks, OSC 133 prompt boundaries, image protocols, mouse
+      pixel-precision. phux passes these through losslessly because
+      libghostty parses once per terminal and bytes forward unchanged.
+      tmux and zellij re-parse mid-path and lose fidelity. screen and
+      the zmx/rmux/cmux generation predate these standards.
+
+[^2]: Federation addressing in phux is specified at wire-protocol level
+      with forward-compatible error handling. No other multiplexer has
+      built federation-ready addressing from launch.
+
+---
+
 ## Identity is federation-ready
 
 A `TerminalId` is a tagged union:
