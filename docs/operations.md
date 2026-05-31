@@ -131,23 +131,81 @@ per-client queue depth, total bytes since start. This is the
 substrate for any future Prometheus/OpenTelemetry exporter — phux
 does not ship one.
 
-## Security model
+## Security model and trust boundaries
+
+> **Design assumption:** This is not a security-hardened system for
+> hostile environments. It is suitable for trusted networks and
+> multi-user boxes where Unix permissions are enforced by the kernel.
 
 The trust boundary is the operating system user. A phux server trusts
 every process running as the same UID that can connect to its Unix
 socket.
 
-- **Local.** Unix socket under `$XDG_RUNTIME_DIR/phux/` (or
-  `/tmp/phux-$UID/`), with the parent directory created mode `0o700`.
-  The OS enforces the trust boundary on the directory; the socket
-  inherits that boundary.
-- **Remote (v0.1).** SSH-tunneled `phux server --stdio` over
-  `ssh host`. Authentication is SSH's problem.
-- **Remote (v0.2+).** QUIC transport behind the `Transport` trait
-  ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md));
-  the wire bytes don't change.
+### Local trust model (single-machine)
 
-phux itself does no authentication and no encryption. Crypto in
-multiplexers is a tarpit; we delegate. See
-[`architecture/transport.md`](./architecture/transport.md) for the
-trait shape that makes additional transports purely additive.
+The Unix socket lives in `$XDG_RUNTIME_DIR/phux/` (typically
+`/run/user/$UID/` on Linux, or `/var/folders/.../T/` on macOS),
+created with parent directory mode `0o700` (user-only). The OS kernel
+enforces this boundary at the filesystem level; the socket inherits
+the parent directory's permissions.
+
+**What this means:**
+
+- Another user on the same machine MAY NOT read or write to the socket
+  (kernel-enforced).
+- If the parent directory or socket permissions are misconfigured (e.g.,
+  accidentally mode `0o777`), the security boundary is breached — any
+  user can connect. **Administrators MUST validate socket permissions
+  in deployment; phux does not re-check at runtime.**
+- The process file descriptor table (`/proc/<pid>/fd/<socket-fd>` on
+  Linux) is not readable by other UIDs, so the socket endpoint cannot
+  be enumerated across user boundaries.
+
+### Federation trust model (v0.1+, forward-compatible)
+
+**v0.1 (current):** Remote attach uses SSH-tunneled `phux server
+--stdio`, delegating all authentication and encryption to SSH. The wire
+bytes flow plaintext through the tunnel; SSH provides the trust
+envelope.
+
+**v0.2+ (future, wire-compatible):** Satellites are phux servers on
+other machines. The hub authenticates consumers and routes terminal
+sessions to satellite servers via the `Transport` trait
+([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)).
+Future transports will include:
+
+- **SSH:** Reuses established SSH auth; inherits SSH's trust model.
+- **QUIC (future):** Certificate-based (mutual TLS, future); no
+  encryption on the wire yet, TLS will be added later.
+
+### Known limitations (be honest)
+
+- **No encryption on local UDS:** Contents flow plaintext through the
+  socket. Roadmap does not currently include local TLS; if a
+  confidentiality requirement exists, delegate to the transport layer
+  (SSH, VPN).
+- **Scrollback unencrypted:** Terminal history is stored in the
+  libghostty grid in RAM, unencrypted. A memory dump can recover it.
+- **No per-command encryption:** Control messages and terminal output
+  are structured but unencrypted on the wire.
+- **No audit logging:** phux does not log which user accessed which
+  terminal or when. Audit requirements can be added as future hooks.
+- **SSH is the trust boundary for remote attach (v0.1):** phux does not
+  perform additional authentication over SSH; it delegates entirely to
+  SSH key management and host verification.
+
+### What you DO get (security wins)
+
+- **Kernel-enforced permission boundary:** On Linux and macOS, the OS
+  prevents other users from connecting to your socket. This holds
+  without phux doing anything special.
+- **No privilege escalation surface:** The server runs as your user
+  (not setuid/setgid). A compromised terminal cannot elevate to other
+  UIDs.
+- **No arbitrary-code-execution surface on the wire:** The wire carries
+  structured commands (key, mouse, paste, focus events), not arbitrary
+  scripts or shell commands. The server does not `eval` or execute
+  user input — it routes it to PTYs managed by the OS.
+- **Process isolation via OS:** Each terminal's PTY is managed by the
+  kernel; one terminal's PTY cannot directly access another terminal's
+  memory or file descriptors.
