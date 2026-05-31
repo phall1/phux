@@ -7,9 +7,12 @@
 //! `RenderState` (per-row dirty tracking) and emits VT to stdout.
 //!
 //! v0 emits a **dirty-row redraw**: for each row reported dirty by
-//! `RenderState`, position the cursor at the row, emit per-cell SGR
-//! deltas, and write each cell's graphemes. Per-row dirty bits are
-//! reset after the row is drawn so subsequent renders skip clean rows.
+//! `RenderState`, position the cursor at the row, then walk its cells
+//! emitting an SGR sequence only when a cell's style differs from the one
+//! currently active on the outer terminal (a run of same-style cells costs
+//! one SGR plus the glyphs) and writing each cell's graphemes. Per-row dirty
+//! bits are reset after the row is drawn so subsequent renders skip clean
+//! rows.
 //!
 //! No raw-mode or alt-screen toggling happens here; the [`super::driver`]
 //! owns those transitions via an RAII guard so they survive panics and
@@ -258,9 +261,11 @@ impl<'alloc> TerminalRenderer<'alloc> {
             if must_draw {
                 write_cup(out, row_index.saturating_add(oy), ox)?;
                 // Force a reset at row start so the previous row's tail
-                // style can't leak into the current row.
+                // style can't leak into the current row. After this the
+                // active outer-terminal SGR state is the default style,
+                // which `emitted = None` represents.
                 out.write_all(b"\x1b[0m")?;
-                let mut prev_style: Option<Style> = None;
+                let mut emitted: Option<EmittedStyle> = None;
 
                 let mut cell_iter = self.cells.update(row)?;
                 while let Some(cell) = cell_iter.next() {
@@ -268,23 +273,26 @@ impl<'alloc> TerminalRenderer<'alloc> {
                     let style = cell.style()?;
                     let fg = cell.fg_color()?;
                     let bg = cell.bg_color()?;
+                    // Coalesce: emit an SGR sequence only when the cell's
+                    // effective style differs from the one currently active
+                    // on the outer terminal. A run of same-style cells then
+                    // costs one SGR sequence plus the glyphs, not one SGR per
+                    // cell. `emitted` tracks the active state for this row
+                    // (reset to default = `None` at row start).
+                    emit_sgr_if_changed(out, &mut emitted, style, fg, bg)?;
                     if graphemes.is_empty() {
                         // Blank or wide-tail cell — advance one column with a
                         // space. Wide-tail mis-emission overwrites the
                         // right half of a wide cell; the base grapheme
                         // emitted on the previous cell already covered that
                         // column. End-state stays equivalent.
-                        emit_sgr_delta(out, prev_style.as_ref(), &style, fg, bg)?;
                         out.write_all(b" ")?;
-                        prev_style = Some(style);
                         continue;
                     }
-                    emit_sgr_delta(out, prev_style.as_ref(), &style, fg, bg)?;
                     let mut buf = [0u8; 4];
                     for ch in &graphemes {
                         out.write_all(ch.encode_utf8(&mut buf).as_bytes())?;
                     }
-                    prev_style = Some(style);
                 }
                 // Reset per-row dirty bit after drawing, per the libghostty
                 // contract.
@@ -341,18 +349,68 @@ fn write_cup(out: &mut impl Write, row: u16, col: u16) -> io::Result<()> {
     write!(out, "\x1b[{r};{c}H")
 }
 
-fn emit_sgr_delta(
+/// The cell style currently active on the outer terminal, as a comparable
+/// key for run coalescing. `fg`/`bg` are tracked alongside `Style` because
+/// the renderer sources the resolved RGB foreground/background from the
+/// per-cell [`render::CellIterator`] (`cell.fg_color()`/`cell.bg_color()`)
+/// rather than from `Style`'s palette-indexed color fields.
+type EmittedStyle = (Style, Option<RgbColor>, Option<RgbColor>);
+
+/// Whether a `(style, fg, bg)` triple renders as the terminal default — no
+/// attributes and no explicit colors. Such a run needs only a plain `\x1b[0m`
+/// reset (which `emit_sgr_set` already produces), and at row start the active
+/// state is already default, so it emits nothing at all.
+fn is_default_render(style: &Style, fg: Option<RgbColor>, bg: Option<RgbColor>) -> bool {
+    fg.is_none() && bg.is_none() && *style == Style::default()
+}
+
+/// Emit an SGR sequence only when `(style, fg, bg)` differs from the style
+/// currently active on the outer terminal (`emitted`).
+///
+/// `emitted` is the per-row coalescing state: `None` means the default style
+/// is active (true at row start, just after the row-leading `\x1b[0m`), and
+/// `Some(key)` means `key` was the last sequence written on this row. A run
+/// of cells sharing a style therefore emits a single SGR sequence; only a
+/// real style change writes another. The bytes for an isolated style change
+/// are identical to the pre-coalescing per-cell emission (a `\x1b[0m` reset
+/// followed by the attribute/color set), so the rendered screen is unchanged.
+fn emit_sgr_if_changed(
     out: &mut impl Write,
-    prev: Option<&Style>,
+    emitted: &mut Option<EmittedStyle>,
+    style: Style,
+    fg: Option<RgbColor>,
+    bg: Option<RgbColor>,
+) -> io::Result<()> {
+    if is_default_render(&style, fg, bg) {
+        // Returning to default mid-row needs an explicit reset; at row start
+        // (`emitted == None`) the default is already active, so skip it.
+        if emitted.is_some() {
+            out.write_all(b"\x1b[0m")?;
+            *emitted = None;
+        }
+        return Ok(());
+    }
+
+    let key = (style, fg, bg);
+    if *emitted == Some(key) {
+        return Ok(());
+    }
+    emit_sgr_set(out, &style, fg, bg)?;
+    *emitted = Some(key);
+    Ok(())
+}
+
+/// Write a full `\x1b[0m` reset followed by the SGR set for `(style, fg, bg)`.
+///
+/// The leading reset clears any prior attributes so the resulting outer-
+/// terminal state is exactly `(style, fg, bg)` regardless of what preceded
+/// it; coalescing in [`emit_sgr_if_changed`] decides *when* this runs.
+fn emit_sgr_set(
+    out: &mut impl Write,
     style: &Style,
     fg: Option<RgbColor>,
     bg: Option<RgbColor>,
 ) -> io::Result<()> {
-    // For v0 we re-emit the full SGR on every cell regardless of `prev`,
-    // because fg/bg ride on the per-cell `cell.fg_color()`/`cell.bg_color()`
-    // result rather than the `Style` and we don't carry a delta there yet.
-    // Coalescing is a follow-up tracked in DESIGN.
-    let _ = prev;
     out.write_all(b"\x1b[0m")?;
 
     let mut wrote_any = false;
@@ -541,6 +599,221 @@ mod tests {
         assert!(
             !s.contains("top"),
             "unchanged row 0 content should not be repainted; out = {s:?}"
+        );
+    }
+
+    /// Count occurrences of `needle` in `hay`.
+    fn count(hay: &[u8], needle: &[u8]) -> usize {
+        if needle.is_empty() {
+            return 0;
+        }
+        hay.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    /// Render a single terminal once and return the emitted bytes.
+    fn render_once(terminal: &Terminal<'_, '_>) -> Vec<u8> {
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut buf = Vec::new();
+        let _ = renderer.render(terminal, &mut buf).expect("render");
+        buf
+    }
+
+    /// One visible cell, normalized for grid comparison: a blank cell
+    /// (no grapheme) and a single space are the same visible verdict, so
+    /// both collapse to `None`. Colors are kept even on blanks because a
+    /// colored gap (e.g. a bg run) is visually distinct.
+    type VisCell = (Option<char>, Option<RgbColor>, Option<RgbColor>);
+
+    fn vis_cell(graphemes: &[char], fg: Option<RgbColor>, bg: Option<RgbColor>) -> VisCell {
+        let ch = match graphemes {
+            [] | [' '] => None,
+            [c, ..] => Some(*c),
+        };
+        (ch, fg, bg)
+    }
+
+    /// Read the visible grid of a live terminal, normalized via [`vis_cell`].
+    fn read_grid(terminal: &Terminal<'_, '_>, cols: u16, rows: u16) -> Vec<VisCell> {
+        let mut state = RenderState::new().expect("RenderState");
+        let mut rows_it = RowIterator::new().expect("RowIterator");
+        let mut cells_it = CellIterator::new().expect("CellIterator");
+        let snap = state.update(terminal).expect("snapshot");
+        let mut out = Vec::new();
+        let mut row_iter = rows_it.update(&snap).expect("rows");
+        let mut ri: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if ri >= rows {
+                break;
+            }
+            let mut cell_iter = cells_it.update(row).expect("cells");
+            let mut ci: u16 = 0;
+            while let Some(cell) = cell_iter.next() {
+                if ci >= cols {
+                    break;
+                }
+                out.push(vis_cell(
+                    &cell.graphemes().expect("graphemes"),
+                    cell.fg_color().expect("fg"),
+                    cell.bg_color().expect("bg"),
+                ));
+                ci += 1;
+            }
+            ri += 1;
+        }
+        out
+    }
+
+    /// Decode `bytes` into a fresh `cols`x`rows` terminal and return its
+    /// normalized visible grid. This is the in-crate stand-in for the Screen
+    /// oracle: it proves the coalesced byte stream reconstructs the same
+    /// visible grid, not just the same byte count.
+    fn decode_grid(bytes: &[u8], cols: u16, rows: u16) -> Vec<VisCell> {
+        let mut term = fresh(cols, rows);
+        term.vt_write(bytes);
+        read_grid(&term, cols, rows)
+    }
+
+    /// (a) A row of N identical-style colored cells emits exactly ONE SGR
+    /// set for the run, not one per cell.
+    #[test]
+    fn identical_colored_run_emits_single_sgr() {
+        let cols = 20u16;
+        let mut terminal = fresh(cols, 1);
+        // Set a truecolor fg, then write a full row of the same color.
+        terminal.vt_write(b"\x1b[38;2;10;20;30m");
+        terminal.vt_write(&vec![b'x'; cols as usize]);
+        let buf = render_once(&terminal);
+
+        // The truecolor fg set appears exactly once for the whole run.
+        assert_eq!(
+            count(&buf, b"38;2;10;20;30"),
+            1,
+            "expected a single fg SGR for the identical-style run; out = {:?}",
+            String::from_utf8_lossy(&buf)
+        );
+        // All N glyphs are present.
+        assert_eq!(
+            count(&buf, b"x"),
+            cols as usize,
+            "all glyphs must be emitted"
+        );
+    }
+
+    /// (b) A row alternating two styles emits an SGR per style change, not
+    /// per cell.
+    #[test]
+    fn alternating_styles_emit_one_sgr_per_change() {
+        let cols = 10u16;
+        let mut terminal = fresh(cols, 1);
+        // Alternate red / green truecolor fg per cell.
+        for i in 0..cols {
+            if i % 2 == 0 {
+                terminal.vt_write(b"\x1b[38;2;255;0;0m");
+            } else {
+                terminal.vt_write(b"\x1b[38;2;0;255;0m");
+            }
+            terminal.vt_write(b"z");
+        }
+        let buf = render_once(&terminal);
+
+        let reds = count(&buf, b"38;2;255;0;0");
+        let greens = count(&buf, b"38;2;0;255;0");
+        // 10 cells alternating ⇒ 5 reds, 5 greens — one SGR per change, i.e.
+        // one per cell here because every adjacent pair differs. The point is
+        // we emit no MORE than the number of style changes.
+        assert_eq!(reds, 5, "one red SGR per red cell; out = {reds}");
+        assert_eq!(greens, 5, "one green SGR per green cell; out = {greens}");
+    }
+
+    /// A run of three same-color cells between two differently-colored
+    /// neighbors collapses to one SGR for the middle run.
+    #[test]
+    fn middle_run_collapses_to_single_sgr() {
+        let cols = 5u16;
+        let mut terminal = fresh(cols, 1);
+        terminal.vt_write(b"\x1b[38;2;1;1;1mA"); // cell 0: color A
+        terminal.vt_write(b"\x1b[38;2;2;2;2mBBB"); // cells 1-3: color B (run)
+        terminal.vt_write(b"\x1b[38;2;3;3;3mC"); // cell 4: color C
+        let buf = render_once(&terminal);
+        assert_eq!(count(&buf, b"38;2;2;2;2"), 1, "middle run is one SGR");
+        assert_eq!(count(&buf, b"BBB"), 1, "run glyphs are contiguous");
+    }
+
+    /// (c) Round-trip: feed the coalesced output back through a fresh
+    /// libghostty Terminal and assert the reconstructed grid equals the
+    /// source grid — coalesced output renders identically.
+    #[test]
+    fn coalesced_output_round_trips_to_identical_grid() {
+        let cols = 24u16;
+        let rows = 3u16;
+        let mut terminal = fresh(cols, rows);
+        // A mix that exercises runs, a return-to-default gap, a bg color, and
+        // attributes, across rows.
+        terminal.vt_write(b"\x1b[38;2;200;100;50mHELLO");
+        terminal.vt_write(b"\x1b[0m   "); // default-style gap
+        terminal.vt_write(b"\x1b[1;48;2;0;0;255mWORLD"); // bold + bg
+        terminal.vt_write(b"\r\n");
+        terminal.vt_write(b"\x1b[3;38;2;9;9;9mitalics same color run");
+        let buf = render_once(&terminal);
+
+        let src = read_grid(&terminal, cols, rows);
+        let reconstructed = decode_grid(&buf, cols, rows);
+        assert_eq!(
+            src, reconstructed,
+            "coalesced output must reconstruct the source grid exactly"
+        );
+    }
+
+    /// (verify the win) A heavy-colored full-width dirty row emits
+    /// substantially fewer bytes coalesced than the per-cell baseline would.
+    #[test]
+    fn colored_full_row_emits_far_fewer_bytes_than_per_cell() {
+        let cols = 80u16;
+        let mut terminal = fresh(cols, 1);
+        terminal.vt_write(b"\x1b[38;2;120;200;40m");
+        terminal.vt_write(&vec![b'#'; cols as usize]);
+        let buf = render_once(&terminal);
+
+        // Pre-coalescing, each of the 80 cells emitted `\x1b[0m` (4 bytes)
+        // plus `\x1b[38;2;120;200;40m` (18 bytes) plus the glyph (1) ≈ 23
+        // bytes/cell ⇒ ~1840 bytes for the run alone. Coalesced, the run is
+        // one such sequence (~22 bytes) plus 80 glyphs.
+        let per_cell_baseline = cols as usize * (4 + 18 + 1);
+        assert!(
+            buf.len() * 3 < per_cell_baseline,
+            "coalesced row ({} bytes) should be far smaller than the \
+             per-cell baseline (~{} bytes)",
+            buf.len(),
+            per_cell_baseline
+        );
+        // Exactly one fg SGR for the whole run is the source of the win.
+        assert_eq!(count(&buf, b"38;2;120;200;40"), 1);
+    }
+
+    /// Returning to the default style mid-row emits a single reset, and a
+    /// default run at row start emits no SGR at all.
+    #[test]
+    fn default_run_emits_at_most_one_reset() {
+        let cols = 10u16;
+        let mut terminal = fresh(cols, 1);
+        // First half colored, second half default.
+        terminal.vt_write(b"\x1b[38;2;7;7;7mAAAAA");
+        terminal.vt_write(b"\x1b[0mBBBBB");
+        let buf = render_once(&terminal);
+        // Row leads with one reset (row start) + the colored SGR + a reset
+        // when returning to default. Count total `\x1b[0m`: row-start reset
+        // (1) + return-to-default (1) + the colored set's leading reset (1)
+        // + final cursor reset (1) = 4. The key invariant: the default run
+        // (BBBBB) added exactly one reset, not one per cell.
+        assert_eq!(count(&buf, b"BBBBB"), 1, "default run glyphs contiguous");
+        // The colored fg appears once.
+        assert_eq!(count(&buf, b"38;2;7;7;7"), 1);
+        // Round-trip equality as the real correctness guard.
+        let reconstructed = decode_grid(&buf, cols, 1);
+        let src = read_grid(&terminal, cols, 1);
+        assert_eq!(
+            src, reconstructed,
+            "default-gap row round-trips identically"
         );
     }
 }
