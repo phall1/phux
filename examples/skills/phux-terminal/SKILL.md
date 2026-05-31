@@ -11,8 +11,9 @@ real terminals**: long-lived panes with state, structured screen reads, and
 structured input. You drive it entirely through the `phux` binary; no TTY,
 no tmux.
 
-This is a v0 surface (ADR-0022). It already supports the read+act loop;
-richer verbs (`run`, `watch`) are landing.
+This is a v0 surface (ADR-0022). It supports the full read+act+wait loop
+today (`ls` / `snapshot` / `send-keys` / `run` / `wait` / `new`); a
+push-driven `watch` is still landing.
 
 ## When to use phux vs a one-shot shell
 

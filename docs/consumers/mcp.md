@@ -6,9 +6,9 @@ last-reviewed: 2026-05-29
 
 # The phux MCP adapter
 
-**TL;DR.** The agent-facing consumer surface: `phux-mcp` exposes five
+**TL;DR.** The agent-facing consumer surface: `phux-mcp` exposes six
 tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`) over JSON-RPC stdio, with their JSON input schemas, the
+`phux_wait`, `phux_new`) over JSON-RPC stdio, with their JSON input schemas, the
 shared CLI selector grammar, the tri-state scrollback / per-cell
 snapshot semantics, and the `tools/call` envelope. It is a thin adapter
 over the same structured surface the CLI uses, with no protocol
@@ -101,7 +101,7 @@ literal `default`).
 
 ## 3. The tool catalog
 
-Five tools, returned verbatim by `tools/list`. Each `inputSchema` is a
+Six tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all.
 
@@ -198,6 +198,20 @@ dwell when `idle_ms` is absent.
 
 Result: `{ "outcome": "met" | "timed_out", "polls": N }`.
 
+### 3.6 `phux_new`
+
+Creates a named session on the running server without attaching. The
+server must already be running (this tool does not auto-spawn one).
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | yes | Name for the new session. A name already in use is rejected. |
+| `command` | array | no | Initial command (argv) for the seed pane. Omit or pass `[]` for the server's default shell. |
+| `cwd` | string | no | Working directory for the seed pane. |
+| `socket` | string | no | Override the UDS path (see §2). |
+
+Result: the new session's name and seed pane id.
+
 ---
 
 ## 4. A worked `tools/call` example
@@ -242,8 +256,8 @@ sparse per-cell `cells` array populated.
 
 The MCP tools are name-for-name the CLI's agent subcommands: `phux_ls` ↔
 `phux ls`, and `phux_snapshot` / `phux_send_keys` / `phux_run` /
-`phux_wait` ↔ `phux snapshot` / `send-keys` / `run` / `wait` (see
-[`tui.md`](./tui.md) §1 and §3). Same surface, same client-side
+`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait` /
+`new` (see [`tui.md`](./tui.md) §1 and §3). Same surface, same client-side
 resolution, same tiebreaks — because the adapter wraps the same
 `phux-client` functions the CLI does.
 
