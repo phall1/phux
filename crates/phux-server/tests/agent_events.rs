@@ -38,11 +38,10 @@ use crate::common::{
 };
 
 /// A shell that defers its observable output so the test client wins the
-/// race to `SUBSCRIBE_EVENTS` before any event fires. After ~250ms it:
-///   - sets the terminal title via OSC 2 (`ESC ] 2 ; phux-watch BEL`) →
-///     `title_changed`,
-///   - rings the bell (`printf '\a'`) → `bell`,
-/// then exits 0 → PTY EOF → `pane_closed`.
+/// race to `SUBSCRIBE_EVENTS` before any event fires. After ~250ms it sets
+/// the terminal title via OSC 2 (`ESC ] 2 ; phux-watch BEL`) →
+/// `title_changed`, rings the bell (`printf '\a'`) → `bell`, then exits 0 →
+/// PTY EOF → `pane_closed`.
 fn seed_with_title_bell_then_exit() -> CommandBuilder {
     let mut cmd = CommandBuilder::new("/bin/sh");
     cmd.arg("-c");
@@ -116,7 +115,9 @@ fn subscribed_client_receives_title_bell_and_pane_closed_events() {
         let events = collect_events(&mut stream, Duration::from_secs(3)).await;
 
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::TitleChanged { title } if title == "phux-watch")),
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TitleChanged { title } if title == "phux-watch")),
             "expected a title_changed event carrying the OSC-2 title; got {events:?}",
         );
         assert!(
@@ -124,7 +125,9 @@ fn subscribed_client_receives_title_bell_and_pane_closed_events() {
             "expected a bell event from the BEL byte; got {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AgentEvent::PaneClosed { exit_status } if *exit_status == Some(0))),
+            events.iter().any(
+                |e| matches!(e, AgentEvent::PaneClosed { exit_status } if *exit_status == Some(0))
+            ),
             "expected a pane_closed event with exit_status Some(0); got {events:?}",
         );
 

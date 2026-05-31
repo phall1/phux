@@ -981,17 +981,13 @@ impl ServerState {
     /// has no single owning Terminal to match a per-pane subscription.
     /// Order is unspecified; callers MUST NOT rely on it.
     #[must_use]
-    pub fn event_targets(
-        &self,
-        terminal: Option<&WireTerminalId>,
-    ) -> Vec<mpsc::Sender<Outbound>> {
+    pub fn event_targets(&self, terminal: Option<&WireTerminalId>) -> Vec<mpsc::Sender<Outbound>> {
         self.event_subscriptions
             .iter()
             .filter(|(_, scopes)| {
                 scopes.contains(&EventScope::Server)
-                    || terminal.is_some_and(|tid| {
-                        scopes.contains(&EventScope::Terminal(tid.clone()))
-                    })
+                    || terminal
+                        .is_some_and(|tid| scopes.contains(&EventScope::Terminal(tid.clone())))
             })
             .filter_map(|(client_id, _)| self.attached.get(client_id).map(|c| c.tx.clone()))
             .collect()

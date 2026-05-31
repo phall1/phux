@@ -490,7 +490,7 @@ fn spawn_pane_event_drain(
 ) {
     tokio::task::spawn_local(async move {
         while let Some(event) = event_rx.recv().await {
-            broadcast_event(&state, Some(wire_terminal_id.clone()), event).await;
+            broadcast_event(&state, Some(&wire_terminal_id), &event);
         }
     });
 }
@@ -633,10 +633,9 @@ async fn broadcast_terminal_closed(
     }) {
         broadcast_event(
             state,
-            Some(wire_terminal_id),
-            AgentEvent::PaneClosed { exit_status },
-        )
-        .await;
+            Some(&wire_terminal_id),
+            &AgentEvent::PaneClosed { exit_status },
+        );
     }
 }
 
@@ -1253,22 +1252,30 @@ fn handle_subscribe_events(
 /// Best-effort: a client whose mailbox is full or closed is silently
 /// skipped — the event stream is an accelerator, never a guarantee
 /// (a dropped event just means the consumer falls back to the poll floor).
-async fn broadcast_event(
+///
+/// Synchronous: fanout uses non-blocking `try_send`, so there is nothing
+/// to await — the caller need not be in an async context to push an event.
+fn broadcast_event(
     state: &SharedState,
-    terminal: Option<phux_protocol::ids::TerminalId>,
-    event: AgentEvent,
+    terminal: Option<&phux_protocol::ids::TerminalId>,
+    event: &AgentEvent,
 ) {
-    let targets = state.with(|s| s.event_targets(terminal.as_ref()));
+    let targets = state.with(|s| s.event_targets(terminal));
     if targets.is_empty() {
         return;
     }
-    trace!(?terminal, ?event, count = targets.len(), "EVENT: broadcasting");
+    trace!(
+        ?terminal,
+        ?event,
+        count = targets.len(),
+        "EVENT: broadcasting"
+    );
     for tx in targets {
         // `try_send` is non-blocking: a full mailbox drops the event
         // rather than stalling the emitter. The accelerator contract
         // tolerates loss (the CLI poll floor still converges).
         let _ = tx.try_send(Outbound::Frame(FrameKind::Event {
-            terminal: terminal.clone(),
+            terminal: terminal.cloned(),
             event: event.clone(),
         }));
     }
@@ -1900,7 +1907,7 @@ async fn handle_spawn_terminal(
         // subscribers (SPEC §7.5). The new pane's wire id rides the
         // `EVENT` envelope; server-wide subscribers and any per-pane
         // subscribers for this id receive it.
-        broadcast_event(state, Some(wire_terminal_id), AgentEvent::PaneSpawned).await;
+        broadcast_event(state, Some(&wire_terminal_id), &AgentEvent::PaneSpawned);
     } else {
         // Defensive: seed_session_with_pty succeeded but the handle
         // somehow vanished before we could clone it. Treat as a spawn

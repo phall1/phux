@@ -2267,8 +2267,8 @@ mod tests {
     // ---- phux watch JSON shape (phux-y2t) ----
 
     use super::watch_event_json;
-    use phux_protocol::wire::frame::AgentEvent;
     use phux_client::watch::WatchEvent;
+    use phux_protocol::wire::frame::AgentEvent;
 
     /// Build the JSON line for an event and parse it back, asserting the
     /// shape the `phux watch --json` contract promises: one object with a
@@ -2295,7 +2295,10 @@ mod tests {
         let line = watch_event_json(&ev, kind, terminal).unwrap();
         // One line, no embedded newline — `phux watch --json` is
         // one-object-per-line.
-        assert!(!line.contains('\n'), "watch --json line must be single-line");
+        assert!(
+            !line.contains('\n'),
+            "watch --json line must be single-line"
+        );
         serde_json::from_str(&line).unwrap()
     }
 
@@ -2324,7 +2327,12 @@ mod tests {
 
     #[test]
     fn watch_json_pane_closed_carries_exit_status() {
-        let v = json_of(AgentEvent::PaneClosed { exit_status: Some(0) }, Some("@1"));
+        let v = json_of(
+            AgentEvent::PaneClosed {
+                exit_status: Some(0),
+            },
+            Some("@1"),
+        );
         assert_eq!(v["event"], "pane_closed");
         assert_eq!(v["exit_status"], 0);
 

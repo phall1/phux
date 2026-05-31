@@ -1511,7 +1511,7 @@ impl TerminalActor {
         // terminal) to keep the RefCell discipline simple.
         let current_title = self.terminal.borrow().title().unwrap_or("").to_owned();
         if current_title != self.last_title {
-            self.last_title = current_title.clone();
+            self.last_title.clone_from(&current_title);
             self.emit_event(AgentEvent::TitleChanged {
                 title: current_title,
             });
