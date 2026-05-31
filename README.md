@@ -33,9 +33,7 @@ For the full mental model, read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md). For th
 
 ## Philosophy
 
-phux solves one problem and refuses to grow a second: spawn, observe, control, persist, and address libghostty terminals — locally or across a fleet — over a layered wire whose tiers a consumer can target without inheriting everything else. The terminal is the substrate; a consumer is anything that rides it. The reference TUI is the proof that the substrate is real, not the product the substrate exists to serve.
-
-Everything that doesn't make terminals more spawnable, observable, or addressable is out of scope on purpose — see Non-goals below.
+One problem: spawn, observe, control, persist, and address terminals. Everything else is out of scope on purpose — see Non-goals below.
 
 ## Status
 
@@ -61,13 +59,13 @@ The L1 substrate is the part worth building against now. For contributors, [`CON
 
 ## Install
 
-Prebuilt binaries via Homebrew (macOS arm64/x86_64, Linux x86_64):
+Homebrew (macOS, Linux x86_64):
 
 ```sh
 brew install phall1/phux/phux
 ```
 
-To hack on it instead, build from source — see Quickstart below. The binary is not on crates.io (it needs zig to build `libghostty-vt`); only the [`phux-protocol`](https://crates.io/crates/phux-protocol) wire crate publishes there. Release mechanics live in [`docs/RELEASING.md`](./docs/RELEASING.md).
+From source: see Quickstart. Only [`phux-protocol`](https://crates.io/crates/phux-protocol) publishes to crates.io.
 
 ## Quickstart
 
