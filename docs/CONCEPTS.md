@@ -6,150 +6,134 @@ last-reviewed: 2026-05-28
 
 # Concepts
 
-**TL;DR.** phux is a libghostty-backed terminal control plane. The
-unit of work is the *terminal* — spawned, observed, controlled,
-persisted, addressable across hosts. Sessions, windows, and panes are
-one consumer's way to arrange terminals on screen. The wire is layered
-so that a consumer speaks only the tiers it needs and federation is
-in the addressing, not bolted on.
+**TL;DR.** phux is a libghostty-backed terminal control plane. The unit of work is the *terminal* — spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, and panes are one consumer's way to arrange terminals on screen. The wire is layered so that a consumer speaks only the tiers it needs and federation is in the addressing, not bolted on.
 
 ---
 
 ## The unit of work is the terminal
 
-A terminal is a long-lived stateful thing. It runs a process, parses
-the bytes that process emits into a grid, accepts structured input
-events, and reports notable structural events back to whoever is
-listening — title changes, working directory, command start, command
-end, hyperlinks, bells.
+A terminal is stateful: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
 
-That is the unit of work in phux. Everything else — sessions, windows,
-panes, splits, status bars, the entire tmux vocabulary — is *one* way
-to arrange and decorate terminals for a human staring at a screen.
-Useful, but not load-bearing.
+Everything else — sessions, windows, panes, splits, status bars — is one way to arrange terminals on screen. Not load-bearing.
 
-Why frame it this way: because the consumer category has widened. A
-human at a workstation wants the tmux experience. An agent driving a
-build wants a terminal it can spawn, observe, drive, and tear down.
-A CI box hosting forty ephemeral shells for a fleet of agents wants
-forty terminals with their events on a stable wire — it does not want
-a status bar. A control plane managing terminals across satellites
-wants them as first-class addressable resources. The terminal is the
-greatest common factor.
+Why frame it this way? The consumer category widened:
+- Humans want the tmux experience.
+- Agents want to spawn, observe, and tear down terminals.
+- CI fleets want stable event streams.
+- Control planes want addressable resources.
 
-The reference TUI ships in this repo because the substrate is only
-real if a real consumer rides it. The substrate is the point.
+The terminal is the greatest common factor.
+
+The reference TUI ships in-tree because the substrate is only real if a real consumer rides it. The substrate is the point.
 
 ---
 
 ## libghostty is the foundation
 
-Both ends of the phux wire run `libghostty_vt::Terminal`. The server's
-is the canonical state for a managed terminal; the client's is a local
-mirror used for rendering. The same parser sits on both ends and
-nothing in the middle re-encodes the stream.
+Both ends run `libghostty_vt::Terminal`: server (canonical state), client (local mirror for rendering). The same parser on both ends; nothing re-encodes in the middle.
 
-That is why modern terminal protocols — Kitty keyboard, true colour,
-OSC 8 hyperlinks, OSC 133 prompt boundaries, image protocols, mouse
-pixel-precision — pass through losslessly. Multiplexers built before
-libghostty (tmux, screen, zellij) re-parse VT mid-path and degrade
-these features as a matter of architecture. phux structurally cannot.
+Modern terminal protocols (Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse) pass through losslessly. Older multiplexers re-parse VT mid-path and degrade fidelity. phux structurally cannot.
 
-The decision and its consequences are recorded in
-[ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md),
-[ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md),
-and [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md).
+See [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md), [ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md), and [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md).
 
-### What this means in practice
+### Practical consequences
 
-- **The wire is asymmetric.** Server→client *terminal content* is **VT
-  bytes** forwarded from the PTY (after per-client capability
-  rewriting). Client→server *input* is **structured key, mouse, focus,
-  and paste events** built from libghostty's own atoms. The server
-  encodes input back to VT bytes per-PTY using libghostty's encoders.
-- **Input types are libghostty's types.** phux re-exports
-  `libghostty_vt::key::{Key, Action, Mods}`,
-  `libghostty_vt::mouse::{Action, Button}`, etc., directly. There is
-  no parallel phux input enum to keep in sync.
-- **A new libghostty feature lights up automatically.** When
-  libghostty learns a new escape sequence or input atom, both the
-  server and the client gain support the moment the pin advances.
-  There is no phux-side bridge to update.
+- **Asymmetric wire.** Server→client: VT bytes (capability-rewritten per client). Client→server: structured events (key, mouse, focus, paste) from libghostty atoms.
+- **Input types are libghostty's.** Direct re-export: `libghostty_vt::key::{Key, Action, Mods}`, `libghostty_vt::mouse::{Action, Button}`. No parallel phux enum.
+- **New libghostty features auto-light.** New escape sequences or input atoms land in both client and server at the next pin. No phux bridge needed.
 
 ---
 
 ## The wire is layered
 
-phux's wire is split into tiers, declared at HELLO time, with strict
-conformance per tier. See
-[ADR-0015 (protocol layering)](../ADR/0015-protocol-layering.md) for
-the canonical statement; the normative bytes are in
-[`spec/`](./spec/).
+The wire splits into tiers, declared at HELLO. See [ADR-0015 (protocol layering)](../ADR/0015-protocol-layering.md) and [`spec/`](./spec/).
 
 | Tier | Concept | Carries |
 |---|---|---|
-| **L1** | Terminal | A PTY + libghostty `Terminal`. Bytes-out (`TERMINAL_OUTPUT`), structured input, snapshot, resize, close, bell, structured terminal events (title, cwd, command-start/end, hyperlinks, progress). |
-| **L2** | Collection | A named lifecycle bundle of Terminals. Killing the Collection kills its members. A server may decline to mount L2 for L1-only deployments. |
-| **L3** | Metadata | Opaque key-value pairs scoped to Terminal, Collection, or global. Consumers store their own conventions here (a TUI's layout tree, window names, ordering). The server stores; the server does not interpret. |
+| **L1** | Terminal | PTY + libghostty Terminal. Bytes-out, structured input, snapshot, resize, close, bell, events (title, cwd, command lifecycle, hyperlinks). |
+| **L2** | Collection | Named bundle of Terminals with kill semantics. Optional; L1-only deployments skip it. |
+| **L3** | Metadata | Opaque key-value pairs (Terminal, Collection, global scope). Consumers store conventions (TUI layout, window names). Server stores; does not interpret. |
 
-Each layer references only layers below it. A consumer **declares
-which layers it speaks** at HELLO and the server omits messages from
-layers the consumer didn't subscribe to.
+Each layer references only lower layers. Consumers declare which tiers they speak at HELLO; the server omits unneeded messages.
 
-Why this matters: an agent SDK speaks L1 alone. It never sees "session"
-or "window" because those concepts live in the TUI's L3 metadata. A
-native GUI consumer might speak L1 plus its own L3 conventions and
-still ignore the TUI's. The wire doesn't privilege any consumer's
-arrangement.
+Example: an agent SDK speaks L1 alone. It never sees "session" or "window" (TUI L3 metadata). A GUI might speak L1 + its own L3 and ignore the TUI's. No consumer is privileged on the wire.
 
-### What's on the wire vs in the consumer
+### Wire vs consumer boundary
 
 | Concept | Owner |
 |---|---|
 | Terminal — PTY, bytes, input, events | L1 (wire) |
 | Collection — named bundle, lifecycle | L2 (wire) |
 | Metadata blob — opaque KV | L3 (wire) |
-| The TUI's layout tree (binary split tree) | TUI consumer; stored as L3 metadata under key `phux.tui.layout/v1` |
-| The TUI's window ordering, focus pointer | TUI consumer; L3 metadata |
+| TUI layout tree | TUI consumer; L3 metadata under `phux.tui.layout/v1` |
+| TUI window ordering, focus | TUI consumer; L3 metadata |
 | Status bar, keybindings, hooks | TUI consumer; local config |
-| Predictive local echo | Any consumer; client-side, transport-agnostic |
+| Predictive local echo | Client-side, transport-agnostic |
 
-If you find yourself wondering "should X be on the wire" — the test
-is: does *every* plausible consumer need it? If only the TUI needs it,
-it's a TUI feature stored in L3, not a wire message.
+Test: does *every* plausible consumer need it? If only the TUI needs it, it's TUI local config or L3 metadata, not a wire message.
 
 ---
 
 ## Identity is federation-ready
 
-A `TerminalId` is a tagged union:
+Every terminal is addressed by a `TerminalId` tagged union:
 
 ```
 TerminalId = LOCAL     { id: u32 }
-           | SATELLITE { host: str, id: u32 }
+           | SATELLITE { host: String, id: u32 }
 ```
 
-Day-1 servers construct `LOCAL` only. Day-N hubs route `SATELLITE` ids
-to satellite servers on other machines. The wire bytes are identical in
-both cases. A v0.1 server accepts SATELLITE-tagged ids and, if it isn't
-a federation hub, replies `UnsupportedSatelliteRoute` — the
-forward-compatibility is in the addressing, present from the first
-release.
+v0.1 constructs `LOCAL` only. The wire accepts both from byte zero. A client can write `SATELLITE{host: "prod-box-3", id: 42}` today. v0.1 rejects it with `UnsupportedSatelliteRoute` (not a crash). When v0.2 lands with satellite routing, the wire bytes are identical. The same command that got rejected in v0.1 just works in v0.2. Forward compatibility, in place before satellites exist.
 
-See [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md)
-and [ADR-0016 (TerminalId as the wire primary)](../ADR/0016-terminal-id-as-wire-primary.md).
+**Unlike tmux:** tmux SSH-attach is client-side (connect to remote, spawn local client). A fleet control plane managing terminals across machines must speak different protocols to each server. phux's wire knows about remote identity from day 1. A single control plane addresses terminals uniformly across all machines; addressing is in L1, the terminal substrate.
 
-So phux is a control plane from the first byte, not a single-machine
-tool with remote attach grafted on later. The load-bearing case is a
-fleet of agents working across a fleet of cloud boxes: terminals as
-addressable resources, reachable from one place, observable live,
-persistent across disconnect. tmux cannot become this without
-discarding its wire; phux's wire already points here.
+phux is a control plane from the first byte, not a single-machine tool with remote attach bolted on. The load-bearing case: a fleet of agents working across cloud boxes with terminals as addressable, persistent, observable resources.
 
-The transport between hub and satellites is whatever works — SSH-stdio
-first, QUIC eventually — behind a `Transport` trait. Domain code never
-names a concrete transport. See
-[`architecture/transport.md`](./architecture/transport.md).
+See [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md) and [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md). Transport (SSH, QUIC, etc.) is pluggable via `Transport` trait; see [`architecture/transport.md`](./architecture/transport.md).
+
+---
+
+## Comparison to other tools
+
+phux is not competing with every terminal tool. Different tools solve different problems. Here's where phux stands.
+
+### Traditional multiplexers
+
+These are human-first session managers: tmux, zellij, screen. They arrange terminals on screen with windows, panes, and splits. phux aims to be in this category but rethought from libghostty up.
+
+| Dimension | phux | tmux | zellij | screen |
+|---|---|---|---|---|
+| Modern terminal protocol support[^1] | ✓ | ◐ | ◐ | ✗ |
+| Federation-ready addressing[^2] | ✓ | ✗ | ✗ | ✗ |
+| libghostty canonical parser | ✓ | ✗ | ✗ | ✗ |
+| Structured input types | ✓ | ✗ | ✓ | ✗ |
+| End-to-end passthrough (no re-parse) | ✓ | ✗ | ✗ | ✗ |
+| Production-proven maturity | ✗ | ✓ | ◐ | ✓ |
+
+**What's different:** phux parses once (libghostty), routes VT bytes losslessly, and bakes federated addressing into the wire from day 1. tmux and zellij re-parse in-path and bolt on remote attach via SSH. screen is the oldest and simplest.
+
+### Agent-focused tools
+
+These solve agent automation and control, not primary human use. They're in a different category than traditional multiplexers.
+
+| Dimension | phux | zmx | cmux | rmux |
+|---|---|---|---|---|
+| Agent SDK or programmatic API | ✓ (planned L1 SDK) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
+| Primary use case | Human multiplexer + control plane | Minimal session persistence | Agent UI (git, PR, notifications) | Agent automation |
+| Cross-platform | ✓ | ✗ (implied) | ✗ (macOS only) | ✓ |
+| Maturity | Pre-release v0.1 | Minimal scope, SSH bugs | Production (20k+ stars) | Public preview (v0.3.1) |
+| Wire protocol published | ✓ (phux-proto in docs/spec/) | ✗ | Proprietary | ✓ (rmux-proto crate) |
+
+**What's going on here:** These are not multiplexer competitors.
+
+- **zmx** is deliberately minimal: session persistence only, delegates window/split logic to the OS. Known terminal state bugs in nested SSH. No agent SDK.
+- **cmux** is Swift + AppKit, macOS-only, focused on agent coordination (Claude, Cursor). Shows git branches, PRs, agent notifications. Not a tmux replacement.
+- **rmux** is a fresh public preview agent SDK (Rust, Playwright-style async). All 90 tmux commands available. No federation.
+
+phux is *both* a human multiplexer *and* a federation-ready control plane. The agent SDK is one consumer of the same wire that the TUI rides. See [ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md).
+
+[^1]: Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse. phux passes through unchanged (libghostty parses once, bytes forward). Others re-parse mid-path and degrade fidelity.
+[^2]: phux wire knows remote identity from day 1. Design in [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md). Traditional multiplexers treat remote attach as client-side (SSH + local connect).
 
 ---
 
@@ -157,65 +141,38 @@ names a concrete transport. See
 
 Consumers in scope:
 
-- **The reference TUI.** Tmux-shaped: sessions, windows, panes,
-  splits, status bar, keybindings, prefix table. Speaks L1 + L2 + L3.
-  Lives in [`consumers/tui.md`](./consumers/tui.md).
-- **The agent SDK** (`phux-client-sdk`, planned). A typed Rust handle
-  to spawn, observe, and drive Terminals. L1 only. No sessions, no
-  windows, no layout.
-  [`consumers/sdk.md`](./consumers/sdk.md) when it ships.
-- **Future:** a native GUI consumer over libghostty's surface API; a
-  recorder; a tmux control-mode adapter
-  ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md)).
+- **Reference TUI.** Tmux-shaped: sessions, windows, panes, splits, status bar, keybindings. Speaks L1 + L2 + L3. See [`consumers/tui.md`](./consumers/tui.md).
+- **Agent SDK** (`phux-client-sdk`, planned). Typed Rust handle to spawn, observe, drive Terminals. L1 only.
+- **Future:** native GUI, recorder, tmux control-mode adapter ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md)).
 
-[ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md)
-states the conformance rule: the reference TUI is one consumer among
-several with no protocol-level privileges. If the TUI needs a behavior
-the wire doesn't provide, the answer is to extend the spec (with an
-ADR) — not to add a TUI-shaped hook.
+[ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md): the reference TUI is one consumer with no protocol-level privileges. If the TUI needs a feature the wire doesn't provide, extend the spec (with an ADR), not add a TUI-shaped hook.
 
-### What the TUI's vocabulary maps to
+### TUI vocabulary mapped to substrate
 
-When a TUI user says one of these, they mean:
-
-| TUI says | Phux substrate is |
+| TUI | Substrate |
 |---|---|
-| "session" | An L2 Collection (named bundle of Terminals, kill-all semantics) |
-| "window" | A layout tree the TUI stores in L3 metadata; not on the wire |
-| "pane" | A leaf of that layout tree — pointing at a Terminal (L1) |
-| "split a pane" | Mutate the L3 layout tree; spawn a new Terminal; client repaints |
-| "kill the pane" | Send L1 `KILL_TERMINAL` for the leaf's terminal; consumer updates its layout |
-| "attach to a session" | L2 `ATTACH` to the Collection; consumer reads its L3 layout and subscribes to L1 output for each Terminal |
+| "session" | L2 Collection (named Terminals, kill-all) |
+| "window" | TUI layout tree in L3 metadata |
+| "pane" | Leaf of layout tree, points to L1 Terminal |
+| "split a pane" | Mutate L3 tree; spawn L1 Terminal; repaint |
+| "kill pane" | L1 `KILL_TERMINAL` for leaf; consumer updates layout |
+| "attach session" | L2 `ATTACH`; read L3 layout; subscribe L1 output |
 
-The TUI's vocabulary is what users expect; the substrate's vocabulary
-is what the wire actually carries.
+The TUI's vocabulary is user-facing. The substrate's vocabulary is what the wire carries.
 
 ---
 
 ## What v0.1 looks like
 
-- **L1 is frozen.** The Terminal substrate is specified, tested,
-  documented. Federation forward-compat is baked in.
-- **L2 is stable.** Collection lifecycle, membership, naming, kill
-  semantics.
-- **L3 exists as opaque storage.** Read / write / delete on metadata
-  blobs. The TUI's conventions live in
-  [`consumers/tui.md`](./consumers/tui.md) and the non-normative
-  conventions appendix in [`spec/L3.md`](./spec/L3.md).
-- **The reference TUI works** on L1 + L3 metadata: attach, detach,
-  splits, layouts, status bar, keybindings.
-- **The agent SDK ships** as a thin L1-only wrapper, with examples
-  that spawn a build, wait for OSC 133 command-end, read exit code.
-  This is what makes the agent-first thesis real instead of
-  aspirational.
+- **L1 is frozen.** The Terminal substrate is specified, tested, documented. Federation forward-compat is baked in.
+- **L2 is stable.** Collection lifecycle, membership, naming, kill semantics.
+- **L3 exists as opaque storage.** Read / write / delete on metadata blobs. The TUI's conventions live in [`consumers/tui.md`](./consumers/tui.md) and the non-normative conventions appendix in [`spec/L3.md`](./spec/L3.md).
+- **The reference TUI works** on L1 + L3 metadata: attach, detach, splits, layouts, status bar, keybindings.
+- **The agent SDK ships** as a thin L1-only wrapper, with examples that spawn a build, wait for OSC 133 command-end, read exit code. This is what makes the agent-first thesis real instead of aspirational.
 
-Federation and Automation are **designed for** in v0.1 (their hooks in
-the wire are present; their ADRs are written) and **shipped** in v0.2.
-Building for now, designed for later.
+Federation and Automation are **designed for** in v0.1 (their hooks in the wire are present; their ADRs are written) and **shipped** in v0.2. Building for now, designed for later.
 
-For the long arc — what v0.2+ looks like, where the agent-driven world
-is going, what makes this not a smaller tmux — see
-[`vision.md`](./vision.md).
+For the long arc — what v0.2+ looks like, where the agent-driven world is going, what makes this not a smaller tmux — see [`vision.md`](./vision.md).
 
 ---
 

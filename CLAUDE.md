@@ -4,62 +4,13 @@ stability: stable
 last-reviewed: 2026-05-28
 ---
 
-# Project Instructions for AI Agents
+# phux Project Instructions for Agents
 
-**TL;DR.** Tracker integration (`bd`) and session-close protocol are
-auto-injected below. Doc system: read [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md)
-before adding or moving docs — it defines frontmatter, TL;DR, ADR
-template, and `just docs-check` gates. Build & test: `nix develop`,
-then `just ci`. Conceptual model in [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
+See [`AGENTS.md`](./AGENTS.md) for universal agent instructions
+(shell hygiene, session completion protocol). This file adds
+phux-project-specific guidance: build, test, architecture, and conventions.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
-## Beads Issue Tracker
-
-This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
-
-### Quick Reference
-
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --claim  # Claim work
-bd close <id>         # Complete work
-```
-
-### Rules
-
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
-- Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
-
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
-
-## Session Completion
-
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-
-**MANDATORY WORKFLOW:**
-
-1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
-3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
-   ```bash
-   git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
-   ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
-
-**CRITICAL RULES:**
-- Work is NOT complete until `git push` succeeds
-- NEVER stop before pushing - that leaves work stranded locally
-- NEVER say "ready to push when you are" - YOU must push
-- If push fails, resolve and retry until it succeeds
-<!-- END BEADS INTEGRATION -->
-
+---
 
 ## Build & Test
 
@@ -93,6 +44,8 @@ Authoritative docs, in order of priority:
 
 - [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) — canonical mental model.
   Read this first if you haven't.
+- [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) — doc system,
+  frontmatter, TL;DR rule, ADR template.
 - [`docs/spec/`](./docs/spec/) — normative wire protocol. Code conforms
   to it, not vice versa.
 - [`docs/architecture/`](./docs/architecture/) — internal structure

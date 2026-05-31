@@ -8,9 +8,11 @@ last-reviewed: 2026-05-28
 
 **TL;DR.** The doc tree. Concepts and consumer-shaped guides live as
 single files; the wire spec and the architecture description are split
-per concept under their own subdirectories. The doc system itself is
-defined in [CONVENTIONS.md](./CONVENTIONS.md) — read that before adding
-or moving content.
+per concept under their own subdirectories.
+
+**Start here:** [`CONVENTIONS.md`](./CONVENTIONS.md) defines the doc
+system itself (frontmatter, TL;DR rule, ADR template, CI gates) — read
+before adding or moving content.
 
 ---
 

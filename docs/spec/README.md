@@ -17,6 +17,7 @@ SHALL / SHOULD / MAY language only inside this directory.
 
 | File | Owns |
 |---|---|
+| [TUTORIAL.md](./TUTORIAL.md) | **Start here:** a complete session walkthrough (HELLO → attach → output → input → detach) |
 | [proto.md](./proto.md) | Framing, version negotiation, capabilities, flow control, transport |
 | [L1.md](./L1.md) | Terminal substrate — the REQUIRED conformance tier |
 | [L2.md](./L2.md) | Collection lifecycle — OPTIONAL |

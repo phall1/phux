@@ -6,12 +6,13 @@ last-reviewed: 2026-05-29
 
 # The phux agent CLI
 
-**TL;DR.** The structured CLI an AI agent drives without a TTY or tmux:
-`phux ls / snapshot / send-keys / run / wait`, plus `new` to create a
-session. Each read verb has a `--json` machine shape over the same
-client-side selector grammar the TUI uses, and reads are side-effect-free
-(no attach, no resize). This file documents the per-verb JSON contracts,
-the read-act-wait loop, and the exit-code semantics each verb mirrors.
+**TL;DR.** The phux **agent CLI surface**: the structured subcommands
+an AI agent drives without a TTY — `phux ls / snapshot / send-keys / run / wait`,
+plus `new` to create a session. Each read verb has a `--json` machine shape
+over the same client-side selector grammar the TUI uses, and reads are
+side-effect-free (no attach, no resize). This file documents the per-verb
+JSON contracts, the read-act-wait loop, and the exit-code semantics each
+verb mirrors. For universal agent instructions, see [`../../AGENTS.md`](../../AGENTS.md).
 
 ---
 
