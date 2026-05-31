@@ -6,109 +6,41 @@ last-reviewed: 2026-05-28
 
 # phux
 
-**A libghostty-backed terminal control plane.** Spawn, observe,
-control, persist, and address terminals — locally or across a fleet —
-with a tmux-shaped TUI riding on top as one consumer among several.
+**A libghostty-backed terminal control plane.** Spawn, observe, control, persist, and address terminals — locally or across a fleet — with a tmux-shaped TUI riding on top as one consumer among several.
 
 The gap it fills, in the words of libghostty's author:
 
-> "Need to replace tmux with a libghostty-based multiplexer so it can
-> understand KIP."
+> "Need to replace tmux with a libghostty-based multiplexer so it can understand KIP."
 > — Mitchell Hashimoto
 
 ## What it is
 
-The unit of work is the **terminal**, not the session or the pane.
-Both ends of the wire run [`libghostty_vt::Terminal`][lghv]: the
-server's is the canonical state for a managed terminal; the client's
-is a local mirror used for rendering. Nothing in the middle re-parses
-VT. Kitty keyboard, true colour, OSC 8, OSC 133, images — they all
-pass through end-to-end because the parser is identical on both ends.
+The unit of work is the **terminal**, not the session or the pane. Both ends of the wire run [`libghostty_vt::Terminal`][lghv]: the server's is the canonical state; the client's is a local mirror for rendering. Nothing in the middle re-parses VT. Kitty keyboard, true colour, OSC 8, OSC 133, images — they all pass through end-to-end because the parser is identical on both ends.
 
-The wire is layered. Consumers declare which tiers they speak and the
-server omits messages from layers they don't subscribe to:
+The wire is layered. Consumers declare which tiers they speak and the server omits messages from layers they don't subscribe to:
 
 - **L1 — Terminal.** PTY, bytes-out, structured input, snapshot, lifecycle, events.
 - **L2 — Collection.** Named lifecycle bundle of Terminals. Optional.
 - **L3 — Metadata.** Opaque KV the server stores but doesn't interpret. Where the TUI keeps its layout, window names, focus pointer.
 
-Identity is federation-ready from the first byte. `TerminalId` is a
-`LOCAL { id } | SATELLITE { host, id }` tagged union. Day-1 servers
-construct `LOCAL` only; day-N hubs route `SATELLITE` ids to satellites
-on other machines. The wire bytes don't change.
+Identity is federation-ready from the first byte. `TerminalId` is a `LOCAL { id } | SATELLITE { host, id }` tagged union. Day-1 servers construct `LOCAL` only; day-N hubs route `SATELLITE` ids to satellites on other machines. The wire bytes don't change.
 
 [lghv]: https://github.com/Uzaaft/libghostty-rs
 
 ## Why it looks different from tmux underneath
 
-- **No re-parse in the middle.** libghostty parses on both ends.
-  Modern terminal protocols pass through unchanged.
-- **The terminal is the substrate, not the pane.** Sessions, windows,
-  panes, splits live in L3 metadata, not on the wire — an agent SDK
-  never hears them.
-- **Federation is in the addressing.** Local UDS and the remote hub
-  speak the same wire. Not a single-machine tool that one day might
-  support remote attach.
-- **No consumer is privileged.** The reference TUI ships in-tree
-  because the substrate is only real if a real consumer rides it.
+- **No re-parse in the middle.** libghostty parses on both ends. Modern terminal protocols pass through unchanged.
+- **The terminal is the substrate, not the pane.** Sessions, windows, panes, splits live in L3 metadata, not on the wire — an agent SDK never hears them.
+- **Federation is in the addressing.** Local UDS and the remote hub speak the same wire. Not a single-machine tool that one day might support remote attach.
+- **No consumer is privileged.** The reference TUI ships in-tree because the substrate is only real if a real consumer rides it.
 
-For the full mental model, read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
-For the long arc, read [`docs/vision.md`](./docs/vision.md).
+For the full mental model, read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md). For the long arc, read [`docs/vision.md`](./docs/vision.md).
 
 ## Philosophy
 
-phux solves one problem and refuses to grow a second: spawn, observe,
-control, persist, and address libghostty terminals — locally or across
-a fleet — over a layered wire whose tiers a consumer can target
-without inheriting everything else. The terminal is the substrate; a
-consumer is anything that rides it. The reference TUI is the proof that
-the substrate is real, not the product the substrate exists to serve.
-Everything that doesn't make terminals more spawnable, observable, or
-addressable is out of scope on purpose — see Non-goals below.
+phux solves one problem and refuses to grow a second: spawn, observe, control, persist, and address libghostty terminals — locally or across a fleet — over a layered wire whose tiers a consumer can target without inheriting everything else. The terminal is the substrate; a consumer is anything that rides it. The reference TUI is the proof that the substrate is real, not the product the substrate exists to serve.
 
-## See it in action
-
-[**Demo video coming soon.** See the spec below for exactly what will be recorded.]
-
-**Demo Spec: 10-15 second recording**
-
-- **Platform:** macOS or Linux terminal
-- **Recording tool:** asciinema (or GIF from screen recording)
-- **Resolution:** 80 cols × 24 rows (or native terminal, normalize in post)
-- **Framerate:** 30fps (if GIF)
-
-**Script to execute:**
-
-1. **Start (1s):** Blank terminal, show `$ phux`
-2. **Spawn server (2-3s):** Type `phux` and press Enter
-   - Shows auto-spawning server + attaching to default session
-   - Status bar appears at bottom (time, session name)
-3. **Split horizontally (2-3s):** Press `Ctrl-A |` (split pane)
-   - Shows two panes side-by-side
-4. **Activity in split (2-3s):** Type in second pane, e.g., `echo "pane 2"` and press Enter
-   - Shows output in the split pane
-5. **Show help (1-2s):** Press `Ctrl-A ?`
-   - Displays keybinding help overlay
-6. **Detach (1-2s):** Press `Ctrl-A d`
-   - Closes TUI, returns to shell
-   - Shows `$` prompt again
-7. **Re-attach (1-2s):** Type `phux` and press Enter
-   - Attaches to the same session
-   - Both panes and content still there (state persisted)
-   - Status bar visible
-
-**Total duration:** ~12-15 seconds
-
-**Output format:** MP4 or GIF (asciinema.org rec then convert)
-
-**What to highlight:**
-- No setup needed (phux auto-spawns server)
-- Keybindings visible (help overlay)
-- State persists across detach + reattach
-- Status bar shows session info
-- Clean, minimal TUI chrome
-
-Want to help? Recording and uploading this is a great first contribution — [see CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow.
+Everything that doesn't make terminals more spawnable, observable, or addressable is out of scope on purpose — see Non-goals below.
 
 ## When to use phux
 
@@ -152,8 +84,7 @@ Want to help? Recording and uploading this is a great first contribution — [se
 - Agent SDK with structured L1 interface (wire hooks in place, implementation pending)
 - Predictive local echo and lazy state sync
 
-The L1 substrate is the part worth building against now. For contributors,
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) has the exact roadmap and constraints.
+The L1 substrate is the part worth building against now. For contributors, [`CONTRIBUTING.md`](./CONTRIBUTING.md) has the exact roadmap and constraints.
 
 ## Install
 
@@ -163,11 +94,7 @@ Prebuilt binaries via Homebrew (macOS arm64/x86_64, Linux x86_64):
 brew install phall1/phux/phux
 ```
 
-To hack on it instead, build from source — see Quickstart below. The
-binary is not on crates.io (it needs zig to build `libghostty-vt`); only
-the [`phux-protocol`](https://crates.io/crates/phux-protocol) wire crate
-publishes there. Release mechanics live in
-[`docs/RELEASING.md`](./docs/RELEASING.md).
+To hack on it instead, build from source — see Quickstart below. The binary is not on crates.io (it needs zig to build `libghostty-vt`); only the [`phux-protocol`](https://crates.io/crates/phux-protocol) wire crate publishes there. Release mechanics live in [`docs/RELEASING.md`](./docs/RELEASING.md).
 
 ## Quickstart
 
@@ -177,8 +104,7 @@ just ci                    # the bar — fmt-check + lint + test + deny + doc
 cargo run --bin phux       # auto-spawns a server and attaches
 ```
 
-Detach with the default prefix (`Ctrl-A d`). Walk-through in
-[`docs/QUICKSTART.md`](./docs/QUICKSTART.md).
+Detach with the default prefix (`Ctrl-A d`). Walk-through in [`docs/QUICKSTART.md`](./docs/QUICKSTART.md).
 
 ## Where to go next
 
@@ -193,7 +119,8 @@ Detach with the default prefix (`Ctrl-A d`). Walk-through in
 | Read the long arc | [`docs/vision.md`](./docs/vision.md) |
 | See past decisions | [`ADR/README.md`](./ADR/README.md) |
 | Contribute | [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
-| Writing docs | [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) (frontmatter, TL;DR, ADR template, CI gates) |
+
+The doc system itself is defined in [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) — frontmatter schema, TL;DR rule, ADR template, CI gates.
 
 ## Crates
 
@@ -206,30 +133,20 @@ Detach with the default prefix (`Ctrl-A d`). Walk-through in
 | `phux-client` | TUI client: local libghostty Terminal + RenderState redraw + ratatui chrome |
 | `phux-config` | TOML config schema + status widget contract |
 
-Future, not yet started: `phux-client-sdk` (L1-only typed Rust handle
-for agents) and `phux-client-gui` (native GUI consumer over
-libghostty's surface API).
+Future, not yet started: `phux-client-sdk` (L1-only typed Rust handle for agents) and `phux-client-gui` (native GUI consumer over libghostty's surface API).
 
 ## Non-goals
 
-Each of these is a "no" that keeps the substrate honest, not a feature
-deferred:
+Each of these is a "no" that keeps the substrate honest, not a feature deferred:
 
-- **No embedded scripting language.** Commands are typed IPC messages.
-  Logic that wants a runtime can shell out to one.
-- **No plugin host.** Hooks are typed events. A plugin contract, if it
-  ever lands, comes after we know what is genuinely pluggable.
-- **No copy-mode reinvention.** Selection and extraction belong to
-  libghostty and the host terminal. phux owns exactly one primitive
-  libghostty doesn't provide: literal search over scrollback.
-- **No homegrown crypto.** SSH and Unix-socket permissions are the
-  trust model.
-- **No format-template DSL.** The status bar takes typed widgets, not a
-  printf dialect to maintain forever.
+- **No embedded scripting language.** Commands are typed IPC messages. Logic that wants a runtime can shell out to one.
+- **No plugin host.** Hooks are typed events. A plugin contract, if it ever lands, comes after we know what is genuinely pluggable.
+- **No copy-mode reinvention.** Selection and extraction belong to libghostty and the host terminal. phux owns exactly one primitive libghostty doesn't provide: literal search over scrollback.
+- **No homegrown crypto.** SSH and Unix-socket permissions are the trust model.
+- **No format-template DSL.** The status bar takes typed widgets, not a printf dialect to maintain forever.
 
 Full rationale in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 
 ## License
 
-Dual-licensed under [MIT](./LICENSE-MIT) or
-[Apache-2.0](./LICENSE-APACHE) at your option.
+Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE) at your option.

@@ -6,14 +6,9 @@ last-reviewed: 2026-05-31
 
 # System shape diagram
 
-**TL;DR.** phux is a libghostty-backed terminal control plane. The canonical
-terminal state lives server-side; clients attach over a wire abstraction and
-maintain local mirrors for rendering. This diagram shows the full path from PTY
-through to screen.
+**TL;DR.** phux is a libghostty-backed terminal control plane. The canonical terminal state lives server-side; clients attach over a wire abstraction and maintain local mirrors for rendering. This diagram shows the full path from PTY through to screen.
 
 ---
-
-## One-glance system shape
 
 ```
 ┌──────────────┐
@@ -100,32 +95,26 @@ through to screen.
 
 ---
 
-## Key invariants labeled
+## Key invariants
 
 ### Canonical state (server)
 
-The server's `libghostty_vt::Terminal` is the single source of truth for
-all terminal state. It holds:
-
-- The canonical grid (full parsed state from PTY bytes)
-- The full parse tree (color, styles, hyperlinks, etc.)
-- PTY supervision (via per-terminal actor pattern)
+The server's `libghostty_vt::Terminal` is the single source of truth:
+- Canonical grid (full parsed state from PTY bytes)
+- Full parse tree (color, styles, hyperlinks, etc.)
+- PTY supervision (per-terminal actor pattern)
 - Session/window/pane collections (L2)
 
 ### Local mirror (client)
 
-The client maintains its own `libghostty_vt::Terminal` as a *local mirror*
-for rendering. It holds the same state shape but is **never the source of
-truth**. It is used to:
-
+The client maintains its own `libghostty_vt::Terminal` as a local mirror for rendering. It is **never the source of truth**:
 - Render text and styles to screen via ratatui
 - Cache `RenderState` (what was painted last frame)
 - Reconcile predictions when server state arrives
 - Scroll-back search
-- Clipboard (since the grid is available locally)
+- Clipboard (grid available locally)
 
-Both terminals are **identical instances** of the same libghostty parser. No
-re-encoding happens in the middle.
+Both terminals are **identical instances** of the same libghostty parser. No re-encoding in the middle.
 
 ### Transport abstraction
 
@@ -147,23 +136,19 @@ No code names a concrete transport; all I/O is trait-bound.
 
 ### Per-terminal actor (server)
 
-Each terminal managed by the server runs as a tokio `current-thread`
-task under supervision. The actor:
-
-- Reads from its PTY via `async` I/O
-- Feeds bytes to the canonical `Terminal`
+Each terminal runs as a tokio `current-thread` task under supervision:
+- Reads from its PTY via async I/O
+- Feeds bytes to the canonical Terminal
 - Broadcasts state snapshots + deltas to all attached clients
-- Accepts structured input events from clients and encodes them back
-  to VT bytes for the PTY
+- Accepts structured input events from clients; encodes them back to VT bytes for the PTY
 
 ### Per-client RenderState (client)
 
-On the client side, a per-frame `RenderState` cache tracks what was painted
-last frame. When a new server state arrives:
+A per-frame `RenderState` cache tracks what was painted last frame. When new server state arrives:
 
-1. The client's local `Terminal` is updated with new bytes
-2. Cells that changed get re-rendered
-3. Cells that didn't change are skipped (zero-copy cell references)
+1. Client's local Terminal is updated with new bytes
+2. Changed cells get re-rendered
+3. Unchanged cells are skipped (zero-copy cell references)
 4. Predictive echoes are reconciled (dropped if server already has the byte)
 
 This is the hot path for rendering; see `render-layering.md` for details.
@@ -171,12 +156,10 @@ This is the hot path for rendering; see `render-layering.md` for details.
 ### Data direction
 
 - **PTY → Server → Wire → Client**: VT bytes (terminal output)
-- **Client → Wire → Server → PTY**: Structured input events (key, mouse,
-  focus, paste)
-- **Server ← → Client**: State snapshots (attach), deltas (every frame)
+- **Client → Wire → Server → PTY**: Structured input events (key, mouse, focus, paste)
+- **Server ↔ Client**: State snapshots (attach), deltas (every frame)
 
-The wire is **asymmetric** — one direction is bytes, the other is structured
-events. This is the core invariant from ADR-0013 (libghostty bytes on the wire).
+The wire is **asymmetric**: one direction is bytes, the other is structured events. Core invariant from ADR-0013 (libghostty bytes on the wire).
 
 ---
 
@@ -189,10 +172,7 @@ events. This is the core invariant from ADR-0013 (libghostty bytes on the wire).
 | **Terminal** | Server (L1 wire) | PTY, canonical grid, events |
 | **Pane** | TUI client (L3 metadata) | Viewport into a Terminal, split geometry |
 
-Why the split: The wire defines *terminals* (PTY + grid + events). The TUI
-defines *sessions*, *windows*, and *panes* as one way to arrange those
-terminals. An agent SDK speaks only L1 (terminals). A headless server speaks
-only L2 (collections). The TUI speaks all three. No concept is duplicated.
+The wire defines terminals (PTY + grid + events). The TUI defines sessions, windows, and panes as one way to arrange those terminals. An agent SDK speaks only L1. A headless server speaks only L2. The TUI speaks all three. No concept is duplicated.
 
 ---
 
@@ -200,16 +180,11 @@ only L2 (collections). The TUI speaks all three. No concept is duplicated.
 
 1. **Start left**: PTY emits VT bytes.
 2. **Move right to Server**: Server's libghostty Terminal is canonical.
-3. **Across the Transport**: Wire abstraction carries bytes one way,
-   structured events the other.
-4. **Right side**: Client's libghostty Terminal mirrors the server's state
-   for rendering.
-5. **Rightmost**: ratatui chrome (TUI) decorates the terminal grid with
-   status bar, layout, keybindings.
+3. **Across the Transport**: Wire abstraction carries bytes one way, structured events the other.
+4. **Right side**: Client's libghostty Terminal mirrors the server's state for rendering.
+5. **Rightmost**: ratatui chrome (TUI) decorates the terminal grid with status bar, layout, keybindings.
 
-The system **cannot degrade modern terminal features** (Kitty keyboard,
-true color, hyperlinks, pixel-precision mouse) because both ends use the
-same libghostty parser and nothing re-encodes in the middle.
+The system **cannot degrade modern terminal features** (Kitty keyboard, true color, hyperlinks, pixel-precision mouse) because both ends use the same libghostty parser and nothing re-encodes in the middle.
 
 ---
 
