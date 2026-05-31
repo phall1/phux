@@ -20,7 +20,7 @@ privileges ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)).
 | File | Owns |
 |---|---|
 | [tui.md](./tui.md) | Reference TUI: CLI, keybinds, status bar, layout, hooks, recording |
-| [agents.md](./agents.md) | Agent CLI surface: structured verbs (ls/snapshot/send-keys/run/wait/new), JSON contracts, exit-code mirroring |
+| [agents.md](./agents.md) | Agent CLI surface: structured verbs (ls/snapshot/send-keys/run/wait/new), JSON contracts, exit-code mirroring. (See [`../../AGENTS.md`](../../AGENTS.md) for universal agent substrate instructions.) |
 | [mcp.md](./mcp.md) | Agent MCP adapter: JSON-RPC stdio tool surface (ls/snapshot/send_keys/run/wait) |
 | [sdk.md](./sdk.md) | Agent SDK shape (forward-looking; not yet shipped) |
 

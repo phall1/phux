@@ -193,10 +193,7 @@ Detach with the default prefix (`Ctrl-A d`). Walk-through in
 | Read the long arc | [`docs/vision.md`](./docs/vision.md) |
 | See past decisions | [`ADR/README.md`](./ADR/README.md) |
 | Contribute | [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
-
-The doc system itself is defined in
-[`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) — frontmatter schema,
-TL;DR rule, ADR template, CI gates.
+| Writing docs | [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md) (frontmatter, TL;DR, ADR template, CI gates) |
 
 ## Crates
 
