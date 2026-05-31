@@ -76,6 +76,27 @@ jobs:
       - name: cargo nextest run
         run: nix develop -c cargo nextest run --workspace
 
+  # Agent-surface + flywheel lane. The `run_wait_e2e` tests drive the real
+  # `phux` binary (run / send-keys / wait against a spawned server) and the
+  # in-process flywheel gates (perf_latency, stress_*). They are `#[ignore]`d
+  # out of the default `test` pool because real-PTY server spawns starve it,
+  # so without this job a regression in the headless agent surface (e.g. a
+  # ROUTE_INPUT gate rejecting `phux run`) ships green. This job is that gate.
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: just e2e
+        run: nix develop -c just e2e
+
   deny:
     name: deny
     runs-on: ubuntu-latest
