@@ -6,6 +6,11 @@ last-reviewed: 2026-05-28
 
 # phux Project Instructions for Agents
 
+**TL;DR.** phux-specific agent guidance layered on [`AGENTS.md`](./AGENTS.md)
+(universal rules): how to build and test (`nix develop`, `just ci`), the
+crate/architecture map, and the project conventions to follow when changing
+code or docs.
+
 See [`AGENTS.md`](./AGENTS.md) for universal agent instructions
 (shell hygiene, session completion protocol). This file adds
 phux-project-specific guidance: build, test, architecture, and conventions.
