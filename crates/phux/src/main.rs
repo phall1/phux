@@ -1683,33 +1683,7 @@ fn print_watch_event(ev: &phux_client::watch::WatchEvent, json: bool) {
     let terminal = ev.terminal.as_ref().map(format_wire_terminal_id);
 
     if json {
-        let mut obj = serde_json::Map::new();
-        obj.insert("event".to_owned(), serde_json::Value::from(kind));
-        if let Some(t) = &terminal {
-            obj.insert("terminal".to_owned(), serde_json::Value::from(t.clone()));
-        }
-        match &ev.event {
-            AgentEvent::TitleChanged { title } => {
-                obj.insert("title".to_owned(), serde_json::Value::from(title.clone()));
-            }
-            AgentEvent::CommandFinished { exit_code } => {
-                obj.insert(
-                    "exit_code".to_owned(),
-                    exit_code.map_or(serde_json::Value::Null, serde_json::Value::from),
-                );
-            }
-            AgentEvent::PaneClosed { exit_status } => {
-                obj.insert(
-                    "exit_status".to_owned(),
-                    exit_status.map_or(serde_json::Value::Null, serde_json::Value::from),
-                );
-            }
-            AgentEvent::Unknown { tag, .. } => {
-                obj.insert("tag".to_owned(), serde_json::Value::from(*tag));
-            }
-            _ => {}
-        }
-        match serde_json::to_string(&serde_json::Value::Object(obj)) {
+        match watch_event_json(ev, kind, terminal.as_deref()) {
             Ok(s) => println!("{s}"),
             Err(err) => eprintln!("phux: failed to serialize event: {err}"),
         }
@@ -1728,6 +1702,47 @@ fn print_watch_event(ev: &phux_client::watch::WatchEvent, json: bool) {
         };
         println!("{scope}\t{kind}{detail}");
     }
+}
+
+/// Build the `--json` line for a watch event: a single JSON object with a
+/// stable `event` name, an optional `terminal` selector, and the event's
+/// payload field (`title` / `exit_code` / `exit_status` / `tag`). Pure
+/// function over the event so the wire-to-JSON projection is unit-testable
+/// without touching stdout.
+fn watch_event_json(
+    ev: &phux_client::watch::WatchEvent,
+    kind: &str,
+    terminal: Option<&str>,
+) -> Result<String, serde_json::Error> {
+    use phux_protocol::wire::frame::AgentEvent;
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("event".to_owned(), serde_json::Value::from(kind));
+    if let Some(t) = terminal {
+        obj.insert("terminal".to_owned(), serde_json::Value::from(t));
+    }
+    match &ev.event {
+        AgentEvent::TitleChanged { title } => {
+            obj.insert("title".to_owned(), serde_json::Value::from(title.clone()));
+        }
+        AgentEvent::CommandFinished { exit_code } => {
+            obj.insert(
+                "exit_code".to_owned(),
+                exit_code.map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+        }
+        AgentEvent::PaneClosed { exit_status } => {
+            obj.insert(
+                "exit_status".to_owned(),
+                exit_status.map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+        }
+        AgentEvent::Unknown { tag, .. } => {
+            obj.insert("tag".to_owned(), serde_json::Value::from(*tag));
+        }
+        _ => {}
+    }
+    serde_json::to_string(&serde_json::Value::Object(obj))
 }
 
 /// Render a wire [`phux_protocol::ids::TerminalId`] as the `@id` selector
@@ -2247,5 +2262,82 @@ mod tests {
             parse_selector(Some("ghost")).unwrap(),
             Selector::Session("ghost".to_owned()),
         );
+    }
+
+    // ---- phux watch JSON shape (phux-y2t) ----
+
+    use super::watch_event_json;
+    use phux_protocol::wire::frame::AgentEvent;
+    use phux_client::watch::WatchEvent;
+
+    /// Build the JSON line for an event and parse it back, asserting the
+    /// shape the `phux watch --json` contract promises: one object with a
+    /// stable `event` name, an optional `terminal` selector, and the
+    /// event's payload field.
+    fn json_of(event: AgentEvent, terminal: Option<&str>) -> serde_json::Value {
+        let ev = WatchEvent {
+            terminal: None,
+            event,
+        };
+        // `kind` is computed the same way `print_watch_event` does; mirror
+        // the mapping here so the test exercises the real names.
+        let kind = match &ev.event {
+            AgentEvent::CommandStarted => "command_started",
+            AgentEvent::CommandFinished { .. } => "command_finished",
+            AgentEvent::TitleChanged { .. } => "title_changed",
+            AgentEvent::Bell => "bell",
+            AgentEvent::PaneSpawned => "pane_spawned",
+            AgentEvent::PaneClosed { .. } => "pane_closed",
+            AgentEvent::Dirty => "dirty",
+            AgentEvent::Idle => "idle",
+            _ => "unknown",
+        };
+        let line = watch_event_json(&ev, kind, terminal).unwrap();
+        // One line, no embedded newline — `phux watch --json` is
+        // one-object-per-line.
+        assert!(!line.contains('\n'), "watch --json line must be single-line");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[test]
+    fn watch_json_title_changed_carries_title_and_terminal() {
+        let v = json_of(
+            AgentEvent::TitleChanged {
+                title: "build".to_owned(),
+            },
+            Some("@3"),
+        );
+        assert_eq!(v["event"], "title_changed");
+        assert_eq!(v["title"], "build");
+        assert_eq!(v["terminal"], "@3");
+    }
+
+    #[test]
+    fn watch_json_bell_is_minimal() {
+        let v = json_of(AgentEvent::Bell, None);
+        assert_eq!(v["event"], "bell");
+        // No terminal selector supplied → key absent (not null).
+        assert!(v.get("terminal").is_none());
+        // Bell carries no payload field.
+        assert!(v.get("title").is_none());
+    }
+
+    #[test]
+    fn watch_json_pane_closed_carries_exit_status() {
+        let v = json_of(AgentEvent::PaneClosed { exit_status: Some(0) }, Some("@1"));
+        assert_eq!(v["event"], "pane_closed");
+        assert_eq!(v["exit_status"], 0);
+
+        // A signal-killed pane reports null exit_status (present, not absent).
+        let v = json_of(AgentEvent::PaneClosed { exit_status: None }, Some("@1"));
+        assert!(v["exit_status"].is_null());
+    }
+
+    #[test]
+    fn watch_json_command_finished_exit_code_nullable() {
+        // The documented exit-code gap: the reference server emits None.
+        let v = json_of(AgentEvent::CommandFinished { exit_code: None }, None);
+        assert_eq!(v["event"], "command_finished");
+        assert!(v["exit_code"].is_null());
     }
 }
