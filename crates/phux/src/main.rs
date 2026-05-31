@@ -1674,10 +1674,9 @@ fn print_watch_event(ev: &phux_client::watch::WatchEvent, json: bool) {
         AgentEvent::PaneClosed { .. } => "pane_closed",
         AgentEvent::Dirty => "dirty",
         AgentEvent::Idle => "idle",
-        AgentEvent::Unknown { .. } => "unknown",
-        // `AgentEvent` is `#[non_exhaustive]`: a future server may push a
-        // kind this client predates. Render it generically rather than
-        // failing the stream.
+        // `AgentEvent::Unknown` (a tag this client predates, preserved by
+        // the decoder) and any future `#[non_exhaustive]` variant both
+        // render generically rather than failing the stream.
         _ => "unknown",
     };
     let terminal = ev.terminal.as_ref().map(format_wire_terminal_id);
