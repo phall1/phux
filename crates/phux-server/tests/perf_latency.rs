@@ -78,6 +78,7 @@ fn burst_command() -> CommandBuilder {
 }
 
 /// Single-client heavy-burst latency gate.
+#[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn single_client_heavy_burst_settles_under_ceiling() {
     run_local(async {
@@ -118,6 +119,7 @@ fn single_client_heavy_burst_settles_under_ceiling() {
 
 /// Two-client attach: the slower subscriber's time-to-settle is gated.
 /// Fanout must not starve the second client.
+#[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn two_client_burst_slowest_settles_under_ceiling() {
     run_local(async {

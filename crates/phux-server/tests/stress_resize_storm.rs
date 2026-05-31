@@ -27,6 +27,7 @@ use crate::common::tracing_capture::TracingCapture;
 
 /// A storm of resizes must not panic the server and must leave the PTY at
 /// the final requested geometry. `stty size` reports `<rows> <cols>`.
+#[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn resize_storm_converges_to_final_geometry() {
     run_local(async {

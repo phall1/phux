@@ -40,18 +40,19 @@ test:
     cargo nextest run --workspace --all-features
 
 # They are `#[ignore]`d so the default `test`/`ci` run stays deterministic
-# — in the full parallel pool the server spawns starve and the socket-bind
-# wait trips. Run on demand (they pass reliably one binary at a time, ~2s).
-# CI may invoke this as a separate step.
+# — in the full parallel pool the real-PTY server spawns starve and the
+# load-sensitive timing assertions trip. Run on demand (they pass reliably
+# one binary at a time). CI may invoke this as a separate step.
 #
-# NOTE: the in-process e2e flywheel suite (the `E2eBuilder` harness, the
-# resize-storm / attach-churn stress tests, and the wall-clock
-# `perf_latency` gate in crates/phux-server/tests/) runs in the normal
-# `just test` / `just ci` pool — it is fast and does not spawn subprocesses.
-#
-# Binary-level e2e tests that spawn real PTY-backed `phux server` subprocesses.
+# This lane covers the heavy e2e/flywheel tests: the binary-level
+# `run_wait_e2e` subprocess tests AND the in-process flywheel suite (the
+# wall-clock `perf_latency` gate + the resize-storm / attach-churn stress
+# tests). All spin a real server + PTY, so they live here, not in the
+# default `just test` / `just ci` pool.
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all
+    cargo nextest run -p phux-server --run-ignored ignored-only \
+      --test perf_latency --test stress_resize_storm --test stress_attach_churn
 
 # Spins a real `phux` server + session, drives a scripted scenario (heavy
 # colored output, a 2nd client attach, a resize storm, an input line) and

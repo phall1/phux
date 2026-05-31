@@ -31,6 +31,7 @@ use crate::common::tracing_capture::TracingCapture;
 
 /// Rapid attach→observe→detach churn must not panic, leak client slots, or
 /// kill the pane. A survivor (anchor) client sees correct state at the end.
+#[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn attach_detach_churn_keeps_pane_alive() {
     // A pane that prints a stable marker once, then idles. Every fresh
