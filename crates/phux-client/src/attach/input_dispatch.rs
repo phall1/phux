@@ -163,20 +163,33 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 // phux-ahv.1: an overlay may commit an action (e.g. the
                 // rename prompt returning `rename-window { name }`); run
                 // it through the same path as a keybinding.
-                if let OverlayOutcome::RunAction(resolved) = ctx.overlays.handle_key(key_event) {
-                    let effects = run_action(&resolved, ctx, focused_pane.as_ref());
-                    if apply_action_effects(
-                        effects,
-                        out,
-                        conn,
-                        ctx,
-                        focused_pane,
-                        detach_pending,
-                        predict,
-                    )
-                    .await?
-                    {
-                        layout_changed = true;
+                match ctx.overlays.handle_key(key_event) {
+                    OverlayOutcome::RunAction(resolved) => {
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        if apply_action_effects(
+                            effects,
+                            out,
+                            conn,
+                            ctx,
+                            focused_pane,
+                            detach_pending,
+                            predict,
+                        )
+                        .await?
+                        {
+                            layout_changed = true;
+                        }
+                    }
+                    OverlayOutcome::SendSelection(sel_event) => {
+                        // Copy-mode: send selection state to the focused pane's Terminal.
+                        if let Some(terminal_id) = focused_pane.as_ref() {
+                            let frame =
+                                InputEvent::Selection(sel_event).into_frame(terminal_id.clone());
+                            conn.send(&frame).await?;
+                        }
+                    }
+                    OverlayOutcome::None => {
+                        // Overlay consumed the key but nothing else to do.
                     }
                 }
                 // On dismiss, repaint everything: the overlay scribbled
