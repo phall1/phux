@@ -6,12 +6,12 @@
 #![allow(clippy::unwrap_used, reason = "tests")]
 #![allow(clippy::print_stderr, reason = "probe diagnostics on failure")]
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::grid::{SCROLLBACK_ALL, SnapshotSynthesizer};
 use phux_server::search::{Scope, SearchOptions, search_oneshot};
 
-fn fresh(cols: u16, rows: u16, scrollback: usize) -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn fresh(cols: u16, rows: u16, scrollback: usize) -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: scrollback,

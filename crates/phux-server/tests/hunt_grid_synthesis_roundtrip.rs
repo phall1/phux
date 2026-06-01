@@ -6,11 +6,11 @@
 
 use libghostty_vt::render::{CellIterator, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::{RenderState, Terminal, TerminalOptions};
+use libghostty_vt::{RenderState, Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::grid::{ConsumerReference, SnapshotSynthesizer, synthesize};
 
-fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: 200,
@@ -19,7 +19,7 @@ fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
 }
 
 /// Project the viewport grid to text rows (wide-tail aware).
-fn render_grid(t: &Terminal<'_, '_>) -> Vec<String> {
+fn render_grid(t: &GhosttyTerminal<'_, '_>) -> Vec<String> {
     let mut rs = RenderState::new().unwrap();
     let snap = rs.update(t).unwrap();
     let rows_n = snap.rows().unwrap();

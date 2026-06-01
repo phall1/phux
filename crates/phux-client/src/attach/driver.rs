@@ -28,7 +28,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
 use phux_protocol::ids::{CollectionId, TerminalId};
@@ -59,7 +59,7 @@ use crate::render::overlay::OverlayState;
 /// keeps a [`PaneMap`] of these keyed by [`TerminalId`].
 pub(super) struct PaneSlot {
     /// libghostty mirror for this pane.
-    pub terminal: Terminal<'static, 'static>,
+    pub terminal: GhosttyTerminal<'static, 'static>,
     /// Cached render scaffolding. One per pane so libghostty's iterators
     /// stay warm across frames (the renderer's `last_cursor` is also
     /// per-pane, so each pane's predictive-echo anchor is independent).
@@ -78,7 +78,7 @@ impl PaneSlot {
     /// pane; 80x24 is the safest no-content placeholder.
     pub(super) fn new() -> Result<Self, AttachError> {
         Ok(Self {
-            terminal: Terminal::new(TerminalOptions {
+            terminal: GhosttyTerminal::new(TerminalOptions {
                 cols: 80,
                 rows: 24,
                 max_scrollback: 10_000,

@@ -5,7 +5,7 @@
 //! gate emission on the pane's DEC mode 1004 state and to own a reusable
 //! encode buffer for `Event::encode`.
 
-use libghostty_vt::{Error, Terminal, terminal::Mode};
+use libghostty_vt::{Error, Terminal as GhosttyTerminal, terminal::Mode};
 use phux_protocol::input::focus::FocusEvent;
 
 /// Per-pane focus encoder.
@@ -35,7 +35,7 @@ impl PerTerminalFocusEncoder {
     pub fn encode(
         &mut self,
         event: FocusEvent,
-        terminal: &Terminal<'_, '_>,
+        terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<Option<&[u8]>, Error> {
         if !terminal.mode(Mode::FOCUS_EVENT)? {
             return Ok(None);
@@ -64,8 +64,8 @@ mod tests {
     use super::*;
     use libghostty_vt::TerminalOptions;
 
-    fn make_terminal() -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn make_terminal() -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols: 80,
             rows: 24,
             max_scrollback: 1000,

@@ -32,14 +32,14 @@
 
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::grid::SnapshotSynthesizer;
 
 /// Allocate a fresh `Terminal` with a small scrollback budget — matches
 /// the existing `tests/common/screen.rs` shape so behaviour is
 /// representative.
-fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: 100,
@@ -50,7 +50,7 @@ fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
 /// Walk a `Terminal`'s viewport into a `Vec<String>`, skipping
 /// `CellWide::SpacerTail` so wide glyphs aren't double-counted. Mirrors
 /// the helper in `crates/phux-server/src/grid.rs`'s tests.
-fn render_grid(t: &Terminal<'_, '_>) -> Vec<String> {
+fn render_grid(t: &GhosttyTerminal<'_, '_>) -> Vec<String> {
     let mut rs = RenderState::new().expect("RenderState::new");
     let snap = rs.update(t).expect("update");
     let rows_n = snap.rows().expect("rows");

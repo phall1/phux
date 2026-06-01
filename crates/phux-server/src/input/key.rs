@@ -7,11 +7,11 @@
 //!
 //! [`PerTerminalKeyEncoder`] owns the per-pane `libghostty_vt::key::Encoder`
 //! plus a reusable byte buffer — call [`PerTerminalKeyEncoder::encode`] with
-//! the pane's current [`Terminal`] and the wire event; the returned
+//! the pane's current [`GhosttyTerminal`] and the wire event; the returned
 //! `&[u8]` is the PTY payload.
 
 use libghostty_vt::{
-    Error, Terminal,
+    Error, Terminal as GhosttyTerminal,
     key::{Encoder as LgKeyEncoder, Event as LgKeyEvent},
 };
 use phux_protocol::input::key::KeyEvent;
@@ -70,7 +70,7 @@ impl PerTerminalKeyEncoder {
     pub fn encode(
         &mut self,
         event: &KeyEvent,
-        terminal: &Terminal<'_, '_>,
+        terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<&[u8], Error> {
         let lg_event = key_event_to_libghostty(event)?;
         self.encoder.set_options_from_terminal(terminal);
@@ -88,8 +88,8 @@ mod tests {
     use libghostty_vt::key::{Action, Key, Mods};
     use phux_protocol::input::key::{KeyAction, ModSet, PhysicalKey};
 
-    fn make_terminal() -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn make_terminal() -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols: 80,
             rows: 24,
             max_scrollback: 1000,

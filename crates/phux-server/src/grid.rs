@@ -19,7 +19,7 @@
 //! 4. Re-establish cursor visibility (`DECSET 25` / `DECRST 25`) and
 //!    visual style (`DECSCUSR`).
 //! 5. Re-establish a small set of mode bits queried from the canonical
-//!    `Terminal` via [`libghostty_vt::Terminal::mode`].
+//!    `GhosttyTerminal` via [`libghostty_vt::Terminal::mode`].
 //!
 //! Out-of-band registries (OSC 8 hyperlinks, kitty graphics, etc.) are
 //! deferred — they need their own re-emission strategy and don't appear
@@ -34,7 +34,7 @@ use phux_core::screen::{
 };
 
 use libghostty_vt::{
-    RenderState, Terminal,
+    RenderState, Terminal as GhosttyTerminal,
     render::{CellIteration, CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
     screen::{CellSemanticContent, CellWide},
     style::{RgbColor, Style, StyleColor},
@@ -109,7 +109,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// replay body (SPEC §8.4).
     pub fn synthesize(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<SnapshotBytes, SynthesisError> {
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
@@ -166,7 +166,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// result for the caller.
     pub fn screen_state(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         pane: u32,
     ) -> Result<ScreenState, SynthesisError> {
         self.screen_state_with_scrollback(terminal, pane, None, false)
@@ -200,7 +200,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// `cells` is left `None` and the walk pays nothing (`phux-8yl`).
     pub fn screen_state_with_scrollback(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         pane: u32,
         scrollback: Option<u32>,
         cells: bool,
@@ -295,7 +295,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// `y = 0` is the oldest retained row, `y = scrollback_rows - 1` is the
     /// row just above the viewport.
     fn scrollback_lines(
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         want: u32,
     ) -> Result<Vec<String>, SynthesisError> {
         let total = terminal.scrollback_rows()?;
@@ -363,7 +363,10 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// After this returns successfully, the next `synthesize_incremental`
     /// against an unchanged terminal will observe `Dirty::Clean` and emit
     /// an empty body, saving wire bytes.
-    pub fn mark_synced(&mut self, terminal: &Terminal<'alloc, '_>) -> Result<(), SynthesisError> {
+    pub fn mark_synced(
+        &mut self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+    ) -> Result<(), SynthesisError> {
         let snapshot = self.render_state.update(terminal)?;
         let rows_n = snapshot.rows()?;
         // Walk rows and clear each dirty bit. The row-level clear is
@@ -408,7 +411,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     ///    invariant ADR-0018 rests on.
     pub fn synthesize_incremental(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<SnapshotBytes, SynthesisError> {
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
@@ -547,7 +550,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// empty body means the viewport is byte-identical to the reference.
     pub fn synthesize_against_reference(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         reference: &mut ConsumerReference,
     ) -> Result<SnapshotBytes, SynthesisError> {
         // Where the per-tick, per-consumer CPU goes (row walk + cell render
@@ -695,7 +698,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// consumer's mirror to this same reference point).
     pub fn prime_reference(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         reference: &mut ConsumerReference,
     ) -> Result<(), SynthesisError> {
         let snapshot = self.render_state.update(terminal)?;
@@ -803,7 +806,7 @@ impl ReferenceCursorMode {
     /// change can independently force an epilogue re-emit.
     fn capture(
         snapshot: &Snapshot<'_, '_>,
-        terminal: &Terminal<'_, '_>,
+        terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<Self, SynthesisError> {
         let (cursor_x, cursor_y) = snapshot
             .cursor_viewport()?
@@ -836,7 +839,7 @@ impl ReferenceCursorMode {
 /// Convenience wrapper: allocate a fresh [`SnapshotSynthesizer`] for a
 /// one-shot synthesis. Per-pane hot loops should reuse a
 /// [`SnapshotSynthesizer`].
-pub fn synthesize(terminal: &Terminal<'_, '_>) -> Result<SnapshotBytes, SynthesisError> {
+pub fn synthesize(terminal: &GhosttyTerminal<'_, '_>) -> Result<SnapshotBytes, SynthesisError> {
     SnapshotSynthesizer::new()?.synthesize(terminal)
 }
 
@@ -1023,7 +1026,7 @@ fn cell_color(resolved: Option<RgbColor>, raw: StyleColor) -> CellColor {
 fn emit_epilogue(
     out: &mut Vec<u8>,
     snapshot: &Snapshot<'_, '_>,
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
 ) -> Result<(), SynthesisError> {
     // Reset SGR before cursor placement so the cursor's visual style
     // isn't tainted by the last cell's attributes.
@@ -1076,7 +1079,10 @@ fn emit_epilogue(
 /// cursor on entry, so emitting it after painting would wipe the content
 /// and clobber the restored cursor. Both the full-reset prologue and the
 /// per-row diff therefore call this ahead of any cell bytes.
-fn emit_screen_mode(out: &mut Vec<u8>, terminal: &Terminal<'_, '_>) -> Result<(), SynthesisError> {
+fn emit_screen_mode(
+    out: &mut Vec<u8>,
+    terminal: &GhosttyTerminal<'_, '_>,
+) -> Result<(), SynthesisError> {
     emit_mode(out, terminal, Mode::ALT_SCREEN_LEGACY, b"47")?;
     emit_mode(out, terminal, Mode::ALT_SCREEN, b"1047")?;
     emit_mode(out, terminal, Mode::ALT_SCREEN_SAVE, b"1049")?;
@@ -1207,7 +1213,7 @@ fn emit_cursor_style(out: &mut Vec<u8>, style: CursorVisualStyle, blinking: bool
 /// Query `mode` on `terminal`; emit `CSI ? <code> h/l` accordingly.
 fn emit_mode(
     out: &mut Vec<u8>,
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     mode: Mode,
     code: &[u8],
 ) -> Result<(), SynthesisError> {
@@ -1222,10 +1228,10 @@ fn emit_mode(
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use libghostty_vt::{Terminal, TerminalOptions};
+    use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 
-    fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 100,
@@ -1246,7 +1252,7 @@ mod tests {
     /// Walk the viewport of `t` and collect each row as a string,
     /// reproducing wide-cell tail handling so the comparison is grid-
     /// equivalent rather than byte-equivalent.
-    fn render_grid(t: &Terminal<'_, '_>) -> Vec<String> {
+    fn render_grid(t: &GhosttyTerminal<'_, '_>) -> Vec<String> {
         let mut rs = RenderState::new().expect("RenderState::new");
         let snap = rs.update(t).expect("update");
         let rows_n = snap.rows().expect("rows");

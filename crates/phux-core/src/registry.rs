@@ -3,7 +3,7 @@
 //! All domain entities live in [`slotmap::SlotMap`]s keyed by the typed IDs
 //! from [`crate::ids`]. The registry preserves parent → child invariants:
 //!
-//! * Removing a [`Terminal`] removes it from its parent [`Window`]'s `panes`
+//! * Removing a [`TerminalDescriptor`] removes it from its parent [`Window`]'s `panes`
 //!   list and collapses it out of the layout tree.
 //! * Removing a [`Window`] cascades to all of its terminals and unlinks the
 //!   window from its parent [`Session`].
@@ -20,7 +20,7 @@ use thiserror::Error;
 
 use crate::ids::{SessionId, TerminalId, WindowId};
 use crate::session::Session;
-use crate::terminal::Terminal;
+use crate::terminal::TerminalDescriptor;
 use crate::window::{SplitDir, Window};
 
 /// Errors returned by the [`Registry`] when a parent ID does not resolve.
@@ -47,7 +47,7 @@ pub enum RegistryError {
 pub struct Registry {
     sessions: SlotMap<SessionId, Session>,
     windows: SlotMap<WindowId, Window>,
-    terminals: SlotMap<TerminalId, Terminal>,
+    terminals: SlotMap<TerminalId, TerminalDescriptor>,
 }
 
 impl Registry {
@@ -112,7 +112,7 @@ impl Registry {
         if !self.windows.contains_key(window) {
             return Err(RegistryError::UnknownWindow(window));
         }
-        let terminal_id = self.terminals.insert_with_key(|id| Terminal {
+        let terminal_id = self.terminals.insert_with_key(|id| TerminalDescriptor {
             id,
             window,
             dims: (80, 24),
@@ -147,12 +147,12 @@ impl Registry {
 
     /// Remove a terminal and unlink it from its parent window.
     ///
-    /// Returns the removed [`Terminal`] if it existed, otherwise `None`. The
+    /// Returns the removed [`TerminalDescriptor`] if it existed, otherwise `None`. The
     /// parent window's `panes`, layout tree, and `active` are all updated
     /// to drop the removed key. When the removed terminal was the only leaf the
     /// window's `layout` is cleared (the window persists with no terminals
     /// until [`Self::remove_window`] is called).
-    pub fn remove_terminal(&mut self, id: TerminalId) -> Option<Terminal> {
+    pub fn remove_terminal(&mut self, id: TerminalId) -> Option<TerminalDescriptor> {
         let terminal = self.terminals.remove(id)?;
         if let Some(w) = self.windows.get_mut(terminal.window) {
             w.panes.retain(|p| *p != id);
@@ -243,13 +243,13 @@ impl Registry {
 
     /// Borrow a terminal by ID, or `None` if the ID is unknown.
     #[must_use]
-    pub fn terminal(&self, id: TerminalId) -> Option<&Terminal> {
+    pub fn terminal(&self, id: TerminalId) -> Option<&TerminalDescriptor> {
         self.terminals.get(id)
     }
 
     /// Mutably borrow a terminal by ID, or `None` if the ID is unknown.
     #[must_use]
-    pub fn terminal_mut(&mut self, id: TerminalId) -> Option<&mut Terminal> {
+    pub fn terminal_mut(&mut self, id: TerminalId) -> Option<&mut TerminalDescriptor> {
         self.terminals.get_mut(id)
     }
 

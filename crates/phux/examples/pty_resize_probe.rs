@@ -34,14 +34,14 @@ use std::time::Duration;
 
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 /// A persistent libghostty grid oracle: the stand-in for the host
 /// terminal. Feed it the bytes phux paints; resize it when the PTY
 /// resizes; read its visible rows back as plain text.
 struct Oracle {
-    terminal: Terminal<'static, 'static>,
+    terminal: GhosttyTerminal<'static, 'static>,
     state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -52,7 +52,7 @@ struct Oracle {
 impl Oracle {
     fn new(cols: u16, n_rows: u16) -> Self {
         Self {
-            terminal: Terminal::new(TerminalOptions {
+            terminal: GhosttyTerminal::new(TerminalOptions {
                 cols,
                 rows: n_rows,
                 max_scrollback: 1000,

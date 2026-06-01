@@ -60,7 +60,7 @@
 //! both.
 
 use libghostty_vt::{
-    Terminal,
+    Terminal as GhosttyTerminal,
     fmt::Format,
     screen::CellWide,
     selection::{FormatOptions, Selection},
@@ -130,7 +130,7 @@ pub enum ExtractError {
 /// clusters), then a linear [`Selection`] is built over `[start_x, end_x]` of row `y`
 /// and formatted with the sound one-shot
 /// [`Terminal::format_selection_alloc`] API.
-pub fn extract_match(terminal: &Terminal<'_, '_>, m: Match) -> Result<String, ExtractError> {
+pub fn extract_match(terminal: &GhosttyTerminal<'_, '_>, m: Match) -> Result<String, ExtractError> {
     match m.region {
         Region::Viewport => {
             let y = u32::try_from(m.row).unwrap_or(u32::MAX);
@@ -164,7 +164,7 @@ pub fn extract_match(terminal: &Terminal<'_, '_>, m: Match) -> Result<String, Ex
 /// between search and extraction surfaces as
 /// [`ExtractError::HistoryRowOutOfRange`] rather than a wrong selection.
 pub fn extract_match_in_scope(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     m: Match,
     scope: Scope,
 ) -> Result<String, ExtractError> {
@@ -202,7 +202,7 @@ const fn restamp_viewport(e: ExtractError, row: usize) -> ExtractError {
 /// [`ExtractError::HistoryRowOutOfRange`] if the resolved `y` is past the
 /// current scrollback (the row aged out since the search).
 fn resolve_history_y(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     row: usize,
     scope: Scope,
 ) -> Result<u32, ExtractError> {
@@ -232,7 +232,7 @@ fn resolve_history_y(
 /// A zero `len` extracts nothing and returns an empty string without touching
 /// libghostty's selection path.
 pub fn extract_active_span(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     y: u32,
     char_col: usize,
     len: usize,
@@ -255,7 +255,7 @@ pub fn extract_active_span(
 /// A zero `len` extracts nothing and returns an empty string without touching
 /// libghostty's selection path.
 pub fn extract_history_span(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     history_y: u32,
     char_col: usize,
     len: usize,
@@ -295,7 +295,7 @@ impl PointSpace {
 /// `y`, and format it with the sound one-shot
 /// [`Terminal::format_selection_alloc`] API.
 fn extract_span(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     space: PointSpace,
     y: u32,
     char_col: usize,
@@ -363,7 +363,7 @@ fn extract_span(
 /// (blank) cell emits one space `char` and one column, matching the
 /// projection's `buf.push(' ')`.
 fn char_col_to_grid_x(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     space: PointSpace,
     y: u32,
     target: usize,
@@ -421,10 +421,10 @@ fn grapheme_char_count(
 mod tests {
     use super::*;
     use crate::search::{Scope, SearchOptions, search_oneshot};
-    use libghostty_vt::{Terminal, TerminalOptions};
+    use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 
-    fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 100,

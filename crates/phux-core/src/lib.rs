@@ -19,5 +19,5 @@ pub use ids::{SessionId, TerminalId, WindowId};
 pub use registry::{Registry, RegistryError};
 pub use screen::{CursorState, SCHEMA_VERSION, ScreenState};
 pub use session::Session;
-pub use terminal::Terminal;
+pub use terminal::TerminalDescriptor;
 pub use window::{Direction, LayoutError, LayoutNode, Rect, SplitDir, Window};

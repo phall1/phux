@@ -53,7 +53,7 @@
 
 mod common;
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::wire::frame::{FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_SNAPSHOT};
 use phux_server::grid::SnapshotSynthesizer;
 use tempfile::TempDir;
@@ -66,8 +66,8 @@ use crate::common::{
 /// Allocate a fresh `libghostty_vt::Terminal` matching the wire
 /// snapshot's declared `cols × rows`. Mirrors the construction the
 /// client uses in `phux-client/src/attach/driver.rs`.
-fn fresh_terminal(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn fresh_terminal(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: 1000,

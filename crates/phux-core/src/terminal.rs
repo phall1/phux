@@ -1,16 +1,16 @@
-//! [`Terminal`] — the leaf entity that (eventually) backs a PTY.
+//! [`TerminalDescriptor`] — the leaf descriptor for a terminal-like pane.
 
 use std::path::PathBuf;
 
 use crate::ids::{TerminalId, WindowId};
 
-/// A terminal: a single terminal-like surface within a window.
+/// Descriptor for a single terminal-like surface within a window.
 ///
-/// `phux-byc.1` defines the terminal as pure data — no PTY, no grid, no async
-/// state. Later epics attach the libghostty terminal and PTY plumbing on top
-/// of this record, keyed by [`TerminalId`].
+/// `phux-byc.1` defines this as pure data — no PTY, no grid, no async state.
+/// The server attaches the libghostty terminal and PTY plumbing on top of this
+/// record, keyed by [`TerminalId`].
 #[derive(Debug, Clone)]
-pub struct Terminal {
+pub struct TerminalDescriptor {
     /// The stable identifier issued by the [`Registry`].
     ///
     /// [`Registry`]: crate::registry::Registry

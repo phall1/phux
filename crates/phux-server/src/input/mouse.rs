@@ -9,7 +9,7 @@
 //! so this module wraps each call site with `option_for_encoder`.
 
 use libghostty_vt::{
-    Error, Terminal,
+    Error, Terminal as GhosttyTerminal,
     mouse::{Encoder as LgMouseEncoder, Event as LgMouseEvent, Position as LgMousePosition},
 };
 use phux_protocol::input::mouse::{MouseButton, MouseEvent};
@@ -77,7 +77,7 @@ impl PerTerminalMouseEncoder {
     pub fn encode(
         &mut self,
         event: &MouseEvent,
-        terminal: &Terminal<'_, '_>,
+        terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<&[u8], Error> {
         let lg_event = mouse_event_to_libghostty(event)?;
         self.encoder.set_options_from_terminal(terminal);

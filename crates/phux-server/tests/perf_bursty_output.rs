@@ -54,7 +54,7 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static A: Counting = Counting;
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::grid::{ConsumerReference, SnapshotSynthesizer};
 
 const COLS: u16 = 80;
@@ -73,7 +73,7 @@ const MAX_ALLOCS_PER_TICK: usize = 250;
 /// (zsh completion menu / syntax-highlighted scroll).
 #[test]
 fn synthesize_against_reference_alloc_bounded_under_full_churn() {
-    let mut t = Terminal::new(TerminalOptions {
+    let mut t = GhosttyTerminal::new(TerminalOptions {
         cols: COLS,
         rows: ROWS,
         max_scrollback: 100,
@@ -134,7 +134,7 @@ fn synthesize_against_reference_alloc_bounded_under_full_churn() {
 /// Write a full screen of SGR-laden content: every row gets a distinct
 /// 256-color foreground plus a per-iteration marker so the body differs
 /// from the previous tick (forcing a full repaint diff every tick).
-fn write_burst(t: &mut Terminal<'_, '_>, iter: usize) {
+fn write_burst(t: &mut GhosttyTerminal<'_, '_>, iter: usize) {
     t.vt_write(b"\x1b[H");
     for r in 0..ROWS {
         let fg = 16 + (u32::from(r) % 200);

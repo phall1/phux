@@ -14,7 +14,7 @@
 //! See `docs/spec/input.md` §5 and ADR-0006.
 
 use libghostty_vt::{
-    Error, Terminal,
+    Error, Terminal as GhosttyTerminal,
     paste::{encode as paste_encode, is_safe},
     terminal::Mode,
 };
@@ -92,7 +92,7 @@ impl PerTerminalPasteEncoder {
     pub fn encode(
         &mut self,
         event: &PasteEvent,
-        terminal: &Terminal<'_, '_>,
+        terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<PasteOutcome<'_>, Error> {
         let bracketed = terminal.mode(Mode::BRACKETED_PASTE)?;
 
@@ -142,8 +142,8 @@ mod tests {
     use super::*;
     use libghostty_vt::TerminalOptions;
 
-    fn make_terminal() -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn make_terminal() -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols: 80,
             rows: 24,
             max_scrollback: 1000,

@@ -13,14 +13,14 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::time::SystemTime;
 
-use libghostty_vt::Terminal;
+use libghostty_vt::Terminal as GhosttyTerminal;
 use phux_protocol::ids::TerminalId;
 
 use super::driver::PaneSlot;
 use crate::layout::LayoutState;
 use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 
-/// Resize a libghostty [`Terminal`] to `cols`x`rows`, clamping each axis to
+/// Resize a libghostty [`GhosttyTerminal`] to `cols`x`rows`, clamping each axis to
 /// a 1-cell minimum (libghostty has no concept of a zero-dimension grid, so
 /// a `0`-col or `0`-row request fails with `InvalidValue` and leaves the
 /// grid unchanged).
@@ -30,7 +30,7 @@ use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 /// "fix: resize overflow"), so a both-shrink is a single safe `resize()`
 /// call — no axis decomposition needed.
 pub(super) fn safe_resize(
-    terminal: &mut Terminal<'_, '_>,
+    terminal: &mut GhosttyTerminal<'_, '_>,
     cols: u16,
     rows: u16,
 ) -> libghostty_vt::error::Result<()> {

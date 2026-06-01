@@ -13,7 +13,7 @@
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_server::input::key::PerTerminalKeyEncoder;
 
@@ -62,8 +62,8 @@ fn hex_dump(bytes: &[u8]) -> String {
 }
 
 /// Fresh 80x24 terminal with no extra modes set.
-fn make_terminal() -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn make_terminal() -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 1000,
@@ -72,7 +72,7 @@ fn make_terminal() -> Terminal<'static, 'static> {
 }
 
 /// Enable xterm modifyOtherKeys=2 (`CSI > 4 ; 2 m`) on a terminal.
-fn enable_modify_other_keys_2(t: &mut Terminal<'_, '_>) {
+fn enable_modify_other_keys_2(t: &mut GhosttyTerminal<'_, '_>) {
     t.vt_write(b"\x1b[>4;2m");
 }
 
@@ -80,13 +80,13 @@ fn enable_modify_other_keys_2(t: &mut Terminal<'_, '_>) {
 /// (`CSI > <flags> u`). `flags` is the bitfield documented in the kitty
 /// keyboard protocol spec; the encoder reads it via
 /// `Terminal::kitty_keyboard_flags()` and `set_options_from_terminal`.
-fn push_kitty_flags(t: &mut Terminal<'_, '_>, flags: u8) {
+fn push_kitty_flags(t: &mut GhosttyTerminal<'_, '_>, flags: u8) {
     let seq = format!("\x1b[>{flags}u");
     t.vt_write(seq.as_bytes());
 }
 
 /// Encode one event with a fresh per-pane encoder and return the hex dump.
-fn dump_encode(event: &KeyEvent, terminal: &Terminal<'_, '_>) -> String {
+fn dump_encode(event: &KeyEvent, terminal: &GhosttyTerminal<'_, '_>) -> String {
     let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
     let bytes = enc.encode(event, terminal).expect("encode");
     hex_dump(bytes)

@@ -72,7 +72,7 @@
 //! unimplemented rather than shipped with a guessed `y`.
 
 use crate::grid::{SnapshotSynthesizer, SynthesisError};
-use libghostty_vt::Terminal;
+use libghostty_vt::Terminal as GhosttyTerminal;
 // `Selection`, `Formatter`, `Point`, and friends are imported only inside the
 // test module that proves the selection -> Formatter extraction path is sound;
 // see `safe_api_selection_formatter_bridge_round_trips_at_pin`.
@@ -181,7 +181,7 @@ pub enum Scope {
 /// [`SnapshotSynthesizer::screen_state_with_scrollback`]).
 pub fn search<'alloc>(
     synth: &mut SnapshotSynthesizer<'alloc>,
-    terminal: &Terminal<'alloc, '_>,
+    terminal: &GhosttyTerminal<'alloc, '_>,
     needle: &str,
     scope: Scope,
     opts: SearchOptions,
@@ -215,7 +215,7 @@ pub fn search<'alloc>(
 /// Convenience: drive [`search`] from a one-shot synthesizer. Per-pane hot
 /// paths should reuse a [`SnapshotSynthesizer`] and call [`search`] directly.
 pub fn search_oneshot(
-    terminal: &Terminal<'_, '_>,
+    terminal: &GhosttyTerminal<'_, '_>,
     needle: &str,
     scope: Scope,
     opts: SearchOptions,
@@ -286,14 +286,14 @@ fn push_byte_hits(
 mod tests {
     use super::*;
     use libghostty_vt::{
-        Terminal, TerminalOptions,
+        TerminalOptions,
         fmt::{Format, Formatter, FormatterOptions},
         selection::{FormatOptions, Selection},
         terminal::{Point, PointCoordinate},
     };
 
-    fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 100,

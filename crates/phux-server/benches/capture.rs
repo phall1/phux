@@ -23,7 +23,7 @@
 use std::hint::black_box;
 
 use criterion::Criterion;
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::grid::SnapshotSynthesizer;
 
 #[global_allocator]
@@ -31,7 +31,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Feed a representative mix of bytes into the terminal so the captured
 /// grid exercises ASCII, wide chars, and SGR run handling.
-fn populate(terminal: &mut Terminal<'_, '_>) {
+fn populate(terminal: &mut GhosttyTerminal<'_, '_>) {
     terminal.vt_write(b"the quick brown fox jumps over the lazy dog 0123456789\r\n");
     terminal.vt_write(
         b"\x1b[1;31mBOLD-RED\x1b[0m \x1b[3;32mital-green\x1b[0m \x1b[4;34munder-blue\x1b[0m\r\n",
@@ -49,8 +49,8 @@ fn populate(terminal: &mut Terminal<'_, '_>) {
     terminal.vt_write(b"\x1b[9mstrike\x1b[0m \x1b[53moverline\x1b[0m\r\n");
 }
 
-fn build_terminal() -> Terminal<'static, 'static> {
-    let mut terminal: Terminal<'static, 'static> = Terminal::new(TerminalOptions {
+fn build_terminal() -> GhosttyTerminal<'static, 'static> {
+    let mut terminal: GhosttyTerminal<'static, 'static> = GhosttyTerminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 1_000,

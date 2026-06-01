@@ -26,7 +26,7 @@
 
 use std::time::Duration;
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_server::state::TerminalInput;
 use phux_server::terminal_actor::{ResizeRequest, SnapshotRequest, TerminalActor};
@@ -272,7 +272,7 @@ fn snapshot_after_pty_output_round_trips_through_fresh_terminal() {
         // grep the grid contents post-parse without pulling grid
         // helpers in, but a successful `vt_write` of the synthesized
         // bytes proves they parse as a coherent VT byte stream.
-        let mut replay = Terminal::new(TerminalOptions {
+        let mut replay = GhosttyTerminal::new(TerminalOptions {
             cols: snap.cols,
             rows: snap.rows,
             max_scrollback: 10_000,

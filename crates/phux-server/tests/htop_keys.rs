@@ -33,7 +33,7 @@ mod common;
 
 use std::time::Duration;
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
     FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
@@ -297,7 +297,7 @@ fn ctrl_c_round_trips_as_legacy_etx_byte() {
 /// `0x71`, Ctrl-C is `0x03`, and `ArrowUp` is `\x1b[A`.
 #[test]
 fn encoder_emits_legacy_bytes_for_q_in_default_terminal_mode() {
-    let terminal = Terminal::new(TerminalOptions {
+    let terminal = GhosttyTerminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 1000,
@@ -370,7 +370,7 @@ fn default_shell_command_advertises_xterm_256color() {
 /// shape).
 #[test]
 fn encoder_emits_kitty_csi_u_when_terminal_has_kitty_flags() {
-    let mut terminal = Terminal::new(TerminalOptions {
+    let mut terminal = GhosttyTerminal::new(TerminalOptions {
         cols: 80,
         rows: 24,
         max_scrollback: 1000,

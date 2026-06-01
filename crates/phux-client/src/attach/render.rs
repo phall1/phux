@@ -24,7 +24,7 @@
 use std::io::{self, Write};
 
 use libghostty_vt::{
-    RenderState, Terminal,
+    RenderState, Terminal as GhosttyTerminal,
     render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
     style::{RgbColor, Style},
 };
@@ -92,7 +92,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// predictions against the authoritative cell grid.
     pub fn read_grapheme_at(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         row: u16,
         col: u16,
     ) -> Result<Option<char>, RenderError> {
@@ -118,7 +118,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// it is not called concurrently with [`Self::render`].
     pub fn read_grapheme_string_at(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         row: u16,
         col: u16,
     ) -> Result<Option<String>, RenderError> {
@@ -136,7 +136,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// or `None` when `(row, col)` is out of range.
     fn read_cell_graphemes(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         row: u16,
         col: u16,
     ) -> Result<Option<Vec<char>>, RenderError> {
@@ -177,7 +177,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// outer viewport.
     pub fn render(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
     ) -> Result<Dirty, RenderError> {
         self.render_at(terminal, out, (0, 0))
@@ -199,7 +199,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// [`crate::render::chrome::dividers::render_dividers`].
     pub fn render_at(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
     ) -> Result<Dirty, RenderError> {
@@ -219,7 +219,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
     /// split-leaves-original-pane-blank bug.
     pub fn render_at_full(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
     ) -> Result<Dirty, RenderError> {
@@ -228,7 +228,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
 
     fn render_at_inner(
         &mut self,
-        terminal: &Terminal<'alloc, '_>,
+        terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
         force_full: bool,
@@ -502,10 +502,10 @@ fn emit_cursor_style(
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use libghostty_vt::{Terminal, TerminalOptions};
+    use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 
-    fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-        Terminal::new(TerminalOptions {
+    fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+        GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 100,
@@ -611,7 +611,7 @@ mod tests {
     }
 
     /// Render a single terminal once and return the emitted bytes.
-    fn render_once(terminal: &Terminal<'_, '_>) -> Vec<u8> {
+    fn render_once(terminal: &GhosttyTerminal<'_, '_>) -> Vec<u8> {
         let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
         let mut buf = Vec::new();
         let _ = renderer.render(terminal, &mut buf).expect("render");
@@ -633,7 +633,7 @@ mod tests {
     }
 
     /// Read the visible grid of a live terminal, normalized via [`vis_cell`].
-    fn read_grid(terminal: &Terminal<'_, '_>, cols: u16, rows: u16) -> Vec<VisCell> {
+    fn read_grid(terminal: &GhosttyTerminal<'_, '_>, cols: u16, rows: u16) -> Vec<VisCell> {
         let mut state = RenderState::new().expect("RenderState");
         let mut rows_it = RowIterator::new().expect("RowIterator");
         let mut cells_it = CellIterator::new().expect("CellIterator");

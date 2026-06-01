@@ -246,7 +246,7 @@ impl WindowInfo {
 /// Excludes grid contents, cursor state, scrollback, and process info.
 /// Grid contents and (optionally) scrollback flow as separate
 /// `TERMINAL_SNAPSHOT` frames per SPEC §13. Process info (PID, command, exit
-/// status) is not yet modeled in `phux_core::Terminal`; adding wire fields the
+/// status) is not yet modeled in `phux_core::TerminalDescriptor`; adding wire fields the
 /// server can only send `None` for is premature. Revisit when core grows
 /// process tracking.
 ///
@@ -258,15 +258,15 @@ pub struct TerminalInfo {
     pub id: TerminalId,
     /// Foreign key into [`SessionSnapshot::windows`].
     pub window_id: WindowId,
-    /// Current grid width in cells (from `core::Terminal::dims.0`).
+    /// Current grid width in cells (from `core::TerminalDescriptor::dims.0`).
     pub cols: u16,
-    /// Current grid height in cells (from `core::Terminal::dims.1`).
+    /// Current grid height in cells (from `core::TerminalDescriptor::dims.1`).
     pub rows: u16,
     /// User-set title, distinct from any title the shell may set.
     pub title: Option<String>,
     /// Working directory as a UTF-8 string.
     ///
-    /// `phux_core::Terminal::cwd` is `PathBuf`; conversion uses
+    /// `phux_core::TerminalDescriptor::cwd` is `PathBuf`; conversion uses
     /// `to_string_lossy().into_owned()`. Lossy on non-UTF-8 cwds (rare on
     /// modern systems) and acceptable for a display field.
     pub cwd: Option<String>,

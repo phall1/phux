@@ -4,12 +4,12 @@
 #![allow(clippy::unwrap_used, reason = "tests")]
 #![allow(clippy::print_stderr, reason = "probe diagnostics on failure")]
 
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_server::extract::{extract_match, extract_match_in_scope};
 use phux_server::search::{Region, Scope, SearchOptions, search_oneshot};
 
-fn fresh(cols: u16, rows: u16) -> Terminal<'static, 'static> {
-    Terminal::new(TerminalOptions {
+fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
+    GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: 200,

@@ -34,7 +34,7 @@
 
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::{
-    Terminal, TerminalOptions,
+    Terminal as GhosttyTerminal, TerminalOptions,
     render::{CellIterator, RenderState, RowIterator},
 };
 
@@ -43,7 +43,7 @@ use libghostty_vt::{
 /// reading without forcing every assertion into a `Result`.
 #[derive(Debug, thiserror::Error)]
 pub enum ScreenError {
-    /// libghostty surfaced an error from `Terminal::new` or one of the
+    /// libghostty surfaced an error from `GhosttyTerminal::new` or one of the
     /// render iterator constructors.
     #[error("libghostty: {0}")]
     Ghostty(#[from] libghostty_vt::Error),
@@ -56,7 +56,7 @@ pub enum ScreenError {
 /// on the thread that will use it. Tests typically construct one per
 /// scenario inside `run_local`.
 pub struct Screen {
-    terminal: Terminal<'static, 'static>,
+    terminal: GhosttyTerminal<'static, 'static>,
     state: RenderState<'static>,
     rows: RowIterator<'static>,
     cells: CellIterator<'static>,
@@ -70,7 +70,7 @@ impl Screen {
     /// attach (`render.rs` uses `100`; we match it so behaviour is
     /// representative).
     pub fn new(cols: u16, rows: u16) -> Result<Self, ScreenError> {
-        let terminal = Terminal::new(TerminalOptions {
+        let terminal = GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             max_scrollback: 100,

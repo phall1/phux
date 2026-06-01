@@ -39,7 +39,7 @@ use std::thread::JoinHandle;
 
 use bytes::Bytes;
 use libghostty_vt::{
-    RenderState, Terminal, TerminalOptions,
+    RenderState, Terminal as GhosttyTerminal, TerminalOptions,
     render::{CursorVisualStyle, Snapshot},
     terminal::Mode,
 };
@@ -111,7 +111,7 @@ impl LastAckedCursorMode {
     /// `LastAckedCursorMode`. Querying every field; libghostty FFI errors
     /// degrade to safe defaults (cursor invisible, modes off) so a
     /// transient FFI failure doesn't kill the actor.
-    fn capture(terminal: &Terminal<'_, '_>, snapshot: &Snapshot<'_, '_>) -> Self {
+    fn capture(terminal: &GhosttyTerminal<'_, '_>, snapshot: &Snapshot<'_, '_>) -> Self {
         let (cursor_x, cursor_y) = match snapshot.cursor_viewport() {
             Ok(Some(v)) => (Some(v.x), Some(v.y)),
             Ok(None) | Err(_) => (None, None),
@@ -642,7 +642,7 @@ pub struct TerminalHandle {
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
 /// input encoders, and serves the channels exposed via [`TerminalHandle`].
 ///
-/// `Terminal<'static, 'static>` because we use [`Terminal::new`] (NULL
+/// `GhosttyTerminal<'static, 'static>` because we use [`GhosttyTerminal::new`] (NULL
 /// allocator) — the lifetime parameters degenerate to `'static`. A
 /// future custom allocator path would tie this to the surrounding
 /// arena's lifetime; not needed for `phux-byc.5`.
@@ -652,7 +652,7 @@ pub struct TerminalHandle {
 /// `&mut self`) can each take what they need without fighting the
 /// borrow checker over disjoint field access.
 pub struct TerminalActor {
-    terminal: RefCell<Terminal<'static, 'static>>,
+    terminal: RefCell<GhosttyTerminal<'static, 'static>>,
     synth: RefCell<SnapshotSynthesizer<'static>>,
     /// Cheap idle short-circuit for [`Self::tick_emit`] (phux-4l0).
     ///
@@ -1023,7 +1023,7 @@ impl TerminalActor {
     /// PTY. Used by tests that exercise snapshot / shutdown semantics
     /// without driving a real process.
     ///
-    /// The `Terminal` is allocated via libghostty's default allocator
+    /// The `GhosttyTerminal` is allocated via libghostty's default allocator
     /// (NULL alloc → `'static` lifetimes). `max_scrollback` is
     /// `DEFAULT_MAX_SCROLLBACK` — a tmux-style mid-range value the
     /// runtime overrides with `defaults.history-limit` via
@@ -1093,7 +1093,7 @@ impl TerminalActor {
         max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
-        let terminal = Terminal::new(TerminalOptions {
+        let terminal = GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             // `defaults.history-limit` is a `u32` on the wire/config; the
@@ -3580,11 +3580,11 @@ mod tests {
     /// then drives the storm with a 1-cell clamp only (the same input
     /// hygiene `handle_resize` keeps), issuing each step as one direct
     /// `resize()`. It must survive every step and settle at the final
-    /// size. (Run as a plain `Terminal` test so a regression aborts THIS
+    /// size. (Run as a plain `GhosttyTerminal` test so a regression aborts THIS
     /// test, not a flaky e2e teardown.)
     #[test]
     fn resize_desync_then_both_shrink_does_not_overflow() {
-        let mut term = Terminal::new(TerminalOptions {
+        let mut term = GhosttyTerminal::new(TerminalOptions {
             cols: 80,
             rows: 24,
             max_scrollback: 100,

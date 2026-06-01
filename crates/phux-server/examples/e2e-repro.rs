@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
 use libghostty_vt::screen::CellWide;
-use libghostty_vt::{Terminal, TerminalOptions};
+use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{
     AttachTarget, FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
@@ -379,7 +379,7 @@ fn write_snapshot(dir: &Path, name: &str, body: &str) {
 /// `Terminal`. Wide-cell tails are skipped (mirrors the server's grid
 /// walk). This is the standalone twin of `tests/common/screen.rs`.
 fn render_vt(bytes: &[u8], cols: u16, rows: u16) -> String {
-    let mut term = Terminal::new(TerminalOptions {
+    let mut term = GhosttyTerminal::new(TerminalOptions {
         cols,
         rows,
         max_scrollback: 200,
