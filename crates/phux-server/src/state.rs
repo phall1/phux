@@ -150,7 +150,10 @@ impl SelectionSpan {
     /// Create a selection span in the active (viewport) point space.
     pub fn active(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
         Self {
-            start: Point::Active(PointCoordinate { x: start_x, y: start_y }),
+            start: Point::Active(PointCoordinate {
+                x: start_x,
+                y: start_y,
+            }),
             end: Point::Active(PointCoordinate { x: end_x, y: end_y }),
             rectangular: false,
         }
@@ -159,7 +162,10 @@ impl SelectionSpan {
     /// Create a selection span in the history (scrollback) point space.
     pub fn history(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
         Self {
-            start: Point::History(PointCoordinate { x: start_x, y: start_y }),
+            start: Point::History(PointCoordinate {
+                x: start_x,
+                y: start_y,
+            }),
             end: Point::History(PointCoordinate { x: end_x, y: end_y }),
             rectangular: false,
         }
@@ -1549,7 +1555,8 @@ impl ServerState {
         terminal_id: TerminalId,
         span: SelectionSpan,
     ) {
-        self.client_selections.insert((client_id, terminal_id), span);
+        self.client_selections
+            .insert((client_id, terminal_id), span);
     }
 
     /// Retrieve a selection span for a client on a terminal, if one exists.
@@ -1558,7 +1565,9 @@ impl ServerState {
         client_id: ClientId,
         terminal_id: TerminalId,
     ) -> Option<SelectionSpan> {
-        self.client_selections.get(&(client_id, terminal_id)).cloned()
+        self.client_selections
+            .get(&(client_id, terminal_id))
+            .cloned()
     }
 
     /// Clear a specific client's selection on a terminal.
@@ -1568,14 +1577,12 @@ impl ServerState {
 
     /// Clear all selections for a client (called on detach).
     pub fn clear_client_selections(&mut self, client_id: ClientId) {
-        self.client_selections
-            .retain(|(c, _t)| *c != client_id);
+        self.client_selections.retain(|(c, _t)| *c != client_id);
     }
 
     /// Clear all selections for a terminal (called when terminal exits).
     pub fn clear_terminal_selections(&mut self, terminal_id: TerminalId) {
-        self.client_selections
-            .retain(|(_c, t)| *t != terminal_id);
+        self.client_selections.retain(|(_c, t)| *t != terminal_id);
     }
 }
 
