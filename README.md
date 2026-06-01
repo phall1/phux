@@ -42,27 +42,36 @@ phux solves one problem and refuses to grow a second: spawn, observe, control, p
 
 Everything that doesn't make terminals more spawnable, observable, or addressable is out of scope on purpose — see Non-goals below.
 
-## When to use phux
+## When to use phux — a positioning guide
 
-**You are a tmux user wanting a modern replacement:**
-✅ Yes. The TUI is tmux-shaped and the underlying substrate is stronger: libghostty instead of VT re-parse, federation-ready addressing, and a clean wire contract for agents. Tradeoff: L2 Collection (named sessions) and full CLI surface land in v0.2. Read [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) to get started.
+**Quick self-identification:**
 
-**You are SSHing into one box and want an ephemeral multiplexer:**
-⚠️ Maybe not yet. phux assumes a persistent server-per-user; one-off SSH + detach-on-disconnect works but isn't a first-class use case. tmux remains the practical choice for "I just logged in and want to split panes."
+| Persona | Fit | Next step |
+|---|---|---|
+| **Terminal multiplexer user** (tmux, screen) | ✅ Yes | [`QUICKSTART.md`](./docs/QUICKSTART.md) to try the TUI |
+| **One-off SSH ephemeral multiplexer** | ⚠️ Not yet | Use tmux for now; phux assumes persistent server |
+| **Agent (Claude, Cursor, etc.)** | ✅ Now (L1) | [`CONTRIBUTING.md`](./CONTRIBUTING.md) §"Building on phux" |
+| **Fleet control plane (10+ machines)** | ✅ Yes (v0.2+) | Read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) for 10-year vision |
+| **Terminal automation / scripting** | ✅ Yes | [`docs/spec/TUTORIAL.md`](./docs/spec/TUTORIAL.md) for typed L1 wire |
 
-**You are an agent (Claude, Cursor, etc.) orchestrating terminals:**
-✅ Yes, eventually. L1's wire protocol is stable and publishable today; the agent SDK is coming in v0.2. For now, use L1 directly — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) §"Building on phux" for examples. Your code will work unchanged when the SDK ships.
+**Detailed breakdown by use case:**
 
-**You are a fleet orchestrator managing terminals across 10+ machines:**
-✅ Yes, this is the 10-year vision. Federation (v0.2+) isn't here yet, but the addressing is ready from day 1. `SATELLITE { host, id }` TerminalIds already live on the wire. Start building on L1 now; your code will route end-to-end when satellites land.
+**Traditional multiplexer user** (want to replace tmux, screen, etc.)  
+✅ **Yes.** The TUI is tmux-shaped; the substrate is stronger: libghostty parsing on both ends (no VT re-encoding), L1 wire protocol stable today, federation-ready addressing built in. Tradeoff: L2 Collection (named sessions) and full CLI (`new`, `ls`, `kill`) surface in v0.2. Start with [`QUICKSTART.md`](./docs/QUICKSTART.md).
 
-**You want to script and automate everything:**
-✅ Yes. phux refuses an embedded scripting language (see Non-goals), so you shell out to a real runtime. Typed L1 wire messages are far better than string-scraping terminal output. See [`docs/spec/TUTORIAL.md`](./docs/spec/TUTORIAL.md) for wire examples.
+**Ephemeral SSH use case** (log in, split panes, log out)  
+⚠️ **Not yet.** phux assumes a persistent server-per-user; your server stays alive across detach/attach cycles. One-off SSH + disconnect-on-exit works but isn't load-bearing. tmux is the practical choice for "I just logged in and want to split panes." Revisit v0.2+ when we have connection resumption optimizations.
 
-**You want tmux key bindings unchanged or a drop-in replacement:**
-⚠️ We are not tmux. We will be better in some places and different in others. Read [`docs/consumers/tui.md`](./docs/consumers/tui.md) to learn the surface before committing.
+**Agent orchestrator** (Claude, Cursor, fleet agents)  
+✅ **Now (L1), fully (v0.2).** The L1 wire protocol is stable and publishable today. The agent SDK ships v0.2. For now, use L1 directly via [`docs/spec/`](./docs/spec/) — your code will work unchanged when the SDK lands. Examples in [`CONTRIBUTING.md`](./CONTRIBUTING.md) §"Building on phux."
 
-**Not sure which box you check?** Read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) — it explains the design philosophy and mental model. That will tell you if this is aligned with how you think about terminals.
+**Fleet orchestrator** (manage terminals across 10+ machines)  
+✅ **Yes (v0.2+).** This is the 10-year vision. Satellite routing (v0.2) isn't here yet, but `SATELLITE { host, id }` TerminalIds are on the wire from day 1. Start building on L1 now; your code routes end-to-end when satellites land. See [`ADR-0007`](./ADR/0007-mosh-class-transport-and-satellites.md) for transport design.
+
+**Scripting and terminal automation**  
+✅ **Yes.** phux refuses embedded scripting (see Non-goals); logic uses external runtimes. Typed L1 wire messages beat string-scraping terminal output. Examples and walkthrough in [`docs/spec/TUTORIAL.md`](./docs/spec/TUTORIAL.md).
+
+**Unsure which fits?** Read [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) — it explains the design philosophy and mental model so you can judge if phux aligns with how you think about terminals.
 
 ## Status
 
