@@ -83,6 +83,10 @@ prefix = "C-a"
 "o" = "next-pane"
 ";" = "previous-pane"
 
+# Copy-mode: enter text selection mode. Arrow keys adjust selection,
+# Enter copies to clipboard, Escape cancels. (phux-wave-a-copy-mode)
+"[" = "copy-mode"
+
 # Windows ("tabs"), tmux-style (phux-4li.15/.16). c opens a new window;
 # n/p cycle windows; X kills the active window (see kill bindings above);
 # 0-9 jump to a window by the position shown in the status bar; w opens an
