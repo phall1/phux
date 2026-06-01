@@ -197,23 +197,24 @@ impl RenderOverlay for CopyModeOverlay {
         match key.key {
             PhysicalKey::ArrowUp => {
                 self.move_cursor(-1, 0);
-                OverlayCommand::Stay
+                OverlayCommand::SendSelection(self.dispatch_selection())
             }
             PhysicalKey::ArrowDown => {
                 self.move_cursor(1, 0);
-                OverlayCommand::Stay
+                OverlayCommand::SendSelection(self.dispatch_selection())
             }
             PhysicalKey::ArrowLeft => {
                 self.move_cursor(0, -1);
-                OverlayCommand::Stay
+                OverlayCommand::SendSelection(self.dispatch_selection())
             }
             PhysicalKey::ArrowRight => {
                 self.move_cursor(0, 1);
-                OverlayCommand::Stay
+                OverlayCommand::SendSelection(self.dispatch_selection())
             }
             PhysicalKey::Enter => {
-                // TODO: send SELECTION_FORMAT_REQUEST to copy selected text
-                OverlayCommand::Dismiss
+                // Copy: send selection event, then dismiss.
+                // The dispatcher will also need to send SELECTION_FORMAT_REQUEST.
+                OverlayCommand::SendSelection(self.dispatch_selection())
             }
             PhysicalKey::Escape => OverlayCommand::Dismiss,
             _ => OverlayCommand::Stay,

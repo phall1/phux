@@ -94,6 +94,9 @@ pub enum OverlayCommand {
     /// committed rename prompt returning `rename-window { name }`. The
     /// dispatcher feeds it through the normal `run_action` path.
     Commit(phux_config::keybind::ResolvedAction),
+    /// Keep the overlay active, but send a selection event to the server
+    /// (used by copy-mode). The dispatcher fills in the terminal_id.
+    SendSelection(phux_protocol::input::selection::SelectionEvent),
 }
 
 /// What [`OverlayState::handle_key`] hands back to the dispatcher.
@@ -177,6 +180,10 @@ impl OverlayState {
             OverlayCommand::Commit(action) => {
                 self.dismiss();
                 OverlayOutcome::RunAction(action)
+            }
+            OverlayCommand::SendSelection(_event) => {
+                // Copy-mode sends selection events; the overlay stays active.
+                OverlayOutcome::None
             }
         }
     }
