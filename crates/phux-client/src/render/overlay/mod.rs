@@ -28,11 +28,13 @@ use phux_protocol::input::key::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+pub mod copy_mode;
 pub mod help;
 pub mod prompt;
 pub mod select_list;
 pub mod widgets;
 
+pub use copy_mode::CopyModeOverlay;
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};

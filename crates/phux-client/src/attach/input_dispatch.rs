@@ -602,6 +602,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "focus-direction",
     "resize-pane",
     "show-help",
+    "copy-mode",
     "detach",
     "next-pane",
     "previous-pane",
@@ -857,6 +858,18 @@ fn run_action(
                 |kb| HelpOverlay::from_config(kb, ctx.theme),
             );
             ctx.overlays.push(Box::new(overlay));
+        }
+        "copy-mode" => {
+            // phux-wave-a-copy-mode: enter selection/copy mode. Arrow keys
+            // adjust selection, Enter copies to clipboard via SELECTION_FORMAT_REQUEST.
+            // Cursor starts at current pane position (0,0 default for now).
+            // TODO(phall1): wire current cursor position from focused pane.
+            let pane_cols = ctx.viewport.0;
+            let pane_rows = ctx.viewport.1.saturating_sub(1); // Leave room for status bar
+            let overlay = Box::new(crate::render::overlay::CopyModeOverlay::new(
+                0, 0, pane_cols, pane_rows,
+            ));
+            ctx.overlays.push(overlay);
         }
         "command-palette" => {
             // phux-ahv.8: push the command palette. It lists every action
