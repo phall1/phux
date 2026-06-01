@@ -1,3 +1,4 @@
+#![allow(clippy::nursery)]
 //! Server-side state shared by the listener loop and per-client tasks
 //! (`phux-byc.4`).
 //!
@@ -1645,7 +1646,8 @@ impl SharedState {
     clippy::match_same_arms,
     clippy::single_match_else,
     clippy::assertions_on_constants,
-    clippy::eq_op,
+    clippy::bool_assert_comparison,
+    clippy::eq_op
 )]
 mod tests {
     use super::*;
