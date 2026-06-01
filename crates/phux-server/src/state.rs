@@ -1641,6 +1641,12 @@ impl SharedState {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::match_same_arms,
+    clippy::single_match_else,
+    clippy::assertions_on_constants,
+    clippy::eq_op,
+)]
 mod tests {
     use super::*;
 
@@ -2182,7 +2188,7 @@ mod tests {
         assert_eq!(s.get_selection(cid, tid), None);
 
         // Set selection
-        s.set_selection(cid, tid, span.clone());
+        s.set_selection(cid, tid, span);
         let retrieved = s.get_selection(cid, tid);
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().rectangular, false);
@@ -2198,8 +2204,8 @@ mod tests {
         let span2 = SelectionSpan::active(0, 0, 5, 0);
 
         // Set different selections on different terminals
-        s.set_selection(cid, tid1, span1.clone());
-        s.set_selection(cid, tid2, span2.clone());
+        s.set_selection(cid, tid1, span1);
+        s.set_selection(cid, tid2, span2);
 
         // Verify isolation
         let sel1 = s.get_selection(cid, tid1).unwrap();
@@ -2227,8 +2233,8 @@ mod tests {
         let span2 = SelectionSpan::active(0, 0, 5, 0);
 
         // Different clients set different selections on same terminal
-        s.set_selection(c1, tid, span1.clone());
-        s.set_selection(c2, tid, span2.clone());
+        s.set_selection(c1, tid, span1);
+        s.set_selection(c2, tid, span2);
 
         // Verify isolation
         let sel1 = s.get_selection(c1, tid).unwrap();
@@ -2267,7 +2273,7 @@ mod tests {
 
         // Set selections on multiple terminals for same client
         s.set_selection(cid, tid1, span.clone());
-        s.set_selection(cid, tid2, span.clone());
+        s.set_selection(cid, tid2, span);
 
         // Clear all for this client
         s.clear_client_selections(cid);
@@ -2287,7 +2293,7 @@ mod tests {
 
         // Two clients have selections on same terminal
         s.set_selection(c1, tid, span.clone());
-        s.set_selection(c2, tid, span.clone());
+        s.set_selection(c2, tid, span);
 
         // Clear all for this terminal
         s.clear_terminal_selections(tid);
@@ -2306,7 +2312,7 @@ mod tests {
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         s.set_selection(c1, tid, span.clone());
-        s.set_selection(c2, tid, span.clone());
+        s.set_selection(c2, tid, span);
 
         // Clear only c1's selections
         s.clear_client_selections(c1);
