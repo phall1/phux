@@ -35,6 +35,7 @@ use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
 use crate::input::paste::PasteEvent;
+use crate::input::selection::{SelectionEvent, SelectionMode};
 
 use super::decode::Decoder;
 use super::encode::Encoder;
@@ -67,6 +68,15 @@ pub const TYPE_INPUT_PASTE: u8 = 0x11;
 pub const TYPE_INPUT_MOUSE: u8 = 0x12;
 /// Discriminant for `INPUT_FOCUS` (client to server, `docs/spec/input.md` §4).
 pub const TYPE_INPUT_FOCUS: u8 = 0x14;
+/// Discriminant for `INPUT_SELECTION` (client to server, `docs/spec/input.md` §6).
+///
+/// Carries selection mode and rectangular-mode flag. Selection is client-owned
+/// state (server does not interpret or act on selections). Per ADR-0025, the
+/// server receives SelectionEvent frames, updates per-Terminal selection state
+/// (start, end, mode), and emits no output to the PTY — selection is a pure
+/// client UI concern. Extraction (plaintext copy via libghostty format_selection_alloc)
+/// is requested via COMMAND with RouteInput(InputEvent::Selection) payload.
+pub const TYPE_INPUT_SELECTION: u8 = 0x15;
 /// Discriminant for `FRAME_ACK` (client to server, `docs/spec/proto.md` §7.2 / §8.2).
 ///
 /// Per-Terminal cumulative acknowledgement of `TERMINAL_OUTPUT` (§8.1) frames
@@ -352,6 +362,8 @@ pub(crate) const INPUT_EVENT_TAG_MOUSE: u8 = 0x01;
 pub(crate) const INPUT_EVENT_TAG_FOCUS: u8 = 0x02;
 /// Wire tag for [`InputEvent::Paste`].
 pub(crate) const INPUT_EVENT_TAG_PASTE: u8 = 0x03;
+/// Wire tag for [`InputEvent::Selection`].
+pub(crate) const INPUT_EVENT_TAG_SELECTION: u8 = 0x04;
 
 // Wire tags for the `StateScope` tagged union (SPEC §5.1, GET_STATE arg).
 /// Wire tag for [`StateScope::Server`].
@@ -1051,6 +1063,19 @@ pub enum FrameKind {
         event: PasteEvent,
     },
 
+    /// `INPUT_SELECTION` — client reports a selection mode change (`docs/spec/input.md` §6).
+    ///
+    /// Selection is client-owned state: the server receives this frame,
+    /// updates per-terminal selection state, and emits no output to the PTY.
+    /// Extraction (plaintext copy) is requested separately via COMMAND.
+    /// See ADR-0025 (rectangular selection rationale).
+    InputSelection {
+        /// Target terminal.
+        terminal_id: TerminalId,
+        /// Selection mode (off, char, line, rect) and rectangular-mode flag.
+        event: SelectionEvent,
+    },
+
     /// `FRAME_ACK` — client acknowledges a `TERMINAL_OUTPUT` it has applied
     /// (`docs/spec/proto.md` §7.2 / §8.2).
     ///
@@ -1500,6 +1525,7 @@ impl FrameKind {
             Self::InputMouse { .. } => TYPE_INPUT_MOUSE,
             Self::InputFocus { .. } => TYPE_INPUT_FOCUS,
             Self::InputPaste { .. } => TYPE_INPUT_PASTE,
+            Self::InputSelection { .. } => TYPE_INPUT_SELECTION,
             Self::FrameAck { .. } => TYPE_FRAME_ACK,
             Self::ViewportResize { .. } => TYPE_VIEWPORT_RESIZE,
             Self::Attached { .. } => TYPE_ATTACHED,
@@ -1608,6 +1634,11 @@ impl FrameKind {
             Self::InputPaste { terminal_id, event } => {
                 encode_terminal_id(terminal_id, &mut enc);
                 encode_paste_event(event, &mut enc);
+            }
+            Self::InputSelection { terminal_id, event } => {
+                encode_terminal_id(terminal_id, &mut enc);
+                enc.write_u8(event.mode.as_u8());
+                enc.write_u8(u8::from(event.rectangle));
             }
             Self::FrameAck { terminal_id, seq } => {
                 encode_terminal_id(terminal_id, &mut enc);
@@ -2374,6 +2405,11 @@ fn encode_input_event(event: &InputEvent, enc: &mut Encoder<'_>) {
             enc.write_u8(INPUT_EVENT_TAG_PASTE);
             encode_paste_event(event, enc);
         }
+        InputEvent::Selection(event) => {
+            enc.write_u8(INPUT_EVENT_TAG_SELECTION);
+            enc.write_u8(event.mode.as_u8());
+            enc.write_u8(u8::from(event.rectangle));
+        }
     }
 }
 
@@ -2384,6 +2420,17 @@ fn decode_input_event(dec: &mut Decoder<'_>) -> Result<InputEvent, DecodeError> 
         INPUT_EVENT_TAG_MOUSE => Ok(InputEvent::Mouse(decode_mouse_event(dec)?)),
         INPUT_EVENT_TAG_FOCUS => Ok(InputEvent::Focus(decode_focus_event(dec.read_u8()?)?)),
         INPUT_EVENT_TAG_PASTE => Ok(InputEvent::Paste(decode_paste_event(dec)?)),
+        INPUT_EVENT_TAG_SELECTION => {
+            let mode_u8 = dec.read_u8()?;
+            let mode = SelectionMode::try_from_u8(mode_u8).ok_or_else(|| {
+                DecodeError::UnknownEnumValue {
+                    field: "SelectionMode",
+                    value: u32::from(mode_u8),
+                }
+            })?;
+            let rectangle = dec.read_u8()? != 0;
+            Ok(InputEvent::Selection(SelectionEvent { mode, rectangle }))
+        }
         other => Err(DecodeError::UnknownEnumValue {
             field: "InputEvent",
             value: u32::from(other),
