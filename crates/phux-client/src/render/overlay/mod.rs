@@ -107,6 +107,8 @@ pub enum OverlayOutcome {
     None,
     /// The overlay committed; run this action.
     RunAction(phux_config::keybind::ResolvedAction),
+    /// Send a selection event to the server (copy-mode).
+    SendSelection(phux_protocol::input::selection::SelectionEvent),
 }
 
 /// Stacked overlay state.
@@ -181,9 +183,9 @@ impl OverlayState {
                 self.dismiss();
                 OverlayOutcome::RunAction(action)
             }
-            OverlayCommand::SendSelection(_event) => {
+            OverlayCommand::SendSelection(event) => {
                 // Copy-mode sends selection events; the overlay stays active.
-                OverlayOutcome::None
+                OverlayOutcome::SendSelection(event)
             }
         }
     }
