@@ -72,10 +72,10 @@ pub const TYPE_INPUT_FOCUS: u8 = 0x14;
 ///
 /// Carries selection mode and rectangular-mode flag. Selection is client-owned
 /// state (server does not interpret or act on selections). Per ADR-0025, the
-/// server receives SelectionEvent frames, updates per-Terminal selection state
+/// server receives `SelectionEvent` frames, updates per-Terminal selection state
 /// (start, end, mode), and emits no output to the PTY — selection is a pure
-/// client UI concern. Extraction (plaintext copy via libghostty format_selection_alloc)
-/// is requested via COMMAND with RouteInput(InputEvent::Selection) payload.
+/// client UI concern. Extraction (plaintext copy via libghostty `format_selection_alloc`)
+/// is requested via `COMMAND` with `RouteInput`(`InputEvent::Selection`) payload.
 pub const TYPE_INPUT_SELECTION: u8 = 0x15;
 /// Discriminant for `FRAME_ACK` (client to server, `docs/spec/proto.md` §7.2 / §8.2).
 ///

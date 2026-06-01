@@ -4,7 +4,7 @@
 //! updates per-terminal selection state, and emits no output to the PTY.
 //! The client uses selection for copy-mode UI; the server uses the stored
 //! selection state to drive extraction (plaintext via libghostty's
-//! format_selection_alloc) when the client requests it via a COMMAND.
+//! `format_selection_alloc`) when the client requests it via a `COMMAND`.
 //! See ADR-0025 (rectangular selection rationale) and docs/spec/input.md §6.
 
 #![allow(clippy::module_name_repetitions)]
@@ -12,7 +12,7 @@
 /// Selection mode for copy-mode operations.
 ///
 /// Describes the type of selection the client is performing or has performed.
-/// Passed in InputEvent::Selection frames to the server; the server stores
+/// Passed in `InputEvent::Selection` frames to the server; the server stores
 /// the mode and uses it to interpret selection boundaries during extraction.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,22 +28,24 @@ pub enum SelectionMode {
 }
 
 impl SelectionMode {
-    /// Attempt to parse a SelectionMode from a wire discriminant.
+    /// Attempt to parse a `SelectionMode` from a wire discriminant.
     ///
     /// Returns None for unknown values; the wire codec uses this to reject
     /// out-of-range mode values.
-    pub fn try_from_u8(v: u8) -> Option<Self> {
+    #[must_use]
+    pub const fn try_from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(SelectionMode::Off),
-            1 => Some(SelectionMode::Char),
-            2 => Some(SelectionMode::Line),
-            3 => Some(SelectionMode::Rect),
+            0 => Some(Self::Off),
+            1 => Some(Self::Char),
+            2 => Some(Self::Line),
+            3 => Some(Self::Rect),
             _ => None,
         }
     }
 
     /// Convert to wire discriminant.
-    pub fn as_u8(self) -> u8 {
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
         self as u8
     }
 }
@@ -56,9 +58,9 @@ impl SelectionMode {
 /// The server stores the selection state (start, end, mode, rect flag)
 /// per terminal and emits no output.
 ///
-/// Extraction (plaintext copy via libghostty format_selection_alloc) is
-/// requested separately via a COMMAND frame carrying a RouteInput payload
-/// with InputEvent::Selection.
+/// Extraction (plaintext copy via libghostty `format_selection_alloc`) is
+/// requested separately via a `COMMAND` frame carrying a `RouteInput` payload
+/// with `InputEvent::Selection`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionEvent {
     /// Selection mode: off, character-wise, line-wise, or rectangular.

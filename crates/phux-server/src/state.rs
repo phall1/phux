@@ -126,7 +126,7 @@ pub enum Outbound {
 /// reconstruct it on-demand.
 ///
 /// [`Selection`]: libghostty_vt::selection::Selection
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectionSpan {
     /// Start point: either Active (viewport) or History (scrollback).
     pub start: Point,
@@ -1577,12 +1577,13 @@ impl ServerState {
 
     /// Clear all selections for a client (called on detach).
     pub fn clear_client_selections(&mut self, client_id: ClientId) {
-        self.client_selections.retain(|(c, _t)| *c != client_id);
+        self.client_selections.retain(|(c, _t), _| *c != client_id);
     }
 
     /// Clear all selections for a terminal (called when terminal exits).
     pub fn clear_terminal_selections(&mut self, terminal_id: TerminalId) {
-        self.client_selections.retain(|(_c, t)| *t != terminal_id);
+        self.client_selections
+            .retain(|(_c, t), _| *t != terminal_id);
     }
 }
 
@@ -2174,7 +2175,7 @@ mod tests {
     fn set_and_get_selection() {
         let mut s = ServerState::new();
         let cid = s.new_client_id();
-        let tid = TerminalId::from(0usize);
+        let (_sid, _wid, tid) = s.seed_session("test");
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         // Initially no selection
@@ -2191,8 +2192,8 @@ mod tests {
     fn per_terminal_isolation() {
         let mut s = ServerState::new();
         let cid = s.new_client_id();
-        let tid1 = TerminalId::from(0usize);
-        let tid2 = TerminalId::from(1usize);
+        let (_sid, _wid, tid1) = s.seed_session("test1");
+        let (_, _, tid2) = s.seed_session("test2");
         let span1 = SelectionSpan::active(10, 5, 20, 5);
         let span2 = SelectionSpan::active(0, 0, 5, 0);
 
@@ -2221,7 +2222,7 @@ mod tests {
         let mut s = ServerState::new();
         let c1 = s.new_client_id();
         let c2 = s.new_client_id();
-        let tid = TerminalId::from(0usize);
+        let (_sid, _wid, tid) = s.seed_session("test");
         let span1 = SelectionSpan::active(10, 5, 20, 5);
         let span2 = SelectionSpan::active(0, 0, 5, 0);
 
@@ -2246,7 +2247,7 @@ mod tests {
     fn clear_selection_removes_specific_entry() {
         let mut s = ServerState::new();
         let cid = s.new_client_id();
-        let tid = TerminalId::from(0usize);
+        let (_sid, _wid, tid) = s.seed_session("test");
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         s.set_selection(cid, tid, span);
@@ -2260,8 +2261,8 @@ mod tests {
     fn clear_client_selections_removes_all_for_client() {
         let mut s = ServerState::new();
         let cid = s.new_client_id();
-        let tid1 = TerminalId::from(0usize);
-        let tid2 = TerminalId::from(1usize);
+        let (_sid, _wid, tid1) = s.seed_session("test1");
+        let (_, _, tid2) = s.seed_session("test2");
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         // Set selections on multiple terminals for same client
@@ -2281,7 +2282,7 @@ mod tests {
         let mut s = ServerState::new();
         let c1 = s.new_client_id();
         let c2 = s.new_client_id();
-        let tid = TerminalId::from(0usize);
+        let (_sid, _wid, tid) = s.seed_session("test");
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         // Two clients have selections on same terminal
@@ -2301,7 +2302,7 @@ mod tests {
         let mut s = ServerState::new();
         let c1 = s.new_client_id();
         let c2 = s.new_client_id();
-        let tid = TerminalId::from(0usize);
+        let (_sid, _wid, tid) = s.seed_session("test");
         let span = SelectionSpan::active(10, 5, 20, 5);
 
         s.set_selection(c1, tid, span.clone());
@@ -2318,7 +2319,7 @@ mod tests {
     #[test]
     fn detach_cleans_up_selections() {
         let mut s = ServerState::new();
-        let (sid, _wid, pid) = s.seed_session("default");
+        let (_sid, _wid, pid) = s.seed_session("default");
         let cid = s.new_client_id();
         s.attach_default_caps(cid, "default", mk_tx()).unwrap();
 

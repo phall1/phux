@@ -64,14 +64,17 @@ impl CellRange {
 pub struct CopyModeOverlay {
     /// Current cursor position (row, col) in pane-local coords.
     pub cursor_row: u16,
+    /// Column position of cursor in pane-local coords.
     pub cursor_col: u16,
     /// Anchor point where selection started.
     pub anchor_row: u16,
+    /// Column position where selection started.
     pub anchor_col: u16,
     /// Selection mode (char, line, rect).
     pub mode: SelectionMode,
     /// Pane dimensions (cols, rows) — used to clamp cursor movement.
     pub pane_cols: u16,
+    /// Number of rows in the pane.
     pub pane_rows: u16,
 }
 
