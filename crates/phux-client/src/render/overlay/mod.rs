@@ -95,7 +95,7 @@ pub enum OverlayCommand {
     /// dispatcher feeds it through the normal `run_action` path.
     Commit(phux_config::keybind::ResolvedAction),
     /// Keep the overlay active, but send a selection event to the server
-    /// (used by copy-mode). The dispatcher fills in the terminal_id.
+    /// (used by copy-mode). The dispatcher fills in the `terminal_id`.
     SendSelection(phux_protocol::input::selection::SelectionEvent),
 }
 
