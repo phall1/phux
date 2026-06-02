@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agent;
 pub mod attach;
 pub mod l2;
 pub mod render;
@@ -38,6 +39,8 @@ pub mod send_keys;
 pub mod snapshot;
 pub mod wait;
 pub mod watch;
+
+pub use agent::{Agent, AgentError, Output};
 
 // Pane-interior substrate, re-exported from `phux-client-core` so the
 // `ratatui`-free boundary is compiler-enforced (ADR-0020) while consumers

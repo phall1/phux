@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_subscribe_deserialize() {
-        let json = r#"{"type":"SubscribeTerminalEvents","payload":{"terminal_id":{"Local":{"id":1}},"event_types":["CommandStarted","CommandEnded"]}}"#;
+        let json = r#"{"type":"SubscribeTerminalEvents","payload":{"terminal_id":{"Local":{"id":1}},"event_types":["COMMAND_STARTED","COMMAND_ENDED"]}}"#;
         let _cmd: Command = serde_json::from_str(json).expect("deserialize");
     }
 
