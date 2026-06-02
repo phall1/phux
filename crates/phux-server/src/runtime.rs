@@ -3827,7 +3827,7 @@ mod tests {
                     let req = tokio::time::timeout(Duration::from_secs(2), rx.recv())
                         .await
                         .unwrap_or_else(|_| {
-                            panic!("snapshot request {i} never arrived — sequential loop?",)
+                            panic!("snapshot request {i} never arrived — sequential loop?")
                         })
                         .expect("snapshot channel closed");
                     replies.push(req.reply);

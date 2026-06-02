@@ -67,7 +67,6 @@
 #![allow(clippy::unused_async, reason = "L2 API not yet implemented")]
 #![allow(clippy::uninlined_format_args, reason = "test readability")]
 #![allow(
-    clippy::expect_used,
     clippy::manual_assert,
     clippy::collapsible_if,
     clippy::match_same_arms,
@@ -143,7 +142,7 @@ async fn attach_and_measure(socket_path: &std::path::Path, label: &str) -> (Unix
                 "{label}: replay bytes should not be empty",
             );
         }
-        other => panic!("{label}: expected TerminalSnapshot, got {other:?}",),
+        other => panic!("{label}: expected TerminalSnapshot, got {other:?}"),
     }
 
     (stream, latency)

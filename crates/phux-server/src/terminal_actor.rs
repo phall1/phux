@@ -1215,18 +1215,15 @@ impl TerminalActor {
             consumer_detach_rx,
             consumer_ack_rx,
             consumer_states: HashMap::new(),
-            // phux-ia4: flipped ON. The state-sync tick is now the live
-            // server->consumer emitter. All three prerequisites are met:
-            // (1) broadcast suppression per tick-managed consumer landed in
-            // phux-3uv; (2) the client FRAME_ACK loop landed in phux-3uv;
-            // (3) per-consumer dirty isolation is solved here by the
-            // per-consumer reference grid (`ConsumerReference` +
-            // `SnapshotSynthesizer::synthesize_against_reference`), which
-            // diffs each consumer against its own last-synced rows rather
-            // than the shared `Terminal` dirty bits that
-            // `RenderState::update` consumes on first read. See the field
-            // doc.
-            consumer_tick_emits: true,
+            // phux-yeca: keep the human attach path on the raw PTY
+            // broadcast pump by default. The per-consumer synthesized-VT
+            // tick path is correct for state-sync experiments, but as the
+            // sole emitter it adds a visible 20-30 ms floor to local typing
+            // and can lose byte-exact styling that interactive shells/TUIs
+            // rely on. Tests can still flip this on explicitly with
+            // `enable_tick_emit_for_test`; production needs a negotiated
+            // consumer mode before making synthesized ticks the human path.
+            consumer_tick_emits: false,
             pty_rx,
             pty_tx,
             pty,
@@ -3078,8 +3075,8 @@ mod tests {
     /// mailbox — even with dirty seeded content. This is the invariant
     /// that lets the per-consumer lifecycle run live alongside the
     /// broadcast pump without double-painting the client when the gate is
-    /// off. (Production defaults the gate ON since phux-ia4; this test
-    /// disables it explicitly.)
+    /// off. Production defaults the gate OFF for human attach (phux-yeca),
+    /// but this test still disables it explicitly so the invariant is local.
     #[test]
     fn tick_emit_is_silent_while_gate_is_off() {
         let bundle = TerminalActor::new(20, 5).expect("new");
@@ -3110,8 +3107,27 @@ mod tests {
         );
     }
 
-    /// phux-0q8 / phux-q0e.3 / phux-3uv / phux-ia4: with the gate ON (its
-    /// production default) for a SINGLE consumer, `tick_emit` diffs the
+    /// phux-yeca: production defaults the synthesized tick emitter OFF so
+    /// human TUI attach stays on the immediate raw PTY broadcast path.
+    #[test]
+    fn tick_emit_gate_defaults_off_for_human_attach() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor.register_consumer(client, tx, 11).expect("register");
+        actor.vt_write_for_test(b"dirty-content");
+
+        actor.tick_emit();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "default human attach path must not wait for synthesized tick output",
+        );
+    }
+
+    /// phux-0q8 / phux-q0e.3 / phux-3uv / phux-ia4: with the gate ON for
+    /// a SINGLE consumer, `tick_emit` diffs the
     /// dirty seeded grid against the consumer's reference and ships exactly
     /// one `TerminalOutput` carrying the content, stamping `seq = 1`.
     ///
@@ -3123,7 +3139,6 @@ mod tests {
     fn tick_emit_emits_once_when_gate_is_on() {
         let bundle = TerminalActor::new(20, 5).expect("new");
         let mut actor = bundle.actor;
-        // Gate is ON by default (phux-ia4); be explicit for clarity.
         actor.enable_tick_emit_for_test();
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
@@ -3976,7 +3991,7 @@ mod tests {
 
         // Satellite-class RTT -> ceiling (5 Hz).
         assert_eq!(
-            adaptive_tick_interval(std::time::Duration::from_millis(2000)),
+            adaptive_tick_interval(std::time::Duration::from_secs(2)),
             MAX_TICK_INTERVAL,
             "huge RTT clamps to the 200ms ceiling",
         );

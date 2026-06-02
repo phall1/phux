@@ -68,7 +68,7 @@ const SETTLE_CEILING: Duration = Duration::from_secs(30);
 /// length so a regression can't hide behind a short burst. Generous: at
 /// ~24 repaints under a few seconds the observed per-frame cost is well
 /// under 200ms; 1s/frame is ~5x+ headroom.
-const PER_FRAME_CEILING: Duration = Duration::from_millis(1000);
+const PER_FRAME_CEILING: Duration = Duration::from_secs(1);
 
 /// Single-client heavy-colored-output latency gate. Drives the worst-case
 /// SGR-per-cell burst, captures the client-applied screen, and asserts
