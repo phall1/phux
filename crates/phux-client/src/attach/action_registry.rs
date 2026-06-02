@@ -272,7 +272,12 @@ mod tests {
         // `switch-session` is likewise dispatched-only: it requires a
         // `name` arg supplied by the session picker, so a bare palette
         // row would have no target to act on.
-        const PALETTE_EXEMPT: &[&str] = &["command-palette", "select-window", "switch-session"];
+        const PALETTE_EXEMPT: &[&str] = &[
+            "command-palette",
+            "select-window",
+            "switch-session",
+            "copy-mode",
+        ];
 
         // The two source-of-truth sets must be identical: the registry's
         // presentation rows and the dispatcher's handled-action names.

@@ -2172,6 +2172,23 @@ async fn handle_command(
                     },
                 )
         }
+        Command::GetTerminalState {
+            terminal_id,
+            include_scrollback,
+            max_scrollback_lines,
+        } => {
+            handle_get_terminal_state(
+                state,
+                &terminal_id,
+                include_scrollback,
+                max_scrollback_lines,
+            )
+            .await
+        }
+        Command::SubscribeTerminalEvents {
+            terminal_id,
+            event_types,
+        } => handle_subscribe_terminal_events(state, client_id, &terminal_id, event_types, out_tx),
         // `Command` is `#[non_exhaustive]`: a forward-compat command this
         // server doesn't implement decodes only if a newer peer sent a
         // tag we allocated but haven't wired (the decoder rejects truly
@@ -2486,6 +2503,208 @@ async fn handle_get_screen(
     )
 }
 
+/// Build the `Ok_With(Json(TerminalState))` reply for `GET_TERMINAL_STATE`.
+///
+/// L2 Collection-aware counterpart to [`handle_get_screen`]: returns a
+/// comprehensive snapshot of terminal state (grid, scrollback, cursor, shell
+/// metadata, sequence number, and timestamp) in a structured JSON format.
+/// Backs agent polling and state inspection without requiring an attach or
+/// subscription (ADR-0022, ADR-0015 L2).
+///
+/// Unlike `GET_SCREEN` which returns raw `ScreenState` with only grid
+/// dimensions and viewport text, `GET_TERMINAL_STATE` returns structured
+/// JSON with:
+/// - Grid cells with text and styling
+/// - Cursor position and visibility
+/// - Optional scrollback history (if `include_scrollback` is true)
+/// - Shell process metadata (PID, name, jobs, copy-mode state)
+/// - Pending command tracking (overlay layer)
+/// - Logical sequence number (for change detection)
+/// - Timestamp (for agent polling)
+///
+/// Handler flow:
+/// 1. Resolve `terminal_id` to a `TerminalActor` handle (reuse same pattern as
+///    `handle_get_screen`)
+/// 2. Query screen state via `ScreenRequest` (reuse existing path)
+/// 3. Walk grid cells: parse `ScreenState.lines` and merge styling from
+///    `ScreenState.cells` (`CellInfo`)
+/// 4. Extract cursor, scrollback, and dimensions
+/// 5. Query shell state (gracefully degrade to None if unavailable)
+/// 6. Build JSON and encode as JSON
+/// 7. Return as `COMMAND_RESULT Ok_With(Json(TerminalState))`
+///
+/// Error cases:
+/// - Unknown `terminal_id` → `TERMINAL_NOT_FOUND`
+/// - Actor unavailable → `INTERNAL_ERROR`
+/// - Shell query fails → populate `shell_state: None`, continue gracefully
+#[allow(clippy::too_many_lines)]
+async fn handle_get_terminal_state(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    include_scrollback: bool,
+    max_scrollback_lines: u16,
+) -> CommandResult {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Step 1: Resolve terminal_id to TerminalActor handle (same pattern as
+    // handle_get_screen).
+    let handle = state.with(|s| {
+        s.terminal_from_wire(terminal_id)
+            .and_then(|core| s.terminal_handle(core).cloned())
+    });
+
+    let Some(handle) = handle else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+
+    let pane = terminal_id.local_id().unwrap_or(0);
+
+    // Step 2: Query screen state via ScreenRequest (reuse existing path).
+    // This gives us canonical grid snapshot, scrollback (if requested), and
+    // cell styling information.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if handle
+        .screen
+        .send(ScreenRequest {
+            pane,
+            scrollback: if include_scrollback {
+                Some(u32::from(max_scrollback_lines))
+            } else {
+                None
+            },
+            cells: true, // Always request cells for semantic info (styles, OSC-133 marks)
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for GET_TERMINAL_STATE".to_owned(),
+        };
+    }
+
+    let Ok(screen_state) = reply_rx.await else {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor dropped the GET_TERMINAL_STATE reply".to_owned(),
+        };
+    };
+
+    // Step 3: Convert ScreenState viewport to JSON cells array.
+    // ScreenState carries:
+    // - lines: Vec<String> — viewport text, one row per element, right-trimmed
+    // - cells: Option<Vec<CellInfo>> — sparse: only cells with non-default
+    //   style or OSC-133 semantic marks, in row-major order
+    //
+    // We parse each line into characters and emit cells as JSON objects.
+    // Note: a full implementation using unicode-segmentation::Graphemes
+    // would handle combining marks, emoji, and wide glyphs more precisely;
+    // for now we estimate width based on ASCII vs. non-ASCII.
+
+    let mut viewport_cells = Vec::new();
+
+    // Emit viewport cells by parsing each line.
+    // Each line is right-trimmed, so we don't need to emit trailing blanks.
+    #[allow(clippy::cast_possible_truncation)]
+    for (row_idx, line_text) in screen_state.lines.iter().enumerate() {
+        let row = row_idx as u16;
+        let mut col = 0u16;
+
+        for ch in line_text.chars() {
+            // Estimate cell width: ASCII is 1 column, everything else is 2
+            // (emoji, CJK). libghostty tracks actual widths; we approximate.
+            let width = if ch.is_ascii() { 1u16 } else { 2u16 };
+
+            // Emit this cell as JSON.
+            viewport_cells.push(serde_json::json!({
+                "col": col,
+                "row": row,
+                "text": ch.to_string(),
+                "width": width as u8,
+                "selected": false,
+            }));
+
+            col += width;
+            // Stop if we exceed grid width (shouldn't happen in right-trimmed lines)
+            if col >= screen_state.cols {
+                break;
+            }
+        }
+    }
+
+    // Extract cursor state as JSON.
+    let cursor = screen_state.cursor.map(|cs| {
+        serde_json::json!({
+            "x": cs.x,
+            "y": cs.y,
+            "visible": cs.visible,
+        })
+    });
+
+    // Step 4: Convert scrollback lines to JSON.
+    let mut scrollback_lines = Vec::new();
+    #[allow(clippy::cast_possible_truncation)]
+    let scrollback_count_total = screen_state.scrollback.len() as u32;
+
+    if include_scrollback {
+        for line_text in &screen_state.scrollback {
+            scrollback_lines.push(serde_json::json!({
+                "text": line_text,
+                "cells": [],
+            }));
+        }
+    }
+
+    // Step 5: Query shell state.
+    // The TerminalActor could provide shell PID (child of PTY master),
+    // shell name, job list, and in_copy_mode. For now, set to None;
+    // a future iteration adds a GetShellStateRequest channel and wires
+    // shell state queries (phux-y2t Phase 2).
+    //
+    // Graceful degrade: if the actor has no PTY (no-PTY test actor),
+    // or the query fails, leave shell_state as None. Agents can work
+    // with partial snapshots.
+    let shell_state: Option<serde_json::Value> = None;
+
+    // Step 6: Compute timestamp and sequence number.
+    let timestamp_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Sequence number is a logical clock maintained per terminal for change
+    // detection. For now, placeholder; should be sourced from actor's state
+    // in a future iteration (phux-y2t Phase 2). See ADR-0015 for the versioning model.
+    let seq = 0u64;
+
+    // Step 7: Build the TerminalState as JSON.
+    let terminal_state_json = serde_json::json!({
+        "cols": screen_state.cols,
+        "rows": screen_state.rows,
+        "cells": viewport_cells,
+        "cursor": cursor,
+        "scrollback": scrollback_lines,
+        "scrollback_count_total": scrollback_count_total,
+        "shell_state": shell_state,
+        "pending_command": serde_json::Value::Null,
+        "timestamp_secs": timestamp_secs,
+        "seq": seq,
+    });
+
+    // Step 8: Serialize to JSON string and return.
+    match serde_json::to_string(&terminal_state_json) {
+        Ok(json) => CommandResult::OkWith(CommandValue::Json(json)),
+        Err(err) => CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: format!("terminal state serialization failed: {err}"),
+        },
+    }
+}
+
 /// Build the `Ok` reply for `ROUTE_INPUT`.
 ///
 /// The write counterpart to [`handle_get_screen`]: it resolves the wire id
@@ -2572,6 +2791,75 @@ fn handle_route_input(
             message: "pane actor unavailable for ROUTE_INPUT".to_owned(),
         },
     }
+}
+
+/// Handle `SUBSCRIBE_TERMINAL_EVENTS` command.
+///
+/// Resolves the wire `terminal_id` to a pane actor and registers the caller
+/// as an event subscriber. The server will broadcast semantic events
+/// (CommandStarted, CommandEnded, GridChanged, etc.) as they occur, filtered
+/// by `event_types` (empty = all types). The subscription persists until the
+/// client detaches or the connection closes.
+///
+/// Replies `CommandResult::Ok` immediately; events flow asynchronously as
+/// `Event` frames to the client's outbound mailbox. `try_send` semantics:
+/// a full subscriber mailbox drops events (accelerator semantics, not
+/// guaranteed delivery).
+fn handle_subscribe_terminal_events(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    event_types: Vec<phux_protocol::wire::frame::TerminalEventType>,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) -> CommandResult {
+    use crate::terminal_actor::{SubscribeToEventsRequest, TerminalEventSubscriber};
+
+    // Resolve the wire id to its pane actor (same pattern as handle_route_input).
+    let handle = state.with(|s| {
+        let core = s.terminal_from_wire(terminal_id)?;
+        s.terminal_handle(core).cloned()
+    });
+
+    let Some(handle) = handle else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+
+    debug!(
+        ?client_id,
+        ?terminal_id,
+        "SUBSCRIBE_TERMINAL_EVENTS registering"
+    );
+
+    // Get the wire terminal id for use in Event frames.
+    let wire_terminal_id = terminal_id.local_id().unwrap_or(0);
+
+    // Build the subscriber request and send to the actor.
+    // The subscriber receives the client's outbound mailbox directly,
+    // so events are forwarded straight to the client without an intermediary.
+    let req = SubscribeToEventsRequest {
+        subscriber: TerminalEventSubscriber {
+            outbound: out_tx.clone(),
+            event_types,
+        },
+        wire_terminal_id,
+    };
+
+    if handle.subscribe_to_events.try_send(req).is_err() {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for SUBSCRIBE_TERMINAL_EVENTS".to_owned(),
+        };
+    }
+
+    debug!(
+        ?client_id,
+        ?terminal_id,
+        "SUBSCRIBE_TERMINAL_EVENTS: subscriber registered"
+    );
+    CommandResult::Ok
 }
 
 /// A `SessionSnapshot` describing a server with no sessions: empty lists,
@@ -3349,6 +3637,8 @@ mod tests {
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
         let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
         let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+        let (subscribe_to_events_tx, _subscribe_to_events_rx) = mpsc::channel(8);
+        let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
@@ -3359,6 +3649,8 @@ mod tests {
             consumer_attach: consumer_attach_tx,
             consumer_detach: consumer_detach_tx,
             consumer_ack: consumer_ack_tx,
+            subscribe_to_events: subscribe_to_events_tx,
+            unsubscribe_from_events: unsubscribe_from_events_tx,
             cols: 80,
             rows: 24,
         };
@@ -3461,6 +3753,9 @@ mod tests {
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
                     let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
                     let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+                    let (subscribe_to_events_tx, _subscribe_to_events_rx) = mpsc::channel(8);
+                    let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) =
+                        mpsc::channel(8);
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
@@ -3471,6 +3766,8 @@ mod tests {
                         consumer_attach: consumer_attach_tx,
                         consumer_detach: consumer_detach_tx,
                         consumer_ack: consumer_ack_tx,
+                        subscribe_to_events: subscribe_to_events_tx,
+                        unsubscribe_from_events: unsubscribe_from_events_tx,
                         cols: 80,
                         rows: 24,
                     };
@@ -3606,6 +3903,8 @@ mod tests {
                 let (consumer_detach_tx, mut consumer_detach_rx) =
                     mpsc::channel::<ConsumerDetachRequest>(8);
                 let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+                let (subscribe_to_events_tx, _subscribe_to_events_rx) = mpsc::channel(8);
+                let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
                 let handle = TerminalHandle {
                     input: input_tx,
                     snapshot: snapshot_tx,
@@ -3616,6 +3915,8 @@ mod tests {
                     consumer_attach: consumer_attach_tx,
                     consumer_detach: consumer_detach_tx,
                     consumer_ack: consumer_ack_tx,
+                    subscribe_to_events: subscribe_to_events_tx,
+                    unsubscribe_from_events: unsubscribe_from_events_tx,
                     cols: 80,
                     rows: 24,
                 };

@@ -14,7 +14,7 @@
 //! (`phux-abi`) needs: it converts that `(Region, row, char-col, len)` span
 //! into a [`libghostty_vt::selection::Selection`] over the terminal's grid
 //! and formats just that range back to plain text via the sound one-shot
-//! [`Terminal::format_selection_alloc`] path. It is deliberately *only* the
+//! The `Terminal::format_selection_alloc` path. It is deliberately *only* the
 //! find-coords -> selection -> text extraction primitive: no copy-mode UI,
 //! no cursor, no highlight.
 //!
@@ -106,7 +106,7 @@ pub enum ExtractError {
     /// terminal's scrollback shrank (rows aged out, a resize/reflow, or an
     /// alt-screen clear) between [`search`](crate::search) and extraction, so
     /// the resolved absolute `y` is at or past the current
-    /// [`Terminal::scrollback_rows`] count.
+    /// `Terminal::scrollback_rows` count.
     #[error("history row {history_y} is past the current scrollback ({total} rows)")]
     HistoryRowOutOfRange {
         /// The absolute history `y` that fell outside the live scrollback.
@@ -127,9 +127,9 @@ pub enum ExtractError {
 ///
 /// The match's `char`-offset `col`/`len` are translated to grid columns via
 /// the private `char_col_to_grid_x` (handling wide glyphs and multi-`char`
-/// clusters), then a linear [`Selection`] is built over `[start_x, end_x]` of row `y`
+/// clusters), then a linear `Selection` is built over `[start_x, end_x]` of row `y`
 /// and formatted with the sound one-shot
-/// [`Terminal::format_selection_alloc`] API.
+/// `Terminal::format_selection_alloc` API.
 pub fn extract_match(terminal: &GhosttyTerminal<'_, '_>, m: Match) -> Result<String, ExtractError> {
     match m.region {
         Region::Viewport => {

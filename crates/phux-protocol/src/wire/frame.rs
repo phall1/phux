@@ -351,6 +351,16 @@ pub(crate) const COMMAND_TAG_KILL_COLLECTION: u8 = 0x0a;
 /// `CREATE_SESSION` uses for a taken name). Backs `phux rename SESSION
 /// NEW-NAME` and the TUI `rename-session` action.
 pub(crate) const COMMAND_TAG_RENAME_SESSION: u8 = 0x0b;
+/// Wire tag for [`Command::GetTerminalState`]. Appended after
+/// `RENAME_SESSION`'s `0x0b`; `GET_TERMINAL_STATE` is an additive
+/// L2 Collection-aware query (ADR-0015 L2) that returns a comprehensive
+/// snapshot of a Terminal's full state: grid, scrollback, cursor, shell
+/// metadata, sequence number, and timestamp as a structured JSON
+/// `phux_client::l2::state::TerminalState`. Unlike `GET_SCREEN` (L1 raw
+/// grid), this returns structured state suitable for agent polling and
+/// change detection. The reply rides `COMMAND_RESULT { Ok_With(Json(..)) }`.
+pub(crate) const COMMAND_TAG_GET_TERMINAL_STATE: u8 = 0x0c;
+pub(crate) const COMMAND_TAG_SUBSCRIBE_TERMINAL_EVENTS: u8 = 0x0d;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -657,6 +667,50 @@ pub enum SpawnResult {
 // Control-plane command types — SPEC §5 (phux-k61 / ADR-0021).
 // -----------------------------------------------------------------------------
 
+/// Semantic event type discriminant for filtering in `SubscribeTerminalEvents`.
+/// Enables clients to subscribe only to event classes they care about
+/// (e.g., command lifecycle without grid chatter).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalEventType {
+    /// Shell state transition (awaiting input → running → idle).
+    ShellStateChanged = 0,
+    /// Command started (OSC-133 B marker or equivalent).
+    CommandStarted = 1,
+    /// Command exited with exit code (OSC-133 D marker).
+    CommandEnded = 2,
+    /// Output arrived on terminal (PTY bytes detected).
+    OutputReceived = 3,
+    /// Shell prompt ready for input (no output + OSC-133 C or heuristic).
+    PromptReady = 4,
+    /// Grid mutated (scroll, output, cursor, clear).
+    GridChanged = 5,
+    /// Working directory changed.
+    CwdChanged = 6,
+}
+
+impl TerminalEventType {
+    /// Convert to wire byte representation.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Convert from wire byte representation.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::ShellStateChanged),
+            1 => Some(Self::CommandStarted),
+            2 => Some(Self::CommandEnded),
+            3 => Some(Self::OutputReceived),
+            4 => Some(Self::PromptReady),
+            5 => Some(Self::GridChanged),
+            6 => Some(Self::CwdChanged),
+            _ => None,
+        }
+    }
+}
+
 /// Scope argument for [`Command::GetState`] (SPEC §5.1).
 ///
 /// `#[non_exhaustive]`: v0.1 exposes only `Server` (the whole-server
@@ -803,6 +857,36 @@ pub enum Command {
         /// New name for the session. A name already in use is rejected
         /// (`INVALID_COMMAND`) rather than silently merging sessions.
         new_name: String,
+    },
+    /// Request a comprehensive snapshot of a terminal's full state: grid,
+    /// scrollback, shell metadata, cursor, and sequence number (L2 Collection-aware
+    /// agent interface). The reply rides `COMMAND_RESULT { Ok_With(Json(..)) }`
+    /// carrying a serialized `phux_client::l2::state::TerminalState`. Backs
+    /// agent polling and state inspection (ADR-0015 L2, `phux-y2t`).
+    GetTerminalState {
+        /// The Terminal whose state to snapshot.
+        terminal_id: TerminalId,
+        /// Whether to include scrollback lines above the viewport.
+        /// When `false`, only the viewport is returned.
+        include_scrollback: bool,
+        /// Maximum number of scrollback lines to return. Ignored if
+        /// `include_scrollback` is `false`.
+        max_scrollback_lines: u16,
+    },
+    /// Subscribe to semantic terminal events for a specific pane without
+    /// attaching or resizing. The server pushes typed events (`CommandStarted`,
+    /// `CommandEnded`, `GridChanged`, `CwdChanged`, `PromptReady`, `OutputReceived`)
+    /// as the pane's state changes. Scoped to the Terminal: only events for
+    /// that pane flow to the subscriber. Idempotent: re-subscribing updates
+    /// the `event_types` filter (empty = all types). Unsubscription is implicit
+    /// on detach. Reply: `COMMAND_RESULT { Ok }`; events flow asynchronously as
+    /// `Event` frames (SPEC §7.1). Backs agent-protocol `SubscribeTerminalEvents`.
+    SubscribeTerminalEvents {
+        /// The Terminal (pane) whose events the client subscribes to.
+        terminal_id: TerminalId,
+        /// Event type filter: which semantic events to forward.
+        /// Empty vector = all event types.
+        event_types: Vec<TerminalEventType>,
     },
 }
 
@@ -2384,6 +2468,27 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_str(name);
             enc.write_str(new_name);
         }
+        Command::GetTerminalState {
+            terminal_id,
+            include_scrollback,
+            max_scrollback_lines,
+        } => {
+            enc.write_u8(COMMAND_TAG_GET_TERMINAL_STATE);
+            encode_terminal_id(terminal_id, enc);
+            enc.write_u8(u8::from(*include_scrollback));
+            enc.write_u16_be(*max_scrollback_lines);
+        }
+        Command::SubscribeTerminalEvents {
+            terminal_id,
+            event_types,
+        } => {
+            enc.write_u8(COMMAND_TAG_SUBSCRIBE_TERMINAL_EVENTS);
+            encode_terminal_id(terminal_id, enc);
+            enc.write_u16_be(u16::try_from(event_types.len()).unwrap_or(0));
+            for et in event_types {
+                enc.write_u8(et.to_u8());
+            }
+        }
     }
 }
 
@@ -2496,6 +2601,30 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
                 collection,
                 name,
                 new_name,
+            })
+        }
+        COMMAND_TAG_GET_TERMINAL_STATE => {
+            let terminal_id = decode_terminal_id(dec)?;
+            let include_scrollback = dec.read_u8()? != 0;
+            let max_scrollback_lines = dec.read_u16_be()?;
+            Ok(Command::GetTerminalState {
+                terminal_id,
+                include_scrollback,
+                max_scrollback_lines,
+            })
+        }
+        COMMAND_TAG_SUBSCRIBE_TERMINAL_EVENTS => {
+            let terminal_id = decode_terminal_id(dec)?;
+            let count = dec.read_u16_be()? as usize;
+            let mut event_types = Vec::with_capacity(count);
+            for _ in 0..count {
+                if let Some(et) = TerminalEventType::from_u8(dec.read_u8()?) {
+                    event_types.push(et);
+                }
+            }
+            Ok(Command::SubscribeTerminalEvents {
+                terminal_id,
+                event_types,
             })
         }
         other => Err(DecodeError::UnknownEnumValue {

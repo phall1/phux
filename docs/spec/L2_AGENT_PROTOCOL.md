@@ -257,10 +257,29 @@ while True:
 
 Uses same framing as L1:
 - Frame: `[length: u32][type: u8][payload: bytes]`
-- Type discriminants: 0x70–0x7E reserved for L2 Agent
+- Type discriminants: allocated from `0x70..=0x7E` (reserved in `docs/spec/appendix-reserved.md`)
 - Payload: field-tagged, extensible
 
-**Or use gRPC + JSON:**
+### Message Types
+
+Discriminants defined in `crates/phux-protocol/src/wire/l2_agent.rs` and re-exported via `crates/phux-protocol/src/wire/mod.rs`:
+
+| Message | Constant | Value | Direction | Purpose |
+|---------|----------|-------|-----------|---------|
+| `GET_TERMINAL_STATE` | `TYPE_GET_TERMINAL_STATE` | `0x70` | C→S | Agent requests Terminal state snapshot |
+| `SUBSCRIBE_TERMINAL_EVENTS` | `TYPE_SUBSCRIBE_TERMINAL_EVENTS` | `0x71` | C→S | Agent opts into typed event stream |
+| `L2_RESPONSE` | `TYPE_L2_RESPONSE` | `0x72` | S→C | Reply to GET_TERMINAL_STATE / etc. (correlated by request_id) |
+| `L2_EVENT` | `TYPE_L2_EVENT` | `0x73` | S→C | Streamed TerminalEvent (per SUBSCRIBE_TERMINAL_EVENTS) |
+
+The three remaining slots (`0x74..=0x7E`) are reserved for future L2 Agent commands
+(e.g., `RUN_COMMAND`, `WAIT_FOR_PROMPT`, `QUERY_GRID` — see §4).
+
+**Handler Integration:** See `docs/architecture/l2-agent-handler-integration.md` for the server-side dispatch and event emission architecture.
+
+### Alternative: gRPC + JSON
+
+Agents MAY connect via gRPC instead of raw wire protocol:
+
 ```protobuf
 service PhuxAgent {
   rpc GetTerminalState(GetTerminalStateRequest)
@@ -273,6 +292,9 @@ service PhuxAgent {
     returns (SendSignalResponse);
 }
 ```
+
+The wire-protocol path is the authoritative v0.1 implementation; gRPC is a
+future convenience wrapper for agents running out-of-process.
 
 ---
 

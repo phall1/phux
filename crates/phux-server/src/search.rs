@@ -34,8 +34,8 @@
 //! The *types* for that bridge are all public at pin `8e1b0f7`: `Selection`
 //! is built from two [`GridRef`](libghostty_vt::screen::GridRef) endpoints via
 //! [`Selection::new`](libghostty_vt::selection::Selection::new),
-//! [`Terminal::grid_ref`] yields them, and the one-shot
-//! [`Terminal::format_selection_alloc`](libghostty_vt::Terminal::format_selection_alloc)
+//! `Terminal::grid_ref` yields them, and the one-shot
+//! `Terminal::format_selection_alloc` (from libghostty)
 //! formats a borrowed selection to bytes. The OSC-133-aware boundary helpers
 //! (`select_word` / `select_line` / `select_output`) now have safe wrappers on
 //! `Terminal`, but those are the boundary engine we deliberately refuse to
@@ -48,7 +48,7 @@
 //! (`Copy`) `ffi::Selection` — which dropped before
 //! `ghostty_formatter_terminal_new` read through it, so libghostty returned
 //! `InvalidValue`. Pin `8e1b0f7` *adds* the sound one-shot selection API
-//! ([`Terminal::format_selection_alloc`] / `format_selection_buf` /
+//! (`Terminal::format_selection_alloc` / `format_selection_buf` /
 //! `FormatOptions`), which holds the `Selection` *by borrow* across the FFI
 //! call. That path round-trips; the extraction bridge uses it.
 //! `safe_api_selection_formatter_bridge_round_trips_at_pin` proves it.

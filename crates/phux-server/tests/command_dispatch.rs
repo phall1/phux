@@ -921,3 +921,115 @@ fn rename_session_duplicate_new_name_is_refused() {
         }
     });
 }
+
+/// **GET_TERMINAL_STATE** on a live pane returns a structured `TerminalState`
+/// JSON object with grid dimensions, cells, cursor, scrollback, shell state,
+/// and metadata (sequence number, timestamp).
+#[test]
+fn get_terminal_state_returns_structured_snapshot_for_live_pane() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Attach to learn a real wire terminal id.
+        send_frame(&mut stream, &attach_by_name("work")).await;
+        let pane_id = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::Attached { snapshot, .. } = frame {
+                break snapshot.panes[0].id.clone();
+            }
+        };
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 10,
+                command: Command::GetTerminalState {
+                    terminal_id: pane_id.clone(),
+                    include_scrollback: false,
+                    max_scrollback_lines: 0,
+                },
+            },
+        )
+        .await;
+
+        let result = await_command_result(&mut stream, 10).await;
+        match result {
+            CommandResult::OkWith(CommandValue::Json(json)) => {
+                // Parse as a generic JSON object to verify structure.
+                let obj: serde_json::Value = serde_json::from_str(&json)
+                    .expect("GET_TERMINAL_STATE reply must be valid JSON");
+
+                // Verify TerminalState contract fields.
+                assert!(obj.get("cols").is_some(), "TerminalState must include cols");
+                assert!(obj.get("rows").is_some(), "TerminalState must include rows");
+                assert!(
+                    obj.get("cells").is_some(),
+                    "TerminalState must include cells"
+                );
+                assert!(
+                    obj.get("cursor").is_some(),
+                    "TerminalState must include cursor"
+                );
+                assert!(
+                    obj.get("scrollback").is_some(),
+                    "TerminalState must include scrollback"
+                );
+                assert!(
+                    obj.get("scrollback_count_total").is_some(),
+                    "TerminalState must include scrollback_count_total"
+                );
+                assert!(
+                    obj.get("shell_state").is_some(),
+                    "TerminalState must include shell_state"
+                );
+                assert!(
+                    obj.get("timestamp_secs").is_some(),
+                    "TerminalState must include timestamp_secs"
+                );
+                assert!(obj.get("seq").is_some(), "TerminalState must include seq");
+            }
+            other => panic!("expected Ok_With(Json(..)), got {other:?}"),
+        }
+    });
+}
+
+/// **GET_TERMINAL_STATE** on an unknown terminal_id is rejected with
+/// `TERMINAL_NOT_FOUND` error.
+#[test]
+fn get_terminal_state_unknown_terminal_returns_not_found_error() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // Send GET_TERMINAL_STATE with a made-up terminal_id that doesn't exist.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 11,
+                command: Command::GetTerminalState {
+                    terminal_id: TerminalId::local(9999),
+                    include_scrollback: false,
+                    max_scrollback_lines: 0,
+                },
+            },
+        )
+        .await;
+
+        let result = await_command_result(&mut stream, 11).await;
+        match result {
+            CommandResult::Error { code, message } => {
+                assert_eq!(code, ErrorCode::TerminalNotFound);
+                assert!(
+                    message.contains("no such terminal"),
+                    "Error message: {message}"
+                );
+            }
+            other => panic!("expected Error(TerminalNotFound, ..), got {other:?}"),
+        }
+    });
+}

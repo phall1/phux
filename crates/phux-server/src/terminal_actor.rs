@@ -44,7 +44,7 @@ use libghostty_vt::{
     terminal::Mode,
 };
 use phux_protocol::ClientId;
-use phux_protocol::wire::frame::{AgentEvent, FrameKind};
+use phux_protocol::wire::frame::{AgentEvent, FrameKind, TerminalEventType};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -633,10 +633,46 @@ pub struct TerminalHandle {
     /// freshly-acked reference. Silent no-op if the consumer is not
     /// currently registered.
     pub consumer_ack: mpsc::Sender<ConsumerAckRequest>,
+    /// Subscribe to semantic terminal events for this pane. The runtime sends
+    /// a [`SubscribeToEventsRequest`] when a client subscribes; the actor
+    /// registers the subscriber and begins broadcasting matching events.
+    pub subscribe_to_events: mpsc::Sender<SubscribeToEventsRequest>,
+    /// Unsubscribe from semantic terminal events. The runtime sends an
+    /// [`UnsubscribeFromEventsRequest`] when a client detaches; the actor
+    /// removes the subscriber from its list (idempotent).
+    pub unsubscribe_from_events: mpsc::Sender<UnsubscribeFromEventsRequest>,
     /// Pane viewport width in cells at construction time.
     pub cols: u16,
     /// Pane viewport height in cells at construction time.
     pub rows: u16,
+}
+
+/// A client subscribed to semantic events for a single Terminal (pane).
+/// Holds the client's outbound mailbox and event type filter.
+#[derive(Clone, Debug)]
+pub struct TerminalEventSubscriber {
+    /// Client's outbound frame channel (where Event frames are sent).
+    pub outbound: tokio::sync::mpsc::Sender<Outbound>,
+    /// Event type filter (empty = all types). Only events matching a type
+    /// in this list are forwarded; if empty, all events are sent.
+    pub event_types: Vec<TerminalEventType>,
+}
+
+/// Request to subscribe to semantic terminal events.
+#[derive(Debug)]
+pub struct SubscribeToEventsRequest {
+    /// The new subscriber to register.
+    pub subscriber: TerminalEventSubscriber,
+    /// Wire-level terminal id for Event frames (SPEC §7.1).
+    /// The runtime passes this when registering.
+    pub wire_terminal_id: u32,
+}
+
+/// Request to unsubscribe from semantic terminal events.
+#[derive(Debug)]
+pub struct UnsubscribeFromEventsRequest {
+    /// Pointer to the subscriber's outbound mailbox (used for identification).
+    pub outbound_ptr: *const tokio::sync::mpsc::Sender<Outbound>,
 }
 
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
@@ -651,6 +687,10 @@ pub struct TerminalHandle {
 /// inside `RefCell` so the `select!` arms (which conceptually borrow
 /// `&mut self`) can each take what they need without fighting the
 /// borrow checker over disjoint field access.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "DEC mode bits and internal state flags are independent; collapsing them would obscure individual semantics"
+)]
 pub struct TerminalActor {
     terminal: RefCell<GhosttyTerminal<'static, 'static>>,
     synth: RefCell<SnapshotSynthesizer<'static>>,
@@ -790,6 +830,31 @@ pub struct TerminalActor {
     /// Drives the dirty/idle coalescing — at most one `dirty` per burst,
     /// then one `idle` when a tick observes the grid has settled.
     in_output_burst: bool,
+    /// Event subscribers for this pane. When semantic state changes occur
+    /// (command started, grid changed, etc.), broadcast to all subscribers
+    /// whose `event_types` filter matches. `Vec` guarded by `RefCell` for
+    /// interior mutability (single-threaded actor, no lock contention).
+    /// Subscribers added by `handle_subscribe_terminal_events` and removed
+    /// implicitly on detach.
+    event_subscribers: RefCell<Vec<TerminalEventSubscriber>>,
+    /// Last known working directory for this pane. Used to detect CWD
+    /// changes and emit `CwdChanged` events. Queried lazily on prompt via
+    /// `process_cwd` (kernel fcntl `F_GETPATH` on macOS, /proc/PID/cwd on Linux).
+    #[allow(dead_code, reason = "reserved for future CwdChanged event emission")]
+    last_known_cwd: RefCell<String>,
+    /// Whether we've already emitted a Dirty event in the current output
+    /// burst. Coalesces multiple grid mutations into one event per burst
+    /// (matching the `in_output_burst` coalescing for `AgentEvent`).
+    dirty_event_emitted_this_burst: bool,
+    /// Inbound subscription request channel. Drained by a select! arm
+    /// that calls `subscribe_to_events`.
+    subscribe_to_events_rx: mpsc::Receiver<SubscribeToEventsRequest>,
+    /// Inbound unsubscription request channel. Drained by a select! arm
+    /// that calls `unsubscribe_from_events`.
+    unsubscribe_from_events_rx: mpsc::Receiver<UnsubscribeFromEventsRequest>,
+    /// Wire-level terminal id (for Event frames). Set by the runtime
+    /// during subscription registration. `0` until a subscriber arrives.
+    wire_terminal_id: u32,
     cols: u16,
     rows: u16,
 }
@@ -839,7 +904,7 @@ enum PtyEvent {
 /// Errors surfaced while constructing a [`TerminalActor`].
 #[derive(Debug, thiserror::Error)]
 pub enum TerminalActorError {
-    /// Libghostty refused to allocate a [`Terminal`] or input encoder.
+    /// Libghostty refused to allocate a Terminal or input encoder.
     #[error("libghostty allocation failed: {0}")]
     Terminal(#[from] libghostty_vt::Error),
     /// Failed to allocate the [`SnapshotSynthesizer`].
@@ -1116,6 +1181,10 @@ impl TerminalActor {
             mpsc::channel::<ConsumerDetachRequest>(DEFAULT_INPUT_MAILBOX);
         let (consumer_ack_tx, consumer_ack_rx) =
             mpsc::channel::<ConsumerAckRequest>(DEFAULT_INPUT_MAILBOX);
+        let (subscribe_to_events_tx, subscribe_to_events_rx) =
+            mpsc::channel::<SubscribeToEventsRequest>(DEFAULT_INPUT_MAILBOX);
+        let (unsubscribe_from_events_tx, unsubscribe_from_events_rx) =
+            mpsc::channel::<UnsubscribeFromEventsRequest>(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
         let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
         let bundle_token = token.clone();
@@ -1167,6 +1236,12 @@ impl TerminalActor {
             event_sink: None,
             last_title: String::new(),
             in_output_burst: false,
+            event_subscribers: RefCell::new(Vec::new()),
+            last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
+            dirty_event_emitted_this_burst: false,
+            subscribe_to_events_rx,
+            unsubscribe_from_events_rx,
+            wire_terminal_id: 0,
             cols,
             rows,
         };
@@ -1180,6 +1255,8 @@ impl TerminalActor {
             consumer_attach: consumer_attach_tx,
             consumer_detach: consumer_detach_tx,
             consumer_ack: consumer_ack_tx,
+            subscribe_to_events: subscribe_to_events_tx,
+            unsubscribe_from_events: unsubscribe_from_events_tx,
             cols,
             rows,
         };
@@ -1492,6 +1569,8 @@ impl TerminalActor {
     /// - `dirty` — the chunk mutated the grid (a new output burst began).
     ///   Coalesced: at most one `dirty` per burst; the settling `idle`
     ///   fires from the tick arm.
+    /// - `OutputReceived` — broadcast to semantic event subscribers.
+    /// - `GridChanged` — broadcast to semantic event subscribers.
     ///
     /// `command_started` / `command_finished` are NOT sourced here — see
     /// the wire spec (SPEC §7.5.1) and the bead for the deferral: the
@@ -1521,6 +1600,10 @@ impl TerminalActor {
         if !self.in_output_burst {
             self.in_output_burst = true;
             self.emit_event(AgentEvent::Dirty);
+            if !self.dirty_event_emitted_this_burst {
+                self.broadcast_agent_event(&AgentEvent::Dirty);
+                self.dirty_event_emitted_this_burst = true;
+            }
         }
     }
 
@@ -1533,7 +1616,58 @@ impl TerminalActor {
     fn maybe_emit_idle(&mut self) {
         if self.in_output_burst && !self.terminal_dirty_since_tick {
             self.in_output_burst = false;
+            self.dirty_event_emitted_this_burst = false;
             self.emit_event(AgentEvent::Idle);
+            self.broadcast_agent_event(&AgentEvent::Idle);
+        }
+    }
+
+    /// Register a new event subscriber to receive semantic terminal events.
+    /// Non-blocking: failure to send is silently dropped (accelerator semantics).
+    /// Also updates the actor's `wire_terminal_id` for use in Event frames.
+    fn subscribe_to_events(&mut self, request: SubscribeToEventsRequest) {
+        self.wire_terminal_id = request.wire_terminal_id;
+        self.event_subscribers.borrow_mut().push(request.subscriber);
+    }
+
+    /// Unsubscribe from semantic terminal events by removing the subscriber
+    /// whose outbound mailbox pointer matches the provided reference.
+    /// Silent no-op if the subscriber is not found.
+    fn unsubscribe_from_events(&self, request: &UnsubscribeFromEventsRequest) {
+        let mut subs = self.event_subscribers.borrow_mut();
+        subs.retain(|sub| !std::ptr::eq(&raw const sub.outbound, request.outbound_ptr));
+    }
+
+    /// Broadcast an `AgentEvent` to all interested subscribers based on the
+    /// event type. Uses `try_send`: drops events if a subscriber's mailbox is full.
+    fn broadcast_agent_event(&self, event: &AgentEvent) {
+        let subs = self.event_subscribers.borrow();
+        for subscriber in subs.iter() {
+            // Check if this subscriber is interested in this event type.
+            // Map AgentEvent variants to TerminalEventType for filtering.
+            let event_type = match event {
+                AgentEvent::CommandStarted => Some(TerminalEventType::CommandStarted),
+                AgentEvent::CommandFinished { .. } => Some(TerminalEventType::CommandEnded),
+                AgentEvent::Dirty => Some(TerminalEventType::GridChanged),
+                AgentEvent::Idle => Some(TerminalEventType::OutputReceived),
+                // Other event types don't map to semantic filters yet
+                _ => None,
+            };
+
+            if let Some(event_type) = event_type
+                && (subscriber.event_types.is_empty()
+                    || subscriber.event_types.contains(&event_type))
+            {
+                let frame = FrameKind::Event {
+                    terminal: if self.wire_terminal_id != 0 {
+                        Some(phux_protocol::ids::TerminalId::local(self.wire_terminal_id))
+                    } else {
+                        None
+                    },
+                    event: event.clone(),
+                };
+                let _ = subscriber.outbound.try_send(Outbound::Frame(frame));
+            }
         }
     }
 
@@ -2126,6 +2260,18 @@ impl TerminalActor {
                     if self.on_frame_ack(client_id, seq) {
                         Self::rearm_tick(&mut tick, &mut tick_interval, self.adaptive_tick_interval());
                     }
+                }
+
+                // Semantic event subscription request. Register the subscriber
+                // and begin broadcasting matching events to their outbound mailbox.
+                Some(req) = self.subscribe_to_events_rx.recv() => {
+                    self.subscribe_to_events(req);
+                }
+
+                // Semantic event unsubscription request. Remove the subscriber
+                // from the broadcast list. Silent no-op if already unsubscribed.
+                Some(req) = self.unsubscribe_from_events_rx.recv() => {
+                    self.unsubscribe_from_events(&req);
                 }
 
                 // State-sync tick driver (phux-q0e.3, phux-ia4, ADR-0018).

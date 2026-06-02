@@ -184,9 +184,9 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// - `Some(n)` — the most-recent `n` history rows (those nearest the
     ///   viewport); fewer if less history exists.
     ///
-    /// History is read cell-by-cell via [`Terminal::grid_ref`] with
-    /// [`Point::History`] coordinates. That path is side-effect-free: it
-    /// neither scrolls the viewport nor mutates the canonical `Terminal`,
+    /// History is read cell-by-cell via `Terminal::grid_ref` with
+    /// `Point::History` coordinates. That path is side-effect-free: it
+    /// neither scrolls the viewport nor mutates the canonical Terminal,
     /// so the read stays safe to poll against a live pane. The viewport
     /// walk is unchanged from [`Self::screen_state`] and still uses the
     /// pooled render iterators.
@@ -349,7 +349,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     }
 
     /// Mark this consumer's `RenderState` as fully in sync with the
-    /// canonical [`Terminal`] — clears the snapshot-level dirty state and
+    /// canonical Terminal — clears the snapshot-level dirty state and
     /// every per-row dirty bit.
     ///
     /// Per ADR-0018 (Lazy state synchronization), this is the operation
@@ -389,7 +389,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// Synthesize the **incremental** VT diff: the bytes that, applied via
     /// `vt_write` to a mirror that's in sync with the per-consumer
     /// `RenderState`'s last-acked reference, advance the mirror to match
-    /// the canonical [`Terminal`] now.
+    /// the canonical Terminal now.
     ///
     /// Per ADR-0018 (Lazy state synchronization) and its 2026-05-26
     /// Addendum, this is the per-tick emission primitive. It follows the
