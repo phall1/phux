@@ -73,18 +73,28 @@ impl std::fmt::Debug for PaneSlot {
 }
 
 impl PaneSlot {
-    /// Allocate a fresh slot with a default-sized libghostty Terminal.
-    /// Dimensions get replaced on the first `TERMINAL_SNAPSHOT` for this
-    /// pane; 80x24 is the safest no-content placeholder.
-    pub(super) fn new() -> Result<Self, AttachError> {
+    /// Allocate a fresh slot at a known pane size.
+    ///
+    /// The client must size libghostty before feeding VT bytes: wrapping,
+    /// clipping, absolute cursor movement, and several style spans are all
+    /// width-sensitive during `vt_write`, so a later resize cannot reliably
+    /// recover from a placeholder geometry.
+    pub(super) fn new_with_size(cols: u16, rows: u16) -> Result<Self, AttachError> {
         Ok(Self {
             terminal: GhosttyTerminal::new(TerminalOptions {
-                cols: 80,
-                rows: 24,
+                cols: cols.max(1),
+                rows: rows.max(1),
                 max_scrollback: 10_000,
             })?,
             renderer: TerminalRenderer::new()?,
         })
+    }
+
+    /// Allocate a fresh slot with a conservative placeholder size.
+    /// Prefer [`Self::new_with_size`] whenever the attach snapshot,
+    /// viewport, or layout already tells us the pane's real dimensions.
+    pub(super) fn new() -> Result<Self, AttachError> {
+        Self::new_with_size(80, 24)
     }
 }
 

@@ -879,22 +879,20 @@ mod tests {
     #[allow(clippy::cast_possible_wrap, reason = "leaf counts are tiny")]
     fn split_close_sequence_preserves_leaf_count() {
         let mut state = LayoutState::single(t(1));
-        let mut next_id: u32 = 2;
         let mut splits: i64 = 0;
         let mut closes: i64 = 0;
 
         // Three splits → 4 leaves.
-        for dir in [
+        for (next_id, dir) in (2_u32..).zip([
             SplitDir::Horizontal,
             SplitDir::Vertical,
             SplitDir::Horizontal,
-        ] {
+        ]) {
             let pending = PendingSplit {
                 focused_at_request: state.focus.clone().expect("focus"),
                 dir,
             };
             state = apply_spawned_ok(&state, t(next_id), &pending).expect("split");
-            next_id += 1;
             splits += 1;
             let leaf_count = crate::layout::leaves(state.tree.as_ref().expect("tree")).len() as i64;
             assert_eq!(leaf_count, splits - closes + 1);

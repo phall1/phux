@@ -225,10 +225,7 @@ fn parse_chord_at(s: &str, base_pos: usize) -> Result<KeyChord, KeybindError> {
     // Peel modifier prefixes ("C-", "M-", "S-", "A-"). The final token is
     // the key — it may itself contain a `-` only via a named key (none of
     // our names do), so a trailing `-` after a modifier is an error.
-    loop {
-        let Some((head, tail)) = split_modifier(rest) else {
-            break;
-        };
+    while let Some((head, tail)) = split_modifier(rest) {
         match head {
             'C' => modifiers |= ModSet::CTRL,
             'M' | 'A' => modifiers |= ModSet::ALT,
@@ -553,7 +550,7 @@ struct TrieNode {
     /// If `Some`, this node is a leaf binding.
     action: Option<ResolvedAction>,
     /// Children keyed by the chord that produces them.
-    children: BTreeMap<KeyChord, TrieNode>,
+    children: BTreeMap<KeyChord, Self>,
 }
 
 impl TrieNode {

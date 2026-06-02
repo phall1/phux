@@ -75,9 +75,9 @@ pub enum LayoutNode {
         /// [`DecodeError::MalformedLayoutRatio`].
         ratio: f32,
         /// Left (for [`SplitDir::Horizontal`]) or top (for [`SplitDir::Vertical`]) child.
-        left: Box<LayoutNode>,
+        left: Box<Self>,
         /// Right (for [`SplitDir::Horizontal`]) or bottom (for [`SplitDir::Vertical`]) child.
-        right: Box<LayoutNode>,
+        right: Box<Self>,
     },
 }
 

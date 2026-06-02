@@ -1182,29 +1182,13 @@ fn emit_cursor_style(out: &mut Vec<u8>, style: CursorVisualStyle, blinking: bool
     // DECSCUSR: `CSI <n> SP q`. Block/blink=1, Block/steady=2,
     // Underline/blink=3, steady=4, Bar/blink=5, steady=6. BlockHollow has
     // no DECSCUSR encoding; map to Block-steady.
-    let code: u8 = match style {
-        CursorVisualStyle::Block => {
-            if blinking {
-                1
-            } else {
-                2
-            }
-        }
-        CursorVisualStyle::Underline => {
-            if blinking {
-                3
-            } else {
-                4
-            }
-        }
-        CursorVisualStyle::Bar => {
-            if blinking {
-                5
-            } else {
-                6
-            }
-        }
-        // Hollow block and any future variant — treat as steady block.
+    let code: u8 = match (style, blinking) {
+        (CursorVisualStyle::Block, true) => 1,
+        (CursorVisualStyle::Underline, true) => 3,
+        (CursorVisualStyle::Underline, false) => 4,
+        (CursorVisualStyle::Bar, true) => 5,
+        (CursorVisualStyle::Bar, false) => 6,
+        // Steady block, hollow block, and any future variant — treat as steady block.
         _ => 2,
     };
     let _ = write!(out, "\x1b[{code} q");

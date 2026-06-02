@@ -1042,8 +1042,8 @@ enum CborLayoutNode {
     Split {
         dir: CborSplitDir,
         ratio: f32,
-        left: Box<CborLayoutNode>,
-        right: Box<CborLayoutNode>,
+        left: Box<Self>,
+        right: Box<Self>,
     },
 }
 

@@ -53,9 +53,9 @@ pub enum LayoutNode {
         /// Fraction of the parent dim given to `left` (range `0.0..=1.0`).
         ratio: f32,
         /// Left (for [`SplitDir::Horizontal`]) or top (for [`SplitDir::Vertical`]) child.
-        left: Box<LayoutNode>,
+        left: Box<Self>,
         /// Right (for [`SplitDir::Horizontal`]) or bottom (for [`SplitDir::Vertical`]) child.
-        right: Box<LayoutNode>,
+        right: Box<Self>,
     },
 }
 

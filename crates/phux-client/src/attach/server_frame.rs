@@ -166,12 +166,23 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // working. The L3 metadata-fetch path replaces this with the
             // server-stored layout (possibly multi-window) when present.
             *workspace = Workspace::single(bootstrap.clone());
-            // Ensure the focused pane has a slot ready for output
-            // frames; output may race ahead of the snapshot. If
-            // libghostty refuses to allocate a Terminal we surface
-            // the failure rather than silently dropping the bootstrap.
+            // Seed client-side mirrors at their server-advertised sizes
+            // before any TERMINAL_OUTPUT can race ahead of the per-pane
+            // TERMINAL_SNAPSHOT. VT interpretation is geometry-sensitive;
+            // starting at 80x24 and resizing later corrupts wraps, clips,
+            // and absolute cursor movement for wider/taller viewports.
+            for pane in &snapshot.panes {
+                if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(pane.id.clone()) {
+                    v.insert(PaneSlot::new_with_size(pane.cols, pane.rows)?);
+                }
+            }
+            // Ensure the focused pane has a slot even if an older server's
+            // ATTACHED graph omitted it. Fall back to the current pane
+            // viewport (the same dimensions used for rendering) rather
+            // than the historical 80x24 placeholder.
             if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
-                v.insert(PaneSlot::new()?);
+                let (cols, rows) = pane_viewport(viewport_dims, status_bar.is_some());
+                v.insert(PaneSlot::new_with_size(cols, rows)?);
             }
             // phux-17u: stash the session name for the status-bar
             // `WidgetContext`. The snapshot carries `sessions:
@@ -235,7 +246,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 .unwrap_or((0, 0));
             let slot = match panes.entry(terminal_id) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(PaneSlot::new_with_size(cols, rows)?)
+                }
             };
             super::paint::safe_resize(&mut slot.terminal, cols, rows)?;
             // phux-flywheel: time the snapshot VT-apply (scrollback +
@@ -349,10 +362,29 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // default `phux=info` filter.
             {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
+                let has_bar = status_bar.is_some();
+                let pane_dims = pane_viewport(viewport_dims, has_bar);
+                let expected_dims = workspace
+                    .active_window()
+                    .and_then(|ls| {
+                        super::multi_pane::compute_layout(ls, pane_dims)
+                            .rects
+                            .get(&terminal_id)
+                            .map(|r| (r.w, r.h))
+                    })
+                    .or_else(|| {
+                        panes.get_mut(&terminal_id).and_then(|slot| {
+                            Some((slot.terminal.cols().ok()?, slot.terminal.rows().ok()?))
+                        })
+                    })
+                    .unwrap_or(pane_dims);
                 let slot = match panes.entry(terminal_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-                    std::collections::hash_map::Entry::Vacant(v) => v.insert(PaneSlot::new()?),
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(PaneSlot::new_with_size(expected_dims.0, expected_dims.1)?)
+                    }
                 };
+                super::paint::safe_resize(&mut slot.terminal, expected_dims.0, expected_dims.1)?;
                 slot.terminal.vt_write(&bytes);
             }
             // The libghostty mirror is now warm even for panes in a
@@ -902,9 +934,9 @@ mod tests {
     use super::{FrameOutcome, handle_server_frame};
     use std::collections::HashMap;
 
-    use phux_protocol::ids::TerminalId;
+    use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
     use phux_protocol::wire::frame::FrameKind;
-    use phux_protocol::wire::info::{LayoutNode, SplitDir};
+    use phux_protocol::wire::info::{LayoutNode, SessionSnapshot, SplitDir, TerminalInfo};
 
     use crate::attach::driver::PaneSlot;
     use crate::layout::{LayoutState, Workspace};
@@ -990,8 +1022,38 @@ mod tests {
         bytes: &[u8],
         seq: u64,
     ) -> FrameOutcome {
+        drive_output_seq_with_viewport(
+            out,
+            layout,
+            focused,
+            panes,
+            terminal_id,
+            bytes,
+            seq,
+            (80, 24),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test driver mirrors frame inputs"
+    )]
+    fn drive_output_seq_with_viewport(
+        out: &mut Vec<u8>,
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        bytes: &[u8],
+        seq: u64,
+        viewport_dims: (u16, u16),
+    ) -> FrameOutcome {
         let mut session_name = String::new();
-        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let mut predict = PredictionState::new(
+            PredictiveConfig::disabled(),
+            viewport_dims.0,
+            viewport_dims.1,
+        );
         let overlay = Overlay;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
@@ -1007,7 +1069,7 @@ mod tests {
             focused,
             &mut session_name,
             None,
-            (80, 24),
+            viewport_dims,
             &mut predict,
             &overlay,
             None,
@@ -1016,6 +1078,86 @@ mod tests {
             false,
         )
         .expect("handle_server_frame")
+    }
+
+    /// phux-ih39: a `TERMINAL_OUTPUT` that races ahead of
+    /// `TERMINAL_SNAPSHOT` must allocate the pane mirror at the current viewport width before
+    /// `vt_write`, not at the historical 80x24 placeholder. Absolute cursor
+    /// movement past column 80 is a compact regression oracle: if the slot
+    /// starts 80-wide, the `X` cannot land in column 100.
+    #[test]
+    fn output_before_snapshot_uses_current_viewport_width() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = HashMap::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        drive_output_seq_with_viewport(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[1;100HX",
+            1,
+            (120, 30),
+        );
+
+        let slot = panes.get_mut(&pane).expect("slot allocated");
+        assert_eq!(slot.terminal.cols().expect("cols"), 120);
+        assert_eq!(slot.terminal.rows().expect("rows"), 30);
+        let cell = slot
+            .renderer
+            .read_grapheme_at(&slot.terminal, 0, 99)
+            .expect("read cell");
+        assert_eq!(cell, Some('X'));
+    }
+
+    /// phux-ih39: the ATTACHED graph already carries per-pane dimensions.
+    /// Seed slots from that graph so output between ATTACHED and
+    /// `TERMINAL_SNAPSHOT` doesn't get interpreted at 80x24.
+    #[test]
+    fn attached_seeds_pane_slots_from_snapshot_dimensions() {
+        let pane = tid(1);
+        let window = WindowId::new(1);
+        let session = SessionId::new(1);
+        let snapshot = SessionSnapshot::new(session, window, pane.clone())
+            .with_panes(vec![TerminalInfo::new(pane.clone(), window, 132, 43)]);
+        let mut panes = HashMap::new();
+        let mut workspace = Workspace::default();
+        let mut focused = None;
+        let mut session_name = String::new();
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 132, 43);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut out: Vec<u8> = Vec::new();
+
+        handle_server_frame(
+            &mut out,
+            FrameKind::Attached {
+                snapshot,
+                initial_client_id: ClientId::new(1),
+            },
+            &mut panes,
+            &mut workspace,
+            &mut focused,
+            &mut session_name,
+            None,
+            (132, 43),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            false,
+        )
+        .expect("attached");
+
+        let slot = panes.get_mut(&pane).expect("slot seeded");
+        assert_eq!(slot.terminal.cols().expect("cols"), 132);
+        assert_eq!(slot.terminal.rows().expect("rows"), 43);
     }
 
     /// phux-3uv: a `TERMINAL_OUTPUT` with a non-zero `seq` yields an

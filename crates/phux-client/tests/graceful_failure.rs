@@ -36,8 +36,7 @@ fn no_alt_screen_on_missing_socket() {
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_nanos()),
     ));
     // Belt-and-suspenders: ensure the path absolutely does not exist.
     let _ = std::fs::remove_file(&bogus);

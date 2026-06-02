@@ -471,28 +471,12 @@ fn emit_cursor_style(
     style: CursorVisualStyle,
     blinking: bool,
 ) -> io::Result<()> {
-    let code: u8 = match style {
-        CursorVisualStyle::Block => {
-            if blinking {
-                1
-            } else {
-                2
-            }
-        }
-        CursorVisualStyle::Underline => {
-            if blinking {
-                3
-            } else {
-                4
-            }
-        }
-        CursorVisualStyle::Bar => {
-            if blinking {
-                5
-            } else {
-                6
-            }
-        }
+    let code: u8 = match (style, blinking) {
+        (CursorVisualStyle::Block, true) => 1,
+        (CursorVisualStyle::Underline, true) => 3,
+        (CursorVisualStyle::Underline, false) => 4,
+        (CursorVisualStyle::Bar, true) => 5,
+        (CursorVisualStyle::Bar, false) => 6,
         _ => 2,
     };
     write!(out, "\x1b[{code} q")

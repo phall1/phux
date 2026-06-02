@@ -2677,8 +2677,7 @@ async fn handle_get_terminal_state(
     // Step 6: Compute timestamp and sequence number.
     let timestamp_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Sequence number is a logical clock maintained per terminal for change
     // detection. For now, placeholder; should be sourced from actor's state
