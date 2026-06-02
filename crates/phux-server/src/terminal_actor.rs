@@ -737,7 +737,10 @@ pub struct TerminalActor {
     /// Whether the per-consumer state-sync tick (phux-q0e.3) is the live
     /// emitter of `TerminalOutput` frames (ADR-0018).
     ///
-    /// `true` in production (phux-ia4). When `true` the tick is the live
+    /// `false` in production for human TUI attach (phux-yeca). Raw PTY
+    /// bytes are the byte-faithful, low-latency human path; synthesized
+    /// per-consumer ticks are reserved for explicitly negotiated
+    /// state-sync consumers. When `true`, the tick is the live
     /// server->client emission path: per attached consumer it diffs the
     /// live `Terminal` against that consumer's own
     /// [`crate::grid::ConsumerReference`] (via the actor's shared
@@ -746,8 +749,9 @@ pub struct TerminalActor {
     /// (emit-once); the runtime suppresses its broadcast pump for any
     /// tick-managed consumer so exactly one emitter serves each consumer.
     ///
-    /// Three prerequisites had to land before flipping this on; all are
-    /// now met:
+    /// Three prerequisites had to land before this can be enabled for a
+    /// negotiated consumer: all are met mechanically, but human attach stays
+    /// raw until phux-fseo adds an explicit mode boundary.
     ///
     /// 1. **Single emitter (phux-3uv).** The runtime's `handle_attach`
     ///    suppresses its raw PTY-byte broadcast pump for any consumer this
@@ -768,8 +772,8 @@ pub struct TerminalActor {
     ///    never reads the shared dirty bits — full per-consumer isolation
     ///    regardless of attach/ack divergence.
     ///
-    /// Tests may set it `false` (e.g. to assert the gated-off path stays
-    /// silent) via the test-only setters; production leaves it `true`.
+    /// Tests may set it either way via the test-only setters; production
+    /// leaves it `false` until output mode negotiation exists.
     consumer_tick_emits: bool,
     /// Bytes streaming in from the PTY reader thread. `None` when this
     /// actor is the no-PTY test variant (`TerminalActor::new`); the select!
@@ -1685,17 +1689,17 @@ impl TerminalActor {
     }
 
     /// Test-only: enable the per-consumer tick emission gate
-    /// (`consumer_tick_emits`). Production now defaults this ON (phux-ia4);
-    /// this setter is retained for tests that toggle it back on after
-    /// disabling it.
+    /// (`consumer_tick_emits`). Production defaults this OFF for human
+    /// attach; this setter lets state-sync tests opt into the synthesized
+    /// output path explicitly.
     #[cfg(test)]
     pub const fn enable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = true;
     }
 
     /// Test-only: disable the per-consumer tick emission gate so the
-    /// `tick_emit`-stays-silent path can be asserted. Production defaults
-    /// it ON (phux-ia4).
+    /// `tick_emit`-stays-silent path can be asserted locally, independent
+    /// of the production default.
     #[cfg(test)]
     pub const fn disable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = false;
