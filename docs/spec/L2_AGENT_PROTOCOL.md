@@ -1,8 +1,8 @@
-<!--
-audience: agents, developers
-stability: draft
+---
+audience: agents, consumers, contributors
+stability: scratch
 last-reviewed: 2026-06-01
--->
+---
 
 # L2 Agent Protocol Specification
 

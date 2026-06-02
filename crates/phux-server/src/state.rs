@@ -140,6 +140,7 @@ pub struct SelectionSpan {
 
 impl SelectionSpan {
     /// Create a new selection span from start and end points.
+    #[must_use]
     pub fn new(start: Point, end: Point) -> Self {
         Self {
             start,
@@ -149,6 +150,7 @@ impl SelectionSpan {
     }
 
     /// Create a selection span in the active (viewport) point space.
+    #[must_use]
     pub fn active(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
         Self {
             start: Point::Active(PointCoordinate {
@@ -161,6 +163,7 @@ impl SelectionSpan {
     }
 
     /// Create a selection span in the history (scrollback) point space.
+    #[must_use]
     pub fn history(start_x: u16, start_y: u32, end_x: u16, end_y: u32) -> Self {
         Self {
             start: Point::History(PointCoordinate {
@@ -263,7 +266,7 @@ pub struct ServerState {
     /// Per-client, per-Terminal selection spans (phux-dh4).
     ///
     /// Stores the coordinate endpoints of text selections for each client
-    /// on each terminal they have attached to. The key is (ClientId, TerminalId)
+    /// on each terminal they have attached to. The key is (`ClientId`, `TerminalId`)
     /// and the value is the [`SelectionSpan`] metadata. Selections are cleaned up
     /// when a client detaches from a terminal or a terminal exits.
     client_selections: HashMap<(ClientId, TerminalId), SelectionSpan>,
@@ -1561,6 +1564,7 @@ impl ServerState {
     }
 
     /// Retrieve a selection span for a client on a terminal, if one exists.
+    #[must_use]
     pub fn get_selection(
         &self,
         client_id: ClientId,

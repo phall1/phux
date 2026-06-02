@@ -30,6 +30,7 @@
 #![warn(missing_docs)]
 
 pub mod attach;
+pub mod l2;
 pub mod render;
 pub mod run;
 pub mod selector;
