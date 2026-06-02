@@ -21,6 +21,10 @@
 //!
 //! Frame types come from `phux_protocol::wire` (ADR-0008): the protocol crate
 //! is the single source of truth for what bytes go on the wire.
+#![allow(
+    clippy::future_not_send,
+    reason = "single-threaded tokio runtime per ADR-0003; Send/Sync not required"
+)]
 
 use std::future::Future;
 use std::io;
@@ -2797,7 +2801,7 @@ fn handle_route_input(
 ///
 /// Resolves the wire `terminal_id` to a pane actor and registers the caller
 /// as an event subscriber. The server will broadcast semantic events
-/// (CommandStarted, CommandEnded, GridChanged, etc.) as they occur, filtered
+/// (`CommandStarted`, `CommandEnded`, `GridChanged`, etc.) as they occur, filtered
 /// by `event_types` (empty = all types). The subscription persists until the
 /// client detaches or the connection closes.
 ///

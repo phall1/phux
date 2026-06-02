@@ -17,7 +17,17 @@
 //! - phux-protocol wire definitions for `TerminalState` and `TerminalEvent` frames
 //! - phux-server handler implementations in the dispatcher
 
-#![allow(clippy::expect_used, reason = "tests")]
+#![allow(
+    clippy::expect_used,
+    clippy::manual_assert,
+    clippy::collapsible_if,
+    clippy::match_same_arms,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::doc_markdown,
+    clippy::while_let_loop,
+    reason = "tests"
+)]
 #![allow(clippy::unwrap_used, reason = "tests")]
 #![allow(clippy::panic, reason = "tests")]
 #![allow(clippy::future_not_send, reason = "LocalSet-driven tests")]
@@ -299,12 +309,8 @@ fn test_subscribe_events_ordered() {
         // Collect events for 500ms
         let deadline = Instant::now() + Duration::from_millis(500);
         let mut events = Vec::new();
-        loop {
-            if let Some(evt) = read_event(&mut stream, deadline).await {
-                events.push(evt);
-            } else {
-                break;
-            }
+        while let Some(evt) = read_event(&mut stream, deadline).await {
+            events.push(evt);
         }
 
         println!(
@@ -459,24 +465,16 @@ fn test_concurrent_subscription_isolation() {
 
         let agent_a = async {
             let mut events = Vec::new();
-            loop {
-                if let Some(evt) = read_event(&mut stream_a, deadline).await {
-                    events.push(evt);
-                } else {
-                    break;
-                }
+            while let Some(evt) = read_event(&mut stream_a, deadline).await {
+                events.push(evt);
             }
             events
         };
 
         let agent_b = async {
             let mut events = Vec::new();
-            loop {
-                if let Some(evt) = read_event(&mut stream_b, deadline).await {
-                    events.push(evt);
-                } else {
-                    break;
-                }
+            while let Some(evt) = read_event(&mut stream_b, deadline).await {
+                events.push(evt);
             }
             events
         };
@@ -493,8 +491,7 @@ fn test_concurrent_subscription_isolation() {
         // This proves isolation doesn't break the subscription mechanism
         assert!(
             (events_a.is_empty() && events_b.is_empty())
-                || (!events_a.is_empty() && !events_b.is_empty())
-                || (events_a.len() > 0 && events_b.len() > 0),
+                || (!events_a.is_empty() && !events_b.is_empty()),
             "subscriptions should see consistent event flow: A={} B={}",
             events_a.len(),
             events_b.len()

@@ -66,6 +66,18 @@
 #![allow(clippy::print_stdout, reason = "test diagnostics")]
 #![allow(clippy::unused_async, reason = "L2 API not yet implemented")]
 #![allow(clippy::uninlined_format_args, reason = "test readability")]
+#![allow(
+    clippy::expect_used,
+    clippy::manual_assert,
+    clippy::collapsible_if,
+    clippy::match_same_arms,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::doc_markdown,
+    clippy::while_let_loop,
+    clippy::similar_names,
+    reason = "test code"
+)]
 
 mod common;
 
@@ -245,6 +257,10 @@ async fn collect_events_until(
 /// - Phase 3 (Event Subscription): ✓ Wired via SUBSCRIBE_EVENTS (already in phux-protocol)
 /// - Phase 4 (Command Execution): ✓ Events delivered via EVENT frames
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "full L2 scenario test spans 4 phases"
+)]
 fn concurrent_attach_l2_identical_state() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
@@ -363,24 +379,16 @@ fn concurrent_attach_l2_identical_state() {
         let deadline = Instant::now() + Duration::from_millis(500);
         let collect_a = async {
             let mut events = Vec::new();
-            loop {
-                if let Some(evt) = read_terminal_event(&mut stream_a, deadline).await {
-                    events.push(evt);
-                } else {
-                    break;
-                }
+            while let Some(evt) = read_terminal_event(&mut stream_a, deadline).await {
+                events.push(evt);
             }
             events
         };
 
         let collect_b = async {
             let mut events = Vec::new();
-            loop {
-                if let Some(evt) = read_terminal_event(&mut stream_b, deadline).await {
-                    events.push(evt);
-                } else {
-                    break;
-                }
+            while let Some(evt) = read_terminal_event(&mut stream_b, deadline).await {
+                events.push(evt);
             }
             events
         };

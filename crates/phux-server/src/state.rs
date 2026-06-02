@@ -1608,7 +1608,12 @@ impl SharedState {
     /// Wrap a fresh [`ServerState`].
     #[must_use]
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(ServerState::new())))
+        #[allow(
+            clippy::arc_with_non_send_sync,
+            reason = "single-threaded current-thread runtime; Mutex+Arc safety not required"
+        )]
+        let state = Arc::new(Mutex::new(ServerState::new()));
+        Self(state)
     }
 
     /// Wrap a caller-built state. Useful when the caller has already pre-
@@ -1616,7 +1621,12 @@ impl SharedState {
     /// shared across tasks.
     #[must_use]
     pub fn from_state(state: ServerState) -> Self {
-        Self(Arc::new(Mutex::new(state)))
+        #[allow(
+            clippy::arc_with_non_send_sync,
+            reason = "single-threaded current-thread runtime; Mutex+Arc safety not required"
+        )]
+        let wrapped = Arc::new(Mutex::new(state));
+        Self(wrapped)
     }
 
     /// Lock the state. Prefer [`Self::with`] / [`Self::with_mut`] when
