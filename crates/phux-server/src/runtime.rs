@@ -482,7 +482,7 @@ pub fn seed_session_with_pty(
 /// (phux-i9zl).
 ///
 /// Identical to `seed_session_with_pty` except the new pane joins
-/// `session`'s window via [`ServerState::add_pane_to_session`] instead of
+/// `session`'s window via `add_pane_to_session` instead of
 /// creating a fresh `spawn-N` session. A TUI split routes here so the new
 /// L1 Terminal stays in the spawning client's current session.
 ///

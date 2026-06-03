@@ -105,6 +105,45 @@ impl PaneSlot {
 /// of pressing Escape stays snappy. xterm uses ~50ms by default; we match.
 const ESC_FLUSH_IDLE: Duration = Duration::from_millis(50);
 
+/// phux-jhv8: upper bound on how many already-queued frames one `recv`
+/// wake-up drains before painting. A back-to-back output burst (nvim
+/// startup) is a few dozen frames; the cap only guards against a server
+/// that streams without pause starving the stdin/signal `select!` arms.
+const FRAME_COALESCE_CAP: usize = 1024;
+
+/// The terminal a frame would repaint under normal handling, if any — the
+/// `vt_write` + render pair a coalesced burst can defer to a later same-pane
+/// frame (phux-jhv8). Output and snapshot frames carry pane content; every
+/// other frame (layout, lifecycle, control) paints through its own path or
+/// not at all, so it never defers (returns `None`).
+const fn frame_paint_target(frame: &FrameKind) -> Option<&TerminalId> {
+    match frame {
+        FrameKind::TerminalOutput { terminal_id, .. }
+        | FrameKind::TerminalSnapshot { terminal_id, .. } => Some(terminal_id),
+        _ => None,
+    }
+}
+
+/// Per-frame paint-deferral mask for a coalesced burst (phux-jhv8).
+///
+/// `targets[i]` is the pane frame `i` would repaint (`None` for control
+/// frames). The result is `true` at `i` iff some later frame repaints the
+/// *same* pane — meaning frame `i`'s paint is redundant and can be skipped
+/// (its `vt_write` still applies). Each pane's LAST frame is therefore never
+/// deferred, so every touched pane settles exactly once and none is left
+/// stale; control frames (`None`) never defer.
+fn coalesce_defer_flags(targets: &[Option<TerminalId>]) -> Vec<bool> {
+    (0..targets.len())
+        .map(|i| {
+            targets[i].as_ref().is_some_and(|pane| {
+                targets[i + 1..]
+                    .iter()
+                    .any(|later| later.as_ref() == Some(pane))
+            })
+        })
+        .collect()
+}
+
 /// Errors the attach loop can surface to its caller.
 ///
 /// Most variants wrap a richer underlying cause; the driver is careful to
@@ -635,6 +674,8 @@ async fn main_loop<W: super::RenderSink>(
         &mut pending_splits,
         &mut pending_windows,
         overlays.is_active(),
+        // Single replayed frame — no burst to coalesce, paint it.
+        false,
     )?;
     if outcome.exit {
         return Ok(LoopExit::Detached);
@@ -701,7 +742,36 @@ async fn main_loop<W: super::RenderSink>(
             // network delivers so the user sees output promptly.
             frame = conn.recv() => {
                 match frame {
-                    Ok(f) => {
+                    Ok(first) => {
+                        // phux-jhv8: drain every frame already queued so a
+                        // back-to-back output burst (nvim startup, a
+                        // full-screen redraw) applies all its vt_writes and
+                        // paints ONCE — on the final frame — instead of a
+                        // render + blocking flush per frame. The non-blocking
+                        // try_recv stops the moment the socket would block, so
+                        // a lone frame keeps the old one-frame-one-paint path.
+                        let mut batch = vec![first];
+                        while batch.len() < FRAME_COALESCE_CAP {
+                            match conn.try_recv() {
+                                Ok(Some(more)) => batch.push(more),
+                                // Socket drained, or a clean EOF the next
+                                // `recv()` will surface as Disconnected.
+                                Ok(None) | Err(AttachError::Disconnected) => break,
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        // Per-pane last-wins: a frame defers its paint iff a
+                        // LATER frame in the burst repaints the same pane, so
+                        // every touched pane (focused or not) settles exactly
+                        // once on its final frame. No pane is left stale, and
+                        // the hot single-pane case collapses to one paint.
+                        let paint_targets: Vec<Option<TerminalId>> = batch
+                            .iter()
+                            .map(|f| frame_paint_target(f).cloned())
+                            .collect();
+                        let defer_flags = coalesce_defer_flags(&paint_targets);
+                        for (frame_idx, f) in batch.into_iter().enumerate() {
+                        let defer_paint = defer_flags[frame_idx];
                         // phux-tnh: snapshot the current per-leaf rects
                         // BEFORE the frame may fold (close) or split the
                         // layout, so a TerminalClosed/Spawned can diff
@@ -732,6 +802,7 @@ async fn main_loop<W: super::RenderSink>(
                             &mut pending_splits,
                             &mut pending_windows,
                             overlays.is_active(),
+                            defer_paint,
                         )?;
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
@@ -831,6 +902,7 @@ async fn main_loop<W: super::RenderSink>(
                             // pending request id so a stray late
                             // MetadataValue can't trample state.
                             layout_get_request_id = None;
+                        }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -1603,6 +1675,50 @@ mod tests {
         let err = AttachError::Io(io::Error::other("boom"));
         let msg = err.to_string();
         assert!(msg.contains("attach loop io error"));
+    }
+
+    #[test]
+    fn coalesce_defers_every_pane_frame_but_its_last() {
+        // phux-jhv8: in a coalesced burst, every output frame for a pane
+        // defers EXCEPT that pane's final frame, which settles the screen.
+        let p = |id| Some(TerminalId::Local { id });
+        // Single-pane burst: only the last frame paints.
+        assert_eq!(
+            coalesce_defer_flags(&[p(2), p(2), p(2)]),
+            vec![true, true, false]
+        );
+        // A lone frame never defers (preserves the one-frame-one-paint path).
+        assert_eq!(coalesce_defer_flags(&[p(2)]), vec![false]);
+    }
+
+    #[test]
+    fn coalesce_keys_deferral_per_pane_not_globally() {
+        // Two panes interleaved: each pane's LAST frame paints, so neither is
+        // left stale even when the burst ends on the other pane's output.
+        let p = |id| Some(TerminalId::Local { id });
+        // A(defer, later A) B(defer, later B) A(last A) B(last B)
+        assert_eq!(
+            coalesce_defer_flags(&[p(1), p(2), p(1), p(2)]),
+            vec![true, true, false, false]
+        );
+        // Burst ending on a non-focused pane B must still paint A's last frame.
+        assert_eq!(
+            coalesce_defer_flags(&[p(1), p(1), p(2)]),
+            vec![true, false, false]
+        );
+    }
+
+    #[test]
+    fn coalesce_control_frames_never_defer() {
+        // `None` (a non-painting control frame) never defers, and never
+        // counts as a later same-pane paint for the frames before it.
+        let p = |id| Some(TerminalId::Local { id });
+        assert_eq!(
+            coalesce_defer_flags(&[p(1), None, p(1)]),
+            vec![true, false, false]
+        );
+        assert_eq!(coalesce_defer_flags(&[None, None]), vec![false, false]);
+        assert_eq!(coalesce_defer_flags(&[]), Vec::<bool>::new());
     }
 
     #[test]

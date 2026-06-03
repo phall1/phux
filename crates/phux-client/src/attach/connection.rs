@@ -12,7 +12,7 @@
 use std::io;
 use std::path::Path;
 
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
 use phux_protocol::wire::frame::{FrameKind, MAX_FRAME_LEN};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -38,11 +38,13 @@ pub struct Connection {
 #[derive(Debug)]
 pub struct FrameReader {
     inner: OwnedReadHalf,
-    /// Reusable assembly buffer; we reset it per frame to avoid a fresh
-    /// allocation each read.
-    framed: BytesMut,
-    /// Reusable scratch for the body bytes. Cleared before each read.
-    body: BytesMut,
+    /// Streaming receive buffer. The socket is read in chunks (not one
+    /// `read_exact` per frame) so a single syscall can surface several
+    /// queued frames at once; [`Self::recv`] and [`Self::try_recv`] decode
+    /// complete frames out of the front and retain any partial tail for the
+    /// next read. This buffering is what lets the attach loop coalesce a
+    /// back-to-back output burst into one paint (phux-jhv8).
+    buf: BytesMut,
 }
 
 /// Write half — encodes one [`FrameKind`] per call.
@@ -67,8 +69,7 @@ impl Connection {
         Ok(Self {
             reader: FrameReader {
                 inner: read,
-                framed: BytesMut::with_capacity(4096),
-                body: BytesMut::with_capacity(4096),
+                buf: BytesMut::with_capacity(8192),
             },
             writer: FrameWriter {
                 inner: write,
@@ -89,8 +90,7 @@ impl Connection {
         Self {
             reader: FrameReader {
                 inner: read,
-                framed: BytesMut::with_capacity(4096),
-                body: BytesMut::with_capacity(4096),
+                buf: BytesMut::with_capacity(8192),
             },
             writer: FrameWriter {
                 inner: write,
@@ -119,6 +119,17 @@ impl Connection {
     pub async fn recv(&mut self) -> Result<FrameKind, AttachError> {
         self.reader.recv().await
     }
+
+    /// Pull a frame that is *already available* without awaiting the socket.
+    ///
+    /// Returns `Ok(Some(frame))` when a complete frame can be decoded from
+    /// data already buffered (or readable without blocking), `Ok(None)` when
+    /// the next frame is not yet fully here. Lets the attach loop drain a
+    /// back-to-back burst after the first `recv` so the whole run coalesces
+    /// into a single paint (phux-jhv8).
+    pub fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
+        self.reader.try_recv()
+    }
 }
 
 impl FrameWriter {
@@ -141,42 +152,80 @@ impl FrameReader {
     /// Read one complete frame off the wire.
     ///
     /// Returns [`AttachError::Disconnected`] on a clean EOF — the SPEC §5
-    /// length prefix is the only legal cut point.
+    /// length prefix is the only legal cut point. Drains a complete frame
+    /// from the receive buffer when one is already buffered; otherwise reads more
+    /// bytes (awaiting the socket) until a full frame lands.
     pub async fn recv(&mut self) -> Result<FrameKind, AttachError> {
-        let mut header = [0u8; LENGTH_PREFIX];
-        match self.inner.read_exact(&mut header).await {
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
+        loop {
+            if let Some(frame) = decode_buffered(&mut self.buf)? {
+                return Ok(frame);
+            }
+            // No complete frame buffered — pull more bytes. A read of zero is
+            // a clean EOF; mid-frame that is a truncated stream, but the only
+            // SPEC §5 cut point is a frame boundary, which `decode_buffered`
+            // already returned above.
+            let n = self
+                .inner
+                .read_buf(&mut self.buf)
+                .await
+                .map_err(AttachError::Io)?;
+            if n == 0 {
                 return Err(AttachError::Disconnected);
             }
+        }
+    }
+
+    /// Non-blocking sibling of [`Self::recv`]: decode a frame only if one is
+    /// already buffered or becomes readable without blocking.
+    ///
+    /// Returns `Ok(None)` when the next frame is not yet fully available.
+    /// Used to drain a burst after the first `recv` so the attach loop paints
+    /// the run once instead of per frame (phux-jhv8).
+    pub fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
+        // A frame may already be sitting in the buffer behind the one `recv`
+        // just returned; hand it over before touching the socket.
+        if let Some(frame) = decode_buffered(&mut self.buf)? {
+            return Ok(Some(frame));
+        }
+        // Top up from the socket without blocking. `WouldBlock` just means
+        // nothing more is queued right now.
+        match self.inner.try_read_buf(&mut self.buf) {
+            Ok(0) => return Err(AttachError::Disconnected),
+            Ok(_) => {}
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(err) => return Err(AttachError::Io(err)),
         }
-
-        let body_len = u32::from_be_bytes(header);
-        if !(1..=MAX_FRAME_LEN).contains(&body_len) {
-            return Err(AttachError::Protocol(format!(
-                "server sent frame with out-of-range length {body_len}",
-            )));
-        }
-        let body_len_usize = body_len as usize;
-
-        self.body.clear();
-        self.body.resize(body_len_usize, 0);
-        self.inner
-            .read_exact(&mut self.body)
-            .await
-            .map_err(AttachError::Io)?;
-
-        // Reassemble length-prefix + body so the decoder sees a full frame.
-        self.framed.clear();
-        self.framed.extend_from_slice(&header);
-        self.framed.extend_from_slice(&self.body);
-
-        let (frame, _rest) = FrameKind::decode(&self.framed).map_err(|err| {
-            AttachError::Protocol(format!("server sent undecodable frame: {err:?}"))
-        })?;
-        Ok(frame)
+        decode_buffered(&mut self.buf)
     }
+}
+
+/// Decode and consume one complete frame from the front of `buf`.
+///
+/// Returns `Ok(None)` when fewer than a full frame's bytes are buffered (the
+/// length prefix is missing, or the body has not all arrived). The decoded
+/// frame's bytes are dropped from the front; any trailing partial frame stays
+/// for the next read.
+fn decode_buffered(buf: &mut BytesMut) -> Result<Option<FrameKind>, AttachError> {
+    if buf.len() < LENGTH_PREFIX {
+        return Ok(None);
+    }
+    let mut header = [0u8; LENGTH_PREFIX];
+    header.copy_from_slice(&buf[..LENGTH_PREFIX]);
+    let body_len = u32::from_be_bytes(header);
+    if !(1..=MAX_FRAME_LEN).contains(&body_len) {
+        return Err(AttachError::Protocol(format!(
+            "server sent frame with out-of-range length {body_len}",
+        )));
+    }
+    let frame_len = LENGTH_PREFIX + body_len as usize;
+    if buf.len() < frame_len {
+        // Body still in flight — wait for more bytes.
+        return Ok(None);
+    }
+    let (frame, _rest) = FrameKind::decode(&buf[..frame_len])
+        .map_err(|err| AttachError::Protocol(format!("server sent undecodable frame: {err:?}")))?;
+    buf.advance(frame_len);
+    Ok(Some(frame))
 }
 
 #[cfg(test)]
@@ -213,5 +262,61 @@ mod tests {
         let (decoded, rest) = FrameKind::decode(&buf).expect("roundtrip");
         assert_eq!(decoded, frame);
         assert!(rest.is_empty());
+    }
+
+    fn framed(seq: u64) -> BytesMut {
+        // A small, cheap-to-build frame with a distinguishing field so the
+        // burst-decode test can assert ordering.
+        let frame = FrameKind::FrameAck {
+            terminal_id: phux_protocol::ids::TerminalId::Local { id: 1 },
+            seq,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        buf
+    }
+
+    #[test]
+    fn decode_buffered_drains_back_to_back_frames_in_order() {
+        // The coalescing path (phux-jhv8) relies on a single socket read
+        // surfacing several queued frames: decode_buffered must peel them off
+        // the front one at a time, in order, leaving nothing behind.
+        let mut buf = BytesMut::new();
+        for seq in 1..=3 {
+            buf.extend_from_slice(&framed(seq));
+        }
+        let mut seqs = Vec::new();
+        while let Some(FrameKind::FrameAck { seq, .. }) = decode_buffered(&mut buf).expect("decode")
+        {
+            seqs.push(seq);
+        }
+        assert_eq!(seqs, vec![1, 2, 3]);
+        assert!(buf.is_empty(), "fully consumed buffer");
+    }
+
+    #[test]
+    fn decode_buffered_holds_partial_frame() {
+        // A frame split across reads must not decode early: the prefix says
+        // more bytes are coming, so decode_buffered returns None and retains
+        // the partial bytes until the rest arrives.
+        let whole = framed(7);
+        let cut = whole.len() - 2;
+        let mut buf = BytesMut::from(&whole[..cut]);
+        assert!(
+            decode_buffered(&mut buf).expect("partial").is_none(),
+            "incomplete frame yields None"
+        );
+        assert_eq!(buf.len(), cut, "partial bytes retained");
+        // Deliver the tail; now it decodes and the buffer drains.
+        buf.extend_from_slice(&whole[cut..]);
+        let frame = decode_buffered(&mut buf).expect("complete");
+        assert!(matches!(frame, Some(FrameKind::FrameAck { seq: 7, .. })));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn decode_buffered_empty_is_none() {
+        let mut buf = BytesMut::new();
+        assert!(decode_buffered(&mut buf).expect("empty").is_none());
     }
 }

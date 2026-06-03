@@ -132,6 +132,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     // suppressed so the modal doesn't get scribbled over. The driver
     // triggers a full repaint on overlay dismiss.
     overlay_active: bool,
+    // phux-jhv8: when `true` this frame is an earlier member of a coalesced
+    // burst — a later frame in the same drain targets this pane, so its
+    // libghostty mirror still ingests `vt_write` (state stays correct) but the
+    // stdout paint (render_at, bar, predict-overlay, reconcile) is suppressed.
+    // The driver passes `defer_paint = false` for each pane's LAST frame in the
+    // burst, so every touched pane settles exactly once instead of repainting
+    // on every intermediate redraw. Same vt_write-but-no-paint contract as
+    // `overlay_active`, minus the modal semantics.
+    defer_paint: bool,
 ) -> Result<FrameOutcome, AttachError> {
     // Per-inbound-frame dispatch span (debug; off under the default
     // `phux=info` filter and free when disabled). For the content frames
@@ -277,7 +286,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // the outbound emit, which would scribble over the
                 // modal. On dismiss the driver triggers a full
                 // repaint and the user sees the latest content.
-                if overlay_active {
+                // phux-jhv8: `defer_paint` suppresses the same way when this
+                // snapshot is an earlier member of a coalesced burst.
+                if overlay_active || defer_paint {
                     let _ = overlay;
                 } else {
                     // phux-flywheel: the snapshot paint trigger, timed
@@ -399,6 +410,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             };
             if is_focused
                 && !overlay_active
+                && !defer_paint
                 && let Some(fid) = focused_pane.as_ref()
             {
                 // phux-flywheel: the paint trigger — render the focused
@@ -465,7 +477,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // no-op (incremental-paint win).
                     false,
                 );
-            } else if !overlay_active {
+            } else if !overlay_active && !defer_paint {
                 // phux-2x9: repaint a NON-focused pane on its own output
                 // so it isn't visually frozen — output (and the
                 // post-split/resize resync snapshot) must show without
@@ -1076,6 +1088,7 @@ mod tests {
             &mut pending_splits,
             &mut pending_windows,
             false,
+            false,
         )
         .expect("handle_server_frame")
     }
@@ -1151,6 +1164,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            false,
             false,
         )
         .expect("attached");
@@ -1478,6 +1492,7 @@ mod tests {
             &mut pending_splits,
             &mut pending_windows,
             false,
+            false,
         )
         .expect("handle_server_frame");
 
@@ -1517,6 +1532,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            false,
             false,
         )
         .expect("handle_server_frame")
