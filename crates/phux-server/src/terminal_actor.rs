@@ -1411,6 +1411,9 @@ impl TerminalActor {
     /// sample was produced (no matching emit instant, older/duplicate ack,
     /// or unregistered consumer).
     fn on_frame_ack(&mut self, client_id: ClientId, seq: u64) -> bool {
+        // Captured before the `&mut` borrow below: the global test override
+        // that forces every consumer onto the tick.
+        let force_all_consumers = self.consumer_tick_emits;
         let Some(consumer) = self.consumer_states.get_mut(&client_id) else {
             // Race against detach (or an ack for an unknown client). No
             // bookkeeping; no warning — this is a steady-state event,
@@ -1421,6 +1424,21 @@ impl TerminalActor {
             );
             return false;
         };
+        // phux-38k6: only a tick-managed consumer's acks belong to this
+        // per-consumer seq space. A raw (broadcast-pump) consumer acks the
+        // pump's *local* seq, which is unrelated to this state's `next_seq` /
+        // `emit_instants`; folding it in would set `last_acked_seq` from a
+        // foreign counter and skew the RTT/backpressure accounting once the
+        // consumer is (or becomes) state-sync. Drop it — the pump owns no
+        // per-consumer state to update (phux-fseo made modes negotiable, so
+        // this is now reachable, not just defensive).
+        if !force_all_consumers && !consumer.wants_state_sync {
+            trace!(
+                ?client_id,
+                seq, "FRAME_ACK for raw-broadcast consumer; not a tick ack, dropping"
+            );
+            return false;
+        }
         if seq <= consumer.last_acked_seq {
             // Older or duplicate ack — acks are cumulative (proto.md
             // §8.2), so `seq <= last_acked_seq` carries no new information.
@@ -3032,8 +3050,10 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(1);
         let (tx, _rx) = dummy_outbound();
+        // State-sync consumer: its acks belong to the per-consumer tick seq
+        // space, so `on_frame_ack` folds them in (phux-38k6).
         actor
-            .register_consumer(client, tx, 11, false)
+            .register_consumer(client, tx, 11, true)
             .expect("register");
 
         for seq in 1..=3 {
@@ -3056,8 +3076,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(1);
         let (tx, _rx) = dummy_outbound();
+        // State-sync consumer so its acks are processed (phux-38k6).
         actor
-            .register_consumer(client, tx, 11, false)
+            .register_consumer(client, tx, 11, true)
             .expect("register");
 
         actor.on_frame_ack(client, 5);
@@ -3084,6 +3105,31 @@ mod tests {
         assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 6);
     }
 
+    /// phux-38k6: a `FRAME_ACK` from a raw (broadcast-pump) consumer carries a
+    /// pump-local seq unrelated to this per-consumer tick state, so
+    /// `on_frame_ack` drops it — `last_acked_seq` must NOT move. Otherwise a
+    /// foreign counter would skew the RTT/backpressure accounting if the
+    /// consumer later went state-sync.
+    #[test]
+    fn on_frame_ack_for_raw_consumer_is_dropped() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        // Global gate OFF (production human-attach default) and a raw consumer.
+        let client = ClientId(1);
+        let (tx, _rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
+
+        let folded = actor.on_frame_ack(client, 7);
+        assert!(!folded, "raw-consumer ack produces no RTT sample");
+        assert_eq!(
+            actor.consumer_state(client).expect("state").last_acked_seq,
+            0,
+            "raw-pump ack must not advance the per-consumer last_acked_seq",
+        );
+    }
+
     /// phux-q0e.4: `on_frame_ack` for an unregistered client is a silent
     /// no-op — no panic, no entry created. Mirrors the rest of the
     /// consumer lifecycle's idempotency.
@@ -3107,8 +3153,10 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(7);
         let (tx, _rx) = dummy_outbound();
+        // State-sync so the pre-detach ack is folded in (phux-38k6); the
+        // point of the test is that a *post*-detach ack does not resurrect.
         actor
-            .register_consumer(client, tx, 11, false)
+            .register_consumer(client, tx, 11, true)
             .expect("register");
         actor.on_frame_ack(client, 2);
         assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 2);
