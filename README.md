@@ -28,7 +28,9 @@ That second one is doing more than it lets on. We'll get to it.
 <!-- DEMO: a ~10s asciinema cast / GIF goes RIGHT HERE. Show kitty graphics +
      truecolor surviving a detach/reattach, then a `phux run`/`phux watch`
      line so the agent angle lands in the same breath. This is the single
-     most important pixel on the page. Until it exists the page is half-built. -->
+     most important pixel on the page. Recipe: docs/demo.md.
+     When the GIF lands at docs/assets/demo.gif, replace this comment with:
+       ![phux: modern terminal content surviving a detach/reattach, then driven headless](docs/assets/demo.gif) -->
 
 ## Try it
 
@@ -56,9 +58,9 @@ phux wait build --until "0 failed"      # blocks until the output shows up, exit
 phux watch --json work:1.0 | jq .       # live events: bells, titles, idle, lifecycle
 ```
 
-Point an MCP-speaking agent at it instead and it gets the same six verbs as
-tools (`phux-mcp`, JSON-RPC over stdio). The agent isn't peeking at a human's
-session through a keyhole. It's a first-class user with the same keys.
+Point an MCP-speaking agent at it instead and it gets the same surface as tools
+— `phux-mcp` exposes the core verbs over JSON-RPC stdio. The agent isn't peeking
+at a human's session through a keyhole. It's a first-class user with the same keys.
 
 ## Why it's built this way
 

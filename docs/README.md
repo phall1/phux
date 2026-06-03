@@ -39,6 +39,7 @@ If you're just trying to understand phux, top to bottom:
 | Reading how it's built | [`architecture/`](./architecture/) — process model, threading, transport, crate graph |
 | Operating it | [`operations.md`](./operations.md) — errors, logging, telemetry, security boundaries |
 | Understanding a past decision | [`../ADR/README.md`](../ADR/README.md) |
+| Recording the README demo | [`demo.md`](./demo.md) |
 | Touching the docs themselves | [`CONVENTIONS.md`](./CONVENTIONS.md) |
 
 [`../ADR/`](../ADR/) holds decision records — one decision per file,
