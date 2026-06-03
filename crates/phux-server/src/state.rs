@@ -1321,6 +1321,25 @@ impl ServerState {
         (sid, wid, pid)
     }
 
+    /// Add a new pane (Terminal) to `session`'s first window — the spawn
+    /// counterpart to [`Self::seed_session`] that does NOT create a new
+    /// session.
+    ///
+    /// A TUI split lands here (phux-i9zl): the new L1 Terminal joins the
+    /// current session's window so `phux ls` keeps showing one session, and
+    /// a reattach to that session resolves every split pane. Targets the
+    /// session's first window — v0.1 sessions are single-window, so that is
+    /// the window the client is viewing; multi-window targeting (the client's
+    /// active window) is future work.
+    ///
+    /// Returns `None` if `session` is unknown or has no window — unreachable
+    /// for a seeded session, which always has at least one window.
+    #[must_use]
+    pub fn add_pane_to_session(&mut self, session: SessionId) -> Option<TerminalId> {
+        let wid = self.registry.session(session)?.windows.first().copied()?;
+        self.registry.new_terminal(wid).ok()
+    }
+
     /// Test-only: snapshot the per-pane input log.
     ///
     /// Exposed behind `#[cfg(test)]` so integration tests can assert

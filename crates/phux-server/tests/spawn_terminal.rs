@@ -43,8 +43,8 @@ use std::time::Duration;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
-    FrameKind, SpawnError, SpawnResult, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT,
-    TYPE_TERMINAL_SPAWNED,
+    Command, CommandResult, CommandValue, FrameKind, SpawnError, SpawnResult, StateScope,
+    TYPE_COMMAND_RESULT, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SPAWNED,
 };
 use phux_server::DEFAULT_COLLECTION_ID;
 use portable_pty::CommandBuilder;
@@ -279,6 +279,100 @@ fn spawn_terminal_in_default_collection_round_trips_input() {
             acc.len(),
             acc,
         );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// Drain frames until a `COMMAND_RESULT` matching `request_id` arrives.
+async fn await_command_result(stream: &mut UnixStream, request_id: u32) -> CommandResult {
+    let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let Ok((type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
+            break;
+        };
+        if type_byte != TYPE_COMMAND_RESULT {
+            continue;
+        }
+        if let FrameKind::CommandResult {
+            request_id: got,
+            result,
+        } = frame
+            && got == request_id
+        {
+            return result;
+        }
+    }
+    panic!("no COMMAND_RESULT for request_id {request_id} within deadline");
+}
+
+/// phux-i9zl: a split (`SPAWN_TERMINAL` from an attached client) must land
+/// the new pane in the client's CURRENT session's window — NOT a fresh
+/// `spawn-N` session. Regression guard for the live bug where `phux ls`
+/// showed two sessions after one split (and the split pane was orphaned in
+/// a session the client never reattached to).
+#[test]
+fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 7,
+                collection: DEFAULT_COLLECTION_ID,
+                command: Some(vec!["/bin/cat".to_owned()]),
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+        let new_id = match await_terminal_spawned(&mut stream, 7).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("expected Ok, got {other:?}"),
+        };
+
+        // Server-scope GET_STATE: exactly ONE session, and the spawned pane
+        // lives in it alongside the seed pane.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 8,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 8).await {
+            CommandResult::OkWith(CommandValue::State(snapshot)) => {
+                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+                assert_eq!(
+                    snapshot.sessions.len(),
+                    1,
+                    "split must NOT create a second session; got {names:?}",
+                );
+                assert_eq!(names, vec!["default"], "the one session is still 'default'");
+                assert_eq!(
+                    snapshot.panes.len(),
+                    2,
+                    "the seed pane + the spawned pane both live in the session",
+                );
+                assert!(
+                    snapshot.panes.iter().any(|p| p.id == new_id),
+                    "the spawned pane id must appear in the session snapshot",
+                );
+            }
+            other => panic!("expected Ok_With(State(..)), got {other:?}"),
+        }
 
         drop(stream);
         shutdown_tx.send(()).ok();
@@ -561,7 +655,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
         send_frame(
             &mut stream_b,
             &FrameKind::Attach {
-                target: AttachTarget::ByName("spawn-1".to_owned()),
+                target: AttachTarget::ByName("resize-test".to_owned()),
                 viewport: ViewportInfo::new(80, 24),
                 request_scrollback: false,
                 scrollback_limit_lines: 0,
@@ -572,10 +666,10 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
         let (type_byte, attached) = recv_typed(&mut stream_b).await;
         assert_eq!(
             type_byte, TYPE_ATTACHED,
-            "second client must see ATTACHED for spawn-1 session",
+            "second client must see ATTACHED for resize-test session",
         );
         // `SessionSnapshot.panes` aggregates panes across ALL sessions
-        // (resize-test + spawn-1 in this test), so filter by the
+        // (resize-test session in this test), so filter by the
         // spawned terminal id rather than asserting on the slice's
         // length. The id is what the client correlates across the wire
         // in any case.
@@ -585,7 +679,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
         };
         let spawned = panes.iter().find(|p| p.id == new_id).unwrap_or_else(|| {
             panic!(
-                "spawn-1's pane (id={new_id:?}) missing from re-attach snapshot \
+                "the spawned pane (id={new_id:?}) missing from re-attach snapshot \
                      (got {} panes: ids={:?})",
                 panes.len(),
                 panes.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
@@ -593,12 +687,12 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
         });
         assert_eq!(
             spawned.cols, 120,
-            "spawn-1's pane must report post-resize cols (120), got {}",
+            "the spawned pane must report post-resize cols (120), got {}",
             spawned.cols,
         );
         assert_eq!(
             spawned.rows, 40,
-            "spawn-1's pane must report post-resize rows (40), got {}",
+            "the spawned pane must report post-resize rows (40), got {}",
             spawned.rows,
         );
 

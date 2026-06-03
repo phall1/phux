@@ -477,6 +477,52 @@ pub fn seed_session_with_pty(
     Ok(terminal)
 }
 
+/// Add a **PTY-backed** pane to an existing `session`'s window and spawn its
+/// `TerminalActor` — the split counterpart to [`seed_session_with_pty`]
+/// (phux-i9zl).
+///
+/// Identical to `seed_session_with_pty` except the new pane joins
+/// `session`'s window via [`ServerState::add_pane_to_session`] instead of
+/// creating a fresh `spawn-N` session. A TUI split routes here so the new
+/// L1 Terminal stays in the spawning client's current session.
+///
+/// Returns `Ok(None)` when `session` has no window to host the pane
+/// (unreachable for a seeded session); the caller maps that to a wire
+/// `SpawnError`. `Err` is an actor-build failure, same as the seed path.
+pub fn spawn_pane_with_pty(
+    state: &SharedState,
+    session: phux_core::ids::SessionId,
+    cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
+    root_token: &CancellationToken,
+) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
+    use phux_core::ids::TerminalId;
+    let Some(terminal): Option<TerminalId> = state.with_mut(|s| s.add_pane_to_session(session))
+    else {
+        return Ok(None);
+    };
+    let terminal_token = root_token.child_token();
+    let bundle =
+        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
+    let crate::terminal_actor::TerminalActorBundle {
+        mut actor,
+        handle,
+        exit_notify,
+        ..
+    } = bundle;
+    // Same agent-event wiring as the seed path (phux-y2t): intern the wire id
+    // up front and spawn the per-pane event drain.
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_SINK_CAPACITY);
+    actor.set_event_sink(event_tx);
+    let wire_terminal_id = state.with_mut(|s| {
+        let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
+        s.intern_terminal_wire(terminal)
+    });
+    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
+    spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    Ok(Some(terminal))
+}
+
 /// Bounded capacity of the per-pane agent-event sink (SPEC §7.5,
 /// phux-y2t). Small: events are coalesced (one `dirty` per burst, one
 /// `idle` to close it) and the stream tolerates loss — a full sink drops
@@ -1716,18 +1762,18 @@ async fn query_pane_cwd(handle: crate::terminal_actor::TerminalHandle) -> Option
 /// id would be rejected at [`handle_terminal_input`]'s subscription
 /// gate and the user would see nothing.
 ///
-/// A fresh session is created to host the pane. v0.1 sessions are 1:1
-/// with panes in practice (the multi-pane lifecycle work tracked under
-/// phux-9gw lifts this); when L2 Collection wire frames ship, the
-/// per-spawn session wrapper can collapse into a real Collection-scoped
-/// container without rewriting this handler.
+/// The pane joins the spawning client's CURRENT session's window
+/// (phux-i9zl): a TUI split keeps the session intact so `phux ls` shows one
+/// session and a reattach resolves every split pane. The session is
+/// resolved from the client's attachment; a `SPAWN_TERMINAL` from a
+/// non-attached client is refused (no session to host the pane).
 #[allow(
     clippy::too_many_arguments,
     reason = "1:1 with the SPAWN_TERMINAL wire frame (request_id + collection + command + cwd + env) plus the standard SharedState/client_id/out_tx/root_token threading the rest of this file uses"
 )]
 #[allow(
     clippy::too_many_lines,
-    reason = "linear orchestration: validate collection → build CommandBuilder from wire frame → synthesize session name → spawn PTY-backed actor → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
+    reason = "linear orchestration: validate collection → build CommandBuilder from wire frame → resolve spawning client's session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
 )]
 async fn handle_spawn_terminal(
     state: &SharedState,
@@ -1802,31 +1848,44 @@ async fn handle_spawn_terminal(
         }
     }
 
-    // Synthesize a per-spawn session name. The registry rejects nothing
-    // about duplicate names (the lookup is by id, not name) but a
-    // distinguishable name eases debugging and keeps the snapshot path's
-    // by-name lookups deterministic. The wire `TerminalId` is what the
-    // client correlates against, not this name.
-    let session_name = state.with(|s| {
-        let existing: std::collections::HashSet<String> = s
-            .registry
-            .sessions()
-            .map(|(_, sess)| sess.name.clone())
-            .collect();
-        let mut idx: u32 = 1;
-        loop {
-            let candidate = format!("spawn-{idx}");
-            if !existing.contains(&candidate) {
-                return candidate;
-            }
-            idx = idx.saturating_add(1);
-        }
-    });
+    // phux-i9zl: a split spawns into the spawning client's CURRENT session's
+    // window, not a fresh `spawn-N` wrapper session. Resolve that session
+    // from the client's attachment (the same `s.attached` lookup the cwd
+    // inheritance above uses). A `SPAWN_TERMINAL` from a non-attached client
+    // has no session to host the pane — reject it rather than orphan a PTY.
+    let Some(session) = state.with(|s| s.attached.get(&client_id).map(|c| c.session)) else {
+        let _ = out_tx
+            .send(Outbound::Frame(FrameKind::TerminalSpawned {
+                request_id,
+                result: SpawnResult::Err(SpawnError::SpawnFailed(
+                    "spawning client is not attached to a session".to_owned(),
+                )),
+            }))
+            .await;
+        return;
+    };
 
     let history_limit = state.with(crate::state::ServerState::history_limit);
     let core_terminal_id =
-        match seed_session_with_pty(state, &session_name, builder, history_limit, root_token) {
-            Ok(id) => id,
+        match spawn_pane_with_pty(state, session, builder, history_limit, root_token) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                warn!(
+                    ?client_id,
+                    request_id,
+                    ?session,
+                    "SPAWN_TERMINAL: attached session has no window to host the pane",
+                );
+                let _ = out_tx
+                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
+                        request_id,
+                        result: SpawnResult::Err(SpawnError::SpawnFailed(
+                            "attached session has no window to host the pane".to_owned(),
+                        )),
+                    }))
+                    .await;
+                return;
+            }
             Err(err) => {
                 warn!(
                     ?client_id,
