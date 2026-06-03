@@ -436,6 +436,38 @@ impl ClientHandle {
         &mut self.screen
     }
 
+    /// Snapshot the oracle's current text WITHOUT draining the wire.
+    ///
+    /// Safe to call against a continuously-emitting seed where
+    /// [`Self::screenshot`] would loop forever (its "drain until quiet" never
+    /// terminates when output arrives faster than its idle window). Pair with
+    /// [`Self::drain_output_bounded`] when the latest content is wanted.
+    pub fn snapshot_text(&mut self) -> String {
+        self.screen.snapshot_text()
+    }
+
+    /// Drain up to `max_frames` of immediately-available `TERMINAL_OUTPUT`
+    /// into the oracle, stopping early on a brief (5ms) quiet gap.
+    ///
+    /// Unlike [`Self::screenshot`], this is BOUNDED by frame count, so it is
+    /// safe to call against a seed that emits continuously (e.g. an infinite
+    /// `printf` loop): `screenshot`'s "drain until quiet" never terminates
+    /// when output arrives faster than its idle window. Use this inside a
+    /// resize/output storm to keep the server's bounded outbound mailbox and
+    /// socket buffer from filling — a client that only sends and never reads
+    /// wedges the writer and deadlocks the shared current-thread runtime.
+    pub async fn drain_output_bounded(&mut self, max_frames: usize) {
+        for _ in 0..max_frames {
+            match timeout(Duration::from_millis(5), recv_typed(&mut self.stream)).await {
+                Ok((tb, FrameKind::TerminalOutput { bytes, .. })) if tb == TYPE_TERMINAL_OUTPUT => {
+                    self.screen.write(&bytes);
+                }
+                Ok(_) => {}      // non-output frame: ignore, keep draining
+                Err(_) => break, // brief quiet: backlog cleared for now
+            }
+        }
+    }
+
     /// Drain `TERMINAL_OUTPUT` into the oracle until `pred` holds or
     /// [`WIRE_RECV_TIMEOUT`] elapses. Returns `Ok(())` if the predicate
     /// held, `Err` with the final screen text on timeout.
