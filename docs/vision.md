@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-03
 ---
 
 # Vision
@@ -13,6 +13,11 @@ destination semantics. For the present-tense model — what phux is
 today — read [`CONCEPTS.md`](./CONCEPTS.md).
 
 ---
+
+This is the part where we tell you where it's all going. Standard
+caveat applies: it's a direction, not a delivery date. The reason to
+write it down is that the v0.1 wire was shaped by it — the forward
+compatibility below isn't a someday-maybe, it's already in the bytes.
 
 ## Why now
 
@@ -100,18 +105,21 @@ chrome the TUI grows over its layered substrate.
 
 ### The agent SDK
 
-A small Rust crate (`phux-client-sdk`) giving a program a typed
-handle to spawn, observe, and drive Terminals over the wire. L1 only.
-No sessions, no windows, no layout. The agent's universe is
-*terminals and events*: spawn a build, wait for the OSC 133
-command-end event, read the exit code, kill the terminal, move on.
+The agent's universe is *terminals and events*: spawn a build, wait
+for the OSC 133 command-end event, read the exit code, kill the
+terminal, move on. Two ways to reach it ship today — the headless
+`phux` CLI verbs (`run`, `wait`, `watch`, `send-keys`, `snapshot`, …)
+and the [`phux-mcp`](./consumers/mcp.md) adapter, both L1-shaped with no
+sessions, windows, or layout in sight.
 
-A future `phux` CLI grows the same primitives for shell use — `phux
-spawn`, `phux observe`, `phux exec`. JSON-over-HTTP shows up if
-non-Rust agents become a real consumer category.
+What's still on the arc here is the *ergonomic* layer: a small Rust
+crate (`phux-client-sdk`) giving a program a typed handle over the same
+wire, and JSON-over-HTTP if non-Rust agents that can't speak MCP become
+a real consumer category. The surface that matters already exists; this
+is convenience on top of it.
 
-[`consumers/sdk.md`](./consumers/sdk.md) is the surface doc (currently
-a stub).
+[`consumers/agents.md`](./consumers/agents.md) and
+[`consumers/mcp.md`](./consumers/mcp.md) are the shipped-surface docs.
 
 ---
 
@@ -119,8 +127,9 @@ a stub).
 
 - **v0.1 — substrate cut.** L1 frozen, L2 stable, L3 as opaque
   storage. Reference TUI works on L1 + L3 for layout. Federation hooks
-  are baked into the wire but not exercised. Agent SDK ships as an
-  L1-only wrapper.
+  are baked into the wire but not exercised. The agent surface ships as
+  the headless CLI verbs plus the `phux-mcp` adapter; the typed Rust SDK
+  crate is the convenience layer still to come.
 - **v0.2 — federation real.** Hubs route to satellites. QUIC
   transport. Lazy state sync replaces pass-through bytes per ADR-0018.
 - **v0.x and beyond — second consumer.** A native GUI consumer
