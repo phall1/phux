@@ -26,24 +26,32 @@
 
 mod common;
 
+use std::time::Duration;
+
 use phux_protocol::wire::frame::{
-    AttachTarget, FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_TERMINAL_SNAPSHOT, ViewportInfo,
+    AttachTarget, FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_TERMINAL_OUTPUT,
+    TYPE_TERMINAL_SNAPSHOT, ViewportInfo,
 };
 use tempfile::TempDir;
+use tokio::time::timeout;
 
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, attach_by_name, recv_typed, run_local, send_frame, spawn_server,
-    wait_for_socket,
+    spawn_server_seed_pty_no_cmd, wait_for_socket,
 };
 
 /// `ATTACH { CreateIfMissing { name } }` at the canonical 80x24 viewport.
 /// Used to materialize a second session over the wire without a second
 /// pre-seed.
 fn create_if_missing(name: &str) -> FrameKind {
+    create_if_missing_with_command(name, None)
+}
+
+fn create_if_missing_with_command(name: &str, command: Option<Vec<String>>) -> FrameKind {
     FrameKind::Attach {
         target: AttachTarget::CreateIfMissing {
             name: name.to_owned(),
-            command: None,
+            command,
             cwd: None,
         },
         viewport: ViewportInfo::new(80, 24),
@@ -180,6 +188,118 @@ fn reattach_to_other_session_on_same_connection_renders_b() {
             }
             other => panic!("B: expected TerminalSnapshot, got {other:?}"),
         }
+
+        drop(client);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn reattach_to_other_session_does_not_forward_old_session_output() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+
+        let alpha_cmd = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "i=0; while :; do i=$((i+1)); printf 'ALPHA-%d\\n' \"$i\"; sleep 0.05; done".to_owned(),
+        ];
+        let beta_cmd = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "i=0; while :; do i=$((i+1)); printf 'BETA-%d\\n' \"$i\"; sleep 0.05; done".to_owned(),
+        ];
+
+        // Materialize both sessions with deterministic, distinct output streams.
+        for (name, command) in [("alpha", alpha_cmd), ("beta", beta_cmd)] {
+            let mut seed = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+            send_frame(
+                &mut seed,
+                &create_if_missing_with_command(name, Some(command)),
+            )
+            .await;
+            let (type_byte, _attached) = recv_typed(&mut seed).await;
+            assert_eq!(type_byte, TYPE_ATTACHED, "seed {name}: ATTACHED");
+            let (type_byte, _snap) = recv_typed(&mut seed).await;
+            assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT, "seed {name}: snapshot");
+            send_frame(&mut seed, &FrameKind::Detach).await;
+            loop {
+                let (type_byte, frame) = recv_typed(&mut seed).await;
+                if type_byte == TYPE_TERMINAL_OUTPUT {
+                    continue;
+                }
+                assert_eq!(type_byte, TYPE_DETACHED, "seed {name}: DETACHED");
+                assert!(matches!(frame, FrameKind::Detached));
+                break;
+            }
+        }
+
+        let mut client = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut client, &attach_by_name("alpha")).await;
+        let (type_byte, _attached_a) = recv_typed(&mut client).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "A: ATTACHED");
+        let (type_byte, _snap_a) = recv_typed(&mut client).await;
+        assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT, "A: snapshot");
+
+        // Prove the alpha raw-output pump is live before the switch.
+        let mut saw_alpha = false;
+        for _ in 0..20 {
+            let (type_byte, frame) = recv_typed(&mut client).await;
+            if type_byte == TYPE_TERMINAL_OUTPUT
+                && let FrameKind::TerminalOutput { bytes, .. } = frame
+                && bytes.windows(b"ALPHA".len()).any(|w| w == b"ALPHA")
+            {
+                saw_alpha = true;
+                break;
+            }
+        }
+        assert!(saw_alpha, "A: expected live ALPHA output before detach");
+
+        send_frame(&mut client, &FrameKind::Detach).await;
+        loop {
+            let (type_byte, frame) = recv_typed(&mut client).await;
+            if type_byte == TYPE_TERMINAL_OUTPUT {
+                continue;
+            }
+            assert_eq!(type_byte, TYPE_DETACHED, "switch: DETACHED");
+            assert!(matches!(frame, FrameKind::Detached));
+            break;
+        }
+
+        send_frame(&mut client, &attach_by_name("beta")).await;
+        let (type_byte, _attached_b) = recv_typed(&mut client).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "B: ATTACHED");
+        let (type_byte, _snap_b) = recv_typed(&mut client).await;
+        assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT, "B: snapshot");
+
+        // After B attaches on the same connection, only B's pump should feed this mailbox.
+        // Before phux-lskb, A's orphaned pump could still forward ALPHA output here.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(700);
+        let mut saw_beta = false;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let Ok((type_byte, frame)) = timeout(remaining, recv_typed(&mut client)).await else {
+                break;
+            };
+            if type_byte != TYPE_TERMINAL_OUTPUT {
+                continue;
+            }
+            let FrameKind::TerminalOutput { bytes, .. } = frame else {
+                continue;
+            };
+            assert!(
+                !bytes.windows(b"ALPHA".len()).any(|w| w == b"ALPHA"),
+                "old alpha output pump forwarded after beta attach: {:?}",
+                String::from_utf8_lossy(&bytes),
+            );
+            if bytes.windows(b"BETA".len()).any(|w| w == b"BETA") {
+                saw_beta = true;
+            }
+        }
+        assert!(saw_beta, "B: expected live BETA output after reattach");
 
         drop(client);
         shutdown_tx.send(()).ok();

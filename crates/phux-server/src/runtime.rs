@@ -843,6 +843,12 @@ where
     let mut sibling_tasks: JoinSet<()> = JoinSet::new();
     sibling_tasks.spawn_local(writer_task(writer, out_rx, client_id));
 
+    // Per-attach raw-output pumps. These are deliberately separate from
+    // `sibling_tasks`: DETACH/session switch must abort pane output pumps
+    // without killing the writer, because the writer still needs to emit
+    // DETACHED and may serve a later ATTACH on the same connection.
+    let mut output_pumps: JoinSet<()> = JoinSet::new();
+
     // Per-connection cache of the most-recently-advertised
     // [`ClientCapabilities`] (SPEC §6.2). HELLO populates this; ATTACH
     // consumes it when constructing the `AttachedClient`. Pre-HELLO it
@@ -952,6 +958,7 @@ where
                     &out_tx,
                     negotiated_client_caps,
                     &root_token,
+                    &mut output_pumps,
                 )
                 .await;
             }
@@ -969,6 +976,7 @@ where
                 // to `detach()` this client on the next line, so the
                 // writer being gone is the next thing to happen
                 // anyway. Logging here would be pure noise.
+                abort_output_pumps(&mut output_pumps, client_id, "DETACH").await;
                 let _ = out_tx.send(Outbound::Frame(FrameKind::Detached)).await;
                 detach_and_release_consumer_state(&state, client_id);
             }
@@ -1080,6 +1088,24 @@ where
             }
         }
     }
+}
+
+async fn abort_output_pumps(
+    output_pumps: &mut JoinSet<()>,
+    client_id: ClientId,
+    reason: &'static str,
+) {
+    if output_pumps.is_empty() {
+        return;
+    }
+    debug!(
+        ?client_id,
+        pump_count = output_pumps.len(),
+        reason,
+        "aborting per-attach output pumps",
+    );
+    output_pumps.abort_all();
+    while output_pumps.join_next().await.is_some() {}
 }
 
 // -----------------------------------------------------------------------------
@@ -2909,6 +2935,7 @@ async fn handle_attach(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     client_caps: ClientCapabilities,
     root_token: &CancellationToken,
+    output_pumps: &mut JoinSet<()>,
 ) {
     let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
         return;
@@ -3054,7 +3081,7 @@ async fn handle_attach(
             let pump_out_tx = out_tx.clone();
             let pump_wire_terminal_id = wire_terminal_id.clone();
             let pump_client_caps = client_caps;
-            tokio::task::spawn_local(async move {
+            output_pumps.spawn_local(async move {
                 let mut seq: u64 = 0;
                 loop {
                     match output_rx.recv().await {
@@ -3572,6 +3599,81 @@ mod tests {
         assert_eq!(&buf[5..13], &0xDEAD_BEEF_CAFE_BABE_u64.to_be_bytes());
     }
 
+    #[test]
+    fn detach_aborts_raw_output_pumps_without_closing_writer_mailbox() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let client_id = ClientId(7);
+            let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Outbound>(8);
+            let (output_tx, _seed_rx) = tokio::sync::broadcast::channel::<bytes::Bytes>(8);
+            let mut output_rx = output_tx.subscribe();
+            let mut output_pumps = JoinSet::new();
+            let terminal_id = phux_protocol::ids::TerminalId::local(42);
+
+            let pump_out_tx = out_tx.clone();
+            let pump_terminal_id = terminal_id.clone();
+            output_pumps.spawn_local(async move {
+                let mut seq: u64 = 0;
+                while let Ok(bytes) = output_rx.recv().await {
+                    seq = seq.wrapping_add(1);
+                    if pump_out_tx
+                        .send(Outbound::Frame(FrameKind::TerminalOutput {
+                            terminal_id: pump_terminal_id.clone(),
+                            seq,
+                            bytes: bytes.to_vec(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+
+            output_tx
+                .send(bytes::Bytes::from_static(b"before-detach"))
+                .unwrap();
+            let first = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+                .await
+                .expect("first output timed out")
+                .expect("writer mailbox closed");
+            assert!(matches!(
+                first,
+                Outbound::Frame(FrameKind::TerminalOutput { seq: 1, .. })
+            ));
+
+            abort_output_pumps(&mut output_pumps, client_id, "test-detach").await;
+            assert!(output_pumps.is_empty());
+
+            // The writer mailbox remains usable after DETACH so the server
+            // can still emit DETACHED or serve a later ATTACH on the same
+            // connection, but the old per-pane pump no longer forwards bytes.
+            assert!(
+                out_tx
+                    .send(Outbound::Frame(FrameKind::Detached))
+                    .await
+                    .is_ok()
+            );
+            assert!(
+                output_tx
+                    .send(bytes::Bytes::from_static(b"after-detach"))
+                    .is_ok()
+            );
+
+            let detached = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+                .await
+                .expect("DETACHED timed out")
+                .expect("writer mailbox closed");
+            assert!(matches!(detached, Outbound::Frame(FrameKind::Detached)));
+            tokio::task::yield_now().await;
+            assert!(
+                out_rx.try_recv().is_err(),
+                "old output pump forwarded after detach"
+            );
+        });
+    }
+
     /// `VIEWPORT_RESIZE` updates the focused pane's stored dims on the
     /// canonical `Registry`. byc.5's PTY-resize integration will read
     /// this state when it lands; today we just observe the mutation.
@@ -3792,6 +3894,7 @@ mod tests {
                 let state_for_task = state.clone();
                 let test_root_token = CancellationToken::new();
                 let attach_task = tokio::task::spawn_local(async move {
+                    let mut output_pumps = JoinSet::new();
                     handle_attach(
                         &state_for_task,
                         client_id,
@@ -3802,6 +3905,7 @@ mod tests {
                         &out_tx,
                         ClientCapabilities::default(),
                         &test_root_token,
+                        &mut output_pumps,
                     )
                     .await;
                 });
@@ -3934,6 +4038,7 @@ mod tests {
                 let state_for_task = state.clone();
                 let token = CancellationToken::new();
                 let attach_task = tokio::task::spawn_local(async move {
+                    let mut output_pumps = JoinSet::new();
                     handle_attach(
                         &state_for_task,
                         client_id,
@@ -3944,6 +4049,7 @@ mod tests {
                         &out_tx,
                         ClientCapabilities::default(),
                         &token,
+                        &mut output_pumps,
                     )
                     .await;
                 });
