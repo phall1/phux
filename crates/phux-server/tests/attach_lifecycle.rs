@@ -269,7 +269,6 @@ fn attach_unknown_session_returns_error() {
 /// drift between binaries.
 #[test]
 fn ping_pong_still_works_after_localset_flip() {
-    use phux_protocol::wire::frame::TYPE_PONG;
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
@@ -280,15 +279,8 @@ fn ping_pong_still_works_after_localset_flip() {
         let ping = encode_frame(&FrameKind::Ping { nonce: 0xABCD });
         stream.write_all(&ping).await.unwrap();
         stream.flush().await.unwrap();
-
-        let mut header = [0u8; 4];
-        stream.read_exact(&mut header).await.unwrap();
-        let body_len = u32::from_be_bytes(header) as usize;
-        let mut body = vec![0u8; body_len];
-        stream.read_exact(&mut body).await.unwrap();
-        assert_eq!(body[0], TYPE_PONG);
-        let nonce = u64::from_be_bytes(body[1..9].try_into().unwrap());
-        assert_eq!(nonce, 0xABCD);
+        let (_type_byte, frame) = read_typed_frame(&mut stream).await;
+        assert_eq!(frame, FrameKind::Pong { nonce: 0xABCD });
 
         drop(stream);
         shutdown_tx.send(()).ok();

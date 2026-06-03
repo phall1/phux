@@ -13,7 +13,7 @@
 use bytes::BytesMut;
 use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
-    KeyboardProtocolSet, Layer, LayerSet,
+    KeyboardProtocolSet, Layer, LayerSet, ServerCapabilities,
 };
 use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
@@ -406,6 +406,52 @@ fn hello_round_trip_minimal() {
     assert!(tail.is_empty());
 }
 
+#[test]
+fn hello_ok_round_trip() {
+    let frame = FrameKind::HelloOk {
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        server_caps: ServerCapabilities::new().with_layers(LayerSet::all()),
+        server_id: vec![0xDE, 0xAD, 0xBE, 0xEF],
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+/// A truncated `HELLO_OK` (version only, no trailing caps / `server_id` —
+/// the shape a pre-capabilities server might emit) must still decode,
+/// falling back to `ServerCapabilities::default()` (L1) and an empty
+/// `server_id` per the SPEC §6 "skip them by length" rule.
+#[test]
+fn hello_ok_round_trip_version_only_trailing_defaults() {
+    use bytes::BufMut;
+    // Hand-build a body of just the type byte + version triple.
+    let mut body = BytesMut::new();
+    body.put_u8(0x80); // TYPE_HELLO_OK
+    body.put_u16(0); // major
+    body.put_u16(2); // minor
+    body.put_u16(0); // patch
+    let mut framed = BytesMut::new();
+    framed.put_u32(u32::try_from(body.len()).unwrap());
+    framed.extend_from_slice(&body);
+
+    let (decoded, tail) = FrameKind::decode(&framed).unwrap();
+    assert_eq!(
+        decoded,
+        FrameKind::HelloOk {
+            protocol_major: 0,
+            protocol_minor: 2,
+            protocol_patch: 0,
+            server_caps: ServerCapabilities::default(),
+            server_id: Vec::new(),
+        }
+    );
+    assert!(tail.is_empty());
+}
 #[test]
 fn hello_round_trip_each_color_support() {
     for color in [

@@ -408,6 +408,52 @@ impl Default for ClientCapabilities {
     }
 }
 
+/// What the server advertises back in `HELLO_OK` (SPEC §6.1).
+///
+/// The client declares what it *wants* via [`ClientCapabilities`]; the
+/// server declares what it *implements* here. The negotiated conformance
+/// tier set is the intersection of the two `layers` bit-fields
+/// ([ADR-0015](../../ADR/0015-protocol-layering.md) §"Conformance tiers").
+/// L1 is always implemented and always present on the wire.
+///
+/// This is deliberately narrow today — `layers` is the only negotiated
+/// axis the server owns. Color / image / keyboard tiers are client-render
+/// concerns carried by [`ClientCapabilities`], so they have no server-side
+/// counterpart. Future server-owned capabilities append as additive
+/// trailing fields (the encoding grows monotonically, same discipline as
+/// [`ClientCapabilities`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerCapabilities {
+    /// The conformance tiers (SPEC §6.2 / §16) the server mounts. L1 is
+    /// always implemented; the server adds L2 / L3 when those services
+    /// are wired. See [`LayerSet`].
+    pub layers: LayerSet,
+}
+
+impl ServerCapabilities {
+    /// Build a default server capability set: L1 only. Call [`Self::with_layers`]
+    /// to advertise the higher tiers the server actually mounts.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            layers: LayerSet::new(),
+        }
+    }
+
+    /// Builder setter for [`Self::layers`].
+    #[must_use]
+    pub const fn with_layers(mut self, layers: LayerSet) -> Self {
+        self.layers = layers;
+        self
+    }
+}
+
+impl Default for ServerCapabilities {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Detect the client terminal's color tier from environment hints.
 ///
 /// The heuristic mirrors what well-known TUIs (tmux, neovim, htop) use:

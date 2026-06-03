@@ -34,7 +34,7 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::wire::frame::{ErrorCode, FrameKind, TYPE_ERROR, TYPE_PONG};
+use phux_protocol::wire::frame::{ErrorCode, FrameKind, TYPE_ERROR};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::timeout;
@@ -121,30 +121,16 @@ fn byc_6_6_attach_unknown_session_returns_error_keeps_connection_open() {
 
         // ---- Liveness: PING/PONG proves the channel is still usable ----
         // SPEC §14: non-fatal errors do NOT close the transport. Send a
-        // PING with a distinctive nonce and confirm the PONG comes back.
-        // (PONG isn't a `FrameKind` variant yet — `0xFF` is reserved per
-        // the catalog comments in `wire/frame.rs` — so we decode it
-        // manually like `socket_lifecycle::lifecycle_ping_pong` does.)
+        // PING with a distinctive nonce and confirm the typed PONG comes back.
         let ping = encode_frame(&FrameKind::Ping { nonce: PING_NONCE });
         stream.write_all(&ping).await.unwrap();
         stream.flush().await.unwrap();
-
-        let mut header = [0u8; 4];
-        timeout(Duration::from_secs(5), stream.read_exact(&mut header))
+        let (_type_byte, frame) = timeout(Duration::from_secs(5), recv_typed(&mut stream))
             .await
-            .expect("timed out waiting for PONG header")
-            .unwrap();
-        let body_len = u32::from_be_bytes(header) as usize;
-        assert_eq!(body_len, 9, "PONG body is type byte + u64 nonce");
-        let mut body = vec![0u8; body_len];
-        timeout(Duration::from_secs(5), stream.read_exact(&mut body))
-            .await
-            .expect("timed out waiting for PONG body")
-            .unwrap();
-        assert_eq!(body[0], TYPE_PONG, "expected PONG type byte");
-        let nonce = u64::from_be_bytes(body[1..9].try_into().unwrap());
+            .expect("timed out waiting for PONG frame");
         assert_eq!(
-            nonce, PING_NONCE,
+            frame,
+            FrameKind::Pong { nonce: PING_NONCE },
             "PONG must echo the PING nonce — proves channel liveness post-error",
         );
 

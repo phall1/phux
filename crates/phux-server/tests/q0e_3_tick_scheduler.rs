@@ -82,7 +82,7 @@ fn terminal_outputs(items: &[Outbound]) -> Vec<(u32, u64, &[u8])> {
                 *seq,
                 bytes.as_slice(),
             )),
-            _ => None,
+            Outbound::Frame(_) => None,
         })
         .collect()
 }

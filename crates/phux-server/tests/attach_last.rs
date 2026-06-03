@@ -24,7 +24,7 @@ mod common;
 
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, TYPE_PONG, ViewportInfo,
+    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, ViewportInfo,
 };
 use tempfile::TempDir;
 
@@ -91,9 +91,8 @@ async fn drain_successful_attach(
 
 async fn round_trip_ping(stream: &mut tokio::net::UnixStream, nonce: u64) {
     send_frame(stream, &FrameKind::Ping { nonce }).await;
-    let framed = common::recv_framed(stream).await;
-    assert_eq!(framed[4], TYPE_PONG, "PING must receive PONG");
-    assert_eq!(&framed[5..13], &nonce.to_be_bytes());
+    let (_type_byte, frame) = recv_typed(stream).await;
+    assert_eq!(frame, FrameKind::Pong { nonce }, "PING must receive PONG");
 }
 
 #[test]

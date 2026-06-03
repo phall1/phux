@@ -25,7 +25,7 @@
 
 use bytes::BytesMut;
 
-use crate::caps::ClientCapabilities;
+use crate::caps::{ClientCapabilities, ServerCapabilities};
 use crate::ids::{
     ClientId, CollectionId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL,
     TERMINAL_ID_TAG_SATELLITE, TerminalId,
@@ -101,7 +101,7 @@ pub const TYPE_FRAME_ACK: u8 = 0x21;
 pub const TYPE_VIEWPORT_RESIZE: u8 = 0x20;
 /// Discriminant for `PING` (client to server, `docs/spec/proto.md` §7.4).
 pub const TYPE_PING: u8 = 0x7F;
-/// Discriminant for `HELLO_OK` (server to client, `docs/spec/proto.md` §6.1). Reserved.
+/// Discriminant for `HELLO_OK` (server to client, `docs/spec/proto.md` §6.1).
 pub const TYPE_HELLO_OK: u8 = 0x80;
 /// Discriminant for `ATTACHED` (server to client, `docs/spec/L1.md` §1 / §13).
 pub const TYPE_ATTACHED: u8 = 0x81;
@@ -116,7 +116,7 @@ pub const TYPE_BELL: u8 = 0xB0;
 /// `COMMAND` (per SPEC §14). Fatal errors MUST be followed by `DETACHED
 /// { reason: PROTOCOL_ERROR }` and transport close.
 pub const TYPE_ERROR: u8 = 0xC1;
-/// Discriminant for `PONG` (server to client, `docs/spec/proto.md` §7.4). Reserved.
+/// Discriminant for `PONG` (server to client, `docs/spec/proto.md` §7.4).
 pub const TYPE_PONG: u8 = 0xFF;
 /// Discriminant for `TERMINAL_OUTPUT` (server to client, `docs/spec/L1.md` §1 / §8.1).
 ///
@@ -1022,8 +1022,8 @@ pub enum AgentEvent {
 /// to spec and splits out `TERMINAL_SNAPSHOT` per SPEC §16. Under [ADR-0013] the
 /// structured `PaneDiff` variant is replaced by `TerminalOutput` (raw VT bytes)
 /// and `TerminalSnapshot` carries `vt_replay_bytes` instead of a `DiffOp` list.
-/// The remaining SPEC §7 catalog (`Hello_Ok`, `Pong`, `TerminalEvent`,
-/// `Alert`, resize/ack/command/etc.) lands in sibling tasks.
+/// The remaining SPEC §7 catalog (`TerminalEvent`, `Alert`,
+/// resize/ack/command/etc.) lands in sibling tasks.
 ///
 /// [ADR-0013]: https://github.com/phall1/phux/blob/main/ADR/0013-libghostty-bytes-on-wire.md
 #[derive(Debug, Clone, PartialEq)]
@@ -1057,11 +1057,47 @@ pub enum FrameKind {
         /// VT byte-stream downsampling via [`crate::caps::ColorSupport`].
         client_caps: ClientCapabilities,
     },
+    /// `HELLO_OK` — server handshake acknowledgement (`docs/spec/proto.md` §6.1).
+    ///
+    /// Carries the version the server selected, the [`ServerCapabilities`]
+    /// it implements, and opaque `server_id` identity bytes. The version
+    /// triple mirrors [`FrameKind::Hello`]'s positional `major/minor/patch`
+    /// (the wire carries a single concrete version, not the spec's abstract
+    /// `VersionRange` list — the server echoes the one it chose). Capability
+    /// and identity fields are trailing and length-skippable, so a decoder
+    /// reading a shorter (older) body falls back to defaults, and future
+    /// server-owned fields append without a wire break (SPEC §6 "skip them
+    /// by length").
+    ///
+    /// Version *negotiation* (rejecting an incompatible client with
+    /// `ERROR { VERSION_INCOMPATIBLE }`) is not yet enforced by the
+    /// reference server; the single-version protocol echoes its own
+    /// `PROTOCOL_VERSION` as the selected version.
+    HelloOk {
+        /// Selected major version (wire-breaking axis pre-1.0).
+        protocol_major: u16,
+        /// Selected minor version.
+        protocol_minor: u16,
+        /// Selected patch version.
+        protocol_patch: u16,
+        /// The conformance tiers the server mounts; intersect with the
+        /// client's `layers` for the negotiated tier set.
+        server_caps: ServerCapabilities,
+        /// Opaque server identity bytes (SPEC §6.1). Not interpreted by
+        /// the client today; reserved for reconnect / multi-server routing.
+        server_id: Vec<u8>,
+    },
 
     /// `PING` — liveness probe (`docs/spec/proto.md` §7.4). The peer MUST echo `nonce`
     /// back in a `PONG` frame.
     Ping {
         /// Opaque nonce echoed by the peer in `PONG`.
+        nonce: u64,
+    },
+    /// `PONG` — liveness response (`docs/spec/proto.md` §7.4). Echoes the
+    /// nonce from a prior [`FrameKind::Ping`].
+    Pong {
+        /// Nonce echoed from the corresponding `PING`.
         nonce: u64,
     },
 
@@ -1601,7 +1637,9 @@ impl FrameKind {
     pub const fn type_byte(&self) -> u8 {
         match self {
             Self::Hello { .. } => TYPE_HELLO,
+            Self::HelloOk { .. } => TYPE_HELLO_OK,
             Self::Ping { .. } => TYPE_PING,
+            Self::Pong { .. } => TYPE_PONG,
             Self::TerminalOutput { .. } => TYPE_TERMINAL_OUTPUT,
             Self::Attach { .. } => TYPE_ATTACH,
             Self::Detach => TYPE_DETACH,
@@ -1677,7 +1715,26 @@ impl FrameKind {
                 enc.write_u8(client_caps.kbd_protocols.as_wire());
                 enc.write_u8(u8::from(client_caps.hyperlinks));
             }
-            Self::Ping { nonce } => {
+            Self::HelloOk {
+                protocol_major,
+                protocol_minor,
+                protocol_patch,
+                server_caps,
+                server_id,
+            } => {
+                enc.write_u16_be(*protocol_major);
+                enc.write_u16_be(*protocol_minor);
+                enc.write_u16_be(*protocol_patch);
+                // Trailing fields — older decoders skip them via the length
+                // header per SPEC §6 ("skip them by length"). The encoder
+                // ALWAYS emits all bytes; the wire shape grows monotonically.
+                // Order: server_caps.layers, then length-prefixed server_id.
+                enc.write_u8(server_caps.layers.as_wire());
+                enc.write_bytes(server_id);
+            }
+            // `Ping` and `Pong` share a single-`u64` nonce body; merged to
+            // satisfy `clippy::match_same_arms`.
+            Self::Ping { nonce } | Self::Pong { nonce } => {
                 enc.write_u64_be(*nonce);
             }
             Self::TerminalOutput {

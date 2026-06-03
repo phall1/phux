@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-03
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -391,12 +391,12 @@ this repository as of 2026-05-26. It is informative, not normative.
 | 0x31  | C → S     | `COMMAND`         | [L1.md §5](./L1.md)| shipped   |
 | 0x40  | C → S     | `SUBSCRIBE`       | §7.3               | spec-only |
 | 0x7F  | C → S     | `PING`            | §7.4               | shipped   |
-| 0x80  | S → C     | `HELLO_OK`        | §6.1               | spec-only |
+| 0x80  | S → C     | `HELLO_OK`        | §6.1               | shipped   |
 | 0x81  | S → C     | `ATTACHED`        | [L1.md §replay](./L1.md) | shipped |
 | 0x82  | S → C     | `DETACHED`        | §7.2               | shipped   |
 | 0xC1  | S → C     | `ERROR`           | §9                 | shipped   |
 | 0xC2  | S → C     | `COMMAND_RESULT`  | [L1.md §5](./L1.md)| shipped   |
-| 0xFF  | S → C     | `PONG`            | §7.4               | partial   |
+| 0xFF  | S → C     | `PONG`            | §7.4               | shipped   |
 
 The `COMMAND` / `COMMAND_RESULT` envelope (§5, allocated 0.2.0-draft.5
 per [ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips

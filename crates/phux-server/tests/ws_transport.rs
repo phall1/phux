@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
-use phux_protocol::wire::frame::{FrameKind, TYPE_PONG};
+use phux_protocol::wire::frame::FrameKind;
 use phux_server::{ServerConfig, ServerError, ServerRuntime};
 use tempfile::TempDir;
 use tokio::net::TcpStream;
@@ -97,17 +97,20 @@ fn ws_lifecycle_ping_pong() {
             .await
             .unwrap();
 
-        // Expect a PONG binary message: [len(4)][type(1)][nonce(8)].
+        // Expect a typed PONG binary message.
         let pong = loop {
             if let Message::Binary(data) = ws.next().await.expect("ws closed before PONG").unwrap()
             {
                 break data;
             }
         };
-        assert!(pong.len() >= 13, "PONG frame too short: {}", pong.len());
-        assert_eq!(pong[4], TYPE_PONG, "expected PONG type byte");
-        let echoed = u64::from_be_bytes(pong[5..13].try_into().unwrap());
-        assert_eq!(echoed, nonce, "PONG nonce must match PING nonce");
+        let (frame, rest) = FrameKind::decode(&pong).expect("decode PONG frame");
+        assert!(rest.is_empty(), "decoder left trailing bytes");
+        assert_eq!(
+            frame,
+            FrameKind::Pong { nonce },
+            "PONG nonce must match PING nonce",
+        );
 
         drop(ws);
         shutdown_tx.send(()).ok();

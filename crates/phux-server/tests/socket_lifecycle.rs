@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bytes::BytesMut;
-use phux_protocol::wire::frame::{FrameKind, TYPE_PONG};
+use phux_protocol::wire::frame::FrameKind;
 use phux_server::{ServerConfig, ServerError, ServerRuntime};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -86,16 +86,19 @@ fn encode_ping(nonce: u64) -> BytesMut {
     buf
 }
 
-/// Read a single length-prefixed frame from the stream into `buf`. Returns the
-/// type byte and body slice via `buf` (caller inspects).
-async fn read_one_frame(stream: &mut UnixStream) -> (u8, Vec<u8>) {
+/// Read and decode one length-prefixed frame from the stream.
+async fn read_one_frame(stream: &mut UnixStream) -> FrameKind {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await.unwrap();
     let body_len = u32::from_be_bytes(header) as usize;
     let mut body = vec![0u8; body_len];
     stream.read_exact(&mut body).await.unwrap();
-    let type_byte = body[0];
-    (type_byte, body)
+    let mut framed = Vec::with_capacity(4 + body_len);
+    framed.extend_from_slice(&header);
+    framed.extend_from_slice(&body);
+    let (frame, rest) = FrameKind::decode(&framed).expect("decode frame");
+    assert!(rest.is_empty(), "decoder did not consume entire frame");
+    frame
 }
 
 /// Drive an async test body inside a `LocalSet` so the helpers can
@@ -127,11 +130,12 @@ fn lifecycle_ping_pong() {
         stream.write_all(&ping).await.unwrap();
         stream.flush().await.unwrap();
 
-        let (type_byte, body) = read_one_frame(&mut stream).await;
-        assert_eq!(type_byte, TYPE_PONG, "expected PONG type byte");
-        assert_eq!(body.len(), 9, "PONG body = type(1) + nonce(8)");
-        let echoed = u64::from_be_bytes(body[1..9].try_into().unwrap());
-        assert_eq!(echoed, nonce, "PONG nonce must match PING nonce");
+        let frame = read_one_frame(&mut stream).await;
+        assert_eq!(
+            frame,
+            FrameKind::Pong { nonce },
+            "PONG nonce must match PING nonce",
+        );
 
         // Trigger shutdown and let the server drain.
         drop(stream);
@@ -162,9 +166,8 @@ fn lifecycle_stale_socket() {
         let mut stream = wait_for_socket(&socket_path, Duration::from_secs(2)).await;
         let ping = encode_ping(7);
         stream.write_all(&ping).await.unwrap();
-        let (type_byte, body) = read_one_frame(&mut stream).await;
-        assert_eq!(type_byte, TYPE_PONG);
-        assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), 7);
+        let frame = read_one_frame(&mut stream).await;
+        assert_eq!(frame, FrameKind::Pong { nonce: 7 });
 
         drop(stream);
         shutdown_tx.send(()).ok();
@@ -234,9 +237,8 @@ fn lifecycle_partial_frame_disconnect() {
         let mut stream2 = UnixStream::connect(&socket_path).await.unwrap();
         let nonce = 42_u64;
         stream2.write_all(&encode_ping(nonce)).await.unwrap();
-        let (type_byte, body) = read_one_frame(&mut stream2).await;
-        assert_eq!(type_byte, TYPE_PONG);
-        assert_eq!(u64::from_be_bytes(body[1..9].try_into().unwrap()), nonce);
+        let frame = read_one_frame(&mut stream2).await;
+        assert_eq!(frame, FrameKind::Pong { nonce });
 
         drop(stream2);
         shutdown_tx.send(()).ok();

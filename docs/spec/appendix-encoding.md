@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-03
 ---
 
 # Appendix A — Encoding primitives
@@ -50,6 +50,8 @@ wire format, but designed for the specific concerns of this protocol:
 - A first-class `TAGGED` wire type for tagged unions, so they don't have
   to be reified as `oneof`-style hacks.
 
-A canonical hex dump of a `HELLO_OK` selecting version `0.1.0` is
-included in `crates/phux-protocol/tests/snapshots/hello_ok_v0_1_0.snap`
-once the codec exists.
+A canonical hex dump of a `HELLO_OK` selecting version `0.2.0` (full
+tier set, opaque `server_id`) is committed at
+`crates/phux-protocol/tests/snapshots/frame_wire_snapshots__snap_hello_ok.snap`
+and pinned by the `snap_hello_ok` snapshot test — any wire-format change
+surfaces there as a reviewable diff.

@@ -10,7 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use bytes::BytesMut;
-use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet};
+use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet, ServerCapabilities};
 use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -574,6 +574,27 @@ fn snap_hello_layers_all() {
         client_caps: ClientCapabilities::new()
             .with_color_support(ColorSupport::TrueColor)
             .with_layers(LayerSet::all()),
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+// -----------------------------------------------------------------------------
+// HELLO_OK — SPEC §6.1. Server handshake ack. Body is `(major, minor, patch)
+// + server_caps.layers + length-prefixed server_id`. The version triple and
+// `server_id` are the cross-implementation contract a reconnecting client
+// pins; the canonical dump is referenced from `docs/spec/appendix-encoding.md`.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snap_hello_ok() {
+    // Canonical fixture: the reference server's reply — selected version
+    // 0.2.0, full tier set (L1+L2+L3), and a fixed opaque `server_id`.
+    let frame = FrameKind::HelloOk {
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        server_caps: ServerCapabilities::new().with_layers(LayerSet::all()),
+        server_id: b"phux-srv".to_vec(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

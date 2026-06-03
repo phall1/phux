@@ -39,7 +39,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use bytes::BytesMut;
 use libghostty_vt::terminal::{Point, PointCoordinate};
 use phux_core::ids::{SessionId, TerminalId, WindowId};
 use phux_core::registry::Registry;
@@ -98,24 +97,17 @@ pub enum TerminalInput {
 /// A message queued on a client's outbound mailbox.
 ///
 /// The writer task drains a single channel of [`Outbound`] and routes each
-/// item to one of two write paths:
+/// item via one write path:
 ///
 /// * [`Outbound::Frame`] carries a [`phux_protocol::wire::frame::FrameKind`]
 ///   and is encoded via `FrameKind::encode` before being written. Per
 ///   ADR-0008 / ADR-0013 the protocol crate owns the wire types and the
 ///   server defers to them for any variant — `Hello`, `TerminalOutput`,
 ///   `TerminalSnapshot`, lifecycle frames, and so on.
-/// * [`Outbound::Raw`] carries pre-encoded bytes that bypass the encoder.
-///   This is currently used only by the PONG path, because PONG (reserved
-///   type byte `0xFF`) is not yet a `FrameKind` variant. Once the protocol
-///   crate lifts `Pong` into the enum, this variant can go away and PONG
-///   collapses to a structured send through `Outbound::Frame`.
 #[derive(Debug)]
 pub enum Outbound {
     /// A structured frame; the writer encodes it before writing.
     Frame(phux_protocol::wire::frame::FrameKind),
-    /// A pre-encoded byte blob; the writer writes it as-is.
-    Raw(BytesMut),
 }
 
 /// Selection span data for a client on a terminal (phux-dh4).
@@ -198,6 +190,20 @@ pub struct AttachedClient {
     /// to [`ClientCapabilities::default`] (most-permissive — never silently
     /// downgrades).
     pub client_caps: ClientCapabilities,
+}
+/// One pane target in an ATTACH snapshot pass.
+///
+/// Bridges the protocol-facing attach flow (`runtime.rs`) to the
+/// state-internal registry topology without exposing `Session`/`Window`
+/// traversal details outside this module.
+#[derive(Debug, Clone)]
+pub struct AttachSnapshotPane {
+    /// Core pane identifier.
+    pub terminal_id: TerminalId,
+    /// Cross-task handle for snapshot/input/resize requests.
+    pub handle: TerminalHandle,
+    /// Stable wire id to use in `TERMINAL_SNAPSHOT` / `TERMINAL_OUTPUT`.
+    pub wire_terminal_id: WireTerminalId,
 }
 
 /// Errors returned by [`ServerState::attach`].
@@ -1550,6 +1556,36 @@ impl ServerState {
                 .with_panes(panes),
         )
     }
+    /// Collect panes in `session` that have live actor handles, with wire ids.
+    ///
+    /// Protocol dispatch (`runtime::handle_attach`) uses this to drive per-pane
+    /// snapshot/output setup without touching `Session`/`Window` internals.
+    #[must_use]
+    pub fn attach_snapshot_panes(&mut self, session: SessionId) -> Vec<AttachSnapshotPane> {
+        let window_ids = self
+            .registry
+            .session(session)
+            .map(|s| s.windows.clone())
+            .unwrap_or_default();
+        let mut panes = Vec::new();
+        for wid in window_ids {
+            let window_panes = self
+                .registry
+                .window(wid)
+                .map(|w| w.panes.clone())
+                .unwrap_or_default();
+            for pid in window_panes {
+                if let Some(handle) = self.terminal_handle(pid).cloned() {
+                    panes.push(AttachSnapshotPane {
+                        terminal_id: pid,
+                        handle,
+                        wire_terminal_id: self.intern_terminal_wire(pid),
+                    });
+                }
+            }
+        }
+        panes
+    }
 
     /// Store a selection span for a client on a terminal (phux-dh4).
     pub fn set_selection(
@@ -1664,10 +1700,41 @@ impl SharedState {
 )]
 mod tests {
     use super::*;
+    use crate::terminal_actor::TerminalHandle;
+    use bytes::Bytes;
+    use tokio::sync::broadcast;
 
     fn mk_tx() -> mpsc::Sender<Outbound> {
         let (tx, _rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
         tx
+    }
+    fn mk_handle() -> TerminalHandle {
+        let (input_tx, _input_rx) = mpsc::channel(8);
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
+        let (screen_tx, _screen_rx) = mpsc::channel(8);
+        let (pwd_tx, _pwd_rx) = mpsc::channel(8);
+        let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+        let (resize_tx, _resize_rx) = mpsc::channel(8);
+        let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
+        let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
+        let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+        let (subscribe_to_events_tx, _subscribe_to_events_rx) = mpsc::channel(8);
+        let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
+        TerminalHandle {
+            input: input_tx,
+            snapshot: snapshot_tx,
+            screen: screen_tx,
+            pwd: pwd_tx,
+            output: output_tx,
+            resize: resize_tx,
+            consumer_attach: consumer_attach_tx,
+            consumer_detach: consumer_detach_tx,
+            consumer_ack: consumer_ack_tx,
+            subscribe_to_events: subscribe_to_events_tx,
+            unsubscribe_from_events: unsubscribe_from_events_tx,
+            cols: 80,
+            rows: 24,
+        }
     }
 
     #[test]
@@ -1909,6 +1976,39 @@ mod tests {
     }
 
     #[test]
+    fn attach_snapshot_panes_collects_live_handles_for_session_tree() {
+        let mut s = ServerState::new();
+        let (sid, wid, pid_a) = s.seed_session("default");
+        let pid_b = s
+            .registry
+            .new_terminal(wid)
+            .expect("same window second pane");
+        let wid_2 = s.registry.new_window(sid).expect("second window");
+        let pid_c = s
+            .registry
+            .new_terminal(wid_2)
+            .expect("pane in second window");
+
+        let _ = s.register_terminal_handle(pid_a, mk_handle(), CancellationToken::new());
+        let _ = s.register_terminal_handle(pid_c, mk_handle(), CancellationToken::new());
+        // pid_b intentionally has no handle and must be excluded.
+
+        let panes = s.attach_snapshot_panes(sid);
+        let ids: HashSet<TerminalId> = panes.iter().map(|p| p.terminal_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&pid_a));
+        assert!(ids.contains(&pid_c));
+        assert!(!ids.contains(&pid_b));
+        for pane in panes {
+            assert_eq!(
+                s.terminal_from_wire(&pane.wire_terminal_id),
+                Some(pane.terminal_id),
+                "wire id should resolve back to the same pane",
+            );
+        }
+    }
+
+    #[test]
     fn most_recently_touched_session_starts_none_and_tracks_touch_order() {
         let mut s = ServerState::new();
         assert!(
@@ -1960,14 +2060,12 @@ mod tests {
         (cid, rx)
     }
 
-    /// Pull every queued frame off `rx`. Returns the inner frames; raw
-    /// PONG bytes (if any) are surfaced as `None` and skipped.
+    /// Pull every queued frame off `rx` and return the inner frames.
     fn drain_frames(rx: &mut mpsc::Receiver<Outbound>) -> Vec<FrameKind> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let Outbound::Frame(f) = msg {
-                out.push(f);
-            }
+            let Outbound::Frame(f) = msg;
+            out.push(f);
         }
         out
     }

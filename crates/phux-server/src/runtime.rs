@@ -35,12 +35,13 @@ use std::time::Duration;
 use bytes::BytesMut;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use phux_protocol::caps::ClientCapabilities;
+use phux_protocol::PROTOCOL_VERSION;
+use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
     AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
-    SpawnError, SpawnResult, StateScope, TYPE_PONG, ViewportInfo,
+    SpawnError, SpawnResult, StateScope, ViewportInfo,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::runtime::Builder;
@@ -49,7 +50,9 @@ use tokio::task::{JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
+use crate::state::{
+    AttachSnapshotPane, ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput,
+};
 use crate::terminal_actor::{
     ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
     ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
@@ -797,8 +800,8 @@ async fn accept_loop<L: Incoming>(
 /// us one place to back-pressure on slow clients without entangling
 /// the read side, and matches the `tx: mpsc::Sender<Outbound>` shape
 /// `ServerState::attach` already wants. The channel carries
-/// [`Outbound`] so structured [`FrameKind`] sends and pre-encoded raw
-/// byte blobs (today: PONG) share a single ordering domain.
+/// [`Outbound`] so every typed [`FrameKind`] send shares one ordering
+/// domain.
 ///
 /// `phux-byc.8`: implements the ATTACH path. Resolves the target,
 /// builds a [`SessionSnapshot`](phux_protocol::wire::info::SessionSnapshot)
@@ -829,12 +832,8 @@ where
     debug!(?client_id, "client task started");
 
     // Allocate the per-client outbound mailbox + spawn the writer task.
-    // Both structured frames and pre-encoded raw byte blobs (currently
-    // only PONG — see `encode_pong` and the wire-protocol comment on
-    // `TYPE_PONG`) ride the same channel, tagged by the `Outbound`
-    // variant. The writer task drains it with a single `recv()` loop;
-    // closure of this one channel is the unambiguous signal for the
-    // writer to exit.
+    // The writer drains one `Outbound` channel; closure of this one
+    // channel is the unambiguous signal for the writer to exit.
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
     // Per-client `JoinSet` for sibling tasks (today: just the writer).
     // Held in this scope so it drops with `handle_client` and the
@@ -922,23 +921,32 @@ where
                     // consumers never see L3 frames (SPEC §16.4).
                     s.set_client_layers(client_id, client_caps.layers);
                 });
-                // SPEC §6.1: server replies with HELLO_OK. The
-                // `HELLO_OK` `FrameKind` variant is not yet populated
-                // (reserved type byte `0x80`); sibling work lifts it
-                // in. Today the client proceeds optimistically without
-                // waiting for HELLO_OK — see `phux-client::attach::driver::handshake`.
+                // SPEC §6.1: server replies with HELLO_OK before ATTACH
+                // is processed on this connection. The single-version
+                // reference server echoes its own PROTOCOL_VERSION as the
+                // selected version (no `VERSION_INCOMPATIBLE` negotiation
+                // yet) and advertises the full tier set it mounts (L1+L2+L3);
+                // the negotiated set is the intersection with the client's
+                // `layers`. `server_id` is the opaque process identity.
+                let hello_ok = FrameKind::HelloOk {
+                    protocol_major: PROTOCOL_VERSION.major,
+                    protocol_minor: PROTOCOL_VERSION.minor,
+                    protocol_patch: PROTOCOL_VERSION.patch,
+                    server_caps: ServerCapabilities::new().with_layers(LayerSet::all()),
+                    server_id: std::process::id().to_be_bytes().to_vec(),
+                };
+                if out_tx.send(Outbound::Frame(hello_ok)).await.is_err() {
+                    trace!(?client_id, "HELLO_OK send dropped: writer gone");
+                }
             }
             FrameKind::Ping { nonce } => {
-                // PONG isn't a `FrameKind` variant yet (the type byte
-                // `0xFF` is reserved). Ship the pre-encoded bytes
-                // through the unified outbound channel as
-                // `Outbound::Raw`. Once the protocol crate lifts
-                // `Pong` into the enum, this collapses to a structured
-                // `Outbound::Frame` send.
+                // SPEC §7.4: echo nonce in PONG.
                 debug!(nonce, "PING -> PONG");
-                let mut buf = BytesMut::new();
-                encode_pong(nonce, &mut buf);
-                if out_tx.send(Outbound::Raw(buf)).await.is_err() {
+                if out_tx
+                    .send(Outbound::Frame(FrameKind::Pong { nonce }))
+                    .await
+                    .is_err()
+                {
                     trace!(?client_id, nonce, "PONG send dropped: writer gone");
                 }
             }
@@ -1313,13 +1321,10 @@ fn broadcast_event(
 
 /// Writer task: drain the per-client outbound channel and write each
 /// message to the socket. Encodes [`Outbound::Frame`] via
-/// `FrameKind::encode`; [`Outbound::Raw`] pre-encoded byte blobs (PONG
-/// today) go straight to the wire.
+/// `FrameKind::encode`.
 ///
 /// Exits when the channel closes — i.e. the client task drops its
-/// sender. The unified `Outbound` enum collapses what used to be two
-/// channels (one for structured frames, one for raw blobs) into a
-/// single ordering domain, so a single `recv()` loop suffices.
+/// sender.
 async fn writer_task<W: FrameWriter>(
     mut writer: W,
     mut rx: tokio::sync::mpsc::Receiver<Outbound>,
@@ -1327,21 +1332,12 @@ async fn writer_task<W: FrameWriter>(
 ) {
     let mut buf = BytesMut::with_capacity(1024);
     while let Some(msg) = rx.recv().await {
-        match msg {
-            Outbound::Frame(frame) => {
-                buf.clear();
-                frame.encode(&mut buf);
-                if let Err(err) = writer.write_frame(&buf).await {
-                    debug!(?client_id, error = %err, "writer error on frame; client task ending");
-                    return;
-                }
-            }
-            Outbound::Raw(bytes) => {
-                if let Err(err) = writer.write_frame(&bytes).await {
-                    debug!(?client_id, error = %err, "writer error on raw; client task ending");
-                    return;
-                }
-            }
+        let Outbound::Frame(frame) = msg;
+        buf.clear();
+        frame.encode(&mut buf);
+        if let Err(err) = writer.write_frame(&buf).await {
+            debug!(?client_id, error = %err, "writer error on frame; client task ending");
+            return;
         }
     }
     debug!(?client_id, "writer task exiting (channel closed)");
@@ -1353,11 +1349,7 @@ async fn writer_task<W: FrameWriter>(
 type AttachPrepared = (
     phux_protocol::wire::info::SessionSnapshot,
     phux_protocol::ids::ClientId,
-    Vec<(
-        phux_core::ids::TerminalId,
-        crate::terminal_actor::TerminalHandle,
-        phux_protocol::ids::TerminalId,
-    )>,
+    Vec<AttachSnapshotPane>,
 );
 
 /// Resolve `target` to a session name. SPEC §13: `ByName` is the only
@@ -2075,28 +2067,7 @@ fn prepare_attach(
         let snapshot = s
             .build_session_snapshot(sid)
             .ok_or_else(|| crate::state::AttachError::UnknownSession(session_name.to_owned()))?;
-        let Some(session) = s.registry.session(sid).cloned() else {
-            // Defensive: attach said yes but the session vanished.
-            return Err(crate::state::AttachError::UnknownSession(
-                session_name.to_owned(),
-            ));
-        };
-        let mut panes_to_snapshot: Vec<(
-            phux_core::ids::TerminalId,
-            crate::terminal_actor::TerminalHandle,
-            phux_protocol::ids::TerminalId,
-        )> = Vec::new();
-        for wid in &session.windows {
-            let Some(window) = s.registry.window(*wid).cloned() else {
-                continue;
-            };
-            for pid in &window.panes {
-                if let Some(handle) = s.terminal_handle(*pid).cloned() {
-                    let wire = s.intern_terminal_wire(*pid);
-                    panes_to_snapshot.push((*pid, handle, wire));
-                }
-            }
-        }
+        let panes_to_snapshot = s.attach_snapshot_panes(sid);
         let initial_client_id =
             phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
         Ok((snapshot, initial_client_id, panes_to_snapshot))
@@ -3002,7 +2973,10 @@ async fn handle_attach(
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
 
     let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
-    for (terminal_id, handle, wire_terminal_id) in panes_to_snapshot {
+    for pane in panes_to_snapshot {
+        let terminal_id = pane.terminal_id;
+        let handle = pane.handle;
+        let wire_terminal_id = pane.wire_terminal_id;
         // ADR-0018 / phux-0q8: register the per-consumer state-sync entry
         // so the actor allocates and primes a per-consumer `RenderState`
         // cache for this client/pane, keyed by `wire_client_id`. We do
@@ -3181,11 +3155,7 @@ async fn handle_attach(
 /// independent of the state lock).
 fn apply_attach_viewport(
     state: &SharedState,
-    panes_to_snapshot: &[(
-        phux_core::ids::TerminalId,
-        crate::terminal_actor::TerminalHandle,
-        phux_protocol::ids::TerminalId,
-    )],
+    panes_to_snapshot: &[AttachSnapshotPane],
     viewport: phux_protocol::wire::frame::ViewportInfo,
 ) {
     let cols = viewport.cols;
@@ -3196,18 +3166,22 @@ fn apply_attach_viewport(
         return;
     }
     state.with_mut(|s| {
-        for (terminal_id, handle, _wire_terminal_id) in panes_to_snapshot {
-            if let Some(pane) = s.registry.terminal_mut(*terminal_id) {
-                pane.dims = (cols, rows);
+        for pane in panes_to_snapshot {
+            if let Some(pane_entry) = s.registry.terminal_mut(pane.terminal_id) {
+                pane_entry.dims = (cols, rows);
             }
             // ATTACH-time resize: do NOT resync — the attach handshake
             // already sends an authoritative TERMINAL_SNAPSHOT, and a
             // resync broadcast here would race ahead of it (phux-8v1).
-            match handle.resize.try_send(ResizeRequest { cols, rows, resync_clients: false }) {
+            match pane.handle.resize.try_send(ResizeRequest {
+                cols,
+                rows,
+                resync_clients: false,
+            }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     warn!(
-                        ?terminal_id,
+                        terminal_id = ?pane.terminal_id,
                         cols,
                         rows,
                         "ATTACH viewport apply: pane resize mailbox full; dropping (next VIEWPORT_RESIZE will retry)",
@@ -3215,7 +3189,7 @@ fn apply_attach_viewport(
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     debug!(
-                        ?terminal_id,
+                        terminal_id = ?pane.terminal_id,
                         "ATTACH viewport apply: pane actor gone; dropping resize",
                     );
                 }
@@ -3572,32 +3546,9 @@ async fn send_error(out_tx: &tokio::sync::mpsc::Sender<Outbound>, code: ErrorCod
     }
 }
 
-/// Encode a `PONG { nonce }` frame directly, since `phux-protocol`'s
-/// `FrameKind` doesn't yet have a `Pong` variant (per the catalog comments in
-/// `wire/frame.rs`, the type byte `0xFF` is reserved). This stays local to
-/// the server until the protocol crate lifts it into a variant; see ADR-0008.
-fn encode_pong(nonce: u64, out: &mut BytesMut) {
-    // Body = type byte (1) + u64 nonce (8) = 9 bytes.
-    let body_len: u32 = 9;
-    out.extend_from_slice(&body_len.to_be_bytes());
-    out.extend_from_slice(&[TYPE_PONG]);
-    out.extend_from_slice(&nonce.to_be_bytes());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pong_frame_has_correct_length_prefix_and_type_byte() {
-        let mut buf = BytesMut::new();
-        encode_pong(0xDEAD_BEEF_CAFE_BABE, &mut buf);
-        // length prefix (4) + type (1) + nonce (8) = 13 bytes
-        assert_eq!(buf.len(), 13);
-        assert_eq!(&buf[0..4], &9u32.to_be_bytes());
-        assert_eq!(buf[4], TYPE_PONG);
-        assert_eq!(&buf[5..13], &0xDEAD_BEEF_CAFE_BABE_u64.to_be_bytes());
-    }
 
     #[test]
     fn detach_aborts_raw_output_pumps_without_closing_writer_mailbox() {
@@ -3915,10 +3866,11 @@ mod tests {
                     .await
                     .expect("attached frame did not arrive")
                     .expect("out_rx closed before attached");
-                match attached {
-                    Outbound::Frame(FrameKind::Attached { .. }) => {}
-                    other => panic!("expected Attached, got {other:?}"),
-                }
+                let Outbound::Frame(frame) = attached;
+                assert!(
+                    matches!(frame, FrameKind::Attached { .. }),
+                    "expected Attached, got {frame:?}",
+                );
 
                 // Now collect all N SnapshotRequests BEFORE replying to
                 // any of them. Under the old sequential loop the

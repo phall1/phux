@@ -389,10 +389,7 @@ fn write_terminal_clear<W: Write>(out: &mut W) -> io::Result<()> {
     out.flush()
 }
 
-/// Send `HELLO` and (when the server starts sending it) wait for
-/// `HELLO_OK`. Today the server does not send a `HELLO_OK` and the
-/// protocol crate does not yet define the variant; we proceed
-/// optimistically.
+/// Send `HELLO` and require `HELLO_OK` before ATTACH.
 async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
     // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
     // `detect_color_support`. The advertised tier feeds the server's
@@ -412,7 +409,14 @@ async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
         protocol_patch: PROTOCOL_VERSION.patch,
         client_caps,
     })
-    .await
+    .await?;
+    match conn.recv().await? {
+        FrameKind::HelloOk { .. } => Ok(()),
+        FrameKind::Error { message, .. } => Err(AttachError::Refused(message)),
+        other => Err(AttachError::Protocol(format!(
+            "expected HELLO_OK or ERROR after HELLO, got {other:?}",
+        ))),
+    }
 }
 
 /// Send the `ATTACH` frame using the current terminal viewport.
@@ -1591,6 +1595,8 @@ fn install_panic_hook_once() {
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+    use phux_protocol::caps::ServerCapabilities;
+    use tokio::net::UnixStream;
 
     #[test]
     fn attach_error_io_display_includes_source() {
@@ -1604,6 +1610,63 @@ mod tests {
         let a = AttachError::Disconnected;
         let b = AttachError::Io(io::Error::other("foo"));
         assert_ne!(std::mem::discriminant(&a), std::mem::discriminant(&b),);
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_waits_for_hello_ok() {
+        let (client_stream, server_stream) = UnixStream::pair().expect("pair");
+        let mut client = Connection::from_stream(client_stream);
+        let mut server = Connection::from_stream(server_stream);
+
+        let server_side = async move {
+            let frame = server.recv().await.expect("server recv hello");
+            assert!(
+                matches!(frame, FrameKind::Hello { .. }),
+                "first client frame must be HELLO"
+            );
+            server
+                .send(&FrameKind::HelloOk {
+                    protocol_major: PROTOCOL_VERSION.major,
+                    protocol_minor: PROTOCOL_VERSION.minor,
+                    protocol_patch: PROTOCOL_VERSION.patch,
+                    server_caps: ServerCapabilities::new(),
+                    server_id: Vec::new(),
+                })
+                .await
+                .expect("server send hello_ok");
+        };
+
+        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        assert!(
+            res.is_ok(),
+            "handshake should succeed when HELLO_OK arrives"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_rejects_non_hello_ok_reply() {
+        let (client_stream, server_stream) = UnixStream::pair().expect("pair");
+        let mut client = Connection::from_stream(client_stream);
+        let mut server = Connection::from_stream(server_stream);
+
+        let server_side = async move {
+            let frame = server.recv().await.expect("server recv hello");
+            assert!(
+                matches!(frame, FrameKind::Hello { .. }),
+                "first client frame must be HELLO"
+            );
+            server
+                .send(&FrameKind::Detached)
+                .await
+                .expect("server send detached");
+        };
+
+        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        match res {
+            Err(AttachError::Protocol(msg)) => {
+                assert!(msg.contains("HELLO_OK"));
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
     }
 
     /// The factored builder produces a `ViewportResize` frame carrying

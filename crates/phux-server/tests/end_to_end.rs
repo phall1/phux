@@ -11,7 +11,8 @@ use std::time::Duration;
 use phux_protocol::caps::{ClientCapabilities, ColorSupport, LayerSet};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
-    FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+    FrameKind, TYPE_ATTACHED, TYPE_DETACHED, TYPE_HELLO_OK, TYPE_TERMINAL_OUTPUT,
+    TYPE_TERMINAL_SNAPSHOT,
 };
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
@@ -65,14 +66,8 @@ async fn shutdown_and_join(
 }
 
 #[test]
-fn handshake_hello_no_reply() {
-    // SPEC §6.1: client MAY send HELLO before ATTACH. The reserved
-    // HELLO_OK type byte (0x80) has no corresponding FrameKind variant
-    // yet; the server consumes HELLO silently and the next outbound
-    // frame is the ATTACHED produced by the subsequent ATTACH. The
-    // ticket's "handshake_roundtrip" scenario is implemented as this
-    // substitute: a HELLO that does not crash the server, followed by
-    // an ATTACH whose reply confirms the connection is still healthy.
+fn handshake_hello_round_trip() {
+    // SPEC §6.1: HELLO must be acknowledged with HELLO_OK before ATTACH.
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
@@ -81,13 +76,42 @@ fn handshake_hello_no_reply() {
         let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
 
         send_frame(&mut stream, &hello_frame()).await;
+        let (type_byte, hello_ok) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte, TYPE_HELLO_OK,
+            "after HELLO the first reply must be HELLO_OK",
+        );
+        // The body must echo the server's selected version and advertise
+        // the tiers it mounts (L1+L2+L3) per SPEC §6.1.
+        match hello_ok {
+            FrameKind::HelloOk {
+                protocol_major,
+                protocol_minor,
+                server_caps,
+                ..
+            } => {
+                assert_eq!(
+                    (protocol_major, protocol_minor),
+                    (
+                        phux_protocol::PROTOCOL_VERSION.major,
+                        phux_protocol::PROTOCOL_VERSION.minor,
+                    ),
+                    "HELLO_OK must echo the server's selected version",
+                );
+                assert_eq!(
+                    server_caps.layers,
+                    LayerSet::all(),
+                    "reference server advertises the full tier set",
+                );
+            }
+            other => panic!("expected HELLO_OK, got {other:?}"),
+        }
         send_frame(&mut stream, &attach_by_name("default")).await;
 
         let (type_byte, attached) = recv_typed(&mut stream).await;
         assert_eq!(
             type_byte, TYPE_ATTACHED,
-            "after HELLO + ATTACH the first reply must be ATTACHED \
-             (no HELLO_OK frame in current wire; got 0x{type_byte:02x})",
+            "after HELLO_OK + ATTACH the next reply must be ATTACHED",
         );
         match attached {
             FrameKind::Attached {
