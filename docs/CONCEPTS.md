@@ -1,18 +1,18 @@
 ---
 audience: humans, contributors, agents, consumers
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-03
 ---
 
 # Concepts
 
-**TL;DR.** phux is a libghostty-backed terminal control plane. The terminal is the model: spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, panes are the TUI's way to arrange them. The wire is layered; federation is in the addressing, not bolted on.
+**TL;DR.** The thing phux manages is the *terminal* — spawned, observed, driven, persisted, addressable across hosts — not the session or the pane. A human's TUI and an agent's API are two consumers of the same terminal, and neither is privileged. Sessions, windows, and panes are just how the TUI arranges terminals for a person. The wire is layered (L1/L2/L3) so a consumer subscribes to only what it needs; identity is federation-ready from the first byte.
 
 ---
 
 ## Terminals, not panes
 
-A terminal: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
+A terminal: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells). That object is the whole model. A person looking at it and a program driving it are holding the same thing two different ways — that equivalence is the point, not a feature bolted on.
 
 Sessions, windows, panes, splits — the entire tmux vocabulary — live in the TUI layer. Not on the wire. Not load-bearing for agents or control planes.
 
@@ -96,7 +96,7 @@ See [ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md) and [ADR-0016
 
 | Dimension | phux | zmx | cmux | rmux |
 |---|---|---|---|---|
-| Agent SDK or programmatic API | ✓ (planned L1 SDK) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
+| Agent SDK or programmatic API | ✓ (CLI + MCP shipped; Rust SDK planned) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
 | Primary use case | Human multiplexer + control plane | Minimal session persistence | Agent UI (git, PR, notifications) | Agent automation |
 | Cross-platform | ✓ | ✗ (implied) | ✗ (macOS only) | ✓ |
 | Maturity | Pre-release v0.1 | Minimal scope, SSH bugs | Production (20k+ stars) | Public preview (v0.3.1) |
@@ -120,7 +120,7 @@ phux is both a human multiplexer and a federation-ready control plane. See [ADR-
 Consumers in scope:
 
 - **Reference TUI.** Tmux-shaped: sessions, windows, panes, splits, status bar, keybindings. Speaks L1 + L2 + L3. See [`consumers/tui.md`](./consumers/tui.md).
-- **Agent SDK** (`phux-client-sdk`, planned). Typed Rust handle to spawn, observe, drive Terminals. L1 only.
+- **Agent surface (shipped).** The headless CLI verbs (`ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`, …) and the [`phux-mcp`](./consumers/mcp.md) adapter, both over the same selector grammar and JSON shapes. L1-shaped: spawn a terminal, drive it, read events and exit codes. A typed Rust SDK crate (`phux-client-sdk`) is still planned.
 - **Future:** native GUI, recorder, tmux control-mode adapter ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md)).
 
 [ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md): the reference TUI is one consumer with no protocol-level privileges. If the TUI needs a feature the wire doesn't provide, extend the spec (with an ADR), not add a TUI-shaped hook.
@@ -146,7 +146,7 @@ The TUI's vocabulary is user-facing. The substrate's vocabulary is what the wire
 - **L2 is stable.** Collection lifecycle, membership, naming, kill semantics.
 - **L3 exists as opaque storage.** Read / write / delete on metadata blobs. The TUI's conventions live in [`consumers/tui.md`](./consumers/tui.md) and the non-normative conventions appendix in [`spec/L3.md`](./spec/L3.md).
 - **The reference TUI works** on L1 + L3 metadata: attach, detach, splits, layouts, status bar, keybindings.
-- **The agent SDK ships** as a thin L1-only wrapper, with examples that spawn a build, wait for OSC 133 command-end, read exit code. This is what makes the agent-first thesis real instead of aspirational.
+- **The agent surface ships** — not as a Rust SDK crate yet, but as the headless CLI verbs and the `phux-mcp` adapter. A program can spawn a build, wait for it to settle or for output to appear, and read the exit code today. That's what makes the agent-first thesis real instead of aspirational; the typed `phux-client-sdk` crate is the convenience layer still to come.
 
 Federation and Automation are **designed for** in v0.1 (their hooks in the wire are present; their ADRs are written) and **shipped** in v0.2. Building for now, designed for later.
 

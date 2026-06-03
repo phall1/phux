@@ -1,16 +1,18 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-03
 ---
 
 # Quickstart
 
 **TL;DR.** Drop into the Nix-pinned dev shell, run `just ci` to verify
 the toolchain, then `cargo run` to spawn a server and attach. phux is
-pre-alpha — what works today is single-pane attach with multi-pane
-splits, keybindings, status bar, and config loading. Most lifecycle
-and federation surface is not yet wired.
+v0.1 — what works today is the TUI (attach/detach, multi-pane splits,
+keybindings, status bar, config) plus the headless verbs you can script
+or point an agent at (`ls`, `run`, `wait`, `watch`, `send-keys`,
+`snapshot`, …). Federation routing is the main thing still on the wire
+but not yet wired.
 
 ---
 
@@ -65,15 +67,29 @@ right where you left it.
 - **Multi-client attach** to the same session.
 - **Bytes-on-wire terminal content**, structured input — full Kitty
   keyboard, OSC 8, OSC 133, true colour, image protocols pass through.
+- **Headless verbs** you can run without a TTY: `ls`, `snapshot`,
+  `send-keys`, `run`, `wait`, `watch`, `new`, `kill`, `rename`,
+  `config`. Each addresses panes by the same selector grammar the TUI
+  uses; reads take `--json`. This is the surface a script — or an agent
+  — drives. See [`consumers/agents.md`](./consumers/agents.md).
+- **MCP adapter** (`phux-mcp`): the same six core verbs as JSON-RPC
+  tools. See [`consumers/mcp.md`](./consumers/mcp.md).
+
+Try the headless side once you have a session up:
+
+```sh
+phux ls --json                       # list sessions
+phux run . "echo hello && exit 3"    # run in the focused pane, get exit code 3 back
+phux watch --json .                  # stream live events; Ctrl-C to stop
+```
 
 ## What doesn't yet
 
-- The full subcommand set (`phux new`, `phux ls`, `phux kill`) — only
-  `phux` (naked, auto-attach) and `phux server` ship today.
-- Most L2 Collection lifecycle and L3 metadata commands.
-- Federation routing (satellites, hubs).
-- The agent SDK.
-- Predictive local echo (designed for; gated on a transport whose
+- **Federation routing** (satellites, hubs). The wire already accepts
+  `SATELLITE{host, id}`; nothing routes it. v0.2.
+- **The typed Rust SDK crate** (`phux-client-sdk`) — the CLI and MCP
+  surfaces cover agent use today; the crate is convenience on top.
+- **Predictive local echo** (designed for; gated on a transport whose
   RTT actually needs it).
 
 Each of these is spec'd before it's built, so the wire hooks are
