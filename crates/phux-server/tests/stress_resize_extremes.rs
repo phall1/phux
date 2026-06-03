@@ -77,7 +77,11 @@ fn resize_degenerate_viewports_do_not_panic() {
                 client.resize(final_cols, final_rows).await;
                 let needle = format!("{final_rows} {final_cols}");
                 let res = client.wait_until(|s| s.contains(&needle)).await;
-                cap.attach_screen(client.screenshot().await.snapshot_text());
+                // Bounded drain, not `screenshot()`: the `stty size` seed loops
+                // every 20ms, so screenshot's "drain until 20ms quiet" can spin
+                // forever against it (same hang class as the both-axes storm).
+                client.drain_output_bounded(32).await;
+                cap.attach_screen(client.snapshot_text());
                 assert!(
                     res.is_ok(),
                     "PTY winsize never converged to {final_cols}x{final_rows} \
@@ -145,7 +149,12 @@ fn both_axes_shrink_storm_under_output_does_not_panic() {
                 // server error at teardown.)
                 client.resize(100, 30).await;
                 let res = client.wait_until(|s| s.contains("row-")).await;
-                cap.attach_screen(client.screenshot().await.snapshot_text());
+                // Snapshot the oracle WITHOUT `screenshot()`: the seed emits
+                // every 5ms, so screenshot's "drain until 20ms quiet" never
+                // terminates here (the pre-existing hang). wait_until already
+                // populated the oracle; a bounded drain refreshes it.
+                client.drain_output_bounded(32).await;
+                cap.attach_screen(client.snapshot_text());
                 assert!(
                     res.is_ok(),
                     "pane produced no output after the both-shrink storm — \
