@@ -6,25 +6,25 @@ last-reviewed: 2026-05-28
 
 # Concepts
 
-**TL;DR.** phux is a libghostty-backed terminal control plane. The unit of work is the *terminal* — spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, and panes are one consumer's way to arrange terminals on screen. The wire is layered so that a consumer speaks only the tiers it needs and federation is in the addressing, not bolted on.
+**TL;DR.** phux is a libghostty-backed terminal control plane. The terminal is the model: spawned, observed, controlled, persisted, addressable across hosts. Sessions, windows, panes are the TUI's way to arrange them. The wire is layered; federation is in the addressing, not bolted on.
 
 ---
 
-## The unit of work is the terminal
+## Terminals, not panes
 
-A terminal is stateful: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
+A terminal: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells).
 
-Everything else — sessions, windows, panes, splits, status bars — is one way to arrange terminals on screen. Not load-bearing.
+Sessions, windows, panes, splits — the entire tmux vocabulary — live in the TUI layer. Not on the wire. Not load-bearing for agents or control planes.
 
-Why frame it this way? The consumer category widened:
-- Humans want the tmux experience.
-- Agents want to spawn, observe, and tear down terminals.
-- CI fleets want stable event streams.
-- Control planes want addressable resources.
+Why? The consumer category expanded beyond humans:
+- Humans want windows and splits (the TUI layer handles this)
+- Agents want to spawn, observe, tear down terminals
+- CI fleets want event streams
+- Control planes want addressable resources across machines
 
-The terminal is the greatest common factor.
+The terminal is what everyone needs. Everything else is optional.
 
-The reference TUI ships in-tree because the substrate is only real if a real consumer rides it. The substrate is the point.
+The reference TUI ships in-tree because the substrate is only real if someone rides it.
 
 ---
 
@@ -36,11 +36,11 @@ Modern terminal protocols (Kitty keyboard, true colour, OSC 8, OSC 133, images, 
 
 See [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md), [ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md), and [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md).
 
-### Practical consequences
+### In practice
 
-- **Asymmetric wire.** Server→client: VT bytes (capability-rewritten per client). Client→server: structured events (key, mouse, focus, paste) from libghostty atoms.
-- **Input types are libghostty's.** Direct re-export: `libghostty_vt::key::{Key, Action, Mods}`, `libghostty_vt::mouse::{Action, Button}`. No parallel phux enum.
-- **New libghostty features auto-light.** New escape sequences or input atoms land in both client and server at the next pin. No phux bridge needed.
+- **Asymmetric wire.** Server→client: VT bytes. Client→server: structured events (key, mouse, focus, paste).
+- **Input types are libghostty's.** Direct re-export. No parallel phux enum.
+- **New libghostty features auto-light.** Next pin bump, both client and server get them.
 
 ---
 
@@ -58,48 +58,28 @@ Each layer references only lower layers. Consumers declare which tiers they spea
 
 Example: an agent SDK speaks L1 alone. It never sees "session" or "window" (TUI L3 metadata). A GUI might speak L1 + its own L3 and ignore the TUI's. No consumer is privileged on the wire.
 
-### Wire vs consumer boundary
-
-| Concept | Owner |
-|---|---|
-| Terminal — PTY, bytes, input, events | L1 (wire) |
-| Collection — named bundle, lifecycle | L2 (wire) |
-| Metadata blob — opaque KV | L3 (wire) |
-| TUI layout tree | TUI consumer; L3 metadata under `phux.tui.layout/v1` |
-| TUI window ordering, focus | TUI consumer; L3 metadata |
-| Status bar, keybindings, hooks | TUI consumer; local config |
-| Predictive local echo | Client-side, transport-agnostic |
-
-Test: does *every* plausible consumer need it? If only the TUI needs it, it's TUI local config or L3 metadata, not a wire message.
-
 ---
 
 ## Identity is federation-ready
 
-Every terminal is addressed by a `TerminalId` tagged union:
+Every terminal:
 
 ```
 TerminalId = LOCAL     { id: u32 }
            | SATELLITE { host: String, id: u32 }
 ```
 
-v0.1 constructs `LOCAL` only. The wire accepts both from byte zero. A client can write `SATELLITE{host: "prod-box-3", id: 42}` today. v0.1 rejects it with `UnsupportedSatelliteRoute` (not a crash). When v0.2 lands with satellite routing, the wire bytes are identical. The same command that got rejected in v0.1 just works in v0.2. Forward compatibility, in place before satellites exist.
+v0.1 constructs `LOCAL` only. The wire accepts both from byte zero. Write `SATELLITE{host: "prod-box-3", id: 42}` today; v0.1 rejects it gracefully; v0.2 routes it. Same command, same wire bytes.
 
-**Unlike tmux:** tmux SSH-attach is client-side (connect to remote, spawn local client). A fleet control plane managing terminals across machines must speak different protocols to each server. phux's wire knows about remote identity from day 1. A single control plane addresses terminals uniformly across all machines; addressing is in L1, the terminal substrate.
+This is intentional forward compatibility. phux is a control plane from the first byte, not a single-machine tool with remote attach bolted on later.
 
-phux is a control plane from the first byte, not a single-machine tool with remote attach bolted on. The load-bearing case: a fleet of agents working across cloud boxes with terminals as addressable, persistent, observable resources.
-
-See [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md) and [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md). Transport (SSH, QUIC, etc.) is pluggable via `Transport` trait; see [`architecture/transport.md`](./architecture/transport.md).
+See [ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md) and [ADR-0016](../ADR/0016-terminal-id-as-wire-primary.md).
 
 ---
 
 ## Comparison to other tools
 
-phux is not competing with every terminal tool. Different tools solve different problems. Here's where phux stands.
-
 ### Traditional multiplexers
-
-These are human-first session managers: tmux, zellij, screen. They arrange terminals on screen with windows, panes, and splits. phux aims to be in this category but rethought from libghostty up.
 
 | Dimension | phux | tmux | zellij | screen |
 |---|---|---|---|---|
@@ -114,8 +94,6 @@ These are human-first session managers: tmux, zellij, screen. They arrange termi
 
 ### Agent-focused tools
 
-These solve agent automation and control, not primary human use. They're in a different category than traditional multiplexers.
-
 | Dimension | phux | zmx | cmux | rmux |
 |---|---|---|---|---|
 | Agent SDK or programmatic API | ✓ (planned L1 SDK) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
@@ -124,13 +102,13 @@ These solve agent automation and control, not primary human use. They're in a di
 | Maturity | Pre-release v0.1 | Minimal scope, SSH bugs | Production (20k+ stars) | Public preview (v0.3.1) |
 | Wire protocol published | ✓ (phux-proto in docs/spec/) | ✗ | Proprietary | ✓ (rmux-proto crate) |
 
-**What's going on here:** These are not multiplexer competitors.
+**The difference:** These are not multiplexer competitors.
 
-- **zmx** is deliberately minimal: session persistence only, delegates window/split logic to the OS. Known terminal state bugs in nested SSH. No agent SDK.
-- **cmux** is Swift + AppKit, macOS-only, focused on agent coordination (Claude, Cursor). Shows git branches, PRs, agent notifications. Not a tmux replacement.
-- **rmux** is a fresh public preview agent SDK (Rust, Playwright-style async). All 90 tmux commands available. No federation.
+- **zmx**: minimal (session persistence only), SSH support, no agent SDK
+- **cmux**: macOS agent UI (Claude, Cursor), not a replacement
+- **rmux**: agent SDK (Rust async), no federation
 
-phux is *both* a human multiplexer *and* a federation-ready control plane. The agent SDK is one consumer of the same wire that the TUI rides. See [ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md).
+phux is both a human multiplexer and a federation-ready control plane. See [ADR-0017](../ADR/0017-tui-not-protocol-privileged.md).
 
 [^1]: Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse. phux passes through unchanged (libghostty parses once, bytes forward). Others re-parse mid-path and degrade fidelity.
 [^2]: phux wire knows remote identity from day 1. Design in [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md). Traditional multiplexers treat remote attach as client-side (SSH + local connect).
