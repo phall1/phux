@@ -28,9 +28,9 @@ That second one is doing more than it lets on. We'll get to it.
 <!-- DEMO: a ~10s asciinema cast / GIF goes RIGHT HERE. Show kitty graphics +
      truecolor surviving a detach/reattach, then a `phux run`/`phux watch`
      line so the agent angle lands in the same breath. This is the single
-     most important pixel on the page. Recipe: docs/demo.md.
-     When the GIF lands at docs/assets/demo.gif, replace this comment with:
-       ![phux: modern terminal content surviving a detach/reattach, then driven headless](docs/assets/demo.gif) -->
+     most important pixel on the page. Recipe and storyboard: docs/demo.md.
+     When the GIF lands at docs/assets/demo.gif, replace this whole comment
+     with a standard markdown image pointing at that path. -->
 
 ## Try it
 

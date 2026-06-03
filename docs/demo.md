@@ -78,10 +78,12 @@ reproducible and the next person doesn't reinvent it.
 ## Wiring it in
 
 Drop the finished file at `docs/assets/demo.gif`, then replace the
-`<!-- DEMO GOES HERE … -->` comment at the top of the root `README.md` with:
+`<!-- DEMO GOES HERE … -->` comment at the top of the root `README.md` with a
+standard markdown image: `!` then `[alt text]` then `(docs/assets/demo.gif)`,
+where the alt text is something like *phux: modern terminal content surviving a
+detach/reattach, then driven headless*.
 
-```markdown
-![phux: modern terminal content surviving a detach/reattach, then driven headless](docs/assets/demo.gif)
-```
+(The literal image syntax isn't shown inline here on purpose — the docs CI
+resolves every relative link, and the GIF doesn't exist until you record it.)
 
 That's the page going from half-built to built.
