@@ -3006,6 +3006,14 @@ async fn handle_attach(
                     client_id: wire_client_id,
                     outbound: out_tx.clone(),
                     wire_terminal_id: wire_id,
+                    // phux-fseo: honor the consumer's negotiated output mode.
+                    // StateSync ⇒ the actor's tick is this consumer's emitter
+                    // and the broadcast pump below is suppressed for it; Raw
+                    // (the human-TUI default) keeps the pump.
+                    wants_state_sync: matches!(
+                        client_caps.output_mode,
+                        phux_protocol::caps::OutputMode::StateSync
+                    ),
                     reply: attach_reply_tx,
                 })
                 .await

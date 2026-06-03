@@ -159,6 +159,7 @@ async fn single_consumer_tick_keeps_actor_healthy() {
                     client_id: ClientId(1),
                     outbound: out_tx,
                     wire_terminal_id: WIRE_TID,
+                    wants_state_sync: false,
                     reply: reply_tx,
                 })
                 .await
@@ -213,6 +214,7 @@ async fn multiple_consumers_get_independent_per_consumer_seq() {
                         client_id,
                         outbound,
                         wire_terminal_id: WIRE_TID,
+                        wants_state_sync: false,
                         reply: reply_tx,
                     })
                     .await
@@ -277,6 +279,7 @@ async fn detached_consumer_receives_no_emission() {
                     client_id: client,
                     outbound: out_tx,
                     wire_terminal_id: WIRE_TID,
+                    wants_state_sync: false,
                     reply: reply_tx,
                 })
                 .await

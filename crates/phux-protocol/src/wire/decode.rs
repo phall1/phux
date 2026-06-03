@@ -261,6 +261,13 @@ impl<'a> Decoder<'a> {
                 if self.pos < body_end {
                     client_caps = client_caps.with_hyperlinks(self.read_u8()? != 0);
                 }
+                // phux-fseo: consumer output-mode preference. Absent on a
+                // pre-fseo HELLO; an unknown tag falls back to `Raw` per
+                // `OutputMode::from_wire`.
+                if self.pos < body_end {
+                    let output_mode = crate::caps::OutputMode::from_wire(self.read_u8()?);
+                    client_caps = client_caps.with_output_mode(output_mode);
+                }
                 FrameKind::Hello {
                     client_name,
                     protocol_major,

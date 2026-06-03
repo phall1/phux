@@ -78,6 +78,59 @@ impl ColorSupport {
     }
 }
 
+/// How the server should emit terminal content to this consumer (SPEC §6.2).
+///
+/// The server has two emitters for a pane's content (see
+/// `phux-server::terminal_actor`): the **raw PTY broadcast** — byte-faithful,
+/// low-latency, the path interactive shells/TUIs rely on for exact styling —
+/// and the **per-consumer synthesized state-sync tick**, which diffs the live
+/// grid against a per-consumer reference and ships only the delta. The tick is
+/// the right emitter for an agent or remote state-sync consumer that wants a
+/// coherent grid model rather than a raw byte stream, but as the human path it
+/// adds a visible typing-latency floor and can lose byte-exact styling
+/// (phux-yeca). A consumer advertises its preference here at HELLO time; the
+/// server honors it per connection.
+///
+/// `#[non_exhaustive]` and decoded leniently: an unknown wire tag falls back
+/// to [`OutputMode::Raw`] (the safe interactive default), so a future mode
+/// never fails an older server's decode (phux-fseo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum OutputMode {
+    /// Raw PTY byte broadcast. Byte-faithful and low-latency — the default
+    /// and the human-TUI path.
+    #[default]
+    Raw,
+    /// Per-consumer synthesized state-sync tick: the server emits grid
+    /// deltas with a per-consumer monotonic `seq`. For agent / remote
+    /// state-sync consumers (ADR-0018).
+    StateSync,
+}
+
+impl OutputMode {
+    /// Wire tag for the [`OutputMode`] variant. Stable within v0.x; new
+    /// variants append.
+    #[must_use]
+    pub const fn as_wire(self) -> u8 {
+        match self {
+            Self::Raw => 0,
+            Self::StateSync => 1,
+        }
+    }
+
+    /// Inverse of [`Self::as_wire`]. An unknown tag maps to [`OutputMode::Raw`]
+    /// (the safe interactive default) so a forward-compat HELLO from a future
+    /// client never fails to decode.
+    #[must_use]
+    pub const fn from_wire(tag: u8) -> Self {
+        match tag {
+            1 => Self::StateSync,
+            // 0 and any unknown future tag both fall back to Raw.
+            _ => Self::Raw,
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Layer / LayerSet — SPEC §6.2 conformance-tier bitset (ADR-0015).
 // -----------------------------------------------------------------------------
@@ -349,6 +402,11 @@ pub struct ClientCapabilities {
     pub kbd_protocols: KeyboardProtocolSet,
     /// Whether OSC 8 hyperlink framing may be forwarded to the client.
     pub hyperlinks: bool,
+    /// Which server emitter this consumer wants for terminal content
+    /// (SPEC §6.2). Defaults to [`OutputMode::Raw`] — the byte-faithful
+    /// human-TUI path; agent / state-sync consumers opt into
+    /// [`OutputMode::StateSync`] (phux-fseo).
+    pub output_mode: OutputMode,
 }
 
 impl ClientCapabilities {
@@ -363,7 +421,15 @@ impl ClientCapabilities {
             image_protocols: ImageProtocolSet::all(),
             kbd_protocols: KeyboardProtocolSet::all(),
             hyperlinks: true,
+            output_mode: OutputMode::Raw,
         }
+    }
+
+    /// Builder setter for [`Self::output_mode`].
+    #[must_use]
+    pub const fn with_output_mode(mut self, output_mode: OutputMode) -> Self {
+        self.output_mode = output_mode;
+        self
     }
 
     /// Builder setter for [`Self::color_support`].

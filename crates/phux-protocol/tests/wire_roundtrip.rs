@@ -13,7 +13,7 @@
 use bytes::BytesMut;
 use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
-    KeyboardProtocolSet, Layer, LayerSet, ServerCapabilities,
+    KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities,
 };
 use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
@@ -493,6 +493,56 @@ fn hello_round_trip_image_kbd_and_hyperlink_caps() {
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
+}
+
+#[test]
+fn hello_round_trip_state_sync_output_mode() {
+    // phux-fseo: a consumer advertising OutputMode::StateSync round-trips
+    // through the trailing client-caps byte.
+    let caps = ClientCapabilities::new().with_output_mode(OutputMode::StateSync);
+    let frame = FrameKind::Hello {
+        client_name: "phux-agent".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: caps,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    let FrameKind::Hello { client_caps, .. } = decoded else {
+        panic!("expected Hello");
+    };
+    assert_eq!(client_caps.output_mode, OutputMode::StateSync);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn hello_decoder_defaults_output_mode_raw_when_absent() {
+    // A HELLO body that stops before the output_mode byte (e.g. a pre-fseo
+    // client) decodes to the safe interactive default, OutputMode::Raw.
+    let caps = ClientCapabilities::new();
+    let frame = FrameKind::Hello {
+        client_name: "x".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: caps,
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    // Drop the final trailing byte (output_mode == Raw == 0) and fix the
+    // length header so the decoder sees a shorter, pre-fseo body.
+    let new_len = u32::try_from(buf.len() - 4 - 1).unwrap();
+    buf.truncate(buf.len() - 1);
+    buf[0..4].copy_from_slice(&new_len.to_be_bytes());
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert!(tail.is_empty());
+    let FrameKind::Hello { client_caps, .. } = decoded else {
+        panic!("expected Hello");
+    };
+    assert_eq!(client_caps.output_mode, OutputMode::Raw);
 }
 
 #[test]

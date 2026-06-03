@@ -226,6 +226,13 @@ pub struct ConsumerSyncState {
     /// handful at the clamped cadence). No wire change: the RTT round-trip
     /// rides the `seq` that `FRAME_ACK` already echoes.
     pub emit_instants: std::collections::BTreeMap<u64, tokio::time::Instant>,
+    /// Whether this consumer negotiated the synthesized state-sync tick
+    /// emitter (phux-fseo). When `true`, `tick_emit` serves this consumer
+    /// even with the global test gate off; when `false` the consumer is
+    /// served by the runtime's raw broadcast pump and `tick_emit` stays
+    /// silent for it. The global `consumer_tick_emits` test override still
+    /// forces emission for every consumer regardless of this flag.
+    pub wants_state_sync: bool,
 }
 
 impl std::fmt::Debug for ConsumerSyncState {
@@ -235,6 +242,7 @@ impl std::fmt::Debug for ConsumerSyncState {
             .field("next_seq", &self.next_seq)
             .field("last_acked_seq", &self.last_acked_seq)
             .field("last_cursor_mode", &self.last_cursor_mode)
+            .field("wants_state_sync", &self.wants_state_sync)
             .finish_non_exhaustive()
     }
 }
@@ -268,6 +276,12 @@ pub struct ConsumerAttachRequest {
     /// from the actor's [`phux_core::ids::TerminalId`] to this wire id and
     /// passes the resolved value here at ATTACH time.
     pub wire_terminal_id: u32,
+    /// Whether this consumer negotiated the synthesized state-sync tick
+    /// emitter (`OutputMode::StateSync`) at HELLO time (phux-fseo). When
+    /// `true` the actor's `tick_emit` serves this consumer and the runtime
+    /// suppresses its broadcast pump for it; when `false` the consumer
+    /// stays on the raw PTY broadcast (the human-TUI default).
+    pub wants_state_sync: bool,
     /// Channel the actor uses to acknowledge the lifecycle insertion.
     /// `Ok(outcome)` on success (the outcome reports whether this actor
     /// is tick-managing the consumer); `Err(...)` if the per-consumer
@@ -1308,6 +1322,7 @@ impl TerminalActor {
         client_id: ClientId,
         outbound: mpsc::Sender<Outbound>,
         wire_terminal_id: u32,
+        wants_state_sync: bool,
     ) -> Result<(), ConsumerAttachError> {
         let terminal = self.terminal.borrow();
         // Cursor + DEC mode capture happens against a one-shot
@@ -1351,6 +1366,7 @@ impl TerminalActor {
                 // first FRAME_ACK round-trip lands (phux-q0e.5).
                 rtt: RttEstimator::default(),
                 emit_instants: std::collections::BTreeMap::new(),
+                wants_state_sync,
             },
         );
         Ok(())
@@ -2207,15 +2223,19 @@ impl TerminalActor {
                         client_id,
                         outbound,
                         wire_terminal_id,
+                        wants_state_sync,
                         reply,
                     } = req;
-                    // phux-3uv: map register success to an outcome that
-                    // tells the runtime whether this actor is tick-managing
-                    // the consumer. Tick-managed ⇒ the runtime suppresses
-                    // its broadcast pump for this pane (single emitter).
-                    let tick_managed = self.consumer_tick_emits;
+                    // phux-3uv / phux-fseo: map register success to an outcome
+                    // that tells the runtime whether this actor is
+                    // tick-managing the consumer. Tick-managed ⇒ the runtime
+                    // suppresses its broadcast pump for this pane (single
+                    // emitter). A consumer is tick-managed if it negotiated
+                    // `OutputMode::StateSync` (`wants_state_sync`), OR the
+                    // global test gate forces every consumer onto the tick.
+                    let tick_managed = self.consumer_tick_emits || wants_state_sync;
                     let result = self
-                        .register_consumer(client_id, outbound, wire_terminal_id)
+                        .register_consumer(client_id, outbound, wire_terminal_id, wants_state_sync)
                         .map(|()| ConsumerAttachOutcome { tick_managed });
                     if let Err(err) = &result {
                         warn!(
@@ -2320,6 +2340,12 @@ impl TerminalActor {
     /// re-emission on the next tick. This is the v0.1 reliable-transport
     /// model (proto.md §8); the loss-tolerance re-diff property is a future
     /// lossy-transport concern (ADR-0018) and is not wired here.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "single cohesive per-tick emission: the length is inline \
+                  safety rationale (permit reservation, emit-once, \
+                  backpressure) that splitting would scatter and endanger"
+    )]
     fn tick_emit(&mut self) {
         // Per-tick observation span (hot path, so debug level: the default
         // `phux=info` filter leaves it disabled and effectively free —
@@ -2341,15 +2367,18 @@ impl TerminalActor {
         )
         .entered();
 
-        // Emission gate (phux-0q8 / phux-3uv / phux-ia4). When ON, the
-        // tick is the single server->consumer emitter and the runtime
-        // suppresses its broadcast pump per tick-managed consumer (see
-        // `ConsumerAttachOutcome`). When OFF, the broadcast pump in
-        // `runtime.rs` is the live emitter and the tick stays silent so the
-        // consumer does not double-paint. Either way the per-consumer
-        // reference is maintained by `register_consumer` (prime) and the
-        // tick itself (advance-on-emit); the gate only controls *emission*.
-        if !self.consumer_tick_emits {
+        // Emission gate (phux-0q8 / phux-3uv / phux-ia4 / phux-fseo). The tick
+        // emits only for a *tick-managed* consumer — one that negotiated
+        // `OutputMode::StateSync` (`state.wants_state_sync`), or any consumer
+        // when the global test gate forces it; the runtime suppresses its
+        // broadcast pump for exactly those (see `ConsumerAttachOutcome`). A
+        // raw consumer is served by the pump, so the tick stays silent for it
+        // to avoid double-painting. `force_all_consumers` is captured here so
+        // the loop below reads it without re-borrowing `self` while it holds
+        // `&mut self.consumer_states`.
+        let force_all_consumers = self.consumer_tick_emits;
+        if !force_all_consumers && !self.consumer_states.values().any(|s| s.wants_state_sync) {
+            // No tick-managed consumer: nothing to emit (dirty flag untouched).
             return;
         }
 
@@ -2401,6 +2430,13 @@ impl TerminalActor {
         let mut emitted: u64 = 0;
         let mut total_out_bytes: usize = 0;
         for (client_id, state) in &mut self.consumer_states {
+            // phux-fseo: serve only tick-managed consumers. A raw consumer
+            // sharing this pane is served by the broadcast pump; emitting here
+            // too would double-paint it, so skip it (reference left untouched
+            // for a later mode flip).
+            if !force_all_consumers && !state.wants_state_sync {
+                continue;
+            }
             // This consumer is being serviced this tick; it no longer needs
             // a forced first pass.
             state.needs_initial_emit = false;
@@ -2882,9 +2918,13 @@ mod tests {
         let b = ClientId(2);
         let (tx_a, _rx_a) = dummy_outbound();
         let (tx_b, _rx_b) = dummy_outbound();
-        actor.register_consumer(a, tx_a, 1).expect("register a");
+        actor
+            .register_consumer(a, tx_a, 1, false)
+            .expect("register a");
         assert_eq!(actor.consumer_count(), 1);
-        actor.register_consumer(b, tx_b, 2).expect("register b");
+        actor
+            .register_consumer(b, tx_b, 2, false)
+            .expect("register b");
         assert_eq!(actor.consumer_count(), 2);
 
         actor.unregister_consumer(a);
@@ -2915,7 +2955,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(7);
         let (tx, _rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         let state = actor.consumer_state(client).expect("state present");
         assert_eq!(state.last_acked_seq, 0, "no acks yet");
@@ -2955,6 +2997,7 @@ mod tests {
                         client_id: client,
                         outbound: out_tx,
                         wire_terminal_id: 99,
+                        wants_state_sync: false,
                         reply: tx_a,
                     })
                     .await
@@ -2989,7 +3032,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(1);
         let (tx, _rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         for seq in 1..=3 {
             actor.on_frame_ack(client, seq);
@@ -3011,7 +3056,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(1);
         let (tx, _rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         actor.on_frame_ack(client, 5);
         assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 5);
@@ -3060,7 +3107,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(7);
         let (tx, _rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
         actor.on_frame_ack(client, 2);
         assert_eq!(actor.consumer_state(client).unwrap().last_acked_seq, 2);
 
@@ -3088,7 +3137,9 @@ mod tests {
         actor.disable_tick_emit_for_test();
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
         // Make the grid genuinely dirty AFTER register so a non-gated tick
         // would have something to emit — proving the gate, not an empty diff.
         actor.vt_write_for_test(b"dirty-content");
@@ -3119,7 +3170,9 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
         actor.vt_write_for_test(b"dirty-content");
 
         actor.tick_emit();
@@ -3127,6 +3180,69 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "default human attach path must not wait for synthesized tick output",
+        );
+    }
+
+    /// phux-fseo: a consumer that negotiated `OutputMode::StateSync`
+    /// (`wants_state_sync == true`) is served by the tick even with the
+    /// global test gate OFF — the per-consumer opt-in is the production
+    /// path. Proves the negotiation actually reaches `tick_emit` without
+    /// relying on `enable_tick_emit_for_test`.
+    #[test]
+    fn tick_emit_serves_negotiated_state_sync_consumer_with_gate_off() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        // NB: global gate left at its production default (OFF).
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.vt_write_for_test(b"state-sync-marker");
+
+        actor.tick_emit();
+
+        let frame = rx
+            .try_recv()
+            .expect("state-sync consumer must be served by the tick even with the gate off");
+        let Outbound::Frame(FrameKind::TerminalOutput { seq, .. }) = frame else {
+            panic!("expected a TerminalOutput frame for the state-sync consumer");
+        };
+        assert_eq!(seq, 1, "first tick emission stamps seq=1");
+    }
+
+    /// phux-fseo: with the global gate OFF and two consumers sharing one
+    /// pane — one `StateSync`, one `Raw` — the tick serves ONLY the
+    /// state-sync consumer. The raw consumer is served by the runtime's
+    /// broadcast pump; emitting to it here too would double-paint it.
+    #[test]
+    fn tick_emit_mixed_mode_serves_only_state_sync_consumer() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let sync_client = ClientId(1);
+        let raw_client = ClientId(2);
+        let (sync_tx, mut sync_rx) = dummy_outbound();
+        let (raw_tx, mut raw_rx) = dummy_outbound();
+        actor
+            .register_consumer(sync_client, sync_tx, 11, true)
+            .expect("register state-sync");
+        actor
+            .register_consumer(raw_client, raw_tx, 12, false)
+            .expect("register raw");
+        actor.vt_write_for_test(b"shared-pane-write");
+
+        actor.tick_emit();
+
+        assert!(
+            matches!(
+                sync_rx.try_recv(),
+                Ok(Outbound::Frame(FrameKind::TerminalOutput { .. })),
+            ),
+            "state-sync consumer must receive the synthesized delta",
+        );
+        assert!(
+            raw_rx.try_recv().is_err(),
+            "raw consumer must stay on the broadcast pump — tick must not double-paint it",
         );
     }
 
@@ -3149,7 +3265,9 @@ mod tests {
         // Register against the (blank) terminal: the reference is primed
         // so deltas are measured "from now." Writing AFTER register is what
         // makes the next tick produce a diff.
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
         actor.vt_write_for_test(b"q0e-marker");
 
         actor.tick_emit();
@@ -3246,10 +3364,10 @@ mod tests {
         let (tx_a, mut rx_a) = dummy_outbound();
         let (tx_b, mut rx_b) = dummy_outbound();
         actor
-            .register_consumer(client_a, tx_a, 11)
+            .register_consumer(client_a, tx_a, 11, false)
             .expect("register a");
         actor
-            .register_consumer(client_b, tx_b, 11)
+            .register_consumer(client_b, tx_b, 11, false)
             .expect("register b");
 
         // One tick of new output AFTER both are primed.
@@ -3318,7 +3436,9 @@ mod tests {
 
         let client = ClientId(1);
         let (tx, mut rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         // First tick: the consumer needs its initial pass, so it is walked
         // (returns empty here — primed against a blank terminal) and the
@@ -3366,7 +3486,9 @@ mod tests {
         // steady-state tick clears the dirty flag.
         let client_a = ClientId(1);
         let (tx_a, mut rx_a) = dummy_outbound();
-        actor.register_consumer(client_a, tx_a, 11).expect("reg a");
+        actor
+            .register_consumer(client_a, tx_a, 11, false)
+            .expect("reg a");
         actor.vt_write_for_test(b"first");
         actor.tick_emit();
         while rx_a.try_recv().is_ok() {}
@@ -3381,7 +3503,9 @@ mod tests {
         // cleared.)
         let client_b = ClientId(2);
         let (tx_b, mut rx_b) = dummy_outbound();
-        actor.register_consumer(client_b, tx_b, 11).expect("reg b");
+        actor
+            .register_consumer(client_b, tx_b, 11, false)
+            .expect("reg b");
         assert!(
             actor
                 .consumer_state(client_b)
@@ -3430,7 +3554,9 @@ mod tests {
 
         let client = ClientId(1);
         let (tx, rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
         assert_eq!(actor.consumer_count(), 1);
 
         // Simulate the dropped-detach leak: the client's receiver goes
@@ -3466,7 +3592,9 @@ mod tests {
 
         let client = ClientId(1);
         let (tx, rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         // Prime past the initial-emit pass with one tick (empty body).
         actor.tick_emit();
@@ -3838,7 +3966,9 @@ mod tests {
         // Tiny mailbox so a few ticks saturate it — same shape as the
         // production `DEFAULT_CLIENT_MAILBOX` pressure, smaller and faster.
         let (tx, mut rx) = mpsc::channel::<Outbound>(2);
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         // Write a distinct marker on its own line and tick to emit it,
         // WITHOUT draining the receiver. Every marker must survive.
@@ -3886,7 +4016,9 @@ mod tests {
 
         let client = ClientId(1);
         let (tx, mut rx) = mpsc::channel::<Outbound>(2);
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         for i in 0..ROUNDS {
             actor.vt_write_for_test(format!("seqmark{i:03}\r\n").as_bytes());
@@ -4033,7 +4165,7 @@ mod tests {
         let slow = ClientId(1);
         let (tx_slow, _rx_slow) = mpsc::channel::<Outbound>(16);
         actor
-            .register_consumer(slow, tx_slow, 11)
+            .register_consumer(slow, tx_slow, 11, false)
             .expect("register slow");
         assert_eq!(
             actor.adaptive_tick_interval_for_test(),
@@ -4062,7 +4194,7 @@ mod tests {
         let fast = ClientId(2);
         let (tx_fast, _rx_fast) = mpsc::channel::<Outbound>(16);
         actor
-            .register_consumer(fast, tx_fast, 12)
+            .register_consumer(fast, tx_fast, 12, false)
             .expect("register fast");
         actor.vt_write_for_test(b"world\r\n");
         actor.tick_emit();
@@ -4108,7 +4240,9 @@ mod tests {
 
         let client = ClientId(1);
         let (tx, _rx) = dummy_outbound();
-        actor.register_consumer(client, tx, 11).expect("register");
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
 
         // No tick_emit ran, so no emit instant was stamped. An ack here
         // advances last_acked_seq but cannot time a round trip.

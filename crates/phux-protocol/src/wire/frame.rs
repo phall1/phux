@@ -1714,6 +1714,10 @@ impl FrameKind {
                 enc.write_u8(client_caps.image_protocols.as_wire());
                 enc.write_u8(client_caps.kbd_protocols.as_wire());
                 enc.write_u8(u8::from(client_caps.hyperlinks));
+                // phux-fseo: consumer output-mode preference (raw vs
+                // synthesized state-sync tick). Trailing/skippable like the
+                // caps bytes above.
+                enc.write_u8(client_caps.output_mode.as_wire());
             }
             Self::HelloOk {
                 protocol_major,

@@ -256,6 +256,11 @@ Layer = bitset (u8) {
     L3 = 0x04,   // Metadata storage (optional service)
 }
 
+OutputMode = enum (u8) {
+    Raw = 0,        // raw PTY byte broadcast (default; byte-faithful human path)
+    StateSync = 1,  // per-consumer synthesized grid-delta tick (ADR-0018)
+}
+
 ClientCapabilities {
     kbd_protocols: bitset<KeyboardProtocol>,
     mouse_protocols: bitset<MouseProtocol>,
@@ -265,6 +270,7 @@ ClientCapabilities {
     unicode_version: u8,
     rendering: RenderingMode,      // Diff | VtReplay (deprecated; see prose below)
     layers: bitset<Layer>,         // tiers the client speaks (§10; ADR-0015)
+    output_mode: OutputMode,       // emitter the consumer wants (phux-fseo)
 }
 
 ServerCapabilities {
@@ -285,10 +291,22 @@ ServerCapabilities {
 
 The reference HELLO codec encodes `ClientCapabilities` as additive
 trailing positional bytes after the original version tuple. The current
-order is `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`.
-Decoders MUST accept every prefix of this sequence and apply defaults for
-missing trailing bytes; future fields append after `hyperlinks` until the
+order is `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
+`output_mode`. Decoders MUST accept every prefix of this sequence and
+apply defaults for missing trailing bytes (a body that stops before
+`output_mode` decodes as `OutputMode::Raw`, an unknown `output_mode` tag
+also as `Raw`); future fields append after `output_mode` until the
 phux-i58 TLV migration replaces this legacy positional shape.
+
+`output_mode` lets a consumer choose, per connection, which server emitter
+serves its attached Terminals: `Raw` (the default) keeps the byte-faithful
+low-latency PTY broadcast that interactive shells and TUIs rely on, while
+`StateSync` opts into the per-consumer synthesized grid-delta tick
+(ADR-0018) suited to agents and remote state-sync consumers. The server
+suppresses the raw broadcast for a `StateSync` consumer so exactly one
+emitter serves it. Raw stays the human default because synthesized ticks
+add a visible local-typing latency floor and can lose byte-exact styling
+(phux-fseo / phux-yeca).
 
 The `CC_FRONTEND` bit on `features` is **reclaimed** per
 [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md). Earlier drafts
