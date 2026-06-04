@@ -50,7 +50,13 @@ test:
 # tests). All spin a real server + PTY, so they live here, not in the
 # default `just test` / `just ci` pool.
 e2e:
-    cargo nextest run -p phux --test run_wait_e2e --run-ignored all
+    # Serial (`--test-threads=1`): these `run_wait_e2e` tests each spawn a real
+    # phux server and are `#[ignore]`d precisely because they "starve in the
+    # full parallel pool" (see their ignore reason). Running them via
+    # `--run-ignored all` at the default thread count recreates that exact
+    # starvation, so an output capture races and reports a truncated read.
+    # phux-uow0.
+    cargo nextest run -p phux --test run_wait_e2e --run-ignored all --test-threads=1
     # phux-uow0: this lane is every PTY-backed stress/perf test, each spawning
     # a real server + PTY child. Run SERIALLY (`--test-threads=1`): at the
     # 2-core CI default they starve each other for CPU and miss the harness
