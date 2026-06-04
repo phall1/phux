@@ -39,6 +39,7 @@ pub mod paint;
 pub mod reflow;
 pub mod render;
 pub mod server_frame;
+mod stdout_writer;
 
 pub use driver::{AttachError, run, run_with_predict, run_with_stdout, write_terminal_reset};
 
