@@ -96,7 +96,12 @@ fn many_concurrent_clients_attach_detach_under_output() {
 
         // The pane survived the whole churn: the anchor still gets output.
         let res = anchor.wait_until(|s| s.contains("tick-")).await;
-        cap.attach_screen(anchor.screenshot().await.snapshot_text());
+        // Bounded drain, not screenshot(): the `tick-` seed emits every 10ms,
+        // so screenshot's "drain until 20ms quiet" never terminates here and
+        // hangs the e2e lane (phux-s2iw class). wait_until already populated
+        // the oracle; a bounded drain refreshes it for the capture.
+        anchor.drain_output_bounded(32).await;
+        cap.attach_screen(anchor.snapshot_text());
         assert!(
             res.is_ok(),
             "anchor stopped receiving output after concurrent-client churn \
