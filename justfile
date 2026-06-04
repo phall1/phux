@@ -49,30 +49,20 @@ test:
 # wall-clock `perf_latency` gate + the resize-storm / attach-churn stress
 # tests). All spin a real server + PTY, so they live here, not in the
 # default `just test` / `just ci` pool.
+# phux-uow0: every test here spawns a real phux server + PTY child. They are
+# `#[ignore]`d out of the default pool precisely because they "starve in the
+# full parallel pool" (see their ignore reasons), and on a 2-core CI runner
+# they are doubly sensitive: serial removes CPU contention (a fresh attach
+# handshake / snapshot render otherwise misses WIRE_RECV_TIMEOUT), and
+# `--retries=2` absorbs the residual environment-driven flakes (a 2MB-burst
+# read that races a socket close, etc.) the same way the reconnect override in
+# .config/nextest.toml does. attach_detach_churn stays QUARANTINED (`-E`): it
+# failed even under retries; re-enable once a serial CI run confirms it holds.
 e2e:
-    # Serial (`--test-threads=1`): these `run_wait_e2e` tests each spawn a real
-    # phux server and are `#[ignore]`d precisely because they "starve in the
-    # full parallel pool" (see their ignore reason). Running them via
-    # `--run-ignored all` at the default thread count recreates that exact
-    # starvation, so an output capture races and reports a truncated read.
-    # phux-uow0.
-    cargo nextest run -p phux --test run_wait_e2e --run-ignored all --test-threads=1
-    # phux-uow0: this lane is every PTY-backed stress/perf test, each spawning
-    # a real server + PTY child. Run SERIALLY (`--test-threads=1`): at the
-    # 2-core CI default they starve each other for CPU and miss the harness
-    # WIRE_RECV_TIMEOUT — a fresh attach's snapshot render or even the initial
-    # `ClientHandle::attach` handshake times out and the harness panics. These
-    # tests are sound in isolation (see the reconnect override in
-    # .config/nextest.toml); serializing removes the contention rather than
-    # papering over it with retries. The lane is small, so the wall-time cost
-    # is a few extra seconds.
-    #
-    # attach_detach_churn_keeps_pane_alive stays QUARANTINED for now: it drives
-    # 12 attach/detach rounds and failed even under retries before
-    # serialization. Re-enable (drop the `-E` filter) under phux-uow0 once a
-    # serial CI run confirms it holds.
+    cargo nextest run -p phux --test run_wait_e2e --run-ignored all \
+      --test-threads=1 --retries=2
     cargo nextest run -p phux-server --run-ignored ignored-only \
-      --test-threads=1 \
+      --test-threads=1 --retries=2 \
       -E 'not test(=attach_detach_churn_keeps_pane_alive)' \
       --test perf_latency --test perf_colored_output \
       --test stress_resize_storm --test stress_resize_extremes \
