@@ -51,14 +51,22 @@ test:
 # default `just test` / `just ci` pool.
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all
-    # phux-uow0: attach_detach_churn_keeps_pane_alive is QUARANTINED. It fails
-    # under e2e-lane load — the per-round snapshot render misses
-    # WIRE_RECV_TIMEOUT when PTY-backed tests starve each other for CPU (the
-    # harness recv_framed then panics). Not load-flaky enough for retries to
-    # save (observed 3/3 fail). Excluded until the proper fix lands: a nextest
-    # test-group capping PTY-heavy test concurrency. Re-enable by dropping the
-    # `-E` filter once that lands.
+    # phux-uow0: this lane is every PTY-backed stress/perf test, each spawning
+    # a real server + PTY child. Run SERIALLY (`--test-threads=1`): at the
+    # 2-core CI default they starve each other for CPU and miss the harness
+    # WIRE_RECV_TIMEOUT — a fresh attach's snapshot render or even the initial
+    # `ClientHandle::attach` handshake times out and the harness panics. These
+    # tests are sound in isolation (see the reconnect override in
+    # .config/nextest.toml); serializing removes the contention rather than
+    # papering over it with retries. The lane is small, so the wall-time cost
+    # is a few extra seconds.
+    #
+    # attach_detach_churn_keeps_pane_alive stays QUARANTINED for now: it drives
+    # 12 attach/detach rounds and failed even under retries before
+    # serialization. Re-enable (drop the `-E` filter) under phux-uow0 once a
+    # serial CI run confirms it holds.
     cargo nextest run -p phux-server --run-ignored ignored-only \
+      --test-threads=1 \
       -E 'not test(=attach_detach_churn_keeps_pane_alive)' \
       --test perf_latency --test perf_colored_output \
       --test stress_resize_storm --test stress_resize_extremes \
