@@ -68,7 +68,12 @@ fn resize_storm_converges_to_final_geometry() {
                 // shows the post-storm geometry.
                 let needle = format!("{final_rows} {final_cols}");
                 let res = client.wait_until(|s| s.contains(&needle)).await;
-                cap.attach_screen(client.screenshot().await.snapshot_text());
+                // Bounded drain, not screenshot(): the `stty size` seed loops
+                // every 30ms; screenshot's "drain until 20ms quiet" can spin
+                // against it under load (phux-s2iw class). wait_until already
+                // populated the oracle; a bounded drain refreshes it.
+                client.drain_output_bounded(32).await;
+                cap.attach_screen(client.snapshot_text());
                 assert!(
                     res.is_ok(),
                     "PTY winsize never converged to {final_cols}x{final_rows} \
