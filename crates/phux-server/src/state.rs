@@ -972,15 +972,36 @@ impl ServerState {
         // `has_served_client` field doc.
         self.has_served_client = true;
 
-        // Subscribe to the session's active pane if there is one. This is the
-        // first cut; richer subscription (every visible pane, dynamic
-        // re-subscription on `FOCUS_CHANGED`) lives in `SUBSCRIBE` (§7.4)
-        // and is deferred per SPEC.
-        if let Some(active_pane) = self.active_pane_of_session(session_id) {
-            self.terminal_subscribers
-                .entry(active_pane)
-                .or_default()
-                .push(client_id);
+        // Subscribe to EVERY pane in the session, across all its windows —
+        // not just the active one (phux-fysb.2). A multi-pane client renders
+        // all panes (it receives a TERMINAL_SNAPSHOT for each via
+        // `attach_snapshot_panes`) and must be able to route input to whichever
+        // it focuses. The input gate in `handle_terminal_input` DROPS keystrokes
+        // to panes the client isn't subscribed to, so the old active-pane-only
+        // subscription left every other pane unable to receive input on
+        // (re-)attach — the user could see the prompts but not type into them,
+        // while a freshly spawned pane worked because `handle_spawn_terminal`
+        // auto-subscribes it. Subscribing every pane also lets the per-pane
+        // actor fan out live output to this client (terminal_actor's
+        // subscriber loop), so non-focused panes stay live too.
+        let session_panes: Vec<TerminalId> = self
+            .registry
+            .session(session_id)
+            .map(|s| s.windows.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|wid| {
+                self.registry
+                    .window(wid)
+                    .map(|w| w.panes.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        for pane in session_panes {
+            let subs = self.terminal_subscribers.entry(pane).or_default();
+            if !subs.contains(&client_id) {
+                subs.push(client_id);
+            }
         }
         Ok(session_id)
     }
@@ -1781,6 +1802,30 @@ mod tests {
         assert_eq!(returned_sid, sid);
         assert!(s.attached.contains_key(&cid));
         assert_eq!(s.subscribers_for_terminal(pid), &[cid]);
+    }
+
+    #[test]
+    fn attach_subscribes_to_every_pane_not_just_the_active_one() {
+        // phux-fysb.2: a multi-pane client must be subscribed to ALL its panes
+        // or the input gate drops keystrokes to non-active panes — the
+        // "can't type after re-attach" bug. Before the fix only the active
+        // pane was subscribed.
+        let mut s = ServerState::new();
+        let (sid, _wid, pid1) = s.seed_session("default");
+        let pid2 = s
+            .add_pane_to_session(sid)
+            .expect("add a second pane to the session");
+        assert_ne!(pid1, pid2);
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert!(
+            s.subscribers_for_terminal(pid1).contains(&cid),
+            "client not subscribed to first pane"
+        );
+        assert!(
+            s.subscribers_for_terminal(pid2).contains(&cid),
+            "client not subscribed to second pane (the regression)"
+        );
     }
 
     #[test]
