@@ -4,6 +4,22 @@
 # toolchain pinned by `rust-toolchain.toml` and the devshell from `flake.nix`
 # (which provides cargo-nextest and cargo-deny).
 #
+# TWO compiling jobs, not six. libghostty-vt's build.rs shells out to `zig`
+# to compile libghostty — the dominant build cost. The previous layout ran
+# fmt/clippy/test/e2e/deny/doc as six independent runners, four of which
+# compiled the whole workspace (and that zig blob) from scratch in parallel.
+# Here the work is grouped so the zig blob builds at most twice per run:
+#   * `check` — fmt + clippy + doc + deny, sharing one target dir (one zig
+#     build for the check/doc profile).
+#   * `test`  — unit tests + the `#[ignore]`d e2e/stress lane, sharing one
+#     target dir (one zig build for the test profile). Merging these two was
+#     pure waste before: `e2e` recompiled the exact test binaries `test`
+#     had already built, just to run the ignored ones.
+# We deliberately do NOT split build-from-run across runners (e.g. `nextest
+# archive`): libghostty's zig build auto-detects the host CPU, so a binary
+# built on one runner can SIGILL on another in the hosted fleet. Keeping
+# build+run on the same runner sidesteps that (see CPU_KEY below).
+#
 # Runners: ubuntu-latest only for now. macOS can be added to a matrix later
 # when a contributor needs it (the devshell already supports darwin systems
 # via flake-utils.lib.eachDefaultSystem).
@@ -13,7 +29,9 @@
 # carries instructions specific to whichever runner compiled it. GitHub's
 # hosted fleet spans CPU generations; restoring such an artifact onto a leaner
 # runner aborts with SIGILL at load time. Keying the cache on /proc/cpuinfo
-# keeps native artifacts pinned to matching hardware.
+# keeps native artifacts pinned to matching hardware. `rust-cache` adds the
+# job id to the key automatically, so `check` and `test` keep separate caches
+# (their target dirs hold different profiles and must not clobber).
 
 name: ci
 
@@ -31,36 +49,40 @@ permissions:
   contents: read
 
 jobs:
-  fmt:
-    name: fmt
+  # Lint + docs + license lane. clippy and rustdoc each compile the workspace
+  # (check / doc profiles); running them in one job shares the dependency
+  # build — including the zig blob — instead of paying for it twice. fmt and
+  # deny are near-free and ride along for a single pass/fail signal.
+  check:
+    name: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: cargo fmt --check
+      - name: fmt
         run: nix develop -c cargo fmt --check
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: CPU fingerprint
-        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: cargo clippy
+      - name: clippy
         run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+      - name: doc
+        run: nix develop -c env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace
+      - name: docs-check
+        run: nix develop -c bash scripts/check-docs.sh
+      - name: deny
+        run: nix develop -c cargo deny check
 
+  # Test lane: the default unit pool, then the `#[ignore]`d e2e/flywheel set
+  # (`run_wait_e2e`, perf gates, stress_*). Both reuse the one test-profile
+  # build in this job's target dir, so the workspace compiles once here.
+  #
+  # The e2e set drives real PTY-backed server spawns and is `#[ignore]`d out
+  # of the default pool because those spawns starve the latency-sensitive
+  # timing tests; without this lane a regression in the headless agent
+  # surface (e.g. a ROUTE_INPUT gate rejecting `phux run`) would ship green.
   test:
     name: test
     runs-on: ubuntu-latest
@@ -69,60 +91,10 @@ jobs:
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: cargo nextest run
+      - name: unit tests
         run: nix develop -c cargo nextest run --workspace
-
-  # Agent-surface + flywheel lane. The `run_wait_e2e` tests drive the real
-  # `phux` binary (run / send-keys / wait against a spawned server) and the
-  # in-process flywheel gates (perf_latency, stress_*). They are `#[ignore]`d
-  # out of the default `test` pool because real-PTY server spawns starve it,
-  # so without this job a regression in the headless agent surface (e.g. a
-  # ROUTE_INPUT gate rejecting `phux run`) ships green. This job is that gate.
-  e2e:
-    name: e2e
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: CPU fingerprint
-        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: just e2e
+      - name: e2e
         run: nix develop -c just e2e
-
-  deny:
-    name: deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: CPU fingerprint
-        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: cargo deny check
-        run: nix develop -c cargo deny check
-
-  doc:
-    name: doc
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: CPU fingerprint
-        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - name: cargo doc
-        run: nix develop -c env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace
