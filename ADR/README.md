@@ -47,6 +47,7 @@ Nygard's template][nygard].
 | [0024](./0024-wire-owns-input-atoms.md) | The wire protocol owns its input atoms (phux-defined), so the codec builds on wasm32 | Accepted (amends [0008](./0008-use-libghostty-types-directly.md)) |
 | [0025](./0025-browser-web-client.md) | Browser web client over a WebSocket transport; reuses the wire codec + libghostty engine, no reimplementation | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md), [0024](./0024-wire-owns-input-atoms.md)) |
 | [0026](./0026-overlays-theme-stack-single-dispatch.md) | Overlays share one theme + a real stack; the command palette is just another overlay; keybinds and palette both dispatch through one `run_action()` | Accepted (builds on [0020](./0020-layered-render.md)) |
+| [0027](./0027-terminal-references-and-l3-links.md) | Terminals are referenced, not owned: views share one geometry (config `window-size`, default smallest); tags/links are L3 metadata via `#tag` | Accepted (builds on [0017](./0017-tui-not-protocol-privileged.md), [0015](./0015-protocol-layering.md)) |
 
 ## When to write an ADR
 
