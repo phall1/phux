@@ -1,14 +1,14 @@
 //! Submodule for terminal actor internals.
 
+use super::tick::RttEstimator;
+use crate::grid::ConsumerReference;
+use crate::state::Outbound;
 use libghostty_vt::{
     Terminal as GhosttyTerminal,
     render::{CursorVisualStyle, Snapshot},
     terminal::Mode,
 };
 use tokio::sync::mpsc;
-use crate::grid::ConsumerReference;
-use crate::state::Outbound;
-use super::tick::RttEstimator;
 
 /// Snapshot of the live `Terminal`'s cursor + DEC mode bits captured at
 /// the moment a consumer is brought up-to-date.

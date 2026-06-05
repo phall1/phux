@@ -1,12 +1,12 @@
 //! Submodule for terminal actor internals.
 
+use super::TerminalActorError;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tracing::debug;
-use super::TerminalActorError;
 
 /// Default PTY read chunk size. Mirrors the example. Sized comfortably
 /// above the typical libghostty escape-sequence span so a single read
@@ -167,7 +167,10 @@ type SpawnedPty = (
 /// Receive from `rx` when `Some`; otherwise park forever. Used as a
 /// select! arm so the actor's loop can run with or without a PTY
 /// without an `expect()` or branching `if`.
-pub(crate) async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> Option<PtyEvent> {
+#[allow(dead_code)] // refactor WIP: duplicated in mod.rs; agent to dedup
+pub(crate) async fn recv_or_pending(
+    rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>,
+) -> Option<PtyEvent> {
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
@@ -177,7 +180,11 @@ pub(crate) async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyE
 /// Open a PTY pair, spawn `cmd` on the slave, and start the reader /
 /// writer bridge threads. Returns the actor-side channel endpoints and
 /// a [`PtyOwned`] bundle to keep the resources alive.
-pub(crate) fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, TerminalActorError> {
+pub(crate) fn spawn_pty(
+    cmd: CommandBuilder,
+    cols: u16,
+    rows: u16,
+) -> Result<SpawnedPty, TerminalActorError> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {

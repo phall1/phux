@@ -1,12 +1,11 @@
 //! Submodule for terminal actor internals.
 
-use bytes::Bytes;
-use tokio::sync::{broadcast, mpsc, oneshot};
-use phux_protocol::ClientId;
-use phux_protocol::wire::frame::TerminalEventType;
 use crate::grid::SnapshotBytes;
 use crate::state::{Outbound, TerminalInput};
-
+use bytes::Bytes;
+use phux_protocol::ClientId;
+use phux_protocol::wire::frame::TerminalEventType;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// Request to register a new consumer with the actor.
 ///

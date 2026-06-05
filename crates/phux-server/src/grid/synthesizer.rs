@@ -52,10 +52,11 @@ use super::reference::{ConsumerReference, ReferenceCursorMode};
 /// this reuse is unambiguous.
 pub const SCROLLBACK_ALL: u32 = 0;
 
-/// Inline grapheme-cluster buffer size for the scrollback walk. Covers the
-/// overwhelming-common case (a base codepoint plus a few combining marks)
-/// without a heap allocation per cell; deeper clusters fall back to a heap
-/// retry on `OutOfSpace`.
+/// Inline grapheme-cluster buffer size for the scrollback walk.
+///
+/// Covers the overwhelming-common case (a base codepoint plus a few
+/// combining marks) without a heap allocation per cell; deeper clusters
+/// fall back to a heap retry on `OutOfSpace`.
 pub const GRAPHEME_INLINE: usize = 8;
 
 /// Errors that can occur while synthesising a snapshot.
@@ -727,7 +728,6 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         Ok(())
     }
 }
-
 
 /// Convenience wrapper: allocate a fresh [`SnapshotSynthesizer`] for a
 /// one-shot synthesis. Per-pane hot loops should reuse a

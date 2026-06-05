@@ -1,11 +1,11 @@
 use phux_core::ids::{SessionId, TerminalId};
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::TerminalId as WireTerminalId;
-use tokio::sync::mpsc;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
-use crate::terminal_actor::TerminalHandle;
 use super::input_log::Outbound;
+use crate::terminal_actor::TerminalHandle;
 
 /// Server-assigned identifier for an attached client.
 ///

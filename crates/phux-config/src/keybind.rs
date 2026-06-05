@@ -902,4 +902,19 @@ mod tests {
             "got {err:?}"
         );
     }
+
+    /// The shipped default config must have no overlapping or ambiguous
+    /// keybindings: building a [`Resolver`] from it succeeds. Asserts the
+    /// invariant, not which keys are bound — the defaults are free to change
+    /// without touching this test.
+    #[test]
+    fn default_config_keybindings_have_no_overlap() {
+        let cfg = crate::parse_str(
+            crate::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        Resolver::new(&cfg.keybindings)
+            .expect("default keybindings build a resolver with no overlap");
+    }
 }

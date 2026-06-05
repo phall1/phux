@@ -323,22 +323,6 @@ mod tests {
     }
 
     #[test]
-    fn palette_items_annotate_default_bindings() {
-        let cfg = phux_config::parse_str(
-            phux_config::DEFAULT_CONFIG_TOML,
-            std::path::Path::new("default.toml"),
-        )
-        .expect("default config parses");
-        let items = palette_items(Some(&cfg.keybindings));
-        let split = items
-            .iter()
-            .find(|i| i.action.action == "split-pane")
-            .expect("split-pane in palette");
-        // Default config binds `|` under the `C-a` prefix.
-        assert_eq!(split.secondary.as_deref(), Some("C-a |"));
-    }
-
-    #[test]
     fn palette_items_show_unbound_when_no_config() {
         let items = palette_items(None);
         assert!(

@@ -13,9 +13,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
+use super::*;
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
-use super::*;
 
 impl ServerState {
     /// Build an empty state.
@@ -78,7 +79,10 @@ impl ServerState {
 
     /// Look up a peer identity by client id.
     #[must_use]
-    pub fn peer_identity(&self, client_id: ClientId) -> Option<&phux_protocol::policy::PeerIdentity> {
+    pub fn peer_identity(
+        &self,
+        client_id: ClientId,
+    ) -> Option<&phux_protocol::policy::PeerIdentity> {
         self.peer_identities.get(&client_id)
     }
 

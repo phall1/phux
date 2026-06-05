@@ -5,18 +5,21 @@
 //! The default implementations are permissive (allow everything, log
 //! nothing) so a server without a custom policy engine behaves exactly
 //! as before.
+//
+// feature WIP (4588a0a): policy extension API; docs + use_self to be tightened
+// by the policy-feature author.
+#![allow(missing_docs, clippy::use_self)]
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use phux_protocol::ids::{CollectionId, TerminalId};
 use phux_protocol::policy::{
-    AuditAction, AuditEvent, AuditTarget, Capability, ConsumerClass, ConsumerId, Decision,
-    InputTag, MetadataOp, MetadataScope, PeerIdentity, TaggedInput, TerminalOp,
+    AuditEvent, Capability, ConsumerClass, ConsumerId, Decision, InputTag, MetadataOp,
+    MetadataScope, PeerIdentity, TaggedInput, TerminalOp,
 };
-use tracing::{debug, trace};
+use tracing::trace;
 
 /// Extension point for authorization decisions.
 ///
@@ -105,12 +108,7 @@ pub trait AuditSink: Send + Sync {
 /// attestation chains.
 pub trait InputProvenance: Send + Sync {
     /// Tag a raw input frame with provenance metadata.
-    fn tag(
-        &self,
-        consumer: &ConsumerId,
-        terminal_id: &TerminalId,
-        payload: &[u8],
-    ) -> TaggedInput;
+    fn tag(&self, consumer: &ConsumerId, terminal_id: &TerminalId, payload: &[u8]) -> TaggedInput;
 
     /// Classify a consumer from its tag.
     fn classify(&self, tag: &InputTag) -> ConsumerClass {
@@ -203,12 +201,7 @@ impl AuditSink for NoopAuditSink {
 pub struct UnknownProvenance;
 
 impl InputProvenance for UnknownProvenance {
-    fn tag(
-        &self,
-        consumer: &ConsumerId,
-        terminal_id: &TerminalId,
-        payload: &[u8],
-    ) -> TaggedInput {
+    fn tag(&self, consumer: &ConsumerId, terminal_id: &TerminalId, payload: &[u8]) -> TaggedInput {
         TaggedInput {
             terminal_id: terminal_id.clone(),
             payload: payload.to_vec(),

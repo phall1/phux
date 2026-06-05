@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 
-use crate::layout::{LayoutNode, LayoutState, Rect};
+use crate::layout::{LayoutState, Rect};
 
-use super::rasterize::{rasterize, walk_layout, DividerCell, DividerSegment};
+use super::rasterize::{DividerCell, DividerSegment, rasterize, walk_layout};
 
 /// Result of [`compute_layout`]: per-pane rectangles plus the cells
 /// occupied by dividers between them.

@@ -1,8 +1,4 @@
-use libghostty_vt::{
-    Terminal as GhosttyTerminal,
-    render::Snapshot,
-    terminal::Mode,
-};
+use libghostty_vt::{Terminal as GhosttyTerminal, render::Snapshot, terminal::Mode};
 
 use super::synthesizer::SynthesisError;
 

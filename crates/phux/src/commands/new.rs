@@ -4,17 +4,14 @@ use std::process::ExitCode;
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::ids::CollectionId;
-use phux_protocol::wire::frame::{AttachTarget, CommandResult, CommandValue, StateScope, Command as WireCommand};
+use phux_protocol::wire::frame::{
+    AttachTarget, Command as WireCommand, CommandResult, CommandValue, StateScope,
+};
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{
-    attach::run_attach_once,
-    cli_runtime,
-    print_attach_error,
-    report_no_server,
-    request_command,
-    server::maybe_auto_spawn_server,
-    DEFAULT_SESSION_NAME,
+    DEFAULT_SESSION_NAME, attach::run_attach_once, cli_runtime, print_attach_error,
+    report_no_server, request_command, server::maybe_auto_spawn_server,
 };
 
 /// `phux new` — create a *new* session and attach to it.

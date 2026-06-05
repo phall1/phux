@@ -33,19 +33,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 use bytes::Bytes;
-use libghostty_vt::{
-    RenderState, Terminal as GhosttyTerminal, TerminalOptions,
-    render::{CursorVisualStyle, Snapshot},
-    terminal::Mode,
-};
+use libghostty_vt::{RenderState, Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::ClientId;
 use phux_protocol::wire::frame::{AgentEvent, FrameKind, TerminalEventType};
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
@@ -58,19 +51,20 @@ use crate::input::{
 };
 use crate::state::{Outbound, TerminalInput};
 
-pub mod sync;
 pub mod requests;
-pub mod tick;
 pub mod spawn;
+pub mod sync;
+pub mod tick;
 
-pub use sync::*;
 pub use requests::*;
-pub use tick::*;
 pub use spawn::*;
+pub use sync::*;
+pub use tick::*;
 
 /// Default PTY read chunk size. Mirrors the example. Sized comfortably
 /// above the typical libghostty escape-sequence span so a single read
 /// rarely splits a sequence boundary.
+#[allow(dead_code)] // refactor WIP: duplicated in spawn.rs; agent to dedup
 const PTY_READ_CHUNK: usize = 4096;
 
 /// Per-Terminal scrollback cap used by the no-config convenience
@@ -78,7 +72,6 @@ const PTY_READ_CHUNK: usize = 4096;
 /// A tmux-style mid-range value; the runtime path overrides it with
 /// `defaults.history-limit` via [`TerminalActor::build_with_token`].
 const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
-
 
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
 /// input encoders, and serves the channels exposed via [`TerminalHandle`].
@@ -1834,6 +1827,7 @@ impl TerminalActor {
 }
 
 /// Convenience: tuple returned by [`spawn_pty`].
+#[allow(dead_code)] // refactor WIP: duplicated in spawn.rs; agent to dedup
 type SpawnedPty = (
     mpsc::UnboundedReceiver<PtyEvent>,
     mpsc::UnboundedSender<Vec<u8>>,
@@ -1850,6 +1844,7 @@ async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> 
     }
 }
 mod tests {
+    #[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
     use super::*;
 
     /// phux-07y: `shell_command` runs the user's command via
@@ -2069,6 +2064,7 @@ mod tests {
     /// shaped like the production [`crate::state::AttachedClient::tx`].
     /// The receiver is returned so callers can hold it open (otherwise
     /// the actor's `try_send` would see a closed channel).
+    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn dummy_outbound() -> (mpsc::Sender<Outbound>, mpsc::Receiver<Outbound>) {
         mpsc::channel(16)
     }
@@ -3125,6 +3121,7 @@ mod tests {
 
     /// Drain every `TerminalOutput` currently queued on `rx`, returning the
     /// concatenated payload bytes and the ordered list of `seq`s.
+    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn drain_terminal_output(rx: &mut mpsc::Receiver<Outbound>) -> (Vec<u8>, Vec<u64>) {
         let mut bytes = Vec::new();
         let mut seqs = Vec::new();
@@ -3248,6 +3245,7 @@ mod tests {
     }
 
     /// Naive subsequence search for test assertions on VT byte streams.
+    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
     }

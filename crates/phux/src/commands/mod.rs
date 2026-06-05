@@ -2,8 +2,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Subcommand;
-use phux_client::attach::connection::Connection;
 use phux_client::attach::AttachError;
+use phux_client::attach::connection::Connection;
 use phux_protocol::wire::frame::{
     Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
 };
@@ -528,8 +528,8 @@ pub(crate) fn print_attach_error(err: &AttachError, socket_path: &Path, session:
 
 #[cfg(test)]
 mod tests {
-    use crate::selector::{Selector, WindowRef};
     use crate::commands::parse_selector;
+    use crate::selector::{Selector, WindowRef};
 
     /// The full `TARGET` grammar now feeds run/send-keys/snapshot/wait/kill
     /// alike (phux-n95). `parse_selector` is the shared CLI front door:

@@ -3,11 +3,11 @@
 //!
 //! See [`synthesizer::SnapshotSynthesizer`] for the main entry point.
 
+/// Reference grid model used to cross-check the synthesizer output.
 pub mod reference;
 pub mod synthesizer;
 
-pub use synthesizer::{
-    SnapshotBytes, SnapshotSynthesizer, SynthesisError, synthesize, SCROLLBACK_ALL,
-    GRAPHEME_INLINE,
-};
 pub use reference::ConsumerReference;
+pub use synthesizer::{
+    GRAPHEME_INLINE, SCROLLBACK_ALL, SnapshotBytes, SnapshotSynthesizer, SynthesisError, synthesize,
+};

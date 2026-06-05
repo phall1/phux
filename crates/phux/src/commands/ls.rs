@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use phux_core::session_list::{SessionJson, SessionListJson};
-use phux_protocol::wire::frame::{CommandResult, CommandValue, StateScope, Command as WireCommand};
+use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
 

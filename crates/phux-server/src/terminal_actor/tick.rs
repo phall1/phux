@@ -1,7 +1,5 @@
 //! Submodule for terminal actor internals.
 
-use std::time::Duration;
-
 /// Default tick interval for the state-sync emission driver, used until a
 /// consumer's RTT has been measured (phux-q0e.3, phux-q0e.5).
 ///

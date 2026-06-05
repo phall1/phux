@@ -7,9 +7,7 @@ use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::AttachTarget;
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{
-    print_attach_error, server::maybe_auto_spawn_server, DEFAULT_SESSION_NAME,
-};
+use crate::commands::{DEFAULT_SESSION_NAME, print_attach_error, server::maybe_auto_spawn_server};
 use crate::print_banner;
 
 /// Naked `phux` invocation (phux-k61.1).

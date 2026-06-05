@@ -28,43 +28,24 @@
 
 use std::future::Future;
 use std::io;
-use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use bytes::BytesMut;
-use futures_util::StreamExt;
-use futures_util::stream::FuturesUnordered;
-use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
-use phux_protocol::ids::CollectionId;
-use phux_protocol::input::InputEvent;
-use phux_protocol::wire::frame::{
-    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
-    SpawnError, SpawnResult, StateScope, ViewportInfo,
-};
-use tokio::net::{UnixListener, UnixStream};
+use phux_protocol::wire::frame::{ErrorCode, FrameKind};
+use tokio::net::UnixListener;
 use tokio::runtime::Builder;
-use tokio::sync::oneshot;
-use tokio::task::{JoinSet, LocalSet};
+use tokio::task::LocalSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::state::{
-    AttachSnapshotPane, ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput,
-};
-use crate::terminal_actor::{
-    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
-    ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
-};
-use crate::transport::{FrameReader, FrameWriter, Incoming};
+use crate::state::{Outbound, SharedState};
 
 pub mod attach;
 pub mod client;
 pub mod commands;
 
-pub use attach::*;
-pub use client::*;
+pub(crate) use attach::*;
+pub(crate) use client::*;
 pub use commands::*;
 
 /// Timeout for the "is the socket still live?" liveness probe used when an
@@ -419,7 +400,11 @@ impl ServerRuntime {
 /// Public-ish (`pub(crate)`) so tests can drive it directly inside
 /// their own `LocalSet`.
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
-pub(crate) async fn send_error(out_tx: &tokio::sync::mpsc::Sender<Outbound>, code: ErrorCode, message: &str) {
+pub(crate) async fn send_error(
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    code: ErrorCode,
+    message: &str,
+) {
     if out_tx
         .send(Outbound::Frame(FrameKind::Error {
             request_id: None,
@@ -436,6 +421,13 @@ pub(crate) async fn send_error(out_tx: &tokio::sync::mpsc::Sender<Outbound>, cod
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Used only by the tests below — scoped here rather than at module level
+    // so the lib's import set stays clean under `-D warnings`.
+    use crate::state::ClientId;
+    use crate::terminal_actor::ResizeRequest;
+    use phux_protocol::caps::ClientCapabilities;
+    use phux_protocol::wire::frame::{AttachTarget, ViewportInfo};
+    use tokio::task::JoinSet;
 
     #[test]
     fn detach_aborts_raw_output_pumps_without_closing_writer_mailbox() {
