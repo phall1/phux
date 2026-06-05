@@ -1,0 +1,46 @@
+use phux_protocol::input::focus::FocusEvent;
+use phux_protocol::input::key::KeyEvent;
+use phux_protocol::input::mouse::MouseEvent;
+use phux_protocol::input::paste::PasteEvent;
+
+/// Default per-client outbound mailbox depth.
+///
+/// Bounded on purpose: a stuck client must not let the server accumulate
+/// unbounded backpressure. The exact number is small because outbound
+/// frames are *coalesced byte chunks* (see `docs/spec/L1.md` §2 and ADR-0013),
+/// not individual PTY reads; eight in-flight `TERMINAL_OUTPUT` batches is
+/// well above steady state.
+pub const DEFAULT_CLIENT_MAILBOX: usize = 8;
+
+/// Per-pane input event recorded against a pane.
+///
+/// `phux-byc.4` records these into a per-pane log; a future task will turn
+/// them into PTY writes. The variant set tracks `docs/spec/input.md` (Input
+/// events).
+#[derive(Debug, Clone)]
+pub enum TerminalInput {
+    /// A keystroke (`INPUT_KEY` on the wire — `docs/spec/input.md` §2).
+    Key(KeyEvent),
+    /// A mouse event (`INPUT_MOUSE` — `docs/spec/input.md` §3).
+    Mouse(MouseEvent),
+    /// A focus gained/lost notification (`INPUT_FOCUS` — `docs/spec/input.md` §4).
+    Focus(FocusEvent),
+    /// A bracketed paste (`INPUT_PASTE` — `docs/spec/input.md` §5).
+    Paste(PasteEvent),
+}
+
+/// A message queued on a client's outbound mailbox.
+///
+/// The writer task drains a single channel of [`Outbound`] and routes each
+/// item via one write path:
+///
+/// * [`Outbound::Frame`] carries a [`phux_protocol::wire::frame::FrameKind`]
+///   and is encoded via `FrameKind::encode` before being written. Per
+///   ADR-0008 / ADR-0013 the protocol crate owns the wire types and the
+///   server defers to them for any variant — `Hello`, `TerminalOutput`,
+///   lifecycle frames, and so on.
+#[derive(Debug)]
+pub enum Outbound {
+    /// A structured frame; the writer encodes it before writing.
+    Frame(phux_protocol::wire::frame::FrameKind),
+}

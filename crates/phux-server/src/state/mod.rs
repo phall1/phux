@@ -1,0 +1,1123 @@
+#![allow(clippy::nursery)]
+//! Server-side state shared by the listener loop and per-client tasks
+//! (`phux-byc.4`).
+//!
+//! This module owns:
+//!
+//! * The [`Registry`] of sessions, windows, and panes (the canonical
+//!   domain state from `phux-byc.1`/`phux-byc.2`).
+//! * The set of currently attached clients ([`AttachedClient`]) keyed by a
+//!   server-assigned monotonic [`ClientId`].
+//! * The list of subscribers per pane — used to fan diffs out to every client
+//!   that is currently observing a pane.
+//! * A per-pane input log (`terminal_inputs`) where every keystroke, mouse event,
+//!   focus change, and paste recorded against a pane is appended. The PTY
+//!   side of the pipeline (PTY writer task) reads from this log; for
+//!   `phux-byc.4` it serves both as the merge point for multi-client input
+//!   and as the inspection surface for tests.
+//!
+//! # Concurrency model
+//!
+//! The server runs on a `tokio::runtime::Builder::new_current_thread`
+//! executor (see `runtime.rs`, ADR-0003 "one server per user, one event
+//! loop"). Per-client tasks are spawned via `tokio::task::spawn_local`
+//! onto a [`tokio::task::LocalSet`] (per ADR-0014), so per-client
+//! futures are `!Send` and can hold `Rc<RefCell<_>>` if desired.
+//!
+//! [`ServerState`] itself stays behind `Arc<Mutex<_>>` because the
+//! [`crate::terminal_actor::TerminalHandle`] held inside `panes` is `Send` and
+//! the surrounding [`SharedState`] is used in a few sync contexts
+//! (pre-seed before `LocalSet` entry, test scaffolding). Critical sections
+//! are short (microseconds: a few `HashMap` ops), so atomic contention
+//! is not a concern in steady state. The `std::sync::Mutex` avoids
+//! `tokio::sync::Mutex`'s async-friendly futures-park machinery because
+//! every section in this module is sync and finite — we never `.await`
+//! while holding it.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use phux_core::ids::{SessionId, TerminalId, WindowId};
+use phux_core::registry::Registry;
+use crate::id_bridge::IdBridge;
+use crate::terminal_actor::TerminalHandle;
+use phux_protocol::caps::LayerSet;
+use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId, WindowId as WireWindowId};
+use portable_pty::CommandBuilder;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
+mod client;
+mod events;
+mod input_log;
+mod metadata;
+mod registry;
+
+pub use client::{AttachError, AttachSnapshotPane, AttachedClient, ClientId};
+pub use events::{EventScope, EventSubscription, SelectionSpan};
+pub use input_log::{Outbound, TerminalInput, DEFAULT_CLIENT_MAILBOX};
+pub use metadata::{MetadataSetOutcome, MetadataStore, RenameOutcome};
+
+/// Default Collection identifier exposed by v0.1 servers.
+///
+/// L2 (Collection lifecycle, SPEC §7.3) is not yet wire-allocated; until
+/// it ships, the server exposes a single static Collection that every
+/// L3 metadata operation targeting `Scope::Collection` lands in. This is
+/// load-bearing for the reference TUI's `phux.tui.layout/v1` key —
+/// ADR-0019 ties layout persistence to a Collection scope and the TUI
+/// needs a Collection to write into before L2 ships.
+pub const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
+
+/// Single owner of all server-side state.
+///
+/// See the module-level doc for the concurrency model. Wrap this in
+/// [`SharedState`] before sharing with per-client tasks.
+#[derive(Debug)]
+pub struct ServerState {
+    /// Canonical domain state.
+    pub registry: Registry,
+    /// Currently attached clients, keyed by server-assigned id.
+    pub attached: HashMap<ClientId, AttachedClient>,
+    /// For each pane, the clients currently observing it (and thus eligible
+    /// to receive `TERMINAL_OUTPUT` frames for it).
+    pub terminal_subscribers: HashMap<TerminalId, Vec<ClientId>>,
+    /// Per-pane input log. Inputs from all attached clients are merged into
+    /// the same vec in arrival order; the PTY writer task drains it.
+    ///
+    /// For `phux-byc.4` no draining consumer exists yet — the log
+    /// accumulates and tests inspect it via
+    /// [`Self::terminal_input_log_for`].
+    terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
+    /// Per-client, per-Terminal selection spans (phux-dh4).
+    ///
+    /// Stores the coordinate endpoints of text selections for each client
+    /// on each terminal they have attached to. The key is (`ClientId`, `TerminalId`)
+    /// and the value is the [`SelectionSpan`] metadata. Selections are cleaned up
+    /// when a client detaches from a terminal or a terminal exits.
+    client_selections: HashMap<(ClientId, TerminalId), SelectionSpan>,
+    /// Bridge between core slotmap [`SessionId`]s and wire-level
+    /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
+    /// this crate) because `phux-core` and `phux-protocol` must not depend
+    /// on each other — see [`crate::id_bridge`] module docs.
+    pub session_id_bridge: IdBridge,
+    /// Per-pane actor handles, keyed by core [`TerminalId`]. The
+    /// `TerminalHandle` is `Send`; the underlying `TerminalActor` (which owns
+    /// the `!Send` `Terminal`) lives on the `LocalSet` — see ADR-0014.
+    ///
+    /// Populated by [`Self::register_terminal_handle`] after the actor is
+    /// spawned. Looked up by the ATTACH handler to request snapshots
+    /// and by future PTY-input branches to forward keystrokes.
+    pub terminals: HashMap<TerminalId, TerminalHandle>,
+    /// Per-pane cancellation tokens. Cancelling a token fires the
+    /// matching `TerminalActor`'s shutdown branch (see
+    /// `TerminalActor::run`'s `select!`). Typically a child of the
+    /// per-server root token, so a root cancel cascades to every
+    /// pane in one step.
+    ///
+    /// Distinct from the prior `oneshot::Sender<()>` shutdown channel:
+    /// dropping the token does NOT cancel — cancellation must be
+    /// explicit (see [`Self::detach_terminal_actor`]).
+    terminal_tokens: HashMap<TerminalId, CancellationToken>,
+    /// `JoinSet` collecting the `TerminalActor::run` futures spawned via
+    /// [`Self::spawn_terminal_actor`]. Owned at this scope so cancellation
+    /// of the per-server root token (or drop of `ServerState`) aborts
+    /// every still-running pane actor in one go.
+    ///
+    /// **Drop-safety note:** `JoinSet<()>` is `Send`, but the futures it
+    /// holds are `!Send` (pane actors own a `!Send` `Terminal` per
+    /// ADR-0014). They were spawned via `JoinSet::spawn_local`, which
+    /// is only legal inside a `LocalSet`. `ServerState` is dropped at
+    /// the tail of `runtime::ServerRuntime::run_async` on the same
+    /// thread that ran the `LocalSet`, so this `JoinSet`'s `Drop` is
+    /// always on the spawning thread — no cross-thread poll of
+    /// `!Send` futures occurs.
+    terminal_tasks: JoinSet<()>,
+    /// Wire-side identifier for each core pane id. Allocated
+    /// monotonically from `1` in [`Self::register_terminal_handle`]. Mirrors
+    /// the `IdBridge` shape used for session ids — kept inline because
+    /// adding a second `IdBridge` generic over an arbitrary id pair is
+    /// out of scope for `phux-byc.8` (the session bridge has its own
+    /// reverse-lookup story; pane reverse lookup is needed too for
+    /// future `INPUT_KEY` routing).
+    terminal_wire_forward: HashMap<TerminalId, WireTerminalId>,
+    terminal_wire_reverse: HashMap<WireTerminalId, TerminalId>,
+    next_terminal_wire_id: u32,
+    /// Wire-side identifier for each core window id. Same shape as
+    /// the pane bridge above; used to populate [`WindowInfo::id`] in
+    /// the `ATTACHED` snapshot.
+    window_wire_forward: HashMap<WindowId, WireWindowId>,
+    window_wire_reverse: HashMap<WireWindowId, WindowId>,
+    next_window_wire_id: u32,
+    next_client_id: u64,
+    /// Per-session last-touch order used to resolve
+    /// [`phux_protocol::wire::frame::AttachTarget::Last`].
+    ///
+    /// Updated by the runtime after successful attach and after valid
+    /// input/focus dispatch. The value is a server-local monotonic
+    /// timestamp: ordering is the only observable contract.
+    session_last_touched: HashMap<SessionId, u64>,
+    next_touch_timestamp: u64,
+    /// Per-scope K/V store backing SPEC §7.4 / §11.L3 metadata.
+    ///
+    /// Three independently-keyed maps mirror the three `Scope` variants
+    /// on the wire. Values are opaque `Vec<u8>`; the server enforces
+    /// nothing beyond per-key size limits (currently un-enforced; the
+    /// SPEC §11.L3 recommended 256 KiB cap is a follow-up).
+    metadata: MetadataStore,
+    /// Per-client cache of the negotiated [`LayerSet`] from HELLO (SPEC
+    /// §6.2). The dispatcher consults this before emitting any L3
+    /// frame; non-L3 consumers MUST NOT see `METADATA_CHANGED` (SPEC
+    /// §16.4). Default for a client that never sent HELLO (test
+    /// scaffolding) is [`LayerSet::all`] — the most-permissive default
+    /// keeps test setups simple; production clients always advertise.
+    client_layers: HashMap<ClientId, LayerSet>,
+    /// Per-client agent-event subscriptions (SPEC §7.5, phux-y2t). Each
+    /// subscribed client maps to its outbound mailbox plus the set of
+    /// scopes it watches: `EventScope::Server` (every event) or one or
+    /// more `EventScope::Terminal(id)` (per-pane). The push half of the
+    /// agent surface; an additive accelerator of the CLI poll-floor
+    /// `wait`. Cleared on detach, matching the L3 metadata subscription
+    /// lifecycle.
+    ///
+    /// The mailbox is stored here (rather than resolved through
+    /// [`Self::attached`]) because a `watch` client subscribes WITHOUT
+    /// attaching — it connects, sends `SUBSCRIBE_EVENTS`, and streams. So
+    /// event fanout must not depend on an `attached` entry that a pure
+    /// watcher never creates.
+    event_subscriptions: HashMap<ClientId, EventSubscription>,
+    /// Whether `AttachTarget::CreateIfMissing` (phux-k61.3) should spawn
+    /// a real PTY-backed actor for the newly created session's seed
+    /// pane. Mirrors [`crate::runtime::ServerConfig::seed_with_pty`] so
+    /// the attach-time creation path matches the server's startup
+    /// configuration. Set by the runtime via
+    /// [`Self::set_attach_create_pty`] right after `SharedState::new`.
+    ///
+    /// Defaults to `false` so tests that never call the setter exercise
+    /// the cheaper no-PTY actor (matches every existing integration
+    /// test that uses `spawn_server`).
+    attach_create_seeds_pty: bool,
+    /// Optional pre-built `CommandBuilder` used when
+    /// [`Self::attach_create_seeds_pty`] is `true` and `CreateIfMissing`
+    /// fires. `None` falls back to
+    /// [`crate::terminal_actor::default_shell_command`] (the user's
+    /// `$SHELL`, or `/bin/sh`).
+    attach_create_seed_command: Option<CommandBuilder>,
+    /// Lines of scrollback retained per pane (`defaults.history-limit`).
+    /// Mirrors [`crate::runtime::ServerConfig::history_limit`] so the
+    /// attach-time creation path (`AttachTarget::CreateIfMissing`) and
+    /// `SPAWN_TERMINAL` build their `TerminalActor`s with the configured
+    /// cap without an extra channel to the runtime. Set by the runtime
+    /// via [`Self::set_history_limit`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default so tests that never
+    /// call the setter still get a sane bound.
+    history_limit: u32,
+    /// How a freshly-spawned pane chooses its working directory
+    /// (`defaults.cwd-inheritance`). Mirrors
+    /// [`crate::runtime::ServerConfig::cwd_inheritance`] so the
+    /// `SPAWN_TERMINAL` handler resolves the new pane's CWD without an
+    /// extra channel to the runtime. Set by the runtime via
+    /// [`Self::set_cwd_inheritance`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default
+    /// ([`phux_config::CwdInheritance::InheritFocused`]) so tests that
+    /// never call the setter exercise the tmux-default behavior.
+    cwd_inheritance: phux_config::CwdInheritance,
+    /// `TERM` advertised to the inner program of every server-spawned pane
+    /// (`defaults.term`, phux-ign). Mirrors
+    /// [`crate::runtime::ServerConfig::term`] so the attach-time creation
+    /// path and `SPAWN_TERMINAL` apply it as the PTY's `TERM` baseline
+    /// without an extra channel to the runtime. A per-spawn
+    /// `SPAWN_TERMINAL.env` entry for `TERM` overrides it. Set by the
+    /// runtime via [`Self::set_term`] right after `SharedState::new`.
+    ///
+    /// Defaults to the `phux_config` schema default (`xterm-256color`) so
+    /// tests that never call the setter get the safe baseline.
+    term: String,
+    /// Frozen session-creation directory per session (phux-nyx,
+    /// `defaults.cwd-inheritance = session-root`). Captured the first time
+    /// a `session-root` spawn resolves a session's seed-pane CWD and reused
+    /// thereafter, so later `cd`s in the seed pane do not move the root.
+    /// Cleared with the rest of a session's bookkeeping on teardown.
+    session_root: HashMap<SessionId, PathBuf>,
+    /// Most-recent observed working directory per window (phux-nyx,
+    /// `defaults.cwd-inheritance = last-cwd-per-window`). Updated whenever a
+    /// `last-cwd-per-window` spawn resolves the window's active-pane CWD;
+    /// new panes in that window inherit the latest value. Cleared with the
+    /// window's bookkeeping on teardown.
+    window_last_cwd: HashMap<WindowId, PathBuf>,
+    /// Whether any client has ever attached to this server.
+    ///
+    /// Gates the tmux-model self-exit (phux-60s): the server only exits
+    /// when its last session is reaped **after** it has served at least
+    /// one client. A freshly auto-spawned server whose seed pane dies
+    /// before anyone attaches therefore stays alive (empty) instead of
+    /// vanishing mid-handshake — the launching `phux` then repopulates it
+    /// via `CreateIfMissing`. Without this guard the auto-spawn → attach
+    /// flow races the server's own self-exit.
+    has_served_client: bool,
+}
+
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Convenience newtype: `Arc<Mutex<ServerState>>`. This is the type
+/// per-client tasks clone and hold.
+///
+/// Usage rules:
+/// * Lock for as short as possible — never `.await` while the guard is
+///   held. Every section in this crate is sync and finite.
+/// * Use [`Self::with`] / [`Self::with_mut`] for scoped access; they
+///   panic if the mutex is poisoned (i.e. a previous holder panicked),
+///   which is the bug-finding behavior we want at this stage.
+#[derive(Debug, Clone, Default)]
+pub struct SharedState(Arc<Mutex<ServerState>>);
+
+impl SharedState {
+    /// Wrap a fresh [`ServerState`].
+    #[must_use]
+    pub fn new() -> Self {
+        #[allow(
+            clippy::arc_with_non_send_sync,
+            reason = "single-threaded current-thread runtime; Mutex+Arc safety not required"
+        )]
+        let state = Arc::new(Mutex::new(ServerState::new()));
+        Self(state)
+    }
+
+    /// Wrap a caller-built state. Useful when the caller has already pre-
+    /// seeded sessions via `seed_session` and wants the prepared state
+    /// shared across tasks.
+    #[must_use]
+    pub fn from_state(state: ServerState) -> Self {
+        #[allow(
+            clippy::arc_with_non_send_sync,
+            reason = "single-threaded current-thread runtime; Mutex+Arc safety not required"
+        )]
+        let wrapped = Arc::new(Mutex::new(state));
+        Self(wrapped)
+    }
+
+    /// Lock the state. Prefer [`Self::with`] / [`Self::with_mut`] when
+    /// possible.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the mutex was poisoned (a previous holder panicked while
+    /// holding the lock). In a current-thread tokio server that means a
+    /// per-client task crashed mid-mutation; the conservative response is
+    /// to crash the server rather than continue with potentially
+    /// inconsistent state.
+    #[allow(clippy::expect_used, reason = "poison panic is the intended behavior")]
+    pub fn lock(&self) -> MutexGuard<'_, ServerState> {
+        self.0.lock().expect("ServerState mutex poisoned")
+    }
+
+    /// Scoped immutable access.
+    pub fn with<R>(&self, f: impl FnOnce(&ServerState) -> R) -> R {
+        f(&self.lock())
+    }
+
+    /// Scoped mutable access.
+    pub fn with_mut<R>(&self, f: impl FnOnce(&mut ServerState) -> R) -> R {
+        f(&mut self.lock())
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::match_same_arms,
+    clippy::single_match_else,
+    clippy::assertions_on_constants,
+    clippy::bool_assert_comparison,
+    clippy::eq_op
+)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::terminal_actor::TerminalHandle;
+    use bytes::Bytes;
+    use phux_protocol::caps::{ClientCapabilities, ColorSupport, LayerSet};
+    use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+    use phux_protocol::wire::frame::{FrameKind, Scope};
+    use tokio::sync::{broadcast, mpsc};
+    use tokio_util::sync::CancellationToken;
+
+    fn mk_tx() -> mpsc::Sender<Outbound> {
+        let (tx, _rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
+        tx
+    }
+    fn mk_handle() -> TerminalHandle {
+        let (input_tx, _input_rx) = mpsc::channel(8);
+        let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
+        let (screen_tx, _screen_rx) = mpsc::channel(8);
+        let (pwd_tx, _pwd_rx) = mpsc::channel(8);
+        let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+        let (resize_tx, _resize_rx) = mpsc::channel(8);
+        let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
+        let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
+        let (consumer_ack_tx, _consumer_ack_rx) = mpsc::channel(8);
+        let (subscribe_to_events_tx, _subscribe_to_events_rx) = mpsc::channel(8);
+        let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
+        TerminalHandle {
+            input: input_tx,
+            snapshot: snapshot_tx,
+            screen: screen_tx,
+            pwd: pwd_tx,
+            output: output_tx,
+            resize: resize_tx,
+            consumer_attach: consumer_attach_tx,
+            consumer_detach: consumer_detach_tx,
+            consumer_ack: consumer_ack_tx,
+            subscribe_to_events: subscribe_to_events_tx,
+            unsubscribe_from_events: unsubscribe_from_events_tx,
+            cols: 80,
+            rows: 24,
+        }
+    }
+
+    #[test]
+    fn new_client_id_is_monotonic_from_one() {
+        let mut s = ServerState::new();
+        assert_eq!(s.new_client_id(), ClientId(1));
+        assert_eq!(s.new_client_id(), ClientId(2));
+        assert_eq!(s.new_client_id(), ClientId(3));
+    }
+
+    #[test]
+    fn attach_unknown_session_returns_error() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let err = s.attach_default_caps(cid, "ghost", mk_tx()).unwrap_err();
+        assert_eq!(err, AttachError::UnknownSession("ghost".to_owned()));
+    }
+
+    #[test]
+    fn attach_records_client_and_subscribes_to_active_pane() {
+        let mut s = ServerState::new();
+        let (sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        let returned_sid = s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert_eq!(returned_sid, sid);
+        assert!(s.attached.contains_key(&cid));
+        assert_eq!(s.subscribers_for_terminal(pid), &[cid]);
+    }
+
+    #[test]
+    fn attach_subscribes_to_every_pane_not_just_the_active_one() {
+        // phux-fysb.2: a multi-pane client must be subscribed to ALL its panes
+        // or the input gate drops keystrokes to non-active panes — the
+        // "can't type after re-attach" bug. Before the fix only the active
+        // pane was subscribed.
+        let mut s = ServerState::new();
+        let (sid, _wid, pid1) = s.seed_session("default");
+        let pid2 = s
+            .add_pane_to_session(sid)
+            .expect("add a second pane to the session");
+        assert_ne!(pid1, pid2);
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert!(
+            s.subscribers_for_terminal(pid1).contains(&cid),
+            "client not subscribed to first pane"
+        );
+        assert!(
+            s.subscribers_for_terminal(pid2).contains(&cid),
+            "client not subscribed to second pane (the regression)"
+        );
+    }
+
+    #[test]
+    fn second_attach_for_same_client_returns_already_attached() {
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        let err = s.attach_default_caps(cid, "default", mk_tx()).unwrap_err();
+        assert_eq!(err, AttachError::AlreadyAttached(cid));
+    }
+
+    #[test]
+    fn two_clients_attach_same_session_see_same_active_pane() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        let b = s.new_client_id();
+        s.attach_default_caps(a, "default", mk_tx()).unwrap();
+        s.attach_default_caps(b, "default", mk_tx()).unwrap();
+        let subs = s.subscribers_for_terminal(pid);
+        assert!(subs.contains(&a) && subs.contains(&b));
+        assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn detach_removes_client_and_drops_empty_subscriber_lists() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert!(!s.subscribers_for_terminal(pid).is_empty());
+        s.detach(cid);
+        assert!(!s.attached.contains_key(&cid));
+        assert!(s.subscribers_for_terminal(pid).is_empty());
+        assert!(
+            s.terminal_subscribers.is_empty(),
+            "empty lists should be GC'd"
+        );
+    }
+
+    #[test]
+    fn detach_is_idempotent() {
+        let mut s = ServerState::new();
+        let cid = ClientId(99);
+        // Not attached at all — must not panic.
+        s.detach(cid);
+        s.detach(cid);
+    }
+
+    #[test]
+    fn reap_last_pane_empties_server() {
+        let mut s = ServerState::new();
+        let (sid, _wid, pid) = s.seed_session("default");
+        assert_eq!(s.registry.session_count(), 1);
+
+        let server_empty = s.reap_terminal(pid);
+
+        assert!(server_empty, "reaping the only pane must empty the server");
+        assert_eq!(s.registry.session_count(), 0);
+        assert!(s.registry.session(sid).is_none(), "session cascaded away");
+        assert!(s.registry.terminal(pid).is_none());
+    }
+
+    #[test]
+    fn reap_one_of_two_sessions_keeps_server_alive() {
+        let mut s = ServerState::new();
+        let (sid_a, _wa, pid_a) = s.seed_session("a");
+        let (sid_b, _wb, _pb) = s.seed_session("b");
+
+        let server_empty = s.reap_terminal(pid_a);
+
+        assert!(!server_empty, "a second session is still live");
+        assert_eq!(s.registry.session_count(), 1);
+        assert!(s.registry.session(sid_a).is_none(), "session a reaped");
+        assert!(s.registry.session(sid_b).is_some(), "session b untouched");
+    }
+
+    #[test]
+    fn reap_pane_in_multipane_window_keeps_session() {
+        let mut s = ServerState::new();
+        let (sid, wid, pid1) = s.seed_session("default");
+        // Add a second pane to the same window so reaping one does not
+        // empty the window.
+        let pid2 = s.registry.new_terminal(wid).unwrap();
+
+        let server_empty = s.reap_terminal(pid1);
+
+        assert!(!server_empty);
+        assert_eq!(s.registry.session_count(), 1);
+        assert!(s.registry.session(sid).is_some());
+        assert!(s.registry.terminal(pid1).is_none(), "reaped pane gone");
+        assert!(s.registry.terminal(pid2).is_some(), "sibling pane survives");
+        assert_eq!(
+            s.registry.window(wid).map(|w| w.panes.len()),
+            Some(1),
+            "window keeps the surviving pane",
+        );
+    }
+
+    #[test]
+    fn reap_is_idempotent_on_unknown_pane() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+
+        assert!(s.reap_terminal(pid), "first reap empties the server");
+        // Second reap of the now-unknown pane must not panic and must
+        // report the server is (still) empty.
+        assert!(s.reap_terminal(pid));
+        assert_eq!(s.registry.session_count(), 0);
+    }
+
+    #[test]
+    fn reap_clears_pane_bookkeeping() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        let wire = s.intern_terminal_wire(pid);
+        assert!(!s.subscribers_for_terminal(pid).is_empty());
+        assert_eq!(s.terminal_from_wire(&wire), Some(pid));
+
+        s.reap_terminal(pid);
+
+        assert!(s.subscribers_for_terminal(pid).is_empty());
+        assert!(
+            s.terminal_from_wire(&wire).is_none(),
+            "wire id retired on reap",
+        );
+    }
+
+    #[test]
+    fn record_terminal_input_appends_in_call_order() {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+
+        let mk = |k: PhysicalKey, text: &str| KeyEvent {
+            action: KeyAction::Press,
+            key: k,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: Some(text.to_owned()),
+            unshifted_codepoint: Some(text.chars().next().unwrap() as u32),
+        };
+
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::A, "a")));
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::B, "b")));
+        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::C, "c")));
+
+        let log = s.terminal_input_log_for(pid);
+        assert_eq!(log.len(), 3);
+        let texts: Vec<String> = log
+            .into_iter()
+            .map(|pi| match pi {
+                TerminalInput::Key(k) => k.text.unwrap_or_default(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(texts, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn attached_client_color_support_defaults_to_truecolor() {
+        // `attach_default_caps` keeps the most-permissive tier — used by
+        // tests and any call site that doesn't have HELLO-derived caps
+        // in hand.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.client_caps.color_support, ColorSupport::TrueColor);
+    }
+
+    #[test]
+    fn attach_records_advertised_color_support() {
+        // Production path: HELLO advertised a tier, ATTACH consumes it.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach(
+            cid,
+            "default",
+            mk_tx(),
+            ClientCapabilities::new().with_color_support(ColorSupport::Indexed16),
+        )
+        .unwrap();
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.client_caps.color_support, ColorSupport::Indexed16);
+    }
+
+    #[test]
+    fn set_client_color_support_updates_live_attached_client() {
+        // Out-of-order HELLO after ATTACH (out of spec, but tolerated):
+        // the setter patches the live record so downsample picks up the
+        // newer tier.
+        let mut s = ServerState::new();
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+        assert!(s.set_client_color_support(cid, ColorSupport::Indexed256));
+        let client = s.attached.get(&cid).unwrap();
+        assert_eq!(client.client_caps.color_support, ColorSupport::Indexed256);
+    }
+
+    #[test]
+    fn set_client_color_support_returns_false_for_unknown_client() {
+        let mut s = ServerState::new();
+        assert!(!s.set_client_color_support(ClientId(999), ColorSupport::Indexed16));
+    }
+
+    #[test]
+    fn attach_snapshot_panes_collects_live_handles_for_session_tree() {
+        let mut s = ServerState::new();
+        let (sid, wid, pid_a) = s.seed_session("default");
+        let pid_b = s
+            .registry
+            .new_terminal(wid)
+            .expect("same window second pane");
+        let wid_2 = s.registry.new_window(sid).expect("second window");
+        let pid_c = s
+            .registry
+            .new_terminal(wid_2)
+            .expect("pane in second window");
+
+        let _ = s.register_terminal_handle(pid_a, mk_handle(), CancellationToken::new());
+        let _ = s.register_terminal_handle(pid_c, mk_handle(), CancellationToken::new());
+        // pid_b intentionally has no handle and must be excluded.
+
+        let panes = s.attach_snapshot_panes(sid);
+        let ids: HashSet<TerminalId> = panes.iter().map(|p| p.terminal_id).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&pid_a));
+        assert!(ids.contains(&pid_c));
+        assert!(!ids.contains(&pid_b));
+        for pane in panes {
+            assert_eq!(
+                s.terminal_from_wire(&pane.wire_terminal_id),
+                Some(pane.terminal_id),
+                "wire id should resolve back to the same pane",
+            );
+        }
+    }
+
+    #[test]
+    fn most_recently_touched_session_starts_none_and_tracks_touch_order() {
+        let mut s = ServerState::new();
+        assert!(
+            s.most_recently_touched_session().is_none(),
+            "fresh state has no prior activity memory",
+        );
+        let (sid, _wid, _pid) = s.seed_session("default");
+        s.touch_session(sid);
+        assert_eq!(s.most_recently_touched_session(), Some(sid));
+
+        // Later touches win, regardless of attach order.
+        let (sid2, _w, _p) = s.seed_session("other");
+        s.touch_session(sid2);
+        assert_eq!(s.most_recently_touched_session(), Some(sid2));
+        s.touch_session(sid);
+        assert_eq!(s.most_recently_touched_session(), Some(sid));
+    }
+
+    #[test]
+    fn shared_state_with_and_with_mut_round_trip() {
+        let shared = SharedState::new();
+        let (_sid, _wid, pid) = shared.with_mut(|s| s.seed_session("default"));
+        let count = shared.with(|s| s.subscribers_for_terminal(pid).len());
+        assert_eq!(count, 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // L3 metadata tests — SPEC §7.4 / §11.L3 (phux-4li.2).
+    //
+    // Cover: SUBSCRIBE → SET → broadcast fanout, scope isolation (Terminal
+    // vs Collection vs Global), non-L3 consumer filtering (§16.4), DELETE
+    // tombstone semantics, and the `Unchanged` SET shortcut.
+    // -------------------------------------------------------------------------
+
+    fn attach_l3_client(s: &mut ServerState) -> (ClientId, mpsc::Receiver<Outbound>) {
+        let _ = s.seed_session("default");
+        let cid = s.new_client_id();
+        let (tx, rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
+        s.attach_default_caps(cid, "default", tx).unwrap();
+        s.set_client_layers(cid, LayerSet::all());
+        (cid, rx)
+    }
+
+    fn attach_l1_only_client(s: &mut ServerState) -> (ClientId, mpsc::Receiver<Outbound>) {
+        let cid = s.new_client_id();
+        let (tx, rx) = mpsc::channel::<Outbound>(DEFAULT_CLIENT_MAILBOX);
+        s.attach_default_caps(cid, "default", tx).unwrap();
+        s.set_client_layers(cid, LayerSet::new());
+        (cid, rx)
+    }
+
+    /// Pull every queued frame off `rx` and return the inner frames.
+    fn drain_frames(rx: &mut mpsc::Receiver<Outbound>) -> Vec<FrameKind> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            let Outbound::Frame(f) = msg;
+            out.push(f);
+        }
+        out
+    }
+
+    #[test]
+    fn metadata_subscribe_then_set_broadcasts_matching_key() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.tui.layout/v1".to_owned());
+        let delivered = s.metadata_set(&scope, "phux.tui.layout/v1", b"value-1".to_vec());
+
+        assert_eq!(delivered, vec![cid]);
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged {
+                scope: s2,
+                key,
+                value,
+            } => {
+                assert_eq!(s2, &scope);
+                assert_eq!(key, "phux.tui.layout/v1");
+                assert_eq!(value.as_deref(), Some(b"value-1".as_slice()));
+            }
+            other => panic!("expected MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_set_on_different_key_does_not_fan_to_subscriber() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.a/v1".to_owned());
+        let delivered = s.metadata_set(&scope, "phux.b/v1", b"x".to_vec());
+
+        assert!(delivered.is_empty(), "no subscriber for the b/v1 key");
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn metadata_scope_isolation_terminal_vs_collection_vs_global() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let key = "phux.same/v1";
+        let t_scope = Scope::Terminal(phux_protocol::ids::TerminalId::local(7));
+        let c_scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let g_scope = Scope::Global;
+
+        // Only subscribe to Collection.
+        s.metadata_subscribe(cid, c_scope.clone(), key.to_owned());
+
+        // Writes to Terminal and Global must NOT fire the subscriber.
+        assert!(s.metadata_set(&t_scope, key, b"t".to_vec()).is_empty());
+        assert!(s.metadata_set(&g_scope, key, b"g".to_vec()).is_empty());
+
+        // Write to Collection MUST fire it.
+        let delivered = s.metadata_set(&c_scope, key, b"c".to_vec());
+        assert_eq!(delivered, vec![cid]);
+
+        // And the receiver MUST see exactly one frame (for Collection).
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged { scope, value, .. } => {
+                assert_eq!(scope, &c_scope);
+                assert_eq!(value.as_deref(), Some(b"c".as_slice()));
+            }
+            other => panic!("expected MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_delete_emits_tombstone_only_if_key_existed() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        // Deleting a missing key is idempotent and silent.
+        let delivered = s.metadata_delete(&scope, "phux.k/v1");
+        assert!(delivered.is_empty());
+        assert!(drain_frames(&mut rx).is_empty());
+
+        // After a SET, DELETE fires the tombstone.
+        s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        drain_frames(&mut rx); // consume the SET broadcast
+
+        let delivered = s.metadata_delete(&scope, "phux.k/v1");
+        assert_eq!(delivered, vec![cid]);
+        let frames = drain_frames(&mut rx);
+        assert_eq!(frames.len(), 1);
+        match &frames[0] {
+            FrameKind::MetadataChanged {
+                value: None,
+                key,
+                scope: s2,
+            } => {
+                assert_eq!(key, "phux.k/v1");
+                assert_eq!(s2, &scope);
+            }
+            other => panic!("expected tombstone MetadataChanged, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn metadata_set_unchanged_value_does_not_broadcast() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        let first = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert_eq!(first, vec![cid]);
+        drain_frames(&mut rx);
+
+        let second = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert!(second.is_empty(), "no broadcast on identical write");
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn non_l3_consumer_does_not_receive_metadata_changed() {
+        // SPEC §16.4: a non-L3 client (agent / recorder) MUST NOT see any
+        // L3 frames. The fanout layer filters by `client_speaks_l3`.
+        let mut s = ServerState::new();
+        let (l3_cid, mut l3_rx) = attach_l3_client(&mut s);
+        let (l1_cid, mut l1_rx) = attach_l1_only_client(&mut s);
+        let scope = Scope::Global;
+
+        s.metadata_subscribe(l3_cid, scope.clone(), "phux.k/v1".to_owned());
+        // L1-only consumer might still TRY to subscribe via misbehaving
+        // client; the dispatch in runtime.rs refuses it. Simulate that by
+        // not subscribing through the gated path.
+        s.metadata_subscribe(l1_cid, scope.clone(), "phux.k/v1".to_owned());
+
+        let delivered = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        // Only the L3 client makes it through.
+        assert_eq!(delivered, vec![l3_cid]);
+        assert_eq!(drain_frames(&mut l3_rx).len(), 1);
+        assert!(drain_frames(&mut l1_rx).is_empty());
+    }
+
+    #[test]
+    fn detach_drops_metadata_subscriptions() {
+        let mut s = ServerState::new();
+        let (cid, mut rx) = attach_l3_client(&mut s);
+        let scope = Scope::Global;
+        s.metadata_subscribe(cid, scope.clone(), "phux.k/v1".to_owned());
+
+        s.detach(cid);
+
+        let delivered = s.metadata_set(&scope, "phux.k/v1", b"v".to_vec());
+        assert!(delivered.is_empty());
+        // Channel returns Err(Disconnected) eventually; just confirm no
+        // frame arrived before detach cleanup.
+        assert!(drain_frames(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn metadata_list_returns_keys_sorted_and_scope_isolated() {
+        let mut s = ServerState::new();
+        let scope_a = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope_b = Scope::Global;
+
+        s.metadata_set(&scope_a, "zeta", b"z".to_vec());
+        s.metadata_set(&scope_a, "alpha", b"a".to_vec());
+        s.metadata_set(&scope_a, "mu", b"m".to_vec());
+        s.metadata_set(&scope_b, "global-only", b"g".to_vec());
+
+        let keys_a = s.metadata().list(&scope_a);
+        assert_eq!(keys_a, vec!["alpha", "mu", "zeta"]);
+        let keys_b = s.metadata().list(&scope_b);
+        assert_eq!(keys_b, vec!["global-only"]);
+    }
+
+    #[test]
+    fn metadata_get_returns_stored_value_or_none() {
+        let mut s = ServerState::new();
+        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        s.metadata_set(&scope, "k", b"v".to_vec());
+        assert_eq!(s.metadata().get(&scope, "k"), Some(b"v".to_vec()));
+        assert_eq!(s.metadata().get(&scope, "missing"), None);
+        // Wrong scope: same key returns None.
+        assert_eq!(s.metadata().get(&Scope::Global, "k"), None);
+    }
+
+    #[test]
+    fn selection_span_active_creates_correct_points() {
+        let span = SelectionSpan::active(10, 5, 20, 5);
+        assert_eq!(span.rectangular, false);
+        match span.start {
+            Point::Active(coord) => {
+                assert_eq!(coord.x, 10);
+                assert_eq!(coord.y, 5);
+            }
+            _ => panic!("Expected Point::Active"),
+        }
+        match span.end {
+            Point::Active(coord) => {
+                assert_eq!(coord.x, 20);
+                assert_eq!(coord.y, 5);
+            }
+            _ => panic!("Expected Point::Active"),
+        }
+    }
+
+    #[test]
+    fn selection_span_history_creates_correct_points() {
+        let span = SelectionSpan::history(5, 100, 15, 100);
+        assert_eq!(span.rectangular, false);
+        match span.start {
+            Point::History(coord) => {
+                assert_eq!(coord.x, 5);
+                assert_eq!(coord.y, 100);
+            }
+            _ => panic!("Expected Point::History"),
+        }
+    }
+
+    #[test]
+    fn set_and_get_selection() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let (_sid, _wid, tid) = s.seed_session("test");
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Initially no selection
+        assert_eq!(s.get_selection(cid, tid), None);
+
+        // Set selection
+        s.set_selection(cid, tid, span);
+        let retrieved = s.get_selection(cid, tid);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().rectangular, false);
+    }
+
+    #[test]
+    fn per_terminal_isolation() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let (_sid, _wid, tid1) = s.seed_session("test1");
+        let (_, _, tid2) = s.seed_session("test2");
+        let span1 = SelectionSpan::active(10, 5, 20, 5);
+        let span2 = SelectionSpan::active(0, 0, 5, 0);
+
+        // Set different selections on different terminals
+        s.set_selection(cid, tid1, span1);
+        s.set_selection(cid, tid2, span2);
+
+        // Verify isolation
+        let sel1 = s.get_selection(cid, tid1).unwrap();
+        let sel2 = s.get_selection(cid, tid2).unwrap();
+        assert_eq!(sel1.rectangular, false);
+        assert_eq!(sel2.rectangular, false);
+        // They have different start x coordinates
+        match sel1.start {
+            Point::Active(c) => assert_eq!(c.x, 10),
+            _ => panic!(),
+        }
+        match sel2.start {
+            Point::Active(c) => assert_eq!(c.x, 0),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn per_client_isolation() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let (_sid, _wid, tid) = s.seed_session("test");
+        let span1 = SelectionSpan::active(10, 5, 20, 5);
+        let span2 = SelectionSpan::active(0, 0, 5, 0);
+
+        // Different clients set different selections on same terminal
+        s.set_selection(c1, tid, span1);
+        s.set_selection(c2, tid, span2);
+
+        // Verify isolation
+        let sel1 = s.get_selection(c1, tid).unwrap();
+        let sel2 = s.get_selection(c2, tid).unwrap();
+        match sel1.start {
+            Point::Active(c) => assert_eq!(c.x, 10),
+            _ => panic!(),
+        }
+        match sel2.start {
+            Point::Active(c) => assert_eq!(c.x, 0),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn clear_selection_removes_specific_entry() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let (_sid, _wid, tid) = s.seed_session("test");
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        s.set_selection(cid, tid, span);
+        assert!(s.get_selection(cid, tid).is_some());
+
+        s.clear_selection(cid, tid);
+        assert_eq!(s.get_selection(cid, tid), None);
+    }
+
+    #[test]
+    fn clear_client_selections_removes_all_for_client() {
+        let mut s = ServerState::new();
+        let cid = s.new_client_id();
+        let (_sid, _wid, tid1) = s.seed_session("test1");
+        let (_, _, tid2) = s.seed_session("test2");
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Set selections on multiple terminals for same client
+        s.set_selection(cid, tid1, span.clone());
+        s.set_selection(cid, tid2, span);
+
+        // Clear all for this client
+        s.clear_client_selections(cid);
+
+        // Both should be gone
+        assert_eq!(s.get_selection(cid, tid1), None);
+        assert_eq!(s.get_selection(cid, tid2), None);
+    }
+
+    #[test]
+    fn clear_terminal_selections_removes_all_for_terminal() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let (_sid, _wid, tid) = s.seed_session("test");
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        // Two clients have selections on same terminal
+        s.set_selection(c1, tid, span.clone());
+        s.set_selection(c2, tid, span);
+
+        // Clear all for this terminal
+        s.clear_terminal_selections(tid);
+
+        // Both clients' selections should be gone
+        assert_eq!(s.get_selection(c1, tid), None);
+        assert_eq!(s.get_selection(c2, tid), None);
+    }
+
+    #[test]
+    fn clear_client_selections_does_not_affect_other_clients() {
+        let mut s = ServerState::new();
+        let c1 = s.new_client_id();
+        let c2 = s.new_client_id();
+        let (_sid, _wid, tid) = s.seed_session("test");
+        let span = SelectionSpan::active(10, 5, 20, 5);
+
+        s.set_selection(c1, tid, span.clone());
+        s.set_selection(c2, tid, span);
+
+        // Clear only c1's selections
+        s.clear_client_selections(c1);
+
+        // c1 gone, c2 remains
+        assert_eq!(s.get_selection(c1, tid), None);
+        assert!(s.get_selection(c2, tid).is_some());
+    }
+
+    #[test]
+    fn detach_cleans_up_selections() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let cid = s.new_client_id();
+        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
+
+        let span = SelectionSpan::active(10, 5, 20, 5);
+        s.set_selection(cid, pid, span);
+        assert!(s.get_selection(cid, pid).is_some());
+
+        // Detach
+        s.detach(cid);
+
+        // Selection should be cleaned up
+        assert_eq!(s.get_selection(cid, pid), None);
+    }
+}
