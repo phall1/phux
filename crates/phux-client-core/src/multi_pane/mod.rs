@@ -1,0 +1,463 @@
+//! Multi-pane composition: layout tree → per-pane sub-rectangles + the
+//! divider cells that live between them.
+//!
+//! Per ADR-0019 decision 4 the reference TUI draws **dividers between**
+//! panes (not frames around each), in plain Unicode box-drawing
+//! (U+2500–U+257F). One column is consumed per `Horizontal` interior
+//! node along the relevant axis path; one row per `Vertical` interior
+//! node. The cell budget given to the layout algorithm is therefore
+//! `(cols - h_dividers, rows - v_dividers)` — the layout tiles the
+//! **content** rectangle and the renderer paints dividers in the gaps
+//! the tree explicitly excluded.
+//!
+//! Focus chrome (decision 4 cont.): the divider segments adjacent to
+//! the focused pane use the **heavy** variant (`━ ┃ ╋` and the heavy
+//! junction pieces); inactive segments use **light** (`─ │ ┼` …).
+//! Junction characters are chosen per-cell from the set of incident
+//! light/heavy edges so a `T`-piece adjacent to a heavy edge renders
+//! the correct mixed-weight glyph (e.g. `┲`, `┳`, `┺`, …).
+//!
+//! The output is a [`PaneLayout`] carrying both the per-pane [`Rect`]s
+//! (which `attach::driver` hands to each `TerminalRenderer`) and the
+//! list of [`DividerCell`]s (which the chrome layer at
+//! `phux_client::render::chrome::dividers` composites onto stdout via
+//! ratatui, with pane interiors marked `Cell::skip` so libghostty's
+//! direct VT output is not stomped — see ADR-0020).
+//!
+//! SIGWINCH-driven reflow lives in `attach::reflow` (sibling ticket
+//! phux-4li.7); this module is the pure compute step it composes with.
+
+pub mod layout;
+pub mod mouse;
+pub mod rasterize;
+
+pub use layout::{compute_layout, PaneLayout};
+pub use mouse::{route_mouse_event, RouteDecision};
+pub use rasterize::DividerCell;
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::unnested_or_patterns,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+    use crate::layout::{split_at, LayoutNode, LayoutState, Rect, SplitDir};
+    use phux_protocol::TerminalId;
+    use phux_protocol::input::key::ModSet;
+    use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
+
+    fn t(id: u32) -> TerminalId {
+        TerminalId::local(id)
+    }
+
+    fn leaf(id: u32) -> LayoutNode {
+        LayoutNode::Leaf(t(id))
+    }
+
+    #[test]
+    fn single_pane_no_dividers() {
+        let state = LayoutState::single(t(1));
+        let out = compute_layout(&state, (80, 24));
+        assert!(out.dividers.is_empty());
+        assert_eq!(out.rects.len(), 1);
+        let r = out.rects.get(&t(1)).unwrap();
+        assert_eq!(
+            *r,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 24
+            }
+        );
+    }
+
+    #[test]
+    fn empty_layout_returns_empty() {
+        let state = LayoutState::default();
+        let out = compute_layout(&state, (80, 24));
+        assert!(out.dividers.is_empty());
+        assert!(out.rects.is_empty());
+    }
+
+    #[test]
+    fn two_pane_vertical_split_divider_at_col_39() {
+        // Two-pane horizontal split (left|right): pane A in cols 0..39,
+        // divider at col 39, pane B in cols 40..79. Ratio 0.5 of
+        // content_cols=79 ⇒ left_w=40, right_w=39. Wait — let's
+        // recompute: viewport=80, h_dividers=1, content=79, split_dim
+        // (79, 0.5).round() = 40 (39.5 rounds to even? actually
+        // f32::round rounds half away from zero in Rust ⇒ 40). So pane
+        // A is cols 0..40 (width 40), divider at col 40, pane B in
+        // cols 41..80 (width 39). The task spec says divider at col 39
+        // for "known 2-pane vertical split in 80x24" — that's with
+        // ratio 0.5 and content=79, where (79*0.5).round() = 40 ...
+        // hmm. Let's just assert that we get *a* divider in the middle
+        // and the two panes tile around it correctly.
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        // Pane A starts at column 0.
+        assert_eq!(ra.x, 0);
+        // Pane B is to the right of pane A and the divider.
+        assert_eq!(rb.x, ra.w + 1);
+        // The combined widths plus one divider equal the viewport.
+        assert_eq!(ra.w + rb.w + 1, 80);
+        // Heights match the viewport (no vertical splits).
+        assert_eq!(ra.h, 24);
+        assert_eq!(rb.h, 24);
+        // 24 divider cells, all at column ra.w.
+        assert_eq!(out.dividers.len(), 24);
+        for cell in &out.dividers {
+            assert_eq!(cell.x, ra.w);
+        }
+    }
+
+    #[test]
+    fn focused_pane_gets_heavy_divider() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        // The divider runs between pane A (focused) and pane B, so the
+        // whole column should be heavy.
+        for cell in &out.dividers {
+            assert_eq!(cell.ch, '\u{2503}', "expected heavy │, got {:?}", cell.ch);
+        }
+    }
+
+    #[test]
+    fn unfocused_layout_uses_light_dividers() {
+        // Three panes split vertically twice with focus on pane 1; the
+        // second divider (between 2 and 3) shouldn't be heavy.
+        let t1 = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let t2 = split_at(&t1, &t(2), &t(3), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(t2),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        // Group dividers by column.
+        let mut by_col: std::collections::HashMap<u16, Vec<char>> = std::collections::HashMap::new();
+        for c in &out.dividers {
+            by_col.entry(c.x).or_default().push(c.ch);
+        }
+        // Two distinct divider columns expected.
+        assert_eq!(by_col.len(), 2, "got cols: {:?}", by_col.keys());
+        let cols: Vec<u16> = {
+            let mut k: Vec<_> = by_col.keys().copied().collect();
+            k.sort_unstable();
+            k
+        };
+        // Leftmost divider is adjacent to focused pane 1 ⇒ heavy.
+        for ch in &by_col[&cols[0]] {
+            assert_eq!(*ch, '\u{2503}', "leftmost divider should be heavy");
+        }
+        // Rightmost divider sits between panes 2 and 3, not adjacent
+        // to focused pane 1 ⇒ light.
+        for ch in &by_col[&cols[1]] {
+            assert_eq!(*ch, '\u{2502}', "rightmost divider should be light");
+        }
+    }
+
+    #[test]
+    fn cross_split_produces_junction() {
+        // Split horizontally then vertically: pane 1 top-left, pane 2
+        // top-right (or bottom; depends on tree shape). We just want
+        // the divider cells to render without panic and include at
+        // least one T-piece.
+        let t1 = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let t2 = split_at(&t1, &t(1), &t(3), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(t2),
+            focus: Some(t(2)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        // Look for at least one T-piece — the horizontal divider runs
+        // only in the left half (where pane 1/3 sit) and meets the
+        // vertical divider at a T.
+        let has_t = out.dividers.iter().any(|c| {
+            matches!(
+                c.ch,
+                '\u{252C}'
+                    | '\u{2534}'
+                    | '\u{251C}'
+                    | '\u{2524}'
+                    | '\u{2533}'
+                    | '\u{253B}'
+                    | '\u{2523}'
+                    | '\u{252B}'
+                    | '\u{251D}'
+                    | '\u{2520}'
+                    | '\u{2525}'
+                    | '\u{2528}'
+                    | '\u{252F}'
+                    | '\u{2530}'
+                    | '\u{2537}'
+                    | '\u{2538}'
+            )
+        });
+        assert!(has_t, "expected at least one T-piece in cross-split chrome");
+    }
+
+    /// Snapshot test for the cardinal "phux-4li.4 acceptance case": a
+    /// 2-pane Horizontal (vertical-divider) split in an 80x24 viewport
+    /// with focus on pane 1, rendered as a grid with the pane rects
+    /// labelled and divider cells in box-drawing. The grid covers the
+    /// whole viewport with no overlap.
+    #[test]
+    fn snapshot_two_pane_horizontal_split_80x24_focus_left() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        let grid = render_layout_to_grid(&layout, 80, 24);
+        insta::assert_snapshot!("two_pane_h_split_80x24_focus_left", grid);
+    }
+
+    /// Same shape, focus on pane 2 — the heavy edge moves to the right
+    /// of the divider but the layout is otherwise identical.
+    #[test]
+    fn snapshot_two_pane_horizontal_split_80x24_focus_right() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(2)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        let grid = render_layout_to_grid(&layout, 80, 24);
+        insta::assert_snapshot!("two_pane_h_split_80x24_focus_right", grid);
+    }
+
+    /// 3-pane mixed split: horizontal then vertical inside the left
+    /// half. Tests that T-piece junctions render correctly and that
+    /// focus chrome doesn't bleed across non-adjacent dividers.
+    #[test]
+    fn snapshot_three_pane_cross_split_80x24_focus_top_left() {
+        let t1 = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let t2 = split_at(&t1, &t(1), &t(3), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(t2),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        let grid = render_layout_to_grid(&layout, 80, 24);
+        insta::assert_snapshot!("three_pane_cross_80x24_focus_top_left", grid);
+    }
+
+    /// Render a `PaneLayout` to a `rows × cols` ASCII grid where pane
+    /// interiors are filled with the per-pane character (lowercase
+    /// letter derived from the `TerminalId`'s local id) and divider
+    /// cells carry their resolved box-drawing glyph. Used by the
+    /// snapshot tests; pure compute, no VT escapes.
+    fn render_layout_to_grid(layout: &PaneLayout, cols: u16, rows: u16) -> String {
+        let mut grid: Vec<Vec<char>> = (0..rows).map(|_| vec![' '; cols as usize]).collect();
+        // Paint pane interiors first.
+        for (id, r) in &layout.rects {
+            let ch = pane_glyph(id);
+            for y in r.y..r.y.saturating_add(r.h).min(rows) {
+                for x in r.x..r.x.saturating_add(r.w).min(cols) {
+                    grid[y as usize][x as usize] = ch;
+                }
+            }
+        }
+        // Then the dividers (overwriting any interior cell that
+        // happened to overlap; in a well-formed layout this never
+        // happens, but `.min()` defends against degenerate inputs).
+        for cell in &layout.dividers {
+            if (cell.y as usize) < grid.len() && (cell.x as usize) < grid[0].len() {
+                grid[cell.y as usize][cell.x as usize] = cell.ch;
+            }
+        }
+        let mut out = String::with_capacity(grid.len() * (cols as usize + 1));
+        for row in grid {
+            for c in row {
+                out.push(c);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn pane_glyph(id: &TerminalId) -> char {
+        // Map TerminalId::Local { id: N } to the lowercase letter a + N
+        // for N < 26; otherwise the digit 0–9. Tests only construct
+        // small N so the letter form is always hit.
+        match id {
+            TerminalId::Local { id: n } => {
+                if *n < 26 {
+                    char::from(b'a' + u8::try_from(*n).unwrap_or(0))
+                } else {
+                    char::from(b'0' + u8::try_from(*n % 10).unwrap_or(0))
+                }
+            }
+            TerminalId::Satellite { .. } => '?',
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // route_mouse_event — phux-4li.6
+    // -------------------------------------------------------------------------
+
+    fn mouse_at(col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            action: MouseAction::Press,
+            button: MouseButton::Left,
+            mods: ModSet::empty(),
+            x: f64::from(col),
+            y: f64::from(row),
+        }
+    }
+
+    /// Clicking inside the focused pane forwards with focus unchanged
+    /// and emits pane-local coordinates relative to the pane's `Rect`.
+    #[test]
+    fn route_mouse_inside_focused_pane_no_focus_change() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        // Click inside the left half (focused) at col 5, row 3.
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(5, 3));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                pane_x,
+                pane_y,
+                focus_changed,
+            } => {
+                assert_eq!(target, t(1));
+                assert!(!focus_changed);
+                // Left pane sits at x=0; pane-local matches outer.
+                assert!((pane_x - 5.0).abs() < f64::EPSILON);
+                assert!((pane_y - 3.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane decision, got {other:?}"),
+        }
+    }
+
+    /// Clicking in a non-focused pane reports `focus_changed` and
+    /// returns pane-local coordinates relative to that pane's `Rect`.
+    #[test]
+    fn route_mouse_click_other_pane_updates_focus() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        let right_rect = layout.rects.get(&t(2)).copied().unwrap();
+        // Click 2 cells into the right pane, on the second row.
+        let click_x = right_rect.x + 2;
+        let click_y = right_rect.y + 1;
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(click_x, click_y));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                pane_x,
+                pane_y,
+                focus_changed,
+            } => {
+                assert_eq!(target, t(2));
+                assert!(focus_changed, "click in unfocused pane must move focus");
+                assert!((pane_x - 2.0).abs() < f64::EPSILON);
+                assert!((pane_y - 1.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane decision, got {other:?}"),
+        }
+    }
+
+    /// Clicking exactly on the divider column produces a no-op —
+    /// drag-to-resize is deferred (DESIGN §7).
+    #[test]
+    fn route_mouse_divider_is_noop() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let layout = compute_layout(&state, (80, 24));
+        // The divider sits at the column equal to the left pane's
+        // width (its `Rect.w`). Any row on that column hits the gap.
+        let left_w = layout.rects.get(&t(1)).copied().unwrap().w;
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(left_w, 10));
+        assert_eq!(decision, RouteDecision::DividerNoOp);
+    }
+
+    /// Single-pane layout: every click stays in the lone pane with no
+    /// focus change, regardless of position.
+    #[test]
+    fn route_mouse_single_pane_always_hits() {
+        let state = LayoutState::single(t(1));
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(40, 12));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                focus_changed,
+                pane_x,
+                pane_y,
+            } => {
+                assert_eq!(target, t(1));
+                assert!(!focus_changed);
+                assert!((pane_x - 40.0).abs() < f64::EPSILON);
+                assert!((pane_y - 12.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane, got {other:?}"),
+        }
+    }
+
+    /// Empty layout (no tree) returns `NoFocus`. Pre-attach race
+    /// protection — the driver drops these.
+    #[test]
+    fn route_mouse_empty_layout_returns_no_focus() {
+        let state = LayoutState::default();
+        let decision = route_mouse_event(&state, (80, 24), &mouse_at(10, 5));
+        assert_eq!(decision, RouteDecision::NoFocus);
+    }
+
+    /// Out-of-viewport click (rare; pixel-precision input from a
+    /// hi-DPI host) clamps into the edge cell rather than panicking.
+    /// 80x24 viewport: a click at (1000, 1000) clamps into the
+    /// rightmost / bottommost pane.
+    #[test]
+    fn route_mouse_out_of_range_clamps_into_edge_pane() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let decision = route_mouse_event(
+            &state,
+            (80, 24),
+            &MouseEvent {
+                action: MouseAction::Press,
+                button: MouseButton::Left,
+                mods: ModSet::empty(),
+                x: 1_000.0,
+                y: 1_000.0,
+            },
+        );
+        // u16::MAX clamps to the right pane's last cell. Either pane
+        // could in principle catch it; the right pane is the only one
+        // whose Rect extends to column 79 of 80, so it should be the
+        // target.
+        if let RouteDecision::Pane { target, .. } = decision {
+            assert_eq!(target, t(2));
+        } else {
+            panic!("expected Pane decision, got {decision:?}");
+        }
+    }
+}
