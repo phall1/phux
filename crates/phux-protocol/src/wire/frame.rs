@@ -205,6 +205,44 @@ pub const TYPE_SPAWN_TERMINAL: u8 = 0x22;
 /// client (phux-4li.9).
 pub const TYPE_TERMINAL_RESIZE: u8 = 0x23;
 
+// ---------------------------------------------------------------------------
+// L0 Process execution frame discriminants — reserved for v0.3 (phux-l0).
+//
+// Raw process execution without PTY allocation: lighter-weight than
+// SPAWN_TERMINAL for non-interactive automation. Allocated from the
+// 0x24..=0x27 C→S block and 0xA3..=0xA6 S→C block, contiguous with the
+// terminal lifecycle range above.
+// ---------------------------------------------------------------------------
+
+/// Discriminant for `SPAWN_PROCESS` (client to server).
+///
+/// Spawns a process without a PTY, capturing raw stdout/stderr.
+/// The reply rides on [`TYPE_PROCESS_SPAWNED`].
+pub const TYPE_SPAWN_PROCESS: u8 = 0x24;
+/// Discriminant for `KILL_PROCESS` (client to server).
+pub const TYPE_KILL_PROCESS: u8 = 0x25;
+/// Discriminant for `PROCESS_SPAWNED` (server to client).
+pub const TYPE_PROCESS_SPAWNED: u8 = 0xA3;
+/// Discriminant for `PROCESS_CLOSED` (server to client).
+pub const TYPE_PROCESS_CLOSED: u8 = 0xA4;
+/// Discriminant for `PROCESS_OUTPUT` (server to client).
+pub const TYPE_PROCESS_OUTPUT: u8 = 0xA5;
+
+// ---------------------------------------------------------------------------
+// Port-forwarding frame discriminants — reserved for v0.3 (phux-tun).
+//
+// TCP port forwarding through the phux wire: satellite-side local
+// forwards and hub-side reverse forwards. Allocated from 0x28..=0x29
+// C→S and 0xA6..=0xA7 S→C.
+// ---------------------------------------------------------------------------
+
+/// Discriminant for `FORWARD_PORT` (client to server).
+pub const TYPE_FORWARD_PORT: u8 = 0x28;
+/// Discriminant for `CLOSE_PORT_FORWARD` (client to server).
+pub const TYPE_CLOSE_PORT_FORWARD: u8 = 0x29;
+/// Discriminant for `PORT_FORWARD_STATUS` (server to client).
+pub const TYPE_PORT_FORWARD_STATUS: u8 = 0xA6;
+
 /// Discriminant for `TERMINAL_CLOSED` (server to client, `docs/spec/L1.md` §1 / §10.1).
 ///
 /// Push notification when a Terminal's PTY exits, naturally or via

@@ -322,45 +322,6 @@ pub(crate) fn handle_subscribe_events(
     state.with_mut(|s| s.subscribe_events(client_id, terminal, out_tx.clone()));
 }
 
-/// Push an [`AgentEvent`] to every client subscribed to events scoped to
-/// `terminal` (SPEC §7.5, phux-y2t).
-///
-/// `terminal` is the wire id the event concerns, or `None` for a
-/// server-scoped event with no owning Terminal. Fan-out uses
-/// [`ServerState::event_targets`], which matches server-wide subscribers
-/// plus (when `terminal` is `Some`) per-pane subscribers for that id.
-/// Best-effort: a client whose mailbox is full or closed is silently
-/// skipped — the event stream is an accelerator, never a guarantee
-/// (a dropped event just means the consumer falls back to the poll floor).
-///
-/// Synchronous: fanout uses non-blocking `try_send`, so there is nothing
-/// to await — the caller need not be in an async context to push an event.
-pub(crate) fn broadcast_event(
-    state: &SharedState,
-    terminal: Option<&phux_protocol::ids::TerminalId>,
-    event: &AgentEvent,
-) {
-    let targets = state.with(|s| s.event_targets(terminal));
-    if targets.is_empty() {
-        return;
-    }
-    trace!(
-        ?terminal,
-        ?event,
-        count = targets.len(),
-        "EVENT: broadcasting"
-    );
-    for tx in targets {
-        // `try_send` is non-blocking: a full mailbox drops the event
-        // rather than stalling the emitter. The accelerator contract
-        // tolerates loss (the CLI poll floor still converges).
-        let _ = tx.try_send(Outbound::Frame(FrameKind::Event {
-            terminal: terminal.cloned(),
-            event: event.clone(),
-        }));
-    }
-}
-
 /// Writer task: drain the per-client outbound channel and write each
 /// message to the socket. Encodes [`Outbound::Frame`] via
 /// `FrameKind::encode`.

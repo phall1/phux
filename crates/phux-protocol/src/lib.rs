@@ -35,6 +35,9 @@ pub mod wire;
 pub mod caps;
 pub mod ids;
 
+#[cfg(feature = "server")]
+pub mod policy;
+
 pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet,

@@ -64,8 +64,8 @@ prefix = "C-a"
 [keybindings.prefix-table]
 # Pane splits, tmux-style: | for a vertical divider (side-by-side panes),
 # - for a horizontal divider (stacked panes).
-"|" = { action = "split-pane", direction = "vertical" }
-"-" = { action = "split-pane", direction = "horizontal" }
+'"' = { action = "split-pane", direction = "vertical" }
+"%" = { action = "split-pane", direction = "horizontal" }
 
 # Kill: x kills the focused pane, X (Shift-x) kills the whole window
 # (all its panes). Soft-kill via shell exit; see phux-4li.12.
@@ -153,11 +153,11 @@ prefix = "C-a"
 "K" = { action = "resize-pane", direction = "up",    amount = 5 }
 "L" = { action = "resize-pane", direction = "right", amount = 5 }
 
+# Show the help overlay (centered modal listing all keybindings). 
+# (hopefully this works with the prefix key. Esc or ? again dismisses.
+"?" = "show-help"
+
 [keybindings.global]
-# Show the help overlay (centered modal listing all keybindings). F1 is
-# a named-key chord and works as a global (no prefix needed) so it's
-# discoverable from a cold start. Esc or F1 again dismisses.
-"F1" = "show-help"
 # No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"
 

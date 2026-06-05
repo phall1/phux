@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
+use phux_protocol::policy::{PeerIdentity, TransportType};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
@@ -44,7 +45,9 @@ pub(crate) trait FrameWriter {
 pub(crate) trait Incoming {
     type Reader: FrameReader + 'static;
     type Writer: FrameWriter + 'static;
-    async fn accept(&self) -> io::Result<(Self::Reader, Self::Writer)>;
+    async fn accept(
+        &self,
+    ) -> io::Result<(Self::Reader, Self::Writer, PeerIdentity)>;
     /// Short transport label for logs (`"uds"` / `"ws"`).
     fn kind(&self) -> &'static str;
 }
@@ -105,8 +108,9 @@ impl Incoming for UdsListener {
     type Reader = UdsReader;
     type Writer = UdsWriter;
 
-    async fn accept(&self) -> io::Result<(UdsReader, UdsWriter)> {
+    async fn accept(&self) -> io::Result<(UdsReader, UdsWriter, PeerIdentity)> {
         let (stream, _addr) = self.0.accept().await?;
+        let peer_identity = peer_identity_from_uds(&stream);
         let (reader, writer) = stream.into_split();
         Ok((
             UdsReader {
@@ -114,11 +118,42 @@ impl Incoming for UdsListener {
                 header: [0u8; LENGTH_PREFIX],
             },
             UdsWriter { writer },
+            peer_identity,
         ))
     }
 
     fn kind(&self) -> &'static str {
         "uds"
+    }
+}
+
+/// Extract peer identity from a Unix domain socket.
+#[cfg(target_os = "linux")]
+fn peer_identity_from_uds(stream: &tokio::net::UnixStream) -> PeerIdentity {
+    let (uid, pid) = match stream.peer_cred() {
+        Ok(cred) => (cred.uid(), cred.pid()),
+        Err(_) => (0, None),
+    };
+    PeerIdentity {
+        uid,
+        pid,
+        exe_path: None,
+        mcp_host_key: None,
+        transport: TransportType::UnixSocket,
+        source_addr: None,
+    }
+}
+
+/// Extract peer identity from a Unix domain socket (non-Linux fallback).
+#[cfg(not(target_os = "linux"))]
+fn peer_identity_from_uds(_stream: &tokio::net::UnixStream) -> PeerIdentity {
+    PeerIdentity {
+        uid: 0,
+        pid: None,
+        exe_path: None,
+        mcp_host_key: None,
+        transport: TransportType::UnixSocket,
+        source_addr: None,
     }
 }
 
@@ -189,13 +224,21 @@ impl Incoming for WsListener {
     type Reader = WsReader;
     type Writer = WsWriter;
 
-    async fn accept(&self) -> io::Result<(WsReader, WsWriter)> {
-        let (tcp, _peer) = self.tcp.accept().await?;
+    async fn accept(&self) -> io::Result<(WsReader, WsWriter, PeerIdentity)> {
+        let (tcp, peer) = self.tcp.accept().await?;
+        let peer_identity = PeerIdentity {
+            uid: 0,
+            pid: None,
+            exe_path: None,
+            mcp_host_key: None,
+            transport: TransportType::WebSocket,
+            source_addr: Some(peer.ip()),
+        };
         let ws = tokio_tungstenite::accept_async(tcp)
             .await
             .map_err(io::Error::other)?;
         let (tx, rx) = ws.split();
-        Ok((WsReader { rx }, WsWriter { tx }))
+        Ok((WsReader { rx }, WsWriter { tx }, peer_identity))
     }
 
     fn kind(&self) -> &'static str {

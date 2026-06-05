@@ -13,6 +13,7 @@ use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
+use phux_protocol::policy::{ConsumerId as PolicyConsumerId, PeerIdentity};
 use phux_protocol::wire::frame::{
     AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
     SpawnError, SpawnResult, StateScope, ViewportInfo,
@@ -205,6 +206,7 @@ pub(crate) async fn broadcast_terminal_closed(
 /// observes the mailbox as `Closed` on its next tick and reaps the
 /// orphaned per-consumer entry itself (phux-ddg, the self-healing path).
 pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
+    state.with_mut(|s| s.remove_peer_identity(client_id));
     let wire_client_id =
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
     let handles = state.with(|s| s.subscribed_terminal_handles(client_id));
@@ -306,11 +308,12 @@ pub(crate) async fn accept_loop<L: Incoming>(
             }
             accept = listener.accept() => {
                 match accept {
-                    Ok((reader, writer)) => {
+                    Ok((reader, writer, peer_identity)) => {
                         debug!(transport = listener.kind(), "client connected");
                         // Allocate the per-client routing id up-front so the
                         // task can detach itself cleanly on EOF.
                         let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+                        state.with_mut(|s| s.set_peer_identity(client_id, peer_identity));
                         let task_state = state.clone();
                         let client_token = root_token.child_token();
                         let task_root_token = root_token.clone();
@@ -449,6 +452,46 @@ where
                     color_support = ?client_caps.color_support,
                     "HELLO",
                 );
+                // Policy check: authorize HELLO before proceeding.
+                let policy_ok = {
+                    let peer = state
+                        .with(|s| s.peer_identity(client_id).cloned())
+                        .unwrap_or(PeerIdentity {
+                            uid: 0,
+                            pid: None,
+                            exe_path: None,
+                            mcp_host_key: None,
+                            transport: phux_protocol::policy::TransportType::UnixSocket,
+                            source_addr: None,
+                        });
+                    let bundle = state.with(|s| s.policy_bundle().clone());
+                    let consumer = PolicyConsumerId(client_id.0.to_string());
+                    // Build a capability list from the advertised layers.
+                    let requested_caps = vec![phux_protocol::policy::Capability {
+                        layer: phux_protocol::caps::Layer::L1,
+                        ops: vec![],
+                        terminals: None,
+                        collections: None,
+                        expires_at: None,
+                    }];
+                    match bundle.engine.authorize_hello(&peer, requested_caps).await {
+                        Ok(_granted) => true,
+                        Err(err) => {
+                            warn!(?client_id, error = %err, "HELLO denied by policy");
+                            let _ = out_tx
+                                .send(Outbound::Frame(FrameKind::Error {
+                                    request_id: None,
+                                    code: ErrorCode::PermissionDenied,
+                                    message: format!("policy denied: {}", err),
+                                }))
+                                .await;
+                            false
+                        }
+                    }
+                };
+                if !policy_ok {
+                    return Ok(());
+                }
                 // SPEC §6.1: HELLO arrives before ATTACH. Cache the
                 // advertised tier on the per-task stack; the ATTACH
                 // branch consumes it when building the `AttachedClient`.

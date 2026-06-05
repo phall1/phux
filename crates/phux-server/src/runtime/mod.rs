@@ -132,6 +132,9 @@ pub struct ServerConfig {
     /// `phux_config`'s `defaults.term`; [`Self::with_default_socket`] uses
     /// the schema default (`xterm-256color`).
     pub term: String,
+    /// Optional policy extension bundle. When `None`, the server uses the
+    /// default permissive policy (allow everything, audit nothing).
+    pub policy_bundle: Option<crate::policy::PolicyBundle>,
 }
 
 impl ServerConfig {
@@ -147,6 +150,7 @@ impl ServerConfig {
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
             term: phux_config::DefaultsCfg::default().term,
+            policy_bundle: None,
         }
     }
 }
@@ -299,6 +303,10 @@ impl ServerRuntime {
         // configured `TERM` baseline.
         let term = self.cfg.term.clone();
         state.with_mut(|s| s.set_term(term));
+        // Wire policy bundle from config into shared state.
+        if let Some(bundle) = self.cfg.policy_bundle.clone() {
+            state.with_mut(|s| s.set_policy_bundle(bundle));
+        }
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`

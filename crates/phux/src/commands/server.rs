@@ -91,6 +91,7 @@ pub(crate) fn run_server(
         history_limit,
         cwd_inheritance,
         term,
+        policy_bundle: None,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

@@ -260,6 +260,10 @@ pub struct ServerState {
     /// via `CreateIfMissing`. Without this guard the auto-spawn → attach
     /// flow races the server's own self-exit.
     has_served_client: bool,
+    /// Optional policy extension bundle. Defaults to permissive.
+    policy_bundle: crate::policy::PolicyBundle,
+    /// Per-client peer identities, keyed by server-assigned client id.
+    peer_identities: HashMap<ClientId, phux_protocol::policy::PeerIdentity>,
 }
 
 impl Default for ServerState {

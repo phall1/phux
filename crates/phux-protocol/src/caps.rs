@@ -145,7 +145,7 @@ impl OutputMode {
 /// client's and server's advertised layers. Out-of-tier messages MUST
 /// surface as protocol errors (SPEC §16.4).
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Layer {
     /// Terminal substrate. Always implemented; always implied.

@@ -14,6 +14,7 @@ pub mod extract;
 pub mod grid;
 pub mod id_bridge;
 pub mod input;
+pub mod policy;
 pub mod runtime;
 pub mod search;
 pub mod state;
