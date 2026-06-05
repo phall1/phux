@@ -1,38 +1,21 @@
 //! Submodule for runtime internals.
 
-use std::future::Future;
-use std::io;
-use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use bytes::BytesMut;
-use futures_util::StreamExt;
-use futures_util::stream::FuturesUnordered;
-use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
+use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
-    SpawnError, SpawnResult, StateScope, ViewportInfo,
+    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, ViewportInfo,
 };
-use tokio::net::{UnixListener, UnixStream};
-use tokio::runtime::Builder;
 use tokio::sync::oneshot;
-use tokio::task::{JoinSet, LocalSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, trace, warn};
 
-use crate::state::{
-    AttachSnapshotPane, ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput,
-};
-use crate::terminal_actor::{
-    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
-    ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
-};
-use crate::transport::{FrameReader, FrameWriter, Incoming};
+#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue
 use super::*;
+use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
+use crate::terminal_actor::{
+    ConsumerAckRequest, ResizeRequest, ScreenRequest, TerminalActor, TerminalHandle,
+};
 
 pub(crate) fn seed_session_with_actor(
     state: &SharedState,
@@ -161,168 +144,6 @@ pub fn spawn_pane_with_pty(
 /// the event rather than stalling the actor's hot PTY-pump loop.
 pub(crate) const EVENT_SINK_CAPACITY: usize = 64;
 
-/// Drain a pane actor's agent-event channel and fan each event out to
-/// event-stream subscribers scoped to `wire_terminal_id` (SPEC §7.5,
-/// phux-y2t). Runs until the actor drops its event sender (pane gone).
-///
-/// `spawn_local` to co-locate with the actor on the `LocalSet` (the
-/// cancellation story rides the root-token `JoinSet` cascade, same as the
-/// EOF watcher).
-pub(crate) async fn handle_get_metadata(
-    state: &SharedState,
-    client_id: ClientId,
-    request_id: u32,
-    scope: &phux_protocol::wire::frame::Scope,
-    key: &str,
-    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-) {
-    let (value, speaks_l3) =
-        state.with(|s| (s.metadata().get(scope, key), s.client_speaks_l3(client_id)));
-    debug!(
-        ?client_id,
-        request_id,
-        ?scope,
-        %key,
-        present = value.is_some(),
-        speaks_l3,
-        "GET_METADATA",
-    );
-    if !speaks_l3 {
-        // SPEC §16.4: out-of-tier traffic from a non-L3 consumer is
-        // dropped silently, matching the SUBSCRIBE_METADATA arm above.
-        // A future ticket may switch to ERROR { OUT_OF_TIER } once the
-        // error code lands.
-        return;
-    }
-    if out_tx
-        .send(Outbound::Frame(FrameKind::MetadataValue {
-            request_id,
-            value,
-        }))
-        .await
-        .is_err()
-    {
-        trace!(
-            ?client_id,
-            request_id, "METADATA_VALUE send dropped: writer gone"
-        );
-    }
-}
-
-pub(crate) fn handle_set_metadata(
-    state: &SharedState,
-    client_id: ClientId,
-    request_id: u32,
-    scope: &phux_protocol::wire::frame::Scope,
-    key: &str,
-    value: Vec<u8>,
-) {
-    debug!(?client_id, request_id, ?scope, %key, "SET_METADATA");
-    let delivered = state.with_mut(|s| s.metadata_set(scope, key, value));
-    trace!(
-        ?client_id,
-        request_id,
-        subscriber_count = delivered.len(),
-        "SET_METADATA delivered"
-    );
-}
-
-pub(crate) fn handle_delete_metadata(
-    state: &SharedState,
-    client_id: ClientId,
-    request_id: u32,
-    scope: &phux_protocol::wire::frame::Scope,
-    key: &str,
-) {
-    debug!(?client_id, request_id, ?scope, %key, "DELETE_METADATA");
-    let delivered = state.with_mut(|s| s.metadata_delete(scope, key));
-    trace!(
-        ?client_id,
-        request_id,
-        subscriber_count = delivered.len(),
-        "DELETE_METADATA delivered"
-    );
-}
-
-pub(crate) async fn handle_list_metadata(
-    state: &SharedState,
-    client_id: ClientId,
-    request_id: u32,
-    scope: &phux_protocol::wire::frame::Scope,
-    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-) {
-    let (keys, speaks_l3) =
-        state.with(|s| (s.metadata().list(scope), s.client_speaks_l3(client_id)));
-    debug!(
-        ?client_id,
-        request_id,
-        ?scope,
-        key_count = keys.len(),
-        speaks_l3,
-        "LIST_METADATA",
-    );
-    if !speaks_l3 {
-        // SPEC §16.4: same out-of-tier gating as `handle_get_metadata`.
-        return;
-    }
-    if out_tx
-        .send(Outbound::Frame(FrameKind::MetadataKeys {
-            request_id,
-            keys,
-        }))
-        .await
-        .is_err()
-    {
-        trace!(
-            ?client_id,
-            request_id, "METADATA_KEYS send dropped: writer gone"
-        );
-    }
-}
-
-pub(crate) fn handle_subscribe_metadata(
-    state: &SharedState,
-    client_id: ClientId,
-    scope: phux_protocol::wire::frame::Scope,
-    key: String,
-) {
-    state.with_mut(|s| {
-        if !s.client_speaks_l3(client_id) {
-            // SPEC §16.4: out-of-tier traffic from a non-L3 consumer.
-            // The L3 dispatch is best-effort: we drop the subscribe
-            // rather than tear the connection down, on the theory that
-            // a misbehaving client should learn from silence faster
-            // than from a protocol error. A future ticket may swap
-            // this for an explicit `ERROR { OUT_OF_TIER }` once the
-            // error code lands.
-            debug!(?client_id, ?scope, %key, "SUBSCRIBE_METADATA refused (non-L3)");
-            return;
-        }
-        debug!(?client_id, ?scope, %key, "SUBSCRIBE_METADATA");
-        s.metadata_subscribe(client_id, scope, key);
-    });
-}
-
-/// Record an agent-event subscription for `client_id` (SPEC §7.5,
-/// phux-y2t). `terminal = None` subscribes server-wide; `Some(id)`
-/// subscribes per-pane. Idempotent (the per-client scope set absorbs
-/// duplicates) and connection-scoped (cleared on detach). Unlike the L3
-/// metadata path this is not tier-gated — the event stream is part of L1
-/// and any consumer may opt in.
-pub(crate) fn handle_subscribe_events(
-    state: &SharedState,
-    client_id: ClientId,
-    terminal: Option<phux_protocol::ids::TerminalId>,
-    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-) {
-    debug!(?client_id, ?terminal, "SUBSCRIBE_EVENTS");
-    // Capture the client's mailbox in the subscription so event fanout
-    // reaches it even without an ATTACH (a pure `watch` client never
-    // attaches).
-    state.with_mut(|s| s.subscribe_events(client_id, terminal, out_tx.clone()));
-}
-
-/// Writer task: drain the per-client outbound channel and write each
 /// message to the socket. Encodes [`Outbound::Frame`] via
 /// `FrameKind::encode`.
 ///
@@ -1231,7 +1052,6 @@ pub(crate) const fn empty_session_snapshot() -> phux_protocol::wire::info::Sessi
     )
 }
 
-
 /// Handle a client's `VIEWPORT_RESIZE` (SPEC §7.1 / §10.5).
 ///
 /// Look up the client's currently-focused pane and update the in-memory
@@ -1251,7 +1071,11 @@ pub(crate) const fn empty_session_snapshot() -> phux_protocol::wire::info::Sessi
 /// Silent on every "not-found" path. A `VIEWPORT_RESIZE` from an
 /// unattached client is a benign race (the client may have sent it
 /// before its ATTACH completed); logging at `debug!` is enough.
-pub(crate) fn handle_viewport_resize(state: &SharedState, client_id: ClientId, viewport: &ViewportInfo) {
+pub(crate) fn handle_viewport_resize(
+    state: &SharedState,
+    client_id: ClientId,
+    viewport: &ViewportInfo,
+) {
     state.with_mut(|s| {
         let Some(client) = s.attached.get(&client_id) else {
             debug!(

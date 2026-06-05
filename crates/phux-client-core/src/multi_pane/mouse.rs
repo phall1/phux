@@ -4,7 +4,7 @@ use phux_protocol::input::mouse::MouseEvent;
 use crate::layout::LayoutState;
 use crate::layout::Rect;
 
-use super::layout::{compute_layout, PaneLayout};
+use super::layout::compute_layout;
 
 // -----------------------------------------------------------------------------
 // route_mouse_event — pure hit-test for INPUT_MOUSE routing (phux-4li.6)

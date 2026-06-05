@@ -45,9 +45,7 @@ pub(crate) trait FrameWriter {
 pub(crate) trait Incoming {
     type Reader: FrameReader + 'static;
     type Writer: FrameWriter + 'static;
-    async fn accept(
-        &self,
-    ) -> io::Result<(Self::Reader, Self::Writer, PeerIdentity)>;
+    async fn accept(&self) -> io::Result<(Self::Reader, Self::Writer, PeerIdentity)>;
     /// Short transport label for logs (`"uds"` / `"ws"`).
     fn kind(&self) -> &'static str;
 }
@@ -130,10 +128,11 @@ impl Incoming for UdsListener {
 /// Extract peer identity from a Unix domain socket.
 #[cfg(target_os = "linux")]
 fn peer_identity_from_uds(stream: &tokio::net::UnixStream) -> PeerIdentity {
-    let (uid, pid) = match stream.peer_cred() {
-        Ok(cred) => (cred.uid(), cred.pid()),
-        Err(_) => (0, None),
-    };
+    // `UCred::pid()` is `Option<i32>` (pid_t); `PeerIdentity.pid` is
+    // `Option<u32>`. A pid is non-negative, so `unsigned_abs` is exact.
+    let (uid, pid) = stream.peer_cred().map_or((0, None), |cred| {
+        (cred.uid(), cred.pid().map(i32::unsigned_abs))
+    });
     PeerIdentity {
         uid,
         pid,
@@ -145,6 +144,7 @@ fn peer_identity_from_uds(stream: &tokio::net::UnixStream) -> PeerIdentity {
 }
 
 /// Extract peer identity from a Unix domain socket (non-Linux fallback).
+#[allow(clippy::missing_const_for_fn)] // feature WIP (4588a0a)
 #[cfg(not(target_os = "linux"))]
 fn peer_identity_from_uds(_stream: &tokio::net::UnixStream) -> PeerIdentity {
     PeerIdentity {

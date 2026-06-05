@@ -1,62 +1,99 @@
 use serde::{Deserialize, Serialize};
 
-use super::{LayoutDecodeError, LayoutNode, SplitDir, TerminalId, unknown_layout_variant, unknown_split_dir};
+use super::{
+    LayoutDecodeError, LayoutNode, SplitDir, TerminalId, unknown_layout_variant, unknown_split_dir,
+};
 
+/// Minimal envelope shape used to peek the `version` byte before
+/// committing to a full decode (the version selects the v1 vs v2 shape).
 #[derive(Debug, Deserialize)]
 pub struct VersionProbe {
+    /// The envelope schema version (`1` legacy single-window, `2` workspace).
     pub version: u8,
 }
 
 /// The legacy v1 single-window envelope.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CborEnvelope {
+    /// Envelope schema version (`1`).
     pub version: u8,
+    /// The window's binary split tree.
     pub root: CborLayoutNode,
+    /// The focused leaf at encode time.
     pub focus: CborTerminalId,
 }
 
 /// The v2 multi-window envelope (docs/spec/L3.md §3.2).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CborWorkspaceEnvelope {
+    /// Envelope schema version (`2`).
     pub version: u8,
+    /// The workspace's windows, in order.
     pub windows: Vec<CborWindow>,
+    /// Index into `windows` of the active window.
     pub focused_window_index: u32,
 }
 
 /// One window inside [`CborWorkspaceEnvelope`].
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CborWindow {
+    /// The window's display name.
     pub name: String,
+    /// The window's binary split tree.
     pub root: CborLayoutNode,
+    /// The focused leaf within this window.
     pub focused_terminal: CborTerminalId,
 }
 
+/// CBOR shadow of [`LayoutNode`] — the wire crate exposes no `serde`
+/// impls, so this mirrors the shape and converts via `From`.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CborLayoutNode {
+    /// A single pane (tree leaf).
     Leaf {
+        /// The leaf's terminal id.
         pane: CborTerminalId,
     },
+    /// An interior split of two child subtrees.
     Split {
+        /// Split orientation.
         dir: CborSplitDir,
+        /// Fraction of the parent given to `left`, in `(0.0, 1.0)`.
         ratio: f32,
+        /// The first (left/top) child subtree.
         left: Box<Self>,
+        /// The second (right/bottom) child subtree.
         right: Box<Self>,
     },
 }
 
+/// CBOR shadow of [`SplitDir`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CborSplitDir {
+    /// A left/right split (vertical divider between panes).
     Horizontal,
+    /// A top/bottom split (horizontal divider between panes).
     Vertical,
 }
 
+/// CBOR shadow of [`TerminalId`].
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CborTerminalId {
-    Local { id: u32 },
-    Satellite { host: String, id: u32 },
+    /// A terminal local to this server.
+    Local {
+        /// The local numeric id.
+        id: u32,
+    },
+    /// A terminal hosted on a federated satellite.
+    Satellite {
+        /// The satellite host identifier.
+        host: String,
+        /// The terminal's id on that host.
+        id: u32,
+    },
 }
 
 impl From<SplitDir> for CborSplitDir {
@@ -123,6 +160,7 @@ impl From<&LayoutNode> for CborLayoutNode {
 }
 
 impl CborLayoutNode {
+    /// Convert this CBOR shadow back into a wire [`LayoutNode`], validating the split ratio.
     pub fn into_layout_node(self) -> Result<LayoutNode, LayoutDecodeError> {
         Ok(match self {
             Self::Leaf { pane } => LayoutNode::Leaf(pane.into()),
@@ -149,4 +187,3 @@ impl CborLayoutNode {
 // -----------------------------------------------------------------------------
 // Tests — unit + property
 // -----------------------------------------------------------------------------
-

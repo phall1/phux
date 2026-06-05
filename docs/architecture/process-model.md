@@ -18,7 +18,7 @@ One server per user, hosting all of that user's sessions. Clients are
 separate processes that attach to the server over a Unix socket.
 
 The runtime path resolution lives in
-[`phux-server/src/runtime.rs`](../../crates/phux-server/src/runtime.rs): the
+[`phux-server/src/runtime.rs`](../../crates/phux-server/src/runtime/mod.rs): the
 socket is `$XDG_RUNTIME_DIR/phux/phux.sock` when that variable is set,
 otherwise `/tmp/phux-$UID/phux.sock`. The parent directory is created
 mode `0o700`.

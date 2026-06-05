@@ -1,39 +1,25 @@
 //! Submodule for runtime internals.
 
-use std::future::Future;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
 
 use bytes::BytesMut;
-use futures_util::StreamExt;
-use futures_util::stream::FuturesUnordered;
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
-use phux_protocol::ids::CollectionId;
-use phux_protocol::input::InputEvent;
 use phux_protocol::policy::{ConsumerId as PolicyConsumerId, PeerIdentity};
-use phux_protocol::wire::frame::{
-    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
-    SpawnError, SpawnResult, StateScope, ViewportInfo,
-};
-use tokio::net::{UnixListener, UnixStream};
-use tokio::runtime::Builder;
+use phux_protocol::wire::frame::{AgentEvent, ErrorCode, FrameKind};
+use tokio::net::UnixStream;
 use tokio::sync::oneshot;
-use tokio::task::{JoinSet, LocalSet};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::state::{
-    AttachSnapshotPane, ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput,
-};
-use crate::terminal_actor::{
-    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
-    ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
-};
-use crate::transport::{FrameReader, FrameWriter, Incoming};
+#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue
 use super::*;
+use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
+use crate::terminal_actor::ConsumerDetachRequest;
+use crate::transport::{FrameReader, FrameWriter, Incoming};
 
 pub(crate) fn spawn_pane_event_drain(
     state: SharedState,
@@ -465,7 +451,7 @@ where
                             source_addr: None,
                         });
                     let bundle = state.with(|s| s.policy_bundle().clone());
-                    let consumer = PolicyConsumerId(client_id.0.to_string());
+                    let _consumer = PolicyConsumerId(client_id.0.to_string());
                     // Build a capability list from the advertised layers.
                     let requested_caps = vec![phux_protocol::policy::Capability {
                         layer: phux_protocol::caps::Layer::L1,
@@ -482,7 +468,7 @@ where
                                 .send(Outbound::Frame(FrameKind::Error {
                                     request_id: None,
                                     code: ErrorCode::PermissionDenied,
-                                    message: format!("policy denied: {}", err),
+                                    message: format!("policy denied: {err}"),
                                 }))
                                 .await;
                             false

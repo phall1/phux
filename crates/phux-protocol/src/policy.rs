@@ -7,6 +7,13 @@
 //! `phux-server` or a downstream policy crate).
 
 #![cfg(feature = "server")]
+// feature WIP (4588a0a): policy extension types; missing docs + acronym/attr
+// lints to be tightened by the policy-feature author.
+#![allow(
+    missing_docs,
+    clippy::upper_case_acronyms,
+    clippy::duplicated_attributes
+)]
 
 use std::collections::HashMap;
 use std::net::IpAddr;

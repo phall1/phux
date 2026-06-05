@@ -79,7 +79,9 @@ id_type!(
 /// federation layer's concern; the wire treats it as bytes.
 ///
 /// [ADR-0007]: https://github.com/phall1/phux/blob/main/ADR/0007-mosh-class-transport-and-satellites.md
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub struct SatelliteHost(String);
 
 impl SatelliteHost {
@@ -140,7 +142,9 @@ pub const TERMINAL_ID_TAG_SATELLITE: u8 = 1;
 ///
 /// [ADR-0016]: https://github.com/phall1/phux/blob/main/ADR/0016-terminal-id-as-wire-primary.md
 /// [`UnsupportedSatelliteRoute`]: crate::wire::frame::ErrorCode::UnsupportedSatelliteRoute
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum TerminalId {
     /// A terminal owned by the receiving server (wire tag = 0).
     Local {
@@ -244,7 +248,19 @@ impl core::fmt::Display for TerminalId {
 
 /// Identifier for a terminal frame. Monotonically increasing per terminal; `0`
 /// is the empty initial frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct FrameId(pub u64);
 
 impl FrameId {

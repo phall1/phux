@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use phux_protocol::ids::CollectionId;
-use phux_protocol::wire::frame::{CommandResult, Command as WireCommand};
+use phux_protocol::wire::frame::{Command as WireCommand, CommandResult};
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{cli_runtime, report_no_server, request_command};

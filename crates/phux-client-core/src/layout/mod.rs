@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::io::Cursor;
 
 use phux_protocol::TerminalId;
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use phux_protocol::wire::info::{LayoutNode, SplitDir};
@@ -1001,9 +1000,12 @@ const fn perpendicular_axis(dir: Direction) -> SplitDir {
 // Conversions are pure (no allocation beyond the recursive tree clone)
 // and unit-tested below.
 
+/// CBOR shadow types + conversions for layout persistence (L3 metadata).
 pub mod serialize;
 
-use serialize::{CborEnvelope, CborLayoutNode, CborTerminalId, CborWindow, CborWorkspaceEnvelope, VersionProbe};
+use serialize::{
+    CborEnvelope, CborLayoutNode, CborTerminalId, CborWindow, CborWorkspaceEnvelope, VersionProbe,
+};
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::float_cmp)]
@@ -1012,7 +1014,9 @@ mod tests {
 
     use proptest::prelude::*;
 
+    use super::serialize::CborSplitDir;
     use super::*;
+    use serde::Serialize;
 
     fn t(id: u32) -> TerminalId {
         TerminalId::local(id)

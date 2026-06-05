@@ -244,7 +244,7 @@ $XDG_STATE_HOME/phux/               # design intent; not yet implemented
 ```
 
 Today only the socket is real (see
-[`phux-server::runtime::default_socket_path`](../../crates/phux-server/src/runtime.rs)).
+[`phux-server::runtime::default_socket_path`](../../crates/phux-server/src/runtime/mod.rs)).
 The state-dir layout matches what
 [`../architecture/process-model.md`](../architecture/process-model.md)
 describes; both docs treat it as the destination shape.

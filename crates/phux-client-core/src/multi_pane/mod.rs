@@ -17,7 +17,7 @@
 //! light/heavy edges so a `T`-piece adjacent to a heavy edge renders
 //! the correct mixed-weight glyph (e.g. `┲`, `┳`, `┺`, …).
 //!
-//! The output is a [`PaneLayout`] carrying both the per-pane [`Rect`]s
+//! The output is a [`PaneLayout`] carrying both the per-pane [`Rect`](crate::layout::Rect)s
 //! (which `attach::driver` hands to each `TerminalRenderer`) and the
 //! list of [`DividerCell`]s (which the chrome layer at
 //! `phux_client::render::chrome::dividers` composites onto stdout via
@@ -27,12 +27,15 @@
 //! SIGWINCH-driven reflow lives in `attach::reflow` (sibling ticket
 //! phux-4li.7); this module is the pure compute step it composes with.
 
+/// Pane-rect geometry: tile a layout tree into per-pane rectangles.
 pub mod layout;
+/// Mouse hit-testing: map a click to the pane (and divider) under it.
 pub mod mouse;
+/// Rasterize the composition (pane interiors + divider segments) for paint.
 pub mod rasterize;
 
-pub use layout::{compute_layout, PaneLayout};
-pub use mouse::{route_mouse_event, RouteDecision};
+pub use layout::{PaneLayout, compute_layout};
+pub use mouse::{RouteDecision, route_mouse_event};
 pub use rasterize::DividerCell;
 
 #[cfg(test)]
@@ -44,7 +47,7 @@ pub use rasterize::DividerCell;
 )]
 mod tests {
     use super::*;
-    use crate::layout::{split_at, LayoutNode, LayoutState, Rect, SplitDir};
+    use crate::layout::{LayoutNode, LayoutState, Rect, SplitDir, split_at};
     use phux_protocol::TerminalId;
     use phux_protocol::input::key::ModSet;
     use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -148,7 +151,8 @@ mod tests {
         };
         let out = compute_layout(&state, (80, 24));
         // Group dividers by column.
-        let mut by_col: std::collections::HashMap<u16, Vec<char>> = std::collections::HashMap::new();
+        let mut by_col: std::collections::HashMap<u16, Vec<char>> =
+            std::collections::HashMap::new();
         for c in &out.dividers {
             by_col.entry(c.x).or_default().push(c.ch);
         }

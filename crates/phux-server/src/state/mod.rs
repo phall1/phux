@@ -38,10 +38,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use phux_core::ids::{SessionId, TerminalId, WindowId};
-use phux_core::registry::Registry;
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
+use phux_core::ids::{SessionId, TerminalId, WindowId};
+use phux_core::registry::Registry;
 use phux_protocol::caps::LayerSet;
 use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId, WindowId as WireWindowId};
 use portable_pty::CommandBuilder;
@@ -59,7 +59,7 @@ mod registry;
 
 pub use client::{AttachError, AttachSnapshotPane, AttachedClient, ClientId};
 pub use events::{EventScope, EventSubscription, SelectionSpan};
-pub use input_log::{Outbound, TerminalInput, DEFAULT_CLIENT_MAILBOX};
+pub use input_log::{DEFAULT_CLIENT_MAILBOX, Outbound, TerminalInput};
 pub use metadata::{MetadataSetOutcome, MetadataStore, RenameOutcome};
 
 /// Default Collection identifier exposed by v0.1 servers.
@@ -350,7 +350,7 @@ mod tests {
     use crate::terminal_actor::TerminalHandle;
     use bytes::Bytes;
     use phux_protocol::caps::{ClientCapabilities, ColorSupport, LayerSet};
-    use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
     use phux_protocol::wire::frame::{FrameKind, Scope};
     use tokio::sync::{broadcast, mpsc};
     use tokio_util::sync::CancellationToken;

@@ -1,38 +1,21 @@
 //! Submodule for runtime internals.
 
-use std::future::Future;
-use std::io;
-use std::os::unix::fs::DirBuilderExt;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use bytes::BytesMut;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
-use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
+use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
-use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
-    SpawnError, SpawnResult, StateScope, ViewportInfo,
+    AgentEvent, AttachTarget, ErrorCode, FrameKind, SpawnError, SpawnResult,
 };
-use tokio::net::{UnixListener, UnixStream};
-use tokio::runtime::Builder;
 use tokio::sync::oneshot;
-use tokio::task::{JoinSet, LocalSet};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, trace, warn};
 
-use crate::state::{
-    AttachSnapshotPane, ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput,
-};
-use crate::terminal_actor::{
-    ConsumerAckRequest, ConsumerAttachRequest, ConsumerDetachRequest, PwdRequest, ResizeRequest,
-    ScreenRequest, SnapshotRequest, TerminalActor, TerminalHandle,
-};
-use crate::transport::{FrameReader, FrameWriter, Incoming};
+#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
 use super::*;
+use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
+use crate::terminal_actor::{ConsumerAttachRequest, PwdRequest, ResizeRequest, SnapshotRequest};
 
 /// Tuple bundling everything `handle_attach` needs after it's done
 /// touching `ServerState`. Cloned out of the critical section so the
@@ -267,7 +250,10 @@ pub(crate) async fn resolve_create_if_missing(
 ///   [`crate::state::ServerState::record_window_last_cwd`], and reused as
 ///   the fallback when a subsequent live query fails. `None` when there is
 ///   no active window and nothing was ever recorded.
-pub(crate) async fn resolve_inherited_cwd(state: &SharedState, client_id: ClientId) -> Option<String> {
+pub(crate) async fn resolve_inherited_cwd(
+    state: &SharedState,
+    client_id: ClientId,
+) -> Option<String> {
     let mode = state.with(crate::state::ServerState::cwd_inheritance);
     match mode {
         phux_config::CwdInheritance::InheritFocused => {
@@ -365,7 +351,9 @@ pub(crate) fn path_to_string(path: &std::path::Path) -> Option<String> {
 /// [`crate::cwd_query`]). `None` when the actor has gone away or the query
 /// is unsupported/denied. The handle must be cloned out of state before the
 /// call: `with` must not be held across the `await`.
-pub(crate) async fn query_pane_cwd(handle: crate::terminal_actor::TerminalHandle) -> Option<String> {
+pub(crate) async fn query_pane_cwd(
+    handle: crate::terminal_actor::TerminalHandle,
+) -> Option<String> {
     let (reply, rx) = tokio::sync::oneshot::channel();
     handle.pwd.send(PwdRequest { reply }).await.ok()?;
     rx.await.ok().flatten()
