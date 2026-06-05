@@ -253,7 +253,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         .map(|r| (r.x, r.y))
                 })
                 .unwrap_or((0, 0));
-            let slot = match panes.entry(terminal_id) {
+            let slot = match panes.entry(terminal_id.clone()) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(PaneSlot::new_with_size(cols, rows)?)
@@ -325,6 +325,59 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         // painter's cache decide whether a re-emit is needed.
                         false,
                     );
+                }
+            } else if !overlay_active && !defer_paint {
+                // phux-paer: a NON-focused pane's snapshot must paint into its
+                // rect — the symmetric counterpart to the `TerminalOutput`
+                // non-focused branch (phux-2x9). Without it, re-attaching to a
+                // split leaves every non-focused pane blank: its libghostty
+                // mirror is warm (the `vt_write` above) but never rendered,
+                // while input still routes — exactly the "screens wiped but
+                // still typable" report. A pane absent from the active window's
+                // composition is off-screen and must NOT paint (off-screen
+                // invariant), so we render only when it has a rect.
+                let rects = workspace
+                    .active_window()
+                    .map(|ls| super::multi_pane::compute_layout(ls, pane_dims).rects)
+                    .unwrap_or_default();
+                if let Some(rect) = rects.get(&terminal_id).copied() {
+                    if let Some(slot) = panes.get_mut(&terminal_id) {
+                        let _ = slot
+                            .renderer
+                            .render_at(&slot.terminal, out, (rect.x, rect.y));
+                    }
+                    // The render above left the host cursor inside the
+                    // non-focused pane; restore the focused pane's cursor so it
+                    // stays where the user is typing.
+                    let focused_cursor = focused_pane
+                        .as_ref()
+                        .and_then(|fid| panes.get(fid))
+                        .and_then(|s| s.renderer.last_cursor());
+                    if status_bar.is_some() {
+                        let fallback = focused_pane
+                            .as_ref()
+                            .and_then(|fid| rects.get(fid))
+                            .map(|r| (r.x, r.y));
+                        paint_bar_after_pane(
+                            status_bar,
+                            out,
+                            viewport_dims,
+                            session_name,
+                            focused_cursor,
+                            fallback,
+                            false,
+                        );
+                    } else if let Some((row, col)) = focused_cursor {
+                        let _ = write!(
+                            out,
+                            "\x1b[{};{}H\x1b[?25h",
+                            row.saturating_add(1),
+                            col.saturating_add(1)
+                        );
+                        let _ = out.flush();
+                    } else {
+                        let _ = out.flush();
+                    }
                 }
             }
             Ok(FrameOutcome::default())
@@ -1268,6 +1321,131 @@ mod tests {
         assert!(
             visible.contains("hello"),
             "non-focused pane should render its glyphs; visible = {visible:?}, raw = {s:?}"
+        );
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test driver mirrors frame inputs"
+    )]
+    fn drive_snapshot(
+        out: &mut Vec<u8>,
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        cols: u16,
+        rows: u16,
+        vt_replay_bytes: &[u8],
+        viewport_dims: (u16, u16),
+    ) -> FrameOutcome {
+        let mut session_name = String::new();
+        let mut predict = PredictionState::new(
+            PredictiveConfig::disabled(),
+            viewport_dims.0,
+            viewport_dims.1,
+        );
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            out,
+            FrameKind::TerminalSnapshot {
+                terminal_id: terminal_id.clone(),
+                cols,
+                rows,
+                vt_replay_bytes: vt_replay_bytes.to_vec(),
+                scrollback_bytes: None,
+            },
+            panes,
+            layout,
+            focused,
+            &mut session_name,
+            None,
+            viewport_dims,
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-paer: on re-attach the server sends a `TERMINAL_SNAPSHOT` per
+    /// pane; a NON-focused pane's snapshot must paint into its rect, or the
+    /// pane renders blank while input still routes — the "screens wiped but
+    /// still typable" report. The symmetric counterpart to
+    /// [`non_focused_pane_repaints_on_output`].
+    #[test]
+    fn non_focused_pane_repaints_on_snapshot() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &right,
+            39,
+            24,
+            b"hello",
+            (80, 24),
+        );
+
+        let s = String::from_utf8_lossy(&out);
+        // Same geometry as the output test: 80-col / 0.5 split ⇒ right pane
+        // origin at 0-based col 41 ⇒ 1-based CUP `;42H`.
+        assert!(
+            s.contains(";42H"),
+            "expected CUP into right pane origin (col 42); out = {s:?}"
+        );
+        let visible = strip_csi(&s);
+        assert!(
+            visible.contains("hello"),
+            "non-focused pane snapshot should render its glyphs; visible = {visible:?}, raw = {s:?}"
+        );
+    }
+
+    /// The focused pane's snapshot still renders into its own rect — guards
+    /// against the phux-paer non-focused branch regressing the focused path.
+    #[test]
+    fn focused_pane_repaints_on_snapshot() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let mut out: Vec<u8> = Vec::new();
+        drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &left,
+            39,
+            24,
+            b"world",
+            (80, 24),
+        );
+
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            s.contains("\x1b[1;1H"),
+            "expected CUP into left pane origin (col 1); out = {s:?}"
+        );
+        let visible = strip_csi(&s);
+        assert!(
+            visible.contains("world"),
+            "focused pane snapshot should render its glyphs; visible = {visible:?}, raw = {s:?}"
         );
     }
 
