@@ -1,0 +1,266 @@
+//! Submodule for terminal actor internals.
+
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use tokio::sync::mpsc;
+use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use tracing::debug;
+use super::TerminalActorError;
+
+/// Default PTY read chunk size. Mirrors the example. Sized comfortably
+/// above the typical libghostty escape-sequence span so a single read
+/// rarely splits a sequence boundary.
+const PTY_READ_CHUNK: usize = 4096;
+
+/// Bundle of PTY-side resources owned by a [`TerminalActor`] with a real PTY.
+///
+/// Fields are kept in struct-declaration order so drop order matches the
+/// teardown contract: writer thread first (so the writer channel closes
+/// before the master), then the master (which sends EOF to the slave),
+/// then the child, then the reader thread.
+pub(crate) struct PtyOwned {
+    /// Master handle — owned by the actor so resize ioctls can be
+    /// issued. Wrapped in `Arc` so the writer thread can hold a clone
+    /// (it doesn't, currently — the writer thread owns its own
+    /// `Box<dyn Write + Send>` taken via `MasterPty::take_writer` —
+    /// but the field keeps the master alive for resize / drop-on-exit).
+    #[allow(dead_code, reason = "kept alive; methods invoked through &self")]
+    pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// Child process spawned on the slave side. Reaped in
+    /// [`TerminalActor::shutdown_pty`].
+    pub(crate) child: Box<dyn Child + Send + Sync>,
+    /// Reader-thread join handle. Reader exits when the master is
+    /// dropped (EOF on the read fd) or when its `mpsc::Sender` closes.
+    pub(crate) reader_thread: Option<JoinHandle<()>>,
+    /// Writer-thread join handle. Writer exits when its `mpsc::Receiver`
+    /// closes (i.e., the actor's [`Self::pty_tx`] sender is dropped).
+    pub(crate) writer_thread: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for PtyOwned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyOwned")
+            .field("child", &self.child)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Events flowing from the PTY reader thread into the actor.
+#[derive(Debug)]
+pub(crate) enum PtyEvent {
+    /// A chunk of bytes read from the PTY master.
+    Bytes(Vec<u8>),
+    /// The PTY hit EOF or errored. Either way: the child is going away.
+    Eof,
+}
+
+/// Map a `portable_pty::ExitStatus` into the `TERMINAL_CLOSED.exit_status`
+/// wire shape (phux-4li.11).
+///
+/// `Some(code)` for `_exit(n)`, `None` for signal-killed or
+/// unknown-cause exits. `portable_pty::ExitStatus` keeps its
+/// `signal: Option<String>` field private; the only way through the
+/// public surface to distinguish a signal-driven death from `_exit(1)`
+/// is the `Display` impl, which formats signal kills as
+/// `"Terminated by <name>"` and exits as `"Exited with code N"` /
+/// `"Success"`. Parsing the prefix is the stable contract; if upstream
+/// ever exposes `signal()` we can swap this for a structured probe
+/// without touching call sites.
+pub(crate) fn exit_status_to_wire(status: &portable_pty::ExitStatus) -> Option<i32> {
+    let rendered = status.to_string();
+    if rendered.starts_with("Terminated by") {
+        return None;
+    }
+    // Both "Success" (success() == true) and "Exited with code N" hit
+    // this branch. `exit_code()` returns u32 — coerce into i32 saturating
+    // at i32::MAX, since `TERMINAL_CLOSED.exit_status` is `Option<i32>`
+    // on the wire and the practical exit-code range is 0..=255.
+    Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
+}
+
+/// Resolve the default shell. Reads `$SHELL`; falls back to `/bin/sh`
+/// (POSIX-guaranteed) when unset.
+///
+/// Sets `TERM=xterm-256color` on the spawned process. This is deliberate
+/// (phux-7vx): we previously advertised `TERM=ghostty`, but ghostty's
+/// terminfo carries the `fullkbd` extended capability that ncurses
+/// applications read as "kitty keyboard protocol available." Several
+/// ncurses TUIs (htop is the canonical reproducer) then push the kitty
+/// progressive-enhancement flags on startup via `CSI > N u`. libghostty's
+/// per-pane `Terminal` honours that push, after which the per-pane key
+/// encoder correctly emits CSI-u sequences (e.g. `\x1b[113;1u` for `q`).
+/// The trouble is the round-trip on the app's side: htop in particular
+/// does NOT actually parse incoming CSI-u for the keys it cares about,
+/// so the user's `q` quit no longer reaches htop's key dispatch.
+///
+/// `xterm-256color` is the universally-recognised safe baseline: 256
+/// colours and the standard xterm key vocabulary, no kitty advertisement.
+/// Apps that want kitty mode still get it — they have to enable it
+/// explicitly with `CSI > N u`, at which point the encoder pivots to
+/// CSI-u (validated in `tests/htop_keys.rs`). The encoder's terminal-
+/// state awareness is unchanged; only the default advertisement is.
+///
+/// Trade-off: phux loses ghostty-specific terminfo extensions (sixel,
+/// kitty graphics caps as advertised by terminfo, the ghostty-specific
+/// SGR colour extensions). Those features are still reachable when the
+/// app opts in directly. When phux's own input/output layer fully
+/// supports the kitty keyboard protocol round-trip, revert this to
+/// `ghostty` (or expose a config switch).
+#[must_use]
+pub fn default_shell_command() -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.env("TERM", DEFAULT_TERM);
+    cmd
+}
+
+/// The baseline `TERM` baked into [`default_shell_command`] and
+/// [`shell_command`].
+///
+/// Matches `phux_config`'s `defaults.term` schema default. The runtime
+/// overrides this per-server with the configured `defaults.term` via
+/// [`apply_term`]; this constant is the value used when a `CommandBuilder`
+/// is built without server config in scope (tests,
+/// [`TerminalActor::new_with_default_shell`]).
+///
+/// `xterm-256color` is the universally-recognised safe baseline (phux-7vx
+/// / phux-ign): 256 colours and the standard xterm key vocabulary, no
+/// kitty-keyboard advertisement — so ncurses TUIs like htop keep working.
+pub const DEFAULT_TERM: &str = "xterm-256color";
+
+/// Override the `TERM` env on `cmd` with `term`, the server's configured
+/// `defaults.term`.
+///
+/// `CommandBuilder::env` overwrites, so this cleanly replaces the baseline
+/// set by [`default_shell_command`] / [`shell_command`]. Callers in the
+/// runtime apply this after building the command from the wire/config so a
+/// single server-wide `TERM` default flows to the seed session,
+/// attach-time creation, and `SPAWN_TERMINAL`.
+pub fn apply_term(cmd: &mut CommandBuilder, term: &str) {
+    cmd.env("TERM", term);
+}
+
+/// Build a [`CommandBuilder`] that runs a user-supplied command line as a
+/// seed pane's initial program (e.g. `defaults.spawn-on-attach`,
+/// phux-07y).
+///
+/// The command runs via `$SHELL -c <command>` (falling back to
+/// `/bin/sh`), so shell quoting and arguments inside `command` behave the
+/// same as they would at an interactive prompt, and the pane closes when
+/// the command exits. `TERM` is set to match [`default_shell_command`].
+#[must_use]
+pub fn shell_command(command: &str) -> CommandBuilder {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.arg("-c");
+    cmd.arg(command);
+    cmd.env("TERM", DEFAULT_TERM);
+    cmd
+}
+type SpawnedPty = (
+    mpsc::UnboundedReceiver<PtyEvent>,
+    mpsc::UnboundedSender<Vec<u8>>,
+    PtyOwned,
+);
+
+/// Receive from `rx` when `Some`; otherwise park forever. Used as a
+/// select! arm so the actor's loop can run with or without a PTY
+/// without an `expect()` or branching `if`.
+pub(crate) async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> Option<PtyEvent> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Open a PTY pair, spawn `cmd` on the slave, and start the reader /
+/// writer bridge threads. Returns the actor-side channel endpoints and
+/// a [`PtyOwned`] bundle to keep the resources alive.
+pub(crate) fn spawn_pty(cmd: CommandBuilder, cols: u16, rows: u16) -> Result<SpawnedPty, TerminalActorError> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| TerminalActorError::OpenPty(e.to_string()))?;
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| TerminalActorError::Spawn(e.to_string()))?;
+    // Drop the slave side: the child inherits the fds, and we don't
+    // need our copy. Keeping it would prevent EOF on master read after
+    // the child exits.
+    drop(pair.slave);
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
+    let mut writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
+    let master = Arc::new(Mutex::new(pair.master));
+
+    let (pty_tx_to_actor, pty_rx_for_actor) = mpsc::unbounded_channel::<PtyEvent>();
+    let (input_tx_to_writer, mut input_rx_for_writer) = mpsc::unbounded_channel::<Vec<u8>>();
+
+    let reader_thread = std::thread::Builder::new()
+        .name("phux-pty-reader".to_owned())
+        .spawn(move || {
+            let mut buf = [0u8; PTY_READ_CHUNK];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        let _ = pty_tx_to_actor.send(PtyEvent::Eof);
+                        break;
+                    }
+                    Ok(n) => {
+                        if pty_tx_to_actor
+                            .send(PtyEvent::Bytes(buf[..n].to_vec()))
+                            .is_err()
+                        {
+                            // Actor went away.
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        debug!(?err, "pty reader thread: read error");
+                        let _ = pty_tx_to_actor.send(PtyEvent::Eof);
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
+
+    let writer_thread = std::thread::Builder::new()
+        .name("phux-pty-writer".to_owned())
+        .spawn(move || {
+            while let Some(bytes) = input_rx_for_writer.blocking_recv() {
+                if writer.write_all(&bytes).is_err() {
+                    break;
+                }
+                if writer.flush().is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
+
+    Ok((
+        pty_rx_for_actor,
+        input_tx_to_writer,
+        PtyOwned {
+            master,
+            child,
+            reader_thread: Some(reader_thread),
+            writer_thread: Some(writer_thread),
+        },
+    ))
+}

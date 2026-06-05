@@ -48,6 +48,9 @@ use portable_pty::CommandBuilder;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+use libghostty_vt::terminal::Point;
+
 mod client;
 mod events;
 mod input_log;
