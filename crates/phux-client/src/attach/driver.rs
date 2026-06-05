@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::os::fd::AsFd;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -229,7 +230,32 @@ impl From<super::render::RenderError> for AttachError {
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError> {
-    run_with_stdout(socket, target, &mut io::stdout()).await
+    run_buffered(socket, target, PredictiveConfig::disabled()).await
+}
+
+/// Production attach: wrap stdout in the off-loop [`StdoutSink`](super::stdout_writer)
+/// so a slow terminal never blocks the select loop (phux-fysb), then run the
+/// session. Tests use the synchronous [`run_with_stdout`] seam directly.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn run_buffered(
+    socket: &Path,
+    target: AttachTarget,
+    predict: PredictiveConfig,
+) -> Result<(), AttachError> {
+    let (mut sink, writer) = super::stdout_writer::spawn_stdout_writer();
+    let resync = Arc::clone(&sink.needs_resync);
+    attach_session(
+        socket,
+        target,
+        &mut sink,
+        predict,
+        Some(resync.as_ref()),
+        Some(writer),
+    )
+    .await
 }
 
 /// Like [`run`], with predictive local echo configurable per call.
@@ -251,7 +277,7 @@ pub async fn run_with_predict(
     target: AttachTarget,
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
-    run_with_stdout_predict(socket, target, &mut io::stdout(), predict).await
+    run_buffered(socket, target, predict).await
 }
 
 /// Same as [`run`], but writes the entire composited output stream to a
@@ -296,6 +322,31 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     target: AttachTarget,
     out: &mut W,
     predict: PredictiveConfig,
+) -> Result<(), AttachError> {
+    // Synchronous-sink test seam: no off-loop writer, no resync flag.
+    attach_session(socket, target, out, predict, None, None).await
+}
+
+/// The attach session body shared by the production ([`run`]) and
+/// test-injectable ([`run_with_stdout_predict`]) entry points.
+///
+/// `resync` is the [`StdoutSink`](super::stdout_writer) backpressure flag
+/// (`None` for the synchronous test sink); `main_loop` polls it to repaint
+/// the latest state after the writer dropped a stale backlog. `writer` is the
+/// off-loop stdout writer's handle (`None` for the test sink); it is drained
+/// and joined before the terminal-reset writes on every exit path so output
+/// isn't lost and the reset isn't garbled.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn attach_session<W: super::RenderSink>(
+    socket: &Path,
+    target: AttachTarget,
+    out: &mut W,
+    predict: PredictiveConfig,
+    resync: Option<&AtomicBool>,
+    mut writer: Option<super::stdout_writer::WriterHandle>,
 ) -> Result<(), AttachError> {
     // STAGE 1 — pre-handshake, on the cooked outer terminal.
     //
@@ -343,7 +394,18 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     // `exit_after_detach` (which never returns — see its doc comment).
     let mut attached = attached;
     loop {
-        match main_loop(&mut conn, attached, predict, out).await? {
+        let exit = match main_loop(&mut conn, attached, predict, out, resync).await {
+            Ok(exit) => exit,
+            Err(err) => {
+                // Drain + stop the off-loop writer before propagating; the
+                // RawModeGuard's Drop restores the terminal as we unwind.
+                if let Some(writer) = writer.take() {
+                    writer.shutdown_and_join();
+                }
+                return Err(err);
+            }
+        };
+        match exit {
             LoopExit::Detached => {
                 // Lifecycle transition (info): the attach loop is exiting.
                 tracing::info!("attach loop: DETACHED; exiting");
@@ -353,6 +415,13 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
                 // `Ok(())` would let the tokio runtime drop block forever
                 // on the uncancellable stdin read thread (see
                 // `exit_after_detach`'s doc comment).
+                //
+                // Drain queued output + stop the writer FIRST so nothing is
+                // lost and the reset writes in `exit_after_detach` aren't
+                // garbled by an in-flight frame.
+                if let Some(writer) = writer.take() {
+                    writer.shutdown_and_join();
+                }
                 exit_after_detach();
             }
             LoopExit::SwitchTo(target) => {
@@ -555,6 +624,11 @@ async fn main_loop<W: super::RenderSink>(
     initial_attached: FrameKind,
     predict_cfg: PredictiveConfig,
     out: &mut W,
+    // phux-fysb: the off-loop StdoutSink's backpressure flag. When the writer
+    // drops a stale backlog under a slow terminal it sets this; we repaint the
+    // latest state from scratch (a self-contained full frame supersedes the
+    // dropped diffs). `None` for the synchronous test sink.
+    needs_resync: Option<&AtomicBool>,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -712,6 +786,30 @@ async fn main_loop<W: super::RenderSink>(
     }
 
     loop {
+        // phux-fysb: the off-loop stdout writer dropped a stale backlog under
+        // a slow terminal. Repaint the latest state from scratch — a
+        // self-contained full frame (or overlay) supersedes the dropped
+        // diffs. `swap(false)` clears the flag, but any set re-armed by THIS
+        // repaint's own flushes is preserved for the next iteration. Checked
+        // before parking so a resync that landed during the prior arm is
+        // serviced promptly.
+        if needs_resync.is_some_and(|flag| flag.swap(false, Ordering::AcqRel)) {
+            if overlays.is_active() {
+                let _ = out.write_all(b"\x1b[2J\x1b[H");
+                let _ = overlays.paint(out, viewport_dims);
+            } else if let Some(ls) = workspace.active_window() {
+                paint_full_frame(
+                    out,
+                    ls,
+                    &mut panes,
+                    focused_pane.as_ref(),
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    &session_name,
+                );
+            }
+        }
+
         // Arm the bare-ESC idle timer only when the parser has pending
         // state. When no flush is pending we substitute a never-resolving
         // future so the select! arm parks forever; this keeps the steady-
