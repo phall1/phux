@@ -272,7 +272,15 @@ pub enum PhysicalKey {
 /// `unshifted_codepoint` carry the layout-resolved character.
 ///
 /// See docs/spec/input.md §2 for field semantics.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written and **redaction-safe** (ADR-0028): it never prints
+/// the layout-resolved `text` or `unshifted_codepoint`, since together those
+/// reconstruct the user's literal keystrokes (passwords, secrets). It reports
+/// only the structural facts an operator needs in a log — action, physical
+/// key, modifiers, and whether text was present (as a length, never the bytes)
+/// — so the common `trace!(?event)` / `trace!(?input)` call sites are safe by
+/// construction without each site having to remember to redact.
+#[derive(Clone, PartialEq, Eq)]
 pub struct KeyEvent {
     /// Press, release, or repeat.
     pub action: KeyAction,
@@ -295,6 +303,29 @@ pub struct KeyEvent {
     /// Layout-resolved codepoint that would have been produced with no
     /// modifiers held. Used by KIP `REPORT_ALTERNATES`.
     pub unshifted_codepoint: Option<u32>,
+}
+
+/// Redaction-safe `Debug` (ADR-0028).
+///
+/// Emits the event's structure but never its content: `text` is reduced to
+/// `text_len` (a UTF-8 byte count) and `unshifted_codepoint` to a present/absent
+/// boolean. This is what lands in logs whenever a `KeyEvent` (or an
+/// `InputEvent` wrapping one) is formatted with `{:?}` — e.g. the server's
+/// `trace!(?input, …)` PTY-handoff diagnostics. The physical key and modifiers
+/// are structural (already plain integers on the wire) and safe to log.
+impl core::fmt::Debug for KeyEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KeyEvent")
+            .field("action", &self.action)
+            .field("key", &self.key)
+            .field("mods", &self.mods)
+            .field("consumed_mods", &self.consumed_mods)
+            .field("composing", &self.composing)
+            // Redacted: never log the literal characters produced.
+            .field("text_len", &self.text.as_ref().map(String::len))
+            .field("has_unshifted_codepoint", &self.unshifted_codepoint.is_some())
+            .finish()
+    }
 }
 
 /// Conversions to/from libghostty's atoms, at the server's engine boundary.
@@ -375,5 +406,34 @@ mod tests {
         };
         assert_ne!(mk("a"), mk("b"));
         assert_eq!(mk("a"), mk("a"));
+    }
+
+    #[test]
+    fn debug_redacts_key_text_and_codepoint() {
+        let secret = "hunter2-PASSWORD";
+        let event = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::A,
+            mods: ModSet::CTRL,
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: Some(secret.to_owned()),
+            unshifted_codepoint: Some(u32::from('q')),
+        };
+        let rendered = format!("{event:?}");
+        // The structural facts are present...
+        assert!(rendered.contains("KeyEvent"), "{rendered}");
+        assert!(rendered.contains("Press"), "{rendered}");
+        assert!(rendered.contains('A'), "{rendered}");
+        assert!(rendered.contains("text_len"), "{rendered}");
+        // ...but the literal keystroke content is NOT.
+        assert!(
+            !rendered.contains(secret),
+            "Debug leaked key text: {rendered}"
+        );
+        assert!(
+            !rendered.contains("113") && !rendered.contains('q'),
+            "Debug leaked unshifted codepoint: {rendered}"
+        );
     }
 }

@@ -64,4 +64,104 @@ impl InputEvent {
             Self::Selection(event) => FrameKind::InputSelection { terminal_id, event },
         }
     }
+
+    /// A short, redaction-safe one-line narration of this event for logs and
+    /// observability (ADR-0028).
+    ///
+    /// Self-narrating input atoms: the string describes the event's *structure*
+    /// — the atom kind plus its structural facts — and NEVER its secret payload
+    /// (typed key text, pasted clipboard bytes). It is the human-friendly
+    /// companion to the types' redaction-safe `Debug`; prefer it where a flat
+    /// log line reads better than a `{:?}` struct dump.
+    #[must_use]
+    pub fn narrate(&self) -> String {
+        match self {
+            Self::Key(e) => {
+                let action = e.action;
+                let key = e.key;
+                let mods = e.mods;
+                let text_len = e.text.as_ref().map(String::len);
+                format!("key {action:?} {key:?} mods={mods:?} text_len={text_len:?}")
+            }
+            Self::Mouse(e) => format!("mouse {e:?}"),
+            Self::Focus(e) => format!("focus {e:?}"),
+            Self::Paste(e) => {
+                let trust = e.trust;
+                let data_len = e.data.len();
+                format!("paste {trust:?} data_len={data_len}")
+            }
+            Self::Selection(e) => format!("selection {e:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputEvent, focus, key, paste};
+
+    const SECRET_TEXT: &str = "rm -rf / --no-preserve-root && PASSWORD=hunter2";
+    const SECRET_PASTE: &[u8] = b"ssh-private-key-BEGIN-SUPER-SECRET";
+
+    fn secret_key_event() -> InputEvent {
+        InputEvent::Key(key::KeyEvent {
+            action: key::KeyAction::Press,
+            key: key::PhysicalKey::A,
+            mods: key::ModSet::CTRL,
+            consumed_mods: key::ModSet::empty(),
+            composing: false,
+            text: Some(SECRET_TEXT.to_owned()),
+            unshifted_codepoint: Some(u32::from('a')),
+        })
+    }
+
+    fn secret_paste_event() -> InputEvent {
+        InputEvent::Paste(paste::PasteEvent {
+            trust: paste::PasteTrust::Untrusted,
+            data: SECRET_PASTE.to_vec(),
+        })
+    }
+
+    /// The wrapping `InputEvent` `{:?}` (what the server's `trace!(?input, …)`
+    /// PTY-handoff diagnostics print) must not leak the typed key text or the
+    /// pasted bytes.
+    #[test]
+    fn input_event_debug_never_leaks_secret_payload() {
+        let key_dbg = format!("{:?}", secret_key_event());
+        assert!(
+            !key_dbg.contains(SECRET_TEXT),
+            "key Debug leaked: {key_dbg}"
+        );
+        assert!(key_dbg.contains("text_len"), "{key_dbg}");
+
+        let paste_dbg = format!("{:?}", secret_paste_event());
+        let leaked = String::from_utf8_lossy(SECRET_PASTE);
+        assert!(
+            !paste_dbg.contains(leaked.as_ref()),
+            "paste Debug leaked: {paste_dbg}"
+        );
+        assert!(paste_dbg.contains("data_len"), "{paste_dbg}");
+    }
+
+    /// `narrate()` is the redaction-safe one-liner — same guarantee.
+    #[test]
+    fn narrate_is_structural_and_redaction_safe() {
+        let key_n = secret_key_event().narrate();
+        assert!(key_n.starts_with("key "), "{key_n}");
+        assert!(
+            !key_n.contains(SECRET_TEXT),
+            "narrate leaked key text: {key_n}"
+        );
+
+        let paste_n = secret_paste_event().narrate();
+        assert!(paste_n.starts_with("paste "), "{paste_n}");
+        let leaked = String::from_utf8_lossy(SECRET_PASTE);
+        assert!(
+            !paste_n.contains(leaked.as_ref()),
+            "narrate leaked paste: {paste_n}"
+        );
+
+        // Non-secret atoms narrate without panicking and carry their kind.
+        let focus_n = InputEvent::Focus(focus::FocusEvent::Gained).narrate();
+        assert!(focus_n.starts_with("focus "), "{focus_n}");
+    }
 }

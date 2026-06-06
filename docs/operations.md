@@ -51,6 +51,10 @@ The **client default log path** (when `PHUX_LOG` is unset) is `$XDG_STATE_HOME/p
 
 The non-blocking file writer offloads I/O to a background thread; its `WorkerGuard` is held for the lifetime of `main` and flushes on exit.
 
+### Sensitive data in logs
+
+Log sinks are created with mode `0o600` (owner-only) on Unix so another user on a shared box cannot read them ([ADR-0028](../ADR/0028-runtime-log-control.md)). Input atoms are **self-narrating and redaction-safe**: `KeyEvent` and `PasteEvent` have hand-written `Debug` impls (and `InputEvent::narrate`) that report only structural facts — action, physical key, modifiers, payload *lengths* — and never the typed key text or pasted bytes. A `trace!(?input, …)` therefore records that a keystroke or paste happened, with its shape, without spilling the secret it carried.
+
 ### Crash capture
 
 Panics are durable on both sides. The **client** panic hook logs the panic message plus a captured `std::backtrace::Backtrace` to its file sink *before* it restores the terminal (survives even though the default hook's stderr backtrace would vanish into the dead alt screen). The **server** panic hook logs task/actor panics with their backtrace through `tracing`, so a daemonized server's crash lands in the log file. Both honor `RUST_BACKTRACE` for trace verbosity.
