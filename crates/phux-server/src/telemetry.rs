@@ -157,6 +157,13 @@ fn file_writer(
             path.display()
         ))
     })?;
+    // Create the sink at mode 0o600 BEFORE the appender opens it (ADR-0028):
+    // logs carry self-narrating input atoms and timing detail, so the file
+    // must not be world- or group-readable. `rolling::never` appends with
+    // `OpenOptions::create(true).append(true)`, whose default mode is 0o644 —
+    // pre-creating (or re-chmod-ing) the file makes the append a no-op on perms
+    // and leaves the sink user-only.
+    harden_log_sink(path)?;
     // `tracing_appender::rolling::never` is the non-rotating file sink: it
     // appends to exactly `dir/file_name`. A bare path (no directory) logs
     // into the current directory.
@@ -165,6 +172,38 @@ fn file_writer(
         file_name,
     );
     Ok(tracing_appender::non_blocking(appender))
+}
+
+/// Ensure the log sink at `path` exists and is owner-only (mode `0o600`)
+/// before any appender writes to it (ADR-0028).
+///
+/// Log files capture redaction-safe-but-still-sensitive operational detail
+/// (input-atom narration, span timing, panics); on a shared multi-user box
+/// they must not be readable by other users. The default file-creation mode
+/// (`0o644`) is group/world-readable, so we create the file ourselves with the
+/// tight mode and re-tighten an existing file's perms. No-op on non-Unix
+/// targets, where file modes don't apply.
+fn harden_log_sink(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        // Create (if absent) with 0o600 in one atomic step, so the file is
+        // never briefly group/world-readable.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        // If it already existed with looser perms (e.g. created before this
+        // hardening, or by another tool), tighten it now.
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
 }
 
 /// Per-pid default client log path: `$XDG_STATE_HOME/phux/client-<pid>.log`
@@ -305,6 +344,9 @@ pub fn init_client() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             path.display()
         ))
     })?;
+    // Create the client log at mode 0o600 before the appender opens it
+    // (ADR-0028); see `harden_log_sink`.
+    harden_log_sink(&path)?;
     let appender = tracing_appender::rolling::never(
         dir.map_or_else(|| PathBuf::from("."), Path::to_path_buf),
         file_name,
@@ -427,6 +469,41 @@ mod tests {
         let line = contents.lines().next().expect("a line");
         let parsed: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
         assert_eq!(parsed["hello"], "world");
+    }
+
+    /// The file sink is created owner-only (mode `0o600`) — logs carry
+    /// operational detail that must not be group/world-readable on a shared
+    /// box (ADR-0028). Also verifies an already-existing looser file is
+    /// re-tightened.
+    #[cfg(unix)]
+    #[test]
+    fn file_writer_creates_sink_with_0o600_perms() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Fresh file: created at 0o600.
+        let fresh = dir.path().join("fresh.log");
+        let (_w, _g) = file_writer(&fresh).expect("file writer");
+        let mode = std::fs::metadata(&fresh)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "fresh sink mode was {mode:o}");
+
+        // Pre-existing world-readable file: re-tightened to 0o600.
+        let loose = dir.path().join("loose.log");
+        std::fs::write(&loose, b"old line\n").expect("seed file");
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o644))
+            .expect("set loose perms");
+        let (_w2, _g2) = file_writer(&loose).expect("file writer");
+        let mode = std::fs::metadata(&loose)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "re-hardened sink mode was {mode:o}");
     }
 
     /// A panic routed through the hook's tracing call writes the panic

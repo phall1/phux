@@ -980,7 +980,9 @@ fn dispatch_kitty_csi_u(params: &[u8], out: &mut Vec<InputEvent>) {
             if let Some(c) = char::from_u32(cp) {
                 s.push(c);
             } else {
-                tracing::trace!(cp, "kitty CSI u: invalid text codepoint, skipping");
+                // Redaction-safe (ADR-0028): the codepoint is part of typed
+                // text, so log only that one was malformed, never its value.
+                tracing::trace!("kitty CSI u: invalid text codepoint, skipping");
             }
         }
         if s.is_empty() { None } else { Some(s) }

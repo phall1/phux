@@ -29,7 +29,12 @@ pub enum PasteTrust {
 /// SPEC §9.4. The `bracketed` flag from the wire form is intentionally not
 /// carried here — server-side encoding decides bracketing based on the
 /// target pane's DEC mode 2004 state via `libghostty_vt::paste::encode`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is hand-written and **redaction-safe** (ADR-0028): it never prints
+/// the `data` payload (clipboard contents routinely carry secrets), only its
+/// length and trust class. This keeps the server's `trace!(?input, …)`
+/// PTY-handoff diagnostics from spilling pasted passwords into a log.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PasteEvent {
     /// Trust classification for `data`.
     pub trust: PasteTrust,
@@ -37,6 +42,18 @@ pub struct PasteEvent {
     /// hands the bytes to `paste::encode`, which strips unsafe control
     /// bytes regardless of encoding.
     pub data: Vec<u8>,
+}
+
+/// Redaction-safe `Debug` (ADR-0028): structure, never payload. The clipboard
+/// bytes are reduced to a `data_len`; the trust class is structural and safe.
+impl core::fmt::Debug for PasteEvent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PasteEvent")
+            .field("trust", &self.trust)
+            // Redacted: never log the pasted bytes.
+            .field("data_len", &self.data.len())
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +76,22 @@ mod tests {
         };
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn debug_redacts_paste_payload() {
+        let secret = "SUPER-SECRET-CLIPBOARD";
+        let event = PasteEvent {
+            trust: PasteTrust::Untrusted,
+            data: secret.as_bytes().to_vec(),
+        };
+        let rendered = format!("{event:?}");
+        assert!(rendered.contains("PasteEvent"), "{rendered}");
+        assert!(rendered.contains("Untrusted"), "{rendered}");
+        assert!(rendered.contains("data_len"), "{rendered}");
+        assert!(
+            !rendered.contains(secret),
+            "Debug leaked paste payload: {rendered}"
+        );
     }
 }
