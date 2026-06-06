@@ -273,6 +273,7 @@ refresh-rate          = 60
 # Sane-default spawn knobs (phux-4li.1):
 cwd-inheritance       = "inherit-focused"
 session-name-template = "default"
+window-size           = "smallest"   # geometry policy for shared Terminals (ADR-0027)
 # spawn-on-attach     = "/usr/bin/some-launcher"  # default: defaults.shell
 
 [keybindings]
@@ -342,6 +343,22 @@ or session comes into being:
   auto-created sessions. Supports `${cwd-basename}` substitution against
   the client's working directory at session-create time. Unknown
   placeholders pass through verbatim.
+- **`window-size`** (string enum, default `"smallest"`) picks one
+  geometry when concurrent *views* of a single Terminal disagree on size.
+  A Terminal is one PTY + one libghostty grid
+  ([ADR-0027](../../ADR/0027-terminal-references-and-l3-links.md)), so it
+  has exactly one authoritative `(cols, rows)`; mirrored panes or multiple
+  attached clients share it, and a view that wants a different size
+  letterboxes rather than reflowing the shared grid. The vocabulary
+  mirrors tmux's `window-size`: `"smallest"` (use the smallest view —
+  nothing is ever cropped; larger views letterbox), `"largest"` (use the
+  largest view; smaller views may crop), `"latest"` (track the
+  most-recently-resized view), `"manual"` (hold a fixed size, which
+  implies a future resize verb). **Not yet wired** at the size-decision
+  point: the multi-view / multi-client geometry negotiation is a follow-up
+  (today the server uses last-writer-wins per the wire spec §10.5, tracked
+  as phux-nk07). The key parses, validates, and defaults today so
+  consumers and config can target a stable name.
 
 **Experimental knobs** live under `[experimental]`. Today the only key
 is `predictive-echo` (boolean, default `false`), which engages Mosh-class
@@ -790,6 +807,7 @@ The shipped defaults, in one place:
 | New-pane CWD inheritance      | `inherit-focused` (tmux-shaped)          |
 | Spawn-on-attach               | `defaults.shell` (unset = inherit)       |
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
+| Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
 | Status bar                    | `{session}` / `{windows}` / `{date %H:%M}` |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |

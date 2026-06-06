@@ -141,6 +141,27 @@ pub struct DefaultsCfg {
         rename = "session-name-template"
     )]
     pub session_name_template: String,
+
+    /// Policy for choosing one geometry when concurrent views of a single
+    /// Terminal disagree on size.
+    ///
+    /// A Terminal is one PTY + one libghostty grid, so it has exactly one
+    /// authoritative `(cols, rows)`; concurrent views (mirrored panes,
+    /// multiple attached clients) share it. When they disagree, this key
+    /// picks which size wins; a view larger than the chosen size
+    /// letterboxes rather than reflowing the shared grid. The vocabulary
+    /// mirrors tmux's `window-size` option.
+    ///
+    /// Default: [`WindowSize::Smallest`] — nothing is ever cropped. See
+    /// [ADR-0027](../../ADR/0027-terminal-references-and-l3-links.md) and
+    /// [`WindowSize`].
+    ///
+    /// Not yet consumed at the size-decision point: the multi-view /
+    /// multi-client geometry negotiation is a follow-up (the server today
+    /// uses last-writer-wins per SPEC §10.5; see phux-nk07). The key lands
+    /// first so consumers can target a stable name.
+    #[serde(default, rename = "window-size")]
+    pub window_size: WindowSize,
 }
 
 impl Default for DefaultsCfg {
@@ -155,6 +176,7 @@ impl Default for DefaultsCfg {
             cwd_inheritance: CwdInheritance::default(),
             spawn_on_attach: None,
             session_name_template: default_session_name_template(),
+            window_size: WindowSize::default(),
         }
     }
 }
@@ -197,6 +219,33 @@ pub enum CwdInheritance {
     /// Remember the last CWD per window and reuse it for new panes in
     /// that window.
     LastCwdPerWindow,
+}
+
+/// Policy for picking one Terminal geometry when concurrent views
+/// disagree on size (ADR-0027).
+///
+/// Selected by the `defaults.window-size` TOML key. Values use kebab-case
+/// on the wire and `PascalCase` in Rust. The vocabulary tracks tmux's
+/// `window-size` option, since the one-PTY-one-grid constraint is the same
+/// one tmux faces: a Terminal cannot render two sizes at once, so a view
+/// that wants a different size letterboxes (larger) or clamps (smaller)
+/// rather than reflowing the shared grid.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowSize {
+    /// Use the smallest view's size. Default — nothing is ever cropped;
+    /// larger views letterbox. Matches tmux's default.
+    #[default]
+    Smallest,
+    /// Use the largest view's size. Smaller views clamp (the grid may
+    /// exceed their viewport, so content can be cut off).
+    Largest,
+    /// Track the most recently resized view's size.
+    Latest,
+    /// Hold a fixed size, ignoring view geometry. Implies a future resize
+    /// verb to set that size (out of scope here; named so the value is not
+    /// a later surprise — see ADR-0027).
+    Manual,
 }
 
 // ---------------------------------------------------------------------------
