@@ -2,17 +2,17 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 
-use crate::layout::{LayoutState, Rect};
+use crate::layout::{LayoutNode, LayoutState, Rect};
 
 use super::rasterize::{DividerCell, DividerSegment, rasterize, walk_layout};
 
 /// Result of [`compute_layout`]: per-pane rectangles plus the cells
 /// occupied by dividers between them.
 ///
-/// The pane `Rect`s tile the content rectangle exactly (same invariant
-/// as [`crate::layout::pane_rects`]); the divider cells fill the **gaps** the layout
-/// algorithm excluded. Together they cover the outer viewport with no
-/// overlap and no holes — proptest target for future regressions.
+/// The pane `Rect`s are exactly those [`pane_rects`] returns; the divider
+/// cells fill the **gaps** the layout algorithm carved out for them.
+/// Together they cover the outer viewport with no overlap and no holes —
+/// the `proptest_rects_and_dividers_tile_exactly` invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneLayout {
     /// The outer viewport this layout was computed against.
@@ -84,4 +84,38 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
         rects,
         dividers,
     }
+}
+
+/// Per-leaf rectangle map for `tree` inside a `viewport_dims` outer
+/// viewport — the canonical client tiling.
+///
+/// This is the exact same local-divider walk [`compute_layout`] paints
+/// with, minus the divider rasterization. Reflow-emit
+/// (`phux_client::attach::reflow`) and the min-cell gate
+/// (`phux_client::attach::actions`) both call it so the size a pane's
+/// PTY is told to be (via `TERMINAL_RESIZE`) equals the rect it is
+/// painted into, by construction — closing the gap/overlap class of bug
+/// that arose when reflow and paint used divergent algorithms.
+///
+/// Every leaf of `tree` receives a rect; sub-viable splits yield
+/// zero-size rects rather than dropping leaves (the same exact-tiling
+/// walk [`compute_layout`] uses). `viewport_dims` is the **outer** viewport —
+/// divider accounting happens *inside* the walk, so callers pass the
+/// full pane viewport, never a pre-deducted content rectangle.
+#[must_use]
+pub fn pane_rects(tree: &LayoutNode, viewport_dims: (u16, u16)) -> HashMap<TerminalId, Rect> {
+    let mut segments: Vec<DividerSegment> = Vec::new();
+    let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
+    walk_layout(
+        tree,
+        Rect {
+            x: 0,
+            y: 0,
+            w: viewport_dims.0,
+            h: viewport_dims.1,
+        },
+        &mut segments,
+        &mut rects,
+    );
+    rects
 }

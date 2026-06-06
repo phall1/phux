@@ -40,15 +40,17 @@
 //! reintroduces min-size freezing flips this from a passive flag to an
 //! active "freeze" branch; the API doesn't change.
 //!
-//! # Divider accounting
+//! # One tiling for paint and reflow
 //!
-//! Matches the algorithm sibling `phux-4li.4` will use in
-//! `attach::multi_pane` (which does not yet exist on this branch): one
-//! divider row per [`SplitDir::Vertical`] interior node, one divider column
-//! per [`SplitDir::Horizontal`] interior node, then call [`pane_rects`] with
-//! the divider-deducted content rectangle. Splits are subtractive on the
-//! axis they split; the tree topology determines the count exactly. See
-//! [ADR-0019] decision 4 for the cell-budget rationale.
+//! The rectangle map comes from [`crate::multi_pane::pane_rects`] — the
+//! *same* local-divider tiling [`crate::multi_pane::compute_layout`] paints
+//! with. Reflow-emit and paint therefore agree by construction: the size a
+//! pane's PTY is told to be (`TERMINAL_RESIZE`) is exactly the rect it is
+//! drawn into, so a nested split can never leave the gap/overlap dead space
+//! that arose when reflow subtracted dividers globally and paint subtracted
+//! them per-node (phux-islu). Divider accounting lives inside the walk; this
+//! module passes the full outer viewport, never a pre-deducted content rect.
+//! See [ADR-0019] decision 4 for the cell-budget rationale.
 //!
 //! [ADR-0019]: ../../../ADR/0019-tui-multi-pane-rendering.md
 
@@ -57,7 +59,8 @@ use std::hash::BuildHasher;
 
 use phux_protocol::TerminalId;
 
-use crate::layout::{LayoutNode, LayoutState, Rect, SplitDir, pane_rects};
+use crate::layout::{LayoutState, Rect};
+use crate::multi_pane::pane_rects;
 
 /// Result of [`compute_reflow`]. Drives the caller's RESIZE-emission loop
 /// (per pane in [`changed`](Self::changed)) and its sub-viable-viewport
@@ -83,15 +86,12 @@ pub struct ReflowDiff {
 /// Pure: no I/O, no allocator games beyond the returned maps/vecs. The
 /// algorithm:
 ///
-/// 1. Count `h_dividers` (one per [`SplitDir::Horizontal`] interior node)
-///    and `v_dividers` (one per [`SplitDir::Vertical`] interior node) from
-///    the tree topology.
-/// 2. Compute content dims as `(cols - h_dividers, rows - v_dividers)`,
-///    saturating at 0 (sub-viable viewport — flagged via `too_small`).
-/// 3. Call [`pane_rects`] for the new rectangle map.
-/// 4. Diff against `prev_rects`: a leaf enters `changed` iff it is new or
+/// 1. Tile the tree into the new outer viewport via
+///    [`crate::multi_pane::pane_rects`] — the canonical local-divider walk
+///    paint uses, so divider accounting is handled inside the walk.
+/// 2. Diff against `prev_rects`: a leaf enters `changed` iff it is new or
 ///    its (w, h) differs.
-/// 5. Set `too_small` if any leaf would have `w < 2 || h < 1`.
+/// 3. Set `too_small` if any leaf would have `w < 2 || h < 1`.
 ///
 /// If [`LayoutState::tree`] is `None`, returns an empty diff (no rects, no
 /// changes, not too small). The caller is single-pane — no reflow to do.
@@ -109,12 +109,7 @@ pub fn compute_reflow<S: BuildHasher>(
         };
     };
 
-    let (h_div, v_div) = count_dividers(tree);
-    let (outer_cols, outer_rows) = new_outer_dims;
-    let content_cols = outer_cols.saturating_sub(h_div);
-    let content_rows = outer_rows.saturating_sub(v_div);
-
-    let new_rects = pane_rects(tree, (content_cols, content_rows));
+    let new_rects = pane_rects(tree, new_outer_dims);
 
     let mut changed: Vec<(TerminalId, Rect)> = Vec::new();
     let mut too_small = false;
@@ -135,44 +130,6 @@ pub fn compute_reflow<S: BuildHasher>(
     }
 }
 
-/// Count divider cells consumed by interior nodes of `tree`.
-///
-/// Returns `(h_dividers, v_dividers)`: each [`SplitDir::Horizontal`] node
-/// contributes one column to `h_dividers`, each [`SplitDir::Vertical`] node
-/// contributes one row to `v_dividers`. Saturates at `u16::MAX` (a
-/// pathological 65k-pane tree would be required to reach it).
-fn count_dividers(node: &LayoutNode) -> (u16, u16) {
-    let mut h: u16 = 0;
-    let mut v: u16 = 0;
-    walk_dividers(node, &mut h, &mut v);
-    (h, v)
-}
-
-fn walk_dividers(node: &LayoutNode, h: &mut u16, v: &mut u16) {
-    if let LayoutNode::Split {
-        dir, left, right, ..
-    } = node
-    {
-        match dir {
-            SplitDir::Horizontal => *h = h.saturating_add(1),
-            SplitDir::Vertical => *v = v.saturating_add(1),
-            // `SplitDir` is `#[non_exhaustive]`; v0.1 only defines
-            // Horizontal and Vertical. A future wire-bumping variant
-            // could not have been decoded into this in-memory tree
-            // by an older client. Treat as a no-op rather than panic
-            // so this pure helper has no panic surface; the rest of
-            // the algorithm will produce a degenerate diff the caller
-            // can still recover from.
-            _ => {}
-        }
-        walk_dividers(left, h, v);
-        walk_dividers(right, h, v);
-    }
-    // `LayoutNode::Leaf` and any future non_exhaustive variants
-    // contribute no dividers — fall through silently. Forward-compat
-    // concession matches the SplitDir arm above.
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -185,7 +142,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::layout::{leaves, split_at};
+    use crate::layout::{LayoutNode, SplitDir, leaves, split_at};
 
     fn t(id: u32) -> TerminalId {
         TerminalId::local(id)
@@ -270,10 +227,10 @@ mod tests {
         let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
         let state = state_with(tree, t(1));
 
-        // Seed prev_rects with the 80x24 layout. One vertical divider row
-        // means content dims are (80, 23); 0.5 ratio splits the 23 rows
-        // into 12/11.
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (80, 23));
+        // Seed prev_rects with the 80x24 outer viewport: the canonical
+        // tiling subtracts the one vertical divider row internally, so the
+        // 23 content rows split 12/11.
+        let prev = pane_rects(state.tree.as_ref().unwrap(), (80, 24));
         let diff = compute_reflow(&state, &prev, (120, 30));
 
         // Both panes are in `changed`.
@@ -300,7 +257,7 @@ mod tests {
         // splits 119 cols into 60/59.
         let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
         let state = state_with(tree, t(1));
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (79, 24));
+        let prev = pane_rects(state.tree.as_ref().unwrap(), (80, 24));
         let diff = compute_reflow(&state, &prev, (120, 30));
 
         assert_eq!(diff.changed.len(), 2);
@@ -354,7 +311,7 @@ mod tests {
         let tree = split_at(&tree, &t(2), &t(3), SplitDir::Vertical, 0.5).unwrap();
         let state = state_with(tree, t(1));
 
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (119, 29));
+        let prev = pane_rects(state.tree.as_ref().unwrap(), (120, 30));
         let diff = compute_reflow(&state, &prev, (40, 12));
 
         // All three leaves present in new_rects.
@@ -402,36 +359,6 @@ mod tests {
                 h: 0
             }
         );
-    }
-
-    // -------------------------------------------------------------------------
-    // Divider counting
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn divider_count_single_leaf_is_zero() {
-        let (h, v) = count_dividers(&leaf(1));
-        assert_eq!((h, v), (0, 0));
-    }
-
-    #[test]
-    fn divider_count_one_horizontal() {
-        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
-        assert_eq!(count_dividers(&tree), (1, 0));
-    }
-
-    #[test]
-    fn divider_count_one_vertical() {
-        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
-        assert_eq!(count_dividers(&tree), (0, 1));
-    }
-
-    #[test]
-    fn divider_count_mixed() {
-        // ((1|2)/3): one horizontal interior + one vertical interior.
-        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
-        let tree = split_at(&tree, &t(2), &t(3), SplitDir::Vertical, 0.5).unwrap();
-        assert_eq!(count_dividers(&tree), (1, 1));
     }
 
     // -------------------------------------------------------------------------
@@ -520,13 +447,11 @@ mod tests {
             let focus = alive.last().cloned().expect("alive non-empty when tree exists");
             let state = state_with(tree.clone(), focus);
 
-            // Seed prev_rects from the same tree at a different outer dim.
-            let (h_div, v_div) = count_dividers(&tree);
-            let prev_content = (
-                prev_cols.saturating_sub(h_div),
-                prev_rows.saturating_sub(v_div),
-            );
-            let prev = pane_rects(&tree, prev_content);
+            // Seed prev_rects from the same tree at a different outer dim
+            // via the canonical tiling — the same one compute_reflow uses,
+            // so the diff reflects a real dimension change, not an
+            // algorithm mismatch.
+            let prev = pane_rects(&tree, (prev_cols, prev_rows));
 
             let diff = compute_reflow(&state, &prev, (cols, rows));
 
@@ -562,10 +487,14 @@ mod tests {
             }
         }
 
-        /// Tiling invariant: total cell coverage of `new_rects` =
-        /// `(cols - h_dividers) * (rows - v_dividers)` (saturating).
+        /// Reflow rects are well-formed: every alive leaf gets a rect,
+        /// each rect sits inside the viewport, and no two leaf rects
+        /// overlap. (The full leaf-plus-divider exact-cover invariant is
+        /// proved against `compute_layout` in the `multi_pane` tests,
+        /// which can see the divider cells; here we only have the leaf
+        /// rects.)
         #[test]
-        fn proptest_tiling_invariant(
+        fn proptest_reflow_rects_well_formed(
             ops in prop::collection::vec(arb_op(), 1..15),
             cols in 4_u16..200,
             rows in 4_u16..80,
@@ -575,20 +504,25 @@ mod tests {
             let focus = alive.last().cloned().expect("alive non-empty");
             let state = state_with(tree.clone(), focus);
 
-            let (h_div, v_div) = count_dividers(&tree);
-            let expected_w = cols.saturating_sub(h_div);
-            let expected_h = rows.saturating_sub(v_div);
-            let expected: u32 = u32::from(expected_w) * u32::from(expected_h);
-
             let diff = compute_reflow(&state, &HashMap::new(), (cols, rows));
-            let total: u32 = diff.new_rects.values()
-                .map(|r| u32::from(r.w) * u32::from(r.h))
-                .sum();
-            prop_assert_eq!(total, expected);
 
-            // Every alive leaf has a rect.
+            // Every alive leaf has a rect — sub-viable splits shrink panes
+            // to zero size but never drop them.
             for id in leaves(&tree) {
                 prop_assert!(diff.new_rects.contains_key(&id));
+            }
+
+            // Each rect lies within the viewport, and no two leaf rects
+            // share a cell.
+            let mut covered: HashSet<(u16, u16)> = HashSet::new();
+            for r in diff.new_rects.values() {
+                prop_assert!(u32::from(r.x) + u32::from(r.w) <= u32::from(cols));
+                prop_assert!(u32::from(r.y) + u32::from(r.h) <= u32::from(rows));
+                for y in r.y..r.y.saturating_add(r.h) {
+                    for x in r.x..r.x.saturating_add(r.w) {
+                        prop_assert!(covered.insert((x, y)), "overlap at ({x}, {y})");
+                    }
+                }
             }
         }
 

@@ -43,9 +43,8 @@ use std::io::{self, Write};
 use phux_protocol::TerminalId;
 use thiserror::Error;
 
-use crate::layout::{
-    self, Direction, LayoutError, LayoutNode, LayoutState, Rect, SplitDir, pane_rects,
-};
+use crate::layout::{self, Direction, LayoutError, LayoutNode, LayoutState, Rect, SplitDir};
+use crate::multi_pane::pane_rects;
 
 /// Errors returned by the pure action helpers.
 ///
