@@ -122,7 +122,7 @@ pub fn default_shell_command() -> CommandBuilder {
 /// overrides this per-server with the configured `defaults.term` via
 /// [`apply_term`]; this constant is the value used when a `CommandBuilder`
 /// is built without server config in scope (tests,
-/// [`TerminalActor::new_with_default_shell`]).
+/// [`super::TerminalActor::new_with_default_shell`]).
 ///
 /// `xterm-256color` is the universally-recognised safe baseline (phux-7vx
 /// / phux-ign): 256 colours and the standard xterm key vocabulary, no
@@ -167,7 +167,6 @@ type SpawnedPty = (
 /// Receive from `rx` when `Some`; otherwise park forever. Used as a
 /// select! arm so the actor's loop can run with or without a PTY
 /// without an `expect()` or branching `if`.
-#[allow(dead_code)] // refactor WIP: duplicated in mod.rs; agent to dedup
 pub(crate) async fn recv_or_pending(
     rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>,
 ) -> Option<PtyEvent> {

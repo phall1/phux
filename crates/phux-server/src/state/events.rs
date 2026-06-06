@@ -84,9 +84,9 @@ pub enum EventScope {
 /// outbound mailbox plus the set of scopes it watches.
 ///
 /// The mailbox lives here so event fanout works for a pure `watch` client
-/// that subscribed without attaching (no [`AttachedClient`] entry exists
+/// that subscribed without attaching (no [`super::AttachedClient`] entry exists
 /// for it). An attached client that also subscribes stores its same
-/// mailbox here — fanout de-duplicates by [`ClientId`].
+/// mailbox here — fanout de-duplicates by [`super::ClientId`].
 #[derive(Debug)]
 pub struct EventSubscription {
     /// The client's outbound mailbox (the per-connection writer task

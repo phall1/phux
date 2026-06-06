@@ -8,7 +8,7 @@ use super::client::ClientId;
 /// Per-scope K/V store for L3 metadata (SPEC §7.4 / §11.L3) plus the
 /// matching subscription registry.
 ///
-/// Held inside [`ServerState`] but lifted into its own type so the
+/// Held inside [`super::ServerState`] but lifted into its own type so the
 /// subscribe / set / delete / list operations live in a focused
 /// surface — easier to test, easier to reason about ordering invariants,
 /// and a natural home for the per-key size cap once that lands.
@@ -42,7 +42,7 @@ pub enum MetadataSetOutcome {
     Unchanged,
 }
 
-/// Outcome of [`ServerState::rename_session`], mapping the three terminal
+/// Outcome of [`super::ServerState::rename_session`], mapping the three terminal
 /// cases of a `RENAME_SESSION` to the wire replies the server issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameOutcome {

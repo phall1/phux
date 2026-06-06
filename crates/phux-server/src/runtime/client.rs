@@ -15,8 +15,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue
-use super::*;
+use super::{
+    STALE_PROBE_TIMEOUT, ServerError, handle_attach, handle_command, handle_frame_ack,
+    handle_spawn_terminal, handle_terminal_input, handle_terminal_resize, handle_viewport_resize,
+};
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::ConsumerDetachRequest;
 use crate::transport::{FrameReader, FrameWriter, Incoming};

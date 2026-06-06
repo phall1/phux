@@ -7,10 +7,6 @@
 //! ADR-0013.
 
 #![warn(missing_docs)]
-// refactor WIP: the module-split (runtime/, state/, grid/, terminal_actor/)
-// scattered types so several intra-doc links no longer resolve from their new
-// sites; allowed here as a temporary unblock until the refactor requalifies them.
-#![allow(rustdoc::broken_intra_doc_links)]
 
 pub mod cwd_query;
 pub mod downsample;

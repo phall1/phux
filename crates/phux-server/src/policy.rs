@@ -5,10 +5,6 @@
 //! The default implementations are permissive (allow everything, log
 //! nothing) so a server without a custom policy engine behaves exactly
 //! as before.
-//
-// feature WIP (4588a0a): policy extension API; docs + use_self to be tightened
-// by the policy-feature author.
-#![allow(missing_docs, clippy::use_self)]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -125,7 +121,7 @@ pub struct PermissivePolicy;
 
 impl PermissivePolicy {
     /// Shared instance (stateless).
-    pub const INSTANCE: PermissivePolicy = PermissivePolicy;
+    pub const INSTANCE: Self = Self;
 }
 
 impl PolicyEngine for PermissivePolicy {
@@ -220,8 +216,11 @@ impl InputProvenance for UnknownProvenance {
 /// Cloning is cheap (all fields are `Arc<dyn ...>`).
 #[derive(Clone)]
 pub struct PolicyBundle {
+    /// Authorization engine consulted at every decision point.
     pub engine: Arc<dyn PolicyEngine>,
+    /// Sink for durable audit events.
     pub audit: Arc<dyn AuditSink>,
+    /// Provenance tagger applied to inbound input frames.
     pub provenance: Arc<dyn InputProvenance>,
 }
 
@@ -248,23 +247,33 @@ impl Default for PolicyBundle {
 /// Filter for querying audit events.
 #[derive(Debug, Clone, Default)]
 pub struct AuditFilter {
+    /// Restrict to events from this consumer.
     pub consumer: Option<ConsumerId>,
+    /// Restrict to events targeting this terminal.
     pub terminal_id: Option<TerminalId>,
+    /// Restrict to events whose action matches this type tag.
     pub action_type: Option<String>,
+    /// Lower bound (inclusive) on event timestamp.
     pub from: Option<chrono::DateTime<chrono::Utc>>,
+    /// Upper bound (inclusive) on event timestamp.
     pub to: Option<chrono::DateTime<chrono::Utc>>,
+    /// Restrict to events with this decision.
     pub decision: Option<Decision>,
 }
 
 /// Errors from policy operations.
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
+    /// The consumer is not permitted to perform the operation.
     #[error("unauthorized: {0}")]
     Unauthorized(String),
+    /// A presented capability token has expired.
     #[error("expired capability")]
     ExpiredCapability,
+    /// A satellite routing request was rejected as invalid.
     #[error("invalid satellite route")]
     InvalidSatelliteRoute,
+    /// An internal error occurred inside the policy engine.
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -272,8 +281,10 @@ pub enum PolicyError {
 /// Errors from audit operations.
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {
+    /// Writing the event to the sink failed.
     #[error("write failed: {0}")]
     WriteFailed(String),
+    /// Querying the sink for events failed.
     #[error("query failed: {0}")]
     QueryFailed(String),
 }

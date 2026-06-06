@@ -13,8 +13,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
-use super::*;
+use super::{
+    AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
+    MetadataStore, Outbound, RenameOutcome, SelectionSpan, ServerState, TerminalInput,
+};
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
 

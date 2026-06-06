@@ -6,15 +6,6 @@
 //! policy logic — that lives in the consumer of these types (typically
 //! `phux-server` or a downstream policy crate).
 
-#![cfg(feature = "server")]
-// feature WIP (4588a0a): policy extension types; missing docs + acronym/attr
-// lints to be tightened by the policy-feature author.
-#![allow(
-    missing_docs,
-    clippy::upper_case_acronyms,
-    clippy::duplicated_attributes
-)]
-
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -92,19 +83,28 @@ pub enum Decision {
     /// The operation is permitted.
     Allow,
     /// The operation is denied with a human-readable reason.
-    Deny { reason: String },
+    Deny {
+        /// Human-readable explanation for the denial.
+        reason: String,
+    },
     /// The operation is permitted but flagged with a threat score.
     /// The policy engine may also trigger an alert via the audit sink.
-    Alert { threat_score: f64 },
+    Alert {
+        /// Heuristic threat score in `[0.0, 1.0]`; higher is riskier.
+        threat_score: f64,
+    },
     /// The operation requires an additional challenge before proceeding.
-    Challenge { mechanism: ChallengeType },
+    Challenge {
+        /// The challenge mechanism the consumer must satisfy.
+        mechanism: ChallengeType,
+    },
 }
 
 /// Challenge mechanism for `Decision::Challenge`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChallengeType {
     /// Time-based one-time password.
-    TOTP,
+    Totp,
     /// Force re-authentication at the transport layer.
     ReAuthenticate,
 }
@@ -148,14 +148,22 @@ pub enum AuditAction {
     /// L3 metadata operation.
     MetadataOp(MetadataOp),
     /// Satellite routing operation (federation).
-    SatelliteRoute { from: String, to: String },
+    SatelliteRoute {
+        /// Originating satellite host.
+        from: String,
+        /// Destination satellite host.
+        to: String,
+    },
 }
 
 /// Terminal-level operations that may be audited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TerminalOp {
     /// Snapshot of terminal state.
-    Snapshot { scrollback: bool },
+    Snapshot {
+        /// Whether scrollback was included in the snapshot.
+        scrollback: bool,
+    },
     /// Key input.
     InputKey,
     /// Mouse input.
@@ -177,20 +185,33 @@ pub enum TerminalOp {
 /// Collection-level operations that may be audited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CollectionOp {
+    /// Create a new collection.
     Create,
+    /// Kill a collection and its terminals.
     Kill,
+    /// Add a terminal to a collection.
     AddTerminal,
+    /// Remove a terminal from a collection.
     RemoveTerminal,
+    /// Rename a collection.
     Rename,
+    /// List collections.
     List,
 }
 
 /// Metadata-level operations that may be audited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetadataOp {
+    /// Read a metadata value.
     Get,
-    Set { size: usize },
+    /// Write a metadata value of the given byte size.
+    Set {
+        /// Size in bytes of the value being written.
+        size: usize,
+    },
+    /// Delete a metadata value.
     Delete,
+    /// List metadata keys.
     List,
 }
 
@@ -200,9 +221,15 @@ pub enum MetadataScope {
     /// Global scope.
     Global,
     /// Terminal-scoped.
-    Terminal { id: TerminalId },
+    Terminal {
+        /// The terminal the metadata is scoped to.
+        id: TerminalId,
+    },
     /// Collection-scoped.
-    Collection { id: CollectionId },
+    Collection {
+        /// The collection the metadata is scoped to.
+        id: CollectionId,
+    },
 }
 
 /// Target resource of an audited action.

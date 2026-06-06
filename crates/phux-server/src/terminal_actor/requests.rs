@@ -16,7 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 /// The actor allocates a fresh `RenderState`, primes it against the
 /// live `Terminal` (so the next incremental synthesis emits only
 /// deltas *from now*), captures the cursor + mode state, and stores
-/// the resulting [`ConsumerSyncState`] keyed by `client_id`. The reply
+/// the resulting [`super::ConsumerSyncState`] keyed by `client_id`. The reply
 /// fires once the entry is in place; the caller can then proceed to
 /// emit `TERMINAL_SNAPSHOT` (which brings the consumer to the same
 /// reference point this `RenderState` was primed against).
@@ -27,7 +27,7 @@ pub struct ConsumerAttachRequest {
     /// `ConsumerDetachRequest`s and `FRAME_ACK` routing.
     pub client_id: ClientId,
     /// Per-consumer outbound mailbox. The actor stores a clone in the
-    /// per-consumer [`ConsumerSyncState`] and uses it on every tick
+    /// per-consumer [`super::ConsumerSyncState`] and uses it on every tick
     /// (phux-q0e.3) to push a `TerminalOutput` frame carrying the
     /// incremental synthesis bytes.
     pub outbound: mpsc::Sender<Outbound>,
@@ -90,7 +90,7 @@ pub enum ConsumerAttachError {
 /// `ServerState::detach`'s idempotent contract.
 #[derive(Debug)]
 pub struct ConsumerDetachRequest {
-    /// Identifier whose [`ConsumerSyncState`] entry to remove.
+    /// Identifier whose [`super::ConsumerSyncState`] entry to remove.
     pub client_id: ClientId,
     /// Fired once the entry has been removed (or was already absent).
     /// The caller can use this to sequence later operations against
@@ -112,7 +112,7 @@ pub struct ConsumerDetachRequest {
 /// actor does the work in-process and the runtime fires-and-forgets.
 #[derive(Debug)]
 pub struct ConsumerAckRequest {
-    /// Identifier whose [`ConsumerSyncState`]'s dirty cache to evict.
+    /// Identifier whose [`super::ConsumerSyncState`]'s dirty cache to evict.
     pub client_id: ClientId,
     /// Cumulative ack sequence (per SPEC §12.2): the highest `seq` from
     /// `TERMINAL_OUTPUT` this consumer has applied. Strictly-monotonic
@@ -138,7 +138,7 @@ pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
 /// Request for the pane's current `vt_replay_bytes` snapshot.
 ///
 /// Sent by the ATTACH handler on the per-client task; the actor walks
-/// its `Terminal` via [`SnapshotSynthesizer`] and replies on the
+/// its `Terminal` via [`crate::grid::SnapshotSynthesizer`] and replies on the
 /// oneshot.
 #[derive(Debug)]
 pub struct SnapshotRequest {
@@ -199,7 +199,7 @@ pub struct PwdRequest {
     pub reply: oneshot::Sender<Option<String>>,
 }
 
-/// A resize request delivered to a [`TerminalActor`] over its `resize`
+/// A resize request delivered to a [`super::TerminalActor`] over its `resize`
 /// mailbox.
 ///
 /// `resync_clients` controls the phux-8v1 post-resize behavior: when
@@ -221,7 +221,7 @@ pub struct ResizeRequest {
     pub resync_clients: bool,
 }
 
-/// Cross-task handle to a [`TerminalActor`].
+/// Cross-task handle to a [`super::TerminalActor`].
 ///
 /// `TerminalHandle` is `Send + Clone`: per-client tasks clone it freely to
 /// request snapshots, send input, or subscribe to the output broadcast.
