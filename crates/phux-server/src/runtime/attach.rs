@@ -2,6 +2,7 @@
 
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
+use phux_core::TerminalId;
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::ids::CollectionId;
 use phux_protocol::wire::frame::{
@@ -763,6 +764,15 @@ pub(crate) async fn handle_attach(
     let wire_client_id =
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
 
+    // phux-7w1j: per-pane "snapshot has been sent" gates. The output pump
+    // subscribes to the broadcast in this loop (BEFORE the SnapshotRequest, so
+    // no live bytes are lost), but must not FORWARD a `TerminalOutput` frame
+    // until the pane's `TerminalSnapshot` has been written to `out_tx` — else a
+    // PTY-active pane races output ahead of its snapshot and the client sees
+    // frame 2 = OUTPUT instead of SNAPSHOT. The pump parks on `gate_rx`; the
+    // drain loop fires `gate_tx` right after sending the snapshot.
+    let mut snapshot_gates: Vec<(TerminalId, oneshot::Sender<()>)> = Vec::new();
+
     let mut pending: FuturesUnordered<_> = FuturesUnordered::new();
     for pane in panes_to_snapshot {
         let terminal_id = pane.terminal_id;
@@ -854,7 +864,17 @@ pub(crate) async fn handle_attach(
             let pump_out_tx = out_tx.clone();
             let pump_wire_terminal_id = wire_terminal_id.clone();
             let pump_client_caps = client_caps;
+            // phux-7w1j: hold this pump's first forward until the pane's
+            // snapshot has been sent (the drain loop fires `gate_tx`).
+            let (gate_tx, gate_rx) = oneshot::channel::<()>();
+            snapshot_gates.push((terminal_id, gate_tx));
             output_pumps.spawn_local(async move {
+                // `output_rx` is already subscribed, so bytes produced while we
+                // wait are buffered by the broadcast (or surface as `Lagged`) —
+                // never lost, and never forwarded ahead of the snapshot. A
+                // dropped gate (attach aborted / snapshot failed) falls through
+                // to forwarding live output rather than going silent.
+                let _ = gate_rx.await;
                 let mut seq: u64 = 0;
                 loop {
                     match output_rx.recv().await {
@@ -924,6 +944,16 @@ pub(crate) async fn handle_attach(
             .is_err()
         {
             return;
+        }
+        // phux-7w1j: snapshot for this pane is on the wire — release its
+        // output pump so any buffered/live `TerminalOutput` now follows the
+        // snapshot in order rather than racing ahead of it.
+        if let Some(pos) = snapshot_gates
+            .iter()
+            .position(|(tid, _)| *tid == terminal_id)
+        {
+            let (_, gate_tx) = snapshot_gates.swap_remove(pos);
+            let _ = gate_tx.send(());
         }
     }
 }
