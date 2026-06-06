@@ -56,6 +56,21 @@ cwd-inheritance = "inherit-focused"
 # the directory you launched from.
 session-name-template = "default"
 
+# Policy for picking one geometry when concurrent views of a single
+# Terminal disagree on size (ADR-0027). A Terminal is one PTY + one grid,
+# so it renders one size; a view wanting another size letterboxes rather
+# than reflowing. One of:
+#   "smallest" — use the smallest view's size; larger views letterbox.
+#                Nothing is ever cropped (tmux's default).
+#   "largest"  — use the largest view's size; smaller views may crop.
+#   "latest"   — track the most recently resized view.
+#   "manual"   — hold a fixed size (implies a future resize verb).
+# Not yet consumed at the size-decision point: multi-view/multi-client
+# geometry negotiation is a follow-up (today the server uses
+# last-writer-wins per SPEC §10.5, phux-nk07). The knob lands first so
+# consumers can target it.
+window-size = "smallest"
+
 [keybindings]
 # Prefix: chord captured by the TUI before everything else. After hitting
 # the prefix, your next keystroke is matched against `prefix-table`.

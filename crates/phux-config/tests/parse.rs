@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use phux_config::{Config, ConfigError, CwdInheritance, DefaultsCfg, parse_str};
+use phux_config::{Config, ConfigError, CwdInheritance, DefaultsCfg, WindowSize, parse_str};
 
 /// The canonical example from `docs/consumers/tui.md` §4.2.
 const CANONICAL: &str = r##"
@@ -233,6 +233,7 @@ fn defaults_spawn_knobs_default_when_absent() {
     assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::InheritFocused);
     assert_eq!(cfg.defaults.spawn_on_attach, None);
     assert_eq!(cfg.defaults.session_name_template, "default");
+    assert_eq!(cfg.defaults.window_size, WindowSize::Smallest);
 }
 
 #[test]
@@ -307,6 +308,59 @@ cwd-inheritance = "random-walk"
     assert!(matches!(err, ConfigError::Parse { .. }));
 }
 
+// ---------------------------------------------------------------------------
+// [defaults] window-size  (ADR-0027)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn window_size_defaults_to_smallest_when_absent() {
+    // ADR-0027: default `smallest` never crops content. A regression here
+    // would silently change the geometry policy for mirrored views /
+    // multi-client attach.
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert_eq!(cfg.defaults.window_size, WindowSize::Smallest);
+    assert_eq!(WindowSize::default(), WindowSize::Smallest);
+}
+
+#[test]
+fn window_size_accepts_all_variants() {
+    for (toml_value, expected) in [
+        ("smallest", WindowSize::Smallest),
+        ("largest", WindowSize::Largest),
+        ("latest", WindowSize::Latest),
+        ("manual", WindowSize::Manual),
+    ] {
+        let input = format!("[defaults]\nwindow-size = \"{toml_value}\"\n");
+        let cfg = parse_str(&input, &path())
+            .unwrap_or_else(|e| panic!("variant {toml_value} should parse: {e}"));
+        assert_eq!(cfg.defaults.window_size, expected);
+    }
+}
+
+#[test]
+fn window_size_unknown_variant_is_rejected() {
+    let input = r#"
+[defaults]
+window-size = "fit-to-content"
+"#;
+    let err = parse_str(input, &path()).expect_err("unknown enum variant rejected");
+    assert!(matches!(err, ConfigError::Parse { .. }));
+}
+
+#[test]
+fn window_size_round_trips_user_value() {
+    let input = r#"
+[defaults]
+window-size = "largest"
+"#;
+    let cfg = parse_str(input, &path()).expect("window-size parses");
+    assert_eq!(cfg.defaults.window_size, WindowSize::Largest);
+
+    let reser = toml::to_string(&cfg).expect("reserialize");
+    let reparsed = parse_str(&reser, &path()).expect("reparse");
+    assert_eq!(cfg, reparsed);
+}
+
 #[test]
 fn embedded_default_toml_populates_new_knobs() {
     // The shipped `default.toml` (via `parse_with_defaults`) must
@@ -315,6 +369,7 @@ fn embedded_default_toml_populates_new_knobs() {
     assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::InheritFocused);
     assert_eq!(cfg.defaults.spawn_on_attach, None);
     assert_eq!(cfg.defaults.session_name_template, "default");
+    assert_eq!(cfg.defaults.window_size, WindowSize::Smallest);
     // history-limit is the canonical scrollback knob (phux-4li.1 DEDUPE).
     assert_eq!(cfg.defaults.history_limit, 50_000);
 }
@@ -331,6 +386,7 @@ cwd-inheritance = "session-root"
     assert_eq!(cfg.defaults.cwd_inheritance, CwdInheritance::SessionRoot);
     assert_eq!(cfg.defaults.spawn_on_attach, None);
     assert_eq!(cfg.defaults.session_name_template, "default");
+    assert_eq!(cfg.defaults.window_size, WindowSize::Smallest);
 }
 
 /// Replace the `:COL:` in `path:LINE:COL: message` with `:<col>:` so
