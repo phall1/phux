@@ -10,24 +10,43 @@ use phux_protocol::wire::frame::{
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{
-    DEFAULT_SESSION_NAME, attach::run_attach_once, cli_runtime, print_attach_error,
-    report_no_server, request_command, server::maybe_auto_spawn_server,
+    DEFAULT_SESSION_NAME, attach::resolved_default_session_name, attach::run_attach_once,
+    cli_runtime, print_attach_error, report_no_server, request_command,
+    server::maybe_auto_spawn_server,
 };
 
 /// `phux new` — create a *new* session and attach to it.
 ///
-/// "New" is enforced client-side against a `GET_STATE` snapshot: an
-/// explicit `-s NAME` that already exists is an error (like tmux's
-/// duplicate-session refusal), and an omitted name is auto-assigned the
-/// smallest free numeric name. The create+attach itself rides
-/// `CreateIfMissing` (ADR-0021 defers a dedicated create-session command).
+/// The name comes from the positional `NAME` or the `-s` flag (the same
+/// field, two spellings; a genuine conflict is an error). "New" is enforced
+/// client-side against a `GET_STATE` snapshot: a name that already exists is
+/// an error (like tmux's duplicate-session refusal), and an omitted name
+/// falls back to the configured `session-name-template` (e.g. "default"),
+/// disambiguated with a numeric suffix if taken. The create+attach itself
+/// rides `CreateIfMissing` (ADR-0021 defers a dedicated create-session
+/// command).
 pub(crate) fn run_new(
+    name: Option<String>,
     session: Option<String>,
     cwd: Option<PathBuf>,
     socket: Option<PathBuf>,
     json: bool,
     command: Vec<String>,
 ) -> ExitCode {
+    // The session name can come from the positional NAME or the `-s` flag;
+    // they are the same field with two spellings. Reject a genuine conflict
+    // rather than silently picking one.
+    let requested = match (name, session) {
+        (Some(positional), Some(flag)) if positional != flag => {
+            eprintln!(
+                "phux: conflicting session names: '{positional}' (positional) vs '{flag}' (-s) — pass just one"
+            );
+            return ExitCode::FAILURE;
+        }
+        (Some(positional), _) => Some(positional),
+        (None, flag) => flag,
+    };
+
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let rt = match cli_runtime() {
         Ok(rt) => rt,
@@ -35,7 +54,7 @@ pub(crate) fn run_new(
     };
 
     if json {
-        return run_new_json(&rt, &socket_path, session, cwd, command);
+        return run_new_json(&rt, &socket_path, requested, cwd, command);
     }
 
     // If a server is up, snapshot its session names so we can enforce
@@ -57,7 +76,7 @@ pub(crate) fn run_new(
         Vec::new()
     };
 
-    let name = match session {
+    let name = match requested {
         Some(requested) => {
             if existing.contains(&requested) {
                 eprintln!(
@@ -67,7 +86,10 @@ pub(crate) fn run_new(
             }
             requested
         }
-        None => unique_session_name(&existing),
+        // No name given: start from the configured session-name-template
+        // (e.g. "default"), the same base every auto-create path uses, and
+        // disambiguate with a numeric suffix instead of emitting a bare "0".
+        None => unique_session_name(&existing, &resolved_default_session_name()),
     };
 
     if !socket_path.exists()
@@ -184,14 +206,18 @@ pub(crate) fn run_new_json(
     }
 }
 
-/// Smallest non-negative integer (as a string) not already a session
-/// name. Matches tmux's default numeric session naming and guarantees
-/// `phux new` (no `-s`) produces a distinct session each time.
-pub(crate) fn unique_session_name(existing: &[String]) -> String {
-    let mut n: u32 = 0;
+/// `base` if it is free, otherwise `base-2`, `base-3`, … — the first
+/// available name. Lets `phux new` (no name given) reuse the configured
+/// session-name-template as its base and still guarantee a distinct
+/// session each time, instead of emitting bare numeric names ("0", "1").
+pub(crate) fn unique_session_name(existing: &[String], base: &str) -> String {
+    if !existing.iter().any(|e| e == base) {
+        return base.to_owned();
+    }
+    let mut n: u32 = 2;
     loop {
-        let candidate = n.to_string();
-        if !existing.contains(&candidate) {
+        let candidate = format!("{base}-{n}");
+        if !existing.iter().any(|e| e == &candidate) {
             return candidate;
         }
         n = n.saturating_add(1);
@@ -203,15 +229,23 @@ mod tests {
     use super::unique_session_name;
 
     #[test]
-    fn unique_session_name_starts_at_zero_and_skips_taken() {
-        assert_eq!(unique_session_name(&[]), "0");
-        assert_eq!(unique_session_name(&["0".to_owned()]), "1");
+    fn unique_session_name_uses_the_base_then_numeric_suffixes() {
+        // Free base ⇒ the base verbatim (no "-2" churn, no bare "0").
+        assert_eq!(unique_session_name(&[], "default"), "default");
         assert_eq!(
-            unique_session_name(&["0".to_owned(), "1".to_owned(), "3".to_owned()]),
-            "2",
+            unique_session_name(&["other".to_owned()], "default"),
+            "default",
         );
-        // Non-numeric names (e.g. the auto-spawn "default") don't block
-        // the numeric sequence.
-        assert_eq!(unique_session_name(&["default".to_owned()]), "0");
+        // Base taken ⇒ first free `base-N`, starting at 2.
+        assert_eq!(
+            unique_session_name(&["default".to_owned()], "default"),
+            "default-2",
+        );
+        assert_eq!(
+            unique_session_name(&["default".to_owned(), "default-2".to_owned()], "default",),
+            "default-3",
+        );
+        // A non-default template base works the same way.
+        assert_eq!(unique_session_name(&["phux".to_owned()], "phux"), "phux-2");
     }
 }
