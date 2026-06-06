@@ -162,12 +162,13 @@ fn main() -> ExitCode {
         }) => commands::server::run_server(&session, socket, daemonize, seed_command.as_deref()),
         Some(Command::Ls { json, socket }) => commands::ls::run_ls(json, socket),
         Some(Command::New {
+            name,
             session,
             cwd,
             socket,
             json,
             command,
-        }) => commands::new::run_new(session, cwd, socket, json, command),
+        }) => commands::new::run_new(name, session, cwd, socket, json, command),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
         Some(Command::Rename {
             session,
@@ -208,5 +209,68 @@ fn main() -> ExitCode {
         }) => commands::run::run_run(&target, &command, timeout, json, socket),
         Some(Command::Config { action }) => commands::config::run_config(&action),
         None => commands::attach::run_naked(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::Cli;
+    use crate::commands::Command;
+
+    /// `phux new <NAME>` must read the bare positional as the SESSION NAME,
+    /// not as a command to spawn (the phux-new-foo bug: `phux new foo` tried
+    /// to exec `foo` in an auto-named "0" session). The seed command is only
+    /// taken after `--`.
+    #[test]
+    fn new_positional_is_session_name_command_requires_dash_dash() {
+        let cli = Cli::try_parse_from(["phux", "new", "foo"]).expect("`phux new foo` must parse");
+        let Some(Command::New {
+            name,
+            session,
+            command,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected New");
+        };
+        assert_eq!(
+            name.as_deref(),
+            Some("foo"),
+            "positional is the session name"
+        );
+        assert_eq!(session, None, "-s not given");
+        assert!(
+            command.is_empty(),
+            "no command without `--`; got {command:?}"
+        );
+
+        // Name + an explicit `-- CMD …`.
+        let cli = Cli::try_parse_from(["phux", "new", "work", "--", "htop", "-d", "1"])
+            .expect("`phux new work -- htop -d 1` must parse");
+        let Some(Command::New { name, command, .. }) = cli.command else {
+            panic!("expected New");
+        };
+        assert_eq!(name.as_deref(), Some("work"));
+        assert_eq!(command, vec!["htop", "-d", "1"]);
+
+        // No name, command-only via `--` ⇒ auto-named session running CMD.
+        let cli =
+            Cli::try_parse_from(["phux", "new", "--", "htop"]).expect("`phux new -- htop` parses");
+        let Some(Command::New { name, command, .. }) = cli.command else {
+            panic!("expected New");
+        };
+        assert_eq!(name, None, "no positional ⇒ auto-name");
+        assert_eq!(command, vec!["htop"]);
+
+        // `-s` still works and stays distinct from a positional.
+        let cli = Cli::try_parse_from(["phux", "new", "-s", "flagged"])
+            .expect("`phux new -s flagged` parses");
+        let Some(Command::New { name, session, .. }) = cli.command else {
+            panic!("expected New");
+        };
+        assert_eq!(name, None);
+        assert_eq!(session.as_deref(), Some("flagged"));
     }
 }

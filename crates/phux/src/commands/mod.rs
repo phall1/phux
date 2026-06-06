@@ -110,8 +110,15 @@ pub(crate) enum Command {
     /// race). `--json` requires an explicit `-s NAME`, and a name already
     /// in use is an error (create-only, never create-or-attach).
     New {
-        /// Session name. Defaults to the standard session name. Required
-        /// with `--json`.
+        /// Session name. `phux new work` creates a session named "work".
+        /// Omitted ⇒ the `session-name-template` (e.g. "default"),
+        /// disambiguated with a numeric suffix if that name is taken.
+        #[arg(value_name = "NAME")]
+        name: Option<String>,
+
+        /// Session name in flag form — equivalent to the positional NAME,
+        /// and the form required by `--json`. An error if it conflicts
+        /// with NAME.
         #[arg(short = 's', long = "session")]
         session: Option<String>,
 
@@ -129,8 +136,8 @@ pub(crate) enum Command {
         json: bool,
 
         /// Command (and arguments) to run in the seed pane instead of the
-        /// default shell. Everything after `--` is taken verbatim.
-        #[arg(trailing_var_arg = true)]
+        /// default shell. Must follow `--`: `phux new work -- htop`.
+        #[arg(last = true)]
         command: Vec<String>,
     },
 
