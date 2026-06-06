@@ -3,9 +3,11 @@
 //! Per [ADR-0019] decision 3 the reference TUI keeps its own copy of the
 //! layout tree. The shape is the wire-side [`LayoutNode`] (re-exported,
 //! not redefined); the operations (`split_at`, `kill_pane`,
-//! `focus_direction`, `pane_rects`) are re-implemented here as free
-//! functions over the wire type so the client crate's edge to
-//! `phux-core` stays as thin as today.
+//! `focus_direction`) are re-implemented here as free functions over the
+//! wire type so the client crate's edge to `phux-core` stays as thin as
+//! today. Pane-rect tiling lives one module over in
+//! [`crate::multi_pane::pane_rects`] — the same local-divider walk paint
+//! uses, so reflow and paint can never disagree.
 //!
 //! Layout persistence (per [ADR-0019] decision 1) wraps the whole
 //! [`Workspace`] (the set of windows plus the active index) in a
@@ -25,7 +27,6 @@
 //!
 //! [ADR-0019]: ../../ADR/0019-tui-multi-pane-rendering.md
 
-use std::collections::HashMap;
 use std::io::Cursor;
 
 use phux_protocol::TerminalId;
@@ -76,10 +77,10 @@ pub enum Direction {
 /// An axis-aligned rectangle in cell coordinates.
 ///
 /// Mirrors `phux_core::window::Rect`. Origin is the outer viewport's
-/// top-left. Border-divider accounting (per ADR-0019 decision 4)
-/// happens *outside* [`pane_rects`]: callers pass `(cols - h_dividers,
-/// rows - v_dividers)`, and the divider cells are drawn in the gaps
-/// the tree explicitly excluded.
+/// top-left. Border-divider accounting (per ADR-0019 decision 4) happens
+/// *inside* [`crate::multi_pane::pane_rects`]: it carves one cell per
+/// split node out of the bounds for the divider, so leaf rects and
+/// divider cells together tile the viewport exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     /// Top-left x coordinate (column).
@@ -710,101 +711,6 @@ pub fn focus_direction(
     None
 }
 
-/// Compute the bounding rectangle of every leaf given the outer
-/// viewport dims.
-///
-/// Returns an empty map if the tree is empty (the caller passed
-/// `LayoutState::tree.is_none()` and called this directly on a
-/// freshly-constructed sentinel — defensive; the real call site
-/// guards on `Option`).
-///
-/// Rectangles tile `(0, 0, dims.0, dims.1)` exactly: dimensions sum
-/// to the parent's dim along the split axis at every interior node
-/// (the `split_dim` rounding rule below guarantees no slop).
-///
-/// `dims` is the **content** rectangle — border-divider accounting
-/// happens outside this function (see ADR-0019 decision 4).
-#[must_use]
-pub fn pane_rects(tree: &LayoutNode, dims: (u16, u16)) -> HashMap<TerminalId, Rect> {
-    let mut out = HashMap::new();
-    fill_rects(
-        tree,
-        Rect {
-            x: 0,
-            y: 0,
-            w: dims.0,
-            h: dims.1,
-        },
-        &mut out,
-    );
-    out
-}
-
-fn fill_rects(node: &LayoutNode, bounds: Rect, out: &mut HashMap<TerminalId, Rect>) {
-    match node {
-        LayoutNode::Leaf(p) => {
-            out.insert(p.clone(), bounds);
-        }
-        LayoutNode::Split {
-            dir,
-            ratio,
-            left,
-            right,
-        } => match dir {
-            SplitDir::Horizontal => {
-                let left_w = split_dim(bounds.w, *ratio);
-                let right_w = bounds.w - left_w;
-                fill_rects(
-                    left,
-                    Rect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        w: left_w,
-                        h: bounds.h,
-                    },
-                    out,
-                );
-                fill_rects(
-                    right,
-                    Rect {
-                        x: bounds.x + left_w,
-                        y: bounds.y,
-                        w: right_w,
-                        h: bounds.h,
-                    },
-                    out,
-                );
-            }
-            SplitDir::Vertical => {
-                let top_h = split_dim(bounds.h, *ratio);
-                let bot_h = bounds.h - top_h;
-                fill_rects(
-                    left,
-                    Rect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        w: bounds.w,
-                        h: top_h,
-                    },
-                    out,
-                );
-                fill_rects(
-                    right,
-                    Rect {
-                        x: bounds.x,
-                        y: bounds.y + top_h,
-                        w: bounds.w,
-                        h: bot_h,
-                    },
-                    out,
-                );
-            }
-            _ => unknown_split_dir(),
-        },
-        _ => unknown_layout_variant(),
-    }
-}
-
 // -----------------------------------------------------------------------------
 // Internal helpers — same shapes as phux-core::window
 // -----------------------------------------------------------------------------
@@ -837,22 +743,6 @@ fn collect_leaves(node: &LayoutNode, out: &mut Vec<TerminalId>) {
             collect_leaves(right, out);
         }
         _ => unknown_layout_variant(),
-    }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn split_dim(total: u16, ratio: f32) -> u16 {
-    let raw = (f32::from(total) * ratio).round();
-    if raw < 0.0 {
-        0
-    } else if raw > f32::from(total) {
-        total
-    } else {
-        raw as u16
     }
 }
 
@@ -1109,38 +999,6 @@ mod tests {
         let mut got: Vec<_> = leaves(&out);
         got.sort_by_key(|id| id.local_id().unwrap_or_default());
         assert_eq!(got, vec![t(2), t(3)]);
-    }
-
-    // -------------------------------------------------------------------------
-    // pane_rects
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn pane_rects_single_leaf() {
-        let rects = pane_rects(&leaf(1), (80, 24));
-        let r = rects.get(&t(1)).unwrap();
-        assert_eq!(
-            *r,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 80,
-                h: 24
-            }
-        );
-    }
-
-    #[test]
-    fn pane_rects_horizontal_split_tiles() {
-        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
-        let rects = pane_rects(&tree, (80, 24));
-        let r1 = rects.get(&t(1)).unwrap();
-        let r2 = rects.get(&t(2)).unwrap();
-        assert_eq!(r1.w + r2.w, 80);
-        assert_eq!(r1.h, 24);
-        assert_eq!(r2.h, 24);
-        assert_eq!(r1.x, 0);
-        assert_eq!(r2.x, r1.w);
     }
 
     // -------------------------------------------------------------------------
@@ -1533,28 +1391,6 @@ mod tests {
             prop_assert_eq!(&alive_set, &leaf_set);
             // Exactly one leaf per id (no duplicates).
             prop_assert_eq!(tree_leaves.len(), leaf_set.len());
-        }
-
-        /// Invariant 2: `pane_rects` tiles the bounding rectangle exactly.
-        #[test]
-        fn proptest_pane_rects_tile(ops in prop::collection::vec(arb_op(), 1..20)) {
-            let (tree, _) = apply_ops(ops);
-            let Some(tree) = tree else { return Ok(()) };
-            let rects = pane_rects(&tree, (80, 24));
-            let total: u32 = rects.values()
-                .map(|r| u32::from(r.w) * u32::from(r.h))
-                .sum();
-            prop_assert_eq!(total, 80 * 24);
-
-            let mut covered: HashSet<(u16, u16)> = HashSet::new();
-            for r in rects.values() {
-                for y in r.y..r.y.saturating_add(r.h) {
-                    for x in r.x..r.x.saturating_add(r.w) {
-                        prop_assert!(covered.insert((x, y)));
-                    }
-                }
-            }
-            prop_assert_eq!(covered.len(), 80 * 24);
         }
 
         /// Invariant 3: `focus_direction` is partial, deterministic, and

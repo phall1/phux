@@ -58,6 +58,17 @@ fn unknown_variant() -> ! {
 /// every leaf. Bounds are in outer-viewport cell coordinates; the
 /// divider cell is subtracted from the split axis before the ratio is
 /// applied.
+///
+/// Exact-tiling invariant: for *any* `bounds`, the leaf rects plus the
+/// divider cells these segments rasterize to cover `bounds` with zero
+/// gap and zero overlap. Every leaf in the tree receives a rect — a
+/// sub-viable split yields zero-size leaf rects rather than dropping
+/// leaves, so the rect a pane is painted into always equals the rect
+/// [`crate::multi_pane::pane_rects`] tells the server to size the PTY to
+/// (ADR-0019 decision 5 punts min-size freezing; sub-viable panes render
+/// as garbage, never as a tiling hole). The divider column/row is only
+/// reserved when the split axis has at least one cell to spare; at zero
+/// width/height the subtree is invisible and emits no divider.
 pub(super) fn walk_layout(
     node: &LayoutNode,
     bounds: Rect,
@@ -75,27 +86,24 @@ pub(super) fn walk_layout(
             right,
         } => match dir {
             SplitDir::Horizontal => {
-                if bounds.w < 3 {
-                    // Degenerate; give the leftmost leaf the whole
-                    // bounds and bail. Callers should be warning about
-                    // an unworkably small viewport already.
-                    if let Some(id) = collect_leaves(left).first() {
-                        rects.insert(id.clone(), bounds);
-                    }
-                    return;
-                }
-                let content_w = bounds.w - 1;
+                // Reserve one column for the divider only when there is
+                // width to spare. At `bounds.w == 0` the subtree is
+                // invisible: no divider, both children get zero width.
+                let has_divider = bounds.w >= 1;
+                let content_w = bounds.w.saturating_sub(1);
                 let left_w = split_dim(content_w, *ratio);
                 let right_w = content_w - left_w;
                 let divider_x = bounds.x + left_w;
-                segments.push(DividerSegment {
-                    split: SplitDir::Horizontal,
-                    a0: bounds.y,
-                    a1: bounds.y + bounds.h.saturating_sub(1),
-                    cross: divider_x,
-                    low_leaves: collect_leaves(left),
-                    high_leaves: collect_leaves(right),
-                });
+                if has_divider {
+                    segments.push(DividerSegment {
+                        split: SplitDir::Horizontal,
+                        a0: bounds.y,
+                        a1: bounds.y + bounds.h.saturating_sub(1),
+                        cross: divider_x,
+                        low_leaves: collect_leaves(left),
+                        high_leaves: collect_leaves(right),
+                    });
+                }
                 walk_layout(
                     left,
                     Rect {
@@ -110,7 +118,7 @@ pub(super) fn walk_layout(
                 walk_layout(
                     right,
                     Rect {
-                        x: divider_x + 1,
+                        x: if has_divider { divider_x + 1 } else { bounds.x },
                         y: bounds.y,
                         w: right_w,
                         h: bounds.h,
@@ -120,24 +128,21 @@ pub(super) fn walk_layout(
                 );
             }
             SplitDir::Vertical => {
-                if bounds.h < 3 {
-                    if let Some(id) = collect_leaves(left).first() {
-                        rects.insert(id.clone(), bounds);
-                    }
-                    return;
-                }
-                let content_h = bounds.h - 1;
+                let has_divider = bounds.h >= 1;
+                let content_h = bounds.h.saturating_sub(1);
                 let top_h = split_dim(content_h, *ratio);
                 let bot_h = content_h - top_h;
                 let divider_y = bounds.y + top_h;
-                segments.push(DividerSegment {
-                    split: SplitDir::Vertical,
-                    a0: bounds.x,
-                    a1: bounds.x + bounds.w.saturating_sub(1),
-                    cross: divider_y,
-                    low_leaves: collect_leaves(left),
-                    high_leaves: collect_leaves(right),
-                });
+                if has_divider {
+                    segments.push(DividerSegment {
+                        split: SplitDir::Vertical,
+                        a0: bounds.x,
+                        a1: bounds.x + bounds.w.saturating_sub(1),
+                        cross: divider_y,
+                        low_leaves: collect_leaves(left),
+                        high_leaves: collect_leaves(right),
+                    });
+                }
                 walk_layout(
                     left,
                     Rect {
@@ -153,7 +158,7 @@ pub(super) fn walk_layout(
                     right,
                     Rect {
                         x: bounds.x,
-                        y: divider_y + 1,
+                        y: if has_divider { divider_y + 1 } else { bounds.y },
                         w: bounds.w,
                         h: bot_h,
                     },

@@ -34,7 +34,7 @@ pub mod mouse;
 /// Rasterize the composition (pane interiors + divider segments) for paint.
 pub mod rasterize;
 
-pub use layout::{PaneLayout, compute_layout};
+pub use layout::{PaneLayout, compute_layout, pane_rects};
 pub use mouse::{RouteDecision, route_mouse_event};
 pub use rasterize::DividerCell;
 
@@ -462,6 +462,126 @@ mod tests {
             assert_eq!(target, t(2));
         } else {
             panic!("expected Pane decision, got {decision:?}");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Exact-tiling property test (phux-islu)
+    // -------------------------------------------------------------------------
+
+    use std::collections::HashSet;
+
+    use proptest::prelude::*;
+
+    use crate::layout::{kill_pane, leaves};
+
+    #[derive(Debug, Clone, Copy)]
+    enum Op {
+        AddPane,
+        KillPaneAt(usize),
+    }
+
+    fn arb_op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            4 => Just(Op::AddPane),
+            1 => (0_usize..16).prop_map(Op::KillPaneAt),
+        ]
+    }
+
+    /// Fold random split/kill ops into a single tree, splitting the most
+    /// recently added pane each time so deep nesting is reached quickly
+    /// (the regime where the old global-vs-local divider math diverged).
+    #[allow(clippy::needless_pass_by_value)]
+    fn apply_ops(ops: Vec<Op>) -> LayoutNode {
+        let mut next_id: u32 = 1;
+        let first = TerminalId::local(next_id);
+        next_id += 1;
+        let mut tree = LayoutNode::Leaf(first.clone());
+        let mut alive = vec![first];
+        for op in ops {
+            match op {
+                Op::AddPane => {
+                    let new_pane = TerminalId::local(next_id);
+                    next_id += 1;
+                    let Some(target) = alive.last().cloned() else {
+                        continue;
+                    };
+                    let dir = if next_id.is_multiple_of(2) {
+                        SplitDir::Horizontal
+                    } else {
+                        SplitDir::Vertical
+                    };
+                    if let Ok(t) = split_at(&tree, &target, &new_pane, dir, 0.5) {
+                        tree = t;
+                        alive.push(new_pane);
+                    }
+                }
+                Op::KillPaneAt(idx) => {
+                    if alive.len() < 2 {
+                        continue;
+                    }
+                    let target = alive[idx % alive.len()].clone();
+                    if let Ok(Some(t)) = kill_pane(&tree, &target) {
+                        tree = t;
+                        alive.retain(|p| *p != target);
+                    }
+                }
+            }
+        }
+        tree
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
+
+        /// phux-islu invariant: for any tree and any (non-empty) viewport,
+        /// the leaf rects from [`pane_rects`] and the divider cells from
+        /// [`compute_layout`] partition the viewport — every cell covered
+        /// exactly once, zero gap and zero overlap. This is the guarantee
+        /// that makes the reflow PTY size equal the painted rect: paint and
+        /// reflow read the *same* tiling, and that tiling leaves no dead
+        /// space, at any nesting depth.
+        #[test]
+        fn proptest_rects_and_dividers_tile_exactly(
+            ops in prop::collection::vec(arb_op(), 1..18),
+            cols in 1_u16..60,
+            rows in 1_u16..30,
+        ) {
+            let tree = apply_ops(ops);
+            let focus = leaves(&tree).into_iter().next();
+            let state = LayoutState { tree: Some(tree), focus };
+
+            let rects = pane_rects(state.tree.as_ref().unwrap(), (cols, rows));
+            let layout = compute_layout(&state, (cols, rows));
+
+            let mut covered: HashSet<(u16, u16)> = HashSet::new();
+
+            // Leaf cells: pairwise-disjoint, all inside the viewport.
+            for r in rects.values() {
+                prop_assert!(u32::from(r.x) + u32::from(r.w) <= u32::from(cols));
+                prop_assert!(u32::from(r.y) + u32::from(r.h) <= u32::from(rows));
+                for y in r.y..r.y.saturating_add(r.h) {
+                    for x in r.x..r.x.saturating_add(r.w) {
+                        prop_assert!(covered.insert((x, y)), "leaf overlap at ({x}, {y})");
+                    }
+                }
+            }
+
+            // Divider cells: inside the viewport, disjoint from leaves and
+            // from each other.
+            for c in &layout.dividers {
+                prop_assert!(
+                    c.x < cols && c.y < rows,
+                    "divider ({}, {}) outside {cols}x{rows} viewport", c.x, c.y
+                );
+                prop_assert!(
+                    covered.insert((c.x, c.y)),
+                    "divider overlaps a leaf or another divider at ({}, {})", c.x, c.y
+                );
+            }
+
+            // Exact cover: nothing left uncovered.
+            prop_assert_eq!(covered.len(), usize::from(cols) * usize::from(rows));
         }
     }
 }
