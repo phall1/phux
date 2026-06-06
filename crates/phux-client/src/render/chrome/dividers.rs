@@ -16,7 +16,8 @@
 //! consumes that data:
 //!
 //! 1. Allocate a ratatui `Buffer` covering the full viewport.
-//! 2. Mark every cell inside a pane interior `Rect` as `set_skip(true)`.
+//! 2. Mark every cell inside a pane interior `Rect` with
+//!    `set_diff_option(CellDiffOption::Skip)`.
 //! 3. Write each `DividerCell` glyph into the buffer at its `(x, y)`.
 //! 4. Emit positioned VT bytes for non-skip cells only.
 //!
@@ -41,7 +42,7 @@
 use std::io::{self, Write};
 
 use phux_protocol::TerminalId;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::Rect as RataRect;
 
 use crate::attach::multi_pane::PaneLayout;
@@ -107,7 +108,7 @@ fn compose_buffer(layout: &PaneLayout) -> Buffer {
         for y in y0..y1 {
             for x in x0..x1 {
                 if let Some(cell) = buf.cell_mut((x, y)) {
-                    cell.set_skip(true);
+                    cell.set_diff_option(CellDiffOption::Skip);
                 }
             }
         }
@@ -127,7 +128,7 @@ fn compose_buffer(layout: &PaneLayout) -> Buffer {
         let symbol = cell.ch.encode_utf8(&mut sbuf);
         if let Some(c) = buf.cell_mut((cell.x, cell.y)) {
             c.set_symbol(symbol);
-            c.set_skip(false);
+            c.set_diff_option(CellDiffOption::None);
         }
     }
 
@@ -157,7 +158,7 @@ fn emit_buffer<W: Write>(out: &mut W, buf: &Buffer) -> io::Result<()> {
             let Some(cell) = buf.cell((x, y)) else {
                 continue;
             };
-            if cell.skip {
+            if cell.diff_option == CellDiffOption::Skip {
                 continue;
             }
             let sym = cell.symbol();
@@ -345,7 +346,7 @@ mod tests {
                 for x in r.x..r.x + r.w {
                     let cell = buf.cell((x, y)).expect("in-bounds");
                     assert!(
-                        cell.skip,
+                        cell.diff_option == CellDiffOption::Skip,
                         "pane interior cell ({x}, {y}) in {r:?} not marked skip"
                     );
                 }
@@ -353,7 +354,12 @@ mod tests {
         }
         for d in &layout.dividers {
             let cell = buf.cell((d.x, d.y)).expect("in-bounds");
-            assert!(!cell.skip, "divider cell ({}, {}) marked skip", d.x, d.y);
+            assert!(
+                cell.diff_option != CellDiffOption::Skip,
+                "divider cell ({}, {}) marked skip",
+                d.x,
+                d.y
+            );
             assert_eq!(
                 cell.symbol().chars().next(),
                 Some(d.ch),
