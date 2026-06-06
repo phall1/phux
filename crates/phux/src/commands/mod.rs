@@ -451,7 +451,7 @@ pub(crate) fn report_no_server(err: &AttachError, socket_path: &Path, verb: &str
     ExitCode::FAILURE
 }
 
-/// Parse an optional target string into a [`selector::Selector`],
+/// Parse an optional target string into a [`crate::selector::Selector`],
 /// defaulting to the focused/last session when absent. On a parse error,
 /// prints a diagnostic and returns the failure exit code for the caller to
 /// bubble.

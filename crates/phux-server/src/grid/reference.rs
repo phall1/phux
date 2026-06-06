@@ -6,7 +6,7 @@ use super::synthesizer::SynthesisError;
 /// owned by each attached consumer (phux-ia4).
 ///
 /// Holds the last-synced rendered body of every viewport row plus the
-/// last-synced cursor/mode state. [`SnapshotSynthesizer::synthesize_against_reference`]
+/// last-synced cursor/mode state. [`super::SnapshotSynthesizer::synthesize_against_reference`]
 /// diffs the live terminal against this and advances it on emit. It is
 /// fully independent per consumer, so it does not depend on libghostty's
 /// shared `Terminal` dirty bits (which `RenderState::update` consumes on

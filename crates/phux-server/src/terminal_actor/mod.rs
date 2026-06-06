@@ -61,12 +61,6 @@ pub use spawn::*;
 pub use sync::*;
 pub use tick::*;
 
-/// Default PTY read chunk size. Mirrors the example. Sized comfortably
-/// above the typical libghostty escape-sequence span so a single read
-/// rarely splits a sequence boundary.
-#[allow(dead_code)] // refactor WIP: duplicated in spawn.rs; agent to dedup
-const PTY_READ_CHUNK: usize = 4096;
-
 /// Per-Terminal scrollback cap used by the no-config convenience
 /// constructors ([`TerminalActor::new`] / [`TerminalActor::new_with_command`]).
 /// A tmux-style mid-range value; the runtime path overrides it with
@@ -1826,25 +1820,8 @@ impl TerminalActor {
     }
 }
 
-/// Convenience: tuple returned by [`spawn_pty`].
-#[allow(dead_code)] // refactor WIP: duplicated in spawn.rs; agent to dedup
-type SpawnedPty = (
-    mpsc::UnboundedReceiver<PtyEvent>,
-    mpsc::UnboundedSender<Vec<u8>>,
-    PtyOwned,
-);
-
-/// Receive from `rx` when `Some`; otherwise park forever. Used as a
-/// select! arm so the actor's loop can run with or without a PTY
-/// without an `expect()` or branching `if`.
-async fn recv_or_pending(rx: Option<&mut mpsc::UnboundedReceiver<PtyEvent>>) -> Option<PtyEvent> {
-    match rx {
-        Some(rx) => rx.recv().await,
-        None => std::future::pending().await,
-    }
-}
+#[cfg(test)]
 mod tests {
-    #[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
     use super::*;
 
     /// phux-07y: `shell_command` runs the user's command via
@@ -2064,7 +2041,6 @@ mod tests {
     /// shaped like the production [`crate::state::AttachedClient::tx`].
     /// The receiver is returned so callers can hold it open (otherwise
     /// the actor's `try_send` would see a closed channel).
-    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn dummy_outbound() -> (mpsc::Sender<Outbound>, mpsc::Receiver<Outbound>) {
         mpsc::channel(16)
     }
@@ -3121,7 +3097,6 @@ mod tests {
 
     /// Drain every `TerminalOutput` currently queued on `rx`, returning the
     /// concatenated payload bytes and the ordered list of `seq`s.
-    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn drain_terminal_output(rx: &mut mpsc::Receiver<Outbound>) -> (Vec<u8>, Vec<u64>) {
         let mut bytes = Vec::new();
         let mut seqs = Vec::new();
@@ -3245,7 +3220,6 @@ mod tests {
     }
 
     /// Naive subsequence search for test assertions on VT byte streams.
-    #[allow(dead_code)] // refactor WIP: test-only helper flagged dead in lib build
     fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
     }

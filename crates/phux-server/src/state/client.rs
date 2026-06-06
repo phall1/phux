@@ -12,7 +12,7 @@ use crate::terminal_actor::TerminalHandle;
 /// Distinct from [`phux_protocol::ids::ClientId`] (which is the wire-level
 /// identity carried in protocol messages): this one is allocated by the
 /// server, monotonic from `1`, and used purely for routing inside
-/// [`ServerState`].
+/// [`super::ServerState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClientId(pub u64);
 
@@ -33,8 +33,8 @@ pub struct AttachedClient {
     ///
     /// Populated from the [`phux_protocol::caps::ClientCapabilities`] the
     /// client advertised in HELLO (SPEC §6.1) and forwarded into
-    /// [`ServerState::attach`]. Test scaffolding that never observed a
-    /// HELLO calls [`ServerState::attach_default_caps`] which falls back
+    /// [`super::ServerState::attach`]. Test scaffolding that never observed a
+    /// HELLO calls [`super::ServerState::attach_default_caps`] which falls back
     /// to [`ClientCapabilities::default`] (most-permissive — never silently
     /// downgrades).
     pub client_caps: ClientCapabilities,
@@ -55,7 +55,7 @@ pub struct AttachSnapshotPane {
     pub wire_terminal_id: WireTerminalId,
 }
 
-/// Errors returned by [`ServerState::attach`].
+/// Errors returned by [`super::ServerState::attach`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AttachError {
     /// No session with that name was found in the registry.

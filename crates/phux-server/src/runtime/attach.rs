@@ -12,8 +12,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue, agent to tighten
-use super::*;
+use super::{
+    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty, send_error,
+    spawn_pane_with_pty,
+};
 use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
 use crate::terminal_actor::{ConsumerAttachRequest, PwdRequest, ResizeRequest, SnapshotRequest};
 

@@ -144,9 +144,8 @@ fn peer_identity_from_uds(stream: &tokio::net::UnixStream) -> PeerIdentity {
 }
 
 /// Extract peer identity from a Unix domain socket (non-Linux fallback).
-#[allow(clippy::missing_const_for_fn)] // feature WIP (4588a0a)
 #[cfg(not(target_os = "linux"))]
-fn peer_identity_from_uds(_stream: &tokio::net::UnixStream) -> PeerIdentity {
+const fn peer_identity_from_uds(_stream: &tokio::net::UnixStream) -> PeerIdentity {
     PeerIdentity {
         uid: 0,
         pid: None,

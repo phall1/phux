@@ -107,7 +107,7 @@ pub struct ConsumerSyncState {
     /// (phux-ia4). Holds the last-synced rendered body of every viewport
     /// row plus the last-synced cursor/mode state. The tick driver diffs
     /// the live `Terminal` against this (via the actor's shared
-    /// [`SnapshotSynthesizer`]) and advances it on emit.
+    /// [`crate::grid::SnapshotSynthesizer`]) and advances it on emit.
     ///
     /// This replaces the earlier per-consumer `RenderState` dirty cache.
     /// `RenderState::update` *consumes* the shared `Terminal` dirty bits
@@ -117,7 +117,7 @@ pub struct ConsumerSyncState {
     /// rest. The reference grid is fully independent per consumer and
     /// never reads the shared dirty bits, so every consumer gets its own
     /// correct diff each tick regardless of attach/ack divergence. See
-    /// [`SnapshotSynthesizer::synthesize_against_reference`].
+    /// [`crate::grid::SnapshotSynthesizer::synthesize_against_reference`].
     pub reference: ConsumerReference,
     /// Per-consumer outbound mailbox the tick driver pushes
     /// `TERMINAL_OUTPUT` frames into. Cloned from the

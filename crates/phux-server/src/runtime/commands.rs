@@ -10,8 +10,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
-#[allow(clippy::wildcard_imports)] // refactor WIP: re-export glue
-use super::*;
+use super::{AttachPrepared, spawn_pane_event_drain, spawn_terminal_exit_watcher};
 use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
     ConsumerAckRequest, ResizeRequest, ScreenRequest, TerminalActor, TerminalHandle,
@@ -51,7 +50,8 @@ pub(crate) fn seed_session_with_actor(
 /// Call sites:
 ///
 /// * The `phux server` binary entry point, via
-///   [`ServerConfig::seed_with_pty`] (with [`ServerConfig::seed_command`]
+///   [`super::ServerConfig::seed_with_pty`] (with
+///   [`super::ServerConfig::seed_command`]
 ///   left `None` to fall back to
 ///   [`crate::terminal_actor::default_shell_command`] — the user's `$SHELL`,
 ///   or `/bin/sh` per the byc.5 convention).
