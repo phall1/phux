@@ -745,7 +745,7 @@ pub(crate) async fn handle_attach(
     // the existing `handle_viewport_resize` convention; the off-by-one
     // for a host-side status bar is the client's concern via the
     // post-attach `TERMINAL_RESIZE` reflow path used by multi-pane).
-    apply_attach_viewport(state, &panes_to_snapshot, viewport);
+    apply_attach_viewport(state, client_id, &panes_to_snapshot, viewport);
 
     if out_tx
         .send(Outbound::Frame(FrameKind::Attached {
@@ -995,6 +995,7 @@ pub(crate) async fn handle_attach(
 /// independent of the state lock).
 pub(crate) fn apply_attach_viewport(
     state: &SharedState,
+    client_id: ClientId,
     panes_to_snapshot: &[AttachSnapshotPane],
     viewport: phux_protocol::wire::frame::ViewportInfo,
 ) {
@@ -1006,7 +1007,19 @@ pub(crate) fn apply_attach_viewport(
         return;
     }
     state.with_mut(|s| {
+        // phux-nk07: this client now contributes its viewport to every pane
+        // it just subscribed to; each pane's geometry is the window-size
+        // policy applied across all subscribers (so a second, smaller client
+        // attaching under `smallest` shrinks the grid rather than the
+        // last-writer winning). `Manual` (or no usable viewport) skips the
+        // resize, leaving the pane at its current size.
+        s.set_client_viewport(client_id, viewport);
         for pane in panes_to_snapshot {
+            let Some((cols, rows)) =
+                s.resolve_terminal_geometry(pane.terminal_id, Some(viewport))
+            else {
+                continue;
+            };
             if let Some(pane_entry) = s.registry.terminal_mut(pane.terminal_id) {
                 pane_entry.dims = (cols, rows);
             }

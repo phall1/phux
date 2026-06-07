@@ -237,6 +237,14 @@ pub struct ServerState {
     /// Defaults to the `phux_config` schema default (`xterm-256color`) so
     /// tests that never call the setter get the safe baseline.
     term: String,
+    /// How a Terminal viewed by clients of differing sizes resolves its one
+    /// authoritative PTY geometry (`defaults.window-size`, phux-nk07). Mirrors
+    /// [`crate::runtime::ServerConfig::window_size`] so `handle_viewport_resize`
+    /// can apply the policy across every subscriber's viewport instead of
+    /// last-writer-wins. Set by the runtime via [`Self::set_window_size`] right
+    /// after `SharedState::new`; defaults to the `phux_config` schema default
+    /// ([`phux_config::WindowSize::Smallest`] — never crops).
+    window_size: phux_config::WindowSize,
     /// Frozen session-creation directory per session (phux-nyx,
     /// `defaults.cwd-inheritance = session-root`). Captured the first time
     /// a `session-root` spawn resolves a session's seed-pane CWD and reused
@@ -459,6 +467,49 @@ mod tests {
         let subs = s.subscribers_for_terminal(pid);
         assert!(subs.contains(&a) && subs.contains(&b));
         assert_eq!(subs.len(), 2);
+    }
+
+    #[test]
+    fn resolve_geometry_applies_window_size_policy_across_subscribers() {
+        use phux_config::WindowSize;
+        use phux_protocol::wire::frame::ViewportInfo;
+
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let big = s.new_client_id();
+        let small = s.new_client_id();
+        s.attach_default_caps(big, "default", mk_tx()).unwrap();
+        s.attach_default_caps(small, "default", mk_tx()).unwrap();
+        s.set_client_viewport(big, ViewportInfo::new(120, 48));
+        s.set_client_viewport(small, ViewportInfo::new(80, 24));
+
+        // smallest: per-axis min — nothing cropped.
+        s.set_window_size(WindowSize::Smallest);
+        assert_eq!(s.resolve_terminal_geometry(pid, None), Some((80, 24)));
+
+        // largest: per-axis max.
+        s.set_window_size(WindowSize::Largest);
+        assert_eq!(s.resolve_terminal_geometry(pid, None), Some((120, 48)));
+
+        // latest: the resizing client's viewport (the `latest` hint), not a
+        // min/max across subscribers.
+        s.set_window_size(WindowSize::Latest);
+        assert_eq!(
+            s.resolve_terminal_geometry(pid, Some(ViewportInfo::new(100, 30))),
+            Some((100, 30)),
+        );
+
+        // manual: geometry is never derived from views.
+        s.set_window_size(WindowSize::Manual);
+        assert_eq!(
+            s.resolve_terminal_geometry(pid, Some(ViewportInfo::new(100, 30))),
+            None
+        );
+
+        // A zero-dimension viewport is ignored, so it can't collapse the grid.
+        s.set_window_size(WindowSize::Smallest);
+        s.set_client_viewport(small, ViewportInfo::new(0, 0));
+        assert_eq!(s.resolve_terminal_geometry(pid, None), Some((120, 48)));
     }
 
     #[test]

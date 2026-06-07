@@ -51,6 +51,7 @@ impl ServerState {
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
             term: phux_config::DefaultsCfg::default().term,
+            window_size: phux_config::WindowSize::default(),
             session_root: HashMap::new(),
             window_last_cwd: HashMap::new(),
             has_served_client: false,
@@ -169,6 +170,75 @@ impl ServerState {
     #[must_use]
     pub fn term(&self) -> &str {
         &self.term
+    }
+
+    /// Set the multi-client window-size policy (`defaults.window-size`,
+    /// phux-nk07). Called once at server startup to mirror
+    /// [`crate::runtime::ServerConfig::window_size`] into state.
+    pub const fn set_window_size(&mut self, window_size: phux_config::WindowSize) {
+        self.window_size = window_size;
+    }
+
+    /// Read the window-size policy set by [`Self::set_window_size`].
+    #[must_use]
+    pub const fn window_size(&self) -> phux_config::WindowSize {
+        self.window_size
+    }
+
+    /// Record `client`'s current outer viewport (`phux-nk07`), as carried by
+    /// `ATTACH` or a live `VIEWPORT_RESIZE`. No-op for an unattached client.
+    pub fn set_client_viewport(
+        &mut self,
+        client: ClientId,
+        viewport: phux_protocol::wire::frame::ViewportInfo,
+    ) {
+        if let Some(c) = self.attached.get_mut(&client) {
+            c.viewport = Some(viewport);
+        }
+    }
+
+    /// Resolve the one authoritative `(cols, rows)` a Terminal's PTY should
+    /// take, given the viewports of every client subscribed to it and the
+    /// active `window-size` policy (`phux-nk07`).
+    ///
+    /// Returns `None` when the policy is `Manual` (geometry is fixed
+    /// externally, never derived from views) or when no subscriber has
+    /// announced a usable (non-zero) viewport yet — in both cases the caller
+    /// leaves the PTY size unchanged. `latest` is the viewport of the client
+    /// that just resized, used only by the `Latest` policy.
+    ///
+    /// Degenerate `0`-dimension viewports are ignored in the min/max so a
+    /// transient resize-to-zero (a detaching client, a probe) can't collapse
+    /// the shared grid.
+    #[must_use]
+    pub fn resolve_terminal_geometry(
+        &self,
+        terminal: TerminalId,
+        latest: Option<phux_protocol::wire::frame::ViewportInfo>,
+    ) -> Option<(u16, u16)> {
+        use phux_config::WindowSize;
+        match self.window_size {
+            WindowSize::Manual => None,
+            WindowSize::Latest => latest
+                .filter(|v| v.cols > 0 && v.rows > 0)
+                .map(|v| (v.cols, v.rows)),
+            WindowSize::Smallest | WindowSize::Largest => {
+                let viewports = self
+                    .subscribers_for_terminal(terminal)
+                    .iter()
+                    .filter_map(|cid| self.attached.get(cid).and_then(|c| c.viewport))
+                    .filter(|v| v.cols > 0 && v.rows > 0);
+                let mut acc: Option<(u16, u16)> = None;
+                for v in viewports {
+                    acc = Some(match (acc, self.window_size) {
+                        (None, _) => (v.cols, v.rows),
+                        (Some((c, r)), WindowSize::Smallest) => (c.min(v.cols), r.min(v.rows)),
+                        (Some((c, r)), _) => (c.max(v.cols), r.max(v.rows)),
+                    });
+                }
+                acc
+            }
+        }
     }
 
     /// Read the frozen session-creation directory recorded for `session`
@@ -402,6 +472,7 @@ impl ServerState {
                 session: session_id,
                 tx,
                 client_caps,
+                viewport: None,
             },
         );
         // The server has now served at least one client, so the

@@ -38,6 +38,15 @@ pub struct AttachedClient {
     /// to [`ClientCapabilities::default`] (most-permissive — never silently
     /// downgrades).
     pub client_caps: ClientCapabilities,
+    /// This client's current outer viewport (`phux-nk07`).
+    ///
+    /// Set from the `ATTACH` viewport and updated on every `VIEWPORT_RESIZE`.
+    /// The server resolves a shared Terminal's authoritative PTY geometry by
+    /// applying the `defaults.window-size` policy across the viewports of
+    /// every client subscribed to that Terminal — replacing the old
+    /// last-writer-wins resize, where two differently-sized clients thrashed
+    /// each other's grid. `None` until the client announces a viewport.
+    pub viewport: Option<phux_protocol::wire::frame::ViewportInfo>,
 }
 
 /// One pane target in an ATTACH snapshot pass.

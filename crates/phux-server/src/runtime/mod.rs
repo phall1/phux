@@ -113,6 +113,13 @@ pub struct ServerConfig {
     /// `phux_config`'s `defaults.term`; [`Self::with_default_socket`] uses
     /// the schema default (`xterm-256color`).
     pub term: String,
+    /// How a Terminal viewed by clients of differing sizes resolves its one
+    /// authoritative PTY geometry (`defaults.window-size`, phux-nk07).
+    /// Threaded into shared state so `handle_viewport_resize` applies the
+    /// policy across every subscriber's viewport. The binary populates this
+    /// from `phux_config`'s `defaults.window-size`; [`Self::with_default_socket`]
+    /// uses the schema default ([`phux_config::WindowSize::Smallest`]).
+    pub window_size: phux_config::WindowSize,
     /// Optional policy extension bundle. When `None`, the server uses the
     /// default permissive policy (allow everything, audit nothing).
     pub policy_bundle: Option<crate::policy::PolicyBundle>,
@@ -131,6 +138,7 @@ impl ServerConfig {
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
             term: phux_config::DefaultsCfg::default().term,
+            window_size: phux_config::WindowSize::default(),
             policy_bundle: None,
         }
     }
@@ -284,6 +292,11 @@ impl ServerRuntime {
         // configured `TERM` baseline.
         let term = self.cfg.term.clone();
         state.with_mut(|s| s.set_term(term));
+        // Mirror `defaults.window-size` into shared state so
+        // `handle_viewport_resize` resolves a shared Terminal's geometry from
+        // the configured multi-client policy (phux-nk07).
+        let window_size = self.cfg.window_size;
+        state.with_mut(|s| s.set_window_size(window_size));
         // Wire policy bundle from config into shared state.
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));

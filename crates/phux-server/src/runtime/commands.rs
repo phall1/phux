@@ -1005,8 +1005,22 @@ pub(crate) fn handle_viewport_resize(
         let Some(terminal_id) = window.active else {
             return;
         };
+        // phux-nk07: record this client's viewport, then resolve the
+        // Terminal's authoritative geometry by applying the window-size policy
+        // across EVERY subscriber's viewport — not last-writer-wins, which let
+        // two differently-sized clients thrash each other's grid. `Manual` (or
+        // no usable viewport yet) yields `None`: leave the PTY size untouched.
+        s.set_client_viewport(client_id, *viewport);
+        let Some((cols, rows)) = s.resolve_terminal_geometry(terminal_id, Some(*viewport)) else {
+            debug!(
+                ?client_id,
+                ?terminal_id,
+                "VIEWPORT_RESIZE: window-size policy yielded no geometry; PTY size unchanged",
+            );
+            return;
+        };
         if let Some(pane) = s.registry.terminal_mut(terminal_id) {
-            pane.dims = (viewport.cols, viewport.rows);
+            pane.dims = (cols, rows);
         }
         // Fan the resize out to the TerminalActor so libghostty's
         // `Terminal::set_size` and the PTY `winsize` ioctl get
@@ -1025,8 +1039,8 @@ pub(crate) fn handle_viewport_resize(
         if let Some(handle) = s.terminals.get(&terminal_id) {
             // Live viewport resize (SIGWINCH): resync clients (phux-8v1).
             match handle.resize.try_send(ResizeRequest {
-                cols: viewport.cols,
-                rows: viewport.rows,
+                cols,
+                rows,
                 resync_clients: true,
             }) {
                 Ok(()) => {}
@@ -1034,8 +1048,8 @@ pub(crate) fn handle_viewport_resize(
                     warn!(
                         ?client_id,
                         ?terminal_id,
-                        cols = viewport.cols,
-                        rows = viewport.rows,
+                        cols,
+                        rows,
                         "VIEWPORT_RESIZE: pane resize mailbox full; dropping (fire-and-forget per SPEC §10.5)",
                     );
                 }
