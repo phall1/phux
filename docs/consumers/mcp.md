@@ -6,10 +6,11 @@ last-reviewed: 2026-06-06
 
 # The phux MCP adapter
 
-**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the six
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the eight
 JSON-RPC stdio tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`,
-`phux_run`, `phux_wait`, `phux_new`), the stdio transport and lifecycle,
-how a tool resolves a target client-side, and the `tools/call` envelope.
+`phux_run`, `phux_wait`, `phux_new`, `phux_kill`, `phux_watch`), the stdio
+transport and lifecycle, how a tool resolves a target client-side, and the
+`tools/call` envelope.
 The structured shapes the tools return and the selector grammar are the
 shared agent surface and live in their owning docs; this file links them.
 
@@ -214,18 +215,41 @@ server must already be running (this tool does not auto-spawn one).
 
 Result: the new session's name and seed pane id.
 
-### 3.7 Event stream (`phux watch`) — not yet an MCP tool
+### 3.7 `phux_kill`
 
-The push half of the agent surface — a subscribed stream of tagged
-lifecycle/activity events — ships today as the CLI verb
-[`phux watch`](./agents.md#2-the-structured-cli-surface-verb-catalog), an
-accelerator of `phux_wait`'s poll floor. It is **not** exposed as an MCP
-tool in this pass: MCP `tools/call` is request/response, whereas the
-event stream is a long-lived push, so a streaming `phux_watch` tool needs
-an MCP notification/streaming shape that is a separate ticket. The
-`phux_wait` polling tool remains the MCP-native way to block on a pane
-condition; an MCP host that wants the stream meanwhile shells out to
-`phux watch --json`.
+Tears down the Terminal(s) a selector resolves to — a whole session, a
+window, a pane, or `@id` — in one atomic `KILL_TERMINALS`.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `target` | string | yes | Selector (§2). Resolves to its full id set. |
+| `socket` | string | no | Override the UDS path (see §2). |
+
+Result: `{ killed: N }`, the number of Terminals torn down. A clean server
+disconnect after the kill (the server self-exits once its last session is
+reaped) is reported as success.
+
+### 3.8 `phux_watch`
+
+The push half of the agent surface — tagged lifecycle/activity events
+(`command_started`/`finished`, `title_changed`, `bell`,
+`pane_spawned`/`closed`, `dirty`, `idle`) — exposed as a **bounded
+one-shot** tool. MCP `tools/call` is request/response while the underlying
+stream is long-lived, so the tool collects events until a bound is reached,
+then returns the batch; an MCP host that wants a truly live stream still
+shells out to `phux watch --json`.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `target` | string | no | Pane selector to watch. Omit for server-wide events. |
+| `max_events` | number | no | Return after collecting this many events. |
+| `timeout_secs` | number | no | Return after this many seconds. **Recommended** — without it (and without `max_events`) the call blocks until the server exits. |
+| `socket` | string | no | Override the UDS path (see §2). |
+
+Result: `{ events: [ { event, terminal?, ...payload } ], count: N }`, the
+same per-event JSON shape as `phux watch --json`. It is an accelerator of
+`phux_wait`'s poll floor, not a replacement: `phux_wait` is still the way to
+block on a specific screen condition.
 
 ---
 

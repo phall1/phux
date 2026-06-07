@@ -13,6 +13,7 @@
 //! stream just cuts latency.
 
 use std::path::Path;
+use std::time::Duration;
 
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{AgentEvent, FrameKind};
@@ -84,4 +85,41 @@ where
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Bounded one-shot over [`watch_events`]: collect events until `max_events`
+/// are seen, `timeout` elapses, or the server closes — then return them.
+///
+/// This is the request/response shape a non-streaming caller (the MCP
+/// `phux_watch` tool) needs: streaming is great for a live CLI, but a tool
+/// call must return a finite result. `timeout` elapsing is success, not an
+/// error — the collected prefix is returned. With both bounds `None`, it
+/// streams until the server exits.
+///
+/// # Errors
+///
+/// Returns [`AttachError`] on connect/transport failure before any timeout.
+pub async fn collect_events(
+    socket: &Path,
+    terminal: Option<TerminalId>,
+    max_events: Option<usize>,
+    timeout: Option<Duration>,
+) -> Result<Vec<WatchEvent>, AttachError> {
+    let mut collected: Vec<WatchEvent> = Vec::new();
+    {
+        let sink = |ev: WatchEvent| {
+            collected.push(ev);
+            // Keep going until we reach the cap (if any).
+            max_events.is_none_or(|m| collected.len() < m)
+        };
+        let fut = watch_events(socket, terminal, sink);
+        match timeout {
+            // Timeout is a clean stop: drop the future, keep the prefix.
+            Some(d) => {
+                let _ = tokio::time::timeout(d, fut).await;
+            }
+            None => fut.await?,
+        }
+    }
+    Ok(collected)
 }

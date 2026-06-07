@@ -57,6 +57,10 @@ const TARGET_DESC: &str = "Target selector: session, session:window, \
 /// Returned verbatim by `tools/list`. Schemas are minimal but valid JSON
 /// Schema (`type: object` with `properties`/`required`).
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat JSON literal — the tool catalog; splitting it hurts readability"
+)]
 pub(crate) fn catalog() -> Value {
     json!([
         {
@@ -136,6 +140,31 @@ pub(crate) fn catalog() -> Value {
                 },
                 "required": ["name"]
             }
+        },
+        {
+            "name": "phux_kill",
+            "description": "Kill the Terminal(s) a selector resolves to (a whole session, a window, a pane, or `#tag`). Atomic for a group via KILL_TERMINALS.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": TARGET_DESC },
+                    "socket": { "type": "string" }
+                },
+                "required": ["target"]
+            }
+        },
+        {
+            "name": "phux_watch",
+            "description": "Collect server-pushed events (command_started/finished, title_changed, bell, pane_spawned/closed, dirty, idle) for a pane or server-wide. Bounded one-shot: returns after max_events or timeout_secs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": "Pane selector to watch. Omit to watch server-wide events." },
+                    "max_events": { "type": "number", "description": "Return after collecting this many events. Omit for no count cap." },
+                    "timeout_secs": { "type": "number", "description": "Return after this many seconds regardless of count. Strongly recommended — without it the call blocks until the server exits." },
+                    "socket": { "type": "string" }
+                }
+            }
         }
     ])
 }
@@ -156,6 +185,8 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_run" => phux_run(args).await,
         "phux_wait" => phux_wait(args).await,
         "phux_new" => phux_new(args).await,
+        "phux_kill" => phux_kill(args).await,
+        "phux_watch" => phux_watch(args).await,
         other => Err(ToolError::new(format!("unknown tool: {other}"))),
     }
 }
@@ -297,6 +328,107 @@ async fn phux_new(args: &Value) -> Result<Value, ToolError> {
     let command = string_array_opt(args, "command")?.filter(|c| !c.is_empty());
 
     create_session(&socket, &name, command, cwd).await
+}
+
+/// `phux_kill` — tear down the Terminal(s) a selector resolves to.
+///
+/// Resolves the selector client-side to its full id set (a whole session, a
+/// window, a pane, or `@id`) and sends one atomic `KILL_TERMINALS { ids }`,
+/// the same op `phux kill` uses. A clean server disconnect after the kill
+/// (the server self-exits once its last session is reaped) is success, not a
+/// failure.
+async fn phux_kill(args: &Value) -> Result<Value, ToolError> {
+    let socket = socket::resolve(str_arg(args, "socket"));
+    let selector = required_target(args)?;
+    let snapshot = get_state(&socket).await?;
+    let ids = selector::resolve(&selector, &snapshot);
+    if ids.is_empty() {
+        return Err(ToolError::new("no such target"));
+    }
+    let count = ids.len();
+
+    let mut conn = Connection::connect(&socket).await?;
+    conn.send(&FrameKind::Command {
+        request_id: 1,
+        command: WireCommand::KillTerminals { ids },
+    })
+    .await?;
+    loop {
+        match conn.recv().await {
+            Ok(FrameKind::CommandResult {
+                request_id: 1,
+                result,
+            }) => {
+                return match result {
+                    CommandResult::Ok => Ok(json!({ "killed": count })),
+                    CommandResult::Error { message, .. } => Err(ToolError::new(message)),
+                    other => Err(ToolError::new(format!("unexpected kill result: {other:?}"))),
+                };
+            }
+            Ok(_) => {}
+            // Server closed after reaping its last session: the kill landed.
+            Err(AttachError::Disconnected) => return Ok(json!({ "killed": count })),
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+/// `phux_watch` — collect server-pushed agent events, bounded.
+///
+/// The streaming `phux watch` doesn't fit a request/response tool call, so
+/// this returns a finite batch: it stops at `max_events`, after
+/// `timeout_secs`, or when the server closes, whichever comes first, and
+/// returns the collected events as structured JSON. Omitting both bounds
+/// blocks until the server exits — callers SHOULD pass `timeout_secs`.
+async fn phux_watch(args: &Value) -> Result<Value, ToolError> {
+    let socket = socket::resolve(str_arg(args, "socket"));
+    // `target` is optional: absent ⇒ server-wide subscription.
+    let terminal = match str_arg(args, "target") {
+        None => None,
+        Some(raw) => {
+            let selector = selector::parse(raw)
+                .map_err(|err| ToolError::new(format!("invalid target '{raw}': {err}")))?;
+            let snapshot = get_state(&socket).await?;
+            Some(resolve_one(&selector, &snapshot)?)
+        }
+    };
+    let max_events = num_arg(args, "max_events").and_then(|n| usize::try_from(n).ok());
+    let timeout = num_arg(args, "timeout_secs").map(Duration::from_secs);
+
+    let events = phux_client::watch::collect_events(&socket, terminal, max_events, timeout).await?;
+    let rendered: Vec<Value> = events.iter().map(agent_event_json).collect();
+    Ok(json!({ "events": rendered, "count": rendered.len() }))
+}
+
+/// Project one [`phux_client::watch::WatchEvent`] to the stable JSON shape the
+/// CLI's `phux watch --json` emits (a `event` name plus the payload field).
+fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
+    use phux_protocol::wire::frame::AgentEvent;
+    let (kind, mut obj) = match &ev.event {
+        AgentEvent::CommandStarted => ("command_started", json!({})),
+        AgentEvent::CommandFinished { exit_code } => {
+            ("command_finished", json!({ "exit_code": exit_code }))
+        }
+        AgentEvent::TitleChanged { title } => ("title_changed", json!({ "title": title })),
+        AgentEvent::Bell => ("bell", json!({})),
+        AgentEvent::PaneSpawned => ("pane_spawned", json!({})),
+        AgentEvent::PaneClosed { exit_status } => {
+            ("pane_closed", json!({ "exit_status": exit_status }))
+        }
+        AgentEvent::Dirty => ("dirty", json!({})),
+        AgentEvent::Idle => ("idle", json!({})),
+        AgentEvent::Unknown { tag, .. } => ("unknown", json!({ "tag": tag })),
+        // `AgentEvent` is `#[non_exhaustive]`: a future minor may add a kind
+        // this build predates. Surface it generically rather than failing.
+        _ => ("unknown", json!({})),
+    };
+    if let Value::Object(map) = &mut obj {
+        map.insert("event".to_owned(), Value::from(kind));
+        if let Some(t) = &ev.terminal {
+            map.insert("terminal".to_owned(), Value::from(format!("{t:?}")));
+        }
+    }
+    obj
 }
 
 // -----------------------------------------------------------------------------
@@ -565,6 +697,8 @@ mod tests {
                 "phux_run",
                 "phux_wait",
                 "phux_new",
+                "phux_kill",
+                "phux_watch",
             ]
         );
         for tool in arr {
@@ -652,6 +786,47 @@ mod tests {
             tool("phux_run")["inputSchema"]["required"],
             json!(["target", "command"]),
         );
+
+        // phux-yhyi: kill requires a target; watch's target is optional.
+        assert_eq!(
+            tool("phux_kill")["inputSchema"]["required"],
+            json!(["target"]),
+        );
+        assert!(tool("phux_watch")["inputSchema"].get("required").is_none());
+    }
+
+    /// `agent_event_json` projects each event kind to the same stable shape
+    /// the CLI's `phux watch --json` emits (`event` name + payload field).
+    #[test]
+    fn agent_event_json_projects_kind_and_payload() {
+        use phux_client::watch::WatchEvent;
+        use phux_protocol::wire::frame::AgentEvent;
+
+        let ev = WatchEvent {
+            terminal: None,
+            event: AgentEvent::CommandFinished {
+                exit_code: Some(42),
+            },
+        };
+        let v = agent_event_json(&ev);
+        assert_eq!(v["event"], json!("command_finished"));
+        assert_eq!(v["exit_code"], json!(42));
+
+        let bell = WatchEvent {
+            terminal: None,
+            event: AgentEvent::Bell,
+        };
+        assert_eq!(agent_event_json(&bell)["event"], json!("bell"));
+
+        let titled = WatchEvent {
+            terminal: None,
+            event: AgentEvent::TitleChanged {
+                title: "vim".to_owned(),
+            },
+        };
+        let tv = agent_event_json(&titled);
+        assert_eq!(tv["event"], json!("title_changed"));
+        assert_eq!(tv["title"], json!("vim"));
     }
 
     /// `scrollback`/`cells` arg plumbing: the tri-state scrollback and the
