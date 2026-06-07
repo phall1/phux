@@ -94,9 +94,37 @@ pub enum OverlayCommand {
     /// committed rename prompt returning `rename-window { name }`. The
     /// dispatcher feeds it through the normal `run_action` path.
     Commit(phux_config::keybind::ResolvedAction),
-    /// Keep the overlay active, but send a selection event to the server
-    /// (used by copy-mode). The dispatcher fills in the `terminal_id`.
-    SendSelection(phux_protocol::input::selection::SelectionEvent),
+    /// Close the overlay and copy the current selection to the host clipboard
+    /// (copy-mode Enter).
+    ///
+    /// Selection is a client-local projection over the focused pane's own
+    /// engine ([ADR-0030]); the dispatcher resolves the [`CopyRequest`]
+    /// against that engine and emits OSC 52 — nothing goes on the wire.
+    ///
+    /// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
+    Copy(CopyRequest),
+}
+
+/// A client-local copy request (phux-v6jw, [ADR-0030]).
+///
+/// The overlay's normalized, inclusive viewport selection rectangle, handed to
+/// the dispatcher to resolve against the focused pane's own libghostty engine.
+/// Coordinates are pane-local viewport cells (`row`/`col`, zero-based,
+/// `start <= end`). `rectangle` selects block (vs linear) extraction.
+///
+/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyRequest {
+    /// Top row of the selection (inclusive).
+    pub start_row: u16,
+    /// Left column of the selection (inclusive).
+    pub start_col: u16,
+    /// Bottom row of the selection (inclusive).
+    pub end_row: u16,
+    /// Right column of the selection (inclusive).
+    pub end_col: u16,
+    /// Block (rectangular) selection when `true`; linear when `false`.
+    pub rectangle: bool,
 }
 
 /// What [`OverlayState::handle_key`] hands back to the dispatcher.
@@ -107,8 +135,8 @@ pub enum OverlayOutcome {
     None,
     /// The overlay committed; run this action.
     RunAction(phux_config::keybind::ResolvedAction),
-    /// Send a selection event to the server (copy-mode).
-    SendSelection(phux_protocol::input::selection::SelectionEvent),
+    /// Copy the resolved selection to the host clipboard (copy-mode).
+    Copy(CopyRequest),
 }
 
 /// Stacked overlay state.
@@ -166,9 +194,10 @@ impl OverlayState {
     }
 
     /// Dispatch a key event to the top overlay. Auto-dismisses (pops) on
-    /// [`OverlayCommand::Dismiss`] and [`OverlayCommand::Commit`]; the
-    /// latter also returns the action for the dispatcher to run. No-op
-    /// (returns [`OverlayOutcome::None`]) when no overlay is active.
+    /// [`OverlayCommand::Dismiss`], [`OverlayCommand::Commit`], and
+    /// [`OverlayCommand::Copy`]; `Commit` also returns the action and `Copy`
+    /// the selection for the dispatcher to handle. No-op (returns
+    /// [`OverlayOutcome::None`]) when no overlay is active.
     pub fn handle_key(&mut self, key: &KeyEvent) -> OverlayOutcome {
         let Some(top) = self.stack.last_mut() else {
             return OverlayOutcome::None;
@@ -183,9 +212,11 @@ impl OverlayState {
                 self.dismiss();
                 OverlayOutcome::RunAction(action)
             }
-            OverlayCommand::SendSelection(event) => {
-                // Copy-mode sends selection events; the overlay stays active.
-                OverlayOutcome::SendSelection(event)
+            OverlayCommand::Copy(req) => {
+                // Copy-mode Enter: dismiss the overlay (tmux-style copy-and-exit)
+                // and hand the dispatcher the selection to resolve locally.
+                self.dismiss();
+                OverlayOutcome::Copy(req)
             }
         }
     }

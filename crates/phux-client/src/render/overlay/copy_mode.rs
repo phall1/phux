@@ -1,18 +1,21 @@
 //! Copy-mode overlay (phux-wave-a-copy-mode).
 //!
 //! Provides terminal-based text selection with visual feedback. The overlay
-//! captures arrow keys to adjust selection boundaries and Enter/Ctrl-C to
-//! copy the selected text via `SELECTION_FORMAT_REQUEST`. The server stores
-//! per-terminal selection state and extracts plaintext via libghostty's
-//! `format_selection_alloc` when requested (ADR-0025).
+//! captures arrow keys to adjust selection boundaries and Enter to copy the
+//! selected text. Per [ADR-0030](../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md),
+//! selection is a *client-local projection*: the overlay tracks the selection
+//! rectangle in pane-local viewport cells, and on Enter the dispatcher
+//! resolves it against the focused pane's own libghostty engine
+//! (`format_selection_alloc`) and writes the text to the host clipboard via
+//! OSC 52. Nothing about the selection touches the wire.
 
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
-use phux_protocol::input::selection::{SelectionEvent, SelectionMode};
+use phux_protocol::input::selection::SelectionMode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::{OverlayCommand, RenderOverlay};
+use super::{CopyRequest, OverlayCommand, RenderOverlay};
 
 /// Rectangular selection state: (row, col) coordinates for start and end.
 /// Normalized so that start <= end.
@@ -137,10 +140,16 @@ impl CopyModeOverlay {
         }
     }
 
-    /// Dispatch a SELECTION_* frame to inform the server of the current selection.
-    fn dispatch_selection(&self) -> SelectionEvent {
-        SelectionEvent {
-            mode: self.mode,
+    /// Build the client-local copy request for the current selection: the
+    /// normalized inclusive viewport rectangle plus the block/linear flag.
+    /// The dispatcher resolves it against the focused pane's own engine.
+    fn copy_request(&self) -> CopyRequest {
+        let range = self.selection_range();
+        CopyRequest {
+            start_row: range.start_row,
+            start_col: range.start_col,
+            end_row: range.end_row,
+            end_col: range.end_col,
             rectangle: self.mode == SelectionMode::Rect,
         }
     }
@@ -220,27 +229,29 @@ impl RenderOverlay for CopyModeOverlay {
         }
 
         match key.key {
+            // Arrow keys adjust the selection in-place; the driver repaints
+            // the overlay after every key while it is active, so `Stay` is
+            // enough to reflect the moved cursor. No wire traffic (ADR-0030).
             PhysicalKey::ArrowUp => {
                 self.move_cursor(-1, 0);
-                OverlayCommand::SendSelection(self.dispatch_selection())
+                OverlayCommand::Stay
             }
             PhysicalKey::ArrowDown => {
                 self.move_cursor(1, 0);
-                OverlayCommand::SendSelection(self.dispatch_selection())
+                OverlayCommand::Stay
             }
             PhysicalKey::ArrowLeft => {
                 self.move_cursor(0, -1);
-                OverlayCommand::SendSelection(self.dispatch_selection())
+                OverlayCommand::Stay
             }
             PhysicalKey::ArrowRight => {
                 self.move_cursor(0, 1);
-                OverlayCommand::SendSelection(self.dispatch_selection())
+                OverlayCommand::Stay
             }
-            PhysicalKey::Enter => {
-                // Copy: send selection event, then dismiss.
-                // The dispatcher will also need to send SELECTION_FORMAT_REQUEST.
-                OverlayCommand::SendSelection(self.dispatch_selection())
-            }
+            // Enter copies the selection client-locally (the dispatcher
+            // resolves it against the focused pane's engine and emits OSC 52)
+            // and exits copy-mode, tmux-style.
+            PhysicalKey::Enter => OverlayCommand::Copy(self.copy_request()),
             PhysicalKey::Escape => OverlayCommand::Dismiss,
             _ => OverlayCommand::Stay,
         }
