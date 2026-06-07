@@ -615,7 +615,15 @@ where
                 key,
                 value,
             } => {
-                handle_set_metadata(&state, client_id, request_id, &scope, &key, value);
+                handle_set_metadata(
+                    &state,
+                    client_id,
+                    request_id,
+                    &scope,
+                    &key,
+                    value,
+                    &root_token,
+                );
             }
             FrameKind::DeleteMetadata {
                 request_id,
@@ -664,7 +672,7 @@ where
                 request_id,
                 command,
             } => {
-                handle_command(&state, client_id, request_id, command, &out_tx, &root_token).await;
+                handle_command(&state, client_id, request_id, command, &out_tx).await;
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -742,6 +750,26 @@ pub(crate) async fn handle_get_metadata(
     }
 }
 
+/// Parse the JSON body of a `SESSION_CREATE_KEY` write into
+/// `(name, command, cwd)`. Returns `None` if the bytes are not valid JSON,
+/// the top level is not an object, or `name` is missing/non-string. `command`
+/// (an array of strings) and `cwd` (a string) are optional; a malformed
+/// optional field is treated as absent rather than failing the whole parse.
+fn parse_session_create_request(
+    value: &[u8],
+) -> Option<(String, Option<Vec<String>>, Option<String>)> {
+    let v: serde_json::Value = serde_json::from_slice(value).ok()?;
+    let obj = v.as_object()?;
+    let name = obj.get("name")?.as_str()?.to_owned();
+    let command = obj.get("command").and_then(|c| c.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|e| e.as_str().map(str::to_owned))
+            .collect::<Vec<String>>()
+    });
+    let cwd = obj.get("cwd").and_then(|c| c.as_str()).map(str::to_owned);
+    Some((name, command, cwd))
+}
+
 pub(crate) fn handle_set_metadata(
     state: &SharedState,
     client_id: ClientId,
@@ -749,8 +777,96 @@ pub(crate) fn handle_set_metadata(
     scope: &phux_protocol::wire::frame::Scope,
     key: &str,
     value: Vec<u8>,
+    root_token: &tokio_util::sync::CancellationToken,
 ) {
+    use phux_protocol::wire::frame::{SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope};
     debug!(?client_id, request_id, ?scope, %key, "SET_METADATA");
+    // v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027): a create-without-
+    // attach is a `SET_METADATA` write of the conventional
+    // `SESSION_CREATE_KEY` under `Scope::Global`, replacing the removed
+    // `CREATE_SESSION` verb. The value is a UTF-8 JSON object
+    // `{ name, command?, cwd? }`. The server seeds the session + pane; the
+    // caller reads the seed-pane id back via `GET_STATE` (SET_METADATA has
+    // no reply frame). A malformed value or a duplicate name is a silent
+    // no-op (logged), matching the fire-and-forget shape of metadata writes.
+    if key == SESSION_CREATE_KEY && matches!(scope, Scope::Global) {
+        match parse_session_create_request(&value) {
+            Some((name, command, cwd)) => {
+                let outcome = crate::runtime::commands::create_named_session(
+                    state,
+                    &name,
+                    command,
+                    cwd.as_deref(),
+                    root_token,
+                );
+                // Publish the result under the conventional result key so the
+                // caller can read the seed-pane id back (SET_METADATA has no
+                // reply frame). On failure we leave the result key untouched;
+                // the client surfaces "did not register" from its snapshot.
+                if let Ok(wire) = &outcome {
+                    let payload = serde_json::json!({
+                        "name": name,
+                        "terminal_id": wire.local_id(),
+                    });
+                    if let Ok(bytes) = serde_json::to_vec(&payload) {
+                        let _ = state.with_mut(|s| {
+                            s.metadata_set(&Scope::Global, SESSION_CREATE_RESULT_KEY, bytes)
+                        });
+                    }
+                }
+                debug!(
+                    ?client_id,
+                    request_id,
+                    %name,
+                    ok = outcome.is_ok(),
+                    "SET_METADATA(session-create): create attempted",
+                );
+            }
+            None => {
+                warn!(
+                    ?client_id,
+                    request_id,
+                    "SET_METADATA(session-create): malformed JSON value (want {{name, command?, cwd?}}); ignoring",
+                );
+            }
+        }
+        return;
+    }
+    // v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027): a session rename is a
+    // `SET_METADATA` write of the conventional `SESSION_NAME_KEY` under
+    // `Scope::Global`, replacing the removed `RENAME_SESSION` verb. The
+    // value is `current_name\0new_name` (NUL-separated UTF-8). The server is
+    // authoritative for session names (they drive `ls` / `attach`), so it
+    // intercepts the write and applies the registry rename rather than
+    // storing it as an opaque blob. A malformed value or unknown session is
+    // a silent no-op — `SET_METADATA` has no reply frame to carry an error,
+    // matching the fire-and-forget shape of every other metadata write.
+    if key == phux_protocol::wire::frame::SESSION_NAME_KEY && matches!(scope, Scope::Global) {
+        match std::str::from_utf8(&value).ok().and_then(|s| {
+            s.split_once('\0')
+                .map(|(cur, new)| (cur.to_owned(), new.to_owned()))
+        }) {
+            Some((current, new_name)) => {
+                let outcome = state.with_mut(|s| s.rename_session(&current, &new_name));
+                debug!(
+                    ?client_id,
+                    request_id,
+                    %current,
+                    %new_name,
+                    ?outcome,
+                    "SET_METADATA(session-name): applied registry rename",
+                );
+            }
+            None => {
+                warn!(
+                    ?client_id,
+                    request_id,
+                    "SET_METADATA(session-name): malformed value (want current\\0new); ignoring",
+                );
+            }
+        }
+        return;
+    }
     let delivered = state.with_mut(|s| s.metadata_set(scope, key, value));
     trace!(
         ?client_id,

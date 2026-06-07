@@ -17,16 +17,15 @@
 //!    seeded session is the server's only one, the kill also triggers the
 //!    tmux-model self-exit (phux-60s), so the test tolerates the
 //!    connection closing.
-//! 5. **CREATE_SESSION** → `COMMAND_RESULT { Ok_With(TerminalId(..)) }`
-//!    creating a named session under the default collection *without*
-//!    attaching (the returned id resolves to a live seed pane, GET_STATE
-//!    lists the new session). Plus the duplicate-name and unknown-collection
-//!    refusals (`phux-fdh`, ADR-0021 §3), and the non-empty-seed-command
-//!    path — the wire `command` actually runs in the seed pane (`phux-rhh`).
-//! 6. **KILL_COLLECTION** → `COMMAND_RESULT { Ok }` tearing down a whole
-//!    named session in one round-trip; a fresh GET_STATE no longer lists it.
-//!    Plus the unknown-session (`SessionNotFound`) and unknown-collection
-//!    (`InvalidCommand`) refusals (`phux-h9s`, ADR-0021 §3).
+//! 5. **KILL_TERMINALS** → `COMMAND_RESULT { Ok }` atomically tearing down a
+//!    multi-terminal group in one round-trip (the v0.3.0 "Option B" re-tier
+//!    op that replaced KILL_COLLECTION; ADR-0019 / ADR-0027), plus the
+//!    unknown-id no-op (idempotent) path.
+//! 6. **Session create / rename via L3 metadata** — the v0.3.0 replacements
+//!    for the dissolved CREATE_SESSION / RENAME_SESSION verbs: a
+//!    `SESSION_CREATE_KEY` write seeds a session and publishes its seed-pane
+//!    id under `SESSION_CREATE_RESULT_KEY`; a `SESSION_NAME_KEY` write
+//!    renames a session (GET_STATE reflects the new name).
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -350,574 +349,308 @@ fn kill_terminal_live_pane_acks_and_closes() {
     });
 }
 
-/// CREATE_SESSION creates a named session under the default collection
-/// without attaching, and the reply carries the seed pane's id. The whole
-/// path rides `handle_client` (the production read loop) — the test only
-/// speaks wire bytes. Driving it through `handle_client` (not
-/// `handle_create_session` directly) is the house rule for wire→dispatch
-/// coverage.
+/// **KILL_TERMINALS** atomically tears down a multi-terminal group in ONE
+/// round-trip — the irreducible op the v0.3.0 "Option B" re-tier (ADR-0019 /
+/// ADR-0027) put in place of the dissolved KILL_COLLECTION verb. The test
+/// attaches to "work", adds a second pane via SPAWN_TERMINAL so the session
+/// owns two Terminals, then KILL_TERMINALS both ids and asserts the `Ok` ack
+/// plus a TERMINAL_CLOSED for *each* pane. The whole path rides
+/// `handle_client` (the production read loop).
 #[test]
-fn create_session_creates_without_attaching_and_returns_seed_pane() {
+fn kill_terminals_tears_down_a_multi_terminal_group_atomically() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let (_shutdown_tx, _server) =
+            spawn_server_seed_pty_no_cmd(socket_path.clone(), Some("work"));
         let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
 
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 9,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "scratch".to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-
-        let created = match await_command_result(&mut stream, 9).await {
-            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+        // Attach to learn the seed pane id and to satisfy SPAWN_TERMINAL's
+        // "spawning client must be attached" precondition.
+        send_frame(&mut stream, &attach_by_name("work")).await;
+        let pane_a = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::Attached { snapshot, .. } = frame {
+                break snapshot.panes[0].id.clone();
+            }
         };
 
-        // The new session shows up in a fresh snapshot — proof the create
-        // happened server-side, with no attach (this client never sent
-        // ATTACH and never received an ATTACHED frame).
+        // Add a second pane to the same session.
         send_frame(
             &mut stream,
             &FrameKind::Command {
-                request_id: 10,
+                request_id: 40,
                 command: Command::GetState {
                     scope: StateScope::Server,
                 },
             },
         )
         .await;
-        match await_command_result(&mut stream, 10).await {
-            CommandResult::OkWith(CommandValue::State(snapshot)) => {
-                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
-                assert!(
-                    names.contains(&"scratch"),
-                    "CREATE_SESSION must register the session; got {names:?}",
-                );
+        let _ = await_command_result(&mut stream, 40).await;
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 41,
+                collection: CollectionId::new(1),
+                command: None,
+                cwd: None,
+                env: None,
+            },
+        )
+        .await;
+        let pane_b = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::TerminalSpawned {
+                request_id: 41,
+                result,
+            } = frame
+            {
+                match result {
+                    phux_protocol::wire::frame::SpawnResult::Ok(id) => break id,
+                    other => panic!("SPAWN_TERMINAL failed: {other:?}"),
+                }
             }
-            other => panic!("expected Ok_With(State(..)), got {other:?}"),
-        }
+        };
+        assert_ne!(pane_a, pane_b, "the two panes must be distinct");
 
-        // The returned id resolves to a live pane: GET_SCREEN on it succeeds
-        // (the side-effect-free read path needs a real actor behind the id).
+        // Atomic teardown of BOTH panes in one round-trip.
         send_frame(
             &mut stream,
             &FrameKind::Command {
-                request_id: 11,
-                command: Command::GetScreen {
-                    terminal_id: created.clone(),
-                    request_scrollback: None,
-                    cells: false,
+                request_id: 42,
+                command: Command::KillTerminals {
+                    ids: vec![pane_a.clone(), pane_b.clone()],
                 },
             },
         )
         .await;
-        match await_command_result(&mut stream, 11).await {
-            CommandResult::OkWith(CommandValue::Json(_)) => {}
-            other => panic!("seed pane id must back a live pane; got {other:?}"),
+
+        // Expect the Ok ack plus a TERMINAL_CLOSED for each pane (any order;
+        // tolerate the server's self-exit close once its only session reaps).
+        let mut saw_ok = false;
+        let mut closed_a = false;
+        let mut closed_b = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while !(saw_ok && closed_a && closed_b) && tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let Ok(maybe) = timeout(remaining, try_recv_typed(&mut stream)).await else {
+                break;
+            };
+            let Some((type_byte, frame)) = maybe else {
+                break; // server self-exited and closed the connection
+            };
+            match (type_byte, frame) {
+                (
+                    _,
+                    FrameKind::CommandResult {
+                        request_id: 42,
+                        result: CommandResult::Ok,
+                    },
+                ) => saw_ok = true,
+                (TYPE_TERMINAL_CLOSED, FrameKind::TerminalClosed { terminal_id, .. }) => {
+                    if terminal_id == pane_a {
+                        closed_a = true;
+                    } else if terminal_id == pane_b {
+                        closed_b = true;
+                    }
+                }
+                _ => {}
+            }
         }
+        assert!(saw_ok, "KILL_TERMINALS must ack with COMMAND_RESULT::Ok");
+        assert!(closed_a, "KILL_TERMINALS must close the first pane");
+        assert!(closed_b, "KILL_TERMINALS must close the second pane");
     });
 }
 
-/// CREATE_SESSION run twice with distinct names yields two distinct seed
-/// panes — the always-new guarantee, without a client-side GET_STATE round
-/// trip. Distinct ids prove no silent reuse.
+/// **KILL_TERMINALS with an unknown / already-dead id is a no-op**, not an
+/// error: the op is idempotent so a caller racing a natural exit still
+/// succeeds. A list mixing one live pane and one bogus id acks `Ok` and
+/// closes only the live pane.
 #[test]
-fn create_session_twice_yields_distinct_panes() {
+fn kill_terminals_skips_unknown_ids() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
         let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
         let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
 
+        send_frame(&mut stream, &attach_by_name("work")).await;
+        let pane = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::Attached { snapshot, .. } = frame {
+                break snapshot.panes[0].id.clone();
+            }
+        };
+
+        // One live id + one id that does not exist.
         send_frame(
             &mut stream,
             &FrameKind::Command {
-                request_id: 1,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "a".to_owned(),
-                    command: None,
-                    cwd: None,
+                request_id: 45,
+                command: Command::KillTerminals {
+                    ids: vec![pane.clone(), TerminalId::local(999_999)],
                 },
             },
         )
         .await;
-        let first = match await_command_result(&mut stream, 1).await {
-            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
+
+        let mut saw_ok = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !saw_ok && tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let Ok(maybe) = timeout(remaining, try_recv_typed(&mut stream)).await else {
+                break;
+            };
+            let Some((_t, frame)) = maybe else { break };
+            if matches!(
+                frame,
+                FrameKind::CommandResult {
+                    request_id: 45,
+                    result: CommandResult::Ok,
+                }
+            ) {
+                saw_ok = true;
+            }
+        }
+        assert!(
+            saw_ok,
+            "KILL_TERMINALS with an unknown id must still ack Ok (idempotent)"
+        );
+    });
+}
+
+/// Session create-without-attach via the conventional `SESSION_CREATE_KEY`
+/// L3 metadata write (the v0.3.0 replacement for CREATE_SESSION). The server
+/// seeds the session + pane and publishes the seed-pane id under
+/// `SESSION_CREATE_RESULT_KEY`; a fresh GET_STATE lists the new session and a
+/// GET_METADATA on the result key returns the id.
+#[test]
+fn session_create_via_metadata_seeds_session_and_publishes_id() {
+    run_local(async {
+        use phux_protocol::wire::frame::{SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope};
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        let value = serde_json::to_vec(&serde_json::json!({
+            "name": "scratch",
+            "command": serde_json::Value::Null,
+            "cwd": serde_json::Value::Null,
+        }))
+        .unwrap();
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: SESSION_CREATE_KEY.to_owned(),
+                value,
+            },
+        )
+        .await;
+
+        // GET_STATE must list the new session.
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 2,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        match await_command_result(&mut stream, 2).await {
+            CommandResult::OkWith(CommandValue::State(snapshot)) => {
+                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+                assert!(
+                    names.contains(&"scratch"),
+                    "session-create must register the session; got {names:?}",
+                );
+            }
+            other => panic!("expected Ok_With(State(..)), got {other:?}"),
+        }
+
+        // The result key carries {name, terminal_id} for the created session.
+        send_frame(
+            &mut stream,
+            &FrameKind::GetMetadata {
+                request_id: 3,
+                scope: Scope::Global,
+                key: SESSION_CREATE_RESULT_KEY.to_owned(),
+            },
+        )
+        .await;
+        let result = loop {
+            let (_t, frame) = recv_typed(&mut stream).await;
+            if let FrameKind::MetadataValue {
+                request_id: 3,
+                value,
+            } = frame
+            {
+                break value;
+            }
         };
+        let bytes = result.expect("result key must be present after a successful create");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json.get("name").and_then(|v| v.as_str()), Some("scratch"));
+        assert!(
+            json.get("terminal_id")
+                .and_then(serde_json::Value::as_u64)
+                .is_some(),
+            "result must carry a terminal_id; got {json:?}",
+        );
+    });
+}
+
+/// Session rename via the conventional `SESSION_NAME_KEY` L3 metadata write
+/// (the v0.3.0 replacement for RENAME_SESSION). The server intercepts the
+/// `current\0new` value and applies the registry rename; a fresh GET_STATE
+/// reflects the new name.
+#[test]
+fn session_rename_via_metadata_updates_registry_name() {
+    run_local(async {
+        use phux_protocol::wire::frame::{SESSION_NAME_KEY, Scope};
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        let mut value = b"work".to_vec();
+        value.push(0);
+        value.extend_from_slice(b"renamed");
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: SESSION_NAME_KEY.to_owned(),
+                value,
+            },
+        )
+        .await;
 
         send_frame(
             &mut stream,
             &FrameKind::Command {
                 request_id: 2,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "b".to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        let second = match await_command_result(&mut stream, 2).await {
-            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
-        };
-
-        assert_ne!(
-            first, second,
-            "two CREATE_SESSION calls must seed distinct panes"
-        );
-    });
-}
-
-/// CREATE_SESSION with a name already in use is refused — create-only, never
-/// create-or-attach (unlike `ATTACH { CreateIfMissing }`).
-#[test]
-fn create_session_duplicate_name_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 4,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "work".to_owned(), // the seeded session's name
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 4).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::InvalidCommand);
-            }
-            other => panic!("expected Error(InvalidCommand), got {other:?}"),
-        }
-    });
-}
-
-/// CREATE_SESSION under an unknown collection is refused; v0.1 servers host
-/// only the default `CollectionId(1)`.
-#[test]
-fn create_session_unknown_collection_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 6,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(99),
-                    name: "other".to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 6).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::InvalidCommand);
-            }
-            other => panic!("expected Error(InvalidCommand), got {other:?}"),
-        }
-    });
-}
-
-/// CREATE_SESSION carrying a NON-EMPTY seed command actually runs that
-/// command in the seed pane (`phux-rhh`). The server is configured with a
-/// real PTY but no server-wide override command, so the wire `command`
-/// takes effect; the fixture writes a deterministic marker, which a poll of
-/// GET_SCREEN on the returned seed-pane id must observe. The whole path
-/// rides `handle_client` (the production read loop) — the test speaks only
-/// wire bytes — closing the Q5 coverage gap a prior verify flagged (the
-/// existing CREATE_SESSION tests only exercised the default-seed path).
-#[test]
-fn create_session_runs_non_empty_seed_command() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        // PTY-backed seeds, but no override command: the wire `command`
-        // below is what the seed pane execs.
-        let (_shutdown_tx, _server) =
-            spawn_server_seed_pty_no_cmd(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        // Deterministic fixture: print a marker, then idle so the pane stays
-        // live long enough for the GET_SCREEN poll to sample it.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 40,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "seeded".to_owned(),
-                    command: Some(vec![
-                        "/bin/sh".to_owned(),
-                        "-c".to_owned(),
-                        "printf RHHMARKER; sleep 30".to_owned(),
-                    ]),
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        let seed = match await_command_result(&mut stream, 40).await {
-            CommandResult::OkWith(CommandValue::TerminalId(id)) => id,
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
-        };
-
-        // Poll GET_SCREEN on the seed pane until the marker the seed command
-        // printed shows up — proof the wire `command` actually ran in the
-        // seed pane (PTY startup + exec is asynchronous).
-        let mut request_id = 41;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        let mut saw_marker = false;
-        while tokio::time::Instant::now() < deadline {
-            send_frame(
-                &mut stream,
-                &FrameKind::Command {
-                    request_id,
-                    command: Command::GetScreen {
-                        terminal_id: seed.clone(),
-                        request_scrollback: None,
-                        cells: false,
-                    },
-                },
-            )
-            .await;
-            if let CommandResult::OkWith(CommandValue::Json(json)) =
-                await_command_result(&mut stream, request_id).await
-            {
-                let screen: phux_core::screen::ScreenState = serde_json::from_str(&json)
-                    .expect("GET_SCREEN reply must be valid ScreenState");
-                if screen.lines.iter().any(|line| line.contains("RHHMARKER")) {
-                    saw_marker = true;
-                    break;
-                }
-            }
-            request_id += 1;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        assert!(
-            saw_marker,
-            "CREATE_SESSION seed command must run in the seed pane (RHHMARKER never rendered)",
-        );
-    });
-}
-
-/// KILL_COLLECTION tears down a whole named session in ONE round-trip
-/// (`phux-h9s`). The test creates a session, kills it via KILL_COLLECTION,
-/// then asserts a fresh GET_STATE no longer lists it. The whole path rides
-/// `handle_client` (the production read loop) — the house rule for
-/// wire->dispatch coverage. The kill replies `Ok` (the same ack shape
-/// KILL_TERMINAL uses); the async TERMINAL_CLOSED frames confirm teardown.
-#[test]
-fn kill_collection_tears_down_named_session() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        // Pre-seed "work" so the server survives "scratch"'s teardown
-        // (the tmux-model self-exit only fires when the LAST session reaps).
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        // Create a second session to tear down.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 50,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "scratch".to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 50).await {
-            CommandResult::OkWith(CommandValue::TerminalId(_)) => {}
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
-        }
-
-        // One round-trip teardown.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 51,
-                command: Command::KillCollection {
-                    collection: CollectionId::new(1),
-                    name: "scratch".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 51).await {
-            CommandResult::Ok => {}
-            other => panic!("expected Ok, got {other:?}"),
-        }
-
-        // The reaped session leaves the snapshot. Teardown is asynchronous
-        // (the Ok acks the start, TERMINAL_CLOSED follows), so poll GET_STATE
-        // until "scratch" is gone while "work" remains.
-        let mut request_id = 52;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut gone = false;
-        while tokio::time::Instant::now() < deadline {
-            send_frame(
-                &mut stream,
-                &FrameKind::Command {
-                    request_id,
-                    command: Command::GetState {
-                        scope: StateScope::Server,
-                    },
-                },
-            )
-            .await;
-            if let CommandResult::OkWith(CommandValue::State(snapshot)) =
-                await_command_result(&mut stream, request_id).await
-            {
-                let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
-                if !names.contains(&"scratch") {
-                    assert!(
-                        names.contains(&"work"),
-                        "KILL_COLLECTION must tear down only the named session; got {names:?}",
-                    );
-                    gone = true;
-                    break;
-                }
-            }
-            request_id += 1;
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        assert!(
-            gone,
-            "KILL_COLLECTION must remove the named session from GET_STATE",
-        );
-    });
-}
-
-/// KILL_COLLECTION on an unknown session name is refused with
-/// `SESSION_NOT_FOUND` rather than silently acked (`phux-h9s`) — symmetric
-/// with CREATE_SESSION's duplicate-name refusal.
-#[test]
-fn kill_collection_unknown_session_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 60,
-                command: Command::KillCollection {
-                    collection: CollectionId::new(1),
-                    name: "does-not-exist".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 60).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::SessionNotFound);
-            }
-            other => panic!("expected Error(SessionNotFound), got {other:?}"),
-        }
-    });
-}
-
-/// KILL_COLLECTION under an unknown collection is refused with
-/// `INVALID_COMMAND`; v0.1 servers host only the default `CollectionId(1)`.
-#[test]
-fn kill_collection_unknown_collection_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 61,
-                command: Command::KillCollection {
-                    collection: CollectionId::new(99),
-                    name: "work".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 61).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::InvalidCommand);
-            }
-            other => panic!("expected Error(InvalidCommand), got {other:?}"),
-        }
-    });
-}
-
-/// RENAME_SESSION reassigns a session's name in one round-trip; a
-/// subsequent GET_STATE snapshot shows the new name and not the old one.
-#[test]
-fn rename_session_renames_and_snapshot_reflects_new_name() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 70,
-                command: Command::RenameSession {
-                    collection: CollectionId::new(1),
-                    name: "work".to_owned(),
-                    new_name: "notes".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 70).await {
-            CommandResult::Ok => {}
-            other => panic!("expected Ok, got {other:?}"),
-        }
-
-        // The rename is synchronous server-side (a single field write), so the
-        // very next snapshot must already carry the new name.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 71,
                 command: Command::GetState {
                     scope: StateScope::Server,
                 },
             },
         )
         .await;
-        match await_command_result(&mut stream, 71).await {
+        match await_command_result(&mut stream, 2).await {
             CommandResult::OkWith(CommandValue::State(snapshot)) => {
                 let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
                 assert!(
-                    names.contains(&"notes"),
-                    "RENAME_SESSION must surface the new name in GET_STATE; got {names:?}",
-                );
-                assert!(
-                    !names.contains(&"work"),
-                    "RENAME_SESSION must drop the old name; got {names:?}",
+                    names.contains(&"renamed") && !names.contains(&"work"),
+                    "session-rename must reflect the new name in GET_STATE; got {names:?}",
                 );
             }
             other => panic!("expected Ok_With(State(..)), got {other:?}"),
-        }
-    });
-}
-
-/// RENAME_SESSION on an unknown current name is refused with
-/// `SESSION_NOT_FOUND` — symmetric with KILL_COLLECTION's refusal.
-#[test]
-fn rename_session_unknown_name_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 72,
-                command: Command::RenameSession {
-                    collection: CollectionId::new(1),
-                    name: "does-not-exist".to_owned(),
-                    new_name: "notes".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 72).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::SessionNotFound);
-            }
-            other => panic!("expected Error(SessionNotFound), got {other:?}"),
-        }
-    });
-}
-
-/// RENAME_SESSION to a name already in use is refused with `INVALID_COMMAND`
-/// — the same code CREATE_SESSION uses for a taken name. Names are unique
-/// within a collection, so a rename never silently merges two sessions.
-#[test]
-fn rename_session_duplicate_new_name_is_refused() {
-    run_local(async {
-        let tmp = TempDir::new().unwrap();
-        let socket_path = tmp.path().join("phux.sock");
-        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
-        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
-
-        // Create a second session whose name "work" already owns.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 73,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "scratch".to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 73).await {
-            CommandResult::OkWith(CommandValue::TerminalId(_)) => {}
-            other => panic!("expected Ok_With(TerminalId(..)), got {other:?}"),
-        }
-
-        // Renaming "scratch" to the taken "work" must be refused.
-        send_frame(
-            &mut stream,
-            &FrameKind::Command {
-                request_id: 74,
-                command: Command::RenameSession {
-                    collection: CollectionId::new(1),
-                    name: "scratch".to_owned(),
-                    new_name: "work".to_owned(),
-                },
-            },
-        )
-        .await;
-        match await_command_result(&mut stream, 74).await {
-            CommandResult::Error { code, .. } => {
-                assert_eq!(code, ErrorCode::InvalidCommand);
-            }
-            other => panic!("expected Error(InvalidCommand), got {other:?}"),
         }
     });
 }

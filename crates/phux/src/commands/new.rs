@@ -1,17 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use phux_client::attach::connection::Connection;
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
-use phux_protocol::ids::CollectionId;
 use phux_protocol::wire::frame::{
-    AttachTarget, Command as WireCommand, CommandResult, CommandValue, StateScope,
+    AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind,
+    SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope, StateScope,
 };
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{
     DEFAULT_SESSION_NAME, attach::resolved_default_session_name, attach::run_attach_once,
-    cli_runtime, print_attach_error, report_no_server, request_command,
+    cli_runtime, command_on, print_attach_error, report_no_server, request_command,
     server::maybe_auto_spawn_server,
 };
 
@@ -130,18 +131,20 @@ pub(crate) fn run_new(
 }
 
 /// `phux new --json` — create a session *without* attaching and print its
-/// seed pane's id as JSON (ADR-0021 §3, `phux-fdh`).
+/// seed pane's id as JSON.
 ///
-/// Issues the `CREATE_SESSION` control command rather than
-/// `ATTACH { CreateIfMissing }`: no attach, no subscription, no resize, and
-/// no client-side `GET_STATE`→attach race — the server allocates the session
-/// and its seed pane atomically, so two concurrent `phux new --json -s X`
-/// callers cannot both create `X` (the loser gets an error).
+/// Since the v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) dissolved the
+/// L2 collection tier and removed the `CREATE_SESSION` verb, create-without-
+/// attach is expressed as an L3 `SET_METADATA` write of the conventional
+/// [`SESSION_CREATE_KEY`] (`Scope::Global`, value = JSON `{name, command?,
+/// cwd?}`). The server seeds the session + pane atomically; the client then
+/// reads the seed-pane id back from [`SESSION_CREATE_RESULT_KEY`] via
+/// `GET_METADATA` (`SET_METADATA` carries no reply frame).
 ///
 /// `--json` requires an explicit `-s NAME` (auto-naming is reserved for the
-/// attaching path, where the client already snapshots state). A name already
-/// in use is the server's error, surfaced verbatim — create-only, never
-/// create-or-attach.
+/// attaching path). A name already in use is reported as an error
+/// (checked client-side against the pre-write snapshot) — create-only,
+/// never create-or-attach.
 pub(crate) fn run_new_json(
     rt: &tokio::runtime::Runtime,
     socket_path: &Path,
@@ -156,33 +159,30 @@ pub(crate) fn run_new_json(
 
     // A server must be running to host the new session. Auto-spawn seeds a
     // throwaway session under DEFAULT_SESSION_NAME (kept distinct from the
-    // requested name so the subsequent CREATE_SESSION does not collide with
-    // the seed) and keeps the server alive; the real session is then created
-    // without attaching. If the requested name equals the seed name the
-    // server rejects the duplicate cleanly — no silent reuse.
+    // requested name so the create write below does not collide with the
+    // seed) and keeps the server alive; the real session is then created
+    // without attaching.
     if !socket_path.exists()
         && let Err(err) = maybe_auto_spawn_server(socket_path, DEFAULT_SESSION_NAME, None)
     {
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
 
-    let target = WireCommand::CreateSession {
-        collection: CollectionId::new(1),
-        name: name.clone(),
-        command: if command.is_empty() {
-            None
-        } else {
-            Some(command)
-        },
-        cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
+    let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
+    let command = if command.is_empty() {
+        None
+    } else {
+        Some(command)
     };
 
-    match rt.block_on(request_command(socket_path, target)) {
-        Ok(CommandResult::OkWith(CommandValue::TerminalId(id))) => {
-            let payload = serde_json::json!({
-                "session": name,
-                "terminal_id": id.local_id(),
-            });
+    match rt.block_on(create_session_via_metadata(
+        socket_path,
+        &name,
+        command,
+        cwd,
+    )) {
+        Ok(terminal_id) => {
+            let payload = serde_json::json!({ "session": name, "terminal_id": terminal_id });
             match serde_json::to_string_pretty(&payload) {
                 Ok(s) => {
                     println!("{s}");
@@ -194,16 +194,96 @@ pub(crate) fn run_new_json(
                 }
             }
         }
-        Ok(CommandResult::Error { code, message }) => {
-            eprintln!("phux: create-session refused ({code:?}): {message}");
-            ExitCode::FAILURE
-        }
-        Ok(other) => {
-            eprintln!("phux: unexpected CREATE_SESSION result: {other:?}");
-            ExitCode::FAILURE
-        }
-        Err(err) => report_no_server(&err, socket_path, "new"),
+        Err(code) => code,
     }
+}
+
+/// Create a named session without attaching via the conventional
+/// `SESSION_CREATE_KEY` write, then read the seed-pane id back from
+/// `SESSION_CREATE_RESULT_KEY`. Returns the seed pane's local id on success,
+/// or the failure `ExitCode` (already reported to stderr) otherwise. Shared
+/// by `phux new --json`; mirrors the MCP `phux_new` path.
+async fn create_session_via_metadata(
+    socket_path: &Path,
+    name: &str,
+    command: Option<Vec<String>>,
+    cwd: Option<String>,
+) -> Result<u64, ExitCode> {
+    let create_bytes = serde_json::to_vec(&serde_json::json!({
+        "name": name,
+        "command": command,
+        "cwd": cwd,
+    }))
+    .map_err(|err| {
+        eprintln!("phux: failed to serialize create request: {err}");
+        ExitCode::FAILURE
+    })?;
+
+    let mut conn = Connection::connect(socket_path)
+        .await
+        .map_err(|err| report_no_server(&err, socket_path, "new"))?;
+
+    // Reject a duplicate name before writing (the server also refuses it, but
+    // silently — SET_METADATA has no reply frame).
+    let pre = match command_on(
+        &mut conn,
+        0,
+        WireCommand::GetState {
+            scope: StateScope::Server,
+        },
+    )
+    .await
+    {
+        Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
+        Ok(other) => {
+            eprintln!("phux: unexpected GET_STATE result: {other:?}");
+            return Err(ExitCode::FAILURE);
+        }
+        Err(err) => return Err(report_no_server(&err, socket_path, "new")),
+    };
+    if pre.sessions.iter().any(|s| s.name == name) {
+        eprintln!("phux: session '{name}' already exists");
+        return Err(ExitCode::FAILURE);
+    }
+
+    // Request the create, then read the published result. Frames are ordered
+    // on the single connection, so the GET's reply observes the SET's effect.
+    conn.send(&FrameKind::SetMetadata {
+        request_id: 1,
+        scope: Scope::Global,
+        key: SESSION_CREATE_KEY.to_owned(),
+        value: create_bytes,
+    })
+    .await
+    .map_err(|err| report_no_server(&err, socket_path, "new"))?;
+    conn.send(&FrameKind::GetMetadata {
+        request_id: 2,
+        scope: Scope::Global,
+        key: SESSION_CREATE_RESULT_KEY.to_owned(),
+    })
+    .await
+    .map_err(|err| report_no_server(&err, socket_path, "new"))?;
+
+    let result_value = loop {
+        match conn.recv().await {
+            Ok(FrameKind::MetadataValue {
+                request_id: 2,
+                value,
+            }) => break value,
+            Ok(_) => {}
+            Err(err) => return Err(report_no_server(&err, socket_path, "new")),
+        }
+    };
+    let not_registered = || {
+        eprintln!("phux: create-session failed: server did not register session '{name}'");
+        ExitCode::FAILURE
+    };
+    let bytes = result_value.ok_or_else(not_registered)?;
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .filter(|v| v.get("name").and_then(serde_json::Value::as_str) == Some(name))
+        .and_then(|v| v.get("terminal_id").and_then(serde_json::Value::as_u64))
+        .ok_or_else(not_registered)
 }
 
 /// `base` if it is free, otherwise `base-2`, `base-3`, … — the first

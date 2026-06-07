@@ -159,6 +159,43 @@ pub const TYPE_SUBSCRIBE_METADATA: u8 = 0x54;
 /// Discriminant for `METADATA_CHANGED` (server to client, `docs/spec/L3.md` §1).
 pub const TYPE_METADATA_CHANGED: u8 = 0xD0;
 
+/// Conventional L3 metadata key holding a session's human-readable name.
+///
+/// Introduced by the v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027): with
+/// the L2 collection tier dissolved and the `RENAME_SESSION` verb removed,
+/// a session rename is expressed as a `SET_METADATA` write of this key.
+/// The server is authoritative — it intercepts a write of this key under
+/// the appropriate scope and applies the registry rename so that `ls` /
+/// `attach` keep reading a single source of truth for the name — but the
+/// key is a stable, documented convention clients can rely on (the same way
+/// `phux.tui.layout/v1` is for TUI layout).
+pub const SESSION_NAME_KEY: &str = "phux.session.name/v1";
+
+/// Conventional L3 metadata key requesting creation of a named session
+/// *without* attaching.
+///
+/// Introduced by the v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) in
+/// place of the removed `CREATE_SESSION` verb. The value is a UTF-8 JSON
+/// object `{ "name": str, "command": [str]?, "cwd": str? }`. The server
+/// intercepts a `SET_METADATA` write of this key under `Scope::Global`,
+/// seeds the session + pane (the same machinery `ATTACH { CreateIfMissing }`
+/// uses), and records the result. Because `SET_METADATA` carries no reply
+/// frame, the caller follows with `GET_STATE` to read back the new session's
+/// seed-pane id (the create-without-attach path `phux new --json` and the
+/// MCP `phux_new` tool use).
+pub const SESSION_CREATE_KEY: &str = "phux.session.create/v1";
+
+/// Conventional L3 metadata key under which the server publishes the result
+/// of the most recent [`SESSION_CREATE_KEY`] write for a given session name.
+///
+/// Because `SET_METADATA` carries no reply frame, the create-without-attach
+/// path needs a way to read back the freshly-seeded pane's id. The server
+/// writes a UTF-8 JSON object `{ "name": str, "terminal_id": u32 }` to this
+/// key (`Scope::Global`) after a successful create; the client `GET`s it and
+/// matches on `name`. Introduced by the v0.3.0 "Option B" re-tier (ADR-0019
+/// / ADR-0027).
+pub const SESSION_CREATE_RESULT_KEY: &str = "phux.session.created/v1";
+
 /// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries
@@ -360,35 +397,20 @@ pub(crate) const COMMAND_TAG_GET_SCREEN: u8 = 0x07;
 /// attach, subscription, or resize — the write counterpart to the
 /// side-effect-free `GET_SCREEN` read.
 pub(crate) const COMMAND_TAG_ROUTE_INPUT: u8 = 0x08;
-/// Wire tag for [`Command::CreateSession`]. Appended after `ROUTE_INPUT`'s
-/// `0x08`; `CREATE_SESSION` is an additive control command (ADR-0021 §3,
-/// `phux-fdh`) that creates a named session under a Collection *without*
-/// attaching, subscribing, or resizing. The reply carries the seed pane's
-/// [`TerminalId`] via `COMMAND_RESULT { Ok_With(TerminalId) }`,
-/// asynchronously correlated by `request_id` — the same shape
-/// `SPAWN_TERMINAL` uses, but session-level. Backs `phux new --json`.
-pub(crate) const COMMAND_TAG_CREATE_SESSION: u8 = 0x09;
-/// Wire tag for [`Command::KillCollection`]. Appended after
-/// `CREATE_SESSION`'s `0x09`; `KILL_COLLECTION` is the additive teardown
-/// counterpart to `CREATE_SESSION` (ADR-0021 §3, `phux-h9s`). It destroys
-/// the named session under a Collection in *one* round-trip — replacing the
-/// N `KILL_TERMINAL` round-trips `phux kill SESSION` issued before. The
-/// reply rides `COMMAND_RESULT { Ok }`, the same ack shape `KILL_TERMINAL`
-/// uses (the async `TERMINAL_CLOSED` frames confirm teardown), but
-/// session-level. Backs `phux kill SESSION`.
-pub(crate) const COMMAND_TAG_KILL_COLLECTION: u8 = 0x0a;
-/// Wire tag for [`Command::RenameSession`]. Appended after
-/// `KILL_COLLECTION`'s `0x0a`; `RENAME_SESSION` is the additive rename
-/// counterpart to `CREATE_SESSION` (ADR-0021 §3). It resolves the named
-/// session under a Collection and reassigns its human-readable name in
-/// one round-trip. The reply rides `COMMAND_RESULT { Ok }`, the same ack
-/// shape `KILL_COLLECTION` uses; the server is authoritative and the next
-/// `ATTACHED` snapshot reconciles the new name to attached clients. An
-/// unknown `name` is rejected with `SESSION_NOT_FOUND`; a `new_name`
-/// already in use is rejected with `INVALID_COMMAND` (the same code
-/// `CREATE_SESSION` uses for a taken name). Backs `phux rename SESSION
-/// NEW-NAME` and the TUI `rename-session` action.
-pub(crate) const COMMAND_TAG_RENAME_SESSION: u8 = 0x0b;
+/// Wire tag for [`Command::KillTerminals`]. Reuses the `0x09` slot freed
+/// when the L2 lifecycle verbs (`CREATE_SESSION` / `KILL_COLLECTION` /
+/// `RENAME_SESSION`) were dissolved in the v0.3.0 "Option B" re-tier
+/// (ADR-0019 / ADR-0027). `KILL_TERMINALS` is the one irreducible
+/// multi-terminal op the dissolved `KILL_COLLECTION` left behind: it
+/// destroys a *list* of Terminals atomically under the server's single
+/// state lock — all-or-nothing for a local server — replacing the
+/// per-session teardown verb with a pure L1 list operation. Grouping
+/// (which Terminals form a "session") is now client logic over L3
+/// metadata, so the server need only know the resolved ids. The reply
+/// rides `COMMAND_RESULT { Ok }` (the async `TERMINAL_CLOSED` frames
+/// confirm teardown), the same ack shape `KILL_TERMINAL` uses. Backs
+/// `phux kill SESSION`.
+pub(crate) const COMMAND_TAG_KILL_TERMINALS: u8 = 0x09;
 /// Wire tag for [`Command::GetTerminalState`]. Appended after
 /// `RENAME_SESSION`'s `0x0b`; `GET_TERMINAL_STATE` is an additive
 /// L2 Collection-aware query (ADR-0015 L2) that returns a comprehensive
@@ -767,11 +789,11 @@ pub enum StateScope {
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
 /// the ones the CLI needs — `KILL_TERMINAL`, `GET_STATE`, the
 /// side-effect-free `GET_SCREEN` (ADR-0021 §3, ADR-0022 §5), the appended
-/// `ROUTE_INPUT` write counterpart, the appended `CREATE_SESSION`
-/// create-without-attach command (`phux-fdh`), its teardown counterpart
-/// `KILL_COLLECTION` (`phux-h9s`), and the rename counterpart
-/// `RENAME_SESSION`. Unknown wire tags surface as
-/// [`DecodeError::UnknownEnumValue`] rather than coercing to a placeholder.
+/// `ROUTE_INPUT` write counterpart, and `KILL_TERMINALS`, the atomic
+/// multi-terminal teardown the v0.3.0 "Option B" re-tier left in place of
+/// the dissolved L2 lifecycle verbs (ADR-0019 / ADR-0027). Unknown wire
+/// tags surface as [`DecodeError::UnknownEnumValue`] rather than coercing
+/// to a placeholder.
 ///
 /// Only `PartialEq` (not `Eq`): `RouteInput` carries a [`MouseEvent`] whose
 /// coordinates are not `Eq`.
@@ -832,69 +854,27 @@ pub enum Command {
         /// The structured input event (key/mouse/focus/paste).
         event: InputEvent,
     },
-    /// Create a named session under `collection` *without* attaching,
-    /// subscribing, or resizing — the create-only counterpart to
-    /// `ATTACH { CreateIfMissing }`, which always attaches. The server
-    /// allocates the session and its seed pane atomically, so two racing
-    /// `CREATE_SESSION` callers cannot collide (closing the `GET_STATE`→`ATTACH`
-    /// TOCTOU window v0.1's client-side always-new logic carried). The
-    /// reply rides `COMMAND_RESULT { Ok_With(TerminalId) }` carrying the
-    /// seed pane's id (or an `Error` if `name` is already taken or
-    /// `collection` is unknown). Backs `phux new --json` (ADR-0021 §3,
-    /// `phux-fdh`).
-    CreateSession {
-        /// Collection to host the new session under. v0.1 servers accept
-        /// only the default `CollectionId(1)`.
-        collection: CollectionId,
-        /// Name for the new session. A name already in use is rejected
-        /// (`Error`) rather than silently reused — `CREATE_SESSION` is
-        /// create-only, never create-or-attach.
-        name: String,
-        /// Initial command to run in the seed pane. `None` falls back to
-        /// the server's default shell, mirroring `CreateIfMissing`.
-        command: Option<Vec<String>>,
-        /// Working directory for the seed pane, if any.
-        cwd: Option<String>,
-    },
-    /// Destroy the session named `name` under `collection`, tearing down
-    /// every Terminal it owns in one round-trip — the teardown counterpart
-    /// to `CreateSession`. The server resolves `name` to its session,
-    /// cancels each pane's actor (the same path a `KILL_TERMINAL` per pane
-    /// would take), and replies `COMMAND_RESULT { Ok }` immediately; the
-    /// per-pane `TERMINAL_CLOSED` frames follow asynchronously as the panes
-    /// reap. An unknown `collection` or an unknown `name` is rejected with
-    /// `Error`. Backs `phux kill SESSION`, collapsing its prior N
-    /// `KILL_TERMINAL` round-trips into one (ADR-0021 §3, `phux-h9s`).
-    KillCollection {
-        /// Collection hosting the session. v0.1 servers accept only the
-        /// default `CollectionId(1)`.
-        collection: CollectionId,
-        /// Name of the session to destroy. An unknown name is rejected
-        /// (`Error`) rather than silently treated as success.
-        name: String,
-    },
-    /// Rename the session named `name` under `collection` to `new_name`,
-    /// reassigning its human-readable name in one round-trip — the rename
-    /// counterpart to `CreateSession`. The server resolves `name` to its
-    /// session (the same resolution `KillCollection` uses), rejects an
-    /// unknown `name` with `SESSION_NOT_FOUND` and a `new_name` already in
-    /// use with `INVALID_COMMAND` (the same rule `CreateSession` applies to
-    /// a taken name), then reassigns the name and replies
-    /// `COMMAND_RESULT { Ok }`. The server is authoritative: each attached
-    /// client reconciles the new name on its next `ATTACHED` snapshot. A
-    /// live `SESSION_RENAMED` push to other clients is out of scope for this
-    /// pass. Backs `phux rename SESSION NEW-NAME` and the TUI
-    /// `rename-session` action (ADR-0021 §3).
-    RenameSession {
-        /// Collection hosting the session. v0.1 servers accept only the
-        /// default `CollectionId(1)`.
-        collection: CollectionId,
-        /// Name of the session to rename. An unknown name is rejected
-        /// (`SESSION_NOT_FOUND`).
-        name: String,
-        /// New name for the session. A name already in use is rejected
-        /// (`INVALID_COMMAND`) rather than silently merging sessions.
-        new_name: String,
+    /// Atomically terminate every Terminal in `ids` under the server's
+    /// single state lock — the one irreducible multi-terminal op left
+    /// behind when the L2 collection tier was dissolved in the v0.3.0
+    /// "Option B" re-tier (ADR-0019 / ADR-0027). Grouping (which Terminals
+    /// belong to a "session") is now client logic over L3 metadata, so the
+    /// caller resolves the group to a concrete id list and the server need
+    /// only tear them down together.
+    ///
+    /// Atomicity is local and all-or-nothing in the sense that every
+    /// removal happens inside *one* lock acquisition: no other command can
+    /// observe a half-killed group on this server. Cross-host atomicity is
+    /// out of scope (it would be under any tiering). Killing an already-dead
+    /// or unknown id is a no-op (not an error) — the op is idempotent so a
+    /// caller racing a natural pane exit still succeeds. The reply rides
+    /// `COMMAND_RESULT { Ok }`; the per-pane `TERMINAL_CLOSED` frames follow
+    /// asynchronously as the panes reap. Backs `phux kill SESSION`.
+    KillTerminals {
+        /// The Terminals to terminate. Unknown / already-dead ids are
+        /// skipped silently; the op succeeds as long as it is structurally
+        /// valid.
+        ids: Vec<TerminalId>,
     },
     /// Request a comprehensive snapshot of a terminal's full state: grid,
     /// scrollback, shell metadata, cursor, and sequence number (L2 Collection-aware
@@ -2511,8 +2491,9 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 // Command tags follow the SPEC §5.1 catalog order; KILL_TERMINAL (0x03)
 // and GET_STATE (0x05) are wired in v0.1, plus the appended GET_SCREEN
 // (0x07, after RUN_HOOK's reserved 0x06), ROUTE_INPUT (0x08), and
-// CREATE_SESSION (0x09). CommandResult / CommandValue tags use the same
-// `Ok = 0x00` / sequential convention as the rest of the wire.
+// KILL_TERMINALS (0x09, reusing the slot freed by the v0.3.0 dissolution
+// of the L2 lifecycle verbs). CommandResult / CommandValue tags use the
+// same `Ok = 0x00` / sequential convention as the rest of the wire.
 // -----------------------------------------------------------------------------
 
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
@@ -2540,32 +2521,16 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             encode_terminal_id(terminal_id, enc);
             encode_input_event(event, enc);
         }
-        Command::CreateSession {
-            collection,
-            name,
-            command,
-            cwd,
-        } => {
-            enc.write_u8(COMMAND_TAG_CREATE_SESSION);
-            enc.write_u32_be(collection.get());
-            enc.write_str(name);
-            encode_optional_string_list(command.as_deref(), enc);
-            encode_optional_str(cwd.as_deref(), enc);
-        }
-        Command::KillCollection { collection, name } => {
-            enc.write_u8(COMMAND_TAG_KILL_COLLECTION);
-            enc.write_u32_be(collection.get());
-            enc.write_str(name);
-        }
-        Command::RenameSession {
-            collection,
-            name,
-            new_name,
-        } => {
-            enc.write_u8(COMMAND_TAG_RENAME_SESSION);
-            enc.write_u32_be(collection.get());
-            enc.write_str(name);
-            enc.write_str(new_name);
+        Command::KillTerminals { ids } => {
+            enc.write_u8(COMMAND_TAG_KILL_TERMINALS);
+            // Length-prefixed list: u16 count, then each tagged TerminalId.
+            // u16 is ample — a single kill-group never approaches 65 535
+            // panes — and matches the count-prefix width used elsewhere
+            // (e.g. `SubscribeTerminalEvents.event_types`).
+            enc.write_u16_be(u16::try_from(ids.len()).unwrap_or(u16::MAX));
+            for id in ids {
+                encode_terminal_id(id, enc);
+            }
         }
         Command::GetTerminalState {
             terminal_id,
@@ -2675,32 +2640,13 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
             terminal_id: decode_terminal_id(dec)?,
             event: decode_input_event(dec)?,
         }),
-        COMMAND_TAG_CREATE_SESSION => {
-            let collection = CollectionId::new(dec.read_u32_be()?);
-            let name = dec.read_str()?.to_owned();
-            let command = decode_optional_string_list(dec)?;
-            let cwd = decode_optional_str(dec)?.map(str::to_owned);
-            Ok(Command::CreateSession {
-                collection,
-                name,
-                command,
-                cwd,
-            })
-        }
-        COMMAND_TAG_KILL_COLLECTION => {
-            let collection = CollectionId::new(dec.read_u32_be()?);
-            let name = dec.read_str()?.to_owned();
-            Ok(Command::KillCollection { collection, name })
-        }
-        COMMAND_TAG_RENAME_SESSION => {
-            let collection = CollectionId::new(dec.read_u32_be()?);
-            let name = dec.read_str()?.to_owned();
-            let new_name = dec.read_str()?.to_owned();
-            Ok(Command::RenameSession {
-                collection,
-                name,
-                new_name,
-            })
+        COMMAND_TAG_KILL_TERMINALS => {
+            let count = dec.read_u16_be()? as usize;
+            let mut ids = Vec::with_capacity(count);
+            for _ in 0..count {
+                ids.push(decode_terminal_id(dec)?);
+            }
+            Ok(Command::KillTerminals { ids })
         }
         COMMAND_TAG_GET_TERMINAL_STATE => {
             let terminal_id = decode_terminal_id(dec)?;

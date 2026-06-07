@@ -17,7 +17,7 @@ use phux_client::attach::connection::Connection;
 use phux_client::run::RunOutcome;
 use phux_client::selector::{self, Selector};
 use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
-use phux_protocol::ids::{CollectionId, TerminalId};
+use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{
     Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
 };
@@ -277,13 +277,17 @@ async fn phux_wait(args: &Value) -> Result<Value, ToolError> {
     Ok(json!({ "outcome": outcome, "polls": result.polls }))
 }
 
-/// `phux_new` — create a named session via `CREATE_SESSION` (no attach).
+/// `phux_new` — create a named session without attaching.
 ///
 /// Mirrors `phux new --json`: `name` is required (the create-only path never
 /// auto-names), `command`/`cwd` are optional. The server must already be
 /// running; unlike the CLI this never auto-spawns one. Returns
-/// `{session, terminal_id}`, where `terminal_id` is the seed pane's local id
-/// (the same projection the CLI's `run_new_json` uses).
+/// `{session, terminal_id}`, where `terminal_id` is the seed pane's local id.
+///
+/// Since the v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) removed the
+/// `CREATE_SESSION` verb, this writes the conventional `SESSION_CREATE_KEY`
+/// L3 metadata key and reads the seed-pane id back from
+/// `SESSION_CREATE_RESULT_KEY` (`SET_METADATA` has no reply frame).
 async fn phux_new(args: &Value) -> Result<Value, ToolError> {
     let socket = socket::resolve(str_arg(args, "socket"));
     let name = required_str(args, "name")?.to_owned();
@@ -292,26 +296,7 @@ async fn phux_new(args: &Value) -> Result<Value, ToolError> {
     // CLI's `if command.is_empty() { None }`.
     let command = string_array_opt(args, "command")?.filter(|c| !c.is_empty());
 
-    let result = create_session(
-        &socket,
-        WireCommand::CreateSession {
-            collection: CollectionId::new(1),
-            name: name.clone(),
-            command,
-            cwd,
-        },
-    )
-    .await?;
-
-    match result {
-        CommandResult::OkWith(CommandValue::TerminalId(id)) => {
-            Ok(json!({ "session": name, "terminal_id": id.local_id() }))
-        }
-        CommandResult::Error { message, .. } => Err(ToolError::new(message)),
-        other => Err(ToolError::new(format!(
-            "unexpected CREATE_SESSION result: {other:?}"
-        ))),
-    }
+    create_session(&socket, &name, command, cwd).await
 }
 
 // -----------------------------------------------------------------------------
@@ -352,21 +337,85 @@ async fn get_state(socket: &std::path::Path) -> Result<SessionSnapshot, ToolErro
 /// [`CommandResult`]. Self-contained over the low-level [`Connection`] — the
 /// same wire-call pattern as [`get_state`], reaching the daemon without any
 /// `phux-client` agent API.
+/// Create a named session via the conventional `SESSION_CREATE_KEY` L3
+/// write, then read the seed-pane id back from `SESSION_CREATE_RESULT_KEY`.
+/// Returns `{session, terminal_id}` on success. A duplicate name (checked
+/// against a pre-write `GET_STATE`) or a server-side seed failure (absent
+/// result key) is a [`ToolError`].
 async fn create_session(
     socket: &std::path::Path,
-    command: WireCommand,
-) -> Result<CommandResult, ToolError> {
+    name: &str,
+    command: Option<Vec<String>>,
+    cwd: Option<String>,
+) -> Result<Value, ToolError> {
+    use phux_protocol::wire::frame::{SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope};
+
     let mut conn = Connection::connect(socket).await?;
-    conn.send(&FrameKind::Command {
+
+    // Reject a duplicate name before writing (the server refuses it too, but
+    // silently — SET_METADATA has no reply frame).
+    let snap = get_state_on(&mut conn).await?;
+    if snap.sessions.iter().any(|s| s.name == name) {
+        return Err(ToolError::new(format!("session {name:?} already exists")));
+    }
+
+    let create_value = json!({ "name": name, "command": command, "cwd": cwd });
+    let create_bytes = serde_json::to_vec(&create_value)
+        .map_err(|err| ToolError::new(format!("failed to serialize create request: {err}")))?;
+    conn.send(&FrameKind::SetMetadata {
         request_id: 1,
-        command,
+        scope: Scope::Global,
+        key: SESSION_CREATE_KEY.to_owned(),
+        value: create_bytes,
+    })
+    .await?;
+
+    conn.send(&FrameKind::GetMetadata {
+        request_id: 2,
+        scope: Scope::Global,
+        key: SESSION_CREATE_RESULT_KEY.to_owned(),
+    })
+    .await?;
+    let value = loop {
+        if let FrameKind::MetadataValue {
+            request_id: 2,
+            value,
+        } = conn.recv().await?
+        {
+            break value;
+        }
+    };
+    let bytes =
+        value.ok_or_else(|| ToolError::new(format!("server did not register session {name:?}")))?;
+    let terminal_id = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .filter(|v| v.get("name").and_then(Value::as_str) == Some(name))
+        .and_then(|v| v.get("terminal_id").and_then(Value::as_u64))
+        .ok_or_else(|| ToolError::new(format!("server did not register session {name:?}")))?;
+    Ok(json!({ "session": name, "terminal_id": terminal_id }))
+}
+
+/// Send `GET_STATE` over an existing connection and return the snapshot.
+async fn get_state_on(conn: &mut Connection) -> Result<SessionSnapshot, ToolError> {
+    conn.send(&FrameKind::Command {
+        request_id: 100,
+        command: WireCommand::GetState {
+            scope: StateScope::Server,
+        },
     })
     .await?;
     loop {
-        if let FrameKind::CommandResult { request_id, result } = conn.recv().await?
-            && request_id == 1
+        if let FrameKind::CommandResult {
+            request_id: 100,
+            result,
+        } = conn.recv().await?
         {
-            return Ok(result);
+            return match result {
+                CommandResult::OkWith(CommandValue::State(snap)) => Ok(snap),
+                other => Err(ToolError::new(format!(
+                    "unexpected GET_STATE result: {other:?}"
+                ))),
+            };
         }
     }
 }

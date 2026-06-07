@@ -53,21 +53,24 @@ id_type!(
     ClientId
 );
 id_type!(
-    /// Identifier for a Collection (L2), the named lifecycle bundle of
-    /// Terminals described in SPEC §7.3.
+    /// Opaque grouping key, formerly the L2 "Collection" lifecycle tier.
     ///
-    /// L2 is not yet wire-allocated (`docs/spec/proto.md` §7.2 discriminants are TBD)
-    /// but the L3 metadata wire frames (`docs/spec/L3.md` §1) reference
-    /// `CollectionId` in the `Scope::Collection` variant, so the type is
-    /// allocated here as part of phux-4li.2. Until L2 ships, v0.1 servers
-    /// use a single static default `CollectionId(1)` and accept it in
-    /// L3 metadata operations.
+    /// The "Option B" re-tier (v0.3.0, ADR-0019 / ADR-0027) **dissolved the
+    /// L2 collection tier**: there is no collection lifecycle anymore.
+    /// Grouping (membership + names) is now L3 metadata plus client logic,
+    /// and the lifecycle verbs that needed a collection id
+    /// (`CREATE_SESSION` / `KILL_COLLECTION` / `RENAME_SESSION`) were
+    /// removed. `CollectionId` survives only as a documented **opaque
+    /// grouping key** because it is still threaded through three surviving
+    /// surfaces that would balloon the re-tier if removed in the same pass:
+    /// the `Scope::Collection` L3-metadata scope (`docs/spec/L3.md` §1),
+    /// the `SpawnTerminal.collection` field, and the `CommandValue::CollectionId`
+    /// reply variant. Removing it entirely is a follow-up bead.
     ///
-    /// The wire encoding is a u32 (the inner `id`). Once L2 lands, this
-    /// type will likely grow into a tagged union (`Local`/`Satellite`) the
-    /// same way `TerminalId` did under ADR-0016; the u32-only shape today
-    /// keeps the wire bytes minimal while leaving room for that growth via
-    /// a versioned `Scope::Collection` encoding.
+    /// It is **not** a lifecycle tier: v0.3 servers expose a single static
+    /// default `CollectionId(1)` and treat it as an opaque scope label, not
+    /// a thing with create/kill/rename semantics. The wire encoding is the
+    /// inner `u32`.
     CollectionId
 );
 
