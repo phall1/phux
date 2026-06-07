@@ -58,7 +58,7 @@ config lives in its own crate.
 ```
 src/
   lib.rs              — re-exports of ServerRuntime, ServerState, PaneActor, ...
-  runtime.rs          — tokio current-thread + UDS listener + accept loop;
+  runtime/mod.rs      — tokio current-thread + UDS listener + accept loop;
                         spawns per-client tasks on a LocalSet
   state.rs            — ServerState, SharedState, AttachedClient, ClientId,
                         PaneInput, Outbound
