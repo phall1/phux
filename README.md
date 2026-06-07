@@ -111,10 +111,16 @@ It's v0.1. Calibrate accordingly, then get pleasantly surprised.
 If it's not in one of those first two lists, it's a promise, not a feature.
 We try to keep that line honest.
 
+Not sure phux is for you yet? The one-page
+[When to use phux (and when not to)](./docs/when-to-use.md) sorts the common
+cases — human-plus-agent, tmux refugee, single SSH session, fleet operator —
+and is honest about which are shipped and which are still a promise.
+
 ## Where to go from here
 
 | You want to | Read |
 |---|---|
+| Decide if it's for you | [`docs/when-to-use.md`](./docs/when-to-use.md) |
 | Get it on your machine | [`docs/INSTALL.md`](./docs/INSTALL.md) |
 | First session, start to finish | [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) |
 | Actually understand it | [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) |
