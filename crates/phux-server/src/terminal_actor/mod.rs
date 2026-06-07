@@ -1814,6 +1814,17 @@ impl TerminalActor {
             // measure. Pruned on ack, so the map stays as small as the
             // in-flight window.
             state.emit_instants.insert(seq, tokio::time::Instant::now());
+            // Defensive bound: ack-pruning keeps this map tiny for a
+            // well-behaved consumer, but one that opts into state sync and
+            // never sends FRAME_ACK (or a transport that drops acks) would
+            // otherwise grow it one entry per emitted tick without bound
+            // (~50/s at the 20ms floor cadence). Evict the oldest (lowest-seq)
+            // samples past the cap; an unacked sample this stale is already
+            // useless for RTT, so dropping it costs nothing and bounds the
+            // map to a few KB per consumer. See `MAX_EMIT_INSTANTS`.
+            while state.emit_instants.len() > MAX_EMIT_INSTANTS {
+                state.emit_instants.pop_first();
+            }
             emitted += 1;
             total_out_bytes += out_bytes;
             trace!(
@@ -3446,6 +3457,51 @@ mod tests {
             actor.adaptive_tick_interval_for_test(),
             DEFAULT_TICK_INTERVAL,
             "cadence stays at the default without a sample",
+        );
+    }
+
+    /// phux-ahk: a state-sync consumer that never sends `FRAME_ACK` must not
+    /// grow `emit_instants` without bound. Ack-pruning never runs for it, so
+    /// the per-tick insert is bounded only by the defensive
+    /// [`MAX_EMIT_INSTANTS`] cap (oldest-evicted). Drive many more emitting
+    /// ticks than the cap, never acking, and assert the map stays capped and
+    /// retains the newest (highest-`seq`) samples rather than the stale ones.
+    #[test]
+    fn emit_instants_is_capped_for_never_acking_consumer() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+
+        // Far more emitting ticks than the cap. Distinct content each tick
+        // keeps the grid dirty so the diff is non-empty and the tick actually
+        // emits (and inserts). Drain the mailbox each tick so the send keeps
+        // succeeding — a full mailbox would backpressure and skip the insert,
+        // hiding the growth this test pins.
+        let ticks = MAX_EMIT_INSTANTS + 64;
+        for i in 0..ticks {
+            actor.vt_write_for_test(&[b'a' + u8::try_from(i % 26).expect("0..26 fits u8")]);
+            actor.tick_emit();
+            while rx.try_recv().is_ok() {}
+        }
+
+        let state = actor.consumer_state(client).expect("state present");
+        assert!(
+            state.emit_instants.len() <= MAX_EMIT_INSTANTS,
+            "emit_instants must stay capped at {} for a never-acking consumer; got {}",
+            MAX_EMIT_INSTANTS,
+            state.emit_instants.len(),
+        );
+        // Eviction drops the oldest seqs, so emission must actually have run
+        // past the cap (otherwise this test proves nothing) and the lowest
+        // retained key is well above the first seq.
+        let lowest = *state.emit_instants.keys().next().expect("non-empty map");
+        assert!(
+            lowest > 1,
+            "oldest emit instants should have been evicted; lowest retained seq = {lowest}",
         );
     }
 }

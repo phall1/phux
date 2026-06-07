@@ -232,7 +232,9 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // SGR reset before the scroll so the blanked rows carry no pen.
         out.extend_from_slice(b"\x1b[0m");
         if visible > 0 {
-            out.extend_from_slice(format!("\x1b[{visible}S").as_bytes());
+            // Format the digits straight into `out` (same as `write_cup`)
+            // rather than allocating a throwaway `String` just to copy it.
+            let _ = write!(out, "\x1b[{visible}S");
         }
         snap.scrollback = out;
         Ok(snap)

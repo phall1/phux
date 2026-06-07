@@ -85,6 +85,17 @@ impl LastAckedCursorMode {
     }
 }
 
+/// Defensive cap on [`ConsumerSyncState::emit_instants`].
+///
+/// The map is pruned to the in-flight window on every `FRAME_ACK`, so a
+/// well-behaved consumer keeps only a handful of entries. This cap guards the
+/// pathological case — a consumer that opts into state sync but never acks, or
+/// a transport that drops acks — where the map would otherwise grow one entry
+/// per emitted tick without bound. 256 entries is ~5s of in-flight ticks at
+/// the [`MIN_TICK_INTERVAL`](super::tick::MIN_TICK_INTERVAL) floor (20ms),
+/// far beyond any real RTT window, and bounds the map to a few KB per consumer.
+pub const MAX_EMIT_INSTANTS: usize = 256;
+
 /// Per-consumer cached reference state for ADR-0018 lazy state
 /// synchronization. One per `(TerminalActor, attached ClientId)`.
 ///
@@ -175,7 +186,9 @@ pub struct ConsumerSyncState {
     /// the value is the `tokio::time::Instant` the frame was handed to the
     /// outbound mailbox. Pruned up to the acked `seq` on every ack so it
     /// stays bounded by the number of frames in flight within one RTT (a
-    /// handful at the clamped cadence). No wire change: the RTT round-trip
+    /// handful at the clamped cadence) for an acking consumer, and hard-capped
+    /// at [`MAX_EMIT_INSTANTS`] (oldest-evicted) so a never-acking consumer
+    /// cannot grow it without bound. No wire change: the RTT round-trip
     /// rides the `seq` that `FRAME_ACK` already echoes.
     pub emit_instants: std::collections::BTreeMap<u64, tokio::time::Instant>,
     /// Whether this consumer negotiated the synthesized state-sync tick
