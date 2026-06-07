@@ -68,9 +68,17 @@ pub use ids::{ClientId, FrameId, GroupId, SatelliteHost, SessionId, TerminalId, 
 /// (`TerminalId`, `ViewportInfo`, `Command`, `SessionSnapshot`, ...) stay
 /// positional inside a field's value. Every body's bytes change, so this is
 /// wire-breaking; pre-1.0 it bumps the minor.
+///
+/// Bumped from `0.4.0` to `0.5.0` by phux-q1ni (ADR-0030): the `INPUT_SELECTION`
+/// frame (type `0x15`), its `Selection` input-event tag (`0x04`), and the
+/// `SelectionEvent` / `SelectionMode` wire types are removed. Selection is a
+/// client-side projection over the consumer's own engine, never a wire tier —
+/// the client extracts the selected text from its own libghostty `Terminal` and
+/// copies it locally (OSC 52). Removing a wire frame is wire-breaking, so pre-1.0
+/// this bumps the minor.
 pub const PROTOCOL_VERSION: Version = Version {
     major: 0,
-    minor: 4,
+    minor: 5,
     patch: 0,
 };
 

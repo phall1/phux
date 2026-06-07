@@ -48,9 +48,6 @@ use portable_pty::CommandBuilder;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(test)]
-use libghostty_vt::terminal::Point;
-
 mod client;
 mod events;
 mod input_log;
@@ -58,7 +55,7 @@ mod metadata;
 mod registry;
 
 pub use client::{AttachError, AttachSnapshotPane, AttachedClient, ClientId};
-pub use events::{EventScope, EventSubscription, SelectionSpan};
+pub use events::{EventScope, EventSubscription};
 pub use input_log::{DEFAULT_CLIENT_MAILBOX, Outbound, TerminalInput};
 pub use metadata::{MetadataSetOutcome, MetadataStore, RenameOutcome};
 
@@ -91,13 +88,6 @@ pub struct ServerState {
     /// accumulates and tests inspect it via the test-only
     /// `terminal_input_log_for` accessor.
     terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
-    /// Per-client, per-Terminal selection spans (phux-dh4).
-    ///
-    /// Stores the coordinate endpoints of text selections for each client
-    /// on each terminal they have attached to. The key is (`ClientId`, `TerminalId`)
-    /// and the value is the [`SelectionSpan`] metadata. Selections are cleaned up
-    /// when a client detaches from a terminal or a terminal exits.
-    client_selections: HashMap<(ClientId, TerminalId), SelectionSpan>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
@@ -981,201 +971,5 @@ mod tests {
         assert_eq!(s.metadata().get(&scope, "missing"), None);
         // Wrong scope: same key returns None.
         assert_eq!(s.metadata().get(&Scope::Global, "k"), None);
-    }
-
-    #[test]
-    fn selection_span_active_creates_correct_points() {
-        let span = SelectionSpan::active(10, 5, 20, 5);
-        assert_eq!(span.rectangular, false);
-        match span.start {
-            Point::Active(coord) => {
-                assert_eq!(coord.x, 10);
-                assert_eq!(coord.y, 5);
-            }
-            _ => panic!("Expected Point::Active"),
-        }
-        match span.end {
-            Point::Active(coord) => {
-                assert_eq!(coord.x, 20);
-                assert_eq!(coord.y, 5);
-            }
-            _ => panic!("Expected Point::Active"),
-        }
-    }
-
-    #[test]
-    fn selection_span_history_creates_correct_points() {
-        let span = SelectionSpan::history(5, 100, 15, 100);
-        assert_eq!(span.rectangular, false);
-        match span.start {
-            Point::History(coord) => {
-                assert_eq!(coord.x, 5);
-                assert_eq!(coord.y, 100);
-            }
-            _ => panic!("Expected Point::History"),
-        }
-    }
-
-    #[test]
-    fn set_and_get_selection() {
-        let mut s = ServerState::new();
-        let cid = s.new_client_id();
-        let (_sid, _wid, tid) = s.seed_session("test");
-        let span = SelectionSpan::active(10, 5, 20, 5);
-
-        // Initially no selection
-        assert_eq!(s.get_selection(cid, tid), None);
-
-        // Set selection
-        s.set_selection(cid, tid, span);
-        let retrieved = s.get_selection(cid, tid);
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().rectangular, false);
-    }
-
-    #[test]
-    fn per_terminal_isolation() {
-        let mut s = ServerState::new();
-        let cid = s.new_client_id();
-        let (_sid, _wid, tid1) = s.seed_session("test1");
-        let (_, _, tid2) = s.seed_session("test2");
-        let span1 = SelectionSpan::active(10, 5, 20, 5);
-        let span2 = SelectionSpan::active(0, 0, 5, 0);
-
-        // Set different selections on different terminals
-        s.set_selection(cid, tid1, span1);
-        s.set_selection(cid, tid2, span2);
-
-        // Verify isolation
-        let sel1 = s.get_selection(cid, tid1).unwrap();
-        let sel2 = s.get_selection(cid, tid2).unwrap();
-        assert_eq!(sel1.rectangular, false);
-        assert_eq!(sel2.rectangular, false);
-        // They have different start x coordinates
-        match sel1.start {
-            Point::Active(c) => assert_eq!(c.x, 10),
-            _ => panic!(),
-        }
-        match sel2.start {
-            Point::Active(c) => assert_eq!(c.x, 0),
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn per_client_isolation() {
-        let mut s = ServerState::new();
-        let c1 = s.new_client_id();
-        let c2 = s.new_client_id();
-        let (_sid, _wid, tid) = s.seed_session("test");
-        let span1 = SelectionSpan::active(10, 5, 20, 5);
-        let span2 = SelectionSpan::active(0, 0, 5, 0);
-
-        // Different clients set different selections on same terminal
-        s.set_selection(c1, tid, span1);
-        s.set_selection(c2, tid, span2);
-
-        // Verify isolation
-        let sel1 = s.get_selection(c1, tid).unwrap();
-        let sel2 = s.get_selection(c2, tid).unwrap();
-        match sel1.start {
-            Point::Active(c) => assert_eq!(c.x, 10),
-            _ => panic!(),
-        }
-        match sel2.start {
-            Point::Active(c) => assert_eq!(c.x, 0),
-            _ => panic!(),
-        }
-    }
-
-    #[test]
-    fn clear_selection_removes_specific_entry() {
-        let mut s = ServerState::new();
-        let cid = s.new_client_id();
-        let (_sid, _wid, tid) = s.seed_session("test");
-        let span = SelectionSpan::active(10, 5, 20, 5);
-
-        s.set_selection(cid, tid, span);
-        assert!(s.get_selection(cid, tid).is_some());
-
-        s.clear_selection(cid, tid);
-        assert_eq!(s.get_selection(cid, tid), None);
-    }
-
-    #[test]
-    fn clear_client_selections_removes_all_for_client() {
-        let mut s = ServerState::new();
-        let cid = s.new_client_id();
-        let (_sid, _wid, tid1) = s.seed_session("test1");
-        let (_, _, tid2) = s.seed_session("test2");
-        let span = SelectionSpan::active(10, 5, 20, 5);
-
-        // Set selections on multiple terminals for same client
-        s.set_selection(cid, tid1, span.clone());
-        s.set_selection(cid, tid2, span);
-
-        // Clear all for this client
-        s.clear_client_selections(cid);
-
-        // Both should be gone
-        assert_eq!(s.get_selection(cid, tid1), None);
-        assert_eq!(s.get_selection(cid, tid2), None);
-    }
-
-    #[test]
-    fn clear_terminal_selections_removes_all_for_terminal() {
-        let mut s = ServerState::new();
-        let c1 = s.new_client_id();
-        let c2 = s.new_client_id();
-        let (_sid, _wid, tid) = s.seed_session("test");
-        let span = SelectionSpan::active(10, 5, 20, 5);
-
-        // Two clients have selections on same terminal
-        s.set_selection(c1, tid, span.clone());
-        s.set_selection(c2, tid, span);
-
-        // Clear all for this terminal
-        s.clear_terminal_selections(tid);
-
-        // Both clients' selections should be gone
-        assert_eq!(s.get_selection(c1, tid), None);
-        assert_eq!(s.get_selection(c2, tid), None);
-    }
-
-    #[test]
-    fn clear_client_selections_does_not_affect_other_clients() {
-        let mut s = ServerState::new();
-        let c1 = s.new_client_id();
-        let c2 = s.new_client_id();
-        let (_sid, _wid, tid) = s.seed_session("test");
-        let span = SelectionSpan::active(10, 5, 20, 5);
-
-        s.set_selection(c1, tid, span.clone());
-        s.set_selection(c2, tid, span);
-
-        // Clear only c1's selections
-        s.clear_client_selections(c1);
-
-        // c1 gone, c2 remains
-        assert_eq!(s.get_selection(c1, tid), None);
-        assert!(s.get_selection(c2, tid).is_some());
-    }
-
-    #[test]
-    fn detach_cleans_up_selections() {
-        let mut s = ServerState::new();
-        let (_sid, _wid, pid) = s.seed_session("default");
-        let cid = s.new_client_id();
-        s.attach_default_caps(cid, "default", mk_tx()).unwrap();
-
-        let span = SelectionSpan::active(10, 5, 20, 5);
-        s.set_selection(cid, pid, span);
-        assert!(s.get_selection(cid, pid).is_some());
-
-        // Detach
-        s.detach(cid);
-
-        // Selection should be cleaned up
-        assert_eq!(s.get_selection(cid, pid), None);
     }
 }

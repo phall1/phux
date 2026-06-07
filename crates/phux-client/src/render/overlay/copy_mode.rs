@@ -10,12 +10,30 @@
 //! OSC 52. Nothing about the selection touches the wire.
 
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
-use phux_protocol::input::selection::SelectionMode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use super::{CopyRequest, OverlayCommand, RenderOverlay};
+
+/// How copy-mode interprets the selection rectangle.
+///
+/// Client-local UI state (phux-q1ni, [ADR-0030]): selection is a consumer-side
+/// projection, so the mode lives with the overlay rather than on the wire.
+/// `Char` is the default linear selection; `Rect` is Mosh-style block
+/// selection; `Line` selects whole lines.
+///
+/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    /// Character-wise (linear) selection — the default.
+    #[default]
+    Char,
+    /// Line-wise selection (whole lines).
+    Line,
+    /// Rectangular (block) selection.
+    Rect,
+}
 
 /// Rectangular selection state: (row, col) coordinates for start and end.
 /// Normalized so that start <= end.
