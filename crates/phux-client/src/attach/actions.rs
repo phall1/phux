@@ -9,7 +9,7 @@
 //! * Wire side-effects: `SET_METADATA` to broadcast the new layout to other
 //!   attached clients (ADR-0019 decision 2 — focus is per-client and never
 //!   travels over the wire; everything else lives under
-//!   `phux.tui.layout/v1` in the default `Collection` scope).
+//!   `phux.tui.layout/v1` in the default `Group` scope).
 //!
 //! The pure functions in this module take a `&LayoutState` and return a
 //! transformed `LayoutState` (or `Option<LayoutState>` / `Result`). They

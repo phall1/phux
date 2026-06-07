@@ -13,7 +13,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Stable IDs (`TerminalId`, `CollectionId`), the input atoms (`KeyEvent`,
+# Stable IDs (`TerminalId`, `GroupId`), the input atoms (`KeyEvent`,
 # `MouseEvent`), and the wire `ViewportInfo` the layout math reasons about.
 # The `server` feature activates the full type surface (input atoms + wire
 # codec) every in-workspace consumer enables.

@@ -82,11 +82,11 @@ fn metadata_keys_huge_count_does_not_over_reserve() {
 
 #[test]
 fn spawn_terminal_huge_command_list_does_not_over_reserve() {
-    // SPAWN_TERMINAL (0x22): request_id(4), collection(4), command Option list.
+    // SPAWN_TERMINAL (0x22): request_id(4), group(4), command Option list.
     // tag=1 (Some) then count u32::MAX.
     let mut body = vec![0x22];
     body.extend_from_slice(&0u32.to_be_bytes()); // request_id
-    body.extend_from_slice(&1u32.to_be_bytes()); // collection
+    body.extend_from_slice(&1u32.to_be_bytes()); // group
     body.push(1); // command = Some
     body.extend_from_slice(&u32::MAX.to_be_bytes()); // list count
     let frame = framed(&body);

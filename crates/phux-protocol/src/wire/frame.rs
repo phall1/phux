@@ -27,8 +27,8 @@ use bytes::BytesMut;
 
 use crate::caps::{ClientCapabilities, ServerCapabilities};
 use crate::ids::{
-    ClientId, CollectionId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL,
-    TERMINAL_ID_TAG_SATELLITE, TerminalId,
+    ClientId, GroupId, SatelliteHost, SessionId, TERMINAL_ID_TAG_LOCAL, TERMINAL_ID_TAG_SATELLITE,
+    TerminalId,
 };
 use crate::input::InputEvent;
 use crate::input::focus::FocusEvent;
@@ -230,7 +230,7 @@ pub const TYPE_METADATA_KEYS: u8 = 0xD2;
 
 /// Discriminant for `SPAWN_TERMINAL` (client to server, `docs/spec/L1.md` §1 / §10.1).
 ///
-/// Carries `{ request_id, collection, command: Option<list<str>>,
+/// Carries `{ request_id, group, command: Option<list<str>>,
 /// cwd: Option<str>, env: Option<list<(str, str)>> }`. The reply rides on
 /// [`TYPE_TERMINAL_SPAWNED`] correlated by `request_id`.
 pub const TYPE_SPAWN_TERMINAL: u8 = 0x22;
@@ -304,16 +304,16 @@ pub(crate) const SPAWN_RESULT_OK: u8 = 0;
 pub(crate) const SPAWN_RESULT_ERR: u8 = 1;
 
 // Wire tags for the `SpawnError` tagged union (SPEC §7.2 / §10.1).
-/// Wire tag for [`SpawnError::CollectionNotFound`].
-pub(crate) const SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND: u8 = 0;
+/// Wire tag for [`SpawnError::GroupNotFound`].
+pub(crate) const SPAWN_ERROR_TAG_GROUP_NOT_FOUND: u8 = 0;
 /// Wire tag for [`SpawnError::SpawnFailed`].
 pub(crate) const SPAWN_ERROR_TAG_SPAWN_FAILED: u8 = 1;
 
 // Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
 /// Wire tag for [`Scope::Terminal`].
 pub(crate) const SCOPE_TAG_TERMINAL: u8 = 0;
-/// Wire tag for [`Scope::Collection`].
-pub(crate) const SCOPE_TAG_COLLECTION: u8 = 1;
+/// Wire tag for [`Scope::Group`].
+pub(crate) const SCOPE_TAG_GROUP: u8 = 1;
 /// Wire tag for [`Scope::Global`].
 pub(crate) const SCOPE_TAG_GLOBAL: u8 = 2;
 
@@ -450,8 +450,8 @@ pub(crate) const COMMAND_RESULT_TAG_ERROR: u8 = 0x02;
 // Wire tags for the `CommandValue` tagged union (SPEC §5).
 /// Wire tag for [`CommandValue::TerminalId`].
 pub(crate) const COMMAND_VALUE_TAG_TERMINAL_ID: u8 = 0x00;
-/// Wire tag for [`CommandValue::CollectionId`].
-pub(crate) const COMMAND_VALUE_TAG_COLLECTION_ID: u8 = 0x01;
+/// Wire tag for [`CommandValue::GroupId`].
+pub(crate) const COMMAND_VALUE_TAG_GROUP_ID: u8 = 0x01;
 /// Wire tag for [`CommandValue::State`].
 pub(crate) const COMMAND_VALUE_TAG_STATE: u8 = 0x02;
 /// Wire tag for [`CommandValue::Json`].
@@ -644,23 +644,22 @@ impl ViewportInfo {
 /// Tagged union:
 /// - `Terminal { terminal_id }` — keys scoped to a single Terminal. Killed
 ///   with the Terminal.
-/// - `Collection { collection_id }` — keys scoped to an L2 Collection.
-///   L2 is not yet wire-allocated; until it ships, v0.1 servers expose a
-///   single default Collection that satisfies the reference TUI's
-///   `phux.tui.layout/v1` use case (see ADR-0019).
-/// - `Global` — keys scoped to the server (e.g. cross-Collection prefs).
+/// - `Group { group_id }` — keys scoped to a Group (opaque grouping key).
+///   v0.1 servers expose a single default Group that satisfies the
+///   reference TUI's `phux.tui.layout/v1` use case (see ADR-0019).
+/// - `Global` — keys scoped to the server (e.g. cross-Group prefs).
 ///
 /// Wire encoding: 1-byte tag + per-variant body.
 /// - tag `0x00` → `Terminal`, body = tagged `TerminalId`.
-/// - tag `0x01` → `Collection`, body = `u32` (the inner `CollectionId`).
+/// - tag `0x01` → `Group`, body = `u32` (the inner `GroupId`).
 /// - tag `0x02` → `Global`, body = empty.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Scope {
     /// Keys scoped to a single Terminal. Cleared when the Terminal closes.
     Terminal(TerminalId),
-    /// Keys scoped to an L2 Collection.
-    Collection(CollectionId),
+    /// Keys scoped to a Group (opaque grouping key).
+    Group(GroupId),
     /// Server-wide keys.
     Global,
 }
@@ -681,7 +680,7 @@ pub enum Scope {
 // Wire encoding:
 //   SpawnResult tag 0x00 Ok  → tagged TerminalId
 //   SpawnResult tag 0x01 Err → SpawnError
-//   SpawnError  tag 0x00 CollectionNotFound → no body
+//   SpawnError  tag 0x00 GroupNotFound → no body
 //   SpawnError  tag 0x01 SpawnFailed        → length-prefixed UTF-8 str
 // -----------------------------------------------------------------------------
 
@@ -695,11 +694,11 @@ pub enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SpawnError {
-    /// The `collection` named in [`FrameKind::SpawnTerminal`] does not
+    /// The `group` named in [`FrameKind::SpawnTerminal`] does not
     /// exist on this server. v0.1 servers expose a single default
-    /// Collection at `CollectionId(1)` (SPEC §7.4 L2-dependency note);
+    /// Group at `GroupId(1)` (SPEC §7.4 L2-dependency note);
     /// any other id MAY surface this error.
-    CollectionNotFound,
+    GroupNotFound,
     /// Spawning the underlying PTY failed for an implementation-specific
     /// reason. The carried string is a human-readable diagnostic — short
     /// enough to log inline; the SPEC does not constrain its contents
@@ -775,7 +774,7 @@ impl TerminalEventType {
 ///
 /// `#[non_exhaustive]`: v0.1 exposes only `Server` (the whole-server
 /// snapshot, which is what `phux ls` and client-side selector resolution
-/// need). Narrower scopes (a single Collection, a single Terminal) are
+/// need). Narrower scopes (a single Group, a single Terminal) are
 /// additive minor changes when L2 lands — see [ADR-0021](../../../ADR/0021-control-plane-commands.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -916,8 +915,8 @@ pub enum Command {
 pub enum CommandValue {
     /// A Terminal identifier (e.g. the result of a spawn).
     TerminalId(TerminalId),
-    /// A Collection identifier (L2).
-    CollectionId(CollectionId),
+    /// A Group identifier (opaque grouping key).
+    GroupId(GroupId),
     /// A server-state snapshot (reply to `GET_STATE`). Reuses the
     /// `ATTACHED` snapshot shape — see the wire-bytes note in SPEC §7.
     State(SessionSnapshot),
@@ -1497,7 +1496,7 @@ pub enum FrameKind {
     // The server-side handler + client-side emission land in follow-up
     // tickets; this enum allocation is the wire substrate they build on.
     // -------------------------------------------------------------------------
-    /// `SPAWN_TERMINAL` — client requests a new Terminal under `collection`
+    /// `SPAWN_TERMINAL` — client requests a new Terminal under `group`
     /// (`docs/spec/L1.md` §1 / §10.1).
     ///
     /// Async: the server replies with [`FrameKind::TerminalSpawned`]
@@ -1509,15 +1508,15 @@ pub enum FrameKind {
     /// inherits the server's environment as-is; `env = Some([])` is
     /// distinct (start with an empty environment).
     ///
-    /// v0.1 servers expose a single default Collection at
-    /// `CollectionId(1)` (SPEC §7.4 L2-dependency note). Other collection
-    /// ids MAY surface as [`SpawnError::CollectionNotFound`] inside the
+    /// v0.1 servers expose a single default Group at
+    /// `GroupId(1)` (SPEC §7.4 L2-dependency note). Other group
+    /// ids MAY surface as [`SpawnError::GroupNotFound`] inside the
     /// reply frame's [`SpawnResult::Err`] arm.
     SpawnTerminal {
         /// Correlates this request with the eventual `TerminalSpawned`.
         request_id: u32,
-        /// Collection under which to spawn the new Terminal.
-        collection: CollectionId,
+        /// Group under which to spawn the new Terminal.
+        group: GroupId,
         /// Command + argv, or `None` to invoke the server's default shell.
         command: Option<Vec<String>>,
         /// Working directory for the new Terminal, or `None` for the
@@ -1906,13 +1905,13 @@ impl FrameKind {
             }
             Self::SpawnTerminal {
                 request_id,
-                collection,
+                group,
                 command,
                 cwd,
                 env,
             } => {
                 enc.write_u32_be(*request_id);
-                enc.write_u32_be(collection.get());
+                enc.write_u32_be(group.get());
                 encode_optional_string_list(command.as_deref(), &mut enc);
                 encode_optional_str(cwd.as_deref(), &mut enc);
                 encode_optional_env(env.as_deref(), &mut enc);
@@ -2384,7 +2383,7 @@ pub(super) fn decode_optional_bytes(dec: &mut Decoder<'_>) -> Result<Option<Vec<
 //
 // Layout: 1-byte tag + variant body.
 //   0x00 Terminal   → tagged TerminalId (re-uses the L1 codec)
-//   0x01 Collection → u32 (the inner CollectionId; once L2 ships a
+//   0x01 Group      → u32 (the inner GroupId; once federation ships a
 //                     Local/Satellite tag will prefix this, mirroring the
 //                     ADR-0016 TerminalId shape)
 //   0x02 Global     → no body
@@ -2396,9 +2395,9 @@ pub(super) fn encode_scope(scope: &Scope, enc: &mut Encoder<'_>) {
             enc.write_u8(SCOPE_TAG_TERMINAL);
             encode_terminal_id(terminal_id, enc);
         }
-        Scope::Collection(collection_id) => {
-            enc.write_u8(SCOPE_TAG_COLLECTION);
-            enc.write_u32_be(collection_id.get());
+        Scope::Group(group_id) => {
+            enc.write_u8(SCOPE_TAG_GROUP);
+            enc.write_u32_be(group_id.get());
         }
         Scope::Global => {
             enc.write_u8(SCOPE_TAG_GLOBAL);
@@ -2410,7 +2409,7 @@ pub(super) fn decode_scope(dec: &mut Decoder<'_>) -> Result<Scope, DecodeError> 
     let tag = dec.read_u8()?;
     match tag {
         SCOPE_TAG_TERMINAL => Ok(Scope::Terminal(decode_terminal_id(dec)?)),
-        SCOPE_TAG_COLLECTION => Ok(Scope::Collection(CollectionId::new(dec.read_u32_be()?))),
+        SCOPE_TAG_GROUP => Ok(Scope::Group(GroupId::new(dec.read_u32_be()?))),
         SCOPE_TAG_GLOBAL => Ok(Scope::Global),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Scope",
@@ -2425,7 +2424,7 @@ pub(super) fn decode_scope(dec: &mut Decoder<'_>) -> Result<Scope, DecodeError> 
 // Layout (outer SpawnResult, the body of `TERMINAL_SPAWNED.result`):
 //   tag 0x00 Ok  → tagged TerminalId
 //   tag 0x01 Err → SpawnError body:
-//                    tag 0x00 CollectionNotFound → no further bytes
+//                    tag 0x00 GroupNotFound → no further bytes
 //                    tag 0x01 SpawnFailed        → length-prefixed UTF-8
 //
 // The `Ok = 0x00 / Err = 0x01` convention deliberately mirrors the
@@ -2460,8 +2459,8 @@ pub(super) fn decode_spawn_result(dec: &mut Decoder<'_>) -> Result<SpawnResult, 
 
 fn encode_spawn_error(err: &SpawnError, enc: &mut Encoder<'_>) {
     match err {
-        SpawnError::CollectionNotFound => {
-            enc.write_u8(SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND);
+        SpawnError::GroupNotFound => {
+            enc.write_u8(SPAWN_ERROR_TAG_GROUP_NOT_FOUND);
         }
         SpawnError::SpawnFailed(msg) => {
             enc.write_u8(SPAWN_ERROR_TAG_SPAWN_FAILED);
@@ -2473,7 +2472,7 @@ fn encode_spawn_error(err: &SpawnError, enc: &mut Encoder<'_>) {
 fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
-        SPAWN_ERROR_TAG_COLLECTION_NOT_FOUND => Ok(SpawnError::CollectionNotFound),
+        SPAWN_ERROR_TAG_GROUP_NOT_FOUND => Ok(SpawnError::GroupNotFound),
         SPAWN_ERROR_TAG_SPAWN_FAILED => Ok(SpawnError::SpawnFailed(dec.read_str()?.to_owned())),
         other => Err(DecodeError::UnknownEnumValue {
             field: "SpawnError",
@@ -2739,8 +2738,8 @@ fn encode_command_value(value: &CommandValue, enc: &mut Encoder<'_>) {
             enc.write_u8(COMMAND_VALUE_TAG_TERMINAL_ID);
             encode_terminal_id(id, enc);
         }
-        CommandValue::CollectionId(id) => {
-            enc.write_u8(COMMAND_VALUE_TAG_COLLECTION_ID);
+        CommandValue::GroupId(id) => {
+            enc.write_u8(COMMAND_VALUE_TAG_GROUP_ID);
             enc.write_u32_be(id.get());
         }
         CommandValue::State(snapshot) => {
@@ -2762,9 +2761,7 @@ fn decode_command_value(dec: &mut Decoder<'_>) -> Result<CommandValue, DecodeErr
     let tag = dec.read_u8()?;
     match tag {
         COMMAND_VALUE_TAG_TERMINAL_ID => Ok(CommandValue::TerminalId(decode_terminal_id(dec)?)),
-        COMMAND_VALUE_TAG_COLLECTION_ID => Ok(CommandValue::CollectionId(CollectionId::new(
-            dec.read_u32_be()?,
-        ))),
+        COMMAND_VALUE_TAG_GROUP_ID => Ok(CommandValue::GroupId(GroupId::new(dec.read_u32_be()?))),
         COMMAND_VALUE_TAG_STATE => Ok(CommandValue::State(decode_session_snapshot(dec)?)),
         COMMAND_VALUE_TAG_JSON => Ok(CommandValue::Json(dec.read_str()?.to_owned())),
         COMMAND_VALUE_TAG_BYTES => Ok(CommandValue::Bytes(dec.read_bytes()?.to_vec())),

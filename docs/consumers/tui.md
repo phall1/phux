@@ -72,7 +72,7 @@ client logic, not a wire-level lifecycle entity.
 | Mouse routing (click-to-focus, drag-to-resize) | TUI-local. The wire carries `INPUT_MOUSE`; what to do with it is the TUI's call. |
 
 A consumer that doesn't want this vocabulary doesn't have to learn it;
-the substrate doesn't carry it. `CollectionId` survives only as a
+the substrate doesn't carry it. `GroupId` survives only as a
 documented opaque grouping key, not a lifecycle tier — its full removal is
 tracked by bead phux-0bmc.
 
@@ -134,12 +134,15 @@ they decompose onto the substrate, with no change to what the user types:
 The command words, flags, and output are exactly as before; only the
 wire path beneath them changed.
 
-### 1.3 Not implemented: split and detach
+### 1.3 No CLI verbs for split/detach — they are interactive actions
 
-The `split` and `detach` CLI subcommands are **not implemented**.
-Detach-as-an-action exists as a keybinding (§5.4), but there is no
-top-level `phux detach` or `phux split` verb. Both are tracked by bead
-phux-99te.
+Split-pane (`C-a |`) and detach (`C-a d`) **are implemented** as
+interactive TUI keybinding actions (§5.4). There are deliberately no
+headless `phux split` / `phux detach` CLI verbs: splitting a pane and
+detaching from a session are interactive view actions performed against
+a live attached TUI, not headless operations a script invokes. This is a
+settled design decision, not pending work — a headless `phux split`/`phux
+detach` would have no attached viewport to act on.
 
 > **Status (design intent, not shipped):** `windows`, `panes`, and
 > `messages` are listed in earlier drafts as future read verbs; none

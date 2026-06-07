@@ -15,7 +15,7 @@ use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities,
 };
-use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
+use phux_protocol::ids::{ClientId, GroupId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -1219,7 +1219,7 @@ const _SPLIT_DIR_TYPE_CHECK: fn() -> SplitDir = || SplitDir::Horizontal;
 fn arb_scope() -> impl Strategy<Value = Scope> {
     prop_oneof![
         arb_terminal_id().prop_map(Scope::Terminal),
-        any::<u32>().prop_map(|id| Scope::Collection(CollectionId::new(id))),
+        any::<u32>().prop_map(|id| Scope::Group(GroupId::new(id))),
         Just(Scope::Global),
     ]
 }
@@ -1461,7 +1461,7 @@ fn arb_env_pair() -> impl Strategy<Value = (String, String)> {
 
 fn arb_spawn_error() -> impl Strategy<Value = SpawnError> {
     prop_oneof![
-        Just(SpawnError::CollectionNotFound),
+        Just(SpawnError::GroupNotFound),
         ".{0,128}".prop_map(SpawnError::SpawnFailed),
     ]
 }
@@ -1477,14 +1477,14 @@ proptest! {
     #[test]
     fn roundtrip_spawn_terminal(
         request_id in any::<u32>(),
-        collection in any::<u32>(),
+        group in any::<u32>(),
         command in proptest::option::of(proptest::collection::vec(".{0,16}", 0..4)),
         cwd in proptest::option::of(".{0,32}"),
         env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
     ) {
         let frame = FrameKind::SpawnTerminal {
             request_id,
-            collection: CollectionId::new(collection),
+            group: GroupId::new(group),
             command,
             cwd,
             env,
@@ -1856,7 +1856,7 @@ fn spawn_terminal_empty_command_vec_round_trips() {
     // argv as malformed at the dispatch layer; the wire is agnostic.)
     let frame = FrameKind::SpawnTerminal {
         request_id: 1,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: Some(Vec::new()),
         cwd: None,
         env: None,
@@ -1875,7 +1875,7 @@ fn spawn_terminal_empty_env_vec_round_trips() {
     // codec must preserve the distinction.
     let frame = FrameKind::SpawnTerminal {
         request_id: 2,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: None,
         cwd: None,
         env: Some(Vec::new()),

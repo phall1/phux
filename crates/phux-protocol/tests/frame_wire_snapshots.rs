@@ -11,7 +11,7 @@
 
 use bytes::BytesMut;
 use phux_protocol::caps::{ClientCapabilities, ColorSupport, Layer, LayerSet, ServerCapabilities};
-use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
+use phux_protocol::ids::{ClientId, GroupId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -614,10 +614,10 @@ fn snap_get_metadata_global() {
 }
 
 #[test]
-fn snap_get_metadata_collection() {
+fn snap_get_metadata_group() {
     let frame = FrameKind::GetMetadata {
         request_id: 0x0000_0007,
-        scope: Scope::Collection(CollectionId::new(1)),
+        scope: Scope::Group(GroupId::new(1)),
         key: "phux.tui.layout/v1".to_owned(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
@@ -634,10 +634,10 @@ fn snap_get_metadata_terminal() {
 }
 
 #[test]
-fn snap_set_metadata_collection_layout() {
+fn snap_set_metadata_group_layout() {
     let frame = FrameKind::SetMetadata {
         request_id: 0x0000_0010,
-        scope: Scope::Collection(CollectionId::new(1)),
+        scope: Scope::Group(GroupId::new(1)),
         key: "phux.tui.layout/v1".to_owned(),
         value: b"\xa2\x01\x01\x02\x82\x00\x01".to_vec(), // arbitrary CBOR-looking bytes
     };
@@ -655,27 +655,27 @@ fn snap_delete_metadata_global() {
 }
 
 #[test]
-fn snap_list_metadata_collection() {
+fn snap_list_metadata_group() {
     let frame = FrameKind::ListMetadata {
         request_id: 0x0000_0012,
-        scope: Scope::Collection(CollectionId::new(1)),
+        scope: Scope::Group(GroupId::new(1)),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
 
 #[test]
-fn snap_subscribe_metadata_collection_layout() {
+fn snap_subscribe_metadata_group_layout() {
     let frame = FrameKind::SubscribeMetadata {
-        scope: Scope::Collection(CollectionId::new(1)),
+        scope: Scope::Group(GroupId::new(1)),
         key: "phux.tui.layout/v1".to_owned(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
 
 #[test]
-fn snap_metadata_changed_set_collection() {
+fn snap_metadata_changed_set_group() {
     let frame = FrameKind::MetadataChanged {
-        scope: Scope::Collection(CollectionId::new(1)),
+        scope: Scope::Group(GroupId::new(1)),
         key: "phux.tui.layout/v1".to_owned(),
         value: Some(b"\xa2\x01\x01\x02\x82\x00\x01".to_vec()),
     };
@@ -741,12 +741,12 @@ fn snap_metadata_keys_populated() {
 
 #[test]
 fn snap_spawn_terminal_minimal() {
-    // The minimum SPAWN_TERMINAL: request_id, default collection, every
+    // The minimum SPAWN_TERMINAL: request_id, default group, every
     // optional field absent. Reads as "spawn the server's default shell
     // in its default cwd, inheriting its env."
     let frame = FrameKind::SpawnTerminal {
         request_id: 0x0000_0001,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: None,
         cwd: None,
         env: None,
@@ -760,7 +760,7 @@ fn snap_spawn_terminal_full() {
     // length-prefixed command list.
     let frame = FrameKind::SpawnTerminal {
         request_id: 0x0000_0002,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: Some(vec!["zsh".to_owned(), "-i".to_owned()]),
         cwd: Some("/home/u/src".to_owned()),
         env: Some(vec![
@@ -781,10 +781,10 @@ fn snap_terminal_spawned_ok() {
 }
 
 #[test]
-fn snap_terminal_spawned_err_collection_not_found() {
+fn snap_terminal_spawned_err_group_not_found() {
     let frame = FrameKind::TerminalSpawned {
         request_id: 0x0000_0007,
-        result: SpawnResult::Err(SpawnError::CollectionNotFound),
+        result: SpawnResult::Err(SpawnError::GroupNotFound),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

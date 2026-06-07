@@ -97,7 +97,7 @@ ADRs for the rationale that shapes this document.
 | **Server** | A long-lived process owning all multiplexer state for one operating-system user. |
 | **Client** | A process that attaches to a server, presenting Terminals to a user. |
 | **Terminal** | A managed terminal: one PTY, one `libghostty_vt::Terminal` parsing its bytes, one stable `TerminalId`. The L1 substrate primitive (ADR-0015, ADR-0016). |
-| **Group** | A named set of Terminals. Not a wire tier: membership and names are L3 metadata plus client logic, and atomic teardown is the L1 `KILL_TERMINALS` op (ADR-0030; see [L2.md](./L2.md)). `CollectionId` survives only as an opaque grouping key. |
+| **Group** | A named set of Terminals. Not a wire tier: membership and names are L3 metadata plus client logic, and atomic teardown is the L1 `KILL_TERMINALS` op (ADR-0030; see [L2.md](./L2.md)). `GroupId` survives only as an opaque grouping key. |
 | **Metadata** | An L3 optional service: a typed key-value store the server hosts but does not interpret (ADR-0015 §"L3"). |
 | **Frame** | A server-emitted `TERMINAL_OUTPUT` carrying a contiguous batch of VT bytes for one Terminal, identified by a monotonically increasing per-Terminal `seq`. |
 | **Grid** | The two-dimensional cell matrix that is a Terminal's visible viewport. |

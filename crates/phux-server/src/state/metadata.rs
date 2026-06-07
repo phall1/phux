@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId};
+use phux_protocol::ids::{GroupId, TerminalId as WireTerminalId};
 use phux_protocol::wire::frame::Scope;
 
 use super::client::ClientId;
@@ -17,8 +17,8 @@ pub struct MetadataStore {
     /// Per-Terminal key → value. Cleared when the Terminal closes (the
     /// L1 lifecycle that owns the Terminal).
     terminal: HashMap<WireTerminalId, HashMap<String, Vec<u8>>>,
-    /// Per-Collection key → value.
-    collection: HashMap<CollectionId, HashMap<String, Vec<u8>>>,
+    /// Per-Group key → value.
+    group: HashMap<GroupId, HashMap<String, Vec<u8>>>,
     /// Global key → value.
     global: HashMap<String, Vec<u8>>,
     /// Active subscriptions: a flat set of `(client, scope, key)` tuples.
@@ -62,7 +62,7 @@ impl MetadataStore {
     pub fn get(&self, scope: &Scope, key: &str) -> Option<Vec<u8>> {
         match scope {
             Scope::Terminal(tid) => self.terminal.get(tid).and_then(|m| m.get(key)).cloned(),
-            Scope::Collection(cid) => self.collection.get(cid).and_then(|m| m.get(key)).cloned(),
+            Scope::Group(gid) => self.group.get(gid).and_then(|m| m.get(key)).cloned(),
             Scope::Global => self.global.get(key).cloned(),
             // `Scope` is `#[non_exhaustive]`: a forward-compat variant we
             // don't know about returns None. The cleanest default for an
@@ -78,7 +78,7 @@ impl MetadataStore {
     pub fn set(&mut self, scope: &Scope, key: &str, value: Vec<u8>) -> MetadataSetOutcome {
         let bucket: &mut HashMap<String, Vec<u8>> = match scope {
             Scope::Terminal(tid) => self.terminal.entry(tid.clone()).or_default(),
-            Scope::Collection(cid) => self.collection.entry(*cid).or_default(),
+            Scope::Group(gid) => self.group.entry(*gid).or_default(),
             Scope::Global => &mut self.global,
             // Unknown forward-compat variant: silently drop the write.
             // SPEC §6 lets newer encoders ship trailing field shapes;
@@ -103,9 +103,9 @@ impl MetadataStore {
                 .get_mut(tid)
                 .and_then(|m| m.remove(key))
                 .is_some(),
-            Scope::Collection(cid) => self
-                .collection
-                .get_mut(cid)
+            Scope::Group(gid) => self
+                .group
+                .get_mut(gid)
                 .and_then(|m| m.remove(key))
                 .is_some(),
             Scope::Global => self.global.remove(key).is_some(),
@@ -123,9 +123,9 @@ impl MetadataStore {
                 .get(tid)
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default(),
-            Scope::Collection(cid) => self
-                .collection
-                .get(cid)
+            Scope::Group(gid) => self
+                .group
+                .get(gid)
                 .map(|m| m.keys().cloned().collect())
                 .unwrap_or_default(),
             Scope::Global => self.global.keys().cloned().collect(),

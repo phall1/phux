@@ -459,7 +459,7 @@ where
                         layer: phux_protocol::caps::Layer::L1,
                         ops: vec![],
                         terminals: None,
-                        collections: None,
+                        groups: None,
                         expires_at: None,
                     }];
                     match bundle.engine.authorize_hello(&peer, requested_caps).await {
@@ -643,7 +643,7 @@ where
             }
             FrameKind::SpawnTerminal {
                 request_id,
-                collection,
+                group,
                 command,
                 cwd,
                 env,
@@ -652,7 +652,7 @@ where
                     &state,
                     client_id,
                     request_id,
-                    collection,
+                    group,
                     command,
                     cwd,
                     env,

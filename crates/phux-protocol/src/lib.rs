@@ -42,7 +42,7 @@ pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet,
 };
-pub use ids::{ClientId, CollectionId, FrameId, SatelliteHost, SessionId, TerminalId, WindowId};
+pub use ids::{ClientId, FrameId, GroupId, SatelliteHost, SessionId, TerminalId, WindowId};
 
 /// Protocol version this crate implements.
 ///

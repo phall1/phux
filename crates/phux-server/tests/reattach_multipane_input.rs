@@ -53,7 +53,7 @@ use phux_protocol::wire::frame::{
     Command, CommandResult, CommandValue, FrameKind, SpawnResult, StateScope, TYPE_ATTACHED,
     TYPE_COMMAND_RESULT, TYPE_TERMINAL_SPAWNED,
 };
-use phux_server::DEFAULT_COLLECTION_ID;
+use phux_server::DEFAULT_GROUP_ID;
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -262,7 +262,7 @@ fn reattach_to_multipane_session_can_type_into_non_active_pane() {
             &mut a,
             &FrameKind::SpawnTerminal {
                 request_id: 1,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec!["cat".to_owned()]),
                 cwd: None,
                 env: None,

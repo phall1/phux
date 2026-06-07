@@ -21,7 +21,7 @@ use super::frame::{
     decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
-use crate::ids::CollectionId;
+use crate::ids::GroupId;
 use crate::input::selection::{SelectionEvent, SelectionMode};
 
 /// Cursor-style decoder over an immutable byte slice.
@@ -488,7 +488,7 @@ impl<'a> Decoder<'a> {
             }
             TYPE_SPAWN_TERMINAL => {
                 let request_id = self.read_u32_be()?;
-                let collection = CollectionId::new(self.read_u32_be()?);
+                let group = GroupId::new(self.read_u32_be()?);
                 // `command`, `cwd`, `env` follow the standard
                 // `0/1`-tagged `Option` convention. See SPEC §7.2 / §10.1
                 // (phux-4li.10) and the encoder symmetry in `frame.rs`.
@@ -497,7 +497,7 @@ impl<'a> Decoder<'a> {
                 let env = decode_optional_env(self)?;
                 FrameKind::SpawnTerminal {
                     request_id,
-                    collection,
+                    group,
                     command,
                     cwd,
                     env,

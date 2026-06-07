@@ -39,7 +39,7 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::ids::{CollectionId, TerminalId};
+use phux_protocol::ids::{GroupId, TerminalId};
 use phux_protocol::wire::frame::{
     Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_COMMAND_RESULT,
     TYPE_TERMINAL_CLOSED,
@@ -391,7 +391,7 @@ fn kill_terminals_tears_down_a_multi_terminal_group_atomically() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 41,
-                collection: CollectionId::new(1),
+                group: GroupId::new(1),
                 command: None,
                 cwd: None,
                 env: None,
