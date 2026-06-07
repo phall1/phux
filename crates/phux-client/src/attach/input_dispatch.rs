@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
-use phux_protocol::wire::frame::{Command as WireCommand, FrameKind, Scope};
+use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
@@ -438,23 +438,27 @@ async fn apply_action_effects<W: super::RenderSink>(
             }
         }
     }
-    // rename-session: send RENAME_SESSION for the current session and
-    // optimistically reflect the new name locally. The server is
-    // authoritative — the next ATTACHED snapshot overwrites `session_name`
-    // (which is also how other attached clients learn the rename; a live
+    // rename-session: since the v0.3.0 "Option B" re-tier (ADR-0019 /
+    // ADR-0027) removed the RENAME_SESSION verb, a rename is a SET_METADATA
+    // write of the conventional SESSION_NAME_KEY (Scope::Global, value
+    // `current\0new`); the server intercepts it and applies the registry
+    // rename. We optimistically reflect the new name locally — the server is
+    // authoritative, and the next ATTACHED snapshot overwrites `session_name`
+    // (also how other attached clients learn the rename; a live
     // SESSION_RENAMED push is out of scope for this pass). A no-op rename
     // (new == current) is dropped: nothing to send, nothing to repaint.
     let renamed = if let Some(new_name) = effects.rename_session.filter(|n| n != &*ctx.session_name)
     {
         let request_id = *ctx.next_request_id;
         *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
-        conn.send(&FrameKind::Command {
+        let mut value = ctx.session_name.as_bytes().to_vec();
+        value.push(0);
+        value.extend_from_slice(new_name.as_bytes());
+        conn.send(&FrameKind::SetMetadata {
             request_id,
-            command: WireCommand::RenameSession {
-                collection: DEFAULT_COLLECTION_ID,
-                name: ctx.session_name.clone(),
-                new_name: new_name.clone(),
-            },
+            scope: Scope::Global,
+            key: SESSION_NAME_KEY.to_owned(),
+            value,
         })
         .await?;
         tracing::info!(new_name = %new_name, "rename-session sent; optimistically updating local name");

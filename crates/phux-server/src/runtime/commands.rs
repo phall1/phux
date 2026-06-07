@@ -1,7 +1,6 @@
 //! Submodule for runtime internals.
 
 use phux_protocol::caps::ClientCapabilities;
-use phux_protocol::ids::CollectionId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
     Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, ViewportInfo,
@@ -271,12 +270,10 @@ pub(crate) fn prepare_attach(
 pub(crate) const fn command_kind(command: &Command) -> &'static str {
     match command {
         Command::KillTerminal { .. } => "kill_terminal",
+        Command::KillTerminals { .. } => "kill_terminals",
         Command::GetState { .. } => "get_state",
         Command::GetScreen { .. } => "get_screen",
         Command::RouteInput { .. } => "route_input",
-        Command::CreateSession { .. } => "create_session",
-        Command::KillCollection { .. } => "kill_collection",
-        Command::RenameSession { .. } => "rename_session",
         _ => "other",
     }
 }
@@ -297,7 +294,6 @@ pub(crate) async fn handle_command(
     request_id: u32,
     command: Command,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
-    root_token: &CancellationToken,
 ) {
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
@@ -309,27 +305,7 @@ pub(crate) async fn handle_command(
         Command::RouteInput { terminal_id, event } => {
             handle_route_input(state, client_id, &terminal_id, event)
         }
-        Command::CreateSession {
-            collection,
-            name,
-            command,
-            cwd,
-        } => handle_create_session(
-            state,
-            collection,
-            &name,
-            command,
-            cwd.as_deref(),
-            root_token,
-        ),
-        Command::KillCollection { collection, name } => {
-            handle_kill_collection(state, collection, &name)
-        }
-        Command::RenameSession {
-            collection,
-            name,
-            new_name,
-        } => handle_rename_session(state, collection, &name, &new_name),
+        Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
         Command::KillTerminal { terminal_id } => {
             // Resolve the wire id to the core pane, then cancel its actor.
             // Cancellation drops the actor's `exit_notify`, which the
@@ -390,44 +366,80 @@ pub(crate) async fn handle_command(
         .await;
 }
 
-/// Build the `OK_WITH(TerminalId(..))` reply for `CREATE_SESSION`
-/// (`phux-fdh`, ADR-0021 §3).
+/// Build the `Ok` reply for `KILL_TERMINALS` — the atomic multi-terminal
+/// teardown the v0.3.0 "Option B" re-tier left in place of the dissolved
+/// L2 `KILL_COLLECTION` verb (ADR-0019 / ADR-0027).
 ///
-/// Creates a named session under `collection` and seeds its pane *without*
-/// attaching, subscribing, or resizing — the create-only counterpart to the
-/// always-attaching `ATTACH { CreateIfMissing }`. The existence check and
-/// the seed both run inside this `handle_client`-driven task on the
-/// single-threaded runtime, so the lookup→create sequence is atomic with
-/// respect to other clients: two racing `CREATE_SESSION { name }` callers
-/// cannot both succeed (the second sees the first's session and is rejected),
-/// which is the TOCTOU fix the client-side `GET_STATE`→`ATTACH` always-new
-/// path could not offer.
+/// Tears down every Terminal in `ids` inside **one** `with_mut` lock scope,
+/// so the removals are atomic with respect to every other command: no peer
+/// can observe a half-killed group on this server. (Cross-host atomicity is
+/// out of scope, as it would be under any tiering.) Each removal cancels the
+/// pane actor via [`crate::state::ServerState::detach_terminal_actor`];
+/// cancellation drops the actor's `exit_notify`, which the per-pane EOF
+/// watcher treats like PTY EOF — it broadcasts `TERMINAL_CLOSED` and reaps
+/// the pane, cascading to session removal and (when the last session
+/// empties) server self-exit. So this reuses the exact teardown a per-pane
+/// `KILL_TERMINAL` (or a natural shell exit) takes, but resolves the whole
+/// group in one pass.
 ///
-/// A name already in use is rejected with `INVALID_COMMAND` (create-only,
-/// never create-or-attach). An unknown `collection` is rejected likewise;
-/// v0.1 servers host only the default [`DEFAULT_COLLECTION_ID`].
-///
-/// The reply carries the seed pane's wire [`TerminalId`] so the caller
-/// (`phux new --json`) can print it without attaching.
-pub(crate) fn handle_create_session(
+/// Idempotent: an `id` that is unknown, satellite-routed, or already-dead is
+/// skipped silently rather than failing the batch, so a caller racing a
+/// natural pane exit still succeeds. The reply is `Ok` the moment the actors
+/// are cancelled; the `TERMINAL_CLOSED` frames follow asynchronously as the
+/// panes reap (SPEC §5). The op is structurally infallible — an empty `ids`
+/// list is a no-op that still acks `Ok`.
+pub(crate) fn handle_kill_terminals(
     state: &SharedState,
-    collection: CollectionId,
+    ids: &[phux_protocol::ids::TerminalId],
+) -> CommandResult {
+    // Single lock scope: resolve every wire id to its core pane and cancel
+    // its actor before releasing the lock. All-or-nothing for a local
+    // server — no other command interleaves between the first and last
+    // removal. `detach_terminal_actor` is idempotent (cancelling an
+    // already-cancelled token is a no-op), so an id racing a natural exit,
+    // an unknown id, and a satellite-routed id (no local pane) all collapse
+    // to a silent skip.
+    let killed = state.with_mut(|s| {
+        let mut killed = 0u32;
+        for wire_id in ids {
+            if let Some(core_id) = s.terminal_from_wire(wire_id) {
+                s.detach_terminal_actor(core_id);
+                killed = killed.saturating_add(1);
+            } else {
+                debug!(?wire_id, "KILL_TERMINALS: unknown / dead id; skipping");
+            }
+        }
+        killed
+    });
+    debug!(
+        requested = ids.len(),
+        killed, "KILL_TERMINALS: torn down group atomically"
+    );
+    CommandResult::Ok
+}
+
+/// Create a named session and seed its pane, *without* attaching — the
+/// create-without-attach path the v0.3.0 "Option B" re-tier (ADR-0019 /
+/// ADR-0027) routes through the conventional
+/// [`phux_protocol::wire::frame::SESSION_CREATE_KEY`] L3 metadata write
+/// (replacing the removed `CREATE_SESSION` verb).
+///
+/// Existence check and seed both run on the single-threaded runtime, so the
+/// lookup→create sequence is atomic with respect to other clients: two
+/// racing create requests for the same `name` cannot both succeed. Returns
+/// `Ok(wire_id)` on success (the seed pane's wire [`TerminalId`], which the
+/// caller publishes under a result key for the client to read back), or
+/// `Err(message)` if `name` is already taken or the seed fails. Because
+/// `SET_METADATA` has no reply frame, the error is for logging only.
+pub(crate) fn create_named_session(
+    state: &SharedState,
     name: &str,
     command: Option<Vec<String>>,
     cwd: Option<&str>,
     root_token: &CancellationToken,
-) -> CommandResult {
-    if collection != crate::state::DEFAULT_COLLECTION_ID {
-        return CommandResult::Error {
-            code: ErrorCode::InvalidCommand,
-            message: format!("unknown collection: {collection:?}"),
-        };
-    }
+) -> Result<phux_protocol::ids::TerminalId, String> {
     if state.with(|s| s.session_by_name(name).is_some()) {
-        return CommandResult::Error {
-            code: ErrorCode::InvalidCommand,
-            message: format!("session {name:?} already exists"),
-        };
+        return Err(format!("session {name:?} already exists"));
     }
 
     let (with_pty, override_cmd, history_limit, term) = state.with(|s| {
@@ -442,7 +454,7 @@ pub(crate) fn handle_create_session(
     let seed_result = if with_pty {
         // Command precedence mirrors `resolve_create_if_missing`: an explicit
         // server-wide override (set by tests for a deterministic child) wins,
-        // then the wire `command`, then the default shell.
+        // then the request `command`, then the default shell.
         let mut seed_cmd = override_cmd.unwrap_or_else(|| match command {
             Some(argv) if !argv.is_empty() => {
                 let mut head = argv.into_iter();
@@ -464,133 +476,27 @@ pub(crate) fn handle_create_session(
                 builder
             }
         });
-        // Apply the server-wide `defaults.term` (phux-ign).
         crate::terminal_actor::apply_term(&mut seed_cmd, &term);
         seed_session_with_pty(state, name, seed_cmd, history_limit, root_token)
     } else {
-        // No-PTY path: the wire `command`/`cwd` are meaningless without a
-        // child to exec, but the session+pane still need to exist so the
-        // reply can carry a real seed-pane id.
         seed_session_with_actor(state, name, history_limit, root_token)
     };
 
     match seed_result {
         Ok(core_terminal) => {
+            // Intern the wire id so it is stable and resolvable, and hand it
+            // back so the caller can publish it for the client to read.
             let wire = state.with_mut(|s| s.intern_terminal_wire(core_terminal));
-            CommandResult::OkWith(CommandValue::TerminalId(wire))
+            Ok(wire)
         }
         Err(err) => {
             warn!(
                 session = %name,
                 error = %err,
-                "CREATE_SESSION: failed to seed pane for new session",
+                "session-create: failed to seed pane for new session",
             );
-            CommandResult::Error {
-                code: ErrorCode::ResourceExhausted,
-                message: format!("failed to create session {name:?}: {err}"),
-            }
+            Err(format!("failed to create session {name:?}: {err}"))
         }
-    }
-}
-
-/// Build the `Ok` reply for `KILL_COLLECTION` — the teardown counterpart to
-/// `CREATE_SESSION` (`phux-h9s`, ADR-0021 §3).
-///
-/// Destroys the session named `name` under `collection` by cancelling every
-/// pane actor it owns, in one round-trip. Each cancellation drops the
-/// actor's `exit_notify`, which the per-pane EOF watcher (phux-it8) treats
-/// like PTY EOF: it broadcasts `TERMINAL_CLOSED` and reaps the pane
-/// (phux-60s), cascading to session removal and — when the last session
-/// empties — server self-exit. So this reuses the exact teardown a per-pane
-/// `KILL_TERMINAL` (or a natural shell exit) takes, but resolves the whole
-/// session's panes in one pass rather than over N client round-trips.
-///
-/// The reply is `Ok` the moment the actors are cancelled; the
-/// `TERMINAL_CLOSED` frames follow asynchronously as the panes reap (SPEC
-/// §5). An unknown `collection` or an unknown `name` is rejected with
-/// `INVALID_COMMAND` — symmetric with `CREATE_SESSION`'s refusals.
-///
-/// Detach is idempotent (cancelling an already-cancelled token is a no-op),
-/// so a pane that exits concurrently with this teardown carries no
-/// double-close risk.
-pub(crate) fn handle_kill_collection(
-    state: &SharedState,
-    collection: CollectionId,
-    name: &str,
-) -> CommandResult {
-    if collection != crate::state::DEFAULT_COLLECTION_ID {
-        return CommandResult::Error {
-            code: ErrorCode::InvalidCommand,
-            message: format!("unknown collection: {collection:?}"),
-        };
-    }
-
-    // Resolve the session to the core pane ids it owns, under a single
-    // `with` borrow. `None` means the name is unknown — refuse it rather
-    // than silently ack a no-op teardown.
-    let Some(panes) = state.with(|s| {
-        let session = s.session_by_name(name)?;
-        let panes: Vec<phux_core::ids::TerminalId> = session
-            .windows
-            .iter()
-            .filter_map(|wid| s.registry.window(*wid))
-            .flat_map(|w| w.panes.iter().copied())
-            .collect();
-        Some(panes)
-    }) else {
-        return CommandResult::Error {
-            code: ErrorCode::SessionNotFound,
-            message: format!("no such session: {name:?}"),
-        };
-    };
-
-    state.with_mut(|s| {
-        for pane in panes {
-            s.detach_terminal_actor(pane);
-        }
-    });
-    CommandResult::Ok
-}
-
-/// Build the reply for `RENAME_SESSION` — the rename counterpart to
-/// `CREATE_SESSION` (ADR-0021 §3).
-///
-/// Resolves the session named `name` under `collection` (the same registry
-/// scan `KILL_COLLECTION` uses for name resolution) and reassigns its
-/// human-readable name to `new_name` in one pass. The rename is a single
-/// field write on the registry's `Session`; there is no name-keyed side
-/// index to update — every lookup scans the registry directly
-/// (`ServerState::find_session_by_name`).
-///
-/// An unknown `collection` or `new_name` already in use is refused with
-/// `INVALID_COMMAND` (symmetric with `CREATE_SESSION`); an unknown `name`
-/// with `SESSION_NOT_FOUND` (symmetric with `KILL_COLLECTION`). On success
-/// the reply is `Ok` — the server is authoritative, and each attached
-/// client reconciles the new name on its next `ATTACHED` snapshot (a live
-/// `SESSION_RENAMED` push to other clients is out of scope for this pass).
-pub(crate) fn handle_rename_session(
-    state: &SharedState,
-    collection: CollectionId,
-    name: &str,
-    new_name: &str,
-) -> CommandResult {
-    if collection != crate::state::DEFAULT_COLLECTION_ID {
-        return CommandResult::Error {
-            code: ErrorCode::InvalidCommand,
-            message: format!("unknown collection: {collection:?}"),
-        };
-    }
-
-    match state.with_mut(|s| s.rename_session(name, new_name)) {
-        crate::state::RenameOutcome::Renamed => CommandResult::Ok,
-        crate::state::RenameOutcome::NotFound => CommandResult::Error {
-            code: ErrorCode::SessionNotFound,
-            message: format!("no such session: {name:?}"),
-        },
-        crate::state::RenameOutcome::NameTaken => CommandResult::Error {
-            code: ErrorCode::InvalidCommand,
-            message: format!("session {new_name:?} already exists"),
-        },
     }
 }
 

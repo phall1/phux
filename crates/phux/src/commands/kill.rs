@@ -3,7 +3,6 @@ use std::process::ExitCode;
 
 use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
-use phux_protocol::ids::CollectionId;
 use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
 use phux_server::runtime::default_socket_path;
 
@@ -12,10 +11,12 @@ use crate::selector;
 
 /// `phux kill TARGET` — resolve the selector client-side, then ask the
 /// server to tear it down. A whole-session target (`.`, `=`, or a bare
-/// `name`) rides a single `KILL_COLLECTION` round-trip (phux-h9s); a
-/// window / pane / `@id` target falls back to one `KILL_TERMINAL` per
-/// resolved Terminal. Exit codes: 0 on success, 1 on a selector miss /
-/// no server, 2 on a server-side refusal.
+/// `name`) resolves to its full Terminal-id list and rides a single
+/// `KILL_TERMINALS { ids }` round-trip — the atomic multi-terminal op the
+/// v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) put in place of the
+/// dissolved `KILL_COLLECTION` verb. A window / pane / `@id` target falls
+/// back to one `KILL_TERMINAL` per resolved Terminal. Exit codes: 0 on
+/// success, 1 on a selector miss / no server, 2 on a server-side refusal.
 pub(crate) fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
     let selector = match selector::parse(target) {
         Ok(sel) => sel,
@@ -55,20 +56,20 @@ pub(crate) fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
         };
 
         // A whole-session target tears down in one round-trip via
-        // KILL_COLLECTION (the teardown counterpart to CREATE_SESSION;
-        // phux-h9s, ADR-0021 §3). Window / pane / @id selectors address a
-        // strict subset and stay on the per-KILL_TERMINAL path below.
+        // KILL_TERMINALS { ids } — the atomic multi-terminal op the v0.3.0
+        // "Option B" re-tier put in place of the dissolved KILL_COLLECTION
+        // verb (ADR-0019 / ADR-0027). Grouping is now client logic: we
+        // resolve the session to its full pane-id list and the server tears
+        // them down together under its single state lock. Window / pane /
+        // @id selectors address a strict subset and stay on the per-pane
+        // KILL_TERMINAL path below.
         if let Some(session_name) = selector::whole_session_name(&selector, &snapshot) {
-            return match command_on(
-                &mut conn,
-                1,
-                WireCommand::KillCollection {
-                    collection: CollectionId::new(1),
-                    name: session_name.clone(),
-                },
-            )
-            .await
-            {
+            let ids = selector::resolve(&selector, &snapshot);
+            if ids.is_empty() {
+                eprintln!("phux: no such target: {target}");
+                return ExitCode::FAILURE;
+            }
+            return match command_on(&mut conn, 1, WireCommand::KillTerminals { ids }).await {
                 // `Ok` is the ack; a clean disconnect means the server
                 // self-exited after its last session was reaped (phux-60s),
                 // so the session is already gone — both are success.

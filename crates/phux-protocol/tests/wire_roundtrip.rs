@@ -1748,67 +1748,31 @@ fn command_route_input_round_trips() {
 }
 
 #[test]
-fn command_create_session_round_trips() {
-    // CREATE_SESSION (tag 0x09): CollectionId + name + optional<list<str>>
-    // command + optional<str> cwd. Exercise the present/absent crossings on
-    // both optional tails so the presence bytes round-trip.
-    for command in [None, Some(vec!["vim".to_owned(), "notes.md".to_owned()])] {
-        for cwd in [None, Some("/tmp/work".to_owned())] {
-            let frame = FrameKind::Command {
-                request_id: 31,
-                command: Command::CreateSession {
-                    collection: CollectionId::new(1),
-                    name: "work".to_owned(),
-                    command: command.clone(),
-                    cwd: cwd.clone(),
-                },
-            };
-            let mut buf = BytesMut::new();
-            frame.encode(&mut buf);
-            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
-            assert_eq!(decoded, frame);
-            assert!(tail.is_empty());
-        }
+fn command_kill_terminals_round_trips() {
+    // KILL_TERMINALS (tag 0x09, the slot freed by the v0.3.0 "Option B"
+    // re-tier that dissolved the L2 lifecycle verbs): a u16-count-prefixed
+    // list of tagged TerminalIds. Exercise the empty list, a singleton, and a
+    // multi-id group so the count prefix and the per-id tagged encoding both
+    // round-trip.
+    for ids in [
+        Vec::new(),
+        vec![TerminalId::local(7)],
+        vec![
+            TerminalId::local(1),
+            TerminalId::local(2),
+            TerminalId::satellite("peer-a", 9),
+        ],
+    ] {
+        let frame = FrameKind::Command {
+            request_id: 31,
+            command: Command::KillTerminals { ids: ids.clone() },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
     }
-}
-
-#[test]
-fn command_kill_collection_round_trips() {
-    // KILL_COLLECTION (tag 0x0a): CollectionId + session name. The teardown
-    // counterpart to CREATE_SESSION; reply rides the existing
-    // COMMAND_RESULT { Ok } envelope so only the request frame is new here.
-    let frame = FrameKind::Command {
-        request_id: 32,
-        command: Command::KillCollection {
-            collection: CollectionId::new(1),
-            name: "work".to_owned(),
-        },
-    };
-    let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
-    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
-    assert_eq!(decoded, frame);
-    assert!(tail.is_empty());
-}
-
-#[test]
-fn command_rename_session_round_trips() {
-    // RENAME_SESSION (tag 0x0b): CollectionId + current name + new name. The
-    // rename counterpart to CREATE_SESSION; reply rides the existing
-    // COMMAND_RESULT { Ok } envelope so only the request frame is new here.
-    let frame = FrameKind::Command {
-        request_id: 33,
-        command: Command::RenameSession {
-            collection: CollectionId::new(1),
-            name: "work".to_owned(),
-            new_name: "notes".to_owned(),
-        },
-    };
-    let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
-    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
-    assert_eq!(decoded, frame);
-    assert!(tail.is_empty());
 }
 
 #[test]
