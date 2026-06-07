@@ -371,7 +371,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// [`SCROLLBACK_ALL`] (`0`) means every retained history row, any other
     /// value caps the result to the most-recent `want` rows.
     ///
-    /// Each cell is read via [`Terminal::grid_ref`] in the
+    /// Each cell is read via [`libghostty_vt::Terminal::grid_ref`] in the
     /// [`Point::History`] coordinate space, mirroring the viewport walk's
     /// wide-cell-tail handling (`SpacerTail` cells advance no column and
     /// are skipped). History coordinates are local to the history region:
@@ -1003,7 +1003,8 @@ fn cell_color(resolved: Option<RgbColor>, raw: StyleColor) -> CellColor {
 
 /// Post-row-walk epilogue shared by both synthesis paths: reset SGR,
 /// re-establish cursor position + visibility + visual style, and replay
-/// the load-bearing mode bits queried from the canonical [`Terminal`].
+/// the load-bearing mode bits queried from the canonical
+/// [`libghostty_vt::Terminal`].
 ///
 /// Identical to the tail of `synthesize` from before the
 /// full/incremental split was introduced.

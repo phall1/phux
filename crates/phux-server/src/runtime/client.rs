@@ -116,8 +116,9 @@ pub(crate) fn spawn_terminal_exit_watcher(
 /// subscribed to `pane` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
 /// Fanout uses the per-pane subscriber list maintained by
-/// [`ServerState::attach`] / [`ServerState::detach`]. The wire
-/// `TerminalId` is interned via [`ServerState::intern_terminal_wire`]
+/// [`crate::state::ServerState::attach`] / [`crate::state::ServerState::detach`].
+/// The wire `TerminalId` is interned via
+/// [`crate::state::ServerState::intern_terminal_wire`]
 /// so the frame carries the same id the client saw on
 /// `TERMINAL_SPAWNED` / `TERMINAL_SNAPSHOT`. The send is best-effort:
 /// a client whose mailbox has closed (it dropped the socket) is
@@ -976,7 +977,8 @@ pub(crate) fn handle_subscribe_events(
 ///
 /// `terminal` is the wire id the event concerns, or `None` for a
 /// server-scoped event with no owning Terminal. Fan-out uses
-/// [`ServerState::event_targets`], which matches server-wide subscribers
+/// [`crate::state::ServerState::event_targets`], which matches server-wide
+/// subscribers
 /// plus (when `terminal` is `Some`) per-pane subscribers for that id.
 /// Best-effort: a client whose mailbox is full or closed is silently
 /// skipped — the event stream is an accelerator, never a guarantee

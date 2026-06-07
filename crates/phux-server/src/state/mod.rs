@@ -88,8 +88,8 @@ pub struct ServerState {
     /// the same vec in arrival order; the PTY writer task drains it.
     ///
     /// For `phux-byc.4` no draining consumer exists yet — the log
-    /// accumulates and tests inspect it via
-    /// [`Self::terminal_input_log_for`].
+    /// accumulates and tests inspect it via the test-only
+    /// `terminal_input_log_for` accessor.
     terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
     /// Per-client, per-Terminal selection spans (phux-dh4).
     ///
@@ -146,7 +146,8 @@ pub struct ServerState {
     terminal_wire_reverse: HashMap<WireTerminalId, TerminalId>,
     next_terminal_wire_id: u32,
     /// Wire-side identifier for each core window id. Same shape as
-    /// the pane bridge above; used to populate [`WindowInfo::id`] in
+    /// the pane bridge above; used to populate
+    /// [`phux_protocol::wire::info::WindowInfo::id`] in
     /// the `ATTACHED` snapshot.
     window_wire_forward: HashMap<WindowId, WireWindowId>,
     window_wire_reverse: HashMap<WireWindowId, WindowId>,

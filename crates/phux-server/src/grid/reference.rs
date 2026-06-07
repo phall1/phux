@@ -25,7 +25,8 @@ pub struct ConsumerReference {
     pub(crate) cursor_mode: ReferenceCursorMode,
     /// Reusable scratch for the indices of rows that changed this tick,
     /// owned here (rather than freshly allocated per
-    /// [`SnapshotSynthesizer::synthesize_against_reference`] call) so a
+    /// [`crate::grid::synthesizer::SnapshotSynthesizer::synthesize_against_reference`]
+    /// call) so a
     /// steady stream of diffs reuses its capacity instead of allocating a
     /// fresh `Vec` each tick.
     pub(crate) changed_scratch: Vec<u16>,

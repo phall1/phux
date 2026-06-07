@@ -423,7 +423,7 @@ pub fn write_bell<W: Write>(out: &mut W) -> io::Result<()> {
 ///
 /// `run_action` emits a `SPAWN_TERMINAL` request and parks one of these
 /// keyed by the request id. When the matching `TERMINAL_SPAWNED { Ok }`
-/// reply arrives, the driver applies [`actions::apply_split`] against
+/// reply arrives, the driver applies [`crate::attach::actions::apply_split`] against
 /// the focused leaf captured here, splitting along the recorded
 /// direction. If a sibling action mutated focus between request and
 /// reply, the captured `focused_at_request` keeps the split anchored

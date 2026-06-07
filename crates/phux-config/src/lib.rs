@@ -9,7 +9,7 @@
 //! span so end-user diagnostics can point at the offending token.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 mod error;
 mod schema;

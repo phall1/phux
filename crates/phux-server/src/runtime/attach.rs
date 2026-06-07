@@ -395,7 +395,8 @@ pub(crate) async fn query_pane_cwd(
 /// output-pump task fanning the actor's broadcast into its outbound
 /// mailbox — the same machinery `handle_attach` uses for the session's
 /// initial panes. Without that, an `INPUT_KEY` to the freshly-spawned
-/// id would be rejected at [`handle_terminal_input`]'s subscription
+/// id would be rejected at [`crate::runtime::commands::handle_terminal_input`]'s
+/// subscription
 /// gate and the user would see nothing.
 ///
 /// The pane joins the spawning client's CURRENT session's window
@@ -978,7 +979,8 @@ pub(crate) async fn handle_attach(
 /// we have to size the PTY to match the client's outer viewport, otherwise
 /// full-screen TUIs (vim, htop) think they're running in 24 rows and
 /// render into a fraction of the visible area. This mirrors what
-/// [`handle_viewport_resize`] does for a live `VIEWPORT_RESIZE` frame.
+/// [`crate::runtime::commands::handle_viewport_resize`] does for a live
+/// `VIEWPORT_RESIZE` frame.
 ///
 /// The resize is fire-and-forget on the per-actor mpsc channel — same
 /// primitive `handle_viewport_resize` and `handle_terminal_resize` use.

@@ -558,7 +558,7 @@ struct ActionEffects {
     /// the focused Terminal (the "soft-kill via shell-exit" — see
     /// `run_action`). The async caller sends them in order; the
     /// resulting `TERMINAL_CLOSED` from the server folds the pane out
-    /// of the layout in [`handle_server_frame`].
+    /// of the layout in [`crate::attach::server_frame::handle_server_frame`].
     kill_frames: Vec<FrameKind>,
     /// phux-4li.20 / phux-eb0 / new-session: an in-process re-attach the
     /// driver should perform after this batch — either switch to an
@@ -992,7 +992,7 @@ fn run_action(
     effects
 }
 
-/// Pull a `Direction` out of a [`ResolvedAction`]'s `direction = "..."`
+/// Pull a `Direction` out of a [`phux_config::keybind::ResolvedAction`]'s `direction = "..."`
 /// arg.
 fn direction_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Direction> {
     let s = resolved.args.get("direction")?.as_str()?;
@@ -1007,7 +1007,7 @@ fn direction_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Dire
     }
 }
 
-/// Pull an `amount = N` arg out of a [`ResolvedAction`]. TOML integers
+/// Pull an `amount = N` arg out of a [`phux_config::keybind::ResolvedAction`]. TOML integers
 /// decode as `i64`; we clamp to `i16` (the [`actions::apply_resize`]
 /// signature). Out-of-range values are silently clamped — a `resize-pane
 /// amount = 99999` user binding gets a 32767-cell amount, which the
@@ -1018,14 +1018,14 @@ fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
     Some(v.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i16)
 }
 
-/// Pull a window index out of a [`ResolvedAction`]'s `index = N` arg.
+/// Pull a window index out of a [`phux_config::keybind::ResolvedAction`]'s `index = N` arg.
 /// Negative or non-integer values yield `None` (the caller bells).
 fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
     let v = resolved.args.get("index")?.as_integer()?;
     usize::try_from(v).ok()
 }
 
-/// Pull a window name out of a [`ResolvedAction`]'s `name = "..."` arg.
+/// Pull a window name out of a [`phux_config::keybind::ResolvedAction`]'s `name = "..."` arg.
 fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
     resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
 }

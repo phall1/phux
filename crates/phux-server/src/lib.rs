@@ -6,7 +6,7 @@
 //! forwards bytes to attached clients as `TERMINAL_OUTPUT` frames per
 //! ADR-0013.
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 pub mod cwd_query;
 pub mod downsample;

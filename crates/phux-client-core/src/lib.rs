@@ -22,7 +22,7 @@
 //! depends on this crate (never the reverse).
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 pub mod layout;
 pub mod multi_pane;

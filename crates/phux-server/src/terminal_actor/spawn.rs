@@ -13,7 +13,8 @@ use tracing::debug;
 /// rarely splits a sequence boundary.
 const PTY_READ_CHUNK: usize = 4096;
 
-/// Bundle of PTY-side resources owned by a [`TerminalActor`] with a real PTY.
+/// Bundle of PTY-side resources owned by a
+/// [`TerminalActor`](crate::terminal_actor::TerminalActor) with a real PTY.
 ///
 /// Fields are kept in struct-declaration order so drop order matches the
 /// teardown contract: writer thread first (so the writer channel closes
@@ -28,13 +29,13 @@ pub(crate) struct PtyOwned {
     #[allow(dead_code, reason = "kept alive; methods invoked through &self")]
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     /// Child process spawned on the slave side. Reaped in
-    /// [`TerminalActor::shutdown_pty`].
+    /// [`TerminalActor::shutdown_pty`](crate::terminal_actor::TerminalActor::shutdown_pty).
     pub(crate) child: Box<dyn Child + Send + Sync>,
     /// Reader-thread join handle. Reader exits when the master is
     /// dropped (EOF on the read fd) or when its `mpsc::Sender` closes.
     pub(crate) reader_thread: Option<JoinHandle<()>>,
     /// Writer-thread join handle. Writer exits when its `mpsc::Receiver`
-    /// closes (i.e., the actor's [`Self::pty_tx`] sender is dropped).
+    /// closes (i.e., the actor's `pty_tx` sender is dropped).
     pub(crate) writer_thread: Option<JoinHandle<()>>,
 }
 
