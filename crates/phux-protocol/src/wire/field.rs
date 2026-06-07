@@ -1,177 +1,319 @@
 //! TLV field-ID constants used inside message bodies.
 //!
-//! Owned by phux-6yl.4. See `docs/spec/proto.md` §7 (message catalog) and Appendix A
-//! (encoding primitives). Field IDs are stable within a major protocol
-//! version; additive minor-version changes append IDs but MUST NOT renumber
-//! existing ones.
+//! Owned by phux-6yl.4. See `docs/spec/proto.md` §7 (message catalog) and
+//! `docs/spec/appendix-encoding.md` (field-tagged TLV encoding). Every message
+//! body is encoded field-tagged: each top-level field is written as
+//! `field_id: varint || wire_type: u8 || length-delimited value`, and decoders
+//! match fields by id, skipping any id they do not recognise by its length.
+//!
+//! # Field-id allocation discipline
+//!
+//! - Field ids are **per message**: each message's body has its own id space
+//!   starting at `1` and running **contiguously** for that message's fields,
+//!   in the order the fields are declared. (Two messages may both use id `1`;
+//!   ids are scoped to the message, the way the type byte already scopes the
+//!   body.)
+//! - Field ids are **stable within a major protocol version**: an additive
+//!   minor-version change MAY append a new id after the existing ones but MUST
+//!   NOT renumber or reuse an existing id. A removed field's id is retired,
+//!   not recycled.
+//! - An **optional or trailing** field is a simply-absent tagged field: the
+//!   encoder writes no field for `None` / an empty trailing value, and the
+//!   decoder applies the documented default when the id is absent. This is the
+//!   forward-compat mechanism — peers round-trip by id, not by position.
+//! - The constants below are grouped one `mod` per message so the per-message
+//!   `1, 2, 3, …` allocation is self-evident and a new field appends to the
+//!   end of its module.
+//!
+//! Nested tagged unions and sub-records (e.g. `TerminalId`, `ViewportInfo`,
+//! `Command`, `SessionSnapshot`) are encoded *positionally* inside a field's
+//! length-delimited value; only the message body itself is field-tagged. Their
+//! wire-tag bytes live alongside their definitions in `wire::frame` /
+//! `wire::info` / `crate::ids`.
 
-// -----------------------------------------------------------------------------
-// `HELLO` / `HELLO_OK` — §6.1
-// -----------------------------------------------------------------------------
+/// `HELLO` body fields (`docs/spec/proto.md` §6.1).
+pub mod hello {
+    /// Free-form client identifier string.
+    pub const CLIENT_NAME: u32 = 1;
+    /// Protocol major version (`u16`).
+    pub const PROTOCOL_MAJOR: u32 = 2;
+    /// Protocol minor version (`u16`).
+    pub const PROTOCOL_MINOR: u32 = 3;
+    /// Protocol patch version (`u16`).
+    pub const PROTOCOL_PATCH: u32 = 4;
+    /// `ClientCapabilities` blob (positional sub-record).
+    pub const CLIENT_CAPS: u32 = 5;
+}
 
-/// `HELLO`: list of `VersionRange` the client supports.
-pub const HELLO_VERSIONS: u32 = 1;
-/// `HELLO`: `ClientCapabilities` blob.
-pub const HELLO_CLIENT_CAPS: u32 = 2;
+/// `HELLO_OK` body fields (`docs/spec/proto.md` §6.1).
+pub mod hello_ok {
+    /// Selected protocol major version (`u16`).
+    pub const PROTOCOL_MAJOR: u32 = 1;
+    /// Selected protocol minor version (`u16`).
+    pub const PROTOCOL_MINOR: u32 = 2;
+    /// Selected protocol patch version (`u16`).
+    pub const PROTOCOL_PATCH: u32 = 3;
+    /// `ServerCapabilities` blob (positional sub-record).
+    pub const SERVER_CAPS: u32 = 4;
+    /// Opaque server identity bytes.
+    pub const SERVER_ID: u32 = 5;
+}
 
-/// `HELLO_OK`: selected `Version`.
-pub const HELLO_OK_VERSION: u32 = 1;
-/// `HELLO_OK`: `ServerCapabilities` blob.
-pub const HELLO_OK_SERVER_CAPS: u32 = 2;
-/// `HELLO_OK`: opaque server identity bytes.
-pub const HELLO_OK_SERVER_ID: u32 = 3;
+/// `PING` / `PONG` body fields (`docs/spec/proto.md` §7.4).
+pub mod ping {
+    /// Nonce the peer echoes back (`u64`). Shared id for `PING` and `PONG`.
+    pub const NONCE: u32 = 1;
+}
 
-// -----------------------------------------------------------------------------
-// `PING` / `PONG` — §7.5
-// -----------------------------------------------------------------------------
+/// `TERMINAL_OUTPUT` body fields (`docs/spec/L1.md` §8.1, ADR-0013).
+pub mod terminal_output {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Monotonic per-terminal sequence id (`u64`).
+    pub const SEQ: u32 = 2;
+    /// VT bytes from the PTY.
+    pub const BYTES: u32 = 3;
+}
 
-/// `PING` / `PONG`: nonce echoed back by the peer.
-pub const PING_NONCE: u32 = 1;
-/// `PING` / `PONG`: nonce echoed back by the peer (alias for symmetry).
-pub const PONG_NONCE: u32 = 1;
+/// `ATTACH` body fields (`docs/spec/proto.md` §7.1 / §13).
+pub mod attach {
+    /// `AttachTarget` tagged union (positional).
+    pub const TARGET: u32 = 1;
+    /// `ViewportInfo` (positional sub-record).
+    pub const VIEWPORT: u32 = 2;
+    /// `request_scrollback: bool`.
+    pub const REQUEST_SCROLLBACK: u32 = 3;
+    /// `scrollback_limit_lines: u32`.
+    pub const SCROLLBACK_LIMIT_LINES: u32 = 4;
+}
 
-// -----------------------------------------------------------------------------
-// `INPUT_KEY` — §9.1
-// -----------------------------------------------------------------------------
+/// `INPUT_KEY` body fields (`docs/spec/input.md` §2).
+pub mod input_key {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// `KeyEvent` (positional sub-record).
+    pub const EVENT: u32 = 2;
+}
 
-/// `INPUT_KEY`: target `TerminalId`.
-pub const INPUT_KEY_TERMINAL: u32 = 1;
-/// `INPUT_KEY`: physical/logical key code (libghostty `Key`).
-pub const INPUT_KEY_KEY: u32 = 2;
-/// `INPUT_KEY`: modifier bitset.
-pub const INPUT_KEY_MODS: u32 = 3;
-/// `INPUT_KEY`: key action (press/release/repeat).
-pub const INPUT_KEY_ACTION: u32 = 4;
-/// `INPUT_KEY`: optional UTF-8 text produced by the key event.
-pub const INPUT_KEY_TEXT: u32 = 5;
+/// `INPUT_MOUSE` body fields (`docs/spec/input.md` §3).
+pub mod input_mouse {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// `MouseEvent` (positional sub-record).
+    pub const EVENT: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `INPUT_MOUSE` — §9.2
-// -----------------------------------------------------------------------------
+/// `INPUT_FOCUS` body fields (`docs/spec/input.md` §4).
+pub mod input_focus {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Focus kind (`u8`: gained=0 / lost=1).
+    pub const EVENT: u32 = 2;
+}
 
-/// `INPUT_MOUSE`: target `TerminalId`.
-pub const INPUT_MOUSE_TERMINAL: u32 = 1;
-/// `INPUT_MOUSE`: action (press/release/motion) — libghostty `mouse::Action`.
-pub const INPUT_MOUSE_ACTION: u32 = 2;
-/// `INPUT_MOUSE`: button identity — libghostty `mouse::Button`.
-pub const INPUT_MOUSE_BUTTON: u32 = 3;
-/// `INPUT_MOUSE`: modifier bitset at event time.
-pub const INPUT_MOUSE_MODS: u32 = 4;
-/// `INPUT_MOUSE`: pane-local pixel `x` (f64, SPEC §9.2.1).
-pub const INPUT_MOUSE_X: u32 = 5;
-/// `INPUT_MOUSE`: pane-local pixel `y` (f64, SPEC §9.2.1).
-pub const INPUT_MOUSE_Y: u32 = 6;
+/// `INPUT_PASTE` body fields (`docs/spec/input.md` §5).
+pub mod input_paste {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// `PasteEvent` (positional sub-record: trust byte + bytes).
+    pub const EVENT: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `INPUT_FOCUS` — §9.3
-// -----------------------------------------------------------------------------
+/// `INPUT_SELECTION` body fields (`docs/spec/input.md` §6).
+pub mod input_selection {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Selection mode (`u8`).
+    pub const MODE: u32 = 2;
+    /// Rectangular-mode flag (`bool`).
+    pub const RECTANGLE: u32 = 3;
+}
 
-/// `INPUT_FOCUS`: target `TerminalId`.
-pub const INPUT_FOCUS_TERMINAL: u32 = 1;
-/// `INPUT_FOCUS`: focus kind (gained=0, lost=1).
-pub const INPUT_FOCUS_KIND: u32 = 2;
+/// `FRAME_ACK` body fields (`docs/spec/proto.md` §7.2 / §8.2).
+pub mod frame_ack {
+    /// Acked `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Acked sequence id (`u64`).
+    pub const SEQ: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `INPUT_PASTE` — §9.4
-// -----------------------------------------------------------------------------
+/// `VIEWPORT_RESIZE` body fields (`docs/spec/proto.md` §7.1 / §10.5).
+pub mod viewport_resize {
+    /// New `ViewportInfo` (positional sub-record).
+    pub const VIEWPORT: u32 = 1;
+}
 
-/// `INPUT_PASTE`: target `TerminalId`.
-pub const INPUT_PASTE_TERMINAL: u32 = 1;
-/// `INPUT_PASTE`: trust classification (0=untrusted, 1=trusted).
-pub const INPUT_PASTE_TRUST: u32 = 2;
-/// `INPUT_PASTE`: raw payload bytes.
-pub const INPUT_PASTE_DATA: u32 = 3;
+/// `ATTACHED` body fields (`docs/spec/L1.md` §1 / §13).
+pub mod attached {
+    /// Full `SessionSnapshot` (positional sub-record).
+    pub const SNAPSHOT: u32 = 1;
+    /// Server-allocated `ClientId` for this attachment (`u32`).
+    pub const INITIAL_CLIENT_ID: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `ATTACH` / `ATTACHED` / `DETACH` / `DETACHED` / `TERMINAL_SNAPSHOT` —
-//   §7.1-§7.3, §8.4, §13. Field IDs are positional-codec-anticipatory
-//   (unused today); TLV migration is tracked in phux-i58.
-// -----------------------------------------------------------------------------
+/// `TERMINAL_SNAPSHOT` body fields (`docs/spec/L1.md` §8.4).
+pub mod terminal_snapshot {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Grid columns (`u16`).
+    pub const COLS: u32 = 2;
+    /// Grid rows (`u16`).
+    pub const ROWS: u32 = 3;
+    /// VT replay byte sequence.
+    pub const VT_REPLAY_BYTES: u32 = 4;
+    /// Optional scrollback bytes (absent field = `None`).
+    pub const SCROLLBACK_BYTES: u32 = 5;
+}
 
-/// `ATTACH`: `AttachTarget` tagged union (SPEC §13).
-pub const ATTACH_TARGET: u32 = 1;
-/// `ATTACH`: `ViewportInfo { cols, rows, pixel_w?, pixel_h? }` (SPEC §13).
-pub const ATTACH_VIEWPORT: u32 = 2;
-/// `ATTACH`: `request_scrollback: bool` (SPEC §13).
-pub const ATTACH_REQUEST_SCROLLBACK: u32 = 3;
-/// `ATTACH`: `scrollback_limit_lines: u32` (SPEC §13).
-pub const ATTACH_SCROLLBACK_LIMIT_LINES: u32 = 4;
+/// `BELL` body fields (`docs/spec/L1.md` §1.2).
+pub mod bell {
+    /// Terminal that received the bell character (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+}
 
-/// `ATTACHED`: full `SessionSnapshot` (SPEC §13).
-pub const ATTACHED_SNAPSHOT: u32 = 1;
-/// `ATTACHED`: server-allocated `ClientId` for this attachment (SPEC §13).
-pub const ATTACHED_INITIAL_CLIENT_ID: u32 = 2;
+/// `ERROR` body fields (`docs/spec/proto.md` §9 / §14).
+pub mod error {
+    /// Optional correlating `request_id` (absent field = `None`).
+    pub const REQUEST_ID: u32 = 1;
+    /// Structured `ErrorCode` (`u16`).
+    pub const CODE: u32 = 2;
+    /// Human-readable UTF-8 message.
+    pub const MESSAGE: u32 = 3;
+}
 
-// `DETACH` and `DETACHED` are unit messages in the phux-4az scaffold;
-// `DETACHED { reason, message }` from SPEC §7.3 lands in a follow-up.
+/// `GET_METADATA` / `DELETE_METADATA` body fields (`docs/spec/L3.md` §1).
+pub mod get_metadata {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `Scope` tagged union (positional).
+    pub const SCOPE: u32 = 2;
+    /// Metadata key string.
+    pub const KEY: u32 = 3;
+}
 
-// -----------------------------------------------------------------------------
-// `TERMINAL_SNAPSHOT` body — §8.4 (separate frame per SPEC §13's attach sequence).
-// -----------------------------------------------------------------------------
+/// `SET_METADATA` body fields (`docs/spec/L3.md` §1).
+pub mod set_metadata {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `Scope` tagged union (positional).
+    pub const SCOPE: u32 = 2;
+    /// Metadata key string.
+    pub const KEY: u32 = 3;
+    /// Metadata value bytes.
+    pub const VALUE: u32 = 4;
+}
 
-/// `TERMINAL_SNAPSHOT`: target `TerminalId`.
-pub const TERMINAL_SNAPSHOT_TERMINAL: u32 = 1;
-/// `TERMINAL_SNAPSHOT`: grid columns.
-pub const TERMINAL_SNAPSHOT_COLS: u32 = 2;
-/// `TERMINAL_SNAPSHOT`: grid rows.
-pub const TERMINAL_SNAPSHOT_ROWS: u32 = 3;
-/// `TERMINAL_SNAPSHOT`: opening sequence of `DiffOp` against a blank grid.
-pub const TERMINAL_SNAPSHOT_OPS: u32 = 4;
+/// `LIST_METADATA` body fields (`docs/spec/L3.md` §1).
+pub mod list_metadata {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `Scope` tagged union (positional).
+    pub const SCOPE: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `BELL` — §7.6
-// -----------------------------------------------------------------------------
+/// `SUBSCRIBE_METADATA` body fields (`docs/spec/L3.md` §1).
+pub mod subscribe_metadata {
+    /// `Scope` tagged union (positional).
+    pub const SCOPE: u32 = 1;
+    /// Metadata key string.
+    pub const KEY: u32 = 2;
+}
 
-/// `BELL`: terminal that received the bell character.
-pub const BELL_TERMINAL: u32 = 1;
+/// `METADATA_CHANGED` body fields (`docs/spec/L3.md` §1).
+pub mod metadata_changed {
+    /// `Scope` tagged union (positional).
+    pub const SCOPE: u32 = 1;
+    /// Metadata key string.
+    pub const KEY: u32 = 2;
+    /// Optional new value bytes (absent field = `None` / tombstone).
+    pub const VALUE: u32 = 3;
+}
 
-// -----------------------------------------------------------------------------
-// `PANE_DIFF` / `TERMINAL_SNAPSHOT` — §8
-// -----------------------------------------------------------------------------
+/// `METADATA_VALUE` body fields (`docs/spec/L3.md` §1).
+pub mod metadata_value {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// Optional value bytes (absent field = key absent).
+    pub const VALUE: u32 = 2;
+}
 
-/// Pane identifier for diff/snapshot frames.
-pub const PANE_DIFF_PANE: u32 = 1;
-/// Monotonic frame id (`FrameId`).
-pub const PANE_DIFF_FRAME_ID: u32 = 2;
-/// Encoded `DiffOp` sequence.
-pub const PANE_DIFF_OPS: u32 = 3;
-/// Base frame id this diff applies on top of (`docs/spec/L1.md` §2.1).
-pub const PANE_DIFF_BASE_FRAME_ID: u32 = 4;
-/// `CursorState` carried with every diff (`docs/spec/L1.md` §2.5).
-pub const PANE_DIFF_CURSOR: u32 = 5;
-/// `PaneModes` bitset carried with every diff (`docs/spec/L1.md` §2.5).
-pub const PANE_DIFF_MODES: u32 = 6;
-/// Revision tag, reserved for SPEC §8.1 compression schemes (`0` today).
-pub const PANE_DIFF_REVISION: u32 = 7;
+/// `METADATA_KEYS` body fields (`docs/spec/L3.md` §1).
+pub mod metadata_keys {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// Sorted list of key names (positional `u32` count + strings).
+    pub const KEYS: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `VIEWPORT_RESIZE` / `TERMINAL_RESIZED` — §10.5
-// -----------------------------------------------------------------------------
+/// `SPAWN_TERMINAL` body fields (`docs/spec/L1.md` §10.1).
+pub mod spawn_terminal {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// Target `GroupId` (`u32`).
+    pub const GROUP: u32 = 2;
+    /// Optional command argv (absent field = `None`).
+    pub const COMMAND: u32 = 3;
+    /// Optional working directory (absent field = `None`).
+    pub const CWD: u32 = 4;
+    /// Optional environment pairs (absent field = `None`).
+    pub const ENV: u32 = 5;
+}
 
-/// Target terminal id for a resize.
-pub const VIEWPORT_RESIZE_TERMINAL: u32 = 1;
-/// New column count.
-pub const VIEWPORT_RESIZE_COLS: u32 = 2;
-/// New row count.
-pub const VIEWPORT_RESIZE_ROWS: u32 = 3;
+/// `TERMINAL_SPAWNED` body fields (`docs/spec/L1.md` §10.1).
+pub mod terminal_spawned {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `SpawnResult` tagged union (positional).
+    pub const RESULT: u32 = 2;
+}
 
-// -----------------------------------------------------------------------------
-// `FRAME_ACK` — §12
-// -----------------------------------------------------------------------------
+/// `TERMINAL_CLOSED` body fields (`docs/spec/L1.md` §10.1).
+pub mod terminal_closed {
+    /// Closed `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// Optional exit status (absent field = signal / unknown).
+    pub const EXIT_STATUS: u32 = 2;
+}
 
-/// Acked terminal id.
-pub const FRAME_ACK_TERMINAL: u32 = 1;
-/// Acked frame id.
-pub const FRAME_ACK_FRAME_ID: u32 = 2;
+/// `TERMINAL_RESIZE` body fields (`docs/spec/L1.md` §10.2).
+pub mod terminal_resize {
+    /// Target `TerminalId` (positional tagged union).
+    pub const TERMINAL_ID: u32 = 1;
+    /// New column count (`u16`).
+    pub const COLS: u32 = 2;
+    /// New row count (`u16`).
+    pub const ROWS: u32 = 3;
+}
 
-// -----------------------------------------------------------------------------
-// `ERROR` — §14
-// -----------------------------------------------------------------------------
+/// `COMMAND` body fields (`docs/spec/L1.md` §5).
+pub mod command {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `Command` tagged union (positional).
+    pub const COMMAND: u32 = 2;
+}
 
-/// Error code discriminant.
-pub const ERROR_CODE: u32 = 1;
-/// Human-readable error message.
-pub const ERROR_MESSAGE: u32 = 2;
+/// `COMMAND_RESULT` body fields (`docs/spec/L1.md` §5).
+pub mod command_result {
+    /// Correlating `request_id` (`u32`).
+    pub const REQUEST_ID: u32 = 1;
+    /// `CommandResult` tagged union (positional).
+    pub const RESULT: u32 = 2;
+}
+
+/// `SUBSCRIBE_EVENTS` body fields (`docs/spec/L1.md` §7.5).
+pub mod subscribe_events {
+    /// Optional `TerminalId` scope (absent field = server-scoped `None`).
+    pub const TERMINAL: u32 = 1;
+}
+
+/// `EVENT` body fields (`docs/spec/L1.md` §7.5).
+pub mod event {
+    /// Optional `TerminalId` scope (absent field = server-scoped `None`).
+    pub const TERMINAL: u32 = 1;
+    /// `AgentEvent` tagged union (positional TLV: tag + length-prefixed body).
+    pub const EVENT: u32 = 2;
+}
 
 // -----------------------------------------------------------------------------
 // `SessionId` tagged union — ADR-0007 §3

@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-06-07
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -194,13 +194,15 @@ within the payload as defined per-message and per-field.
 ## 6. Version negotiation
 
 The protocol uses semantic versioning: `major.minor.patch`. This
-document specifies version `0.3.0`.
+document specifies version `0.4.0`.
 
 - **Major** version changes are wire-breaking.
-- **Minor** version changes add new messages or trailing fields. A
-  peer encountering an unknown message type at a known minor version
-  MUST log and drop the message. A peer encountering trailing fields it
-  does not recognize within a known message MUST skip them by length.
+- **Minor** version changes add new messages or new fields. A peer
+  encountering an unknown message type at a known minor version MUST log
+  and drop the message. A peer encountering a **field id** it does not
+  recognize within a known message MUST skip that field by its declared
+  length (the field-tagged TLV extensibility rule of
+  [appendix-encoding.md](./appendix-encoding.md)).
 - **Patch** version changes are editorial and MUST NOT change behavior.
 
 ### 6.1 The HELLO handshake
@@ -292,18 +294,18 @@ ServerCapabilities {
 }
 ```
 
-The HELLO codec encodes `ClientCapabilities` as positional,
-big-endian, length-prefixed fields after the version tuple — the
-current normative encoding shape for every payload
-([appendix-encoding.md](./appendix-encoding.md)). The field order is
-`color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
-`output_mode`. Decoders MUST accept every prefix of this sequence and
-apply defaults for missing trailing fields: a body that stops before
-`output_mode` decodes as `OutputMode::Raw`, and an unknown
-`output_mode` tag also decodes as `Raw`. New fields append after
-`output_mode`. A migration from positional to field-tagged encoding is
-tracked future work (bead phux-ktte, relates phux-i58) and is not
-part of this version.
+The HELLO body is field-tagged TLV per
+[appendix-encoding.md](./appendix-encoding.md): `client_name`, the version
+triple, and the `ClientCapabilities` blob each ride as a separate tagged
+field. `ClientCapabilities` itself is a nested positional, big-endian,
+length-prefixed sub-record carried inside its field's value, with the field
+order `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
+`output_mode`. A decoder MUST accept every prefix of that caps sub-record and
+apply defaults for missing trailing bytes — a value that stops before
+`output_mode` decodes as `OutputMode::Raw`, and an unknown `output_mode` tag
+also decodes as `Raw` — and an absent `ClientCapabilities` *field* decodes to
+the default capabilities. New capability bytes append after `output_mode`
+inside the same field.
 
 `output_mode` lets a consumer choose, per connection, which server emitter
 serves its attached Terminals: `Raw` (the default) keeps the byte-faithful

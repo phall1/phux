@@ -40,6 +40,7 @@ use crate::input::selection::{SelectionEvent, SelectionMode};
 use super::decode::Decoder;
 use super::encode::Encoder;
 use super::error::DecodeError;
+use super::field;
 use super::info::{
     SessionSnapshot, decode_session_snapshot, encode_client_id, encode_session_snapshot,
 };
@@ -1717,24 +1718,29 @@ impl FrameKind {
                 protocol_patch,
                 client_caps,
             } => {
-                enc.write_str(client_name);
-                enc.write_u16_be(*protocol_major);
-                enc.write_u16_be(*protocol_minor);
-                enc.write_u16_be(*protocol_patch);
-                // Trailing fields — older decoders skip them via the length
-                // header per SPEC §6 ("skip them by length"). The encoder
-                // ALWAYS emits all bytes; the wire shape grows monotonically.
-                // Order: color_support (phux-7lf), layers (phux-4li.2),
-                // image_protocols/kbd_protocols/hyperlinks (phux-4rj).
-                enc.write_u8(client_caps.color_support.as_wire());
-                enc.write_u8(client_caps.layers.as_wire());
-                enc.write_u8(client_caps.image_protocols.as_wire());
-                enc.write_u8(client_caps.kbd_protocols.as_wire());
-                enc.write_u8(u8::from(client_caps.hyperlinks));
-                // phux-fseo: consumer output-mode preference (raw vs
-                // synthesized state-sync tick). Trailing/skippable like the
-                // caps bytes above.
-                enc.write_u8(client_caps.output_mode.as_wire());
+                // String fields ride as raw UTF-8 bytes — the field is already
+                // length-delimited by the TLV header, so no inner length prefix.
+                enc.write_field(field::hello::CLIENT_NAME, client_name.as_bytes());
+                enc.write_field_with(field::hello::PROTOCOL_MAJOR, |e| {
+                    e.write_u16_be(*protocol_major);
+                });
+                enc.write_field_with(field::hello::PROTOCOL_MINOR, |e| {
+                    e.write_u16_be(*protocol_minor);
+                });
+                enc.write_field_with(field::hello::PROTOCOL_PATCH, |e| {
+                    e.write_u16_be(*protocol_patch);
+                });
+                // ClientCapabilities rides as one field whose value is the
+                // positional caps blob: color_support, layers,
+                // image_protocols, kbd_protocols, hyperlinks, output_mode.
+                enc.write_field_with(field::hello::CLIENT_CAPS, |e| {
+                    e.write_u8(client_caps.color_support.as_wire());
+                    e.write_u8(client_caps.layers.as_wire());
+                    e.write_u8(client_caps.image_protocols.as_wire());
+                    e.write_u8(client_caps.kbd_protocols.as_wire());
+                    e.write_u8(u8::from(client_caps.hyperlinks));
+                    e.write_u8(client_caps.output_mode.as_wire());
+                });
             }
             Self::HelloOk {
                 protocol_major,
@@ -1743,29 +1749,37 @@ impl FrameKind {
                 server_caps,
                 server_id,
             } => {
-                enc.write_u16_be(*protocol_major);
-                enc.write_u16_be(*protocol_minor);
-                enc.write_u16_be(*protocol_patch);
-                // Trailing fields — older decoders skip them via the length
-                // header per SPEC §6 ("skip them by length"). The encoder
-                // ALWAYS emits all bytes; the wire shape grows monotonically.
-                // Order: server_caps.layers, then length-prefixed server_id.
-                enc.write_u8(server_caps.layers.as_wire());
-                enc.write_bytes(server_id);
+                enc.write_field_with(field::hello_ok::PROTOCOL_MAJOR, |e| {
+                    e.write_u16_be(*protocol_major);
+                });
+                enc.write_field_with(field::hello_ok::PROTOCOL_MINOR, |e| {
+                    e.write_u16_be(*protocol_minor);
+                });
+                enc.write_field_with(field::hello_ok::PROTOCOL_PATCH, |e| {
+                    e.write_u16_be(*protocol_patch);
+                });
+                enc.write_field_with(field::hello_ok::SERVER_CAPS, |e| {
+                    e.write_u8(server_caps.layers.as_wire());
+                });
+                // server_id is opaque bytes; the field is already
+                // length-delimited so the raw bytes are the value.
+                enc.write_field(field::hello_ok::SERVER_ID, server_id);
             }
-            // `Ping` and `Pong` share a single-`u64` nonce body; merged to
+            // `Ping` and `Pong` share a single-`u64` nonce field; merged to
             // satisfy `clippy::match_same_arms`.
             Self::Ping { nonce } | Self::Pong { nonce } => {
-                enc.write_u64_be(*nonce);
+                enc.write_field_with(field::ping::NONCE, |e| e.write_u64_be(*nonce));
             }
             Self::TerminalOutput {
                 terminal_id,
                 seq,
                 bytes,
             } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u64_be(*seq);
-                enc.write_bytes(bytes);
+                enc.write_field_with(field::terminal_output::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::terminal_output::SEQ, |e| e.write_u64_be(*seq));
+                enc.write_field(field::terminal_output::BYTES, bytes);
             }
             Self::Attach {
                 target,
@@ -1773,48 +1787,78 @@ impl FrameKind {
                 request_scrollback,
                 scrollback_limit_lines,
             } => {
-                encode_attach_target(target, &mut enc);
-                encode_viewport_info(viewport, &mut enc);
-                enc.write_u8(u8::from(*request_scrollback));
-                enc.write_u32_be(*scrollback_limit_lines);
+                enc.write_field_with(field::attach::TARGET, |e| encode_attach_target(target, e));
+                enc.write_field_with(field::attach::VIEWPORT, |e| {
+                    encode_viewport_info(viewport, e);
+                });
+                enc.write_field_with(field::attach::REQUEST_SCROLLBACK, |e| {
+                    e.write_u8(u8::from(*request_scrollback));
+                });
+                enc.write_field_with(field::attach::SCROLLBACK_LIMIT_LINES, |e| {
+                    e.write_u32_be(*scrollback_limit_lines);
+                });
             }
-            // `Detach` and `Detached` are unit variants: just the type byte,
-            // no payload. Merged to satisfy `clippy::match_same_arms`.
+            // `Detach` and `Detached` are unit variants: type byte only, no
+            // fields. Merged to satisfy `clippy::match_same_arms`.
             Self::Detach | Self::Detached => {}
             Self::InputKey { terminal_id, event } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                encode_key_event(event, &mut enc);
+                enc.write_field_with(field::input_key::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::input_key::EVENT, |e| encode_key_event(event, e));
             }
             Self::InputMouse { terminal_id, event } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                encode_mouse_event(event, &mut enc);
+                enc.write_field_with(field::input_mouse::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::input_mouse::EVENT, |e| encode_mouse_event(event, e));
             }
             Self::InputFocus { terminal_id, event } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u8(encode_focus_event(*event));
+                enc.write_field_with(field::input_focus::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::input_focus::EVENT, |e| {
+                    e.write_u8(encode_focus_event(*event));
+                });
             }
             Self::InputPaste { terminal_id, event } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                encode_paste_event(event, &mut enc);
+                enc.write_field_with(field::input_paste::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::input_paste::EVENT, |e| encode_paste_event(event, e));
             }
             Self::InputSelection { terminal_id, event } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u8(event.mode.as_u8());
-                enc.write_u8(u8::from(event.rectangle));
+                enc.write_field_with(field::input_selection::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::input_selection::MODE, |e| {
+                    e.write_u8(event.mode.as_u8());
+                });
+                enc.write_field_with(field::input_selection::RECTANGLE, |e| {
+                    e.write_u8(u8::from(event.rectangle));
+                });
             }
             Self::FrameAck { terminal_id, seq } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u64_be(*seq);
+                enc.write_field_with(field::frame_ack::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::frame_ack::SEQ, |e| e.write_u64_be(*seq));
             }
             Self::ViewportResize { viewport } => {
-                encode_viewport_info(viewport, &mut enc);
+                enc.write_field_with(field::viewport_resize::VIEWPORT, |e| {
+                    encode_viewport_info(viewport, e);
+                });
             }
             Self::Attached {
                 snapshot,
                 initial_client_id,
             } => {
-                encode_session_snapshot(snapshot, &mut enc);
-                encode_client_id(*initial_client_id, &mut enc);
+                enc.write_field_with(field::attached::SNAPSHOT, |e| {
+                    encode_session_snapshot(snapshot, e);
+                });
+                enc.write_field_with(field::attached::INITIAL_CLIENT_ID, |e| {
+                    encode_client_id(*initial_client_id, e);
+                });
             }
             Self::TerminalSnapshot {
                 terminal_id,
@@ -1823,23 +1867,33 @@ impl FrameKind {
                 vt_replay_bytes,
                 scrollback_bytes,
             } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u16_be(*cols);
-                enc.write_u16_be(*rows);
-                enc.write_bytes(vt_replay_bytes);
-                encode_optional_bytes(scrollback_bytes.as_deref(), &mut enc);
+                enc.write_field_with(field::terminal_snapshot::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::terminal_snapshot::COLS, |e| e.write_u16_be(*cols));
+                enc.write_field_with(field::terminal_snapshot::ROWS, |e| e.write_u16_be(*rows));
+                enc.write_field(field::terminal_snapshot::VT_REPLAY_BYTES, vt_replay_bytes);
+                // Optional: present only when Some; an absent field decodes None.
+                if let Some(sb) = scrollback_bytes.as_deref() {
+                    enc.write_field(field::terminal_snapshot::SCROLLBACK_BYTES, sb);
+                }
             }
             Self::Bell { terminal_id } => {
-                encode_terminal_id(terminal_id, &mut enc);
+                enc.write_field_with(field::bell::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
             }
             Self::Error {
                 request_id,
                 code,
                 message,
             } => {
-                encode_optional_u32(*request_id, &mut enc);
-                enc.write_u16_be(code.as_wire());
-                enc.write_str(message);
+                // Optional request_id: absent field = None.
+                if let Some(id) = request_id {
+                    enc.write_field_with(field::error::REQUEST_ID, |e| e.write_u32_be(*id));
+                }
+                enc.write_field_with(field::error::CODE, |e| e.write_u16_be(code.as_wire()));
+                enc.write_field(field::error::MESSAGE, message.as_bytes());
             }
             // GET / DELETE share `{request_id, scope, key}`; merged to
             // satisfy `clippy::match_same_arms`. The wire bodies are
@@ -1855,9 +1909,11 @@ impl FrameKind {
                 scope,
                 key,
             } => {
-                enc.write_u32_be(*request_id);
-                encode_scope(scope, &mut enc);
-                enc.write_str(key);
+                enc.write_field_with(field::get_metadata::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::get_metadata::SCOPE, |e| encode_scope(scope, e));
+                enc.write_field(field::get_metadata::KEY, key.as_bytes());
             }
             Self::SetMetadata {
                 request_id,
@@ -1865,43 +1921,57 @@ impl FrameKind {
                 key,
                 value,
             } => {
-                enc.write_u32_be(*request_id);
-                encode_scope(scope, &mut enc);
-                enc.write_str(key);
-                enc.write_bytes(value);
+                enc.write_field_with(field::set_metadata::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::set_metadata::SCOPE, |e| encode_scope(scope, e));
+                enc.write_field(field::set_metadata::KEY, key.as_bytes());
+                enc.write_field(field::set_metadata::VALUE, value);
             }
             Self::ListMetadata { request_id, scope } => {
-                enc.write_u32_be(*request_id);
-                encode_scope(scope, &mut enc);
+                enc.write_field_with(field::list_metadata::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::list_metadata::SCOPE, |e| encode_scope(scope, e));
             }
             Self::SubscribeMetadata { scope, key } => {
-                encode_scope(scope, &mut enc);
-                enc.write_str(key);
+                enc.write_field_with(field::subscribe_metadata::SCOPE, |e| encode_scope(scope, e));
+                enc.write_field(field::subscribe_metadata::KEY, key.as_bytes());
             }
             Self::MetadataChanged { scope, key, value } => {
-                encode_scope(scope, &mut enc);
-                enc.write_str(key);
-                encode_optional_bytes(value.as_deref(), &mut enc);
+                enc.write_field_with(field::metadata_changed::SCOPE, |e| encode_scope(scope, e));
+                enc.write_field(field::metadata_changed::KEY, key.as_bytes());
+                // Optional value: absent field = tombstone (None).
+                if let Some(v) = value.as_deref() {
+                    enc.write_field(field::metadata_changed::VALUE, v);
+                }
             }
             Self::MetadataValue { request_id, value } => {
-                enc.write_u32_be(*request_id);
-                encode_optional_bytes(value.as_deref(), &mut enc);
+                enc.write_field_with(field::metadata_value::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                // Optional value: absent field = key absent (None).
+                if let Some(v) = value.as_deref() {
+                    enc.write_field(field::metadata_value::VALUE, v);
+                }
             }
             Self::MetadataKeys { request_id, keys } => {
-                enc.write_u32_be(*request_id);
-                // Length-prefixed list of UTF-8 strings: u32 count + N strs.
-                // Mirrors the encoder shape used by `encode_optional_string_list`
-                // for the `Some` arm, minus the optional tag (the keys list
-                // is always present even when empty).
-                debug_assert!(
-                    u32::try_from(keys.len()).is_ok(),
-                    "metadata keys list length exceeds u32",
-                );
-                let len = u32::try_from(keys.len()).unwrap_or(u32::MAX);
-                enc.write_u32_be(len);
-                for k in keys {
-                    enc.write_str(k);
-                }
+                enc.write_field_with(field::metadata_keys::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                // The keys list is one field whose value is a positional u32
+                // count + N length-prefixed strings (present even when empty).
+                enc.write_field_with(field::metadata_keys::KEYS, |e| {
+                    debug_assert!(
+                        u32::try_from(keys.len()).is_ok(),
+                        "metadata keys list length exceeds u32",
+                    );
+                    let len = u32::try_from(keys.len()).unwrap_or(u32::MAX);
+                    e.write_u32_be(len);
+                    for k in keys {
+                        e.write_str(k);
+                    }
+                });
             }
             Self::SpawnTerminal {
                 request_id,
@@ -1910,49 +1980,88 @@ impl FrameKind {
                 cwd,
                 env,
             } => {
-                enc.write_u32_be(*request_id);
-                enc.write_u32_be(group.get());
-                encode_optional_string_list(command.as_deref(), &mut enc);
-                encode_optional_str(cwd.as_deref(), &mut enc);
-                encode_optional_env(env.as_deref(), &mut enc);
+                enc.write_field_with(field::spawn_terminal::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::spawn_terminal::GROUP, |e| {
+                    e.write_u32_be(group.get());
+                });
+                // Optional command/cwd/env: absent field = None. An empty list
+                // (`Some(vec![])`) stays distinct: a present field with a zero
+                // count.
+                if let Some(cmd) = command.as_deref() {
+                    enc.write_field_with(field::spawn_terminal::COMMAND, |e| {
+                        encode_string_list(cmd, e);
+                    });
+                }
+                if let Some(c) = cwd.as_deref() {
+                    enc.write_field(field::spawn_terminal::CWD, c.as_bytes());
+                }
+                if let Some(env) = env.as_deref() {
+                    enc.write_field_with(field::spawn_terminal::ENV, |e| encode_env(env, e));
+                }
             }
             Self::TerminalSpawned { request_id, result } => {
-                enc.write_u32_be(*request_id);
-                encode_spawn_result(result, &mut enc);
+                enc.write_field_with(field::terminal_spawned::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::terminal_spawned::RESULT, |e| {
+                    encode_spawn_result(result, e);
+                });
             }
             Self::TerminalClosed {
                 terminal_id,
                 exit_status,
             } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                encode_optional_i32(*exit_status, &mut enc);
+                enc.write_field_with(field::terminal_closed::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                // Optional exit status: absent field = signal / unknown.
+                if let Some(status) = exit_status {
+                    enc.write_field_with(field::terminal_closed::EXIT_STATUS, |e| {
+                        e.write_u32_be(u32::from_be_bytes(status.to_be_bytes()));
+                    });
+                }
             }
             Self::TerminalResize {
                 terminal_id,
                 cols,
                 rows,
             } => {
-                encode_terminal_id(terminal_id, &mut enc);
-                enc.write_u16_be(*cols);
-                enc.write_u16_be(*rows);
+                enc.write_field_with(field::terminal_resize::TERMINAL_ID, |e| {
+                    encode_terminal_id(terminal_id, e);
+                });
+                enc.write_field_with(field::terminal_resize::COLS, |e| e.write_u16_be(*cols));
+                enc.write_field_with(field::terminal_resize::ROWS, |e| e.write_u16_be(*rows));
             }
             Self::Command {
                 request_id,
                 command,
             } => {
-                enc.write_u32_be(*request_id);
-                encode_command(command, &mut enc);
+                enc.write_field_with(field::command::REQUEST_ID, |e| e.write_u32_be(*request_id));
+                enc.write_field_with(field::command::COMMAND, |e| encode_command(command, e));
             }
             Self::CommandResult { request_id, result } => {
-                enc.write_u32_be(*request_id);
-                encode_command_result(result, &mut enc);
+                enc.write_field_with(field::command_result::REQUEST_ID, |e| {
+                    e.write_u32_be(*request_id);
+                });
+                enc.write_field_with(field::command_result::RESULT, |e| {
+                    encode_command_result(result, e);
+                });
             }
             Self::SubscribeEvents { terminal } => {
-                encode_optional_terminal_id(terminal.as_ref(), &mut enc);
+                // Optional terminal scope: absent field = server-scoped None.
+                if let Some(t) = terminal.as_ref() {
+                    enc.write_field_with(field::subscribe_events::TERMINAL, |e| {
+                        encode_terminal_id(t, e);
+                    });
+                }
             }
             Self::Event { terminal, event } => {
-                encode_optional_terminal_id(terminal.as_ref(), &mut enc);
-                encode_agent_event(event, &mut enc);
+                if let Some(t) = terminal.as_ref() {
+                    enc.write_field_with(field::event::TERMINAL, |e| encode_terminal_id(t, e));
+                }
+                enc.write_field_with(field::event::EVENT, |e| encode_agent_event(event, e));
             }
         }
 
@@ -2209,36 +2318,10 @@ pub(super) fn decode_terminal_id(dec: &mut Decoder<'_>) -> Result<TerminalId, De
     }
 }
 
-/// Encode an `Option<TerminalId>` with the standard `0 = None / 1 = Some`
-/// presence tag, then the tagged [`TerminalId`] body for the `Some` arm.
-///
-/// Used by the agent-event frames (`SUBSCRIBE_EVENTS`, `EVENT`) where the
-/// Terminal scope is optional (`None` = server-scoped).
-pub(super) fn encode_optional_terminal_id(id: Option<&TerminalId>, enc: &mut Encoder<'_>) {
-    match id {
-        None => enc.write_u8(0),
-        Some(id) => {
-            enc.write_u8(1);
-            encode_terminal_id(id, enc);
-        }
-    }
-}
-
-/// Decode an `Option<TerminalId>` previously written by
-/// [`encode_optional_terminal_id`].
-pub(super) fn decode_optional_terminal_id(
-    dec: &mut Decoder<'_>,
-) -> Result<Option<TerminalId>, DecodeError> {
-    let tag = dec.read_u8()?;
-    match tag {
-        0 => Ok(None),
-        1 => Ok(Some(decode_terminal_id(dec)?)),
-        other => Err(DecodeError::UnknownEnumValue {
-            field: "Option<TerminalId> tag",
-            value: u32::from(other),
-        }),
-    }
-}
+// The optional `TerminalId` scope of `SUBSCRIBE_EVENTS` / `EVENT` is now
+// carried by TLV field *presence* (an absent `terminal` field = server-scoped
+// `None`), so the old `encode_optional_terminal_id` / `decode_optional_terminal_id`
+// presence-tag helpers were retired with the field-tagged migration.
 
 // -----------------------------------------------------------------------------
 // Small option-of-primitive helpers. Local to this module — `info.rs` has its
@@ -2356,27 +2439,76 @@ pub(super) fn decode_optional_string_list(
     }
 }
 
-fn encode_optional_bytes(value: Option<&[u8]>, enc: &mut Encoder<'_>) {
-    match value {
-        None => enc.write_u8(0),
-        Some(b) => {
-            enc.write_u8(1);
-            enc.write_bytes(b);
-        }
+/// Encode a string list as a `u32` count + N length-prefixed UTF-8 strings,
+/// with no outer presence tag.
+///
+/// The optionality of a `SPAWN_TERMINAL.command` field is now carried by TLV
+/// field *presence* (an absent field is `None`); a present field always holds a
+/// concrete list, so the inner encoding drops the old `0/1` presence byte. An
+/// empty list (`Some(vec![])`) round-trips as a present field whose value is
+/// just a zero count.
+pub(super) fn encode_string_list(list: &[String], enc: &mut Encoder<'_>) {
+    debug_assert!(
+        u32::try_from(list.len()).is_ok(),
+        "string list length exceeds u32",
+    );
+    let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+    enc.write_u32_be(len);
+    for s in list {
+        enc.write_str(s);
     }
 }
 
-pub(super) fn decode_optional_bytes(dec: &mut Decoder<'_>) -> Result<Option<Vec<u8>>, DecodeError> {
-    let tag = dec.read_u8()?;
-    match tag {
-        0 => Ok(None),
-        1 => Ok(Some(dec.read_bytes()?.to_vec())),
-        other => Err(DecodeError::UnknownEnumValue {
-            field: "Option<bytes> tag",
-            value: u32::from(other),
-        }),
+/// Decode a string list previously written by [`encode_string_list`].
+///
+/// Clamps the pre-reservation to the bytes remaining in the field value (each
+/// element is at least one byte on the wire), so an over-declared count errors
+/// on EOF rather than driving an unbounded `Vec::with_capacity`.
+pub(super) fn decode_string_list(dec: &mut Decoder<'_>) -> Result<Vec<String>, DecodeError> {
+    let len = dec.read_u32_be()?;
+    let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
+    let mut out = dec.bounded_capacity(len_usize);
+    for _ in 0..len_usize {
+        out.push(dec.read_str()?.to_owned());
+    }
+    Ok(out)
+}
+
+/// Encode an environment list as a `u32` count + N `(key, value)` string pairs,
+/// with no outer presence tag (presence is the TLV field, as for
+/// [`encode_string_list`]).
+pub(super) fn encode_env(list: &[(String, String)], enc: &mut Encoder<'_>) {
+    debug_assert!(
+        u32::try_from(list.len()).is_ok(),
+        "env list length exceeds u32",
+    );
+    let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
+    enc.write_u32_be(len);
+    for (k, v) in list {
+        enc.write_str(k);
+        enc.write_str(v);
     }
 }
+
+/// Decode an environment list previously written by [`encode_env`]. Bounds
+/// pre-reservation by the remaining field bytes (each pair is at least eight
+/// bytes on the wire).
+pub(super) fn decode_env(dec: &mut Decoder<'_>) -> Result<Vec<(String, String)>, DecodeError> {
+    let len = dec.read_u32_be()?;
+    let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
+    let mut out = dec.bounded_capacity(len_usize);
+    for _ in 0..len_usize {
+        let k = dec.read_str()?.to_owned();
+        let v = dec.read_str()?.to_owned();
+        out.push((k, v));
+    }
+    Ok(out)
+}
+
+// The optional-bytes fields (`TERMINAL_SNAPSHOT.scrollback_bytes`,
+// `METADATA_CHANGED.value`, `METADATA_VALUE.value`) now express `None` as an
+// absent TLV field, so the `encode_optional_bytes` / `decode_optional_bytes`
+// presence-tag helpers were retired with the field-tagged migration.
 
 // -----------------------------------------------------------------------------
 // Scope codec — SPEC §7.4 (phux-4li.2).
@@ -2416,6 +2548,43 @@ pub(super) fn decode_scope(dec: &mut Decoder<'_>) -> Result<Scope, DecodeError> 
             value: u32::from(other),
         }),
     }
+}
+
+/// Decode the shared `{request_id, scope, key}` body of `GET_METADATA` and
+/// `DELETE_METADATA` (identical field-tagged shape; `docs/spec/L3.md` §1).
+///
+/// Loops over the message body's TLV fields using the `field::get_metadata::*`
+/// ids (shared by both messages) and surfaces a missing required `scope` /
+/// `key` as [`DecodeError::UnexpectedEof`].
+pub(super) fn decode_metadata_scope_key(
+    dec: &mut Decoder<'_>,
+) -> Result<(u32, Scope, String), DecodeError> {
+    let mut request_id = 0u32;
+    let mut scope: Option<Scope> = None;
+    let mut key: Option<String> = None;
+    while let Some((id, value)) = dec.read_field()? {
+        match id {
+            field::get_metadata::REQUEST_ID => {
+                request_id = Decoder::new(value).read_u32_be()?;
+            }
+            field::get_metadata::SCOPE => {
+                scope = Some(decode_scope(&mut Decoder::new(value))?);
+            }
+            field::get_metadata::KEY => {
+                key = Some(
+                    core::str::from_utf8(value)
+                        .map_err(|_| DecodeError::InvalidUtf8)?
+                        .to_owned(),
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok((
+        request_id,
+        scope.ok_or(DecodeError::UnexpectedEof)?,
+        key.ok_or(DecodeError::UnexpectedEof)?,
+    ))
 }
 
 // -----------------------------------------------------------------------------
@@ -2813,61 +2982,11 @@ pub(super) fn decode_optional_i32(dec: &mut Decoder<'_>) -> Result<Option<i32>, 
     }
 }
 
-// -----------------------------------------------------------------------------
-// `Option<Vec<(String, String)>>` codec — used by `SPAWN_TERMINAL.env`
-// (SPEC §7.2 / §10.1).
-//
-// Mirrors `encode_optional_string_list`'s shape: outer 1-byte presence
-// tag, then (when `Some`) a `u32` element count followed by N pairs of
-// length-prefixed UTF-8 strings. Each pair is `(key, value)` in that
-// order.
-// -----------------------------------------------------------------------------
-
-fn encode_optional_env(value: Option<&[(String, String)]>, enc: &mut Encoder<'_>) {
-    match value {
-        None => enc.write_u8(0),
-        Some(list) => {
-            enc.write_u8(1);
-            debug_assert!(
-                u32::try_from(list.len()).is_ok(),
-                "env list length exceeds u32",
-            );
-            let len = u32::try_from(list.len()).unwrap_or(u32::MAX);
-            enc.write_u32_be(len);
-            for (k, v) in list {
-                enc.write_str(k);
-                enc.write_str(v);
-            }
-        }
-    }
-}
-
-pub(super) fn decode_optional_env(
-    dec: &mut Decoder<'_>,
-) -> Result<Option<Vec<(String, String)>>, DecodeError> {
-    let tag = dec.read_u8()?;
-    match tag {
-        0 => Ok(None),
-        1 => {
-            let len = dec.read_u32_be()?;
-            let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
-            // Clamp reservation to remaining bytes (each (k, v) pair is
-            // >=8 bytes on the wire, so remaining bytes is a safe upper
-            // bound): an over-declared length errors on EOF below.
-            let mut out = dec.bounded_capacity(len_usize);
-            for _ in 0..len_usize {
-                let k = dec.read_str()?.to_owned();
-                let v = dec.read_str()?.to_owned();
-                out.push((k, v));
-            }
-            Ok(Some(out))
-        }
-        other => Err(DecodeError::UnknownEnumValue {
-            field: "Option<list<(str, str)>> tag",
-            value: u32::from(other),
-        }),
-    }
-}
+// `SPAWN_TERMINAL.env`'s optionality is now carried by TLV field presence (an
+// absent `env` field = `None`; a present field holds a concrete, possibly
+// empty, list via [`encode_env`] / [`decode_env`]). The old
+// `encode_optional_env` / `decode_optional_env` presence-tag helpers were
+// retired with the field-tagged migration.
 
 // -----------------------------------------------------------------------------
 // AgentEvent codec — SPEC §7.5 / §10.3 (phux-y2t).

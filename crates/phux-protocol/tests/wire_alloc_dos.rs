@@ -62,17 +62,41 @@ fn framed(body: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Append an unsigned LEB128 varint.
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Append one field-tagged TLV field: `field_id || wire_type(4) || len || value`.
+fn tlv_field(out: &mut Vec<u8>, field_id: u32, value: &[u8]) {
+    put_varint(out, u64::from(field_id));
+    out.push(4); // wire_type BYTES
+    put_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
+}
+
 #[test]
 fn metadata_keys_huge_count_does_not_over_reserve() {
-    // type 0xD2 + request_id(4) + count(4) = u32::MAX.
+    // METADATA_KEYS (0xD2): the KEYS field (id 2) value is a positional u32
+    // count + strings. Declare count = u32::MAX inside a tiny field.
+    let mut keys_value = Vec::new();
+    keys_value.extend_from_slice(&u32::MAX.to_be_bytes());
     let mut body = vec![0xD2];
-    body.extend_from_slice(&0u32.to_be_bytes());
-    body.extend_from_slice(&u32::MAX.to_be_bytes());
+    tlv_field(&mut body, 1, &0u32.to_be_bytes()); // request_id
+    tlv_field(&mut body, 2, &keys_value); // keys: huge count, no elements
     let frame = framed(&body);
     let max = largest_alloc_during(&frame);
     assert!(FrameKind::decode(&frame).is_err());
-    // Body is 9 bytes; a sane decoder reserves on the order of the input,
-    // never gigabytes. 1 MiB is a generous ceiling.
+    // A sane decoder reserves on the order of the input, never gigabytes.
+    // 1 MiB is a generous ceiling.
     assert!(
         max < 1 << 20,
         "decoder reserved {max} bytes for a {}-byte frame",
@@ -82,13 +106,14 @@ fn metadata_keys_huge_count_does_not_over_reserve() {
 
 #[test]
 fn spawn_terminal_huge_command_list_does_not_over_reserve() {
-    // SPAWN_TERMINAL (0x22): request_id(4), group(4), command Option list.
-    // tag=1 (Some) then count u32::MAX.
+    // SPAWN_TERMINAL (0x22): the COMMAND field (id 3) value is a positional u32
+    // count + strings. Declare count = u32::MAX inside a tiny field.
+    let mut cmd_value = Vec::new();
+    cmd_value.extend_from_slice(&u32::MAX.to_be_bytes());
     let mut body = vec![0x22];
-    body.extend_from_slice(&0u32.to_be_bytes()); // request_id
-    body.extend_from_slice(&1u32.to_be_bytes()); // group
-    body.push(1); // command = Some
-    body.extend_from_slice(&u32::MAX.to_be_bytes()); // list count
+    tlv_field(&mut body, 1, &0u32.to_be_bytes()); // request_id
+    tlv_field(&mut body, 2, &1u32.to_be_bytes()); // group
+    tlv_field(&mut body, 3, &cmd_value); // command: huge count
     let frame = framed(&body);
     let max = largest_alloc_during(&frame);
     assert!(FrameKind::decode(&frame).is_err());
@@ -97,14 +122,14 @@ fn spawn_terminal_huge_command_list_does_not_over_reserve() {
 
 #[test]
 fn spawn_terminal_huge_env_list_does_not_over_reserve() {
-    // SPAWN_TERMINAL env: command None(0), cwd None(0), env Some(1) + count.
+    // SPAWN_TERMINAL env: the ENV field (id 5) value is a positional u32 count
+    // + pairs. Declare count = u32::MAX inside a tiny field.
+    let mut env_value = Vec::new();
+    env_value.extend_from_slice(&u32::MAX.to_be_bytes());
     let mut body = vec![0x22];
-    body.extend_from_slice(&0u32.to_be_bytes());
-    body.extend_from_slice(&1u32.to_be_bytes());
-    body.push(0); // command None
-    body.push(0); // cwd None
-    body.push(1); // env Some
-    body.extend_from_slice(&u32::MAX.to_be_bytes());
+    tlv_field(&mut body, 1, &0u32.to_be_bytes()); // request_id
+    tlv_field(&mut body, 2, &1u32.to_be_bytes()); // group
+    tlv_field(&mut body, 5, &env_value); // env: huge count
     let frame = framed(&body);
     let max = largest_alloc_during(&frame);
     assert!(FrameKind::decode(&frame).is_err());
@@ -113,9 +138,13 @@ fn spawn_terminal_huge_env_list_does_not_over_reserve() {
 
 #[test]
 fn attached_snapshot_huge_sessions_list_does_not_over_reserve() {
-    // ATTACHED (0x81): SessionSnapshot starts with a u32 sessions count.
+    // ATTACHED (0x81): the SNAPSHOT field (id 1) value is a positional
+    // SessionSnapshot that starts with a u32 sessions count. Declare
+    // count = u32::MAX inside a tiny field.
+    let mut snap_value = Vec::new();
+    snap_value.extend_from_slice(&u32::MAX.to_be_bytes()); // sessions count
     let mut body = vec![0x81];
-    body.extend_from_slice(&u32::MAX.to_be_bytes()); // sessions count
+    tlv_field(&mut body, 1, &snap_value); // snapshot
     let frame = framed(&body);
     let max = largest_alloc_during(&frame);
     assert!(FrameKind::decode(&frame).is_err());

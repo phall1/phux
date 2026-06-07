@@ -5,6 +5,8 @@
 //! past the end of the borrowed slice.
 
 use super::error::DecodeError;
+use super::field;
+use super::frame::Scope;
 use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_COMMAND,
     TYPE_COMMAND_RESULT, TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_EVENT,
@@ -14,15 +16,30 @@ use super::frame::{
     TYPE_SET_METADATA, TYPE_SPAWN_TERMINAL, TYPE_SUBSCRIBE_EVENTS, TYPE_SUBSCRIBE_METADATA,
     TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_RESIZE, TYPE_TERMINAL_SNAPSHOT,
     TYPE_TERMINAL_SPAWNED, TYPE_VIEWPORT_RESIZE, decode_agent_event, decode_attach_target,
-    decode_command, decode_command_result, decode_focus_event, decode_key_event,
-    decode_mouse_event, decode_optional_bytes, decode_optional_env, decode_optional_i32,
-    decode_optional_str, decode_optional_string_list, decode_optional_terminal_id,
-    decode_optional_u32, decode_paste_event, decode_scope, decode_spawn_result, decode_terminal_id,
-    decode_viewport_info,
+    decode_command, decode_command_result, decode_env, decode_focus_event, decode_key_event,
+    decode_metadata_scope_key, decode_mouse_event, decode_paste_event, decode_scope,
+    decode_spawn_result, decode_string_list, decode_terminal_id, decode_viewport_info,
 };
 use super::info::{decode_client_id, decode_session_snapshot};
-use crate::ids::GroupId;
+use crate::ids::{GroupId, TerminalId};
+use crate::input::focus::FocusEvent;
+use crate::input::key::KeyEvent;
+use crate::input::mouse::MouseEvent;
 use crate::input::selection::{SelectionEvent, SelectionMode};
+
+/// Decode a sub-record / leaf from a TLV field's value via a positional
+/// [`Decoder`] bounded by the field's bytes.
+///
+/// The field value's bytes are the positional encoding of one logical field;
+/// running a fresh `Decoder` over just that slice means a malformed nested
+/// value cannot read past its field (the slice end bounds it), and an
+/// over-declared inner list errors on EOF rather than over-reserving.
+macro_rules! sub {
+    ($value:expr, $body:expr) => {{
+        let mut sub = Decoder::new($value);
+        $body(&mut sub)?
+    }};
+}
 
 /// Cursor-style decoder over an immutable byte slice.
 ///
@@ -197,12 +214,73 @@ impl<'a> Decoder<'a> {
         core::str::from_utf8(bytes).map_err(|_| DecodeError::InvalidUtf8)
     }
 
+    /// Read an unsigned LEB128 varint (`docs/spec/appendix-encoding.md`,
+    /// `wire_type` `VARINT`). Pairs with
+    /// [`super::encode::Encoder::write_varint`].
+    ///
+    /// Refuses a varint longer than ten bytes (the maximum a `u64` needs) with
+    /// [`DecodeError::LengthOverflow`], so a malformed continuation run cannot
+    /// spin or overflow. Truncated input surfaces as
+    /// [`DecodeError::UnexpectedEof`].
+    pub fn read_varint(&mut self) -> Result<u64, DecodeError> {
+        let mut result: u64 = 0;
+        let mut shift: u32 = 0;
+        loop {
+            // A u64 needs at most ten 7-bit groups; reject anything longer.
+            if shift >= 64 {
+                return Err(DecodeError::LengthOverflow);
+            }
+            let byte = self.read_u8()?;
+            result |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+        }
+    }
+
+    /// Read one TLV field at the message-body level
+    /// (`docs/spec/appendix-encoding.md` §1).
+    ///
+    /// Returns `Ok(None)` when the cursor is at the end of the current frame
+    /// body (no more fields). Otherwise reads `field_id: varint`,
+    /// `wire_type: u8`, and the field's **length-delimited value**
+    /// (`varint length || bytes`), returning `(field_id, value_slice)`. Every
+    /// wire type phux emits at the top level is length-delimited, so this one
+    /// primitive both reads a known field and *skips* an unknown one — a
+    /// caller that does not recognise `field_id` simply discards the returned
+    /// slice and loops, which is the forward-compat "skip unknown fields by
+    /// length" rule.
+    ///
+    /// The returned slice is bounded by the field's declared length and by the
+    /// remaining frame body, so a nested positional decoder run over it cannot
+    /// read past the field — and an over-declared length errors with
+    /// [`DecodeError::UnexpectedEof`] rather than bleeding into the next field.
+    pub fn read_field(&mut self) -> Result<Option<(u32, &'a [u8])>, DecodeError> {
+        if self.at_body_end() {
+            return Ok(None);
+        }
+        let field_id =
+            u32::try_from(self.read_varint()?).map_err(|_| DecodeError::LengthOverflow)?;
+        // The wire_type byte is informational at the top level: every field
+        // phux emits is length-delimited, so the value is always
+        // `varint length || bytes` and an unknown field skips by that length.
+        let _wire_type = self.read_u8()?;
+        let len = self.read_varint()?;
+        if len > u64::from(MAX_FRAME_LEN) {
+            return Err(DecodeError::LengthOverflow);
+        }
+        let len_usize = usize::try_from(len).map_err(|_| DecodeError::LengthOverflow)?;
+        let value = self.take(len_usize)?;
+        Ok(Some((field_id, value)))
+    }
+
     /// Read a complete wire frame from the current position. Returns the
     /// decoded frame and the unconsumed tail of the underlying input.
     ///
     /// The body is one big `match` over the SPEC §7 catalog, intentionally —
     /// keeping the dispatch table in one place trades length for locality.
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
     pub fn read_frame(&mut self) -> Result<(FrameKind, &'a [u8]), DecodeError> {
         // Length header: u32 big-endian, excludes itself, includes type byte.
         let length = self.read_u32_be()?;
@@ -225,51 +303,78 @@ impl<'a> Decoder<'a> {
         self.body_end = Some(body_end);
 
         let type_byte = self.read_u8()?;
+        // Message bodies are field-tagged TLV (`docs/spec/appendix-encoding.md`):
+        // each top-level field is `field_id || wire_type || length-delimited
+        // value`, read by `read_field` which also skips an unrecognised
+        // `field_id` by its length (forward-compat). Each arm below loops over
+        // the body's fields, collecting them by id, then assembles the variant
+        // applying documented defaults for absent optional/trailing fields. A
+        // missing *required* field surfaces as `UnexpectedEof` (the body ended
+        // before a field the message requires).
         let frame = match type_byte {
             TYPE_HELLO => {
-                let client_name = self.read_str()?.to_owned();
-                let protocol_major = self.read_u16_be()?;
-                let protocol_minor = self.read_u16_be()?;
-                let protocol_patch = self.read_u16_be()?;
-                // Backward-compat trailing fields (SPEC §6.2). A pre-7lf
-                // HELLO ends right after `protocol_patch`; a 7lf-era HELLO
-                // adds one byte for ColorSupport; a 4li.2-era HELLO adds
-                // a further byte for the Layer bitset. phux-4rj appends
-                // image_protocols, kbd_protocols, and hyperlinks. The
-                // decoder tolerates every prefix per SPEC §6 ("skip them
-                // by length") and applies defaults for missing bytes.
+                let mut client_name: Option<String> = None;
+                let mut protocol_major = 0u16;
+                let mut protocol_minor = 0u16;
+                let mut protocol_patch = 0u16;
                 let mut client_caps = crate::caps::ClientCapabilities::default();
-                if self.pos < body_end {
-                    let tag = self.read_u8()?;
-                    let color_support =
-                        crate::caps::ColorSupport::from_wire(tag).unwrap_or_default();
-                    client_caps = client_caps.with_color_support(color_support);
-                }
-                if self.pos < body_end {
-                    let layers = crate::caps::LayerSet::from_wire(self.read_u8()?);
-                    client_caps = client_caps.with_layers(layers);
-                }
-                if self.pos < body_end {
-                    let image_protocols = crate::caps::ImageProtocolSet::from_wire(self.read_u8()?);
-                    client_caps = client_caps.with_image_protocols(image_protocols);
-                }
-                if self.pos < body_end {
-                    let kbd_protocols =
-                        crate::caps::KeyboardProtocolSet::from_wire(self.read_u8()?);
-                    client_caps = client_caps.with_kbd_protocols(kbd_protocols);
-                }
-                if self.pos < body_end {
-                    client_caps = client_caps.with_hyperlinks(self.read_u8()? != 0);
-                }
-                // phux-fseo: consumer output-mode preference. Absent on a
-                // pre-fseo HELLO; an unknown tag falls back to `Raw` per
-                // `OutputMode::from_wire`.
-                if self.pos < body_end {
-                    let output_mode = crate::caps::OutputMode::from_wire(self.read_u8()?);
-                    client_caps = client_caps.with_output_mode(output_mode);
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::hello::CLIENT_NAME => {
+                            client_name = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        field::hello::PROTOCOL_MAJOR => {
+                            protocol_major = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello::PROTOCOL_MINOR => {
+                            protocol_minor = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello::PROTOCOL_PATCH => {
+                            protocol_patch = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello::CLIENT_CAPS => {
+                            // Caps blob: a prefix of color_support, layers,
+                            // image_protocols, kbd_protocols, hyperlinks,
+                            // output_mode. A shorter blob (older peer) leaves
+                            // the trailing caps at their defaults.
+                            let mut d = Decoder::new(value);
+                            if !d.at_body_end() {
+                                let cs = crate::caps::ColorSupport::from_wire(d.read_u8()?)
+                                    .unwrap_or_default();
+                                client_caps = client_caps.with_color_support(cs);
+                            }
+                            if !d.at_body_end() {
+                                client_caps = client_caps
+                                    .with_layers(crate::caps::LayerSet::from_wire(d.read_u8()?));
+                            }
+                            if !d.at_body_end() {
+                                client_caps = client_caps.with_image_protocols(
+                                    crate::caps::ImageProtocolSet::from_wire(d.read_u8()?),
+                                );
+                            }
+                            if !d.at_body_end() {
+                                client_caps = client_caps.with_kbd_protocols(
+                                    crate::caps::KeyboardProtocolSet::from_wire(d.read_u8()?),
+                                );
+                            }
+                            if !d.at_body_end() {
+                                client_caps = client_caps.with_hyperlinks(d.read_u8()? != 0);
+                            }
+                            if !d.at_body_end() {
+                                client_caps = client_caps.with_output_mode(
+                                    crate::caps::OutputMode::from_wire(d.read_u8()?),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 FrameKind::Hello {
-                    client_name,
+                    client_name: client_name.ok_or(DecodeError::UnexpectedEof)?,
                     protocol_major,
                     protocol_minor,
                     protocol_patch,
@@ -277,23 +382,33 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_HELLO_OK => {
-                let protocol_major = self.read_u16_be()?;
-                let protocol_minor = self.read_u16_be()?;
-                let protocol_patch = self.read_u16_be()?;
-                // Trailing fields, mirror of `HELLO` (SPEC §6 "skip them by
-                // length"): an older/shorter body ends after `protocol_patch`
-                // and the missing fields fall back to defaults. Order:
-                // server_caps.layers, then length-prefixed server_id.
+                let mut protocol_major = 0u16;
+                let mut protocol_minor = 0u16;
+                let mut protocol_patch = 0u16;
                 let mut server_caps = crate::caps::ServerCapabilities::default();
-                if self.pos < body_end {
-                    let layers = crate::caps::LayerSet::from_wire(self.read_u8()?);
-                    server_caps = server_caps.with_layers(layers);
+                let mut server_id: Vec<u8> = Vec::new();
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::hello_ok::PROTOCOL_MAJOR => {
+                            protocol_major = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello_ok::PROTOCOL_MINOR => {
+                            protocol_minor = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello_ok::PROTOCOL_PATCH => {
+                            protocol_patch = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::hello_ok::SERVER_CAPS => {
+                            let mut d = Decoder::new(value);
+                            if !d.at_body_end() {
+                                server_caps = server_caps
+                                    .with_layers(crate::caps::LayerSet::from_wire(d.read_u8()?));
+                            }
+                        }
+                        field::hello_ok::SERVER_ID => server_id = value.to_vec(),
+                        _ => {}
+                    }
                 }
-                let server_id = if self.pos < body_end {
-                    self.read_bytes()?.to_vec()
-                } else {
-                    Vec::new()
-                };
                 FrameKind::HelloOk {
                     protocol_major,
                     protocol_minor,
@@ -303,127 +418,319 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_PING => {
-                let nonce = self.read_u64_be()?;
-                FrameKind::Ping { nonce }
+                let mut nonce: Option<u64> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    if id == field::ping::NONCE {
+                        nonce = Some(sub!(value, |d: &mut Decoder<'_>| d.read_u64_be()));
+                    }
+                }
+                FrameKind::Ping {
+                    nonce: nonce.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_PONG => {
-                let nonce = self.read_u64_be()?;
-                FrameKind::Pong { nonce }
+                let mut nonce: Option<u64> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    if id == field::ping::NONCE {
+                        nonce = Some(sub!(value, |d: &mut Decoder<'_>| d.read_u64_be()));
+                    }
+                }
+                FrameKind::Pong {
+                    nonce: nonce.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_TERMINAL_OUTPUT => {
-                let terminal_id = decode_terminal_id(self)?;
-                let seq = self.read_u64_be()?;
-                let bytes = self.read_bytes()?.to_vec();
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut seq = 0u64;
+                let mut bytes: Vec<u8> = Vec::new();
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::terminal_output::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::terminal_output::SEQ => {
+                            seq = sub!(value, |d: &mut Decoder<'_>| d.read_u64_be());
+                        }
+                        field::terminal_output::BYTES => bytes = value.to_vec(),
+                        _ => {}
+                    }
+                }
                 FrameKind::TerminalOutput {
-                    terminal_id,
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
                     seq,
                     bytes,
                 }
             }
             TYPE_ATTACH => {
-                let target = decode_attach_target(self)?;
-                let viewport = decode_viewport_info(self)?;
-                let request_scrollback = self.read_u8()? != 0;
-                let scrollback_limit_lines = self.read_u32_be()?;
+                let mut target: Option<crate::wire::frame::AttachTarget> = None;
+                let mut viewport: Option<crate::wire::frame::ViewportInfo> = None;
+                let mut request_scrollback = false;
+                let mut scrollback_limit_lines = 0u32;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::attach::TARGET => target = Some(sub!(value, decode_attach_target)),
+                        field::attach::VIEWPORT => {
+                            viewport = Some(sub!(value, decode_viewport_info));
+                        }
+                        field::attach::REQUEST_SCROLLBACK => {
+                            request_scrollback =
+                                sub!(value, |d: &mut Decoder<'_>| d.read_u8()) != 0;
+                        }
+                        field::attach::SCROLLBACK_LIMIT_LINES => {
+                            scrollback_limit_lines =
+                                sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        _ => {}
+                    }
+                }
                 FrameKind::Attach {
-                    target,
-                    viewport,
+                    target: target.ok_or(DecodeError::UnexpectedEof)?,
+                    viewport: viewport.ok_or(DecodeError::UnexpectedEof)?,
                     request_scrollback,
                     scrollback_limit_lines,
                 }
             }
-            TYPE_DETACH => FrameKind::Detach,
+            TYPE_DETACH => {
+                while self.read_field()?.is_some() {}
+                FrameKind::Detach
+            }
             TYPE_INPUT_KEY => {
-                let terminal_id = decode_terminal_id(self)?;
-                let event = decode_key_event(self)?;
-                FrameKind::InputKey { terminal_id, event }
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut event: Option<KeyEvent> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::input_key::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::input_key::EVENT => event = Some(sub!(value, decode_key_event)),
+                        _ => {}
+                    }
+                }
+                FrameKind::InputKey {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    event: event.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_INPUT_MOUSE => {
-                let terminal_id = decode_terminal_id(self)?;
-                let event = decode_mouse_event(self)?;
-                FrameKind::InputMouse { terminal_id, event }
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut event: Option<MouseEvent> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::input_mouse::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::input_mouse::EVENT => event = Some(sub!(value, decode_mouse_event)),
+                        _ => {}
+                    }
+                }
+                FrameKind::InputMouse {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    event: event.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_INPUT_FOCUS => {
-                let terminal_id = decode_terminal_id(self)?;
-                let event = decode_focus_event(self.read_u8()?)?;
-                FrameKind::InputFocus { terminal_id, event }
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut event: Option<FocusEvent> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::input_focus::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::input_focus::EVENT => {
+                            let tag = sub!(value, |d: &mut Decoder<'_>| d.read_u8());
+                            event = Some(decode_focus_event(tag)?);
+                        }
+                        _ => {}
+                    }
+                }
+                FrameKind::InputFocus {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    event: event.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_INPUT_PASTE => {
-                let terminal_id = decode_terminal_id(self)?;
-                let event = decode_paste_event(self)?;
-                FrameKind::InputPaste { terminal_id, event }
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut event: Option<crate::input::paste::PasteEvent> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::input_paste::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::input_paste::EVENT => event = Some(sub!(value, decode_paste_event)),
+                        _ => {}
+                    }
+                }
+                FrameKind::InputPaste {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    event: event.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_INPUT_SELECTION => {
-                let terminal_id = decode_terminal_id(self)?;
-                let mode_u8 = self.read_u8()?;
-                let mode = SelectionMode::try_from_u8(mode_u8).ok_or_else(|| {
-                    DecodeError::UnknownEnumValue {
-                        field: "SelectionMode",
-                        value: u32::from(mode_u8),
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut mode: Option<SelectionMode> = None;
+                let mut rectangle = false;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::input_selection::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::input_selection::MODE => {
+                            let mode_u8 = sub!(value, |d: &mut Decoder<'_>| d.read_u8());
+                            mode = Some(SelectionMode::try_from_u8(mode_u8).ok_or_else(|| {
+                                DecodeError::UnknownEnumValue {
+                                    field: "SelectionMode",
+                                    value: u32::from(mode_u8),
+                                }
+                            })?);
+                        }
+                        field::input_selection::RECTANGLE => {
+                            rectangle = sub!(value, |d: &mut Decoder<'_>| d.read_u8()) != 0;
+                        }
+                        _ => {}
                     }
-                })?;
-                let rectangle = self.read_u8()? != 0;
+                }
                 FrameKind::InputSelection {
-                    terminal_id,
-                    event: SelectionEvent { mode, rectangle },
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    event: SelectionEvent {
+                        mode: mode.ok_or(DecodeError::UnexpectedEof)?,
+                        rectangle,
+                    },
                 }
             }
             TYPE_FRAME_ACK => {
-                let terminal_id = decode_terminal_id(self)?;
-                let seq = self.read_u64_be()?;
-                FrameKind::FrameAck { terminal_id, seq }
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut seq = 0u64;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::frame_ack::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::frame_ack::SEQ => {
+                            seq = sub!(value, |d: &mut Decoder<'_>| d.read_u64_be());
+                        }
+                        _ => {}
+                    }
+                }
+                FrameKind::FrameAck {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                    seq,
+                }
             }
             TYPE_VIEWPORT_RESIZE => {
-                let viewport = decode_viewport_info(self)?;
-                FrameKind::ViewportResize { viewport }
+                let mut viewport: Option<crate::wire::frame::ViewportInfo> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    if id == field::viewport_resize::VIEWPORT {
+                        viewport = Some(sub!(value, decode_viewport_info));
+                    }
+                }
+                FrameKind::ViewportResize {
+                    viewport: viewport.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_ATTACHED => {
-                let snapshot = decode_session_snapshot(self)?;
-                let initial_client_id = decode_client_id(self)?;
+                let mut snapshot: Option<crate::wire::info::SessionSnapshot> = None;
+                let mut initial_client_id: Option<crate::ids::ClientId> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::attached::SNAPSHOT => {
+                            snapshot = Some(sub!(value, decode_session_snapshot));
+                        }
+                        field::attached::INITIAL_CLIENT_ID => {
+                            initial_client_id = Some(sub!(value, decode_client_id));
+                        }
+                        _ => {}
+                    }
+                }
                 FrameKind::Attached {
-                    snapshot,
-                    initial_client_id,
+                    snapshot: snapshot.ok_or(DecodeError::UnexpectedEof)?,
+                    initial_client_id: initial_client_id.ok_or(DecodeError::UnexpectedEof)?,
                 }
             }
             TYPE_TERMINAL_SNAPSHOT => {
-                let terminal_id = decode_terminal_id(self)?;
-                let cols = self.read_u16_be()?;
-                let rows = self.read_u16_be()?;
-                let vt_replay_bytes = self.read_bytes()?.to_vec();
-                let scrollback_bytes = decode_optional_bytes(self)?;
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut cols = 0u16;
+                let mut rows = 0u16;
+                let mut vt_replay_bytes: Vec<u8> = Vec::new();
+                let mut scrollback_bytes: Option<Vec<u8>> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::terminal_snapshot::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::terminal_snapshot::COLS => {
+                            cols = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::terminal_snapshot::ROWS => {
+                            rows = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::terminal_snapshot::VT_REPLAY_BYTES => {
+                            vt_replay_bytes = value.to_vec();
+                        }
+                        field::terminal_snapshot::SCROLLBACK_BYTES => {
+                            scrollback_bytes = Some(value.to_vec());
+                        }
+                        _ => {}
+                    }
+                }
                 FrameKind::TerminalSnapshot {
-                    terminal_id,
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
                     cols,
                     rows,
                     vt_replay_bytes,
                     scrollback_bytes,
                 }
             }
-            TYPE_DETACHED => FrameKind::Detached,
+            TYPE_DETACHED => {
+                while self.read_field()?.is_some() {}
+                FrameKind::Detached
+            }
             TYPE_BELL => {
-                let terminal_id = decode_terminal_id(self)?;
-                FrameKind::Bell { terminal_id }
+                let mut terminal_id: Option<TerminalId> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    if id == field::bell::TERMINAL_ID {
+                        terminal_id = Some(sub!(value, decode_terminal_id));
+                    }
+                }
+                FrameKind::Bell {
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_ERROR => {
-                let request_id = decode_optional_u32(self)?;
-                let code_raw = self.read_u16_be()?;
-                let code = ErrorCode::from_wire(code_raw).ok_or_else(|| {
-                    DecodeError::UnknownEnumValue {
-                        field: "ErrorCode",
-                        value: u32::from(code_raw),
+                let mut request_id: Option<u32> = None;
+                let mut code: Option<ErrorCode> = None;
+                let mut message: Option<String> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::error::REQUEST_ID => {
+                            request_id = Some(sub!(value, |d: &mut Decoder<'_>| d.read_u32_be()));
+                        }
+                        field::error::CODE => {
+                            let raw = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                            code = Some(ErrorCode::from_wire(raw).ok_or_else(|| {
+                                DecodeError::UnknownEnumValue {
+                                    field: "ErrorCode",
+                                    value: u32::from(raw),
+                                }
+                            })?);
+                        }
+                        field::error::MESSAGE => {
+                            message = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        _ => {}
                     }
-                })?;
-                let message = self.read_str()?.to_owned();
+                }
                 FrameKind::Error {
                     request_id,
-                    code,
-                    message,
+                    code: code.ok_or(DecodeError::UnexpectedEof)?,
+                    message: message.ok_or(DecodeError::UnexpectedEof)?,
                 }
             }
             TYPE_GET_METADATA => {
-                let request_id = self.read_u32_be()?;
-                let scope = decode_scope(self)?;
-                let key = self.read_str()?.to_owned();
+                let (request_id, scope, key) = decode_metadata_scope_key(self)?;
                 FrameKind::GetMetadata {
                     request_id,
                     scope,
@@ -431,21 +738,36 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_SET_METADATA => {
-                let request_id = self.read_u32_be()?;
-                let scope = decode_scope(self)?;
-                let key = self.read_str()?.to_owned();
-                let value = self.read_bytes()?.to_vec();
+                let mut request_id = 0u32;
+                let mut scope: Option<Scope> = None;
+                let mut key: Option<String> = None;
+                let mut value_bytes: Vec<u8> = Vec::new();
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::set_metadata::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::set_metadata::SCOPE => scope = Some(sub!(value, decode_scope)),
+                        field::set_metadata::KEY => {
+                            key = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        field::set_metadata::VALUE => value_bytes = value.to_vec(),
+                        _ => {}
+                    }
+                }
                 FrameKind::SetMetadata {
                     request_id,
-                    scope,
-                    key,
-                    value,
+                    scope: scope.ok_or(DecodeError::UnexpectedEof)?,
+                    key: key.ok_or(DecodeError::UnexpectedEof)?,
+                    value: value_bytes,
                 }
             }
             TYPE_DELETE_METADATA => {
-                let request_id = self.read_u32_be()?;
-                let scope = decode_scope(self)?;
-                let key = self.read_str()?.to_owned();
+                let (request_id, scope, key) = decode_metadata_scope_key(self)?;
                 FrameKind::DeleteMetadata {
                     request_id,
                     scope,
@@ -453,48 +775,137 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_LIST_METADATA => {
-                let request_id = self.read_u32_be()?;
-                let scope = decode_scope(self)?;
-                FrameKind::ListMetadata { request_id, scope }
+                let mut request_id = 0u32;
+                let mut scope: Option<Scope> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::list_metadata::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::list_metadata::SCOPE => scope = Some(sub!(value, decode_scope)),
+                        _ => {}
+                    }
+                }
+                FrameKind::ListMetadata {
+                    request_id,
+                    scope: scope.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_SUBSCRIBE_METADATA => {
-                let scope = decode_scope(self)?;
-                let key = self.read_str()?.to_owned();
-                FrameKind::SubscribeMetadata { scope, key }
+                let mut scope: Option<Scope> = None;
+                let mut key: Option<String> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::subscribe_metadata::SCOPE => scope = Some(sub!(value, decode_scope)),
+                        field::subscribe_metadata::KEY => {
+                            key = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                FrameKind::SubscribeMetadata {
+                    scope: scope.ok_or(DecodeError::UnexpectedEof)?,
+                    key: key.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_METADATA_CHANGED => {
-                let scope = decode_scope(self)?;
-                let key = self.read_str()?.to_owned();
-                let value = decode_optional_bytes(self)?;
-                FrameKind::MetadataChanged { scope, key, value }
+                let mut scope: Option<Scope> = None;
+                let mut key: Option<String> = None;
+                let mut value_bytes: Option<Vec<u8>> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::metadata_changed::SCOPE => scope = Some(sub!(value, decode_scope)),
+                        field::metadata_changed::KEY => {
+                            key = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        field::metadata_changed::VALUE => value_bytes = Some(value.to_vec()),
+                        _ => {}
+                    }
+                }
+                FrameKind::MetadataChanged {
+                    scope: scope.ok_or(DecodeError::UnexpectedEof)?,
+                    key: key.ok_or(DecodeError::UnexpectedEof)?,
+                    value: value_bytes,
+                }
             }
             TYPE_METADATA_VALUE => {
-                let request_id = self.read_u32_be()?;
-                let value = decode_optional_bytes(self)?;
-                FrameKind::MetadataValue { request_id, value }
+                let mut request_id = 0u32;
+                let mut value_bytes: Option<Vec<u8>> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::metadata_value::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::metadata_value::VALUE => value_bytes = Some(value.to_vec()),
+                        _ => {}
+                    }
+                }
+                FrameKind::MetadataValue {
+                    request_id,
+                    value: value_bytes,
+                }
             }
             TYPE_METADATA_KEYS => {
-                let request_id = self.read_u32_be()?;
-                let count = self.read_u32_be()?;
-                let count_usize =
-                    usize::try_from(count).map_err(|_| DecodeError::LengthOverflow)?;
-                // Bound pre-reservation by remaining bytes: an over-declared
-                // count must error on EOF, not pre-allocate gigabytes.
-                let mut keys = self.bounded_capacity(count_usize);
-                for _ in 0..count_usize {
-                    keys.push(self.read_str()?.to_owned());
+                let mut request_id = 0u32;
+                let mut keys: Vec<String> = Vec::new();
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::metadata_keys::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::metadata_keys::KEYS => {
+                            let mut d = Decoder::new(value);
+                            let count = d.read_u32_be()?;
+                            let count_usize =
+                                usize::try_from(count).map_err(|_| DecodeError::LengthOverflow)?;
+                            let mut out = d.bounded_capacity(count_usize);
+                            for _ in 0..count_usize {
+                                out.push(d.read_str()?.to_owned());
+                            }
+                            keys = out;
+                        }
+                        _ => {}
+                    }
                 }
                 FrameKind::MetadataKeys { request_id, keys }
             }
             TYPE_SPAWN_TERMINAL => {
-                let request_id = self.read_u32_be()?;
-                let group = GroupId::new(self.read_u32_be()?);
-                // `command`, `cwd`, `env` follow the standard
-                // `0/1`-tagged `Option` convention. See SPEC §7.2 / §10.1
-                // (phux-4li.10) and the encoder symmetry in `frame.rs`.
-                let command = decode_optional_string_list(self)?;
-                let cwd = decode_optional_str(self)?.map(str::to_owned);
-                let env = decode_optional_env(self)?;
+                let mut request_id = 0u32;
+                let mut group = GroupId::new(0);
+                let mut command: Option<Vec<String>> = None;
+                let mut cwd: Option<String> = None;
+                let mut env: Option<Vec<(String, String)>> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::spawn_terminal::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::spawn_terminal::GROUP => {
+                            group =
+                                GroupId::new(sub!(value, |d: &mut Decoder<'_>| d.read_u32_be()));
+                        }
+                        field::spawn_terminal::COMMAND => {
+                            command = Some(sub!(value, decode_string_list));
+                        }
+                        field::spawn_terminal::CWD => {
+                            cwd = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
+                        field::spawn_terminal::ENV => env = Some(sub!(value, decode_env)),
+                        _ => {}
+                    }
+                }
                 FrameKind::SpawnTerminal {
                     request_id,
                     group,
@@ -504,56 +915,128 @@ impl<'a> Decoder<'a> {
                 }
             }
             TYPE_TERMINAL_SPAWNED => {
-                let request_id = self.read_u32_be()?;
-                let result = decode_spawn_result(self)?;
-                FrameKind::TerminalSpawned { request_id, result }
+                let mut request_id = 0u32;
+                let mut result: Option<crate::wire::frame::SpawnResult> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::terminal_spawned::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::terminal_spawned::RESULT => {
+                            result = Some(sub!(value, decode_spawn_result));
+                        }
+                        _ => {}
+                    }
+                }
+                FrameKind::TerminalSpawned {
+                    request_id,
+                    result: result.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_TERMINAL_CLOSED => {
-                let terminal_id = decode_terminal_id(self)?;
-                let exit_status = decode_optional_i32(self)?;
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut exit_status: Option<i32> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::terminal_closed::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::terminal_closed::EXIT_STATUS => {
+                            let bits = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                            exit_status = Some(i32::from_be_bytes(bits.to_be_bytes()));
+                        }
+                        _ => {}
+                    }
+                }
                 FrameKind::TerminalClosed {
-                    terminal_id,
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
                     exit_status,
                 }
             }
             TYPE_TERMINAL_RESIZE => {
-                let terminal_id = decode_terminal_id(self)?;
-                let cols = self.read_u16_be()?;
-                let rows = self.read_u16_be()?;
+                let mut terminal_id: Option<TerminalId> = None;
+                let mut cols = 0u16;
+                let mut rows = 0u16;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::terminal_resize::TERMINAL_ID => {
+                            terminal_id = Some(sub!(value, decode_terminal_id));
+                        }
+                        field::terminal_resize::COLS => {
+                            cols = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        field::terminal_resize::ROWS => {
+                            rows = sub!(value, |d: &mut Decoder<'_>| d.read_u16_be());
+                        }
+                        _ => {}
+                    }
+                }
                 FrameKind::TerminalResize {
-                    terminal_id,
+                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
                     cols,
                     rows,
                 }
             }
             TYPE_COMMAND => {
-                let request_id = self.read_u32_be()?;
-                let command = decode_command(self)?;
+                let mut request_id = 0u32;
+                let mut command: Option<crate::wire::frame::Command> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::command::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::command::COMMAND => command = Some(sub!(value, decode_command)),
+                        _ => {}
+                    }
+                }
                 FrameKind::Command {
                     request_id,
-                    command,
+                    command: command.ok_or(DecodeError::UnexpectedEof)?,
                 }
             }
             TYPE_COMMAND_RESULT => {
-                let request_id = self.read_u32_be()?;
-                let result = decode_command_result(self)?;
-                FrameKind::CommandResult { request_id, result }
+                let mut request_id = 0u32;
+                let mut result: Option<crate::wire::frame::CommandResult> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::command_result::REQUEST_ID => {
+                            request_id = sub!(value, |d: &mut Decoder<'_>| d.read_u32_be());
+                        }
+                        field::command_result::RESULT => {
+                            result = Some(sub!(value, decode_command_result));
+                        }
+                        _ => {}
+                    }
+                }
+                FrameKind::CommandResult {
+                    request_id,
+                    result: result.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
             TYPE_SUBSCRIBE_EVENTS => {
-                let terminal = decode_optional_terminal_id(self)?;
+                let mut terminal: Option<TerminalId> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    if id == field::subscribe_events::TERMINAL {
+                        terminal = Some(sub!(value, decode_terminal_id));
+                    }
+                }
                 FrameKind::SubscribeEvents { terminal }
             }
             TYPE_EVENT => {
-                let terminal = decode_optional_terminal_id(self)?;
-                let event = decode_agent_event(self)?;
-                FrameKind::Event { terminal, event }
+                let mut terminal: Option<TerminalId> = None;
+                let mut event: Option<crate::wire::frame::AgentEvent> = None;
+                while let Some((id, value)) = self.read_field()? {
+                    match id {
+                        field::event::TERMINAL => terminal = Some(sub!(value, decode_terminal_id)),
+                        field::event::EVENT => event = Some(sub!(value, decode_agent_event)),
+                        _ => {}
+                    }
+                }
+                FrameKind::Event {
+                    terminal,
+                    event: event.ok_or(DecodeError::UnexpectedEof)?,
+                }
             }
-            // The deferred message-catalog variants (`TerminalEvent`, `Alert`,
-            // `InputRaw`, resize/ack/command/etc.)
-            // are recognised by the SPEC §7 catalog but not yet populated as
-            // `FrameKind` variants. Sibling tasks lift them in during the
-            // integration pass. Treat them as unknown alongside genuinely
-            // unallocated tags.
             other => {
                 return Err(DecodeError::UnknownFrameKind {
                     tag: u16::from(other),
