@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents, consumers
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-06-07
 ---
 
 # Concepts
@@ -70,6 +70,10 @@ Divergence to be honest about: the code on this branch still ships `CREATE_SESSI
 ## Identity is federation-ready
 
 Every terminal is addressed by a `TerminalId` that is either `LOCAL { id }` or `SATELLITE { host, id }`. Today the server constructs `LOCAL` only, but the wire accepts both forms from the first byte: a consumer can write a `SATELLITE` id now, and the current server rejects it cleanly rather than misreading it. Routing it to a remote host is designed, not built — see the [maturity section](#maturity-pre-alpha-spec-first). The point is that remote identity is in the wire shape from the start, not bolted on later.
+
+Concretely: `TerminalId::Local { id: 42 }` names terminal 42 on the server you are talking to. `TerminalId::Satellite { host: "prod-box-3", id: 42 }` names terminal 42 on a different machine — and it is a well-formed wire value *today*. A v0.1 decoder parses it without complaint; the byte layout that carries it (a one-byte tag, then the fields) is frozen; the only thing a non-hub server does with it is answer `UnsupportedSatelliteRoute` instead of guessing. Satellites don't exist yet, but the name for one already does.
+
+When federation lands, that `TerminalId` does not change shape — it gains a destination. The same value a v0.1 decoder already accepts becomes routable, so no consumer relearns what a terminal's name is. Contrast the bolt-on path, where remote addressing arrives later as a second scheme grafted beside the local one and every tool has to grow a new notion of identity. phux pays that cost once, up front, in the type.
 
 See [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md).
 
