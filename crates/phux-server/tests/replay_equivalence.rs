@@ -169,7 +169,10 @@ fn drain_pending(rx: &mut Receiver<bytes::Bytes>) -> Vec<u8> {
 async fn snapshot(snap_tx: &mpsc::Sender<SnapshotRequest>) -> SnapshotBytes {
     let (tx, rx) = oneshot::channel();
     snap_tx
-        .send(SnapshotRequest { reply: tx })
+        .send(SnapshotRequest {
+            scrollback: None,
+            reply: tx,
+        })
         .await
         .expect("send snapshot request");
     timeout(STEP_DEADLINE, rx)

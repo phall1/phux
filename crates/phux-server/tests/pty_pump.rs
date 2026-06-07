@@ -107,7 +107,10 @@ fn pty_output_reaches_broadcast_and_terminal() {
         let (tx, rx) = oneshot::channel();
         handle
             .snapshot
-            .send(SnapshotRequest { reply: tx })
+            .send(SnapshotRequest {
+                scrollback: None,
+                reply: tx,
+            })
             .await
             .expect("snapshot send");
         let snap = timeout(Duration::from_secs(1), rx)
@@ -259,7 +262,10 @@ fn snapshot_after_pty_output_round_trips_through_fresh_terminal() {
         let (tx, rx) = oneshot::channel();
         handle
             .snapshot
-            .send(SnapshotRequest { reply: tx })
+            .send(SnapshotRequest {
+                scrollback: None,
+                reply: tx,
+            })
             .await
             .expect("snapshot send");
         let snap = timeout(Duration::from_secs(1), rx)

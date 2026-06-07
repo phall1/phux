@@ -693,13 +693,19 @@ pub(crate) async fn handle_attach(
     client_id: ClientId,
     target: AttachTarget,
     viewport: phux_protocol::wire::frame::ViewportInfo,
-    _request_scrollback: bool,
-    _scrollback_limit_lines: u32,
+    request_scrollback: bool,
+    scrollback_limit_lines: u32,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     client_caps: ClientCapabilities,
     root_token: &CancellationToken,
     output_pumps: &mut JoinSet<()>,
 ) {
+    // phux-9q5f: honor the ATTACH scrollback request. `request_scrollback`
+    // gates the feature; `scrollback_limit_lines` caps it (0 ⇒ all retained
+    // history, the SCROLLBACK_ALL sentinel). The per-pane SnapshotRequest
+    // carries this so the actor primes TERMINAL_SNAPSHOT.scrollback_bytes.
+    let scrollback_req: Option<u32> = request_scrollback.then_some(scrollback_limit_lines);
+
     let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
         return;
     };
@@ -913,7 +919,10 @@ pub(crate) async fn handle_attach(
         let (reply_tx, reply_rx) = oneshot::channel();
         if handle
             .snapshot
-            .send(SnapshotRequest { reply: reply_tx })
+            .send(SnapshotRequest {
+                scrollback: scrollback_req,
+                reply: reply_tx,
+            })
             .await
             .is_err()
         {
@@ -936,9 +945,11 @@ pub(crate) async fn handle_attach(
                 cols: snap.cols,
                 rows: snap.rows,
                 vt_replay_bytes: snap.bytes,
-                // Scrollback negotiation per ATTACH viewport metrics
-                // lands with the PTY pump; byc.8 always sends None.
-                scrollback_bytes: None,
+                // phux-9q5f: when the ATTACH requested scrollback and the pane
+                // retains history, the actor primed these history-priming VT
+                // bytes; the client `vt_write`s them before the viewport
+                // replay. Empty ⇒ `None` (viewport-only, or no history).
+                scrollback_bytes: (!snap.scrollback.is_empty()).then_some(snap.scrollback),
             }))
             .await
             .is_err()

@@ -178,7 +178,64 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             cols,
             rows: rows_n,
             bytes: out,
+            scrollback: Vec::new(),
         })
+    }
+
+    /// Like [`Self::synthesize`], but additionally primes the client's
+    /// scrollback with up to `scrollback` retained history rows (`phux-9q5f`).
+    ///
+    /// `scrollback` follows the [`Self::screen_state_with_scrollback`]
+    /// convention: `None` ⇒ viewport only (identical to [`Self::synthesize`]);
+    /// [`SCROLLBACK_ALL`] (`0`) ⇒ every retained row; `Some(n)` ⇒ the most
+    /// recent `n` rows.
+    ///
+    /// The history rows are emitted into [`SnapshotBytes::scrollback`] as the
+    /// pane's plain text, one row per line, then a `CSI <k> S` (SU) scrolls
+    /// them off the top into the client's scrollback so the viewport replay
+    /// (`bytes`, which opens with `ED 2`) lands on a clean screen without
+    /// erasing the most-recent history rows. The client applies `scrollback`
+    /// then `bytes`. History styling is not reproduced in v1 (plain text only,
+    /// tracked as a follow-up); the live viewport keeps full SGR fidelity.
+    ///
+    /// Alt-screen panes retain no history (`scrollback_rows() == 0`), so this
+    /// degrades to a viewport-only snapshot there automatically.
+    pub fn synthesize_with_scrollback(
+        &self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+        scrollback: Option<u32>,
+    ) -> Result<SnapshotBytes, SynthesisError> {
+        let mut snap = self.synthesize(terminal)?;
+        let Some(want) = scrollback else {
+            return Ok(snap);
+        };
+        let lines = Self::scrollback_lines(terminal, want)?;
+        if lines.is_empty() {
+            return Ok(snap);
+        }
+        // Reproduce the history as plain text, one row per line, joined by
+        // CRLF with no trailing newline so the cursor stays in-grid. A fresh
+        // client Terminal naturally scrolls the overflow into history during
+        // this write; `min(rows, lines)` then SU's the still-visible remainder
+        // off the top, leaving every history row in scrollback and a blank
+        // viewport for the `bytes` replay to repaint.
+        let mut out: Vec<u8> = Vec::with_capacity(lines.iter().map(|l| l.len() + 2).sum::<usize>());
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                out.extend_from_slice(b"\r\n");
+            }
+            out.extend_from_slice(line.as_bytes());
+        }
+        let visible = u16::try_from(lines.len())
+            .unwrap_or(snap.rows)
+            .min(snap.rows);
+        // SGR reset before the scroll so the blanked rows carry no pen.
+        out.extend_from_slice(b"\x1b[0m");
+        if visible > 0 {
+            out.extend_from_slice(format!("\x1b[{visible}S").as_bytes());
+        }
+        snap.scrollback = out;
+        Ok(snap)
     }
 
     /// Walk `terminal`'s viewport into a structured [`ScreenState`] — the
@@ -449,6 +506,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 cols,
                 rows: rows_n,
                 bytes: Vec::new(),
+                scrollback: Vec::new(),
             }),
             Dirty::Full => {
                 // Full reset + paint everything. Identical bytes to the
@@ -481,6 +539,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                     cols,
                     rows: rows_n,
                     bytes: out,
+                    scrollback: Vec::new(),
                 })
             }
             Dirty::Partial => {
@@ -526,6 +585,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                     cols,
                     rows: rows_n,
                     bytes: out,
+                    scrollback: Vec::new(),
                 })
             }
         }
@@ -666,6 +726,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 cols,
                 rows: rows_n,
                 bytes: Vec::new(),
+                scrollback: Vec::new(),
             });
         }
         let changed_row_count = reference.changed_scratch.len();
@@ -714,6 +775,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             cols,
             rows: rows_n,
             bytes: out,
+            scrollback: Vec::new(),
         })
     }
 
@@ -768,6 +830,12 @@ pub struct SnapshotBytes {
     pub rows: u16,
     /// VT byte sequence; opaque, mosh-style, fed to the client's `Terminal`.
     pub bytes: Vec<u8>,
+    /// Optional scrollback-priming VT bytes (`phux-9q5f`). When the ATTACH
+    /// requested scrollback, these reproduce the pane's retained history rows
+    /// on the client's fresh `Terminal` *before* `bytes` repaints the
+    /// viewport — the client `vt_write`s `scrollback` then `bytes`, per
+    /// SPEC §8.4. Empty when no scrollback was requested or none is retained.
+    pub scrollback: Vec<u8>,
 }
 
 /// Per-cell emission shared by the full ([`SnapshotSynthesizer::synthesize`])
@@ -1147,6 +1215,84 @@ mod tests {
         assert_eq!(snap.rows, 24);
         // First bytes should be the reset prelude.
         assert!(snap.bytes.starts_with(b"\x1b[!p\x1b[2J\x1b[H"));
+        // No scrollback requested ⇒ no scrollback-priming bytes.
+        assert!(snap.scrollback.is_empty());
+    }
+
+    /// phux-9q5f: a scrollback-bearing snapshot, applied to a fresh client
+    /// `Terminal` exactly as the wire client does (`vt_write(scrollback)` then
+    /// `vt_write(bytes)`), reconstructs both the viewport and the retained
+    /// history — every history row, none lost to the viewport replay's `ED 2`.
+    #[test]
+    fn scrollback_snapshot_round_trips_history_and_viewport() {
+        // 4-row grid; 10 numbered lines push 6 into history (10 - 4 visible).
+        let mut source = fresh(20, 4);
+        for i in 1..=10 {
+            source.vt_write(format!("line{i}\r\n").as_bytes());
+        }
+        // After the trailing CRLF the cursor sits on a fresh blank row, so the
+        // viewport is [line8, line9, line10, ""] and history holds line1..=7.
+        let synth = SnapshotSynthesizer::new().expect("synth");
+        let snap = synth
+            .synthesize_with_scrollback(&source, Some(SCROLLBACK_ALL))
+            .expect("synthesize_with_scrollback");
+        assert!(
+            !snap.scrollback.is_empty(),
+            "history present ⇒ scrollback-priming bytes emitted"
+        );
+
+        // Replay onto a fresh client terminal, wire order: scrollback, viewport.
+        let mut client = fresh(20, 4);
+        client.vt_write(&snap.scrollback);
+        client.vt_write(&snap.bytes);
+
+        // Viewport matches.
+        assert_eq!(render_grid(&client), render_grid(&source));
+
+        // History matches, row for row, with nothing dropped.
+        let mut sb_synth = SnapshotSynthesizer::new().expect("synth2");
+        let source_hist = sb_synth
+            .screen_state_with_scrollback(&source, 0, Some(SCROLLBACK_ALL), false)
+            .expect("source history")
+            .scrollback;
+        let client_hist = sb_synth
+            .screen_state_with_scrollback(&client, 0, Some(SCROLLBACK_ALL), false)
+            .expect("client history")
+            .scrollback;
+        assert_eq!(
+            client_hist, source_hist,
+            "reconstructed history must equal the source's retained rows"
+        );
+        assert!(
+            source_hist.iter().any(|l| l == "line7"),
+            "sanity: line7 is the most-recent history row and must survive"
+        );
+    }
+
+    /// A bounded request keeps only the most-recent `n` history rows.
+    #[test]
+    fn scrollback_snapshot_honors_bounded_limit() {
+        let mut source = fresh(20, 4);
+        for i in 1..=10 {
+            source.vt_write(format!("line{i}\r\n").as_bytes());
+        }
+        let synth = SnapshotSynthesizer::new().expect("synth");
+        let snap = synth
+            .synthesize_with_scrollback(&source, Some(2))
+            .expect("synthesize_with_scrollback");
+
+        let mut client = fresh(20, 4);
+        client.vt_write(&snap.scrollback);
+        client.vt_write(&snap.bytes);
+
+        let mut sb_synth = SnapshotSynthesizer::new().expect("synth2");
+        let client_hist = sb_synth
+            .screen_state_with_scrollback(&client, 0, Some(SCROLLBACK_ALL), false)
+            .expect("client history")
+            .scrollback;
+        // Exactly the 2 most-recent history rows (line6, line7), no more.
+        assert_eq!(client_hist, vec!["line6".to_owned(), "line7".to_owned()]);
+        assert_eq!(render_grid(&client), render_grid(&source));
     }
 
     /// Walk the viewport of `t` and collect each row as a string,
