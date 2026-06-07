@@ -204,6 +204,9 @@ Hard cap: **~150 lines**. If a decision needs more, the body belongs in
 
 One line. Exactly one of:
 
+- `Proposed` — drafted and under review, not yet ratified. The gate and
+  the ADR template both accept it; an ADR sits here until it is accepted
+  or withdrawn.
 - `Accepted`
 - `Accepted (forward-compat)` — the invariants are committed to, the
   implementation is deferred to a later milestone
@@ -231,18 +234,61 @@ qualification is important, it goes in the TL;DR or the body.
 
 ## Style rules
 
+These are the house contract, not suggestions. The standing complaint
+about the docs is over-produced AI prose; the rules below exist to keep
+it out. They apply to every committed doc unless a rule names a narrower
+scope.
+
+### Mechanics
+
 - **No emojis in committed files.** Plain prose only. (Inherited from
   CONTRIBUTING.md and the existing repo norm.)
-- **No future-tense in stable docs.** If `docs/architecture/` describes
+- **No future-tense in stable docs.** If a `stable` doc describes
   something not yet implemented, say so explicitly — don't write as if
-  it exists. (`evolving` stability is the safety valve.)
+  it exists. `evolving` stability is the safety valve; "designed, not
+  built" is the honest phrasing.
 - **Wire docs use SHALL / SHOULD / MAY** per RFC 2119, only in
   `docs/spec/`. Outside the spec, prefer plain prose.
-- **Cross-reference by relative path**, not by URL. CI will catch dead
-  links.
+- **Cross-reference by relative path**, not by URL. The dead-link gate
+  checks relative paths; URLs are not verified and silently rot.
 - **Don't restate the type system.** Module and item docs explain
   *intent* (why this exists, what the constraint is, who calls it).
   The type signature already explains *what*.
+- **No internal ticket IDs or commit SHAs in prose.** The one exception:
+  you may reference a tracked bead by id when pointing at known future
+  work (name it as tracked work; do not describe its contents).
+
+### Wordmark and voice
+
+- **The wordmark is always lowercase `phux`**, even at the start of a
+  sentence.
+- **Voice is terminal-native: precise, dry, complete sentences.** No
+  superlatives ("killer feature," "centerpiece," "blazing,"
+  "revolutionary"). No curt one-word fragments standing in for an
+  argument. No "load-bearing" as a filler intensifier.
+- **No hype absolutes about a pre-alpha system** ("cannot degrade,"
+  "phux will not," "tmux structurally cannot"). Argue the architecture,
+  not the slogan; don't repeat coined taglines verbatim.
+
+### Honest maturity
+
+- **phux is pre-alpha and spec-first.** State what works *today* versus
+  what is a direction. Never write unbuilt behavior in present tense in a
+  `stable` doc.
+- **Divergence honesty.** When the code and the target shape disagree,
+  state the current code reality, mark the divergence inline, and point
+  at the ADR that owns the target plus its tracking bead. Never document
+  aspiration as shipped, and never silently drop a roadmap capability.
+- **No competitor comparison tables** built on unverifiable claims.
+  Positioning is the substrate-vs-product argument
+  ([ADR-0009](../ADR/0009-phux-vs-mux-positioning.md)) in plain prose.
+
+### TL;DR discipline
+
+The `**TL;DR.**` block (see above) states the doc's *job* in 75 words or
+fewer, is self-contained, carries no links, and is **not** repeated as
+the first body paragraph. A TL;DR followed by a paragraph that restates
+it is padding — cut one.
 
 ---
 

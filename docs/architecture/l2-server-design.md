@@ -1,12 +1,12 @@
 ---
 audience: contributors, agents
 stability: scratch
-last-reviewed: 2026-06-01
+last-reviewed: 2026-06-06
 ---
 
 # L2 Server-Side Architecture
 
-**TL;DR.** Designing how phux-server implements L2 Collection lifecycle management. State lives in the `Registry` alongside L1 Terminals; events flow from TerminalActors through new `CollectionEventEmitter` channels to per-Collection subscriber lists; the runtime's L2 handler routes commands (create, kill, rename) against the registry and broadcasts lifecycle frames to all attached clients.
+**TL;DR.** Superseded scratch. This file designs how phux-server would have implemented a server-side Collection lifecycle tier (state in the `Registry` alongside Terminals; events via `CollectionEventEmitter` channels to per-Collection subscriber lists; a handler routing create/kill/rename commands). [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md) dissolves that tier — grouping becomes L3 metadata plus client logic, and the one atomic need (multi-terminal teardown) becomes a single L1 op, `KILL_TERMINALS { ids }`. Kept for design history, not as a build target.
 
 ---
 

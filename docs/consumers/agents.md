@@ -1,169 +1,196 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-05-29
+last-reviewed: 2026-06-06
 ---
 
 # The phux agent CLI
 
-**TL;DR.** The phux **agent CLI surface**: the structured subcommands
-an AI agent drives without a TTY — `phux ls / snapshot / send-keys / run / wait`,
-plus `new` to create a session. Each read verb has a `--json` machine shape
-over the same client-side selector grammar the TUI uses, and reads are
-side-effect-free (no attach, no resize). This file documents the per-verb
-JSON contracts, the read-act-wait loop, and the exit-code semantics each
-verb mirrors. For universal agent instructions, see [`../../AGENTS.md`](../../AGENTS.md).
+**TL;DR.** The structured CLI surface an AI agent drives without a TTY:
+`phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
+session. This file is the agent contract. Per ADR-0030, the structured agent
+state — cells, command results, semantic events — is a local projection over
+the shared engine, and the CLI plus its versioned JSON schemas are what an
+agent depends on, not a structured wire tier. It documents each verb, its JSON
+shape, the read-act-wait loop, and the exit codes each verb mirrors.
 
 ---
 
-## 0. What this is, what this isn't
+## 0. The thesis: structured agent state is a projection
 
-This document is the **agent-facing CLI surface**, parallel to the
-[TUI's product surface](./tui.md) and the
-[MCP adapter](./mcp.md). Every consumer projects the one
-source-of-truth libghostty `Terminal`
-([ADR-0022](../../ADR/0022-tool-for-agents.md)); the TUI projects it to
-VT bytes (it renders, like tmux), while agents project it to
-**structured data** — cells, OSC-133 marks, command results.
+phux does not own terminal semantics; libghostty does, and both ends of the
+wire run that engine
+([ADR-0013](../../ADR/0013-libghostty-bytes-on-wire.md)). It follows that any
+structured view of a terminal — a cell grid, an OSC-133 command-boundary
+stream, a command's captured output — is computed by a consumer from the
+engine it already has, not transmitted as a second model on the wire
+([ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)).
 
-There are three agent surfaces, and they nest:
+So the agent contract is **not** a structured wire protocol. It is this CLI and
+the versioned JSON schemas its `--json` verbs emit. The wire carries opaque
+terminal bytes plus lifecycle and metadata; the structured shapes below are a
+local projection an agent reads through the CLI
+([ADR-0022](../../ADR/0022-tool-for-agents.md): agents are a projection, the
+CLI plus JSON schema is the contract). An agent that wants to own its own
+projection — run the engine and read its grid directly — should copy
+[phux-web](./web.md), the reference carry-your-own-engine consumer
+(ADR-0030 §4).
 
-- **This CLI** is the canonical, stable agent contract
-  ([ADR-0022](../../ADR/0022-tool-for-agents.md)): the verbs and their
+The live wire does expose agent affordances: `GET_SCREEN`, `ROUTE_INPUT`,
+`GET_TERMINAL_STATE`, `SUBSCRIBE_TERMINAL_EVENTS`, and an `AgentEvent` push
+frame, documented in [`../spec/L1.md`](../spec/L1.md). Read those as
+engine-convenience snapshots over the shared engine — a convenience for
+consumers that have not adopted the carry-your-own-engine pattern — not a
+normative structured contract and not a license to add new structured wire
+surface (ADR-0030 §2).
+
+## 1. What this is, what this isn't
+
+This document is the agent-facing CLI surface, parallel to the
+[TUI's product surface](./tui.md) and the [MCP adapter](./mcp.md). The TUI
+projects the source-of-truth `Terminal` to VT bytes (it renders, like tmux);
+agents project it to structured data — cells, OSC-133 marks, command results.
+
+The agent surfaces nest:
+
+- **This CLI** is the canonical, stable agent contract: the verbs and their
   `--json` shapes are what an agent depends on.
-- [`mcp.md`](./mcp.md) is a thin adapter that wraps these same
-  `phux-client` functions name-for-name over JSON-RPC stdio.
-- [`sdk.md`](./sdk.md) is the future typed-Rust L1 handle
-  (forward-looking, not yet shipped).
+- [`mcp.md`](./mcp.md) is a thin adapter that wraps the same `phux-client`
+  functions name-for-name over JSON-RPC stdio.
+- [`sdk.md`](./sdk.md) documents `phux-client` itself — the library crate the
+  CLI and MCP adapter are both built from. It exists today; it is L1-shaped and
+  follows the same projection pattern.
 
 All three are unprivileged consumers
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); none holds a
-protocol-level privilege. The wire underneath stays additive and
-versioned, normative under [`../spec/`](../spec/).
+protocol-level privilege. The wire underneath stays additive and versioned,
+normative under [`../spec/`](../spec/).
 
-The selector grammar is owned by [`tui.md`](./tui.md) §3 — this file
-links there rather than restating the table (the doc system's "one fact,
-one home" rule). The decision rationale lives in
-[ADR-0022](../../ADR/0022-tool-for-agents.md); client-side selector
-resolution in
-[ADR-0021](../../ADR/0021-control-plane-commands.md).
+The selector grammar is owned by [`tui.md`](./tui.md) §3; this file links there
+rather than restating the table (the doc system's one-fact-one-home rule). The
+decision rationale lives in
+[ADR-0022](../../ADR/0022-tool-for-agents.md); client-side selector resolution
+in [ADR-0021](../../ADR/0021-control-plane-commands.md).
 
-**Side-effect-free against a live pane.** `snapshot`, `run`,
-`send-keys`, and `wait` neither attach nor resize the target pane: the
-reads issue the `GET_SCREEN` control command (the server walks its own
-grid), and input rides `ROUTE_INPUT` (events route to a pane by id). So
-an agent can drive — or just watch — a pane a human is also attached to,
-without disturbing that human's view.
+**Side-effect-free against a live pane.** `snapshot`, `run`, `send-keys`, and
+`wait` neither attach nor resize the target pane: the reads issue the
+`GET_SCREEN` control command (the server walks its own grid), and input rides
+`ROUTE_INPUT` (events route to a pane by id). An agent can drive — or just
+watch — a pane a human is also attached to, without disturbing that human's
+view.
 
----
-
-## 1. The structured CLI surface (verb catalog)
+## 2. The structured CLI surface (verb catalog)
 
 phux is one binary; the verbs below are its agent-facing subcommands.
-[`tui.md`](./tui.md) §1 has the full CLI table (which marks
-`snapshot`/`send-keys`/`run`/`wait`/`kill` as shipped; its `ls` row still
-reads `spec-only` even though the verb ships today); this section zooms
-into the agent verbs and their JSON. Exit codes are collected in §4.2.
+[`tui.md`](./tui.md) §1 has the full CLI table; this section zooms into the
+agent verbs and their JSON. Exit codes are collected in §5.2.
 
-- **`phux ls [--json] [--socket P]`** — list sessions via `GET_STATE`.
-  Does *not* auto-start a server (like `tmux ls`): with none running it
-  reports as much and exits non-zero. `--json` emits `SessionListJson`
-  (§3.1).
+- **`phux ls [--json] [--socket P]`** — list sessions. Does not auto-start a
+  server (like `tmux ls`): with none running it reports as much and exits
+  non-zero. `--json` emits `SessionListJson` (§4.1).
 - **`phux snapshot [TARGET] [--json] [--scrollback[=N]] [--cells]
-  [--socket P]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET`
-  is optional (defaults to the focused/last session). `--json` emits
-  `ScreenState` (§3.2); without it, a boxed text view.
+  [--socket P]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
+  optional (defaults to the focused/last session). `--json` emits `ScreenState`
+  (§4.2); without it, a boxed text view.
 - **`phux send-keys TARGET KEYS... [--socket P]`** — route named keys or
   literal strings to one resolved pane by id (`ROUTE_INPUT`). `TARGET` is
   required. No JSON. `KEYS` are tmux-shaped: named keys (`Enter`, `Tab`,
   `Escape`, `Up`, `C-c`, `M-x`) or a literal string sent character by
   character.
-- **`phux run TARGET CMD... [--timeout SECS] [--json] [--socket P]`** —
-  run a command in a pane and capture its exit code, output, and
-  duration via printed sentinels (assumes a POSIX shell: sh/bash/zsh).
-  `TARGET` is required. `--json` emits `RunResult` (§3.3). The exit code
-  mirrors the child (§4.2). **Gotcha:** flags MUST precede `CMD`, or
-  clap's `trailing_var_arg` swallows them into the command line.
-- **`phux wait [TARGET] [--until TEXT] [--idle MS] [--timeout SECS]
-  [--json] [--socket P]`** — poll the side-effect-free screen read until
-  a condition holds. `--until` takes precedence over `--idle`; with
-  neither, it settles on idle. `--json` emits the final `ScreenState`.
-  Exit 0 when the condition is met, 124 on timeout. **Gotchas:** flags
-  must precede `TARGET`; and `--until` matches *any* visible row,
-  including the shell's echo of the command you just typed — match on
-  text that appears only in command *output*, never the command itself.
-- **`phux watch [TARGET] [--json] [--socket P]`** — stream a pane's live
-  events (the push half of the agent surface, SPEC §7.5). Subscribes to
-  the server's `EVENT` stream scoped to the resolved pane and prints one
-  event per line until EOF (server gone) or Ctrl-C; the subscription
-  neither attaches nor resizes the pane. With `--json`, each line is a
-  JSON object `{ "event": <name>, "terminal"?: "@id", … }` and stdout
-  stays pure JSON (diagnostics on stderr); otherwise a compact
-  tab-separated human line. Event names: `title_changed` (carries
-  `title`), `bell`, `dirty`, `idle`, `pane_spawned`, `pane_closed`
-  (carries `exit_status`), plus the deferred `command_started` /
-  `command_finished` (carries a nullable `exit_code` — see the gap note
-  below). This is the latency-cutting accelerator of `wait`'s poll floor:
-  a `watch` consumer wakes the instant an event fires rather than on the
-  next poll tick. It is additive — `wait` still works without it, and a
-  dropped event (full mailbox) just falls back to polling. **Deferred:**
-  `command_started` / `command_finished` are wire-allocated but NOT
-  emitted by the current server (the OSC-133 command boundary isn't
+- **`phux run TARGET CMD... [--timeout SECS] [--json] [--socket P]`** — run a
+  command in a pane and capture its exit code, output, and duration via printed
+  sentinels (assumes a POSIX shell: sh/bash/zsh). `TARGET` is required.
+  `--json` emits `RunResult` (§4.3). The exit code mirrors the child (§5.2).
+  Flags must precede `CMD`, or clap's `trailing_var_arg` swallows them into the
+  command line.
+- **`phux wait [TARGET] [--until TEXT] [--idle MS] [--timeout SECS] [--json]
+  [--socket P]`** — poll the side-effect-free screen read until a condition
+  holds. `--until` takes precedence over `--idle`; with neither, it settles on
+  idle. `--json` emits the final `ScreenState`. Exit 0 when the condition is
+  met, 124 on timeout. Two gotchas: flags must precede `TARGET`; and `--until`
+  matches any visible row, including the shell's echo of the command you just
+  typed — match on text that appears only in command output, never the command
+  itself.
+- **`phux watch [TARGET] [--json] [--socket P]`** — stream a pane's live events
+  (the push half of the agent surface; see [`../spec/L1.md`](../spec/L1.md)).
+  Subscribes to the server's event stream scoped to the resolved pane and
+  prints one event per line until EOF (server gone) or Ctrl-C; the
+  subscription neither attaches nor resizes the pane. With `--json`, each line
+  is a JSON object `{ "event": <name>, "terminal"?: "@id", ... }` and stdout
+  stays pure JSON (diagnostics on stderr); otherwise a compact tab-separated
+  human line. Event names: `title_changed` (carries `title`), `bell`, `dirty`,
+  `idle`, `pane_spawned`, `pane_closed` (carries `exit_status`), plus the
+  deferred `command_started` / `command_finished` (carries a nullable
+  `exit_code` — see the gap note below). `watch` cuts `wait`'s poll-floor
+  latency: a `watch` consumer wakes the instant an event fires rather than on
+  the next poll tick. It is additive — `wait` still works without it, and a
+  dropped event (full mailbox) falls back to polling.
+  **Deferred:** `command_started` / `command_finished` are wire-allocated but
+  not emitted by the current server (the OSC-133 command boundary is not
   cleanly observable without disturbing the per-consumer state-sync
-  synthesizer); `command_finished.exit_code` is likewise always null until
-  that shell-integration plumbing lands. The mechanism and the
+  synthesizer); `command_finished.exit_code` is likewise always null until that
+  shell-integration plumbing lands. The mechanism and the
   lifecycle/title/bell/dirty/idle events ship today.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
-  create a **new** session. Without `--json` it creates *and attaches*:
-  an explicit `-s NAME` that already exists is an error (like tmux's
-  duplicate-session refusal); an omitted name is auto-assigned the
-  smallest free numeric name (tmux-style); a server is auto-spawned if
-  none is running. With `--json` it creates the session **without
-  attaching** (no attach, no resize) via the `CREATE_SESSION` control
-  command, whose create is atomic server-side — no `GET_STATE`→attach
-  race — then prints the seed pane id as JSON and exits. `--json`
-  **requires an explicit `-s NAME`** and errors if that name is already
-  in use (create-only, never create-or-attach). Shape in §3.4.
+  create a new session. Without `--json` it creates and attaches: an explicit
+  `-s NAME` that already exists is an error (like tmux's duplicate-session
+  refusal); an omitted name is auto-assigned the smallest free numeric name
+  (tmux-style); a server is auto-spawned if none is running. With `--json` it
+  creates the session without attaching (no attach, no resize), then prints the
+  seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
+  errors if that name is already in use (create-only, never create-or-attach).
+  Shape in §4.4.
 
-**Socket precedence (once, for every verb).** The `--socket` argument
-wins, then the `PHUX_SOCKET` environment variable, then the daemon
-default: `$XDG_RUNTIME_DIR/phux/phux.sock`, falling back to
-`/tmp/phux-$UID/phux.sock`. Per-verb rows above just say "see §1".
+**Not implemented.** `split` and `detach` do not exist as subcommands today
+(tracked as bead phux-99te). The shipped verbs are the twelve in
+[`tui.md`](./tui.md) §1; the agent-relevant subset is the catalog above plus
+`kill` and `attach`.
 
----
+**How `new` decomposes on the wire.** Session create is no longer an L1
+session verb. Per
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md) §5,
+the session lifecycle verbs were removed from L1 and decompose into substrate
+primitives plus L3 metadata: `new` is `SPAWN_TERMINAL` plus an L3 metadata
+write on the `phux.session.create/v1` key (the assigned identity is read back
+via `phux.session.created/v1`), and rename is an L3 metadata SET on the
+`phux.session.name/v1` key. Grouping conventions are owned by
+[`../spec/L3.md`](../spec/L3.md). The user-facing UX of `new` is unchanged; the
+divergence is on the wire, where the migration to this decomposition is tracked
+against ADR-0030 (full `CollectionId` removal is bead phux-0bmc).
 
-## 2. Targeting: the selector grammar
+**Socket precedence (once, for every verb).** The `--socket` argument wins,
+then the `PHUX_SOCKET` environment variable, then the daemon default:
+`$XDG_RUNTIME_DIR/phux/phux.sock`, falling back to `/tmp/phux-$UID/phux.sock`.
 
-One grammar, every targeted command — `kill`, `snapshot`, `wait`,
-`send-keys`, and `run` all share `TARGET`. It is resolved
-**client-side** against a `GET_STATE` snapshot
-([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server never
-parses a selector.
+## 3. Targeting: the selector grammar
 
-The full grammar table and CLI examples live in [`tui.md`](./tui.md) §3.
-In one line, the forms are: `.` (current), `=` (last), `name` (session),
-`name:N` / `name:tag` (window), `name:N.M` (pane), and `@N` (opaque id).
+One grammar, every targeted command — `kill`, `snapshot`, `wait`, `send-keys`,
+and `run` all share `TARGET`. It is resolved client-side against a server
+snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
+never parses a selector.
 
-A selector that names several panes (a whole session or window) narrows
-to a **single** pane: the focused pane when it is among the matches, else
-the first in snapshot order (the `pick_target_pane` tiebreak the MCP
-tools share). Optionality differs per verb: `snapshot` and `wait` default
-`TARGET` to the last-focused session; `send-keys` and `run` require it.
+The full grammar table and CLI examples live in [`tui.md`](./tui.md) §3. In one
+line, the forms are: `.` (current), `=` (last), `name` (session), `name:N` /
+`name:tag` (window), `name:N.M` (pane), and `@N` (opaque id).
 
----
+A selector that names several panes (a whole session or window) narrows to a
+single pane: the focused pane when it is among the matches, else the first in
+snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
+Optionality differs per verb: `snapshot` and `wait` default `TARGET` to the
+last-focused session; `send-keys` and `run` require it.
 
-## 3. JSON contracts (the per-verb machine shapes)
+## 4. JSON contracts (the per-verb machine shapes)
 
-Each `--json` verb emits a versioned, plain-data struct from `phux-core`
-or `phux-client`. These structs *are* the stable agent contract
-([ADR-0022](../../ADR/0022-tool-for-agents.md)); the wire underneath
-stays additive and versioned. Each struct carries its own
-`schema_version`, tracked independently.
+Each `--json` verb emits a versioned, plain-data struct from `phux-core` or
+`phux-client`. These structs are the stable agent contract
+([ADR-0022](../../ADR/0022-tool-for-agents.md)); they are a local projection
+over the shared engine, and the wire underneath stays additive and versioned.
+Each struct carries its own `schema_version`, tracked independently.
 
-### 3.1 `SessionListJson` — `phux ls --json`
+### 4.1 `SessionListJson` — `phux ls --json`
 
-Defined in `crates/phux-core/src/session_list.rs`
-(`LS_SCHEMA_VERSION = 1`). Shape, name-sorted:
+Defined in `crates/phux-core/src/session_list.rs` (`LS_SCHEMA_VERSION = 1`).
+Shape, name-sorted:
 
 ```json
 {
@@ -174,18 +201,17 @@ Defined in `crates/phux-core/src/session_list.rs`
 }
 ```
 
-`windows` is the window **count**; `attached` is a bool — whether any
-client is attached. **Cross-surface gotcha:** the MCP `phux_ls` tool
-([`mcp.md`](./mcp.md) §3.1) surfaces the raw wire fields
-`window_count` / `attached_client_count`; the CLI's `--json` projects
-them to `windows` / `attached`. The two surfaces do not share identical
-keys — don't carry a parser across them.
+`windows` is the window count; `attached` is a bool — whether any client is
+attached. **Cross-surface gotcha:** the MCP `phux_ls` tool ([`mcp.md`](./mcp.md)
+§3.1) surfaces the raw wire fields `window_count` / `attached_client_count`;
+the CLI's `--json` projects them to `windows` / `attached`. The two surfaces do
+not share identical keys — do not carry a parser across them.
 
-### 3.2 `ScreenState` — `phux snapshot --json` (and `phux wait --json`)
+### 4.2 `ScreenState` — `phux snapshot --json` (and `phux wait --json`)
 
-Defined in `crates/phux-core/src/screen.rs` (`SCHEMA_VERSION = 3`). The
-same struct the server returns from `GET_SCREEN`, not an agents-specific
-shape. Fields:
+Defined in `crates/phux-core/src/screen.rs` (`SCHEMA_VERSION = 3`). The same
+struct the server returns from `GET_SCREEN`, not an agents-specific shape.
+Fields:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -195,34 +221,33 @@ shape. Fields:
 | `cursor` | `Option<{x,y,visible}>` | Viewport-relative, zero-based; `None` when the cursor is not viewport-resident (scrollback or hidden). |
 | `lines` | `Vec<String>` | Viewport rows, top to bottom, right-trimmed. |
 | `scrollback` | `Vec<String>` | History rows above the viewport, oldest first; empty unless requested. |
-| `cells` | `Option<Vec<CellInfo>>` | Per-cell marks + styles; present only with `--cells`. |
+| `cells` | `Option<Vec<CellInfo>>` | Per-cell marks and styles; present only with `--cells`. |
 
-**`scrollback` is tri-state** (and load-bearing — mirrors
-[`mcp.md`](./mcp.md) §3.2): flag **absent** → viewport only;
-`--scrollback` or `--scrollback=0` → **all** retained history;
-`--scrollback N` → the most-recent `N` rows. On the wire this is
-`None` / `Some(0)` (all) / `Some(n)`.
+**`scrollback` is tri-state** (mirrors [`mcp.md`](./mcp.md) §3.2): flag absent →
+viewport only; `--scrollback` or `--scrollback=0` → all retained history;
+`--scrollback N` → the most-recent `N` rows. On the wire this is `None` /
+`Some(0)` (all) / `Some(n)`.
 
-**`--cells`** populates `cells` with a sparse `Vec<CellInfo>` — only
-cells carrying a non-default style or an OSC-133 mark, in row-major
-order, skipping the right half of double-width glyphs. Each `CellInfo`
-is `{ col, row, semantic?, style }`:
+**`--cells`** populates `cells` with a sparse `Vec<CellInfo>` — only cells
+carrying a non-default style or an OSC-133 mark, in row-major order, skipping
+the right half of double-width glyphs. Each `CellInfo` is
+`{ col, row, semantic?, style }`:
 
-- `semantic` is `SemanticContent` — `Input` (typed input) or `Prompt`
-  (shell prompt). `Output` is the default for every cell and is collapsed
-  to absence, so `semantic` is `Some` only for marked input vs prompt.
+- `semantic` is `SemanticContent` — `Input` (typed input) or `Prompt` (shell
+  prompt). `Output` is the default for every cell and is collapsed to absence,
+  so `semantic` is `Some` only for marked input vs prompt.
 - `style` is `CellStyle`: nine SGR booleans (`bold`, `faint`, `italic`,
-  `underline`, `blink`, `inverse`, `invisible`, `strikethrough`,
-  `overline`) plus `fg` / `bg`, each a `CellColor` tagged enum with
-  `kind` of `default`, `palette` (`{ index }`), or `rgb` (`{ r, g, b }`).
-  The tag distinguishes "terminal default" from "explicitly black".
+  `underline`, `blink`, `inverse`, `invisible`, `strikethrough`, `overline`)
+  plus `fg` / `bg`, each a `CellColor` tagged enum with `kind` of `default`,
+  `palette` (`{ index }`), or `rgb` (`{ r, g, b }`). The tag distinguishes
+  "terminal default" from "explicitly black".
 
-**Back-compat.** `scrollback` and `cells` are `#[serde(default)]` (and
-`cells` is `skip_serializing_if` `None`), so a `cells = None` snapshot
-serializes to exactly the pre-cells shape, and an older consumer reading
-a newer payload ignores extra keys. `schema_version` is the bump signal.
+**Back-compat.** `scrollback` and `cells` are `#[serde(default)]` (and `cells`
+is `skip_serializing_if` `None`), so a `cells = None` snapshot serializes to
+exactly the pre-cells shape, and an older consumer reading a newer payload
+ignores extra keys. `schema_version` is the bump signal.
 
-### 3.3 `RunResult` — `phux run --json` (on completion)
+### 4.3 `RunResult` — `phux run --json` (on completion)
 
 Defined in `crates/phux-client/src/run.rs`:
 
@@ -236,50 +261,46 @@ Defined in `crates/phux-client/src/run.rs`:
 }
 ```
 
-- `exit_code` (i32) is the child's `$?`, parsed out of a printed
-  sentinel (`run` brackets the command with `BEGIN`/`RC` markers — it
-  does not rely on shell integration).
+- `exit_code` (i32) is the child's `$?`, parsed out of a printed sentinel
+  (`run` brackets the command with `BEGIN`/`RC` markers — it does not rely on
+  shell integration).
 - `output` is the rows between the `BEGIN` and `RC` markers.
-- `duration_ms` (u64) is wall-clock from submit to sentinel-seen,
-  **including poll latency** — an upper bound on the child's runtime, not
-  a precise measurement.
+- `duration_ms` (u64) is wall-clock from submit to sentinel-seen, including
+  poll latency — an upper bound on the child's runtime, not a precise
+  measurement.
 - `truncated` is `true` when the `BEGIN` marker had scrolled out of the
-  viewport, so `output` is best-effort visible context; a full capture
-  needs scrollback (phux-o1v).
+  viewport, so `output` is best-effort visible context; a full capture needs
+  scrollback.
 
-**On timeout, `run --json` emits no JSON.** `RunOutcome::TimedOut`
-carries the command, elapsed time, and last screen internally, but the
-CLI's `--json` path serializes only the completed `RunResult`. The
-timeout signal is the **exit code** (125 — see §4.2), printed alongside a
-stderr diagnostic. An agent must read the exit code here and must *not*
-expect an `outcome: "timed_out"` body — that shape exists in the MCP
-`phux_run` tool ([`mcp.md`](./mcp.md) §3.4), not in the CLI's `--json`
-output.
+**On timeout, `run --json` emits no JSON.** `RunOutcome::TimedOut` carries the
+command, elapsed time, and last screen internally, but the CLI's `--json` path
+serializes only the completed `RunResult`. The timeout signal is the exit code
+(125 — see §5.2), printed alongside a stderr diagnostic. An agent must read the
+exit code here and must not expect an `outcome: "timed_out"` body — that shape
+exists in the MCP `phux_run` tool ([`mcp.md`](./mcp.md) §3.4), not in the CLI's
+`--json` output.
 
-### 3.4 `phux new --json`
+### 4.4 `phux new --json`
 
-`phux new --json -s NAME` emits a small fixed object naming the created
-session and its seed pane's wire-local id, then exits `0` without
-attaching:
+`phux new --json -s NAME` emits a small fixed object naming the created session
+and its seed pane's wire-local id, then exits `0` without attaching:
 
 ```json
 { "session": "NAME", "terminal_id": 2 }
 ```
 
-It is create-only: `--json` requires an explicit `-s NAME` and errors
-(exit `1`) if that name is already in use. Unlike the versioned
-`ScreenState` / `RunResult` / `SessionListJson` shapes, this is a flat
-ad-hoc object with no `schema_version`.
+It is create-only: `--json` requires an explicit `-s NAME` and errors (exit `1`)
+if that name is already in use. Unlike the versioned `ScreenState` /
+`RunResult` / `SessionListJson` shapes, this is a flat ad-hoc object with no
+`schema_version`. The wire decomposition behind it is in §2.
 
----
+## 5. The read-act-wait loop and exit-code mirroring
 
-## 4. The read-act-wait loop + exit-code mirroring
+### 5.1 The loop
 
-### 4.1 The loop
-
-The canonical agent pattern is **read → act → wait → read**: snapshot the
-pane, send input or run a command, wait for the result to land, snapshot
-again. A worked example in `sh`:
+The canonical agent pattern is read → act → wait → read: snapshot the pane,
+send input or run a command, wait for the result to land, snapshot again. A
+worked example in `sh`:
 
 ```sh
 phux send-keys build "cargo test" Enter
@@ -287,23 +308,22 @@ phux wait build --until "test result:" --timeout 120
 phux snapshot build --json --scrollback 200 > out.json
 ```
 
-When you only want a command's exit code and output, the one-shot
-`phux run` is the higher-level alternative — it brackets the command with
-sentinels and mirrors `$?`:
+When you only want a command's exit code and output, the one-shot `phux run` is
+the higher-level alternative — it brackets the command with sentinels and
+mirrors `$?`:
 
 ```sh
 phux run build "cargo test" --json
 ```
 
-The contrast: `run` is "I want the exit code"; `send-keys` + `wait` is
-"I'm driving an interactive or long-lived program." Because `run` mirrors
-the child's code (§4.2), `phux run ... && next` composes like a shell
+The contrast: `run` is "I want the exit code"; `send-keys` plus `wait` is "I am
+driving an interactive or long-lived program." Because `run` mirrors the
+child's code (§5.2), `phux run ... && next` composes like a shell
 ([ADR-0022](../../ADR/0022-tool-for-agents.md) §3).
 
-### 4.2 Exit-code mirroring
+### 5.2 Exit-code mirroring
 
-Exit codes are **not uniform across verbs** — this is the load-bearing
-table:
+Exit codes are not uniform across verbs:
 
 | Verb | Exit codes |
 |---|---|
@@ -316,24 +336,21 @@ table:
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 
 **Why `run` uses 125, not 124.** `run` mirrors the child's own code into
-`0..=255`, and `124` is a code real commands produce — notably GNU
-`timeout`. So `run` reserves `125` (the wrapper-failure convention, as
-used by `env` and `timeout`) for "phux itself gave up," keeping it
-distinct from a child that legitimately exited `124`. `wait`, which wraps
-nothing, uses `124` for its own timeout. `kill` is a control-plane verb
-(not strictly an agent read) but shares `TARGET`; its `0`/`1`/`2` triad
-is listed for completeness.
+`0..=255`, and `124` is a code real commands produce — notably GNU `timeout`.
+So `run` reserves `125` (the wrapper-failure convention, as used by `env` and
+`timeout`) for "phux itself gave up," keeping it distinct from a child that
+legitimately exited `124`. `wait`, which wraps nothing, uses `124` for its own
+timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
+`TARGET`; its `0`/`1`/`2` triad is listed for completeness.
 
----
+## 6. Relationship to the other agent surfaces
 
-## 5. Relationship to the other agent surfaces
-
-The CLI verbs here are the stable contract. The [MCP adapter](./mcp.md)
-exposes them name-for-name (`phux_ls` ↔ `ls`, and
-`phux_snapshot` / `phux_send_keys` / `phux_run` / `phux_wait` ↔ the
-matching subcommands) over the same `phux-client` functions — same
-client-side resolution, same tiebreaks. [`sdk.md`](./sdk.md) is the
-future typed-Rust L1 handle. All three are unprivileged consumers
+The CLI verbs here are the stable contract. The [MCP adapter](./mcp.md) exposes
+them name-for-name (`phux_ls` ↔ `ls`, and `phux_snapshot` / `phux_send_keys` /
+`phux_run` / `phux_wait` ↔ the matching subcommands) over the same
+`phux-client` functions — same client-side resolution, same tiebreaks.
+[`sdk.md`](./sdk.md) documents `phux-client`, the library crate those surfaces
+are built from. All three are unprivileged consumers
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); the wire
 underneath stays additive and versioned under [`../spec/`](../spec/)
 ([ADR-0022](../../ADR/0022-tool-for-agents.md)).

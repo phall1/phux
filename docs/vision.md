@@ -1,23 +1,16 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-03
+last-reviewed: 2026-06-06
 ---
 
 # Vision
 
-**TL;DR.** The long arc. Where phux is going beyond the v0.1
-substrate cut: agents as a primary consumer category, federation as
-the default deployment shape, lazy state synchronization as the wire's
-destination semantics. For the present-tense model — what phux is
-today — read [`CONCEPTS.md`](./CONCEPTS.md).
+**TL;DR.** The long arc beyond the current substrate cut: agents as a primary consumer category, federation as the default deployment shape, and lazy state synchronization as the wire's destination semantics. This is a direction, not a schedule; the value of writing it down is that the wire was shaped to leave room for it. For what phux is today, read CONCEPTS.md.
 
 ---
 
-This is the part where we tell you where it's all going. Standard
-caveat applies: it's a direction, not a delivery date. The reason to
-write it down is that the v0.1 wire was shaped by it — the forward
-compatibility below isn't a someday-maybe, it's already in the bytes.
+These are directions, not delivery dates. The wire shipped today was shaped by them, so the forward compatibility below is already in the bytes rather than a later retrofit. For the present-tense model — what phux is and what works now — [`CONCEPTS.md`](./CONCEPTS.md) is the owner.
 
 ## Why now
 
@@ -30,8 +23,9 @@ identically, with no re-parsing in between. Modern terminal protocols —
 the Kitty keyboard protocol, true colour, OSC 8 hyperlinks, OSC 133
 prompt boundaries, image protocols, mouse pixel-precision — pass
 through end-to-end because the same parser sits on both ends. tmux,
-screen, and zellij predate this and re-parse VT mid-path, degrading
-those features as a matter of architecture. phux structurally cannot.
+screen, and zellij predate this and re-parse VT mid-path, which is
+where those features degrade. phux carries the bytes and re-runs the
+same engine, so there is no second parser to fall behind.
 
 **Agents became a consumer category.** Programs that drive terminals —
 Claude Code, Cursor's agent, anything orchestrating a developer
@@ -63,12 +57,11 @@ satellite, observe and drive them. The transport between hub and
 satellite is whatever works — SSH-stdio first, QUIC eventually. The
 wire is oblivious.
 
-This shape is the load-bearing answer to "what is this for, beyond a
-better tmux." A fleet of agents working on a fleet of cloud boxes
-needs exactly this: terminals as first-class addressable resources,
-accessible from one place, observable in real time, persistent across
-disconnect. tmux cannot become this without throwing its wire away.
-phux's wire is already pointed at it.
+This shape is the answer to "what is this for, beyond a better tmux." A
+fleet of agents working on a fleet of cloud boxes needs terminals as
+first-class addressable resources: accessible from one place, observable
+in real time, persistent across disconnect. tmux would have to replace
+its wire to get there; phux's wire is already pointed at it.
 
 ## Lazy state synchronization as the wire's destination
 
@@ -103,42 +96,46 @@ strip if multi-window juggling becomes painful enough,
 prefix-discoverable hooks. None of these touch the wire — they're
 chrome the TUI grows over its layered substrate.
 
-### The agent SDK
+### The agent surface
 
 The agent's universe is *terminals and events*: spawn a build, wait
 for the OSC 133 command-end event, read the exit code, kill the
 terminal, move on. Two ways to reach it ship today — the headless
 `phux` CLI verbs (`run`, `wait`, `watch`, `send-keys`, `snapshot`, …)
 and the [`phux-mcp`](./consumers/mcp.md) adapter, both L1-shaped with no
-sessions, windows, or layout in sight.
+sessions, windows, or layout in sight. The structured state an agent
+reads is a local projection over the shared engine, exposed through the
+CLI and a versioned JSON schema, not a structured wire tier
+([ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md)).
+The typed Rust handle over the same wire already exists as the
+`phux-client` library crate over `phux-protocol`.
 
-What's still on the arc here is the *ergonomic* layer: a small Rust
-crate (`phux-client-sdk`) giving a program a typed handle over the same
-wire, and JSON-over-HTTP if non-Rust agents that can't speak MCP become
-a real consumer category. The surface that matters already exists; this
-is convenience on top of it.
+What's still on the arc here is the *ergonomic* layer past that crate:
+JSON-over-HTTP if non-Rust agents that can't speak MCP become a real
+consumer category, and a richer agent SDK that follows the phux-web
+pattern — carry your own engine and project structured state locally
+rather than read it off the wire.
 
-[`consumers/agents.md`](./consumers/agents.md) and
-[`consumers/mcp.md`](./consumers/mcp.md) are the shipped-surface docs.
+[`consumers/agents.md`](./consumers/agents.md) owns the agent projection
+surface (verb set and JSON contracts);
+[`consumers/mcp.md`](./consumers/mcp.md) covers the MCP adapter.
 
 ---
 
 ## Milestones
 
-- **v0.1 — substrate cut.** L1 frozen, L2 stable, L3 as opaque
-  storage. Reference TUI works on L1 + L3 for layout. Federation hooks
-  are baked into the wire but not exercised. The agent surface ships as
-  the headless CLI verbs plus the `phux-mcp` adapter; the typed Rust SDK
-  crate is the convenience layer still to come.
+What works today and the current substrate state are in
+[`CONCEPTS.md`](./CONCEPTS.md); this list is the forward arc only.
+
 - **v0.2 — federation real.** Hubs route to satellites. QUIC
   transport. Lazy state sync replaces pass-through bytes per ADR-0018.
 - **v0.x and beyond — second consumer.** A native GUI consumer
-  proves the substrate isn't TUI-shaped. A recorder proves it isn't
-  consumer-shaped. A tmux control-mode adapter
-  ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md))
-  proves it isn't phux-shaped.
-
-Building for now, designed for later.
+  would show the substrate isn't TUI-shaped; a recorder, that it isn't
+  consumer-shaped; a tmux control-mode adapter
+  ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md)), that
+  it isn't phux-shaped. phux-web ([`consumers/web.md`](./consumers/web.md))
+  is the first such consumer: a browser client that carries its own
+  engine and projects locally, which is the reference shape for the rest.
 
 ---
 

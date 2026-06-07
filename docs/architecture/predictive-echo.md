@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-27
+last-reviewed: 2026-06-06
 ---
 
 # Predictive local echo
@@ -50,60 +50,31 @@ extra divergence risk that implies.
 
 ## Sequence
 
-The happy path (single keypress, server echoes the same grapheme back):
+The happy path: a single keypress the server echoes back unchanged.
 
 ```
-User      Client                                          Server                          PTY/Shell
- │         │                                                │                                │
- │ key 'a' │                                                │                                │
- ├────────►│                                                │                                │
- │         │ 1. predict: paint 'a' at cursor in overlay     │                                │
- │         │    (epoch = N, style = dim/underline)          │                                │
- │         │ 2. INPUT_KEY {pane, KeyEvent('a', …)}          │                                │
- │         ├───────────────────────────────────────────────►│                                │
- │         │                                                │ 3. libghostty Encoder → 0x61   │
- │         │                                                │ 4. write to PTY                │
- │         │                                                ├───────────────────────────────►│
- │         │                                                │                                │ 5. shell
- │         │                                                │                                │    echoes
- │         │                                                │ 6. feed bytes to canonical     │◄─┐
- │         │                                                │    libghostty Terminal         │  │
- │         │                                                │◄───────────────────────────────┘  │
- │         │ 7. PANE_OUTPUT {pane, seq=K, bytes=0x61}       │                                   │
- │         │◄───────────────────────────────────────────────┤                                   │
- │         │ 8. vt_write bytes into mirror Terminal         │                                   │
- │         │ 9. reconcile: prediction at (row,col,'a')      │                                   │
- │         │    matches mirror at (row,col,'a') → CONFIRM,  │                                   │
- │         │    drop overlay entry                          │                                   │
- │         │                                                │                                   │
- │         │ 10. FRAME_ACK {pane, seq=K} ──────────────────►│                                   │
- │         │                                                │                                   │
-
-  Contradiction path (e.g. user is in vim normal mode):
- │         │ 7'. PANE_OUTPUT bytes do NOT place 'a' at      │                                   │
- │         │     cursor (cursor moves instead, no insert)   │                                   │
- │         │ 8'. reconcile: prediction CONTRADICTED         │                                   │
- │         │     drop overlay entry; redraw cell from       │                                   │
- │         │     mirror                                     │                                   │
-
-  Timeout path (server silent, no confirming output ever arrives):
- │         │ -. epoch N has lived > predict_ttl_ms without  │                                   │
- │         │    a confirming PANE_OUTPUT → KILL prediction, │                                   │
- │         │    redraw cell from mirror                     │                                   │
+User      Client                                          Server
+ │ key 'a' │                                                │
+ ├────────►│                                                │
+ │         │ 1. predict: paint 'a' at cursor in overlay     │
+ │         │    (epoch = N, style = dim/underline)          │
+ │         │ 2. INPUT_KEY {pane, KeyEvent('a', …)}          │
+ │         ├───────────────────────────────────────────────►│ encode → PTY → shell echoes
+ │         │ 3. PANE_OUTPUT {pane, seq=K, bytes=0x61}        │
+ │         │◄───────────────────────────────────────────────┤
+ │         │ 4. vt_write into mirror; reconcile: prediction  │
+ │         │    at (row,col,'a') matches mirror → CONFIRM,   │
+ │         │    drop overlay entry                           │
 ```
 
-Three properties hold:
+A prediction the mirror later contradicts (e.g. the user is in vim
+normal mode, so the cursor moves instead of inserting) is dropped on
+the next `PANE_OUTPUT` and the cell is redrawn from the mirror. A
+prediction that ages past `predict_ttl_ms` with no confirming
+`PANE_OUTPUT` is killed the same way.
 
-1. **The mirror is authoritative.** Predictions are an overlay drawn on
-   top at render time; they never mutate the mirror. A bug in the
-   predictor cannot corrupt the user's visible grid past the next
-   redraw.
-2. **Reconciliation runs on `PANE_OUTPUT` arrival**, not on
-   `FRAME_ACK`. The ack is a server-side flow-control signal (SPEC
-   §12.2); it carries no rendering meaning. This means predictive echo
-   continues to function correctly even if a future minor version
-   reshapes the ack protocol.
-3. **Epochs + TTL are the safety net.** If the server is silent
-   (network dead, app not echoing, app crashed), predictions don't
-   accumulate forever; they age out and the displayed cell falls back
-   to the mirror's truth.
+Two invariants make this safe: the mirror is authoritative, so a
+predictor bug cannot corrupt the visible grid past the next redraw; and
+reconciliation keys off `PANE_OUTPUT`, not `FRAME_ACK` — the ack is a
+flow-control signal (SPEC §12.2) with no rendering meaning, so reshaping
+it in a later minor version does not affect echo.

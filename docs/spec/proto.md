@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-06-03
+last-reviewed: 2026-06-06
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -49,7 +49,7 @@ phux is a terminal multiplexer. A long-lived server owns **Terminals**:
 each Terminal backs one PTY and one libghostty grid. Clients attach to
 the server over a reliable byte stream and present Terminals to users —
 as a TUI inside another terminal, as a native GUI, as an agent harness,
-or as something else entirely. The Terminal is the wire's load-bearing
+or as something else entirely. The Terminal is the wire's primary
 primitive; everything else is an optional layered service on top of it.
 
 The protocol described here is the contract between server and client.
@@ -74,10 +74,12 @@ are not separate wire concepts.
 This is the protocol's defining trait. Everything else follows from
 it. See [ADR-0013] for the design rationale.
 
-The protocol is organized into three layers per
+The protocol is organized in tiers per
 [ADR-0015](../../ADR/0015-protocol-layering.md): **L1** (Terminal substrate,
-MUST), **L2** (Collection lifecycle, OPTIONAL service), **L3**
-(Metadata storage, OPTIONAL service). The Terminal is the wire's
+MUST) and **L3** (Metadata storage, OPTIONAL service). The **L2** range is
+reserved but carries no messages — there is no collection tier
+([ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md);
+see [L2.md](./L2.md)). The Terminal is the wire's
 primary identity ([ADR-0016](../../ADR/0016-terminal-id-as-wire-primary.md));
 session-window-pane-layout-focus vocabulary is a convention of the
 reference TUI consumer, not a wire concept
@@ -95,15 +97,15 @@ ADRs for the rationale that shapes this document.
 | **Server** | A long-lived process owning all multiplexer state for one operating-system user. |
 | **Client** | A process that attaches to a server, presenting Terminals to a user. |
 | **Terminal** | A managed terminal: one PTY, one `libghostty_vt::Terminal` parsing its bytes, one stable `TerminalId`. The L1 substrate primitive (ADR-0015, ADR-0016). |
-| **Collection** | An L2 optional service: a named lifecycle bundle of Terminals (ADR-0015 §"L2"). May not be implemented; consumers opt in via `HELLO.layers`. |
+| **Group** | A named set of Terminals. Not a wire tier: membership and names are L3 metadata plus client logic, and atomic teardown is the L1 `KILL_TERMINALS` op (ADR-0030; see [L2.md](./L2.md)). `CollectionId` survives only as an opaque grouping key. |
 | **Metadata** | An L3 optional service: a typed key-value store the server hosts but does not interpret (ADR-0015 §"L3"). |
 | **Frame** | A server-emitted `TERMINAL_OUTPUT` carrying a contiguous batch of VT bytes for one Terminal, identified by a monotonically increasing per-Terminal `seq`. |
 | **Grid** | The two-dimensional cell matrix that is a Terminal's visible viewport. |
 | **Scrollback** | Lines that have scrolled out of the grid but are retained for review. |
 | **Cell** | One character position in a grid: a grapheme cluster plus rendering attributes. |
-| **Tier** | A conformance layer: L1, L2, or L3 (message catalog and §10 Conformance below). |
-| **Substrate consumer** | A consumer that speaks only L1: an agent, a recorder, a CI orchestrator. Sees Terminals; never sees Collections or Metadata. |
-| **Reference TUI** | The first-party tmux-shaped consumer. Speaks L1+L2+L3. Session, window, pane, layout, and focus are this consumer's conventions, implemented as L3 metadata; they are not wire concepts (ADR-0017). |
+| **Tier** | A conformance layer: L1 or L3 (message catalog and §11 Conformance below). The L2 range is reserved but unused (see [L2.md](./L2.md)). |
+| **Substrate consumer** | A consumer that speaks only L1: an agent, a recorder, a CI orchestrator. Sees Terminals; never sees Metadata. |
+| **Reference TUI** | The first-party tmux-shaped consumer. Speaks L1+L3. Session, window, pane, layout, and focus are this consumer's conventions, implemented as L3 metadata; they are not wire concepts (ADR-0017). |
 
 ---
 
@@ -118,15 +120,15 @@ ADRs for the rationale that shapes this document.
 │  └─ libghostty Terminal    │  ───────────────►│  │   (libghostty-vt;    │
 │     (canonical)            │                  │  │    local parse for   │
 │                            │     INPUT_KEY    │  │    rendering)        │
-│  L2: Collections (opt)     │  ◄───────────────│  └─ Render loop         │
-│  L3: Metadata    (opt)     │                  │     (per-row dirty)     │
+│  L3: Metadata    (opt)     │  ◄───────────────│  └─ Render loop         │
+│  (L2 reserved, unused)     │                  │     (per-row dirty)     │
 └────────────────────────────┘                  └─────────────────────────┘
 ```
 
 The server is authoritative for all state. L1 (Terminal substrate) is
-always on; L2 (Collection) and L3 (Metadata) are optional services
-that the server may or may not mount, and consumers opt in via
-`HELLO.layers`. The client's local libghostty `Terminal` is a mirror,
+always on; L3 (Metadata) is an optional service the server may or may
+not mount, and consumers opt in via `HELLO.layers`. The L2 range is
+reserved but unused (no collection tier; see [L2.md](./L2.md)). The client's local libghostty `Terminal` is a mirror,
 fed by the server's downsampled VT byte stream; the client's renderer
 uses libghostty's `RenderState` per-row dirty tracking for efficient
 redraw. The server is the only source of truth.
@@ -192,7 +194,7 @@ within the payload as defined per-message and per-field.
 ## 6. Version negotiation
 
 The protocol uses semantic versioning: `major.minor.patch`. This
-document specifies version `0.1.0`.
+document specifies version `0.3.0`.
 
 - **Major** version changes are wire-breaking.
 - **Minor** version changes add new messages or trailing fields. A
@@ -227,13 +229,14 @@ it back as `version`. If no such version exists, the server MUST send
 `ERROR { code: VERSION_INCOMPATIBLE }` and close.
 
 The `layers` bit-field on `ClientCapabilities` and `ServerCapabilities`
-declares which conformance tiers (§10 Conformance) each side speaks. Per
+declares which conformance tiers (§11 Conformance) each side speaks. Per
 [ADR-0015](../../ADR/0015-protocol-layering.md) §"Conformance tiers":
 
 - The client's `layers` lists what it wants. L1 is always implied; a
   client MAY omit higher tiers (an agent SDK declares L1 only).
 - The server's `layers` (in `HELLO_OK`) lists what it implements. L1
-  is always implemented; the server MAY mount L2, L3, or neither.
+  is always implemented; the server MAY mount L3 or not. L2 is never
+  mounted (no collection tier).
 - The **negotiated tier set** is the intersection of the two `layers`
   bit-fields. The server MUST NOT send messages from tiers outside
   the intersection, and the client MUST NOT send messages from tiers
@@ -252,7 +255,7 @@ of the connection. They are not renegotiated.
 ```
 Layer = bitset (u8) {
     L1 = 0x01,   // Terminal substrate (always implemented; MUST be set)
-    L2 = 0x02,   // Collection lifecycle (optional service)
+    L2 = 0x02,   // reserved, unused — no collection tier (L2.md)
     L3 = 0x04,   // Metadata storage (optional service)
 }
 
@@ -269,8 +272,8 @@ ClientCapabilities {
     hyperlinks: bool,
     unicode_version: u8,
     rendering: RenderingMode,      // Diff | VtReplay (deprecated; see prose below)
-    layers: bitset<Layer>,         // tiers the client speaks (§10; ADR-0015)
-    output_mode: OutputMode,       // emitter the consumer wants (phux-fseo)
+    layers: bitset<Layer>,         // tiers the client speaks (§11; ADR-0015)
+    output_mode: OutputMode,       // emitter the consumer wants
 }
 
 ServerCapabilities {
@@ -282,21 +285,25 @@ ServerCapabilities {
     //   IMAGE_PASSTHROUGH  — server forwards image protocols transparently
     //   <reserved>         — slot formerly `CC_FRONTEND` per ADR-0010;
     //                        **reclaimed** per ADR-0017. Decoders MUST
-    //                        ignore the bit if set. v0.2 may re-use the
-    //                        slot.
+    //                        ignore the bit if set. A future minor may
+    //                        re-use the slot.
     max_message_size: u32,
-    layers: bitset<Layer>,         // tiers the server implements (§10; ADR-0015)
+    layers: bitset<Layer>,         // tiers the server implements (§11; ADR-0015)
 }
 ```
 
-The reference HELLO codec encodes `ClientCapabilities` as additive
-trailing positional bytes after the original version tuple. The current
-order is `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
+The HELLO codec encodes `ClientCapabilities` as positional,
+big-endian, length-prefixed fields after the version tuple — the
+current normative encoding shape for every payload
+([appendix-encoding.md](./appendix-encoding.md)). The field order is
+`color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
 `output_mode`. Decoders MUST accept every prefix of this sequence and
-apply defaults for missing trailing bytes (a body that stops before
-`output_mode` decodes as `OutputMode::Raw`, an unknown `output_mode` tag
-also as `Raw`); future fields append after `output_mode` until the
-phux-i58 TLV migration replaces this legacy positional shape.
+apply defaults for missing trailing fields: a body that stops before
+`output_mode` decodes as `OutputMode::Raw`, and an unknown
+`output_mode` tag also decodes as `Raw`. New fields append after
+`output_mode`. A migration from positional to field-tagged encoding is
+tracked future work (bead phux-ktte, relates phux-i58) and is not
+part of this version.
 
 `output_mode` lets a consumer choose, per connection, which server emitter
 serves its attached Terminals: `Raw` (the default) keeps the byte-faithful
@@ -305,15 +312,14 @@ low-latency PTY broadcast that interactive shells and TUIs rely on, while
 (ADR-0018) suited to agents and remote state-sync consumers. The server
 suppresses the raw broadcast for a `StateSync` consumer so exactly one
 emitter serves it. Raw stays the human default because synthesized ticks
-add a visible local-typing latency floor and can lose byte-exact styling
-(phux-fseo / phux-yeca).
+add a visible local-typing latency floor and can lose byte-exact styling.
 
 The `CC_FRONTEND` bit on `features` is **reclaimed** per
 [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md). Earlier drafts
 reserved it for a server that could "speak tmux control mode as an
 alternative frontend." Under ADR-0017 the reference TUI has no
 protocol-level privilege, and `tmux control mode` (when added) is one
-L1/L2/L3 consumer among several — no capability bit required.
+L1/L3 consumer among several — no capability bit required.
 Decoders MUST ignore the slot.
 
 Servers MUST adapt outbound `TERMINAL_OUTPUT` (see [L1.md §state
@@ -373,13 +379,13 @@ The catalog is organized by **tier** per
   Required of every consumer that completes a HELLO. Not tier-
   specific. Defined here.
 - **L1** — Terminal substrate. Every conforming consumer speaks L1
-  (§10). Carries `TerminalId` per
+  (§11). Carries `TerminalId` per
   [ADR-0016](../../ADR/0016-terminal-id-as-wire-primary.md). See
   [L1.md](./L1.md).
-- **L2** — Collection lifecycle. Optional service. See
+- **L2** — reserved, no messages. There is no collection tier. See
   [L2.md](./L2.md).
 - **L3** — Metadata storage. Optional service. See [L3.md](./L3.md).
-- **cmd** — typed command messages. Carry an L1/L2/L3 payload
+- **cmd** — typed command messages. Carry an L1 or L3 payload
   depending on the variant (see each tier's commands section).
 
 The **Status** column tracks reference-implementation coverage in
@@ -391,10 +397,10 @@ this repository as of 2026-05-26. It is informative, not normative.
   yet produce or consume it (e.g. the client does not yet emit
   `VIEWPORT_RESIZE` even though the frame round-trips).
 - `spec-only` — defined here, no codec entry yet.
-- `TBD` — message family is reserved by ADR-0015 at this tier but
-  not yet wire-allocated. Discriminant byte will be assigned when
-  the tier ships (target: v0.2). Decoders MUST NOT speculatively
-  assume any particular discriminant slot.
+- `TBD` — message family is reserved at this tier but not yet
+  wire-allocated. Discriminant byte will be assigned if and when the
+  message ships. Decoders MUST NOT speculatively assume any particular
+  discriminant slot.
 
 [`phux_protocol::wire::frame::FrameKind`]: ../../crates/phux-protocol/src/wire/frame.rs
 
@@ -416,17 +422,29 @@ this repository as of 2026-05-26. It is informative, not normative.
 | 0xC2  | S → C     | `COMMAND_RESULT`  | [L1.md §5](./L1.md)| shipped   |
 | 0xFF  | S → C     | `PONG`            | §7.4               | shipped   |
 
-The `COMMAND` / `COMMAND_RESULT` envelope (§5, allocated 0.2.0-draft.5
-per [ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips
-through the codec. v0.1 wires the `KILL_TERMINAL` (tag 0x03) and
-`GET_STATE` (tag 0x05) commands, plus the appended agent-surface and
-control commands `GET_SCREEN` (tag 0x07), `ROUTE_INPUT` (tag 0x08),
-`CREATE_SESSION` (tag 0x09), and `KILL_COLLECTION` (tag 0x0a); the
-remaining §5.1 catalog entries are reserved and decode as
-`UnknownEnumValue` until allocated. `CREATE_SESSION` is a full-fledged
-L1 command (create a session without attaching, ADR-0021 §3), not
-deferred to L2; `KILL_COLLECTION` is its teardown counterpart, destroying
-a named session in one round-trip (ADR-0021 §3, phux-h9s).
+The `COMMAND` / `COMMAND_RESULT` envelope (§5, per
+[ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips
+through the codec. The wire carries `KILL_TERMINAL` (tag 0x03),
+`GET_STATE` (tag 0x05), `KILL_TERMINALS` (tag 0x09), and the
+agent-convenience commands `GET_SCREEN` (tag 0x07), `ROUTE_INPUT`
+(tag 0x08), `GET_TERMINAL_STATE` (tag 0x0c), and
+`SUBSCRIBE_TERMINAL_EVENTS` (tag 0x0d); the remaining §5.1 catalog
+entries are reserved and decode as `UnknownEnumValue` until allocated.
+
+`KILL_TERMINALS { ids: Vec<TerminalId> }` is the one atomic
+multi-terminal teardown operation
+([ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)):
+its body is a `u16` count followed by that many tagged `TerminalId`s,
+applied all-or-nothing under the server's single `Mutex<ServerState>`
+lock. The session-vocabulary verbs `CREATE_SESSION` and
+`KILL_COLLECTION` that earlier drafts placed on L1 are removed per
+ADR-0030: create decomposes into `SPAWN` plus an L3 metadata key, and
+group teardown is `KILL_TERMINALS`. Group lifecycle is L3 metadata plus
+client logic, not a wire tier; see [L3.md](./L3.md). The agent-surface
+commands are engine-convenience snapshots over the shared engine, not a
+normative structured wire contract (ADR-0030); the structured agent
+state is a local projection exposed via the CLI and a versioned JSON
+schema, owned by [../consumers/agents.md](../consumers/agents.md).
 
 ### 7.2 DETACH / DETACHED
 
@@ -447,10 +465,10 @@ DETACHED { reason: DetachReason, message: str }
 DetachReason = enum {
     REQUESTED         = 0,  // client asked
     SERVER_SHUTDOWN   = 1,
-    SESSION_KILLED    = 2,  // legacy name; retained for v0.1 wire compat.
-                            //   Under ADR-0015 this maps to "the
-                            //   Collection the attach was rooted in was
-                            //   killed." Renamed in v0.2.
+    SESSION_KILLED    = 2,  // legacy name; retained for wire compat.
+                            //   Means "the group the attach was rooted
+                            //   in was torn down" (now a KILL_TERMINALS
+                            //   over its members; see L2.md / ADR-0030).
     REPLACED          = 3,  // another client took over an exclusive attach
     PROTOCOL_ERROR    = 4,
     INTERNAL_ERROR    = 255,
@@ -460,8 +478,8 @@ DetachReason = enum {
 ### 7.3 SUBSCRIBE
 
 Reserved for opting in/out of notification streams (e.g. only the focused
-client should receive `BELL` for inactive Terminals). Format defined in
-v0.2.
+client should receive `BELL` for inactive Terminals). Format not yet
+defined.
 
 ### 7.4 PING / PONG
 
@@ -667,26 +685,18 @@ The server MUST implement L3 storage scoped by `MetadataScope`
 (see [L3.md](./L3.md)). Values are opaque bytes; the server enforces
 nothing beyond size limits.
 
-### 11.4 L1+L2+L3 conformance (REQUIRED for the reference TUI)
+### 11.4 L2 — reserved, no collection tier
 
-A consumer that additionally declares `L2` MUST implement, in
-addition to §11.1, §11.2, and (typically) §11.3:
+There is no L2 collection lifecycle tier. The `L2` bit and discriminant
+range stay reserved so the three-tier numbering is not reused, but no L2
+message is allocated and no consumer declares `L2`. Group membership and
+names are L3 metadata plus client logic; the one atomic need,
+multi-terminal teardown, is the single L1 operation `KILL_TERMINALS`
+(§7.1). See [L2.md](./L2.md) for the full statement and
+[L3.md](./L3.md) for the grouping conventions that replace it.
 
-- **Collection lifecycle commands:** `CREATE_COLLECTION`,
-  `RENAME_COLLECTION`, `KILL_COLLECTION`, `LIST_COLLECTIONS`,
-  `ADD_TERMINAL_TO_COLLECTION`, `REMOVE_TERMINAL_FROM_COLLECTION`.
-- **Collection events:** `COLLECTION_OPENED`, `COLLECTION_CLOSED`,
-  `COLLECTION_RENAMED`, `COLLECTION_MEMBERSHIP_CHANGED`.
-- **The atomic-kill invariant:** `KILL_COLLECTION` MUST cause the
-  server to kill every member Terminal before emitting
-  `COLLECTION_CLOSED`. Clients observe a flurry of `TERMINAL_CLOSED`
-  followed by `COLLECTION_CLOSED`.
-
-The L2 wire discriminants are TBD (allocated in v0.2; see
-[L2.md](./L2.md)). An L1+L2+L3 consumer that ships against a server
-that does not advertise `L2` in `HELLO_OK.server_caps.layers` MUST
-fall back to L1-only operation or terminate the attach with
-`DETACHED { reason: PROTOCOL_ERROR }`.
+The reference TUI is therefore an L1+L3 consumer (§11.3); it builds
+sessions, windows, and panes from L3 metadata, not from a wire tier.
 
 ### 11.5 Out-of-tier messages
 

@@ -459,6 +459,7 @@ gate_dead_link() {
 # ---------------------------------------------------------------------------
 
 # Allowed statuses (anchored, exact):
+#   Status: Proposed
 #   Status: Accepted
 #   Status: Accepted (forward-compat)
 #   Status: Superseded by ADR-NNNN

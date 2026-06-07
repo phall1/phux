@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-27
+last-reviewed: 2026-06-06
 ---
 
 # Process model
@@ -9,16 +9,14 @@ last-reviewed: 2026-05-27
 **TL;DR.** One server per user hosts every session for that user; clients
 are separate processes attached over a Unix socket. The single `phux`
 binary contains both halves and dispatches by subcommand; an attach
-auto-spawns a server if none is listening, the way tmux does. Runtime
-paths live under `$XDG_RUNTIME_DIR/phux/`.
+auto-spawns a server if none is listening. Runtime paths live under
+`$XDG_RUNTIME_DIR/phux/`, with a per-user state directory still on the
+roadmap.
 
 ---
 
-One server per user, hosting all of that user's sessions. Clients are
-separate processes that attach to the server over a Unix socket.
-
 The runtime path resolution lives in
-[`phux-server/src/runtime.rs`](../../crates/phux-server/src/runtime/mod.rs): the
+[`phux-server/src/runtime/mod.rs`](../../crates/phux-server/src/runtime/mod.rs): the
 socket is `$XDG_RUNTIME_DIR/phux/phux.sock` when that variable is set,
 otherwise `/tmp/phux-$UID/phux.sock`. The parent directory is created
 mode `0o700`.
@@ -40,7 +38,5 @@ $XDG_STATE_HOME/phux/               # NOT YET IMPLEMENTED
 The single `phux` binary contains both server and client logic; the
 subcommand dispatches. `phux server` runs the daemon in the foreground;
 `phux` (no args) becomes a client and lazily spawns a server if none is
-listening on the socket.
-
-This mirrors tmux's "auto-server" convention because it is correct: users
-should never have to think about a daemon.
+listening on the socket. The auto-spawn follows tmux's convention so a
+user never has to start a daemon by hand.

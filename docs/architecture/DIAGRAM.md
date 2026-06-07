@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
-stability: stable
-last-reviewed: 2026-05-31
+stability: scratch
+last-reviewed: 2026-06-06
 ---
 
 # System shape diagram

@@ -1,40 +1,48 @@
 ---
 audience: consumers, contributors, agents
-stability: stable
-last-reviewed: 2026-05-28
+stability: evolving
+last-reviewed: 2026-06-06
 ---
 
 # docs/consumers/
 
-**TL;DR.** One file per consumer surface that rides on the phux wire.
-The reference TUI is the consumer most users meet first; the agent
-SDK is the consumer that proves the substrate is consumer-shaped, not
-TUI-shaped. Every consumer here speaks some subset of the tiers
-defined in [`../spec/`](../spec/) and has no protocol-level
-privileges ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)).
+**TL;DR.** One file per consumer surface that rides on the phux wire. The
+surfaces are peers: a reference TUI, a reference browser projection, an agent
+surface, an MCP adapter, and the client library they share. No consumer is
+protocol-privileged; each speaks a subset of the wire spec and projects what
+it needs locally. This index lists them and points at the owning doc for each.
 
 ---
+
+## The peer principle
+
+No consumer is protocol-privileged. The TUI, the web client, and the agent
+surface are peers over one wire, and the structured views each one shows
+(screen state, panes, layouts, run-and-wait results) are computed locally
+from the shared engine, not transmitted as a wire tier. This is stated once
+here; the per-consumer docs link it rather than restating it. See
+[ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md) (the TUI gets no
+protocol-level standing) and
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
+(every structured surface is a consumer-side projection of the shared engine).
+
+If a consumer needs behavior the wire does not provide, the answer is to
+extend the spec with an ADR, not to add a consumer-shaped hook. The reference
+pattern for a consumer that wants structure is to carry its own engine and
+project locally, the way the web client does.
 
 ## Files
 
 | File | Owns |
 |---|---|
-| [tui.md](./tui.md) | Reference TUI: CLI, keybinds, status bar, layout, hooks, recording |
-| [agents.md](./agents.md) | Agent CLI surface: structured verbs (ls/snapshot/send-keys/run/wait/new), JSON contracts, exit-code mirroring. (See [`../../AGENTS.md`](../../AGENTS.md) for universal agent substrate instructions.) |
-| [mcp.md](./mcp.md) | Agent MCP adapter: JSON-RPC stdio tool surface (ls/snapshot/send_keys/run/wait) |
-| [sdk.md](./sdk.md) | Agent SDK shape (forward-looking; not yet shipped) |
+| [tui.md](./tui.md) | Reference TUI, the adoption wedge: CLI, keybinds, status bar, layout, hooks, recording. |
+| [web.md](./web.md) | Reference projection consumer: Rust-to-WASM browser client that carries its own engine over the WebSocket wire codec. |
+| [agents.md](./agents.md) | Agent surface: the CLI verb set and versioned JSON contracts (ScreenState, RunResult, WaitOutcome). (See [`../../AGENTS.md`](../../AGENTS.md) for universal agent substrate instructions.) |
+| [mcp.md](./mcp.md) | MCP adapter: a JSON-RPC stdio tool surface over the agent verbs. |
+| [sdk.md](./sdk.md) | The `phux-client` library crate over the `phux-protocol` wire codec, shared by the surfaces above. |
 
-Future consumers — a native GUI, a recorder, a tmux-CC adapter — get
-their own files here when they materialize. Each file's frontmatter
-declares its `stability`: a shipped surface is `stable`; a
-forward-looking sketch is `evolving`.
-
-## Conformance, not chrome
-
-The reason consumers live in their own directory is that **none of
-them are privileged**. The TUI happens to be in-tree and shipping
-first; it is not "the phux UI" any more than the SDK is "the phux
-API." Each consumer speaks an L-tier subset of the wire spec and
-nothing more. If a consumer needs behavior the wire doesn't provide,
-the answer is to extend the spec (with an ADR) — not to add a
-consumer-shaped hook.
+Future consumers — a native GUI, a recorder, a tmux-CC adapter — get their
+own files here when they materialize. Each file's frontmatter declares its
+own `stability`; a shipped surface is `stable`, a forward-looking sketch is
+`evolving`. Today every surface in this directory is pre-alpha and marked
+`evolving`.

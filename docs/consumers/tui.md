@@ -1,16 +1,18 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-06
 ---
 
 # The phux reference TUI
 
-**TL;DR.** The reference TUI's consumer-facing surface: subcommands,
-keybinds, status bar, layout, hooks, recording. The TUI is one consumer
-of the phux wire spec; it has no protocol-level privileges (see
-[ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)). What's
-normative lives in [`../spec/`](../spec/) — this file is the
+**TL;DR.** The reference TUI's consumer-facing product surface:
+subcommands, keybinds, status bar, layout, hooks, recording. The TUI is
+the wedge — the daily-driver adoption surface — and its differentiator is
+the wire: attach/detach, remoting, and a human and their agents sharing
+the same live terminals. It is held a pure consumer with no protocol
+privilege by [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md).
+What's normative lives in [`../spec/`](../spec/); this file is the
 human-facing reference for the tmux-shaped consumer that ships in tree.
 
 ---
@@ -18,42 +20,61 @@ human-facing reference for the tmux-shaped consumer that ships in tree.
 ## 0. What this is, what this isn't
 
 This document is the **reference TUI consumer's product surface**: the
-things a tmux-shaped phux user sees and configures. It describes how a
-user invokes the TUI, configures it, binds keys to it, reads its status
-output, and extends it. It is not the phux substrate; it is one of
-several consumers that ride the substrate. Where this document conflicts
-with the normative wire spec under [`../spec/`](../spec/), the spec
-wins; file an issue.
+things a tmux-shaped phux user sees and configures — how a user invokes
+the TUI, configures it, binds keys, reads its status output, and extends
+it. Where this document conflicts with the normative wire spec under
+[`../spec/`](../spec/), the spec wins; file an issue.
 
-The TUI is one consumer of the phux wire among several
-([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)). Other
-consumers — an agent SDK, a future native GUI — get their own files
-under [`docs/consumers/`](./). The TUI's specialness is that it ships in
-tree as the human-facing reference; nothing on the wire exists for it
-alone.
+### 0.1 The TUI is the wedge, not a second local multiplexer
+
+The reference TUI is worth heavy product investment because it is the
+adoption surface that bootstraps a population of terminals-on-the-wire
+([ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
+§6). What distinguishes it from a local multiplexer is not local splits —
+those are table stakes — but the wire underneath: a phux session lives on
+the server, so a client can **attach and detach** without killing it,
+**remote** over a transport, and let a **human and their agents share the
+same live terminals** ([`agents.md`](./agents.md) drives those terminals
+side-effect-free while a human watches). The local-tiling features in this
+doc are the familiar shape that gets a tmux user in the door; the wire is
+why they stay.
+
+Investing in the TUI as a product and holding it as a pure consumer are
+not in tension. The constraint that keeps the wedge from corrupting the
+platform is [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md): the
+TUI gets no protocol-level standing, and its needs land as L3 conventions
+and client logic, never as new wire surface. Other consumers — the
+[agent CLI](./agents.md), the [MCP adapter](./mcp.md), the
+[browser client](./web.md), a future native GUI — are peers, each its own
+file under [`docs/consumers/`](./).
 
 For the long arc, read [`../vision.md`](../vision.md). For the wire
 protocol, see [`../spec/`](../spec/). For internal structure, see
 [`../architecture/`](../architecture/). This document is everything
 between.
 
-The user-facing vocabulary is tmux's because it's what people know.
-Under the hood, each TUI concept maps to one or more substrate
-concepts from [ADR-0015](../../ADR/0015-protocol-layering.md):
+### 0.2 TUI vocabulary maps to the substrate
+
+The user-facing vocabulary is tmux's. Under the hood, each TUI concept
+maps to substrate concepts. Following
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md),
+there is **no L2 collection tier**: a session is L3 grouping metadata plus
+client logic, not a wire-level lifecycle entity.
 
 | TUI vocabulary | Substrate mapping |
 |---|---|
-| Session | L2 Collection (`CollectionId`, named lifecycle bundle of Terminals) |
-| Window | TUI convention. An entry in a layout-tree blob stored in L3 metadata, keyed by `phux.tui.layout/v1` under the Collection that contains the Session. |
+| Session | L3 metadata grouping a set of `TerminalId`s under a well-known key plus client logic; named via the `phux.session.name/v1` key. Not an L2 tier. Atomic teardown rides the single `KILL_TERMINALS` L1 op. |
+| Window | TUI convention. An entry in a layout-tree blob stored in L3 metadata, keyed by `phux.tui.layout/v1` for the session's terminals. |
 | Pane | L1 Terminal (`TerminalId`) referenced from a leaf of the TUI's layout tree. |
-| Layout (split tree) | TUI convention. The shape stored in the L3 metadata blob above. ADR-0012's "binary split, not n-ary" still governs *this tree*; it is no longer a wire concept. |
+| Layout (split tree) | TUI convention. The shape stored in the L3 metadata blob above. ADR-0012's "binary split, not n-ary" still governs *this tree*; it is not a wire concept. |
 | Active pane / window focus | TUI convention. Per-client, persisted in TUI metadata if the client wants it to come back on reattach. |
 | Status bar / hooks / keybindings | TUI-local. Not on the wire. |
 | Mouse routing (click-to-focus, drag-to-resize) | TUI-local. The wire carries `INPUT_MOUSE`; what to do with it is the TUI's call. |
 
-A consumer that doesn't want this vocabulary doesn't have to learn
-it. The substrate doesn't carry it. The TUI design that follows is
-*the TUI's* design.
+A consumer that doesn't want this vocabulary doesn't have to learn it;
+the substrate doesn't carry it. `CollectionId` survives only as a
+documented opaque grouping key, not a lifecycle tier — its full removal is
+tracked by bead phux-0bmc.
 
 ---
 
@@ -61,38 +82,69 @@ it. The substrate doesn't carry it. The TUI design that follows is
 
 phux is a single binary with subcommands. The naked invocation —
 `phux` — is the common case: attach to the user's server, lazily
-spawning it if it isn't running.
+spawning it if it isn't running. With no arguments it auto-spawns a server
+if the socket is missing, then attaches via `AttachTarget::Last` with a
+fallback to `AttachTarget::ByName("default")` when the server has no
+prior-attach memory. Auto-spawn (the client forks itself as `phux server`
+if the socket is missing, polls 25 ms / 2 s) covers both the naked and the
+explicit-attach paths.
 
-> **Status (2026-05-27):** today's binary ships `attach`, `server`,
-> and the naked `phux` invocation (phux-k61.1) — `phux` with no
-> arguments auto-spawns a server if the socket is missing, then
-> attaches via `AttachTarget::Last` with a fallback to
-> `AttachTarget::ByName("default")` when the server has no
-> prior-attach memory. Auto-spawn (client forks itself as `phux
-> server` if the socket is missing, polls 25 ms / 2 s) covers both
-> the naked and explicit-attach paths. The rest of the table below
-> is design intent.
+### 1.1 The twelve shipped verbs
+
+These are the subcommands the binary ships today:
 
 ```
-phux                          # attach to default session, autostart server shipped
-phux attach [SESSION]         # attach explicitly; session optional (alias: a) shipped
-phux server  [--session N]    # run server in foreground (incl. for SSH) shipped (no --stdio yet)
+phux                          # attach to default session, autostart server
+phux attach [SESSION]         # attach explicitly; session optional (alias: a)
+phux server  [--session N]    # run server in foreground (incl. for SSH; no --stdio yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
-                              # create a session                         shipped
-phux ls                       # list sessions (alias: list)              shipped
-phux windows [-s SESSION]     # list windows                             spec-only
-phux panes [-w WINDOW]        # list panes                               spec-only
-phux kill TARGET              # kill session/window/pane by selector     shipped
-phux rename SESSION NEW-NAME  # rename a session                         shipped
-phux send-keys TARGET KEYS... # send keys to a pane (scripting)          shipped
-phux run TARGET CMD...        # run a command in a pane, capture $?      shipped
-phux snapshot [TARGET]        # dump pane grid (for piping/scripting)    shipped
-phux wait [TARGET]            # poll a pane until a condition holds       shipped
-phux config <init|path|show>  # scaffold + inspect config                init/path/show shipped; edit spec-only
-phux messages                 # recent server-emitted messages           spec-only
-phux --version                # print version                            shipped
-phux help [COMMAND]                                                       shipped
+                              # create a session
+phux ls                       # list sessions (alias: list)
+phux kill TARGET              # kill session/window/pane by selector
+phux rename SESSION NEW-NAME  # rename a session
+phux snapshot [TARGET]        # dump pane grid (for piping/scripting)
+phux send-keys TARGET KEYS... # send keys to a pane (scripting)
+phux run TARGET CMD...        # run a command in a pane, capture $?
+phux wait [TARGET]            # poll a pane until a condition holds
+phux watch [TARGET]           # stream a pane's live events
+phux config <init|path|show>  # scaffold + inspect config (edit spec-only)
+phux --version                # print version
+phux help [COMMAND]
 ```
+
+The agent-facing verbs — `ls`, `snapshot`, `send-keys`, `run`, `wait`,
+`watch` (and `new`'s create-only `--json` mode) — have their JSON
+contracts and exit-code semantics documented in [`agents.md`](./agents.md);
+this file does not restate them.
+
+### 1.2 new / kill / rename ride the wire mechanism; UX is unchanged
+
+`new`, `kill`, and `rename` no longer ride dedicated session/collection
+L1 verbs. Per
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
+they decompose onto the substrate, with no change to what the user types:
+
+- **`new`** is `SPAWN_TERMINAL` plus an L3 metadata write
+  (`phux.session.create/v1`, read back via `phux.session.created/v1`).
+- **`rename`** is an L3 metadata SET on `phux.session.name/v1`.
+- **`kill`** of a whole group is the atomic `KILL_TERMINALS { ids }` L1
+  op (tag `0x09`), applied all-or-nothing under the server's single lock
+  so no observer sees a partial teardown.
+
+The command words, flags, and output are exactly as before; only the
+wire path beneath them changed.
+
+### 1.3 Not implemented: split and detach
+
+The `split` and `detach` CLI subcommands are **not implemented**.
+Detach-as-an-action exists as a keybinding (§5.4), but there is no
+top-level `phux detach` or `phux split` verb. Both are tracked by bead
+phux-99te.
+
+> **Status (design intent, not shipped):** `windows`, `panes`, and
+> `messages` are listed in earlier drafts as future read verbs; none
+> ships today. `config` ships `init` / `path` / `show`; `config edit`
+> and `config reload` are design intent (§4.3).
 
 **The target convention.** The verbs that address an existing pane —
 `kill`, `snapshot`, `send-keys`, `run`, `wait` — take the selector as a
@@ -111,13 +163,11 @@ words. Each command's `--help` calls this out.
 
 **Output hygiene (for scripts and agents).** One-shot verbs print no
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
-document (`ls`, `snapshot`, `wait`, `run`, `new`); diagnostics go to
-stderr with a nonzero exit, never interleaved into the JSON. Exit codes
-are stable: `ls` exits nonzero with no server (like `tmux ls`); `wait`
-exits `124` on `--timeout`; `run` mirrors the command's own exit code, or
-`125` when `phux` itself gives up on `--timeout`. Output is human-readable
-by default and JSON with `--json` where it makes sense (`ls`, `snapshot`,
-`wait`, `run`, `new`, `windows`, `panes`, `capture`, `config show`).
+document; diagnostics go to stderr with a nonzero exit, never interleaved
+into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
+`run`, `new`, and `config show`. Their per-verb JSON shapes and the
+stable exit-code semantics are owned by [`agents.md`](./agents.md)
+§3–§4 — this file does not restate them.
 
 ---
 
@@ -251,17 +301,9 @@ describes; both docs treat it as the destination shape.
 
 ### 4.2 Format
 
-Config is **TOML**. We picked TOML over KDL because:
-
-- TOML is ubiquitous in the Rust ecosystem and the broader tooling
-  world; every developer and every LLM-based assistant reads and writes
-  it fluently. KDL's syntactic niceties are real but don't outweigh
-  TOML's leverage in an environment where humans *and* agents are both
-  expected to edit configuration routinely.
-- Our config tree is shallow enough that TOML's idioms
-  (`[table]`, `[[array.of.tables]]`, inline tables for parameterized
-  values) cover it cleanly. We avoid the deep nesting that makes TOML
-  awkward.
+Config is **TOML**. The config tree is shallow, so TOML's idioms
+(`[table]`, `[[array.of.tables]]`, inline tables for parameterized values)
+cover it without deep nesting.
 
 A minimal config:
 
@@ -460,17 +502,8 @@ To shell out, use the explicit `run` action:
 
 ### 5.3 Defaults
 
-The defaults ship with `prefix="ctrl+space"`. We chose `ctrl+space`
-because:
-
-- It does not conflict with readline (`C-a` begin-line, `C-b` back-char,
-  `C-e` end-line are all common).
-- It does not conflict with screen (`C-a`).
-- It does not conflict with vim (`C-w` is window, but `C-Space` is
-  free or used as completion which we tolerate).
-- It is two physical keys, no Greek-key chord.
-
-Users with strong opinions override it in one line of config.
+The defaults ship with `prefix = "ctrl+space"`. Users override it in one
+line of config.
 
 ### 5.4 Action catalog (initial)
 
@@ -543,8 +576,7 @@ sessions) resizes, split ratios are preserved and dimensions are
 redistributed proportionally. A leaf that hits its minimum size
 (`min_cols = 2`, `min_rows = 1` for the inner content; chrome is per
 client) freezes; remaining space redistributes among non-frozen leaves.
-
-This is tmux's behavior. It's what users expect.
+This mirrors tmux's resize behavior.
 
 ### 6.3 Resize commands
 
@@ -663,8 +695,8 @@ architectural revision to grow a status bar plugin story.
 Every widget kind accepts a `style` table with optional `fg`, `bg`
 (color strings: names, `#rrggbb`, or palette indices), and the boolean
 attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
-implemented built-ins today are `time`, `session-name`, and `windows`
-(the others above are design intent); `windows` takes its `active` and
+implemented built-ins today are `clock`, `session`, and `windows` (the
+others above are design intent); `windows` takes its `active` and
 `inactive` segments as such style tables.
 
 ### 8.4 Refresh and ordering
@@ -762,8 +794,8 @@ canonical `Terminal` parses them like any other PTY output). We do
 not ship a full player; the ecosystem has plenty.
 
 We do not record per-keystroke timing client-side; recordings reflect
-output as the server emitted it. This matches what users expect and
-keeps the recording infrastructure server-local.
+output as the server emitted it, which keeps the recording infrastructure
+server-local.
 
 [asciinema]: https://asciinema.org/
 
@@ -808,7 +840,7 @@ The shipped defaults, in one place:
 | Spawn-on-attach               | `defaults.shell` (unset = inherit)       |
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
-| Status bar                    | `{session}` / `{windows}` / `{date %H:%M}` |
+| Status bar                    | `["session"]` / `["windows"]` / `[{ kind = "clock", format = "%H:%M" }]` |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
 | Cursor blink                  | follow inner program request             |
