@@ -207,6 +207,18 @@ CLI arguments, keybinding actions, and hook arguments.
 | `@N`                  | opaque ID (pane/window/session) — stable for the |
 |                       | server's lifetime                                |
 | `=`                   | last (most recently focused)                     |
+| `#tag`                | every Terminal carrying L3 tag `tag`             |
+
+The `#tag` form (ADR-0027) resolves to the **set** of Terminals tagged
+`tag`, exactly as a session name resolves to many panes. Tags are L3
+metadata (`phux.tags/v1`), read and written with `phux tag`:
+
+```text
+phux tag add work:1.0 build ci    # tag a pane
+phux tag ls .                      # list the focused pane's tags
+phux kill #build                   # kill every Terminal tagged 'build'
+phux tag rm @7 ci                  # untag
+```
 
 One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, and
 `run` all accept the same `TARGET` (phux-n95) and resolve it client-side

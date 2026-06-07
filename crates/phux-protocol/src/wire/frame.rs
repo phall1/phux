@@ -197,6 +197,32 @@ pub const SESSION_CREATE_KEY: &str = "phux.session.create/v1";
 /// / ADR-0027).
 pub const SESSION_CREATE_RESULT_KEY: &str = "phux.session.created/v1";
 
+/// Conventional L3 metadata key holding a Terminal's freeform string tags
+/// (ADR-0027 decision point 4, `phux-p0yq`).
+///
+/// Scope: the Terminal's [`TerminalId`]. Value: a UTF-8 JSON array of
+/// non-empty, duplicate-free tag strings, e.g. `["build","ci"]`; an empty
+/// array or an absent key both mean "no tags". The server stores the bytes
+/// without interpreting them ([`docs/spec/L3.md`](../../../docs/spec/L3.md)
+/// §3.6); tag *meaning* is the normative client convention this key names, so
+/// the `#tag` selector ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)
+/// decision point 5) resolves identically across consumers. Set via
+/// `SET_METADATA`, read via `GET_METADATA`/`LIST_METADATA`.
+pub const TERMINAL_TAGS_KEY: &str = "phux.tags/v1";
+
+/// Conventional L3 metadata key holding a Terminal's outgoing *link* edges
+/// (ADR-0027 decision point 4, `phux-p0yq`).
+///
+/// Scope: the source Terminal's [`TerminalId`]. Value: a UTF-8 JSON array of
+/// link records `{ "target": u32, "kind": str }`, where `target` is the
+/// linked Terminal's local wire id and `kind` is an OPEN enum — v1 defines
+/// `"group"` (a soft grouping edge); unknown kinds are preserved, not
+/// rejected, so the vocabulary grows additively. The server stores the bytes
+/// opaquely; link *meaning* is the normative client convention this key
+/// names. A link is a metadata value, never a second wire identity
+/// ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)).
+pub const TERMINAL_LINK_KEY: &str = "phux.link/v1";
+
 /// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries

@@ -1,0 +1,242 @@
+//! `phux tag` — read and write a Terminal's L3 tags (`phux-f8wi`, ADR-0027).
+//!
+//! Tags are freeform strings stored as L3 metadata under the conventional
+//! key [`TERMINAL_TAGS_KEY`] (`phux.tags/v1`), scoped to a `TerminalId`. The
+//! value is a UTF-8 JSON array of tag strings; the server stores the bytes
+//! opaquely ([`docs/spec/L3.md`](../../../docs/spec/L3.md) §3.6). Once a
+//! Terminal is tagged, the `#tag` selector ([`crate::selector`]) addresses
+//! every Terminal carrying that tag — the read side this command writes.
+
+use std::process::ExitCode;
+
+use phux_client::attach::connection::Connection;
+use phux_client::selector::{self, TagIndex};
+use phux_protocol::ids::TerminalId;
+use phux_protocol::wire::frame::{
+    Command as WireCommand, CommandResult, CommandValue, FrameKind, Scope, StateScope,
+    TERMINAL_TAGS_KEY,
+};
+use phux_protocol::wire::info::SessionSnapshot;
+use phux_server::runtime::default_socket_path;
+
+use crate::commands::{TagAction, cli_runtime, command_on, report_no_server};
+
+/// Dispatch `phux tag <action>`.
+pub(crate) fn run_tag(action: &TagAction, socket: Option<std::path::PathBuf>) -> ExitCode {
+    let target = match action {
+        TagAction::Ls { target } | TagAction::Add { target, .. } | TagAction::Rm { target, .. } => {
+            target
+        }
+    };
+    let selector = match selector::parse(target) {
+        Ok(sel) => sel,
+        Err(err) => {
+            eprintln!("phux: invalid target '{target}': {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+
+    rt.block_on(async move {
+        let mut conn = match Connection::connect(&socket_path).await {
+            Ok(conn) => conn,
+            Err(err) => return report_no_server(&err, &socket_path, "tag"),
+        };
+        let snapshot = match command_on(
+            &mut conn,
+            0,
+            WireCommand::GetState {
+                scope: StateScope::Server,
+            },
+        )
+        .await
+        {
+            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
+            Ok(other) => {
+                eprintln!("phux: unexpected GET_STATE result: {other:?}");
+                return ExitCode::FAILURE;
+            }
+            Err(err) => return report_no_server(&err, &socket_path, "tag"),
+        };
+
+        // `phux tag` resolves the target itself (it may be a `#tag` selector,
+        // e.g. re-tagging a set), so it goes through the tag-aware resolver.
+        let index = fetch_tag_index(&mut conn, &snapshot).await;
+        let targets = selector::resolve_with_tags(&selector, &snapshot, &index);
+        if targets.is_empty() {
+            eprintln!("phux: no such target: {target}");
+            return ExitCode::FAILURE;
+        }
+
+        match action {
+            TagAction::Ls { .. } => {
+                for id in &targets {
+                    let tags = index.get(id).cloned().unwrap_or_default();
+                    println!("@{}\t{}", local_id(id), tags.join(" "));
+                }
+                ExitCode::SUCCESS
+            }
+            TagAction::Add { tags, .. } => {
+                let wanted = normalize(tags);
+                edit_tags(&mut conn, &targets, &index, &socket_path, |cur| {
+                    for t in &wanted {
+                        if !cur.iter().any(|e| e == t) {
+                            cur.push(t.clone());
+                        }
+                    }
+                })
+                .await
+            }
+            TagAction::Rm { tags, .. } => {
+                let unwanted = normalize(tags);
+                edit_tags(&mut conn, &targets, &index, &socket_path, |cur| {
+                    cur.retain(|e| !unwanted.iter().any(|u| u == e));
+                })
+                .await
+            }
+        }
+    })
+}
+
+/// Strip an optional leading `#` from each supplied tag and drop empties /
+/// duplicates, so `phux tag add x #x` and `phux tag add x` are equivalent.
+fn normalize(tags: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.strip_prefix('#').unwrap_or(t).trim();
+        if !t.is_empty() && !out.iter().any(|e| e == t) {
+            out.push(t.to_owned());
+        }
+    }
+    out
+}
+
+/// The `u32` of a `TerminalId::Local`, for display. Satellite ids (federation,
+/// out of scope here) fall back to `0`.
+fn local_id(id: &TerminalId) -> u32 {
+    id.local_id().unwrap_or(0)
+}
+
+/// Read every `targets` Terminal's current tags from `index`, apply `mutate`,
+/// and write the result back via `SET_METADATA`, then a `GET_METADATA`
+/// round-trip per Terminal.
+///
+/// The trailing GET is load-bearing, not cosmetic: `SET_METADATA` carries no
+/// reply, so without a following round-trip the client could exit and close
+/// the socket before the server reads the SET frame, dropping the write
+/// (the same reason `phux new` GETs after its create SET). Frames are ordered
+/// on the one connection, so the GET's reply proves the SET was applied; we
+/// print that confirmed value.
+async fn edit_tags<F: Fn(&mut Vec<String>)>(
+    conn: &mut Connection,
+    targets: &[TerminalId],
+    index: &TagIndex,
+    socket_path: &std::path::Path,
+    mutate: F,
+) -> ExitCode {
+    let mut req: u32 = 100;
+    for id in targets {
+        let mut cur = index.get(id).cloned().unwrap_or_default();
+        mutate(&mut cur);
+        cur.sort();
+        cur.dedup();
+        let value = serde_json::to_vec(&cur).unwrap_or_else(|_| b"[]".to_vec());
+        req += 1;
+        if let Err(err) = conn
+            .send(&FrameKind::SetMetadata {
+                request_id: req,
+                scope: Scope::Terminal(id.clone()),
+                key: TERMINAL_TAGS_KEY.to_owned(),
+                value,
+            })
+            .await
+        {
+            return report_no_server(&err, socket_path, "tag");
+        }
+        req += 1;
+        let get_id = req;
+        if let Err(err) = conn
+            .send(&FrameKind::GetMetadata {
+                request_id: get_id,
+                scope: Scope::Terminal(id.clone()),
+                key: TERMINAL_TAGS_KEY.to_owned(),
+            })
+            .await
+        {
+            return report_no_server(&err, socket_path, "tag");
+        }
+        // Drain to the matching reply (proves the prior SET landed).
+        let confirmed = loop {
+            match conn.recv().await {
+                Ok(FrameKind::MetadataValue { request_id, value }) if request_id == get_id => {
+                    break value
+                        .and_then(|b| serde_json::from_slice::<Vec<String>>(&b).ok())
+                        .unwrap_or_default();
+                }
+                Ok(_) => {}
+                Err(err) => return report_no_server(&err, socket_path, "tag"),
+            }
+        };
+        println!("@{}\t{}", local_id(id), confirmed.join(" "));
+    }
+    ExitCode::SUCCESS
+}
+
+/// Fetch the L3 tag index — `TerminalId` → its `phux.tags/v1` tags — for
+/// every pane in `snapshot`, over `conn`.
+///
+/// One `GET_METADATA` per pane, pipelined: all requests are sent first, then
+/// the `METADATA_VALUE` replies are collected by `request_id`. A pane with no
+/// tag key, an empty value, or a value that is not a JSON string array maps to
+/// no tags (absent from the index).
+pub(crate) async fn fetch_tag_index(conn: &mut Connection, snapshot: &SessionSnapshot) -> TagIndex {
+    let ids: Vec<TerminalId> = snapshot.panes.iter().map(|p| p.id.clone()).collect();
+    let mut index = TagIndex::new();
+    if ids.is_empty() {
+        return index;
+    }
+    // request_id base of 1 so the GET_STATE on request_id 0 (sent earlier on
+    // shared connections) never collides.
+    for (i, id) in ids.iter().enumerate() {
+        let request_id = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
+        if conn
+            .send(&FrameKind::GetMetadata {
+                request_id,
+                scope: Scope::Terminal(id.clone()),
+                key: TERMINAL_TAGS_KEY.to_owned(),
+            })
+            .await
+            .is_err()
+        {
+            return index; // server gone mid-flight: best-effort empty.
+        }
+    }
+    let mut remaining = ids.len();
+    while remaining > 0 {
+        match conn.recv().await {
+            Ok(FrameKind::MetadataValue { request_id, value }) => {
+                let Some(pos) = usize::try_from(request_id)
+                    .ok()
+                    .and_then(|r| r.checked_sub(1))
+                else {
+                    continue;
+                };
+                let Some(id) = ids.get(pos) else { continue };
+                remaining -= 1;
+                if let Some(bytes) = value
+                    && let Ok(tags) = serde_json::from_slice::<Vec<String>>(&bytes)
+                    && !tags.is_empty()
+                {
+                    index.insert(id.clone(), tags);
+                }
+            }
+            Ok(_) => {}      // unrelated interleaved frame: ignore
+            Err(_) => break, // transport closed: return what we have
+        }
+    }
+    index
+}

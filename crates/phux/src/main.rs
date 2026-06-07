@@ -208,6 +208,7 @@ fn main() -> ExitCode {
             socket,
         }) => commands::run::run_run(&target, &command, timeout, json, socket),
         Some(Command::Config { action }) => commands::config::run_config(&action),
+        Some(Command::Tag { socket, action }) => commands::tag::run_tag(&action, socket),
         None => commands::attach::run_naked(),
     }
 }

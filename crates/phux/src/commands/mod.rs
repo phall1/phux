@@ -18,6 +18,7 @@ pub(crate) mod run;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod tag;
 pub(crate) mod wait;
 pub(crate) mod watch;
 
@@ -364,6 +365,51 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+
+    /// Read and write a Terminal's L3 tags (phux-f8wi, ADR-0027).
+    ///
+    /// Tags are freeform strings stored as L3 metadata (`phux.tags/v1`),
+    /// the server stores them opaquely. Once a Terminal is tagged, the
+    /// `#tag` selector addresses every Terminal carrying that tag — e.g.
+    /// `phux kill #build`, `phux snapshot #web`.
+    Tag {
+        /// Override the UDS path. Global so it may precede or follow the
+        /// action (`phux tag --socket … add` and `phux tag add … --socket`
+        /// both parse).
+        #[arg(long, global = true)]
+        socket: Option<std::path::PathBuf>,
+
+        #[command(subcommand)]
+        action: TagAction,
+    },
+}
+
+/// `phux tag <action>` — list and edit a Terminal's L3 tags.
+#[derive(Debug, Subcommand)]
+pub(crate) enum TagAction {
+    /// List the tags on each Terminal a selector resolves to.
+    Ls {
+        /// Target selector (session, `session:window`, `@id`, `.`, `#tag`).
+        target: String,
+    },
+
+    /// Add one or more tags to each Terminal a selector resolves to.
+    Add {
+        /// Target selector.
+        target: String,
+        /// Tags to add (the leading `#` is optional).
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
+
+    /// Remove one or more tags from each Terminal a selector resolves to.
+    Rm {
+        /// Target selector.
+        target: String,
+        /// Tags to remove (the leading `#` is optional).
+        #[arg(required = true)]
+        tags: Vec<String>,
+    },
 }
 
 /// `phux config <action>` — local config inspection and scaffolding.
@@ -495,11 +541,33 @@ pub(crate) async fn resolve_target(
         }
         Err(err) => return Err(report_no_server(&err, socket_path, verb)),
     };
-    let candidates = crate::selector::resolve(selector, &snapshot);
+    let candidates = resolve_targets(socket_path, selector, &snapshot).await;
     crate::selector::pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
         eprintln!("phux: no such target");
         ExitCode::FAILURE
     })
+}
+
+/// Resolve `selector` to its `TerminalId`s, fetching L3 tag metadata first
+/// only when the selector is `#tag` (`phux-f8wi`). Non-tag selectors resolve
+/// purely against `snapshot`, so the common path pays no extra round-trip.
+///
+/// A tag fetch that fails (no server mid-flight, a malformed value) degrades
+/// to an empty tag index, so a `#tag` selector then resolves to nothing —
+/// the caller reports it as a selector miss, never a hang.
+pub(crate) async fn resolve_targets(
+    socket_path: &Path,
+    selector: &crate::selector::Selector,
+    snapshot: &phux_protocol::wire::info::SessionSnapshot,
+) -> Vec<phux_protocol::ids::TerminalId> {
+    if !matches!(selector, crate::selector::Selector::Tag(_)) {
+        return crate::selector::resolve(selector, snapshot);
+    }
+    let tags = match Connection::connect(socket_path).await {
+        Ok(mut conn) => tag::fetch_tag_index(&mut conn, snapshot).await,
+        Err(_) => crate::selector::TagIndex::new(),
+    };
+    crate::selector::resolve_with_tags(selector, snapshot, &tags)
 }
 
 /// Print an `AttachError` as a one-line, actionable message on stderr.
