@@ -169,7 +169,7 @@ fn byc_6_1_attach_returns_session_id_and_round_trip_snapshot() {
         let mut client_term_1 = fresh_terminal(snap_cols, snap_rows);
         client_term_1.vt_write(&vt_replay_bytes);
 
-        let mut synth = SnapshotSynthesizer::new().expect("fresh SnapshotSynthesizer");
+        let synth = SnapshotSynthesizer::new().expect("fresh SnapshotSynthesizer");
         let resynth_1 = synth.synthesize(&client_term_1).expect("resynth_1");
 
         assert_eq!(

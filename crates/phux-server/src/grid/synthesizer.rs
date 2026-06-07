@@ -110,11 +110,35 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// Returns the synthesised bytes plus the queried `(cols, rows)`
     /// dimensions, since `TERMINAL_SNAPSHOT` carries them alongside the
     /// replay body (SPEC §8.4).
+    #[allow(
+        clippy::unused_self,
+        reason = "a full snapshot is intentionally stateless — it builds a fresh \
+                  RenderState each call (phux-uow0) — but stays a method on \
+                  SnapshotSynthesizer for API symmetry with the incremental paths"
+    )]
     pub fn synthesize(
-        &mut self,
+        &self,
         terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<SnapshotBytes, SynthesisError> {
-        let snapshot = self.render_state.update(terminal)?;
+        // phux-uow0: a full snapshot must observe the LIVE grid in its
+        // entirety, so it uses a FRESH `RenderState` + iterators rather than
+        // the synthesizer's reused `self.render_state`. libghostty's per-row
+        // dirty bits live on the `Terminal` and are CONSUMED by
+        // `RenderState::update`; the server runs several `RenderState`
+        // consumers against one `Terminal` (this shared snapshot path plus the
+        // per-consumer state-sync references primed in `register_consumer`). On
+        // the reused render state, a row whose dirty bit was already consumed by
+        // another consumer reads back as clean — yielding that row's STALE
+        // cached body (e.g. the blank grid captured at a prior attach) instead
+        // of the current content. A re-attaching client then got a blank
+        // snapshot and waited forever for live output that never came (the
+        // attach_detach_churn / both_axes flakes). A fresh render state has no
+        // prior cache, so its first `update` observes every row as it is now.
+        let mut render_state = RenderState::new()?;
+        let mut rows = RowIterator::new()?;
+        let mut cells = CellIterator::new()?;
+
+        let snapshot = render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
 
@@ -129,12 +153,11 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         //     on the correct buffer instead of the primary screen.
         emit_screen_mode(&mut out, terminal)?;
 
-        // 2. Walk rows + cells, emitting SGR deltas and graphemes. The
-        //    full-snapshot path paints every row unconditionally; the
-        //    incremental path consults `Row::dirty()`. The inner cell loop
-        //    is shared via [`emit_cell`].
+        // 2. Walk every row + cell, emitting SGR deltas and graphemes. The
+        //    fresh render state above guarantees a full observation; the inner
+        //    cell loop is shared via [`emit_cell`].
         let mut prev_style: Option<Style> = None;
-        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_iter = rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
         while let Some(row) = row_iter.next() {
             if row_index >= rows_n {
@@ -142,7 +165,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             }
             // Position to the start of the row. CUP is 1-based.
             write_cup(&mut out, row_index, 0);
-            let mut cell_iter = self.cells.update(row)?;
+            let mut cell_iter = cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
                 emit_cell(cell, &mut out, &mut prev_style)?;
             }
@@ -1468,6 +1491,83 @@ mod tests {
         let bx = b.cursor_x().expect("cursor_x b");
         let by = b.cursor_y().expect("cursor_y b");
         assert_eq!((ax, ay), (bx, by), "cursor position should round-trip");
+    }
+
+    /// phux-uow0: the actor reuses ONE `SnapshotSynthesizer` across every
+    /// attach (`self.synth`). A client attaching AFTER content was written
+    /// must receive that content in its snapshot — even though a prior
+    /// `synthesize()` already ran and consumed libghostty's shared per-row
+    /// dirty bits. `synthesize()` is a FULL snapshot: it must repaint every
+    /// row unconditionally, not emit a delta against the consumed dirty state.
+    /// Pre-fix, the second snapshot came back blank (the dirty bits were gone),
+    /// so a snapshot-reliant re-attach saw an empty screen and hung waiting for
+    /// live output that never came (the `attach_detach_churn` / `both_axes` flakes).
+    #[test]
+    fn synthesize_reused_across_calls_emits_full_snapshot_each_time() {
+        let mut t = fresh(20, 5);
+        let synth = SnapshotSynthesizer::new().expect("synth");
+
+        // First attach: blank grid (no content yet).
+        let snap1 = synth.synthesize(&t).expect("synth1");
+        assert!(
+            !String::from_utf8_lossy(&snap1.bytes).contains("MARKER"),
+            "blank grid should not carry MARKER yet",
+        );
+
+        // Content arrives with NO trailing newline (like `printf MARKER`).
+        t.vt_write(b"MARKER");
+
+        // Second attach via the SAME synthesizer: the snapshot MUST be a full
+        // repaint carrying MARKER, not a delta against the consumed dirty bits.
+        let snap2 = synth.synthesize(&t).expect("synth2");
+        let body = String::from_utf8_lossy(&snap2.bytes);
+        assert!(
+            body.contains("MARKER"),
+            "phux-uow0: reused synthesizer must emit a FULL snapshot including \
+             content written after the first call; got: {body:?}",
+        );
+
+        // And it must round-trip into a fresh terminal's grid.
+        let mut b = fresh(snap2.cols, snap2.rows);
+        b.vt_write(&snap2.bytes);
+        assert_eq!(render_grid(&b)[0], "MARKER              ");
+    }
+
+    /// phux-uow0 REAL root cause: libghostty's per-row dirty bits live on the
+    /// `Terminal` and are CONSUMED by `RenderState::update`. The actor has
+    /// MULTIPLE `RenderState` consumers on one Terminal — the shared snapshot
+    /// synthesizer (`self.synth`, reused across attaches) plus the per-consumer
+    /// state-sync references primed in `register_consumer`. If a per-consumer
+    /// `update` eats the dirty bits BEFORE the full snapshot runs, `synthesize()`
+    /// must STILL emit the complete grid: it is a FULL snapshot, not a delta.
+    /// This mirrors the actor sequence that blanked a re-attach's snapshot:
+    /// client-1 attach (`synthesize`), marker arrives (`vt_write`), client-2
+    /// attach (`register_consumer`'s update consumes dirty), client-2 snapshot.
+    #[test]
+    fn full_snapshot_survives_another_consumer_eating_dirty_bits() {
+        let mut t = fresh(20, 5);
+        let snap_synth = SnapshotSynthesizer::new().expect("snap_synth");
+
+        // Client 1 attaches: synthesize the (blank) grid; this consumes dirty
+        // and leaves snap_synth's reference clean.
+        let _ = snap_synth.synthesize(&t).expect("synth client1");
+
+        // Content arrives with no trailing newline (printf-style).
+        t.vt_write(b"MARKER");
+
+        // Client 2's register_consumer primes a SEPARATE per-consumer reference,
+        // whose update consumes the Terminal's freshly-set dirty bits.
+        let mut other = SnapshotSynthesizer::new().expect("other");
+        let _ = other.screen_state(&t, 0).expect("other screen_state");
+
+        // Client 2's snapshot via the SHARED synthesizer must still carry MARKER.
+        let snap = snap_synth.synthesize(&t).expect("synth client2");
+        let body = String::from_utf8_lossy(&snap.bytes);
+        assert!(
+            body.contains("MARKER"),
+            "phux-uow0: a full snapshot must emit the whole grid even when another \
+             consumer already consumed the per-row dirty bits; got: {body:?}",
+        );
     }
 
     /// Regression test for phux-073: a wide CJK glyph (here `你`) takes

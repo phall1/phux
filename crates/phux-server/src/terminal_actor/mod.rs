@@ -986,7 +986,11 @@ impl TerminalActor {
     /// without going through the actor's `select!` loop.
     fn synthesize(&self) -> Result<SnapshotBytes, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
-        let mut synth = self.synth.borrow_mut();
+        // phux-uow0: the full snapshot uses a fresh RenderState internally, so
+        // it needs only a shared borrow — taking `&mut` here would falsely
+        // serialize it against the per-consumer tick path that also reads
+        // `self.synth`.
+        let synth = self.synth.borrow();
         synth.synthesize(&terminal)
     }
 

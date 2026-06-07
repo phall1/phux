@@ -262,7 +262,7 @@ fn incremental_full_dirty_falls_back_to_full_reset() {
     // syntheses we want to compare. We assert *bytes-equality* of the
     // full-path output and the incremental-Full-fallback output by
     // running each one on a clean synthesizer state.
-    let mut synth_a = SnapshotSynthesizer::new().expect("synth_a");
+    let synth_a = SnapshotSynthesizer::new().expect("synth_a");
     let mut synth_b = SnapshotSynthesizer::new().expect("synth_b");
 
     // Push the canonical into alt screen, write content there. Both the
