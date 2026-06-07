@@ -180,12 +180,15 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                             layout_changed = true;
                         }
                     }
-                    OverlayOutcome::SendSelection(sel_event) => {
-                        // Copy-mode: send selection state to the focused pane's Terminal.
-                        if let Some(terminal_id) = focused_pane.as_ref() {
-                            let frame =
-                                InputEvent::Selection(sel_event).into_frame(terminal_id.clone());
-                            conn.send(&frame).await?;
+                    OverlayOutcome::Copy(req) => {
+                        // Copy-mode commit: resolve the selection against the
+                        // focused pane's own engine and write it to the host
+                        // clipboard via OSC 52. Client-local per ADR-0030 —
+                        // no wire traffic.
+                        if let Some(fid) = focused_pane.as_ref()
+                            && let Some(slot) = panes.get(fid)
+                        {
+                            super::copy::copy_to_host_clipboard(out, &slot.terminal, req)?;
                         }
                     }
                     OverlayOutcome::None => {
