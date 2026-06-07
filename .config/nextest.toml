@@ -1,17 +1,28 @@
 # nextest configuration. See https://nexte.st/docs/configuration/
 
 [profile.default]
-# Workspace-wide default: surface flakes promptly without masking real
-# failures. Individual load-sensitive tests are pinned below.
+# Workspace-wide default: surface flakes promptly, no blanket retries.
 retries = 0
 
-# `reconnect_after_detach_replays_snapshot_and_resumes_output` drives a real
-# PTY through a full detach/reattach lifecycle and asserts on rendered screen
-# content. The assertion deadlines (WIRE_RECV_TIMEOUT) are sound in isolation
-# and at -j4, but under full-parallelism nextest on a cached build the test
-# competes with many other PTY-backed tests for CPU and the snapshot-replay
-# render can miss its deadline. This is load, not correctness: retry rather
-# than relax the deadline so a genuine hang still fails the run.
+# PTY-backed integration tests each spawn a real pseudo-terminal: a blocking
+# reader thread, a server task, and a per-pane libghostty actor. Running two at
+# once on the 2-core CI runner oversubscribes those threads and starves the
+# timing-sensitive ones past their deadlines (WIRE_RECV_TIMEOUT / poll_for_echo)
+# — the root cause behind the route_input / reconnect / attach-churn flakes that
+# previously needed per-test `retries` band-aids and quarantines.
+#
+# Bound the whole phux-server integration-test set (tests/*.rs) to one at a
+# time. nextest's global test-threads still fills the second core slot with a
+# non-group test, so wall-clock barely moves on 2 cores, but no PTY test ever
+# runs alongside another — which is what was breaking. Everything else (lib unit
+# tests, other crates) stays fully parallel. New PTY tests are covered
+# automatically by the filter; no per-test pinning to maintain.
+#
+# A larger CI runner (>= 4 cores) would let these run parallel again; if that
+# lands, raise `max-threads` or drop the group.
+[test-groups]
+pty-serial = { max-threads = 1 }
+
 [[profile.default.overrides]]
-filter = 'test(=reconnect_after_detach_replays_snapshot_and_resumes_output)'
-retries = 2
+filter = 'package(phux-server) & kind(test)'
+test-group = 'pty-serial'
