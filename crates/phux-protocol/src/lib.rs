@@ -42,7 +42,7 @@ pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet,
 };
-pub use ids::{ClientId, CollectionId, FrameId, SatelliteHost, SessionId, TerminalId, WindowId};
+pub use ids::{ClientId, FrameId, GroupId, SatelliteHost, SessionId, TerminalId, WindowId};
 
 /// Protocol version this crate implements.
 ///
@@ -57,9 +57,20 @@ pub use ids::{ClientId, CollectionId, FrameId, SatelliteHost, SessionId, Termina
 /// multi-terminal op, `KILL_TERMINALS` (reusing tag `0x09`); grouping
 /// (membership + names) moves to L3 metadata + client logic. Removing wire
 /// verbs is wire-breaking, so pre-1.0 this bumps the minor.
+///
+/// Bumped from `0.3.0` to `0.4.0` by the field-tagged TLV wire migration:
+/// every message body changes from positional, fixed-order fields to
+/// field-tagged TLV (`field_id: varint || wire_type: u8 || length-delimited
+/// value`) per `docs/spec/appendix-encoding.md`. Decoders now match top-level
+/// fields by stable id (start at `1`, contiguous per message) and skip any id
+/// they do not recognise by its declared length; optional / trailing fields
+/// become simply-absent tagged fields. Nested tagged unions and sub-records
+/// (`TerminalId`, `ViewportInfo`, `Command`, `SessionSnapshot`, ...) stay
+/// positional inside a field's value. Every body's bytes change, so this is
+/// wire-breaking; pre-1.0 it bumps the minor.
 pub const PROTOCOL_VERSION: Version = Version {
     major: 0,
-    minor: 3,
+    minor: 4,
     patch: 0,
 };
 

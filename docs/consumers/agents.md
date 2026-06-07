@@ -156,7 +156,7 @@ via `phux.session.created/v1`), and rename is an L3 metadata SET on the
 `phux.session.name/v1` key. Grouping conventions are owned by
 [`../spec/L3.md`](../spec/L3.md). The user-facing UX of `new` is unchanged; the
 divergence is on the wire, where the migration to this decomposition is tracked
-against ADR-0030 (full `CollectionId` removal is bead phux-0bmc).
+against ADR-0030 (full `GroupId` removal is bead phux-0bmc).
 
 **Socket precedence (once, for every verb).** The `--socket` argument wins,
 then the `PHUX_SOCKET` environment variable, then the daemon default:

@@ -34,13 +34,13 @@ see ADR-0008 and the crate-graph note above.
 There is no built `Collection` type and no L2 collection lifecycle tier.
 Grouping a set of terminals — what a user thinks of as a session — is L3
 metadata plus client logic over the [L3 metadata model](../spec/L3.md),
-keyed by an opaque grouping identity. `CollectionId` is retained only as that
+keyed by an opaque grouping identity. `GroupId` is retained only as that
 opaque key, not as a lifecycle entity the server creates, names, or tears
 down; per [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
 (option B) the structured grouping that used to be proposed for the wire is a
 consumer-side projection, and the lone irreducible group operation — atomic
 multi-terminal teardown — is a single L1 op (`KILL_TERMINALS`) rather than a
-tier. Full removal of the `CollectionId` remnant is tracked as bead
+tier. Full removal of the `GroupId` remnant is tracked as bead
 phux-0bmc.
 
 The `Registry`'s `Session` and `Window` types are the in-process carriers of

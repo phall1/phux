@@ -2,11 +2,42 @@
 //!
 //! Owned by phux-6yl.4. See `docs/spec/appendix-encoding.md`.
 //!
-//! All multi-byte integers are encoded **big-endian**. Strings and byte
-//! sequences are length-prefixed with a `u32` big-endian count. The encoder
-//! never allocates outside the `BytesMut` it borrows.
+//! Message bodies are **field-tagged TLV** (`docs/spec/appendix-encoding.md`):
+//! every top-level field of a message is written as
+//! `field_id: varint || wire_type: u8 || value`, where `value` for the
+//! length-delimited wire types is `varint length || bytes`. A decoder reads
+//! fields by id and skips any field id it does not recognise by that field's
+//! declared length — the forward-compat lever. Optional / trailing fields are
+//! simply absent tagged fields.
+//!
+//! Inside a field's value the leaf primitives below are still encoded
+//! positionally and **big-endian**: multi-byte integers big-endian, strings
+//! and byte sequences length-prefixed with a `u32` big-endian count. The
+//! encoder never allocates outside the `BytesMut` it borrows.
 
 use bytes::BytesMut;
+
+/// TLV wire types (`docs/spec/appendix-encoding.md` §1).
+///
+/// The `wire_type` byte follows the `field_id` varint and tells a decoder how
+/// to read — and, for an unrecognised `field_id`, how to skip — the field's
+/// value.
+///
+/// Every wire type phux emits at the message-body level is **length-delimited**
+/// (`varint length || bytes`): a decoder skips an unknown field by reading its
+/// varint length and advancing past that many bytes, without needing to know
+/// the field's logical type. The fixed-width / varint scalar types in the
+/// Appendix A table are reserved for future nested use and are not emitted at
+/// the top level today.
+pub mod wire_type {
+    /// Length-delimited opaque bytes: `varint length || bytes`.
+    ///
+    /// The single wire type phux emits for every top-level message field — the
+    /// field's value is the positional encoding of that logical field, captured
+    /// as an opaque length-delimited blob so unknown fields skip cleanly by
+    /// length.
+    pub const BYTES: u8 = 4;
+}
 
 /// Low-level primitive encoder.
 ///
@@ -107,5 +138,66 @@ impl<'a> Encoder<'a> {
         let len = u32::try_from(value.len()).unwrap_or(u32::MAX);
         self.write_u32_be(len);
         self.buf.extend_from_slice(value);
+    }
+
+    /// Write an unsigned LEB128 varint (`docs/spec/appendix-encoding.md`,
+    /// `wire_type` `VARINT`).
+    ///
+    /// Each byte carries seven value bits in its low bits; the high bit is a
+    /// continuation flag (`1` = more bytes follow). Used for TLV `field_id`s
+    /// and length prefixes. Small values (`< 128`) encode in a single byte,
+    /// which is what keeps the common low-numbered field ids cheap.
+    pub fn write_varint(&mut self, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                self.buf.extend_from_slice(&[byte]);
+                break;
+            }
+            self.buf.extend_from_slice(&[byte | 0x80]);
+        }
+    }
+
+    /// Write one TLV field at the message-body level: `field_id: varint ||
+    /// wire_type: u8 (BYTES) || varint length || value bytes`
+    /// (`docs/spec/appendix-encoding.md` §1).
+    ///
+    /// `value` is the positional encoding of the logical field captured as an
+    /// opaque blob; carrying it length-delimited is what lets a decoder skip a
+    /// field id it does not recognise. Callers assign stable, contiguous
+    /// `field_id`s per message (see [`super::field`]); a value that is logically
+    /// absent (`None`, an empty trailing field) is simply not written, so an
+    /// older or newer peer round-trips by id rather than position.
+    pub fn write_field(&mut self, field_id: u32, value: &[u8]) {
+        self.write_varint(u64::from(field_id));
+        self.write_u8(wire_type::BYTES);
+        debug_assert!(
+            u32::try_from(value.len()).is_ok(),
+            "TLV field value exceeds u32",
+        );
+        self.write_varint(value.len() as u64);
+        self.buf.extend_from_slice(value);
+    }
+
+    /// Write one TLV field whose value is produced by `build` writing
+    /// positionally into a scratch [`Encoder`].
+    ///
+    /// The ergonomic counterpart to [`Self::write_field`] for the common case
+    /// where a field's value is the positional encoding of a leaf primitive or
+    /// a nested tagged union: the closure writes into a fresh buffer, and the
+    /// captured bytes become the field's length-delimited value. Keeping the
+    /// nested encoders positional (and only the *message body* field-tagged)
+    /// is what lets the existing leaf / sub-record codecs stay untouched.
+    pub fn write_field_with<F>(&mut self, field_id: u32, build: F)
+    where
+        F: FnOnce(&mut Encoder<'_>),
+    {
+        let mut scratch = BytesMut::new();
+        {
+            let mut sub = Encoder::new(&mut scratch);
+            build(&mut sub);
+        }
+        self.write_field(field_id, &scratch);
     }
 }

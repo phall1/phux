@@ -31,7 +31,7 @@
 
 mod common;
 
-use phux_protocol::ids::CollectionId;
+use phux_protocol::ids::GroupId;
 use phux_protocol::wire::frame::{FrameKind, Scope, TYPE_METADATA_KEYS, TYPE_METADATA_VALUE};
 use tempfile::TempDir;
 
@@ -44,9 +44,9 @@ const OTHER_KEY: &str = "phux.tui.window_order/v1";
 const LAYOUT_VALUE: &[u8] = b"\xa2\x01\x01\x02\x82\x00\x01"; // CBOR-ish fixture
 
 const fn collection_scope() -> Scope {
-    // Matches `phux_server::state::DEFAULT_COLLECTION_ID`. The wire-side
-    // CollectionId is a bare u32 in v0.1 (see phux-4li.2's commit body).
-    Scope::Collection(CollectionId::new(1))
+    // Matches `phux_server::state::DEFAULT_GROUP_ID`. The wire-side
+    // GroupId is a bare u32 in v0.1 (see phux-4li.2's commit body).
+    Scope::Group(GroupId::new(1))
 }
 
 #[test]

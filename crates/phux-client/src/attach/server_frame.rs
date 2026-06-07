@@ -12,7 +12,7 @@ use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
 use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
-use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
+use super::driver::{AttachError, DEFAULT_GROUP_ID, LAYOUT_KEY, PaneSlot};
 use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
 use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
@@ -744,14 +744,14 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         }
                     }
                 }
-                SpawnResult::Err(SpawnError::CollectionNotFound) => {
-                    // v0.1 clients only ever target DEFAULT_COLLECTION_ID,
+                SpawnResult::Err(SpawnError::GroupNotFound) => {
+                    // v0.1 clients only ever target DEFAULT_GROUP_ID,
                     // which the server always exposes; this branch
                     // means a server-side L2 invariant changed under
                     // us. Log loudly + bell.
                     tracing::warn!(
                         request_id,
-                        "TerminalSpawned: server reports CollectionNotFound for DEFAULT collection",
+                        "TerminalSpawned: server reports GroupNotFound for DEFAULT group",
                     );
                     let _ = actions::write_bell(out);
                     Ok(FrameOutcome::default())
@@ -937,9 +937,9 @@ fn focused_session_name(snapshot: &phux_protocol::wire::info::SessionSnapshot) -
 
 /// Decide whether `(scope, key)` matches the layout-coordination key
 /// ADR-0019 reserves (`phux.tui.layout/v1`, scoped to the default
-/// Collection).
+/// Group).
 fn is_layout_key(scope: &Scope, key: &str) -> bool {
-    matches!(scope, Scope::Collection(id) if *id == DEFAULT_COLLECTION_ID) && key == LAYOUT_KEY
+    matches!(scope, Scope::Group(id) if *id == DEFAULT_GROUP_ID) && key == LAYOUT_KEY
 }
 
 /// Sanity-check a freshly decoded layout against the panes the driver

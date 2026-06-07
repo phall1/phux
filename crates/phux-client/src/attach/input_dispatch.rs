@@ -15,7 +15,7 @@ use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
-use super::driver::{AttachError, DEFAULT_COLLECTION_ID, LAYOUT_KEY, PaneSlot};
+use super::driver::{AttachError, DEFAULT_GROUP_ID, LAYOUT_KEY, PaneSlot};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -383,7 +383,7 @@ async fn apply_action_effects<W: super::RenderSink>(
             *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
             conn.send(&FrameKind::SetMetadata {
                 request_id,
-                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+                scope: Scope::Group(DEFAULT_GROUP_ID),
                 key: LAYOUT_KEY.to_owned(),
                 value: bytes,
             })
@@ -657,7 +657,7 @@ fn run_action(
     match resolved.action.as_str() {
         "split-pane" => {
             // phux-4li.12: SPAWN_TERMINAL → server allocates the new
-            // Terminal under DEFAULT_COLLECTION_ID and replies with
+            // Terminal under DEFAULT_GROUP_ID and replies with
             // TERMINAL_SPAWNED { request_id, result: Ok(new_id) }. The
             // layout mutation happens in the reply handler — see
             // `handle_server_frame`'s TerminalSpawned arm and
@@ -684,7 +684,7 @@ fn run_action(
             // server's environment as-is.
             let frame = FrameKind::SpawnTerminal {
                 request_id,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: None,
                 cwd: None,
                 env: None,
@@ -725,14 +725,14 @@ fn run_action(
             // reply (`handle_server_frame`'s TerminalSpawned arm) adds a
             // window seeded on the spawned pane and makes it active. The
             // new pane is a bare leaf — the server files it under the
-            // default Collection; the TUI groups it into a window itself
+            // default Group; the TUI groups it into a window itself
             // (windows are a client convention, ADR-0017).
             let request_id = *ctx.next_request_id;
             *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
             let name = ctx.workspace.default_window_name();
             let frame = FrameKind::SpawnTerminal {
                 request_id,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: None,
                 cwd: None,
                 env: None,

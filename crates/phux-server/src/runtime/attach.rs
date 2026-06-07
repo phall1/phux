@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use phux_core::TerminalId;
 use phux_protocol::caps::ClientCapabilities;
-use phux_protocol::ids::CollectionId;
+use phux_protocol::ids::GroupId;
 use phux_protocol::wire::frame::{
     AgentEvent, AttachTarget, ErrorCode, FrameKind, SpawnError, SpawnResult,
 };
@@ -364,9 +364,9 @@ pub(crate) async fn query_pane_cwd(
 
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
-/// v0.1 servers expose a single default Collection at
-/// [`crate::state::DEFAULT_COLLECTION_ID`] (= `CollectionId(1)`). Any
-/// other id is rejected with [`SpawnError::CollectionNotFound`] inside
+/// v0.1 servers expose a single default Group at
+/// [`crate::state::DEFAULT_GROUP_ID`] (= `GroupId(1)`). Any
+/// other id is rejected with [`SpawnError::GroupNotFound`] inside
 /// the [`SpawnResult::Err`] arm of the reply frame — separate from
 /// the catch-all `Error` channel so command-correlated failures stay
 /// typed end-to-end (the same precedent the metadata reply path uses).
@@ -405,17 +405,17 @@ pub(crate) async fn query_pane_cwd(
 /// non-attached client is refused (no session to host the pane).
 #[allow(
     clippy::too_many_arguments,
-    reason = "1:1 with the SPAWN_TERMINAL wire frame (request_id + collection + command + cwd + env) plus the standard SharedState/client_id/out_tx/root_token threading the rest of this file uses"
+    reason = "1:1 with the SPAWN_TERMINAL wire frame (request_id + group + command + cwd + env) plus the standard SharedState/client_id/out_tx/root_token threading the rest of this file uses"
 )]
 #[allow(
     clippy::too_many_lines,
-    reason = "linear orchestration: validate collection → build CommandBuilder from wire frame → resolve spawning client's session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
+    reason = "linear orchestration: validate group → build CommandBuilder from wire frame → resolve spawning client's session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
 )]
 pub(crate) async fn handle_spawn_terminal(
     state: &SharedState,
     client_id: ClientId,
     request_id: u32,
-    collection: CollectionId,
+    group: GroupId,
     command: Option<Vec<String>>,
     cwd: Option<String>,
     env: Option<Vec<(String, String)>>,
@@ -425,18 +425,18 @@ pub(crate) async fn handle_spawn_terminal(
     debug!(
         ?client_id,
         request_id,
-        collection = ?collection,
+        group = ?group,
         command = ?command,
         cwd = ?cwd,
         env_count = env.as_ref().map_or(0, Vec::len),
         "SPAWN_TERMINAL",
     );
 
-    if collection != crate::state::DEFAULT_COLLECTION_ID {
+    if group != crate::state::DEFAULT_GROUP_ID {
         let _ = out_tx
             .send(Outbound::Frame(FrameKind::TerminalSpawned {
                 request_id,
-                result: SpawnResult::Err(SpawnError::CollectionNotFound),
+                result: SpawnResult::Err(SpawnError::GroupNotFound),
             }))
             .await;
         return;

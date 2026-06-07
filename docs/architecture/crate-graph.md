@@ -108,7 +108,7 @@ in tree:
 | Layer | Concept | Implemented in tree as | Status |
 |---|---|---|---|
 | **L1** | Terminal: PTY + libghostty `Terminal` + identity + I/O + snapshot + event stream | `PaneActor` in `phux-server::pane_actor`; wire `PaneId` and the `PANE_OUTPUT` / `PANE_SNAPSHOT` / `INPUT_*` / `BELL` / `OSC_EVENT` (currently spec-only) messages | shipped under pre-layering vocabulary; rename to `TerminalId` is ADR-0016 |
-| **L2** | Reserved, unused — no collection tier | nothing on the wire | dissolved per [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md); grouping is L3 metadata + client logic, atomic teardown is the L1 `KILL_TERMINALS` op. `CollectionId` survives only as an opaque grouping key (removal tracked as future work). See [../spec/L2.md](../spec/L2.md). |
+| **L2** | Reserved, unused — no collection tier | nothing on the wire | dissolved per [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md); grouping is L3 metadata + client logic, atomic teardown is the L1 `KILL_TERMINALS` op. `GroupId` survives only as an opaque grouping key (removal tracked as future work). See [../spec/L2.md](../spec/L2.md). |
 | **L3** | Opaque metadata KV scoped to Terminal / group / global | not yet implemented — closest analog is the in-memory window/layout state on `ServerState` | spec-only |
 
 Cross-cuts:

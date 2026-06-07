@@ -3,17 +3,17 @@
 //!
 //! Four scenarios pin the behavior:
 //!
-//! 1. **Spawn into the default Collection.** A client sends
-//!    `SPAWN_TERMINAL { collection: DEFAULT, command: Some(/bin/cat) }`.
+//! 1. **Spawn into the default Group.** A client sends
+//!    `SPAWN_TERMINAL { group: DEFAULT, command: Some(/bin/cat) }`.
 //!    The server replies `TERMINAL_SPAWNED { result: Ok(new_id) }`.
 //!    A subsequent `INPUT_KEY { terminal_id: new_id, … }` round-trips
 //!    via the freshly-spawned PTY's stdin → stdout, observable as
 //!    `TERMINAL_OUTPUT { terminal_id: new_id, … }`.
 //!
-//! 2. **Spawn into an unknown Collection.** A client sends
-//!    `SPAWN_TERMINAL { collection: CollectionId::new(99999), … }`.
+//! 2. **Spawn into an unknown Group.** A client sends
+//!    `SPAWN_TERMINAL { group: GroupId::new(99999), … }`.
 //!    The server replies `TERMINAL_SPAWNED { result:
-//!    Err(CollectionNotFound) }`.
+//!    Err(GroupNotFound) }`.
 //!
 //! 3. **TERMINAL_CLOSED on PTY exit.** Spawn a Terminal running
 //!    `sh -c 'exit 42'`. The PTY exits; the server emits
@@ -40,13 +40,13 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::ids::CollectionId;
+use phux_protocol::ids::GroupId;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
     Command, CommandResult, CommandValue, FrameKind, SpawnError, SpawnResult, StateScope,
     TYPE_COMMAND_RESULT, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SPAWNED,
 };
-use phux_server::DEFAULT_COLLECTION_ID;
+use phux_server::DEFAULT_GROUP_ID;
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -220,7 +220,7 @@ async fn spawn_and_attach(
 }
 
 #[test]
-fn spawn_terminal_in_default_collection_round_trips_input() {
+fn spawn_terminal_in_default_group_round_trips_input() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
@@ -232,7 +232,7 @@ fn spawn_terminal_in_default_collection_round_trips_input() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 42,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
@@ -328,7 +328,7 @@ fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 7,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
@@ -402,7 +402,7 @@ fn spawn_terminal_env_term_overrides_default() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 7,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
@@ -456,7 +456,7 @@ fn spawn_terminal_default_term_is_xterm_256color() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 8,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
@@ -493,19 +493,19 @@ fn spawn_terminal_default_term_is_xterm_256color() {
 }
 
 #[test]
-fn spawn_terminal_unknown_collection_returns_collection_not_found() {
+fn spawn_terminal_unknown_group_returns_group_not_found() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
 
-        // CollectionId::new(99999) — any non-default id MUST surface
-        // SpawnError::CollectionNotFound per SPEC §7.4's L2-dependency
+        // GroupId::new(99999) — any non-default id MUST surface
+        // SpawnError::GroupNotFound per SPEC §7.4's L2-dependency
         // note and the wire frame's doc.
         send_frame(
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 7,
-                collection: CollectionId::new(99_999),
+                group: GroupId::new(99_999),
                 command: None,
                 cwd: None,
                 env: None,
@@ -515,12 +515,12 @@ fn spawn_terminal_unknown_collection_returns_collection_not_found() {
 
         let result = await_terminal_spawned(&mut stream, 7).await;
         match result {
-            SpawnResult::Err(SpawnError::CollectionNotFound) => {}
-            other => panic!("expected Err(CollectionNotFound), got {other:?}"),
+            SpawnResult::Err(SpawnError::GroupNotFound) => {}
+            other => panic!("expected Err(GroupNotFound), got {other:?}"),
         }
         // SAFETY note for the future reader: SpawnError is
         // #[non_exhaustive] so the outer SpawnResult::Err arm above
-        // catches both CollectionNotFound and any v0.2.x additions —
+        // catches both GroupNotFound and any v0.2.x additions —
         // `other` covers both unknown SpawnResult variants and
         // unknown SpawnError variants nested inside Err.
 
@@ -546,7 +546,7 @@ fn spawn_terminal_emits_terminal_closed_on_pty_exit() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 1,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
@@ -613,7 +613,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
             &mut stream_a,
             &FrameKind::SpawnTerminal {
                 request_id: 99,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
@@ -795,7 +795,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 1,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
@@ -884,7 +884,7 @@ fn spawn_terminal_session_root_inherits_seed_pane_dir() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 1,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),
@@ -966,7 +966,7 @@ fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
             &mut stream,
             &FrameKind::SpawnTerminal {
                 request_id: 1,
-                collection: DEFAULT_COLLECTION_ID,
+                group: DEFAULT_GROUP_ID,
                 command: Some(vec![
                     "/bin/sh".to_owned(),
                     "-c".to_owned(),

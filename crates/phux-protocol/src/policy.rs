@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::caps::Layer;
-use crate::ids::{CollectionId, TerminalId};
+use crate::ids::{GroupId, TerminalId};
 
 /// Identity of a peer at the transport layer.
 ///
@@ -69,9 +69,9 @@ pub struct Capability {
     /// Optional restriction to specific terminals. `None` means all
     /// terminals in scope.
     pub terminals: Option<Vec<TerminalId>>,
-    /// Optional restriction to specific collections. `None` means all
-    /// collections in scope.
-    pub collections: Option<Vec<CollectionId>>,
+    /// Optional restriction to specific groups. `None` means all
+    /// groups in scope.
+    pub groups: Option<Vec<GroupId>>,
     /// Optional expiry time. `None` means the capability is valid for
     /// the lifetime of the connection.
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -143,8 +143,8 @@ pub enum AuditAction {
     Hello,
     /// L1 terminal operation.
     TerminalOp(TerminalOp),
-    /// L2 collection operation.
-    CollectionOp(CollectionOp),
+    /// Group operation.
+    GroupOp(GroupOp),
     /// L3 metadata operation.
     MetadataOp(MetadataOp),
     /// Satellite routing operation (federation).
@@ -182,20 +182,20 @@ pub enum TerminalOp {
     Detach,
 }
 
-/// Collection-level operations that may be audited.
+/// Group-level operations that may be audited.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CollectionOp {
-    /// Create a new collection.
+pub enum GroupOp {
+    /// Create a new group.
     Create,
-    /// Kill a collection and its terminals.
+    /// Kill a group and its terminals.
     Kill,
-    /// Add a terminal to a collection.
+    /// Add a terminal to a group.
     AddTerminal,
-    /// Remove a terminal from a collection.
+    /// Remove a terminal from a group.
     RemoveTerminal,
-    /// Rename a collection.
+    /// Rename a group.
     Rename,
-    /// List collections.
+    /// List groups.
     List,
 }
 
@@ -225,10 +225,10 @@ pub enum MetadataScope {
         /// The terminal the metadata is scoped to.
         id: TerminalId,
     },
-    /// Collection-scoped.
-    Collection {
-        /// The collection the metadata is scoped to.
-        id: CollectionId,
+    /// Group-scoped.
+    Group {
+        /// The group the metadata is scoped to.
+        id: GroupId,
     },
 }
 
@@ -237,8 +237,8 @@ pub enum MetadataScope {
 pub struct AuditTarget {
     /// Terminal id, when applicable.
     pub terminal_id: Option<TerminalId>,
-    /// Collection id, when applicable.
-    pub collection_id: Option<CollectionId>,
+    /// Group id, when applicable.
+    pub group_id: Option<GroupId>,
     /// Satellite host, when applicable.
     pub satellite: Option<String>,
 }

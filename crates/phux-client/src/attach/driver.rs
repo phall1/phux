@@ -32,7 +32,7 @@ use std::time::Duration;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
-use phux_protocol::ids::{CollectionId, TerminalId};
+use phux_protocol::ids::{GroupId, TerminalId};
 use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
@@ -769,12 +769,12 @@ async fn main_loop<W: super::RenderSink>(
         next_request_id = next_request_id.wrapping_add(1);
         conn.send(&FrameKind::GetMetadata {
             request_id: req_id,
-            scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+            scope: Scope::Group(DEFAULT_GROUP_ID),
             key: LAYOUT_KEY.to_owned(),
         })
         .await?;
         conn.send(&FrameKind::SubscribeMetadata {
-            scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+            scope: Scope::Group(DEFAULT_GROUP_ID),
             key: LAYOUT_KEY.to_owned(),
         })
         .await?;
@@ -934,7 +934,7 @@ async fn main_loop<W: super::RenderSink>(
                             next_request_id = next_request_id.wrapping_add(1);
                             conn.send(&FrameKind::SetMetadata {
                                 request_id,
-                                scope: Scope::Collection(DEFAULT_COLLECTION_ID),
+                                scope: Scope::Group(DEFAULT_GROUP_ID),
                                 key: LAYOUT_KEY.to_owned(),
                                 value: bytes,
                             })
@@ -1309,14 +1309,13 @@ async fn main_loop<W: super::RenderSink>(
 /// or write it.
 pub(super) const LAYOUT_KEY: &str = "phux.tui.layout/v1";
 
-/// phux-4li.5: the single Collection v0.1 servers expose. L2
-/// (Collection lifecycle) is not yet wire-allocated; until it ships,
-/// every L3 key the reference TUI cares about is scoped to this
-/// constant. Matches `phux_server::state::DEFAULT_COLLECTION_ID`
+/// phux-4li.5: the single Group v0.1 servers expose. The grouping tier
+/// is not a wire lifecycle; every L3 key the reference TUI cares about
+/// is scoped to this constant. Matches `phux_server::state::DEFAULT_GROUP_ID`
 /// (the server picks the same numeric value; if they ever drift, the
 /// L3 reconcile path silently no-ops because the broadcast scope
 /// won't match).
-pub(super) const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
+pub(super) const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
 /// phux-4li.5: build a [`phux_config::keybind::Resolver`] from the
 /// on-disk config. Failures log and return `None` — a malformed

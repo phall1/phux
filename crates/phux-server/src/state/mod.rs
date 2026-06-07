@@ -43,7 +43,7 @@ use crate::terminal_actor::TerminalHandle;
 use phux_core::ids::{SessionId, TerminalId, WindowId};
 use phux_core::registry::Registry;
 use phux_protocol::caps::LayerSet;
-use phux_protocol::ids::{CollectionId, TerminalId as WireTerminalId, WindowId as WireWindowId};
+use phux_protocol::ids::{GroupId, TerminalId as WireTerminalId, WindowId as WireWindowId};
 use portable_pty::CommandBuilder;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -62,15 +62,14 @@ pub use events::{EventScope, EventSubscription, SelectionSpan};
 pub use input_log::{DEFAULT_CLIENT_MAILBOX, Outbound, TerminalInput};
 pub use metadata::{MetadataSetOutcome, MetadataStore, RenameOutcome};
 
-/// Default Collection identifier exposed by v0.1 servers.
+/// Default Group identifier exposed by v0.1 servers.
 ///
-/// L2 (Collection lifecycle, SPEC §7.3) is not yet wire-allocated; until
-/// it ships, the server exposes a single static Collection that every
-/// L3 metadata operation targeting `Scope::Collection` lands in. This is
-/// load-bearing for the reference TUI's `phux.tui.layout/v1` key —
-/// ADR-0019 ties layout persistence to a Collection scope and the TUI
-/// needs a Collection to write into before L2 ships.
-pub const DEFAULT_COLLECTION_ID: CollectionId = CollectionId::new(1);
+/// The grouping tier is not a wire lifecycle (SPEC §7.3); the server
+/// exposes a single static Group that every L3 metadata operation
+/// targeting `Scope::Group` lands in. This is load-bearing for the
+/// reference TUI's `phux.tui.layout/v1` key — ADR-0019 ties layout
+/// persistence to a Group scope and the TUI needs a Group to write into.
+pub const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
 /// Single owner of all server-side state.
 ///
@@ -714,7 +713,7 @@ mod tests {
     // L3 metadata tests — SPEC §7.4 / §11.L3 (phux-4li.2).
     //
     // Cover: SUBSCRIBE → SET → broadcast fanout, scope isolation (Terminal
-    // vs Collection vs Global), non-L3 consumer filtering (§16.4), DELETE
+    // vs Group vs Global), non-L3 consumer filtering (§16.4), DELETE
     // tombstone semantics, and the `Unchanged` SET shortcut.
     // -------------------------------------------------------------------------
 
@@ -749,7 +748,7 @@ mod tests {
     fn metadata_subscribe_then_set_broadcasts_matching_key() {
         let mut s = ServerState::new();
         let (cid, mut rx) = attach_l3_client(&mut s);
-        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope = Scope::Group(DEFAULT_GROUP_ID);
 
         s.metadata_subscribe(cid, scope.clone(), "phux.tui.layout/v1".to_owned());
         let delivered = s.metadata_set(&scope, "phux.tui.layout/v1", b"value-1".to_vec());
@@ -775,7 +774,7 @@ mod tests {
     fn metadata_set_on_different_key_does_not_fan_to_subscriber() {
         let mut s = ServerState::new();
         let (cid, mut rx) = attach_l3_client(&mut s);
-        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope = Scope::Group(DEFAULT_GROUP_ID);
 
         s.metadata_subscribe(cid, scope.clone(), "phux.a/v1".to_owned());
         let delivered = s.metadata_set(&scope, "phux.b/v1", b"x".to_vec());
@@ -785,26 +784,26 @@ mod tests {
     }
 
     #[test]
-    fn metadata_scope_isolation_terminal_vs_collection_vs_global() {
+    fn metadata_scope_isolation_terminal_vs_group_vs_global() {
         let mut s = ServerState::new();
         let (cid, mut rx) = attach_l3_client(&mut s);
         let key = "phux.same/v1";
         let t_scope = Scope::Terminal(phux_protocol::ids::TerminalId::local(7));
-        let c_scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let c_scope = Scope::Group(DEFAULT_GROUP_ID);
         let g_scope = Scope::Global;
 
-        // Only subscribe to Collection.
+        // Only subscribe to Group.
         s.metadata_subscribe(cid, c_scope.clone(), key.to_owned());
 
         // Writes to Terminal and Global must NOT fire the subscriber.
         assert!(s.metadata_set(&t_scope, key, b"t".to_vec()).is_empty());
         assert!(s.metadata_set(&g_scope, key, b"g".to_vec()).is_empty());
 
-        // Write to Collection MUST fire it.
+        // Write to Group MUST fire it.
         let delivered = s.metadata_set(&c_scope, key, b"c".to_vec());
         assert_eq!(delivered, vec![cid]);
 
-        // And the receiver MUST see exactly one frame (for Collection).
+        // And the receiver MUST see exactly one frame (for Group).
         let frames = drain_frames(&mut rx);
         assert_eq!(frames.len(), 1);
         match &frames[0] {
@@ -907,7 +906,7 @@ mod tests {
     #[test]
     fn metadata_list_returns_keys_sorted_and_scope_isolated() {
         let mut s = ServerState::new();
-        let scope_a = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope_a = Scope::Group(DEFAULT_GROUP_ID);
         let scope_b = Scope::Global;
 
         s.metadata_set(&scope_a, "zeta", b"z".to_vec());
@@ -924,7 +923,7 @@ mod tests {
     #[test]
     fn metadata_get_returns_stored_value_or_none() {
         let mut s = ServerState::new();
-        let scope = Scope::Collection(DEFAULT_COLLECTION_ID);
+        let scope = Scope::Group(DEFAULT_GROUP_ID);
         s.metadata_set(&scope, "k", b"v".to_vec());
         assert_eq!(s.metadata().get(&scope, "k"), Some(b"v".to_vec()));
         assert_eq!(s.metadata().get(&scope, "missing"), None);

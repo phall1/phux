@@ -15,7 +15,7 @@ use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities,
 };
-use phux_protocol::ids::{ClientId, CollectionId, SessionId, TerminalId, WindowId};
+use phux_protocol::ids::{ClientId, GroupId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -30,6 +30,48 @@ use phux_protocol::wire::info::{
 };
 use phux_protocol::wire::{DecodeError, decode::Decoder, frame::FrameKind};
 use proptest::prelude::*;
+
+// -----------------------------------------------------------------------------
+// TLV test helpers (`docs/spec/appendix-encoding.md`).
+//
+// Message bodies are field-tagged: each field is
+// `field_id: varint || wire_type: u8 (4 = BYTES) || varint length || value`.
+// These helpers hand-build malformed / partial frames for the
+// decoder-rejection and forward-compat tests below, the field-tagged
+// counterparts of the old positional byte-builders.
+// -----------------------------------------------------------------------------
+
+/// Append an unsigned LEB128 varint.
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(byte);
+            break;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Append one TLV field: `field_id || wire_type(4) || len || value`.
+fn tlv_field(out: &mut Vec<u8>, field_id: u32, value: &[u8]) {
+    put_varint(out, u64::from(field_id));
+    out.push(4); // wire_type BYTES
+    put_varint(out, value.len() as u64);
+    out.extend_from_slice(value);
+}
+
+/// Wrap a `type_byte` + field-tagged `body` in the outer length frame
+/// (`u32 length || type || body`), where `length` covers the type byte + body.
+fn framed_tlv(type_byte: u8, fields: &[u8]) -> Vec<u8> {
+    let mut body = vec![type_byte];
+    body.extend_from_slice(fields);
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(&body);
+    frame
+}
 
 // -----------------------------------------------------------------------------
 // Strategies
@@ -428,16 +470,14 @@ fn hello_ok_round_trip() {
 /// `server_id` per the SPEC §6 "skip them by length" rule.
 #[test]
 fn hello_ok_round_trip_version_only_trailing_defaults() {
-    use bytes::BufMut;
-    // Hand-build a body of just the type byte + version triple.
-    let mut body = BytesMut::new();
-    body.put_u8(0x80); // TYPE_HELLO_OK
-    body.put_u16(0); // major
-    body.put_u16(2); // minor
-    body.put_u16(0); // patch
-    let mut framed = BytesMut::new();
-    framed.put_u32(u32::try_from(body.len()).unwrap());
-    framed.extend_from_slice(&body);
+    // Forward-compat under TLV: a HELLO_OK carrying only the version-triple
+    // fields (SERVER_CAPS and SERVER_ID fields absent) decodes with
+    // ServerCapabilities::default() and an empty server_id.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &0u16.to_be_bytes()); // PROTOCOL_MAJOR
+    tlv_field(&mut fields, 2, &2u16.to_be_bytes()); // PROTOCOL_MINOR
+    tlv_field(&mut fields, 3, &0u16.to_be_bytes()); // PROTOCOL_PATCH
+    let framed = framed_tlv(0x80, &fields);
 
     let (decoded, tail) = FrameKind::decode(&framed).unwrap();
     assert_eq!(
@@ -520,23 +560,24 @@ fn hello_round_trip_state_sync_output_mode() {
 
 #[test]
 fn hello_decoder_defaults_output_mode_raw_when_absent() {
-    // A HELLO body that stops before the output_mode byte (e.g. a pre-fseo
-    // client) decodes to the safe interactive default, OutputMode::Raw.
-    let caps = ClientCapabilities::new();
-    let frame = FrameKind::Hello {
-        client_name: "x".to_owned(),
-        protocol_major: 0,
-        protocol_minor: 2,
-        protocol_patch: 0,
-        client_caps: caps,
-    };
-    let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
-    // Drop the final trailing byte (output_mode == Raw == 0) and fix the
-    // length header so the decoder sees a shorter, pre-fseo body.
-    let new_len = u32::try_from(buf.len() - 4 - 1).unwrap();
-    buf.truncate(buf.len() - 1);
-    buf[0..4].copy_from_slice(&new_len.to_be_bytes());
+    // A CLIENT_CAPS field (id 5) whose blob stops before the output_mode byte
+    // (a pre-fseo client encodes only the first five caps bytes) decodes to the
+    // safe interactive default, OutputMode::Raw.
+    let caps_blob = [
+        ColorSupport::TrueColor.as_wire(),
+        LayerSet::new().as_wire(),
+        ImageProtocolSet::default().as_wire(),
+        KeyboardProtocolSet::default().as_wire(),
+        1u8, // hyperlinks = true (ClientCapabilities::new default)
+             // no output_mode byte
+    ];
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, b"x"); // CLIENT_NAME
+    tlv_field(&mut fields, 2, &0u16.to_be_bytes());
+    tlv_field(&mut fields, 3, &2u16.to_be_bytes());
+    tlv_field(&mut fields, 4, &0u16.to_be_bytes());
+    tlv_field(&mut fields, 5, &caps_blob);
+    let buf = framed_tlv(0x01, &fields);
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert!(tail.is_empty());
     let FrameKind::Hello { client_caps, .. } = decoded else {
@@ -547,18 +588,17 @@ fn hello_decoder_defaults_output_mode_raw_when_absent() {
 
 #[test]
 fn hello_decoder_accepts_legacy_body_without_caps() {
-    // Hand-built HELLO body matching the pre-7lf shape:
-    //   client_name="x" + (u16, u16, u16) = 4 + 1 + 2 + 2 + 2 = 11 bytes
-    // Plus the 1-byte type tag = 12 bytes. The length header excludes
-    // itself but includes the type byte (SPEC §5), so length = 12.
-    let mut framed = BytesMut::new();
-    framed.extend_from_slice(&12u32.to_be_bytes()); // length
-    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
-    framed.extend_from_slice(&1u32.to_be_bytes()); // client_name length
-    framed.extend_from_slice(b"x");
-    framed.extend_from_slice(&0u16.to_be_bytes()); // major
-    framed.extend_from_slice(&1u16.to_be_bytes()); // minor
-    framed.extend_from_slice(&0u16.to_be_bytes()); // patch
+    // Forward-compat under TLV: a HELLO whose CLIENT_CAPS field (id 5) is
+    // simply absent decodes with ClientCapabilities::default() — the
+    // field-tagged counterpart of the old "shorter positional body, trailing
+    // caps default" rule. Only the version-triple fields plus client_name are
+    // present.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, b"x"); // CLIENT_NAME
+    tlv_field(&mut fields, 2, &0u16.to_be_bytes()); // PROTOCOL_MAJOR
+    tlv_field(&mut fields, 3, &1u16.to_be_bytes()); // PROTOCOL_MINOR
+    tlv_field(&mut fields, 4, &0u16.to_be_bytes()); // PROTOCOL_PATCH
+    let framed = framed_tlv(0x01, &fields);
     let (decoded, tail) = FrameKind::decode(&framed).unwrap();
     assert!(tail.is_empty());
     match decoded {
@@ -568,7 +608,7 @@ fn hello_decoder_accepts_legacy_body_without_caps() {
             ..
         } => {
             assert_eq!(client_name, "x");
-            // Missing trailing field defaults to TrueColor.
+            // Absent caps field defaults to TrueColor.
             assert_eq!(client_caps.color_support, ColorSupport::TrueColor);
         }
         other => panic!("expected Hello, got {other:?}"),
@@ -577,18 +617,15 @@ fn hello_decoder_accepts_legacy_body_without_caps() {
 
 #[test]
 fn hello_decoder_treats_unknown_color_support_tag_as_truecolor() {
-    // Same as `hello_round_trip_minimal`, but inject an unknown tag
-    // (0xFF) for the trailing color_support byte. Per the `#[non_exhaustive]`
-    // contract the decoder maps unknown → TrueColor.
-    let mut framed = BytesMut::new();
-    framed.extend_from_slice(&13u32.to_be_bytes()); // length
-    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
-    framed.extend_from_slice(&1u32.to_be_bytes()); // client_name length
-    framed.extend_from_slice(b"x");
-    framed.extend_from_slice(&0u16.to_be_bytes());
-    framed.extend_from_slice(&1u16.to_be_bytes());
-    framed.extend_from_slice(&0u16.to_be_bytes());
-    framed.extend_from_slice(&[0xFF]); // unknown color_support tag
+    // A CLIENT_CAPS field (id 5) whose first (color_support) byte is an unknown
+    // tag (0xFF) maps to TrueColor per the `#[non_exhaustive]` contract.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, b"x"); // CLIENT_NAME
+    tlv_field(&mut fields, 2, &0u16.to_be_bytes()); // PROTOCOL_MAJOR
+    tlv_field(&mut fields, 3, &1u16.to_be_bytes()); // PROTOCOL_MINOR
+    tlv_field(&mut fields, 4, &0u16.to_be_bytes()); // PROTOCOL_PATCH
+    tlv_field(&mut fields, 5, &[0xFF]); // CLIENT_CAPS: unknown color_support tag
+    let framed = framed_tlv(0x01, &fields);
     let (decoded, _) = FrameKind::decode(&framed).unwrap();
     match decoded {
         FrameKind::Hello { client_caps, .. } => {
@@ -697,6 +734,68 @@ fn unknown_frame_kind_is_rejected() {
 }
 
 #[test]
+fn unknown_field_id_is_skipped_forward_compat() {
+    // Forward-compat (`docs/spec/appendix-encoding.md`): a decoder MUST skip a
+    // field id it does not recognise, by that field's declared length, and
+    // decode the rest of the message normally. Encode a real PING (nonce field
+    // id 1), then splice in an unknown field id (99) carrying junk *before* the
+    // known field; the nonce must still decode and the unknown field is ignored.
+    let real = {
+        let mut buf = BytesMut::new();
+        FrameKind::Ping {
+            nonce: 0x0102_0304_0506_0708,
+        }
+        .encode(&mut buf);
+        buf.to_vec()
+    };
+    // Reconstruct the body with an extra unknown field prepended.
+    let type_byte = real[4];
+    let known_fields = &real[5..]; // the PING nonce field
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 99, &[0xDE, 0xAD, 0xBE, 0xEF]); // unknown field, skipped
+    fields.extend_from_slice(known_fields);
+    let bytes = framed_tlv(type_byte, &fields);
+
+    let (decoded, tail) = FrameKind::decode(&bytes).unwrap();
+    assert_eq!(
+        decoded,
+        FrameKind::Ping {
+            nonce: 0x0102_0304_0506_0708,
+        },
+        "the unknown field must be skipped and the known field still decode",
+    );
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn unknown_trailing_field_id_is_skipped_forward_compat() {
+    // The same skip-by-length rule for an unknown field appended *after* the
+    // known fields — the shape a newer peer produces when it adds a field an
+    // older decoder does not know.
+    let real = {
+        let mut buf = BytesMut::new();
+        FrameKind::Bell {
+            terminal_id: TerminalId::local(0x2A),
+        }
+        .encode(&mut buf);
+        buf.to_vec()
+    };
+    let type_byte = real[4];
+    let mut fields = real[5..].to_vec(); // the Bell terminal_id field
+    tlv_field(&mut fields, 250, &[1, 2, 3, 4, 5, 6]); // unknown trailing field
+    let bytes = framed_tlv(type_byte, &fields);
+
+    let (decoded, tail) = FrameKind::decode(&bytes).unwrap();
+    assert_eq!(
+        decoded,
+        FrameKind::Bell {
+            terminal_id: TerminalId::local(0x2A),
+        },
+    );
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn retired_pane_diff_discriminant_is_rejected() {
     // The pre-ADR-0013 `PANE_DIFF` discriminant (0x40) is no longer
     // recognised. A frame carrying it must surface as UnknownFrameKind.
@@ -713,17 +812,12 @@ fn retired_pane_diff_discriminant_is_rejected() {
 
 #[test]
 fn invalid_utf8_in_hello_client_name() {
-    let mut body = vec![0x01u8];
-    let bad_str = [0xFFu8, 0xFE, 0xFD];
-    body.extend_from_slice(&u32::try_from(bad_str.len()).unwrap().to_be_bytes());
-    body.extend_from_slice(&bad_str);
-    body.extend_from_slice(&0u16.to_be_bytes());
-    body.extend_from_slice(&0u16.to_be_bytes());
-    body.extend_from_slice(&0u16.to_be_bytes());
-
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // HELLO (0x01) whose CLIENT_NAME field (id 1) holds non-UTF-8 bytes must
+    // surface InvalidUtf8. The client_name value rides as raw bytes inside the
+    // length-delimited field (no inner length prefix under TLV).
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &[0xFFu8, 0xFE, 0xFD]); // field::hello::CLIENT_NAME
+    let bytes = framed_tlv(0x01, &fields);
 
     let err = Decoder::new(&bytes).read_frame().unwrap_err();
     assert_eq!(err, DecodeError::InvalidUtf8);
@@ -964,11 +1058,12 @@ fn detached_round_trip() {
 
 #[test]
 fn attach_unknown_target_tag_is_rejected() {
-    let mut body = vec![0x02u8];
-    body.push(0xFF);
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // ATTACH (0x02) carrying a TARGET field (id 1) whose value is an
+    // AttachTarget with an unknown tag byte (0xFF) must surface
+    // UnknownEnumValue from the nested positional decoder.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &[0xFF]); // field::attach::TARGET
+    let bytes = framed_tlv(0x02, &fields);
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(
         err,
@@ -981,15 +1076,14 @@ fn attach_unknown_target_tag_is_rejected() {
 
 #[test]
 fn input_focus_unknown_kind_is_rejected() {
-    let mut body = vec![0x14u8];
-    // TerminalId::Local { id: 0 } — tag byte 0x00 followed by the u32 id.
-    body.push(0x00);
-    body.extend_from_slice(&0u32.to_be_bytes());
-    body.push(0xAB);
-
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // INPUT_FOCUS (0x14): TERMINAL_ID (id 1) = local{0}, then an EVENT field
+    // (id 2) carrying an unknown focus-kind byte (0xAB).
+    let mut term = vec![0x00u8]; // TERMINAL_ID_TAG_LOCAL
+    term.extend_from_slice(&0u32.to_be_bytes());
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &term); // field::input_focus::TERMINAL_ID
+    tlv_field(&mut fields, 2, &[0xAB]); // field::input_focus::EVENT
+    let bytes = framed_tlv(0x14, &fields);
 
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(
@@ -1033,17 +1127,14 @@ fn error_round_trip_with_request_id() {
 
 #[test]
 fn error_unknown_code_is_rejected() {
-    // Hand-roll a TYPE_ERROR (0xC1) frame with a code that the v0.1 decoder
-    // does not recognise. The decoder MUST surface UnknownEnumValue rather
-    // than silently mapping to a placeholder variant.
-    let mut body = vec![0xC1u8];
-    body.push(0); // request_id: None tag
-    body.extend_from_slice(&0x9999u16.to_be_bytes()); // unknown code
-    body.extend_from_slice(&0u32.to_be_bytes()); // empty message
-
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // A TYPE_ERROR (0xC1) frame whose CODE field (id 2) carries a code the
+    // v0.1 decoder does not recognise MUST surface UnknownEnumValue rather
+    // than silently mapping to a placeholder variant. (request_id is omitted
+    // — an absent optional field.)
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 2, &0x9999u16.to_be_bytes()); // field::error::CODE
+    tlv_field(&mut fields, 3, b""); // field::error::MESSAGE (empty)
+    let bytes = framed_tlv(0xC1, &fields);
 
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(
@@ -1094,51 +1185,48 @@ fn bell_round_trip() {
 // -----------------------------------------------------------------------------
 
 fn encode_split_with_ratio(ratio: f32) -> Vec<u8> {
-    // Hand-roll an ATTACHED frame whose single WindowInfo carries a Split
-    // node with `ratio`. The shape mirrors `info::encode_session_snapshot`
-    // exactly — keep this in sync when the wire shape changes.
-    let mut body = vec![0x81u8]; // TYPE_ATTACHED
-
+    // Hand-roll an ATTACHED frame whose single WindowInfo carries a Split node
+    // with `ratio`. Under field-tagged TLV the message body is two fields —
+    // SNAPSHOT (id 1) and INITIAL_CLIENT_ID (id 2) — but the SessionSnapshot
+    // value is still positional, so the inner bytes mirror
+    // `info::encode_session_snapshot` exactly. Keep in sync when the snapshot
+    // wire shape changes.
+    let mut snap = Vec::new();
     // sessions: empty list
-    body.extend_from_slice(&0u32.to_be_bytes());
+    snap.extend_from_slice(&0u32.to_be_bytes());
     // windows: one item
-    body.extend_from_slice(&1u32.to_be_bytes());
-
+    snap.extend_from_slice(&1u32.to_be_bytes());
     // WindowInfo
-    body.extend_from_slice(&1u32.to_be_bytes()); // id
-    body.extend_from_slice(&1u32.to_be_bytes()); // session_id
-    body.extend_from_slice(&0u16.to_be_bytes()); // index
-    body.extend_from_slice(&1u32.to_be_bytes()); // name length
-    body.push(b'w'); // name bytes
-    body.push(0); // active_pane: None
-    body.push(1); // layout: Some
-    body.push(1); // LayoutNode::Split
-    body.push(0); // SplitDir::Horizontal
-    body.extend_from_slice(&ratio.to_be_bytes());
+    snap.extend_from_slice(&1u32.to_be_bytes()); // id
+    snap.extend_from_slice(&1u32.to_be_bytes()); // session_id
+    snap.extend_from_slice(&0u16.to_be_bytes()); // index
+    snap.extend_from_slice(&1u32.to_be_bytes()); // name length
+    snap.push(b'w'); // name bytes
+    snap.push(0); // active_pane: None
+    snap.push(1); // layout: Some
+    snap.push(1); // LayoutNode::Split
+    snap.push(0); // SplitDir::Horizontal
+    snap.extend_from_slice(&ratio.to_be_bytes());
     // Left leaf: LAYOUT_TAG_LEAF=0, then TerminalId::Local { id: 1 }
-    body.push(0);
-    body.push(0); // TERMINAL_ID_TAG_LOCAL
-    body.extend_from_slice(&1u32.to_be_bytes());
+    snap.push(0);
+    snap.push(0); // TERMINAL_ID_TAG_LOCAL
+    snap.extend_from_slice(&1u32.to_be_bytes());
     // Right leaf: LAYOUT_TAG_LEAF=0, then TerminalId::Local { id: 2 }
-    body.push(0);
-    body.push(0); // TERMINAL_ID_TAG_LOCAL
-    body.extend_from_slice(&2u32.to_be_bytes());
-
+    snap.push(0);
+    snap.push(0); // TERMINAL_ID_TAG_LOCAL
+    snap.extend_from_slice(&2u32.to_be_bytes());
     // panes: empty list
-    body.extend_from_slice(&0u32.to_be_bytes());
+    snap.extend_from_slice(&0u32.to_be_bytes());
     // focused_session, focused_window, focused_pane (tagged TerminalId)
-    body.extend_from_slice(&0u32.to_be_bytes()); // focused_session
-    body.extend_from_slice(&0u32.to_be_bytes()); // focused_window
-    body.push(0); // TERMINAL_ID_TAG_LOCAL
-    body.extend_from_slice(&1u32.to_be_bytes()); // focused_pane id
+    snap.extend_from_slice(&0u32.to_be_bytes()); // focused_session
+    snap.extend_from_slice(&0u32.to_be_bytes()); // focused_window
+    snap.push(0); // TERMINAL_ID_TAG_LOCAL
+    snap.extend_from_slice(&1u32.to_be_bytes()); // focused_pane id
 
-    // initial_client_id
-    body.extend_from_slice(&0u32.to_be_bytes());
-
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
-    bytes
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &snap); // field::attached::SNAPSHOT
+    tlv_field(&mut fields, 2, &0u32.to_be_bytes()); // field::attached::INITIAL_CLIENT_ID
+    framed_tlv(0x81, &fields)
 }
 
 #[test]
@@ -1219,7 +1307,7 @@ const _SPLIT_DIR_TYPE_CHECK: fn() -> SplitDir = || SplitDir::Horizontal;
 fn arb_scope() -> impl Strategy<Value = Scope> {
     prop_oneof![
         arb_terminal_id().prop_map(Scope::Terminal),
-        any::<u32>().prop_map(|id| Scope::Collection(CollectionId::new(id))),
+        any::<u32>().prop_map(|id| Scope::Group(GroupId::new(id))),
         Just(Scope::Global),
     ]
 }
@@ -1379,15 +1467,15 @@ proptest! {
 fn hello_decoder_accepts_legacy_body_with_color_but_no_layers() {
     // A 7lf-era HELLO ends right after the ColorSupport byte; a 4li.2+
     // decoder must accept it and substitute the default LayerSet.
-    let mut framed = BytesMut::new();
-    framed.extend_from_slice(&13u32.to_be_bytes()); // length: 1 (type) + 11 (body) + 1 (color tag)
-    framed.extend_from_slice(&[0x01]); // TYPE_HELLO
-    framed.extend_from_slice(&1u32.to_be_bytes());
-    framed.extend_from_slice(b"x");
-    framed.extend_from_slice(&0u16.to_be_bytes());
-    framed.extend_from_slice(&2u16.to_be_bytes());
-    framed.extend_from_slice(&0u16.to_be_bytes());
-    framed.extend_from_slice(&[0x00]); // ColorSupport::TrueColor; no layers byte
+    // A CLIENT_CAPS field (id 5) carrying only the color_support byte (no
+    // layers byte) decodes with L1 implied and no L3.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, b"x"); // CLIENT_NAME
+    tlv_field(&mut fields, 2, &0u16.to_be_bytes());
+    tlv_field(&mut fields, 3, &2u16.to_be_bytes());
+    tlv_field(&mut fields, 4, &0u16.to_be_bytes());
+    tlv_field(&mut fields, 5, &[0x00]); // CLIENT_CAPS: ColorSupport::TrueColor; no layers
+    let framed = framed_tlv(0x01, &fields);
     let (decoded, tail) = FrameKind::decode(&framed).unwrap();
     assert!(tail.is_empty());
     match decoded {
@@ -1427,15 +1515,12 @@ fn layer_set_unknown_bits_are_dropped_but_l1_forced_on() {
 
 #[test]
 fn scope_unknown_tag_is_rejected() {
-    // A wire SET_METADATA carrying an unknown Scope tag must surface as
-    // UnknownEnumValue, not silently coerce.
-    let mut body = vec![phux_protocol::wire::frame::TYPE_SET_METADATA];
-    body.extend_from_slice(&0u32.to_be_bytes()); // request_id
-    body.push(0xFE); // unknown Scope tag
-    // No further bytes — the decoder fails on the tag itself.
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // A SET_METADATA whose SCOPE field (id 2) carries an unknown Scope tag must
+    // surface UnknownEnumValue, not silently coerce.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &0u32.to_be_bytes()); // field::set_metadata::REQUEST_ID
+    tlv_field(&mut fields, 2, &[0xFE]); // field::set_metadata::SCOPE (unknown tag)
+    let bytes = framed_tlv(phux_protocol::wire::frame::TYPE_SET_METADATA, &fields);
 
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(
@@ -1461,7 +1546,7 @@ fn arb_env_pair() -> impl Strategy<Value = (String, String)> {
 
 fn arb_spawn_error() -> impl Strategy<Value = SpawnError> {
     prop_oneof![
-        Just(SpawnError::CollectionNotFound),
+        Just(SpawnError::GroupNotFound),
         ".{0,128}".prop_map(SpawnError::SpawnFailed),
     ]
 }
@@ -1477,14 +1562,14 @@ proptest! {
     #[test]
     fn roundtrip_spawn_terminal(
         request_id in any::<u32>(),
-        collection in any::<u32>(),
+        group in any::<u32>(),
         command in proptest::option::of(proptest::collection::vec(".{0,16}", 0..4)),
         cwd in proptest::option::of(".{0,32}"),
         env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
     ) {
         let frame = FrameKind::SpawnTerminal {
             request_id,
-            collection: CollectionId::new(collection),
+            group: GroupId::new(group),
             command,
             cwd,
             env,
@@ -1619,11 +1704,12 @@ fn command_get_screen_decodes_pre_cells_body_as_false() {
     // trailing `cells` bool existed has a body that ends after
     // `request_scrollback`, with a length header one byte shorter. A
     // current decoder must read the missing `cells` as `false`, not error
-    // on EOF. Reconstruct the pre-cells frame by stripping the trailing
-    // `cells` byte off a current encoding *and* fixing up the length
-    // header to match the shorter body — the framing layer is
-    // length-bounded, so the header is load-bearing.
-    let frame = FrameKind::Command {
+    // on EOF. `cells` is a trailing positional field *inside* the COMMAND
+    // field's value (the Command::GetScreen body), bounded by that field's
+    // length. Build the COMMAND field value with a GetScreen body that ends
+    // after `request_scrollback` (the pre-cells shape); the Command sub-decoder
+    // sees `at_body_end` and defaults `cells = false`.
+    let expected = FrameKind::Command {
         request_id: 7,
         command: Command::GetScreen {
             terminal_id: TerminalId::local(9),
@@ -1631,43 +1717,41 @@ fn command_get_screen_decodes_pre_cells_body_as_false() {
             cells: false,
         },
     };
-    let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
 
-    // Drop the trailing `cells` byte the encoder appended.
-    let mut pre_cells = buf[..buf.len() - 1].to_vec();
-    // The first four bytes are the big-endian body length; decrement it by
-    // one to match the now-shorter body (the dropped `cells` byte).
-    let new_len = u32::from_be_bytes([pre_cells[0], pre_cells[1], pre_cells[2], pre_cells[3]]) - 1;
-    pre_cells[0..4].copy_from_slice(&new_len.to_be_bytes());
+    // Command::GetScreen positional value, minus the trailing cells byte.
+    let mut get_screen = vec![0x07u8]; // COMMAND_TAG_GET_SCREEN
+    get_screen.push(0x00); // TERMINAL_ID_TAG_LOCAL
+    get_screen.extend_from_slice(&9u32.to_be_bytes());
+    get_screen.push(0x01); // request_scrollback = Some
+    get_screen.extend_from_slice(&3u32.to_be_bytes());
+    // no cells byte
 
-    let (decoded, tail) = FrameKind::decode(&pre_cells).unwrap();
-    assert_eq!(decoded, frame, "absent cells byte must decode as false");
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &7u32.to_be_bytes()); // field::command::REQUEST_ID
+    tlv_field(&mut fields, 2, &get_screen); // field::command::COMMAND
+    let buf = framed_tlv(0x31, &fields);
+
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, expected, "absent cells byte must decode as false");
     assert!(tail.is_empty());
 }
 
 #[test]
 fn command_get_screen_back_to_back_frames_dont_bleed_cells() {
     // Two GET_SCREEN frames concatenated in one buffer: decoding the first
-    // (with `cells: false`, so its body ends after `request_scrollback`
-    // when produced by an old peer) must NOT consume the *second* frame's
-    // leading byte as its `cells`. The `at_body_end` boundary, not a raw
-    // "any bytes remain" check, is what guarantees this (phux-8yl).
-    let mut first = BytesMut::new();
-    FrameKind::Command {
-        request_id: 1,
-        command: Command::GetScreen {
-            terminal_id: TerminalId::local(1),
-            request_scrollback: None,
-            cells: false,
-        },
-    }
-    .encode(&mut first);
-    // Strip the first frame's trailing `cells` byte + fix its length, to
-    // mimic an old peer that never wrote it.
-    let mut first = first[..first.len() - 1].to_vec();
-    let new_len = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) - 1;
-    first[0..4].copy_from_slice(&new_len.to_be_bytes());
+    // (whose COMMAND field value omits the trailing `cells` byte, the pre-cells
+    // shape of an old peer) must NOT consume the *second* frame's leading byte
+    // as its `cells`. Under TLV the outer frame is length-delimited and the
+    // COMMAND field value is too, so the boundary holds at both levels (phux-8yl).
+    let mut get_screen = vec![0x07u8]; // COMMAND_TAG_GET_SCREEN
+    get_screen.push(0x00); // TERMINAL_ID_TAG_LOCAL
+    get_screen.extend_from_slice(&1u32.to_be_bytes());
+    get_screen.push(0x00); // request_scrollback = None
+    // no cells byte
+    let mut first_fields = Vec::new();
+    tlv_field(&mut first_fields, 1, &1u32.to_be_bytes()); // REQUEST_ID
+    tlv_field(&mut first_fields, 2, &get_screen); // COMMAND
+    let first = framed_tlv(0x31, &first_fields);
 
     let second = FrameKind::Command {
         request_id: 2,
@@ -1825,17 +1909,12 @@ fn command_result_ok_with_terminal_id_round_trips() {
 
 #[test]
 fn command_unknown_tag_is_rejected() {
-    // A COMMAND frame carrying an unallocated command tag (0x7F) must
-    // decode-fail rather than silently coerce. Hand-build the bytes:
-    // [len:u32][type COMMAND][request_id:u32][cmd tag 0x7F].
-    let mut buf = BytesMut::new();
-    let body: &[u8] = &[
-        0x31, // TYPE_COMMAND
-        0, 0, 0, 1,    // request_id
-        0x7F, // unallocated Command tag
-    ];
-    buf.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    buf.extend_from_slice(body);
+    // A COMMAND frame whose COMMAND field (id 2) carries an unallocated command
+    // tag (0x7F) must decode-fail rather than silently coerce.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &1u32.to_be_bytes()); // field::command::REQUEST_ID
+    tlv_field(&mut fields, 2, &[0x7F]); // field::command::COMMAND (unallocated tag)
+    let buf = framed_tlv(0x31, &fields);
     let err = FrameKind::decode(&buf).unwrap_err();
     assert!(
         matches!(
@@ -1856,7 +1935,7 @@ fn spawn_terminal_empty_command_vec_round_trips() {
     // argv as malformed at the dispatch layer; the wire is agnostic.)
     let frame = FrameKind::SpawnTerminal {
         request_id: 1,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: Some(Vec::new()),
         cwd: None,
         env: None,
@@ -1875,7 +1954,7 @@ fn spawn_terminal_empty_env_vec_round_trips() {
     // codec must preserve the distinction.
     let frame = FrameKind::SpawnTerminal {
         request_id: 2,
-        collection: CollectionId::new(1),
+        group: GroupId::new(1),
         command: None,
         cwd: None,
         env: Some(Vec::new()),
@@ -1989,21 +2068,18 @@ proptest! {
 #[test]
 fn event_unknown_tag_decodes_as_unknown_and_skips() {
     // Forward-compat: an EVENT frame whose event tag this version does not
-    // know MUST decode as `AgentEvent::Unknown` (preserving the body
-    // verbatim) rather than failing the frame parse — so an older client
-    // skips a newer server's event kinds cleanly. Hand-roll the frame:
-    // type 0xB3, optional-terminal None (0x00), event tag 0x7F (unknown),
-    // length-prefixed body bytes.
+    // know MUST decode as `AgentEvent::Unknown` (preserving the body verbatim)
+    // rather than failing the frame parse — so an older client skips a newer
+    // server's event kinds cleanly. The terminal scope is an absent field
+    // (server-scoped None); the EVENT field (id 2) holds the positional
+    // AgentEvent: unknown tag 0x7F + a length-prefixed body.
     let body_bytes = [0xDEu8, 0xAD, 0xBE, 0xEF];
-    let mut body = vec![0xB3u8]; // TYPE_EVENT
-    body.push(0x00); // Option<TerminalId>::None
-    body.push(0x7F); // unknown event tag
-    body.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
-    body.extend_from_slice(&body_bytes);
-
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    let mut agent_event = vec![0x7Fu8]; // unknown event tag
+    agent_event.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
+    agent_event.extend_from_slice(&body_bytes);
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 2, &agent_event); // field::event::EVENT
+    let bytes = framed_tlv(0xB3, &fields);
 
     let (decoded, tail) = FrameKind::decode(&bytes).unwrap();
     assert_eq!(
@@ -2039,15 +2115,12 @@ fn event_unknown_tag_reencodes_verbatim() {
 
 #[test]
 fn terminal_spawned_unknown_result_tag_is_rejected() {
-    // A `TERMINAL_SPAWNED` carrying an unknown `SpawnResult` tag MUST
-    // surface as `UnknownEnumValue`, not silently coerce. Hand-roll a
-    // frame body: type byte 0xA2, then u32 request_id, then a bogus tag.
-    let mut body = vec![0xA2u8];
-    body.extend_from_slice(&7u32.to_be_bytes()); // request_id
-    body.push(0xFE); // unknown SpawnResult tag
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // A `TERMINAL_SPAWNED` whose RESULT field (id 2) carries an unknown
+    // `SpawnResult` tag MUST surface as `UnknownEnumValue`, not silently coerce.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &7u32.to_be_bytes()); // field::terminal_spawned::REQUEST_ID
+    tlv_field(&mut fields, 2, &[0xFE]); // field::terminal_spawned::RESULT (unknown tag)
+    let bytes = framed_tlv(0xA2, &fields);
 
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(
@@ -2062,14 +2135,12 @@ fn terminal_spawned_unknown_result_tag_is_rejected() {
 #[test]
 fn terminal_spawned_unknown_spawn_error_tag_is_rejected() {
     // Inside the `Err` arm of `SpawnResult`, an unknown `SpawnError` tag
-    // MUST also surface as `UnknownEnumValue`.
-    let mut body = vec![0xA2u8];
-    body.extend_from_slice(&7u32.to_be_bytes()); // request_id
-    body.push(0x01); // SpawnResult::Err
-    body.push(0xFE); // unknown SpawnError tag
-    let mut bytes = vec![];
-    bytes.extend_from_slice(&u32::try_from(body.len()).unwrap().to_be_bytes());
-    bytes.extend_from_slice(&body);
+    // MUST also surface as `UnknownEnumValue`. The RESULT field value is the
+    // positional SpawnResult: tag 0x01 (Err) then a bogus SpawnError tag.
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 1, &7u32.to_be_bytes()); // field::terminal_spawned::REQUEST_ID
+    tlv_field(&mut fields, 2, &[0x01, 0xFE]); // RESULT = Err + unknown SpawnError tag
+    let bytes = framed_tlv(0xA2, &fields);
 
     let err = FrameKind::decode(&bytes).unwrap_err();
     assert_eq!(

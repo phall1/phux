@@ -60,18 +60,18 @@ id_type!(
     /// Grouping (membership + names) is now L3 metadata plus client logic,
     /// and the lifecycle verbs that needed a collection id
     /// (`CREATE_SESSION` / `KILL_COLLECTION` / `RENAME_SESSION`) were
-    /// removed. `CollectionId` survives only as a documented **opaque
+    /// removed. `GroupId` survives only as a documented **opaque
     /// grouping key** because it is still threaded through three surviving
     /// surfaces that would balloon the re-tier if removed in the same pass:
-    /// the `Scope::Collection` L3-metadata scope (`docs/spec/L3.md` §1),
-    /// the `SpawnTerminal.collection` field, and the `CommandValue::CollectionId`
+    /// the `Scope::Group` L3-metadata scope (`docs/spec/L3.md` §1),
+    /// the `SpawnTerminal.group` field, and the `CommandValue::GroupId`
     /// reply variant. Removing it entirely is a follow-up bead.
     ///
     /// It is **not** a lifecycle tier: v0.3 servers expose a single static
-    /// default `CollectionId(1)` and treat it as an opaque scope label, not
+    /// default `GroupId(1)` and treat it as an opaque scope label, not
     /// a thing with create/kill/rename semantics. The wire encoding is the
     /// inner `u32`.
-    CollectionId
+    GroupId
 );
 
 /// Federation-routing host identifier for a [`TerminalId::Satellite`].

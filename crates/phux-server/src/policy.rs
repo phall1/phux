@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use phux_protocol::ids::{CollectionId, TerminalId};
+use phux_protocol::ids::{GroupId, TerminalId};
 use phux_protocol::policy::{
     AuditEvent, Capability, ConsumerClass, ConsumerId, Decision, InputTag, MetadataOp,
     MetadataScope, PeerIdentity, TaggedInput, TerminalOp,
@@ -46,12 +46,12 @@ pub trait PolicyEngine: Send + Sync {
         op: &'a TerminalOp,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, PolicyError>> + Send + 'a>>;
 
-    /// Authorize a collection operation.
-    fn authorize_collection_op<'a>(
+    /// Authorize a group operation.
+    fn authorize_group_op<'a>(
         &'a self,
         consumer: &'a ConsumerId,
-        collection_id: &'a CollectionId,
-        op: &'a phux_protocol::policy::CollectionOp,
+        group_id: &'a GroupId,
+        op: &'a phux_protocol::policy::GroupOp,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, PolicyError>> + Send + 'a>>;
 
     /// Authorize a metadata operation.
@@ -148,11 +148,11 @@ impl PolicyEngine for PermissivePolicy {
         })
     }
 
-    fn authorize_collection_op<'a>(
+    fn authorize_group_op<'a>(
         &'a self,
         _consumer: &'a ConsumerId,
-        _collection_id: &'a CollectionId,
-        _op: &'a phux_protocol::policy::CollectionOp,
+        _group_id: &'a GroupId,
+        _op: &'a phux_protocol::policy::GroupOp,
     ) -> Pin<Box<dyn Future<Output = Result<Decision, PolicyError>> + Send + 'a>> {
         Box::pin(async move { Ok(Decision::Allow) })
     }

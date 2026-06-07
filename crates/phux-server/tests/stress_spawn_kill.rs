@@ -24,7 +24,7 @@ use std::time::Duration;
 use phux_protocol::wire::frame::{
     Command, CommandResult, FrameKind, SpawnResult, TYPE_COMMAND_RESULT, TYPE_TERMINAL_SPAWNED,
 };
-use phux_server::DEFAULT_COLLECTION_ID;
+use phux_server::DEFAULT_GROUP_ID;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
@@ -97,7 +97,7 @@ fn spawn_storm_then_kill_storm_does_not_panic() {
                 &mut stream,
                 &FrameKind::SpawnTerminal {
                     request_id: req,
-                    collection: DEFAULT_COLLECTION_ID,
+                    group: DEFAULT_GROUP_ID,
                     command: Some(vec![
                         "/bin/sh".to_owned(),
                         "-c".to_owned(),

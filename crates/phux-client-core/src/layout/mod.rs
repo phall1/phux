@@ -259,7 +259,7 @@ pub struct WindowState {
     pub state: LayoutState,
 }
 
-/// The set of windows the TUI presents for one Collection, plus which
+/// The set of windows the TUI presents for one Group, plus which
 /// one is active.
 ///
 /// The renderer and every pure layout helper operate on a single
