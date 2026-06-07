@@ -410,3 +410,47 @@ fn send_keys_pane_selector_routes_to_that_pane() {
         "the marker should be visible on the pane the selector named",
     );
 }
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn tag_round_trips_and_drives_the_hash_selector() {
+    // phux-f8wi: tag a pane, read it back, then address it by `#tag`.
+    let server = ServerGuard::start();
+
+    // Tag the seed pane (resolving the whole session to its panes).
+    assert_eq!(
+        run_status(&server, &["tag", "add", SESSION, "build", "ci"]),
+        0,
+        "`phux tag add work build ci` should succeed",
+    );
+
+    // `tag ls` reflects the stored tags.
+    let listed = run_stdout(&server, &["tag", "ls", SESSION]);
+    assert!(
+        listed.contains("build") && listed.contains("ci"),
+        "`phux tag ls work` should list the tags; got: {listed}",
+    );
+
+    // The `#tag` selector resolves the tagged pane — `wait` against it sees
+    // the live shell (a wait on `#build` for a prompt-ish idle settles).
+    assert_eq!(
+        run_status(&server, &["tag", "ls", "#build"]),
+        0,
+        "`phux tag ls #build` should resolve via the tag index",
+    );
+
+    // Removing a tag drops it from the set.
+    assert_eq!(run_status(&server, &["tag", "rm", "#build", "ci"]), 0);
+    let after = run_stdout(&server, &["tag", "ls", SESSION]);
+    assert!(
+        after.contains("build") && !after.contains("ci"),
+        "`ci` should be gone, `build` should remain; got: {after}",
+    );
+
+    // `#tag` drives a mutating verb: kill every Terminal tagged `build`.
+    assert_eq!(
+        run_status(&server, &["kill", "#build"]),
+        0,
+        "`phux kill #build` should tear down the tagged Terminal",
+    );
+}

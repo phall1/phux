@@ -88,7 +88,14 @@ pub(crate) fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
             };
         }
 
-        let terminals = selector::resolve(&selector, &snapshot);
+        // A `#tag` selector resolves against L3 tag metadata fetched on this
+        // same connection; every other form is pure snapshot resolution.
+        let terminals = if matches!(selector, selector::Selector::Tag(_)) {
+            let index = crate::commands::tag::fetch_tag_index(&mut conn, &snapshot).await;
+            selector::resolve_with_tags(&selector, &snapshot, &index)
+        } else {
+            selector::resolve(&selector, &snapshot)
+        };
         if terminals.is_empty() {
             eprintln!("phux: no such target: {target}");
             return ExitCode::FAILURE;

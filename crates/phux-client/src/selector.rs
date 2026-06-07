@@ -20,6 +20,13 @@
 //! | `name:tag`  | window whose name is `tag` in session `name`        |
 //! | `name:N.M`  | pane index `M` of window `N` of session `name`      |
 //! | `@N`        | an opaque local Terminal id (`TerminalId::local(N)`) |
+//! | `#tag`      | every Terminal carrying L3 tag `tag` (`phux.tags/v1`) |
+//!
+//! The `#tag` form ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)
+//! decision point 5) resolves to a *set*, like a session name, against L3
+//! tag metadata the caller fetches alongside the snapshot — see
+//! [`resolve_with_tags`]. The server stays selector-agnostic
+//! ([ADR-0017](../../../ADR/0017-tui-not-protocol-privileged.md)).
 
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::info::SessionSnapshot;
@@ -39,6 +46,9 @@ pub enum Selector {
     Pane(String, WindowRef, u16),
     /// `@N` — a Terminal addressed directly by its local wire id.
     TerminalId(u32),
+    /// `#tag` — every Terminal carrying the L3 tag `tag` (`phux.tags/v1`).
+    /// Resolves to a set; see [`resolve_with_tags`].
+    Tag(String),
 }
 
 /// How a window is addressed within a session: by numeric index or by name.
@@ -59,6 +69,8 @@ pub enum ParseError {
     BadTerminalId(String),
     /// A pane index `M` (after the `.`) was non-numeric or out of range.
     BadPaneIndex(String),
+    /// `#` carried no tag (the bare sigil).
+    EmptyTag,
 }
 
 impl std::fmt::Display for ParseError {
@@ -67,6 +79,7 @@ impl std::fmt::Display for ParseError {
             Self::Empty => write!(f, "empty selector"),
             Self::BadTerminalId(s) => write!(f, "invalid terminal id in '@{s}'"),
             Self::BadPaneIndex(s) => write!(f, "invalid pane index '{s}'"),
+            Self::EmptyTag => write!(f, "empty tag in '#' selector"),
         }
     }
 }
@@ -94,6 +107,12 @@ pub fn parse(raw: &str) -> Result<Selector, ParseError> {
             .parse::<u32>()
             .map_err(|_| ParseError::BadTerminalId(rest.to_owned()))?;
         return Ok(Selector::TerminalId(id));
+    }
+    if let Some(tag) = raw.strip_prefix('#') {
+        if tag.is_empty() {
+            return Err(ParseError::EmptyTag);
+        }
+        return Ok(Selector::Tag(tag.to_owned()));
     }
 
     // `name`, `name:window`, or `name:window.pane`.
@@ -130,6 +149,28 @@ fn parse_window_ref(part: &str) -> WindowRef {
 /// a selector miss).
 #[must_use]
 pub fn resolve(selector: &Selector, snapshot: &SessionSnapshot) -> Vec<TerminalId> {
+    resolve_with_tags(selector, snapshot, &TagIndex::new())
+}
+
+/// A map from `TerminalId` to its L3 tags (`phux.tags/v1`).
+///
+/// The caller fetches it alongside the snapshot. `resolve_with_tags` reads it
+/// only for a [`Selector::Tag`]; an empty map resolves every `#tag` to nothing.
+pub type TagIndex = std::collections::HashMap<TerminalId, Vec<String>>;
+
+/// Like [`resolve`], but resolves a [`Selector::Tag`] against `tags`.
+///
+/// Every selector form except `#tag` ignores `tags` entirely (so
+/// [`resolve`] is the zero-tag specialization). A `#tag` selector yields, in
+/// snapshot order, every Terminal whose `tags` entry contains the tag — the
+/// set semantics ADR-0027 specifies, matching how a session name resolves to
+/// many Terminals.
+#[must_use]
+pub fn resolve_with_tags(
+    selector: &Selector,
+    snapshot: &SessionSnapshot,
+    tags: &TagIndex,
+) -> Vec<TerminalId> {
     match selector {
         Selector::Current | Selector::Last => {
             terminals_in_session(snapshot, snapshot.focused_session)
@@ -153,6 +194,12 @@ pub fn resolve(selector: &Selector, snapshot: &SessionSnapshot) -> Vec<TerminalI
                 Vec::new()
             }
         }
+        Selector::Tag(tag) => snapshot
+            .panes
+            .iter()
+            .map(|p| p.id.clone())
+            .filter(|id| tags.get(id).is_some_and(|ts| ts.iter().any(|t| t == tag)))
+            .collect(),
     }
 }
 
@@ -173,7 +220,9 @@ pub fn whole_session_name(selector: &Selector, snapshot: &SessionSnapshot) -> Op
     let session_id = match selector {
         Selector::Current | Selector::Last => snapshot.focused_session,
         Selector::Session(name) => session_id_by_name(snapshot, name)?,
-        Selector::Window(..) | Selector::Pane(..) | Selector::TerminalId(_) => return None,
+        Selector::Window(..) | Selector::Pane(..) | Selector::TerminalId(_) | Selector::Tag(_) => {
+            return None;
+        }
     };
     snapshot
         .sessions
@@ -278,6 +327,7 @@ mod tests {
             Selector::Pane("work".to_owned(), WindowRef::Index(1), 2),
         );
         assert_eq!(parse("@42").unwrap(), Selector::TerminalId(42));
+        assert_eq!(parse("#build").unwrap(), Selector::Tag("build".to_owned()));
     }
 
     #[test]
@@ -288,6 +338,30 @@ mod tests {
             parse("work:1.x"),
             Err(ParseError::BadPaneIndex(_))
         ));
+        assert_eq!(parse("#"), Err(ParseError::EmptyTag));
+    }
+
+    #[test]
+    fn resolve_tag_returns_every_tagged_terminal_in_snapshot_order() {
+        let snap = fixture();
+        // Tag 'build' on panes 100 (work) and 200 (play) — a cross-session set.
+        let mut tags = TagIndex::new();
+        tags.insert(
+            TerminalId::local(100),
+            vec!["build".to_owned(), "ci".to_owned()],
+        );
+        tags.insert(TerminalId::local(200), vec!["build".to_owned()]);
+        tags.insert(TerminalId::local(101), vec!["web".to_owned()]);
+
+        let build = resolve_with_tags(&parse("#build").unwrap(), &snap, &tags);
+        assert_eq!(build, vec![TerminalId::local(100), TerminalId::local(200)]);
+
+        let ci = resolve_with_tags(&parse("#ci").unwrap(), &snap, &tags);
+        assert_eq!(ci, vec![TerminalId::local(100)]);
+
+        // An unknown tag, and the no-index path, both resolve to nothing.
+        assert!(resolve_with_tags(&parse("#nope").unwrap(), &snap, &tags).is_empty());
+        assert!(resolve(&parse("#build").unwrap(), &snap).is_empty());
     }
 
     /// Build a snapshot: session "work" (id 1) with two windows, each
