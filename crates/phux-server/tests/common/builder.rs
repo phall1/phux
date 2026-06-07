@@ -58,7 +58,7 @@ use tokio::time::timeout;
 use super::screen::Screen;
 use super::{
     SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, recv_typed, send_frame, spawn_server_with_seed_cmd,
-    wait_for_socket,
+    try_recv_typed, wait_for_socket,
 };
 use phux_server::ServerError;
 
@@ -488,16 +488,25 @@ impl ClientHandle {
         let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
-            let Ok((tb, frame)) = timeout(remaining, recv_typed(&mut self.stream)).await else {
-                break;
-            };
-            if tb == TYPE_TERMINAL_OUTPUT
-                && let FrameKind::TerminalOutput { bytes, .. } = frame
-            {
-                self.screen.write(&bytes);
-                if pred(&mut self.screen) {
-                    return Ok(());
+            // phux-fheq: use the EOF-tolerant reader. Under the tmux
+            // server-exit model a slow drain can race the server's
+            // self-exit (it drops every client when its last session is
+            // reaped), closing the socket mid-loop. That clean EOF is not a
+            // test failure — break and report the screen we have, rather
+            // than panicking with `UnexpectedEof` on the length prefix.
+            match timeout(remaining, try_recv_typed(&mut self.stream)).await {
+                Ok(Some((tb, frame))) => {
+                    if tb == TYPE_TERMINAL_OUTPUT
+                        && let FrameKind::TerminalOutput { bytes, .. } = frame
+                    {
+                        self.screen.write(&bytes);
+                        if pred(&mut self.screen) {
+                            return Ok(());
+                        }
+                    }
                 }
+                // Clean server close (self-exit) or outer timeout: stop.
+                Ok(None) | Err(_) => break,
             }
         }
         Err(self.screen.snapshot_text())

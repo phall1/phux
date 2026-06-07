@@ -39,10 +39,18 @@ fn multi_mb_no_newline_burst_does_not_panic() {
 
         // ~2 MB of 'X' with no newline, then a marker on its own line so we
         // can confirm the pane is still alive and parsing afterward.
+        //
+        // phux-fheq: hold the pane open well past any plausible drain time
+        // (was `sleep 30`). On the 2-core CI runner the 2 MB drain through the
+        // single-thread runtime can outlast a 30s seed; the shell then exits,
+        // the last session is reaped, and the server self-exits — closing the
+        // socket while the client is still draining (`UnexpectedEof`). A
+        // long-lived seed decouples the assertion from wall clock; the harness
+        // tears the shell down via the shutdown cascade when the test ends.
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args([
             "-c",
-            "yes X | head -c 2000000 | tr -d '\\n'; printf '\\nNONLDONE\\n'; sleep 30",
+            "yes X | head -c 2000000 | tr -d '\\n'; printf '\\nNONLDONE\\n'; sleep 100000",
         ]);
 
         E2eBuilder::new()
