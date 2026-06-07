@@ -256,9 +256,11 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#).unwrap();
         let resp = handle_request(req).await.expect("tools/list replies");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 8);
         assert!(tools.iter().any(|t| t["name"] == json!("phux_ls")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_new")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_kill")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_watch")));
     }
 
     #[tokio::test]
