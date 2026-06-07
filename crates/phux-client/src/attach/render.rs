@@ -343,7 +343,11 @@ pub fn write_reset(out: &mut impl Write) -> io::Result<()> {
     out.flush()
 }
 
-fn write_cup(out: &mut impl Write, row: u16, col: u16) -> io::Result<()> {
+// CURSOR-AUTHORITY: the canonical CUP formatter. The composite end-of-frame
+// emitter (paint::end_of_frame_cursor) and the pane-interior renderer both
+// route cursor moves through this one place (ADR-0029); raw `\x1b[..H`
+// elsewhere under attach/ is banned.
+pub(super) fn write_cup(out: &mut impl Write, row: u16, col: u16) -> io::Result<()> {
     let r = row.saturating_add(1);
     let c = col.saturating_add(1);
     write!(out, "\x1b[{r};{c}H")

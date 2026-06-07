@@ -81,6 +81,47 @@ pub(super) fn paint_focused_pane<W: Write>(
     slot.renderer.last_cursor()
 }
 
+/// The single composite end-of-frame cursor authority (ADR-0029, phux-gxy/
+/// 9xn/b9n/d69/549). Every frame ends here: this is the SOLE place that emits
+/// the composite cursor placement (CUP + DECTCEM) and the SOLE place that
+/// flushes the pane/chrome composite. Routing all paint paths through it keeps
+/// ADR-0020 invariant 4 ("exactly one renderer positions the cursor per
+/// frame") true and collapses the three-way None-fallback policy — previously
+/// copy-pasted across several paint sites — into one body.
+///
+/// `cursor` is the focused pane's authoritative last cursor as `(row, col)`
+/// (0-based). When `None`, `fallback_origin` (`(x, y)` = the focused pane's
+/// `Rect` origin) parks the cursor inside the pane area and HIDES it (`?25l`),
+/// so a `None` cursor never strands the host cursor at the status bar's tail
+/// (bottom-right) — the visible phux-gxy/9xn symptom. `None` + `None` parks at
+/// the viewport origin, hidden, as a safety net.
+///
+/// The trailing flush is load-bearing: stdout is a `LineWriter` and the CUP we
+/// write has no newline, so without the flush it sits buffered until the next
+/// pane output — which never comes for an idle pane (a shell prompt). That was
+/// the real phux-gxy: prior fixes computed the right CUP but never flushed it,
+/// so in-memory unit tests passed while the live terminal never saw it.
+// CURSOR-AUTHORITY: composite
+pub(super) fn end_of_frame_cursor<W: Write>(
+    out: &mut W,
+    cursor: Option<(u16, u16)>,
+    fallback_origin: Option<(u16, u16)>,
+) -> std::io::Result<()> {
+    if let Some((row, col)) = cursor {
+        tracing::trace!(row, col, "end_of_frame_cursor: restore focused cursor");
+        super::render::write_cup(out, row, col)?;
+        out.write_all(b"\x1b[?25h")?;
+    } else {
+        // No authoritative cursor: park at the focused pane's origin (or the
+        // viewport origin) and hide. `fallback_origin` is `(x, y)`.
+        let (x, y) = fallback_origin.unwrap_or((0, 0));
+        tracing::trace!(x, y, "end_of_frame_cursor: no cursor, parking hidden");
+        super::render::write_cup(out, y, x)?;
+        out.write_all(b"\x1b[?25l")?;
+    }
+    out.flush()
+}
+
 /// Clear the viewport and paint every pane + dividers + bar from
 /// scratch. Use after layout mutations, viewport resize, or initial
 /// attach — anything where the previous frame may not be a coherent
@@ -156,40 +197,13 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     let final_cursor = focused_pane.and_then(|fid| {
         paint_focused_pane(out, layout_state, panes, fid, viewport_dims, has_bar, true)
     });
-    if let Some((row, col)) = final_cursor {
-        let one_based_row = row.saturating_add(1);
-        let one_based_col = col.saturating_add(1);
-        tracing::trace!(
-            row,
-            col,
-            "paint_full_frame: restore cursor to focused last_cursor"
-        );
-        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
-    } else {
-        // No authoritative cursor. Park at the focused pane's Rect
-        // origin if we have one, otherwise top-left of the viewport.
-        // Always emit a CUP so the cursor never strands at the bar's
-        // tail (bottom-right) — that was phux-gxy's visible symptom
-        // when focused_pane was None and the bar repaint owned the
-        // final escape on the wire.
-        let (x, y) = focused_pane
-            .and_then(|fid| multi.rects.get(fid).copied())
-            .map_or((0, 0), |r| (r.x, r.y));
-        let one_based_row = y.saturating_add(1);
-        let one_based_col = x.saturating_add(1);
-        tracing::trace!(
-            row = y,
-            col = x,
-            focused_pane_set = focused_pane.is_some(),
-            "paint_full_frame: no last_cursor, parking at fallback hidden"
-        );
-        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
-    }
-    // Flush the final cursor placement. See the note in
-    // `paint_bar_after_pane`: render_at flushes mid-frame, but the
-    // explicit CUP we write *after* the last render_at has no newline
-    // and would otherwise sit in the LineWriter buffer indefinitely.
-    let _ = out.flush();
+    // The focused pane's Rect origin is the fallback cursor parking spot when
+    // `final_cursor` is None (phux-gxy/9xn). All cursor placement + the flush
+    // is owned by the one composite authority.
+    let fallback_origin = focused_pane
+        .and_then(|fid| multi.rects.get(fid).copied())
+        .map(|r| (r.x, r.y));
+    let _ = end_of_frame_cursor(out, final_cursor, fallback_origin);
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -255,36 +269,9 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     // otherwise fall back to the focused pane's Rect origin (hidden)
     // so the cursor doesn't remain stranded at the bar's tail —
     // bottom-right of the host terminal. See phux-9xn.
-    if let Some((row, col)) = restore_cursor {
-        let one_based_row = row.saturating_add(1);
-        let one_based_col = col.saturating_add(1);
-        tracing::trace!(row, col, "paint_bar_after_pane: restore cursor");
-        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25h");
-    } else if let Some((x, y)) = fallback_origin {
-        // No authoritative cursor: park inside the focused pane and
-        // hide. The next pane render that hits this slot will lift
-        // visibility back up via its own DECTCEM emit.
-        let one_based_row = y.saturating_add(1);
-        let one_based_col = x.saturating_add(1);
-        tracing::trace!(x, y, "paint_bar_after_pane: fallback origin (hidden)");
-        let _ = write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[?25l");
-    } else {
-        // Both None — historically a no-op (caller promised to own
-        // cursor placement after). But every observed caller of this
-        // shape strands the cursor at the bar's last cell. Park at
-        // top-left hidden as a safety net.
-        tracing::trace!("paint_bar_after_pane: both None, parking at (0,0) hidden");
-        let _ = write!(out, "\x1b[1;1H\x1b[?25l");
-    }
-    // CRITICAL: flush so the cursor-restore CUP actually reaches the
-    // terminal. stdout is a LineWriter and the CUP we just wrote has no
-    // trailing newline, so without an explicit flush it stays buffered
-    // until the next pane output. When the pane is idle (a shell prompt)
-    // that output never comes, and the host cursor strands at the bar's
-    // tail — bottom-right. This is the real phux-gxy: the prior fixes
-    // computed the right CUP but never flushed it, so unit tests on the
-    // in-memory buffer passed while the live terminal never saw it.
-    let _ = out.flush();
+    // All cursor placement (restore / fallback / safety-net) and the
+    // load-bearing flush are owned by the one composite authority (ADR-0029).
+    let _ = end_of_frame_cursor(out, restore_cursor, fallback_origin);
 }
 
 /// Effective viewport available to pane rendering: outer dims with the
@@ -303,6 +290,28 @@ pub(super) const fn pane_viewport(outer: (u16, u16), has_status_bar: bool) -> (u
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    /// ADR-0029: the one composite cursor emitter resolves the three-way
+    /// None-fallback policy and always ends with a flush. Pins the byte output
+    /// for each case (the cursor-matrix the phux-gxy/9xn/b9n scars chased).
+    #[test]
+    fn end_of_frame_cursor_resolves_all_three_cases() {
+        // Some(cursor) -> CUP(row,col) + show. (2,4) 0-based -> CUP 3;5.
+        let mut out = Vec::new();
+        end_of_frame_cursor(&mut out, Some((2, 4)), None).expect("write");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[3;5H\x1b[?25h");
+
+        // None + fallback origin (x=3, y=5) -> CUP(y,x)=6;4 + hide.
+        let mut out = Vec::new();
+        end_of_frame_cursor(&mut out, None, Some((3, 5))).expect("write");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[6;4H\x1b[?25l");
+
+        // None + None -> safety net: viewport origin, hidden.
+        let mut out = Vec::new();
+        end_of_frame_cursor(&mut out, None, None).expect("write");
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1;1H\x1b[?25l");
+    }
+
     use crate::attach::driver::PaneSlot;
     use crate::render::chrome::status_bar::Position;
     use phux_config::widget::WidgetRegistry;
