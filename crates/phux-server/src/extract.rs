@@ -293,7 +293,7 @@ impl PointSpace {
 /// Shared span extraction over a [`PointSpace`]: translate `char` offsets to
 /// grid columns, build a linear [`Selection`] over `[start_x, end_x]` of row
 /// `y`, and format it with the sound one-shot
-/// [`Terminal::format_selection_alloc`] API.
+/// [`libghostty_vt::Terminal::format_selection_alloc`] API.
 fn extract_span(
     terminal: &GhosttyTerminal<'_, '_>,
     space: PointSpace,

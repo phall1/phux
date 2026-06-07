@@ -356,7 +356,7 @@ pub(super) fn write_cup(out: &mut impl Write, row: u16, col: u16) -> io::Result<
 /// The cell style currently active on the outer terminal, as a comparable
 /// key for run coalescing. `fg`/`bg` are tracked alongside `Style` because
 /// the renderer sources the resolved RGB foreground/background from the
-/// per-cell [`render::CellIterator`] (`cell.fg_color()`/`cell.bg_color()`)
+/// per-cell [`libghostty_vt::render::CellIterator`] (`cell.fg_color()`/`cell.bg_color()`)
 /// rather than from `Style`'s palette-indexed color fields.
 type EmittedStyle = (Style, Option<RgbColor>, Option<RgbColor>);
 

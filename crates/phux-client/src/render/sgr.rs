@@ -1,7 +1,7 @@
 //! Shared per-cell SGR emission for the ratatui-backed chrome layers.
 //!
 //! Both the overlay painter ([`super::overlay`]) and the status bar
-//! ([`super::chrome::status_bar`]) walk a ratatui [`Buffer`] and emit one
+//! ([`super::chrome::status_bar`]) walk a ratatui [`ratatui::buffer::Buffer`] and emit one
 //! cell at a time. This module owns the per-cell SGR delta so the two
 //! paths style identically. It lives under `render/` so the ratatui
 //! dependency stays within the ADR-0020 boundary.

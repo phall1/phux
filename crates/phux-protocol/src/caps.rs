@@ -5,7 +5,7 @@
 //! `ServerCapabilities` envelopes and drive the server-side VT byte-stream
 //! rewriter per [ADR-0013].
 //!
-//! Under ADR-0013 the cell-level [`Color`](libghostty_vt::style::StyleColor)
+//! Under ADR-0013 the cell-level `StyleColor`
 //! downsampling helper is gone; the server rewrites SGR sequences in the
 //! outbound byte stream instead (see `phux_server::downsample`). What
 //! survives on the protocol side is the *advertised tier itself* —

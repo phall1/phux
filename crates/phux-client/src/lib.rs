@@ -27,7 +27,7 @@
 //! paths.
 
 #![forbid(unsafe_code)]
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 pub mod agent;
 pub mod attach;

@@ -88,7 +88,7 @@ pub struct TerminalActor {
     synth: RefCell<SnapshotSynthesizer<'static>>,
     /// Cheap idle short-circuit for [`Self::tick_emit`] (phux-4l0).
     ///
-    /// `true` whenever the canonical [`Terminal`] has been mutated
+    /// `true` whenever the canonical [`libghostty_vt::Terminal`] has been mutated
     /// (`vt_write`, resize) since the last `tick_emit`. Set at every
     /// mutation point, cleared at the top of each `tick_emit`. When this
     /// is `false` AND no consumer is awaiting its first emission, the

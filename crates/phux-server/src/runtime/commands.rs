@@ -224,7 +224,7 @@ pub(crate) fn handle_terminal_resize(
 /// [`crate::state::ServerState::attach`], build the snapshot, collect
 /// the per-pane handles + wire ids to snapshot.
 ///
-/// Pulled out so [`handle_attach`] stays under clippy's
+/// Pulled out so [`crate::runtime::attach::handle_attach`] stays under clippy's
 /// `too_many_lines` ceiling.
 pub(crate) fn prepare_attach(
     state: &SharedState,
@@ -427,7 +427,8 @@ pub(crate) fn handle_kill_terminals(
 /// Existence check and seed both run on the single-threaded runtime, so the
 /// lookup→create sequence is atomic with respect to other clients: two
 /// racing create requests for the same `name` cannot both succeed. Returns
-/// `Ok(wire_id)` on success (the seed pane's wire [`TerminalId`], which the
+/// `Ok(wire_id)` on success (the seed pane's wire [`phux_core::ids::TerminalId`],
+/// which the
 /// caller publishes under a result key for the client to read back), or
 /// `Err(message)` if `name` is already taken or the seed fails. Because
 /// `SET_METADATA` has no reply frame, the error is for logging only.
@@ -503,7 +504,8 @@ pub(crate) fn create_named_session(
 /// Build the `OK_WITH(STATE(..))` reply for `GET_STATE`.
 ///
 /// v0.1 supports only [`StateScope::Server`] (the whole-server snapshot).
-/// The snapshot reuses the `ATTACHED` [`SessionSnapshot`] shape; `phux ls`
+/// The snapshot reuses the `ATTACHED`
+/// [`phux_protocol::wire::info::SessionSnapshot`] shape; `phux ls`
 /// and client-side selector resolution read its `sessions` list and ignore
 /// the focused-* fields. An empty server yields an empty session list with
 /// sentinel focus ids (the wire requires the focus fields to be present).
@@ -1075,13 +1077,14 @@ pub(crate) fn handle_viewport_resize(
 ///
 /// SPEC §9: input frames are fire-and-forget — no `Outbound` reply.
 /// On the wire the pane is identified by its `WireTerminalId` (`u32`); we
-/// resolve it back to a core [`TerminalId`] via [`ServerState::terminal_from_wire`],
+/// resolve it back to a core [`phux_core::ids::TerminalId`] via
+/// [`crate::state::ServerState::terminal_from_wire`],
 /// then locate the [`TerminalHandle`] and `try_send` the encoded
 /// [`TerminalInput`] onto the actor's input mailbox.
 ///
 /// Validation: we drop with `warn!` (not `debug!`, this is observable
 /// misbehavior worth surfacing) on:
-///   * Unknown wire pane id (no [`TerminalId`] mapping).
+///   * Unknown wire pane id (no [`phux_core::ids::TerminalId`] mapping).
 ///   * Client not attached (the per-client task should not be reading
 ///     frames from a detached identity, but we re-check defensively).
 ///   * Client attached but not subscribed to this pane — prevents one

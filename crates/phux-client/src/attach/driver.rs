@@ -57,7 +57,7 @@ use crate::render::overlay::OverlayState;
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
 /// terminal. Grown from "one of these per attach" (single-pane v0) to
 /// "one of these per leaf in the layout tree" by phux-4li.4. The driver
-/// keeps a [`PaneMap`] of these keyed by [`TerminalId`].
+/// keeps a `PaneMap` of these keyed by [`TerminalId`].
 pub(super) struct PaneSlot {
     /// libghostty mirror for this pane.
     pub terminal: GhosttyTerminal<'static, 'static>,
