@@ -492,6 +492,7 @@ gate_adr_status() {
         fi
 
         case "$status_line" in
+            "Status: Proposed"|\
             "Status: Accepted"|\
             "Status: Accepted (forward-compat)"|\
             "Status: Deprecated")
@@ -500,7 +501,7 @@ gate_adr_status() {
                 ;;
             *)
                 violate adr-status "$file" \
-                    "non-vocabulary status: '$status_line' (allowed: 'Status: Accepted', 'Status: Accepted (forward-compat)', 'Status: Superseded by ADR-NNNN', 'Status: Deprecated')"
+                    "non-vocabulary status: '$status_line' (allowed: 'Status: Proposed', 'Status: Accepted', 'Status: Accepted (forward-compat)', 'Status: Superseded by ADR-NNNN', 'Status: Deprecated')"
                 ;;
         esac
     done < <(find "$ROOT/ADR" -type f -name '*.md' | LC_ALL=C sort)
