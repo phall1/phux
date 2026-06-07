@@ -1,156 +1,97 @@
 ---
 audience: humans, contributors, agents, consumers
-stability: stable
-last-reviewed: 2026-06-03
+stability: evolving
+last-reviewed: 2026-06-06
 ---
 
 # Concepts
 
-**TL;DR.** The thing phux manages is the *terminal* — spawned, observed, driven, persisted, addressable across hosts — not the session or the pane. A human's TUI and an agent's API are two consumers of the same terminal, and neither is privileged. Sessions, windows, and panes are just how the TUI arranges terminals for a person. The wire is layered (L1/L2/L3) so a consumer subscribes to only what it needs; identity is federation-ready from the first byte.
+**TL;DR.** This is the doc that says what phux is and how mature it is. phux manages the terminal as the unit of work: spawned, observed, driven, persisted, addressable across hosts. A human's TUI, a browser client, and an agent are peer consumers of the same terminal, none privileged on the wire. The wire carries only identity, lifecycle, transport, opaque terminal bytes, and metadata; every structured view is computed by a consumer. phux is pre-alpha and spec-first.
+
+---
+
+## Maturity: pre-alpha, spec-first
+
+phux is pre-alpha. The protocol is at version 0.3.0 and the spec leads the code: several behaviors are designed and written down before they are built, and a few shipped behaviors still diverge from the target the spec describes. This document distinguishes what runs today from a stated direction. Where they disagree, the divergence is marked inline and pointed at the ADR that decides it.
+
+What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). What is designed but not built includes federation routing and the encoding migration noted below.
+
+This document owns the maturity fact. Other docs link here rather than restating it.
 
 ---
 
 ## Terminals, not panes
 
-A terminal: runs a process, parses bytes into a grid, accepts structured input, reports events (title, cwd, command lifecycle, hyperlinks, bells). That object is the whole model. A person looking at it and a program driving it are holding the same thing two different ways — that equivalence is the point, not a feature bolted on.
+A terminal runs a process, parses bytes into a grid of cells, accepts structured input, and reports events (title, working directory, command lifecycle, hyperlinks, bells). That object is the whole model. A person looking at one and a program driving one are holding the same thing two different ways.
 
-Sessions, windows, panes, splits — the entire tmux vocabulary — live in the TUI layer. Not on the wire. Not load-bearing for agents or control planes.
+Sessions, windows, panes, and splits — the tmux vocabulary — are not on the wire. They are how a consumer arranges terminals for a person, expressed as metadata and client logic. An agent never has to learn them to spawn a terminal, drive it, and read its exit code.
 
-Why? The consumer category expanded beyond humans:
-- Humans want windows and splits (the TUI layer handles this)
-- Agents want to spawn, observe, tear down terminals
-- CI fleets want event streams
-- Control planes want addressable resources across machines
+The reason the consumer set drives the model: humans want windows and splits, agents want to spawn and tear down terminals and read their events, CI fleets want event streams, and control planes want resources addressable across machines. The terminal is the one thing all of them need. Everything else is a per-consumer arrangement.
 
-The terminal is what everyone needs. Everything else is optional.
-
-The reference TUI ships in-tree because the substrate is only real if someone rides it.
+The reference TUI ships in-tree because a substrate is only real if something rides it.
 
 ---
 
-## libghostty is the foundation
+## The engine is delegated; structure is a projection
 
-Both ends run `libghostty_vt::Terminal`: server (canonical state), client (local mirror for rendering). The same parser on both ends; nothing re-encodes in the middle.
+Both ends of the wire run the same terminal engine, libghostty: the server holds canonical state, each client holds a local mirror for rendering. The same parser runs on both ends, and nothing re-encodes terminal state into a second representation in between.
 
-Modern terminal protocols (Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse) pass through losslessly. Older multiplexers re-parse VT mid-path and degrade fidelity. phux structurally cannot.
+It follows that any structured view of a terminal — a cell grid, a command-boundary event stream, a pane tree, a layout, a "run a command and collect its output" result — is computed by a consumer from the engine it already runs. Structure is a projection, not a transmission. Putting a structured terminal representation on the wire would re-create the re-parse problem one layer up: a second model that can drift from the engine and lose fidelity when capabilities mismatch. Older multiplexers re-parse VT mid-path; phux delegates to one engine on both ends and forwards opaque bytes.
 
-See [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md), [ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md), and [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md).
+This is the central design commitment. See [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md), [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md), [ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md), and [ADR-0030 (engine-delegated wire and projection consumers)](../ADR/0030-engine-delegated-wire-and-projection-consumers.md).
 
-### In practice
+In practice:
 
-- **Asymmetric wire.** Server→client: VT bytes. Client→server: structured events (key, mouse, focus, paste).
-- **Input types are libghostty's.** Direct re-export. No parallel phux enum.
-- **New libghostty features auto-light.** Next pin bump, both client and server get them.
+- The wire is asymmetric. Server to client: terminal bytes (output and snapshots). Client to server: structured input atoms (key, mouse, focus, paste).
+- Input types are libghostty's, re-exported directly. There is no parallel phux input enum.
+- A libghostty pin bump lights up new terminal features on both ends at once.
 
 ---
 
-## The wire is layered
+## What the wire carries
 
-The wire splits into tiers, declared at HELLO. See [ADR-0015 (protocol layering)](../ADR/0015-protocol-layering.md) and [`spec/`](./spec/).
+The wire carries terminal **identity**, terminal **lifecycle** (including one atomic multi-terminal teardown operation), **transport** framing and capability negotiation, **opaque terminal bytes**, and **metadata** the server stores without interpreting. It does not carry structured screen state, a normative semantic-event type system, panes, layouts, or command-runner results. Those are consumer projections.
+
+The spec organizes this as layers declared at connect time:
 
 | Tier | Concept | Carries |
 |---|---|---|
-| **L1** | Terminal | PTY + libghostty Terminal. Bytes-out, structured input, snapshot, resize, close, bell, events (title, cwd, command lifecycle, hyperlinks). |
-| **L2** | Collection | Named bundle of Terminals with kill semantics. Optional; L1-only deployments skip it. |
-| **L3** | Metadata | Opaque key-value pairs (Terminal, Collection, global scope). Consumers store conventions (TUI layout, window names). Server stores; does not interpret. |
+| **L1** | Terminal | The PTY plus its libghostty Terminal: output bytes, structured input, snapshots, resize, close, bell, and engine-derived events (title, working directory, command lifecycle, hyperlinks). |
+| **L3** | Metadata | Opaque key-value pairs scoped to a terminal or globally. Consumers store conventions here (TUI layout, window and session names, group membership). The server stores; it does not interpret. |
 
-Each layer references only lower layers. Consumers declare which tiers they speak at HELLO; the server omits unneeded messages.
+There is no L2 collection tier. Group lifecycle — "these terminals belong together, tear them down as a unit" — is metadata plus client logic, with one exception. The one thing a consumer cannot do correctly on its own is an atomic group teardown: a client killing N terminals one at a time exposes intermediate states to other observers. That single irreducible need is met by one L1 operation, `KILL_TERMINALS { ids }` (command tag `0x09`), which the server applies all-or-nothing under its single state lock. Atomicity earns one operation, not a tier. See [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md) and [ADR-0015 (protocol layering)](../ADR/0015-protocol-layering.md).
 
-Example: an agent SDK speaks L1 alone. It never sees "session" or "window" (TUI L3 metadata). A GUI might speak L1 + its own L3 and ignore the TUI's. No consumer is privileged on the wire.
+The wire surface itself is owned by the spec: L1 by [`spec/L1.md`](./spec/L1.md), the metadata model and grouping conventions by [`spec/L3.md`](./spec/L3.md), and the byte-level codec by [`spec/appendix-encoding.md`](./spec/appendix-encoding.md).
+
+Divergence to be honest about: the code on this branch still ships `CREATE_SESSION`, `RENAME_SESSION`, and `KILL_COLLECTION` as L1 commands, which puts session vocabulary and collection lifecycle in the substrate tier. The target decomposes them — create is `SPAWN_TERMINAL` plus a metadata key, rename is a metadata SET, kill-group is `KILL_TERMINALS` — and retires the `CollectionId` plumbing that only served them. `CollectionId` is retained for now as a documented opaque grouping key, not a lifecycle tier; its full removal is tracked work (bead phux-0bmc). The decomposition is decided in [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md); until the code lands, treat the spec as the target and the leaked verbs as the current reality.
 
 ---
 
 ## Identity is federation-ready
 
-Every terminal:
+Every terminal is addressed by a `TerminalId` that is either `LOCAL { id }` or `SATELLITE { host, id }`. Today the server constructs `LOCAL` only, but the wire accepts both forms from the first byte: a consumer can write a `SATELLITE` id now, and the current server rejects it cleanly rather than misreading it. Routing it to a remote host is designed, not built — see the [maturity section](#maturity-pre-alpha-spec-first). The point is that remote identity is in the wire shape from the start, not bolted on later.
 
-```
-TerminalId = LOCAL     { id: u32 }
-           | SATELLITE { host: String, id: u32 }
-```
-
-v0.1 constructs `LOCAL` only. The wire accepts both from byte zero. Write `SATELLITE{host: "prod-box-3", id: 42}` today; v0.1 rejects it gracefully; v0.2 routes it. Same command, same wire bytes.
-
-This is intentional forward compatibility. phux is a control plane from the first byte, not a single-machine tool with remote attach bolted on later.
-
-See [ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md) and [ADR-0016](../ADR/0016-terminal-id-as-wire-primary.md).
+See [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md).
 
 ---
 
-## Comparison to other tools
+## Consumers are peers; carry your own engine
 
-### Traditional multiplexers
+The reference TUI, the browser client, and the agent surface are peers. None has protocol-level standing: if a consumer needs a capability the wire does not provide, the answer is an ADR that extends the spec, not a consumer-shaped hook on the wire ([ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md)).
 
-| Dimension | phux | tmux | zellij | screen |
-|---|---|---|---|---|
-| Modern terminal protocol support[^1] | ✓ | ◐ | ◐ | ✗ |
-| Federation-ready addressing[^2] | ✓ | ✗ | ✗ | ✗ |
-| libghostty canonical parser | ✓ | ✗ | ✗ | ✗ |
-| Structured input types | ✓ | ✗ | ✓ | ✗ |
-| End-to-end passthrough (no re-parse) | ✓ | ✗ | ✗ | ✗ |
-| Production-proven maturity | ✗ | ✓ | ◐ | ✓ |
+The reference pattern for a consumer that wants structured state is to carry its own engine and project locally. phux-web is that pattern in shipping code: it compiles to WASM, loads `ghostty-vt.wasm`, speaks the exact wire codec over WebSocket, and computes its rendered view from engine state it owns. An agent SDK should follow the same shape — run the engine, project to structured state locally — rather than ask the wire for a structured-state service. See [ADR-0025 (browser web client)](../ADR/0025-browser-web-client.md), [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md), and the consumer docs: [`consumers/web.md`](./consumers/web.md), [`consumers/tui.md`](./consumers/tui.md), [`consumers/agents.md`](./consumers/agents.md).
 
-**What's different:** phux parses once (libghostty), routes VT bytes losslessly, and bakes federated addressing into the wire from day 1. tmux and zellij re-parse in-path and bolt on remote attach via SSH. screen is the oldest and simplest.
+The agent surface today is the headless CLI verb set plus the [`phux-mcp`](./consumers/mcp.md) adapter over it. An agent reads structured state through that CLI and its versioned JSON shapes (ScreenState, RunResult, WaitOutcome) — a local projection, not a wire contract. The library behind the CLI is the `phux-client` crate over `phux-protocol`; it exists today rather than being a future SDK. The verb catalog and JSON contracts are owned by [`consumers/agents.md`](./consumers/agents.md).
 
-### Agent-focused tools
-
-| Dimension | phux | zmx | cmux | rmux |
-|---|---|---|---|---|
-| Agent SDK or programmatic API | ✓ (CLI + MCP shipped; Rust SDK planned) | ✗ | ✓ (macOS native) | ✓ (Rust async) |
-| Primary use case | Human multiplexer + control plane | Minimal session persistence | Agent UI (git, PR, notifications) | Agent automation |
-| Cross-platform | ✓ | ✗ (implied) | ✗ (macOS only) | ✓ |
-| Maturity | Pre-release v0.1 | Minimal scope, SSH bugs | Production (20k+ stars) | Public preview (v0.3.1) |
-| Wire protocol published | ✓ (phux-proto in docs/spec/) | ✗ | Proprietary | ✓ (rmux-proto crate) |
-
-**The difference:** These are not multiplexer competitors.
-
-- **zmx**: minimal (session persistence only), SSH support, no agent SDK
-- **cmux**: macOS agent UI (Claude, Cursor), not a replacement
-- **rmux**: agent SDK (Rust async), no federation
-
-phux is both a human multiplexer and a federation-ready control plane. See [ADR-0017](../ADR/0017-tui-not-protocol-privileged.md).
-
-[^1]: Kitty keyboard, true colour, OSC 8, OSC 133, images, pixel-precision mouse. phux passes through unchanged (libghostty parses once, bytes forward). Others re-parse mid-path and degrade fidelity.
-[^2]: phux wire knows remote identity from day 1. Design in [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md). Traditional multiplexers treat remote attach as client-side (SSH + local connect).
+Some L1 commands return engine-derived snapshots a consumer could also compute locally — `GET_SCREEN`, `GET_TERMINAL_STATE`, `SUBSCRIBE_TERMINAL_EVENTS`, and the pushed `AgentEvent` frame. Read these as a convenience for consumers that have not yet adopted the carry-your-own-engine pattern, not as a normative structured contract and not as license to grow new structured wire surface. [`spec/L1.md`](./spec/L1.md) owns that surface.
 
 ---
 
-## Consumers are plural; none are privileged
+## Positioning: a substrate, not a product
 
-Consumers in scope:
+phux is a substrate — a wire and an engine that terminals ride — with a reference TUI as its first product on top. The argument for it is architectural, not a feature race: because the engine is shared and never re-encoded, the wire does not carry a second terminal model that can drift or lose fidelity, and the same bytes serve a human, a browser, and an agent without any of them being privileged.
 
-- **Reference TUI.** Tmux-shaped: sessions, windows, panes, splits, status bar, keybindings. Speaks L1 + L2 + L3. See [`consumers/tui.md`](./consumers/tui.md).
-- **Agent surface (shipped).** The headless CLI verbs (`ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`, …) and the [`phux-mcp`](./consumers/mcp.md) adapter, both over the same selector grammar and JSON shapes. L1-shaped: spawn a terminal, drive it, read events and exit codes. A typed Rust SDK crate (`phux-client-sdk`) is still planned.
-- **Future:** native GUI, recorder, tmux control-mode adapter ([ADR-0010](../ADR/0010-frontend-agnostic-tmux-cc-reserved.md)).
-
-[ADR-0017 (TUI not protocol-privileged)](../ADR/0017-tui-not-protocol-privileged.md): the reference TUI is one consumer with no protocol-level privileges. If the TUI needs a feature the wire doesn't provide, extend the spec (with an ADR), not add a TUI-shaped hook.
-
-### TUI vocabulary mapped to substrate
-
-| TUI | Substrate |
-|---|---|
-| "session" | L2 Collection (named Terminals, kill-all) |
-| "window" | TUI layout tree in L3 metadata |
-| "pane" | Leaf of layout tree, points to L1 Terminal |
-| "split a pane" | Mutate L3 tree; spawn L1 Terminal; repaint |
-| "kill pane" | L1 `KILL_TERMINAL` for leaf; consumer updates layout |
-| "attach session" | L2 `ATTACH`; read L3 layout; subscribe L1 output |
-
-The TUI's vocabulary is user-facing. The substrate's vocabulary is what the wire carries.
-
----
-
-## What v0.1 looks like
-
-- **L1 is frozen.** The Terminal substrate is specified, tested, documented. Federation forward-compat is baked in.
-- **L2 is stable.** Collection lifecycle, membership, naming, kill semantics.
-- **L3 exists as opaque storage.** Read / write / delete on metadata blobs. The TUI's conventions live in [`consumers/tui.md`](./consumers/tui.md) and the non-normative conventions appendix in [`spec/L3.md`](./spec/L3.md).
-- **The reference TUI works** on L1 + L3 metadata: attach, detach, splits, layouts, status bar, keybindings.
-- **The agent surface ships** — not as a Rust SDK crate yet, but as the headless CLI verbs and the `phux-mcp` adapter. A program can spawn a build, wait for it to settle or for output to appear, and read the exit code today. That's what makes the agent-first thesis real instead of aspirational; the typed `phux-client-sdk` crate is the convenience layer still to come.
-
-Federation and Automation are **designed for** in v0.1 (their hooks in the wire are present; their ADRs are written) and **shipped** in v0.2. Building for now, designed for later.
-
-For the long arc — what v0.2+ looks like, where the agent-driven world is going, what makes this not a smaller tmux — see [`vision.md`](./vision.md).
+The reference TUI matters as the adoption surface that bootstraps a population of terminals-on-the-wire, and it is worth real product investment. Its distinguishing trait is the wire itself — attach and detach, remoting, and humans and their agents sharing the same live terminals — rather than local splits, which it also has. ADR-0017 is what keeps that investment from corrupting the substrate: the TUI's needs land as metadata conventions and client logic, never as new wire surface. See [ADR-0009 (phux vs. mux positioning)](../ADR/0009-phux-vs-mux-positioning.md) and [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md).
 
 ---
 
@@ -161,6 +102,8 @@ For the long arc — what v0.2+ looks like, where the agent-driven world is goin
 | Run it | [`QUICKSTART.md`](./QUICKSTART.md) |
 | Understand the wire bytes | [`spec/README.md`](./spec/README.md) |
 | Understand how the server is built | [`architecture/README.md`](./architecture/README.md) |
+| Drive it from an agent | [`consumers/agents.md`](./consumers/agents.md) |
+| Use the browser client | [`consumers/web.md`](./consumers/web.md) |
 | Understand the TUI surface | [`consumers/tui.md`](./consumers/tui.md) |
 | See why we decided X | [`../ADR/README.md`](../ADR/README.md) |
 | Read the long arc | [`vision.md`](./vision.md) |

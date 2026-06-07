@@ -1,39 +1,37 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-06-03
+last-reviewed: 2026-06-06
 ---
 
 # Install
 
-**TL;DR.** Homebrew on macOS and Linux x86_64 is the one-liner. From source is
-a Nix dev shell plus one `cargo run` — that's the path if you're hacking on it
-or you're on a platform the bottle doesn't cover. There is no `cargo install
-phux` yet (only `phux-protocol` is published); the binary ships via brew and
-source for now.
+**TL;DR.** Homebrew on macOS and Linux x86_64 is the one-liner for the binary. Building from source — including any platform the bottle doesn't cover yet — uses the Nix dev shell, which QUICKSTART.md owns. There is no `cargo install phux` yet; only `phux-protocol` is published, and the binary ships via brew and source.
 
 ---
 
-## Homebrew (the easy one)
+## Homebrew
 
 macOS and Linux, x86_64:
 
 ```sh
 brew install phall1/phux/phux
-phux            # attached. that's it.
+phux            # auto-spawns a server and attaches
 ```
 
 `phux` with no arguments auto-spawns a server and attaches to it. Detach with
-`Ctrl-A d`; run `phux` again to come back.
+`Ctrl-A d`; run `phux` again to re-attach.
 
-Apple Silicon and Linux aarch64 build fine from source today; a bottle for them
-is on the list, not in the tap yet.
+Apple Silicon and Linux aarch64 build from source today; a bottle for them is
+tracked, not in the tap yet (see the matrix below).
 
 ## From source
 
-You need the toolchain phux is pinned to. The supported way to get it is the Nix
-dev shell, because it pins everything — including the Zig compiler libghostty's
-build wants — to versions known to work.
+Building from source uses the Nix dev shell, which pins the toolchain —
+including the Zig compiler libghostty's build needs — to known-good versions.
+The setup block (dev shell, off-Nix pins, `just ci`) lives in
+[`QUICKSTART.md`](./QUICKSTART.md); follow it there rather than duplicating it
+here. The short version:
 
 ```sh
 git clone https://github.com/phall1/phux
@@ -41,30 +39,6 @@ cd phux
 nix develop          # or `direnv allow` once, then it loads on cd
 cargo run --bin phux # auto-spawns a server and attaches
 ```
-
-That's a working phux. For the guided first session — splits, config,
-detach/reattach — see [`QUICKSTART.md`](./QUICKSTART.md).
-
-### Off Nix
-
-If you'd rather not use Nix, you're signing up to match the pins by hand. As of
-this writing:
-
-- Rust **1.90**
-- Zig **0.15** (`zig_0_15` — libghostty-vt's build invokes it)
-- `cargo-nextest`, `cargo-deny` on `PATH` if you want to run the gates
-
-The Nix flake (`flake.nix`) is the source of truth for exact versions; when in
-doubt, read it rather than this paragraph.
-
-### Verify the build
-
-```sh
-just check           # quick type-check across the workspace
-just ci              # the full bar: fmt-check + lint + test + deny + doc
-```
-
-`just ci` is what CI runs and what a PR has to pass. If it's green, you're good.
 
 ## Drive it from an agent
 
@@ -78,7 +52,7 @@ cargo run --bin phux-mcp     # JSON-RPC over stdio; wire it into your MCP client
 Tool catalog and JSON contracts: [`consumers/mcp.md`](./consumers/mcp.md). The
 plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agents.md).
 
-## Platform support, honestly
+## Platform support
 
 | Platform | Status |
 |---|---|
@@ -87,5 +61,3 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 | Linux x86_64 | Brew + source |
 | Linux aarch64 | Source: yes. Bottle: not yet. |
 | Windows | No. Not on the near roadmap. |
-
-phux is v0.1. The install story gets shorter from here, not longer.

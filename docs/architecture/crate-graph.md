@@ -1,16 +1,16 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-30
+last-reviewed: 2026-06-06
 ---
 
 # Crate dependency graph
 
-**TL;DR.** The crate edges that hold phux together and the two
-load-bearing boundaries: `phux-core` and `phux-protocol` never depend on
-each other, and `phux-protocol` re-exports libghostty atoms directly.
-Plus how each crate participates in the L1/L2/L3 wire layering from
-ADR-0015.
+**TL;DR.** The crate edges that hold phux together and the boundaries
+they enforce: `phux-core` and `phux-protocol` never depend on each other,
+`phux-protocol` re-exports libghostty atoms directly, and the ratatui
+chrome is fenced into `phux-client`. Plus how each crate participates in
+the L1/L2/L3 wire layering from ADR-0015.
 
 ---
 
@@ -35,7 +35,7 @@ ADR-0015.
                         └───────────────────┘      ADR-0013)
 ```
 
-Two boundaries are load-bearing:
+Three crate boundaries carry weight:
 
 1. **`phux-core` and `phux-protocol` do not depend on each other.** Core
    holds the in-process domain (slotmap keys with generational tags,
@@ -49,6 +49,14 @@ Two boundaries are load-bearing:
    libghostty's input and style atoms instead of mirroring them. The
    default-features-off shell exists so `crates.io`/`docs.rs` see a
    git-dep-free surface (libghostty-vt is a git-only dep today).
+3. **`phux-client` is split from `phux-client-core` so the ratatui
+   boundary is compiler-enforced** (ADR-0020, phux-0fv). The split and
+   the two-renderer rationale are owned by
+   [`render-layering.md`](./render-layering.md); for crate purposes,
+   `ratatui` lives only in `phux-client`, `phux-client-core` declares no
+   `ratatui` dependency, and `phux-client` re-exports
+   `phux_client_core::{layout, multi_pane, predict}` so consumers keep
+   stable `phux_client::…` paths.
 
 `server` and `client` both depend on `protocol`. Both also depend on
 `libghostty-vt` directly: the server's `Terminal` is the canonical
@@ -61,17 +69,6 @@ for the renderer-side contract on both ends.
 
 `phux-config` is a sibling of `core` and is consumed by the binary and
 the client.
-
-3. **`phux-client` is split from `phux-client-core` so the ratatui
-   boundary is compiler-enforced** (ADR-0020, phux-0fv). The chrome
-   toolkit (`ratatui`) lives only in `phux-client`; the pane-interior
-   substrate — layout math, multi-pane composition, predictive echo —
-   lives in `phux-client-core`, which declares no `ratatui` dependency.
-   A `use ratatui` in the substrate cannot resolve, so it fails to
-   compile. The attach loop stays in `phux-client` because it
-   composites chrome over panes and depends on both. `phux-client`
-   re-exports `phux_client_core::{layout, multi_pane, predict}` so
-   consumers keep stable `phux_client::…` paths.
 
 ## Browser client crates (standalone wasm workspace)
 
@@ -111,8 +108,8 @@ in tree:
 | Layer | Concept | Implemented in tree as | Status |
 |---|---|---|---|
 | **L1** | Terminal: PTY + libghostty `Terminal` + identity + I/O + snapshot + event stream | `PaneActor` in `phux-server::pane_actor`; wire `PaneId` and the `PANE_OUTPUT` / `PANE_SNAPSHOT` / `INPUT_*` / `BELL` / `OSC_EVENT` (currently spec-only) messages | shipped under pre-layering vocabulary; rename to `TerminalId` is ADR-0016 |
-| **L2** | Collection: named lifecycle bundle of Terminals | `phux-core::Session` plus the session/window registries on `ServerState`; the "session" CLI noun | partial — session lifecycle today bundles windows AND terminals; ADR-0015 splits Collection (bundle of terminals) from the TUI's "windows" presentation |
-| **L3** | Opaque metadata KV scoped to Terminal / Collection / global | not yet implemented — closest analog is the in-memory window/layout state on `ServerState` | spec-only |
+| **L2** | Reserved, unused — no collection tier | nothing on the wire | dissolved per [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md); grouping is L3 metadata + client logic, atomic teardown is the L1 `KILL_TERMINALS` op. `CollectionId` survives only as an opaque grouping key (removal tracked as future work). See [../spec/L2.md](../spec/L2.md). |
+| **L3** | Opaque metadata KV scoped to Terminal / group / global | not yet implemented — closest analog is the in-memory window/layout state on `ServerState` | spec-only |
 
 Cross-cuts:
 
@@ -120,16 +117,16 @@ Cross-cuts:
 - **Automation** — server-side rules subscribing to L1 events. Not yet implemented; an optional service when it lands.
 
 A consumer's tier set is declared at HELLO time. Today's `phux-client`
-is an L1+L2+L3-equivalent TUI consumer. A future `phux-client-sdk`
-will be L1-only; a future native GUI consumer will be L1+L3 with its
-own metadata schema. The reference TUI is **not** protocol-privileged
+is an L1+L3-equivalent TUI consumer. The `phux-client` SDK is L1-only;
+a future native GUI consumer will be L1+L3 with its own metadata
+schema. The reference TUI is **not** protocol-privileged
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)) — the wire
 carries nothing that exists for it alone.
 
 The cascades that align the in-tree implementation with this layering
 are queued, not landed: rename `PaneId` → `TerminalId` workspace-wide;
 split `phux-server` so L1 (terminal supervision) is mountable without
-the L2/L3 services; reify L3 as a real KV store; demote `LayoutNode`,
+the L3 service; reify L3 as a real KV store; demote `LayoutNode`,
 `WindowId`, `WINDOW_*`, `LAYOUT_CHANGED`, `FOCUS_CHANGED` from the
 wire into the TUI's L3 metadata conventions.
 

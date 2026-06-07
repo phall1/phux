@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-27
+last-reviewed: 2026-06-06
 ---
 
 # Module structure
@@ -125,13 +125,13 @@ The two-renderer split inside `phux-client/src/render/` is described in
 
 ## `phux-client-core`
 
-The ratatui-free pane-interior substrate (`layout`, `multi_pane`,
-`predict`), extracted from `phux-client` under phux-0fv. It declares no
-`ratatui` dependency, so the chrome boundary (ADR-0020) is enforced by
-the compiler rather than a grep guard. `phux-client` depends on it and
+The pane-interior substrate (`layout`, `multi_pane`, `predict`),
+extracted from `phux-client` under phux-0fv. Why the split exists and
+how the chrome boundary is enforced are owned by
+[`render-layering.md`](./render-layering.md); the crate edges are in
+[`crate-graph.md`](./crate-graph.md). `phux-client` depends on it and
 re-exports its modules so consumers keep `phux_client::{layout,
-multi_pane, predict}` paths. See [`crate-graph.md`](./crate-graph.md)
-and [`render-layering.md`](./render-layering.md).
+multi_pane, predict}` paths.
 
 ## `phux-config`
 

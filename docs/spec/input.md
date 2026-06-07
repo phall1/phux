@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-06
 ---
 
 # Input events
@@ -17,12 +17,11 @@ multiplexer to one server and many consumers (TUI, GUI, agent).
 
 ## 1. Overview
 
-This section is the second-most-important part of the protocol. Carrying
-input events as structured data — not raw VT bytes — is what allows
-phux to faithfully transport the kitty keyboard protocol, IME
-composition, modifier-rich chords, and pixel-precise mouse events
-end-to-end through the multiplexer. It is also what lets the protocol
-serve a future GUI client and a TUI client from the same wire format.
+This section specifies the L1 client-to-server input messages: their
+wire shape and the server-side encoding pipeline that turns each into
+PTY bytes. The same wire format serves a TUI, a GUI, and an agent
+consumer, because the structured representation is layout- and
+terminal-mode-agnostic until the server encodes it.
 
 Per ADR-0008, the input *atom* types (`KeyAction`, `PhysicalKey`,
 `ModSet`, `MouseAction`, `MouseButton`, `FocusEvent`) **are** libghostty-
@@ -240,8 +239,10 @@ This pipeline supports, end-to-end:
 - Modifier-rich combinations (Super, side-discriminated) for tiling-WM-
   style bindings, with correct passthrough.
 
-These are the things tmux structurally cannot do because it speaks raw
-VT between client and server.
+These follow from carrying input as structured events and encoding once
+on the server, against the target terminal's current modes — rather than
+encoding to VT bytes on the client, before the terminal's mode state is
+known.
 
 ---
 

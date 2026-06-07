@@ -1,44 +1,46 @@
 ---
-audience: consumers, contributors
+audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-05-31
+last-reviewed: 2026-06-06
 ---
 
-# Protocol 101: A Complete Session Walkthrough
+# Protocol 101: a complete session walkthrough
 
-**TL;DR.** A walkthrough of one complete phux session from HELLO to detach: what happens, what the wire looks like, and why it matters. Read this before diving into the reference specs (proto.md, L1.md, etc).
+**TL;DR.** One phux session traced end to end, from HELLO to detach: what each step does, the wire frames it sends, and why the design lands where it does. Read it before the reference specs; it is the narrative spine the per-tier docs assume you have already seen. Wire bodies here are illustrative shapes, not byte layouts; the normative encoding lives in the specs each step links.
 
 ---
 
 ## The big picture
 
-A phux session: client connects to a server, negotiates capabilities, attaches to a terminal (or creates one), receives a stream of VT bytes as the PTY emits them, sends keypresses and mouse events back, eventually detaches. The entire wire flow is **asymmetric**: server sends bytes, client sends structured events.
+A phux session, in one breath: a client connects to a server, negotiates capabilities, attaches to a terminal (or creates one), receives a stream of VT bytes as the PTY emits them, sends keypresses and mouse events back, and eventually detaches. The flow is asymmetric on purpose. The server sends opaque terminal **bytes**; the client sends **structured** input events. Both ends run the same terminal engine (libghostty), so neither side re-encodes terminal state into a second model — the bytes go straight onto the wire and are parsed once on each end.
+
+Protocol version for this walkthrough is `0.3.0`.
 
 ---
 
 ## Step 1: HELLO negotiation
 
-**What happens:** The client connects over a Unix socket (or SSH stdin/stdout) and declares its name and capabilities.
+**What happens:** the client connects over a Unix socket (or SSH stdin/stdout), declares the versions it speaks, and advertises its capabilities.
 
 ```
 Client sends (frame type 0x01):
   HELLO {
-    versions: [{ min: 0.1.0, max: 0.1.0 }],
+    versions: [{ min: 0.3.0, max: 0.3.0 }],
     client_caps: {
       layers: 0x01,              // L1 only
       color: TrueColor,
       kbd_protocols: 0x03,       // kitty + modifyOtherKeys
       mouse_protocols: 0x01,     // standard mouse
       hyperlinks: true,
-      rendering: VtReplay,
+      output_mode: Raw,          // byte-faithful PTY broadcast
     }
   }
 
 Server replies (frame type 0x80):
   HELLO_OK {
-    version: 0.1.0,
+    version: 0.3.0,
     server_caps: {
-      layers: 0x07,              // L1 + L2 + L3
+      layers: 0x05,              // L1 + L3 implemented (no L2 tier)
       features: 0x01,            // REATTACH_REPLAY enabled
       max_message_size: 16777216,
     },
@@ -46,71 +48,78 @@ Server replies (frame type 0x80):
   }
 ```
 
-**Wire shape:** See [proto.md §6.1](./proto.md). Key pieces:
-- Client's `versions` lists semantic version ranges. Server picks the highest match.
-- `layers` is a bitset: `0x01` = L1 only, `0x07` = all three. An agent SDK declares L1; a TUI declares L1+L2+L3.
-- Client caps (color, keyboard, mouse) tell the server how to downregulate the output byte stream. Example: if client says `Indexed256`, the server rewrites truecolor SGR codes to 256-color equivalents.
+**Wire shape:** see [proto.md §6.1](./proto.md). Key pieces:
 
-**Why it matters:** Negotiation happens once and defines the entire conversation's contract — version, capabilities, which message tiers will be used.
+- `versions` lists the semantic version ranges the client accepts; the server selects the highest version that lies in some range and that it also supports, then echoes it back.
+- `layers` is a bitset: `0x01` is L1 only, `0x05` is L1+L3. The negotiated tier set is the intersection of the two `layers` fields; an agent declares L1, a TUI declares L1+L3. The L2 bit (`0x02`) is reserved but unused — there is no collection tier (see [L2.md](./L2.md)).
+- The capability fields (color, keyboard, mouse, hyperlinks) tell the server how to downsample the outbound byte stream. If the client advertises `Indexed256`, the server rewrites truecolor SGR codes to their 256-color equivalents before forwarding.
+
+`HELLO.client_caps` carries a legacy `rendering` field (`Diff` vs. `VtReplay`); it is deprecated and ignored. With `TERMINAL_OUTPUT` carrying VT bytes, every client renders by local libghostty parse, so there is no structured-diff alternative to select. See [proto.md §6.2](./proto.md).
+
+**Why it matters:** negotiation happens once and fixes the contract for the whole connection — version, capabilities, and which tiers the two sides will use.
 
 ---
 
 ## Step 2: Attach to a terminal
 
-**What happens:** After HELLO, the client chooses a terminal to watch. It can attach to an existing terminal or create one.
+**What happens:** after HELLO, the client picks a terminal to watch. It can attach to an existing terminal or create one, and it declares the role it wants on that terminal.
 
 ```
 Client sends (frame type 0x02):
   ATTACH {
-    target: CreateIfMissing {
-      collection: CollectionId(1),
-      command: None,             // use server's default shell
-      cwd: None,                 // use server's default cwd
-      env: None,                 // inherit server's environment
-    }
+    target: CREATE_IF_MISSING {
+      name: "scratch",           // L3 name key, resolved client-side
+      command: None,             // use the server's default shell
+      cwd: None,                 // use the server's default cwd
+    },
+    viewport: { cols: 120, rows: 40 },
+    request_scrollback: false,
+    scrollback_limit_lines: 0,
+    role_policy: {
+      requested_role: PRIMARY,
+      takeover: NEVER,
+    },
   }
 
 Server replies (frame type 0x81):
   ATTACHED {
-    terminal_id: TerminalId::LOCAL(42),
-    grid_size: { cols: 120, rows: 40 },
+    snapshot: SubstrateSnapshot { terminals: [...], collections: [], metadata_keys: [] },
+    initial_client_id: ClientId(7),
   }
 ```
 
-**Wire shape:** [L1.md §state replay](./L1.md) defines ATTACH. The `target` is a tagged union:
-- `AttachExisting { terminal_id: TerminalId }` — attach to a running terminal
-- `CreateIfMissing { ... }` — create a new terminal if it doesn't exist, or attach to an existing one
+**Wire shape:** [L1.md §state replay](./L1.md) defines `ATTACH`, its `AttachTarget` union, and `RolePolicy`. The target is a tagged union — `BY_TERMINAL_ID` to attach to one running terminal, `CREATE_IF_MISSING` to spawn one if absent, and others. `viewport` carries the client's drawable size so the server can size the terminal; `role_policy` chooses `PRIMARY` (input-capable) or `VIEWER` (watch-only). `ATTACHED` is metadata only: it carries a `SubstrateSnapshot` of the tier-visible state and the client's `initial_client_id`. It carries no terminal content yet — that arrives next.
 
-The server replies with the terminal's dimensions so the client knows the initial grid size.
-
-**Why it matters:** This is where the client says "I want to see and control this terminal." The server allocates a subscription and starts streaming output.
+**Why it matters:** this is where the client says "I want to see and control this terminal," and which role it claims. The server then allocates a subscription and begins the replay sequence.
 
 ---
 
 ## Step 3: Receive initial state (snapshot)
 
-**What happens:** Immediately after `ATTACHED`, the server sends the current grid state — the scrollback and viewport. This is the bootstrap payload.
+**What happens:** for each terminal the client attached to, the server sends a self-contained snapshot of the current grid. This is the bootstrap payload that brings the client's local engine up to date.
 
 ```
 Server sends (frame type 0x91):
   TERMINAL_SNAPSHOT {
     terminal_id: TerminalId::LOCAL(42),
-    seq: 1,
-    scrollback: bytes,           // all prior lines as VT bytes
-    viewport: bytes,             // current grid as VT bytes
-    cursor: { row: 10, col: 5 },
+    cols: 120,
+    rows: 40,
+    vt_replay_bytes: bytes,        // synthesized VT that reproduces the grid
+    scrollback_bytes: None,        // present iff request_scrollback was true
   }
 ```
 
-**Wire shape:** [L1.md §snapshot](./L1.md) describes the full shape. The `seq` field is crucial: a monotonic counter per-terminal. Every `TERMINAL_OUTPUT` increments it. The client acknowledges receipt by seq number, so the server knows what state the client has seen.
+**Wire shape:** [L1.md §2.4](./L1.md) describes the full shape. `vt_replay_bytes` is a Mosh-style, self-contained VT byte sequence the server synthesizes from its canonical terminal: written to a fresh `libghostty_vt::Terminal` of the declared `cols × rows`, it reproduces the server's grid at snapshot time. The bytes are opaque — the client feeds them to its engine and does not parse or rewrite them. `scrollback_bytes` is present only when the client set `request_scrollback`, bounded by `scrollback_limit_lines`, and is applied before `vt_replay_bytes`.
 
-**Why it matters:** The snapshot gets the client's local libghostty Terminal up to speed. After this frame, the client's grid matches the server's canonical state.
+Cursor position and terminal modes are not separate wire fields. They live inside each end's `libghostty_vt::Terminal`; a client that needs the cursor or modes queries its local engine ([L1.md §2.5](./L1.md)).
+
+**Why it matters:** after applying the snapshot, the client's local engine grid matches the server's canonical grid. From here the live byte stream continues.
 
 ---
 
 ## Step 4: Stream terminal output
 
-**What happens:** Every time the PTY produces bytes, the server collects them (paced at a configurable refresh rate, default 60 Hz) and sends them to the client.
+**What happens:** every time the PTY produces bytes, the server collects them (paced at a configurable refresh rate, default 60 Hz) and forwards them.
 
 ```
 User types "ls" and presses Enter.
@@ -119,7 +128,7 @@ Server sends (frame type 0x90):
   TERMINAL_OUTPUT {
     terminal_id: TerminalId::LOCAL(42),
     seq: 2,
-    bytes: b"ls\r\n"   // raw bytes from the keyboard, echoed by PTY
+    bytes: b"ls\r\n"               // keyboard bytes, echoed by the PTY
   }
 
 A moment later, the shell replies:
@@ -128,28 +137,28 @@ Server sends (frame type 0x90):
   TERMINAL_OUTPUT {
     terminal_id: TerminalId::LOCAL(42),
     seq: 3,
-    bytes: b"Documents\r\nDownloads\r\n..." // directory listing
+    bytes: b"Documents\r\nDownloads\r\n..."
   }
 
-Client parses these VT bytes into its local libghostty Terminal,
+The client parses these VT bytes into its local libghostty Terminal,
 renders to screen, then acknowledges:
 
 Client sends (frame type 0x21):
   FRAME_ACK {
     terminal_id: TerminalId::LOCAL(42),
-    seq: 3   // "I've applied all output up to seq 3"
+    seq: 3   // "I have applied all output up to seq 3"
   }
 ```
 
-**Wire shape:** [L1.md §frame model](./L1.md) and [proto.md §8.2](./proto.md). The bytes are raw VT — no re-encoding, no structuring. The server forwards them directly from the PTY. The monotonic `seq` allows the server to implement flow control: if a client falls behind, the server can pause and avoid memory explosion.
+**Wire shape:** [L1.md §2](./L1.md) and [proto.md §8](./proto.md). The bytes are raw VT — no re-encoding, no structuring; the server forwards what the PTY emitted. The per-terminal `seq` is monotonic and drives flow control: a client that falls behind lets the server pace itself instead of buffering without bound. Note that `seq` does not carry across a snapshot boundary; the first `TERMINAL_OUTPUT` after a `TERMINAL_SNAPSHOT` is authoritative for the new base ([L1.md §7](./L1.md)).
 
-**Why it matters:** This is the hot path. The asymmetric design (VT bytes server→client, structured events client→server) means the server sends exactly what the PTY emitted, preserving every terminal feature.
+**Why it matters:** this is the hot path. Sending exactly the bytes the PTY emitted preserves every terminal feature without the server modeling any of them.
 
 ---
 
 ## Step 5: Handle client input
 
-**What happens:** The client sends a keystroke. The server reads it as a structured event, converts it back to VT bytes, and writes to the PTY.
+**What happens:** the client sends a keystroke as a structured event. The server hands it to its libghostty encoder, which produces terminal-mode-aware VT bytes, and writes them to the PTY.
 
 ```
 User presses Ctrl+C.
@@ -158,49 +167,47 @@ Client sends (frame type 0x10):
   INPUT_KEY {
     terminal_id: TerminalId::LOCAL(42),
     event: {
-      action: Press,
-      key: KeyC,
+      action: PRESS,
+      key: KEY_C,
       mods: { ctrl: true },
-      text: Some("\x03"),        // Ctrl+C = U+0003
+      text: None,                  // C0 controls are derived by the encoder
     }
   }
 
-Server receives, looks up TerminalId(42), and writes the VT bytes
-to its PTY encoder. The PTY process receives SIGINT or the byte,
-depending on the terminal mode.
+The server looks up TerminalId(42), refreshes its key encoder against
+that terminal's current modes, encodes, and writes the bytes to the PTY.
+The process receives SIGINT or the byte, depending on terminal mode.
 
-A moment later, the process exits and the shell prompt returns:
+A moment later, the process exits and the prompt returns:
 
 Server sends (frame type 0x90):
   TERMINAL_OUTPUT {
     terminal_id: TerminalId::LOCAL(42),
     seq: 4,
-    bytes: b"^C\r\n$ "  // shell echoed the interrupt and returned prompt
+    bytes: b"^C\r\n$ "
   }
 ```
 
-**Wire shape:** [input.md](./input.md) defines the input family: `INPUT_KEY`, `INPUT_MOUSE`, `INPUT_PASTE`, `INPUT_FOCUS`, `INPUT_RAW`. Each carries a `terminal_id` and a structured event. The server's libghostty-backed encoder converts the event to terminal-mode-aware VT bytes and writes to the PTY.
+**Wire shape:** [input.md](./input.md) defines the input family — `INPUT_KEY`, `INPUT_MOUSE`, `INPUT_PASTE`, `INPUT_FOCUS`, `INPUT_RAW`. Each carries a `terminal_id` and a structured event. The server's libghostty-backed encoder converts the event to mode-aware VT bytes and writes to the PTY; encoder configuration never crosses the wire. Sending input as structured data (rather than VT bytes) is what lets phux transport modifier-rich chords, the kitty keyboard protocol, IME composition, and pixel-precise mouse events end to end.
 
-**Why it matters:** Structured input means the server faithfully transports modifier-rich key combinations, pixel-precise mouse events, IME composition, and Kitty keyboard protocol end-to-end. No ambiguity, no loss.
+**Why it matters:** the seam is the protocol. The client never produces VT bytes; the server never sees encoder options. Each side owns one half.
 
 ---
 
-## Step 6: Other notable events
+## Step 6: Other terminal-originated events
 
-**What happens:** The running process may emit terminal control sequences that the server parses and surfaces as structured events.
+**What happens:** the running process may emit control sequences that the server's engine parses and the server surfaces as structured events, rather than re-emitting raw escapes.
 
 ```
 Process sets the window title via OSC 0:
 
-Server parses the OSC sequence and sends (frame type 0xB1):
+Server sends (frame type 0xB1):
   TERMINAL_EVENT {
     terminal_id: TerminalId::LOCAL(42),
-    event: {
-      TITLE { title: "my-project — vim" }
-    }
+    event: TITLE { title: "my-project — vim" }
   }
 
-Process rings the bell (BEL character):
+Process rings the bell (BEL):
 
 Server sends (frame type 0xB0):
   BELL {
@@ -212,21 +219,19 @@ Process reports its working directory via OSC 7:
 Server sends (frame type 0xB1):
   TERMINAL_EVENT {
     terminal_id: TerminalId::LOCAL(42),
-    event: {
-      CURRENT_DIR { uri: "file:///Users/alice/workspace" }
-    }
+    event: CURRENT_DIR { uri: "file:///Users/alice/workspace" }
   }
 ```
 
-**Wire shape:** [L1.md §1.2–1.3](./L1.md) define BELL and TERMINAL_EVENT. These are parsed once on the server (via libghostty) and never re-emitted as raw escape sequences to the client; the client gets structured data. This is load-bearing for agents and control planes — they can read "the current directory" without parsing escape sequences themselves.
+**Wire shape:** [L1.md §1.2–1.3](./L1.md) define `BELL` and `TERMINAL_EVENT`. The server's engine parses the OSC sequence once and forwards a structured field, so a consumer reads "the current directory" without parsing escape sequences itself. These frames are `spec-only` today; the live byte stream already carries the same OSC sequences inside `TERMINAL_OUTPUT`, so a consumer can also read title and cwd from its own engine.
 
-**Why it matters:** Structured terminal events decouple clients from OSC parsing. An agent sees the title and cwd as fields, not as bytes to parse.
+**Why it matters:** structured terminal events decouple a consumer from OSC parsing. An agent sees title and cwd as fields.
 
 ---
 
 ## Step 7: Detach
 
-**What happens:** The user quits or switches clients. The client sends DETACH; the server acknowledges and closes.
+**What happens:** the user quits or switches clients. The client sends `DETACH`; the server acknowledges and closes the transport.
 
 ```
 Client sends (frame type 0x03):
@@ -238,20 +243,20 @@ Server replies (frame type 0x82):
     message: "detach acknowledged"
   }
 
-Server closes the transport (TCP, UDS, or SSH pipe).
+The server closes the transport (UDS or SSH pipe).
 The terminal keeps running on the server.
-Other clients can attach to the same terminal later.
+Another client can attach to it later.
 ```
 
-**Wire shape:** [proto.md §7.2](./proto.md). The `reason` is an enum: `REQUESTED` (clean client detach), `SERVER_SHUTDOWN`, `SESSION_KILLED`, `REPLACED` (another client took exclusive attach), `PROTOCOL_ERROR`, `INTERNAL_ERROR`.
+**Wire shape:** [proto.md §7.2](./proto.md). `reason` is an enum: `REQUESTED` (clean client detach), `SERVER_SHUTDOWN`, `SESSION_KILLED` (a legacy name retained for wire compat), `REPLACED` (another client deliberately took over an exclusive attach), `PROTOCOL_ERROR`, and `INTERNAL_ERROR`.
 
-**Why it matters:** Detach is clean. The server does not kill the terminal; it just stops sending output to this client. The next client that attaches will receive the scrollback and pick up where the previous one left off.
+**Why it matters:** detach is clean and does not kill the terminal; the server just stops sending it output. The next client to attach receives the snapshot — and scrollback up to the configured limit if it asks — and picks up where the previous one left off. This is the property tmux does not provide: scrollback survives detach.
 
 ---
 
 ## Putting it together
 
-Complete sequence as a timeline:
+The complete sequence as a timeline:
 
 ```
 Client                              Server                    Terminal (PTY)
@@ -261,8 +266,7 @@ Client                              Server                    Terminal (PTY)
   |                                   |                           |
   |------- ATTACH ------>             |                           |
   |                   <------ ATTACHED |                           |
-  |                                   |                           |
-  |              <----- TERMINAL_SNAPSHOT (scrollback + viewport) |
+  |              <----- TERMINAL_SNAPSHOT (vt_replay_bytes)       |
   |                                   |                           |
   |              <----- TERMINAL_OUTPUT (seq 2) -------- shell prompt
   |                                   |                           |
@@ -289,14 +293,17 @@ After detach, the terminal keeps running. Its PTY is still open. Another client 
 
 This walkthrough covers the happy path. For details:
 
-- **Version negotiation details:** [proto.md §6](./proto.md)
-- **Full frame types and encoding:** [proto.md §7](./proto.md)
+- **Version negotiation and capabilities:** [proto.md §6](./proto.md)
+- **Full frame catalog and encoding:** [proto.md §7](./proto.md)
 - **Terminal state, snapshots, and flow control:** [L1.md](./L1.md)
 - **All input event types:** [input.md](./input.md)
-- **Collections (L2) and metadata (L3):** [L2.md](./L2.md), [L3.md](./L3.md)
+- **Metadata, session names, and grouping conventions:** [L3.md](./L3.md)
 - **Encoding primitives (varints, strings, tagged unions):** [appendix-encoding.md](./appendix-encoding.md)
 
-For the conceptual big picture, read [CONCEPTS.md](../CONCEPTS.md) and the ADRs that shape the design:
+For the conceptual picture, read [CONCEPTS.md](../CONCEPTS.md) and the ADRs that shape the design:
+
 - [ADR-0013: libghostty bytes on the wire](../../ADR/0013-libghostty-bytes-on-wire.md)
-- [ADR-0015: protocol layering](../../ADR/0015-protocol-layering.md)
 - [ADR-0016: terminal ID as wire primary](../../ADR/0016-terminal-id-as-wire-primary.md)
+- [ADR-0030: engine-delegated wire and projection consumers](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
+</content>
+</invoke>

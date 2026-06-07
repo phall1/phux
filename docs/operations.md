@@ -1,12 +1,12 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-05-28
+last-reviewed: 2026-06-06
 ---
 
 # Operations
 
-**TL;DR.** How phux behaves at the seams: error typing inside the workspace and translation at the IPC boundary; available logs and runtime introspection; where the trust boundary sits. Each section focuses on a single seam.
+**TL;DR.** How phux behaves at the seams: error typing inside the workspace and translation at the IPC boundary; the logging and introspection surface an operator drives at runtime; and where the trust boundary sits and what it does and does not cover. Each section is one seam.
 
 ---
 
@@ -31,6 +31,8 @@ pub enum ServerError {
 Errors crossing the IPC boundary translate to `ERROR` messages (see [`spec/proto.md`](./spec/proto.md)) with a `code: ErrorCode` and `message: str`. The server's IPC layer maps internal Rust errors to wire `ErrorCode`.
 
 ## Logging and observability
+
+Logs are both an operator surface and a leak surface; [ADR-0028](../ADR/0028-runtime-log-control.md) owns that decision and its slicing, and this section is the home for the facts.
 
 `tracing` is the structured logging substrate, bootstrapped in `phux_server::telemetry`. Two entry points share one layer builder:
 
@@ -61,9 +63,7 @@ Panics are durable on both sides. The **client** panic hook logs the panic messa
 
 ### Reading a trace to localize lag
 
-The hot paths carry `tracing` spans whose `CLOSE` event reports the span's duration (`time.busy`/`time.idle`). A captured session shows where time went before a stall. Per-frame / per-tick spans are at **debug** so the default `phux=info` filter leaves them disabled and effectively free; turn them up only while diagnosing.
-
-Capture a session:
+The hot paths carry `tracing` spans whose `CLOSE` event reports the span's duration (`time.busy`/`time.idle`), so a captured session shows where time went before a stall. The per-frame and per-tick spans are at **debug**, so the default `phux=info` filter leaves them off and effectively free; raise the level only while diagnosing.
 
 ```sh
 PHUX_LOG=/tmp/phux.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug phux ...
@@ -72,25 +72,9 @@ PHUX_LOG=/tmp/phux.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug \
   cargo run -p phux-server --example e2e-repro
 ```
 
-Spans to grep for (use `jq -c 'select(.fields.message=="close")'` to narrow to timed events):
+Two spans carry most of the signal. On the server, `synthesize_against_reference` (fields `changed_row_count`, `out_bytes`) is the per-tick CPU cost of diffing engine state for one consumer. On the client, `handle_server_frame` (grep `kind=terminal_output`) is the per-frame apply-and-paint cost; its children `vt_apply` (libghostty parse) and `paint_trigger` (render) let you attribute a client stall to parse versus paint by comparing their `time.busy`. Narrow a JSON capture to timed events with `jq -c 'select(.fields.message=="close")'`. Finer per-PTY-chunk and per-frame-emit detail is at **trace**; a wedged or leaked consumer shows as `consumer mailbox full` / `consumer mailbox closed` at debug.
 
-| Span (`span.name`) | Side | Level | Key fields | Localizes |
-|---|---|---|---|---|
-| `tick_emit` | server | debug | `consumer_count`, `dirty`, `emitted`, `total_out_bytes` | per-tick fan-out cost + volume shipped |
-| `synthesize` | server | debug | `client_id`, `wire_terminal_id` | per-consumer diff (parent of row walk) |
-| `synthesize_against_reference` | server | debug | `changed_row_count`, `out_bytes` | per-tick CPU sink — **the** server lag signal |
-| `handle_attach` | server | info | `client_id`, `target`, `cols`, `rows` | attach-handshake latency |
-| `handle_command` | server | info | `client_id`, `request_id`, `kind` | control-command latency |
-| `handle_server_frame` | client | debug | `kind`, `terminal_id`, `seq`, `bytes` | per-frame client apply+paint cost — **the** client lag signal (grep `kind=terminal_output`) |
-| `vt_apply` | client | debug | `bytes` | child of `handle_server_frame`: the libghostty VT parse alone (feeding bytes into the pane mirror) |
-| `paint_trigger` | client | debug | `rows` | child of `handle_server_frame`: the render alone (pane `render_at` + bar). Compare its `time.busy` against `vt_apply`'s to attribute client lag to parse vs paint |
-| `attach_handshake` | client | info | `target` | client-side end-to-end attach latency |
-
-Per-PTY-chunk volume (`vt_write`) and per-frame emit detail are at **trace** (`RUST_LOG=phux=trace`) — useful for "what was the PTY doing right before the stall," off by default. A wedged or leaked consumer shows as `consumer mailbox full` / `consumer mailbox closed` at debug.
-
-Example close line (server, full-screen repaint): `synthesize_against_reference` span with `time.busy:586µs`, `changed_row_count:39`, `out_bytes:4359`, nested under `synthesize{client_id, wire_terminal_id}` and `tick_emit{consumer_count, dirty}` — i.e. "this tick painted 39 changed rows / 4359 bytes for that consumer in 586µs."
-
-Runtime introspection ships as `phux server status --json`: number of sessions / windows / terminals / clients, per-terminal refresh rate, per-client queue depth, total bytes since start. This is the substrate for any future Prometheus/OpenTelemetry exporter — phux does not ship one.
+Runtime introspection ships as `phux server status --json`: number of sessions / windows / terminals / clients, per-terminal refresh rate, per-client queue depth, total bytes since start. This is the substrate for any future Prometheus/OpenTelemetry exporter — phux does not ship one. Runtime per-target log-level control and a `phux logs` discovery/tail verb are designed but not built ([ADR-0028](../ADR/0028-runtime-log-control.md) Slice 2); today the dials are the `RUST_LOG` / `PHUX_LOG` / `PHUX_LOG_FORMAT` environment knobs above, set at process start.
 
 ## Security model and trust boundaries
 

@@ -1,42 +1,38 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-05-29
+last-reviewed: 2026-06-06
 ---
 
 # The phux MCP adapter
 
-**TL;DR.** The agent-facing consumer surface: `phux-mcp` exposes six
-tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`, `phux_new`) over JSON-RPC stdio, with their JSON input schemas, the
-shared CLI selector grammar, the tri-state scrollback / per-cell
-snapshot semantics, and the `tools/call` envelope. It is a thin adapter
-over the same structured surface the CLI uses, with no protocol
-privilege.
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the six
+JSON-RPC stdio tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`,
+`phux_run`, `phux_wait`, `phux_new`), the stdio transport and lifecycle,
+how a tool resolves a target client-side, and the `tools/call` envelope.
+The structured shapes the tools return and the selector grammar are the
+shared agent surface and live in their owning docs; this file links them.
 
 ---
 
 ## 0. What this is, what this isn't
 
-This document is the **agent-facing consumer's surface**, parallel to the
-[TUI's product surface](./tui.md). Every consumer projects the one
-source-of-truth libghostty `Terminal`
-([ADR-0022](../../ADR/0022-tool-for-agents.md)); the TUI projects it to
-VT bytes (it renders, like tmux), while agents project it to
-**structured data** — cells, OSC-133 marks, command results.
-
-`phux-mcp` is "MCP as a thin adapter": it has no separate core. Each tool
-is a thin wrapper over the same structured agent surface the CLI's `phux
-snapshot` / `send-keys` / `run` / `wait` subcommands use, plus a direct
-`GET_STATE` control command. Like every consumer, it holds no
+This is the MCP adapter only. `phux-mcp` has no separate core: each tool
+is a thin wrapper over the same `phux-client` functions the agent CLI
+verbs use ([`agents.md`](./agents.md)). Like every consumer it holds no
 protocol-level privilege
-([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)).
+([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); the
+structured agent surface is a local projection over the shared engine,
+exposed through the CLI and its versioned JSON schema, not a wire service
+([ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)).
 
-The selector grammar and the CLI equivalents are owned by
-[`tui.md`](./tui.md) §3 — this file links there rather than restating the
-table (the doc system's "one fact, one home" rule). The normative wire
-lives under [`../spec/`](../spec/); the decision rationale is in
-[ADR-0022](../../ADR/0022-tool-for-agents.md).
+Two things this file does not restate, by the "one fact, one home" rule:
+
+- The structured return shapes — `ScreenState`, `RunResult`,
+  `SessionListJson` — are owned by [`agents.md`](./agents.md) §3. Each
+  tool below names the shape and links there.
+- The selector grammar is owned by [`tui.md`](./tui.md) §3. §2 below
+  links it.
 
 ---
 
@@ -46,8 +42,8 @@ lives under [`../spec/`](../spec/); the decision rationale is in
 newline-delimited JSON, one message per line on stdin and stdout. The
 JSON-RPC is hand-rolled over `serde_json` — no framework dependency.
 
-The MCP protocol version is pinned to the `2024-11-05` revision. Newer MCP
-revisions are additive; the pin will be bumped when the adapter adopts
+The MCP protocol version is pinned to the `2024-11-05` revision. Newer
+MCP revisions are additive; the pin is bumped when the adapter adopts
 one.
 
 The methods:
@@ -60,27 +56,27 @@ The methods:
 | `tools/call` | dispatch by tool name (see §3, §4) |
 | `ping` | an empty result (keepalive) |
 
-Robustness: a malformed line yields a JSON-RPC parse error with a null id;
-an unknown method on a request yields a method-not-found error (an unknown
-notification, having no id, is silently ignored). Neither stops the loop,
-which runs until stdin EOF.
+Robustness: a malformed line yields a JSON-RPC parse error with a null
+id; an unknown method on a request yields a method-not-found error (an
+unknown notification, having no id, is silently ignored). Neither stops
+the loop, which runs until stdin EOF.
 
 ---
 
 ## 2. How a tool resolves a target
 
 Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`) takes a `target` selector string in the **same grammar as the
-CLI's `TARGET`**. The full grammar table and CLI examples live in
-[`tui.md`](./tui.md) §3; the forms, in one line, are: `.` (current), `=`
+`phux_wait`) takes a `target` selector string in the **same grammar as
+the CLI's `TARGET`**, whose table and examples live in
+[`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
 (last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
 (pane), and `@N` (opaque id).
 
 Resolution is **client-side**, exactly as the CLI resolves it
-([ADR-0021](../../ADR/0021-control-plane-commands.md)): the adapter fetches
-a `GET_STATE` snapshot, expands the selector to candidate `TerminalId`s,
-then narrows to a single pane — the focused pane if it is among the
-candidates, else the first in snapshot order. This is the same
+([ADR-0021](../../ADR/0021-control-plane-commands.md)): the adapter
+fetches a state snapshot, expands the selector to candidate
+`TerminalId`s, then narrows to a single pane — the focused pane if it is
+among the candidates, else the first in snapshot order. This is the same
 `pick_target_pane` tiebreak the CLI uses. The server never parses a
 selector.
 
@@ -90,12 +86,12 @@ selector.
   it defaults to the focused/last session (`Selector::Last`).
 - `phux_send_keys` and `phux_run` **require** `target`.
 
-Every tool also takes an optional `socket` string naming the Unix-domain
-socket to connect to. Precedence: an explicit `socket` argument, then the
-`PHUX_SOCKET` environment variable, then the daemon default
-(`$XDG_RUNTIME_DIR/phux/phux.sock`, falling back to
-`/tmp/phux-$UID/phux.sock` — the segment is `$UID`, then `$USER`, then the
-literal `default`).
+Every tool also takes an optional `socket` string naming the
+Unix-domain socket to connect to. Precedence: an explicit `socket`
+argument, then the `PHUX_SOCKET` environment variable, then the daemon
+default (`$XDG_RUNTIME_DIR/phux/phux.sock`, falling back to
+`/tmp/phux-$UID/phux.sock` — the segment is `$UID`, then `$USER`, then
+the literal `default`).
 
 ---
 
@@ -103,18 +99,24 @@ literal `default`).
 
 Six tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
-`phux_ls`) work with no `arguments` at all.
+`phux_ls`) work with no `arguments` at all. The return shapes are the
+shared agent shapes owned by [`agents.md`](./agents.md) §3; each tool
+names its shape and links there.
 
 ### 3.1 `phux_ls`
 
-Lists phux sessions on the running server via `GET_STATE`. No target.
+Lists phux sessions on the running server. No target.
 
 | Param | Type | Required | Meaning |
 |---|---|---|---|
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Result: `{ "sessions": [ { "name", "window_count", "attached_client_count" } ] }`,
-sorted by name.
+sorted by name. The MCP tool surfaces the **raw wire fields**
+(`window_count` / `attached_client_count`); the CLI's `ls --json`
+projects them to `windows` / `attached`. The two surfaces do not share
+identical keys ([`agents.md`](./agents.md) §3.1) — do not carry a parser
+across them.
 
 ### 3.2 `phux_snapshot`
 
@@ -128,19 +130,14 @@ attach or resize.
 | `cells` | boolean | no | When true, include per-cell OSC-133 marks and styles. Default `false`. |
 | `socket` | string | no | Override the UDS path (see §2). |
 
-`scrollback` is **tri-state**, and the distinction is load-bearing:
+`scrollback` is **tri-state**: **absent** captures the viewport only;
+**`0`** captures all retained history; **`N`** captures the most-recent
+`N` rows.
 
-- **absent** — the viewport only.
-- **`0`** — all retained history.
-- **`N`** — the most-recent `N` rows.
-
-Result: a serialized `phux-core` `ScreenState` (the same struct `phux
-snapshot` emits — not a bespoke MCP shape). Its fields are
-`schema_version` (the contract version), `pane` (the captured pane's
-wire-local id), `cols`, `rows`, `cursor` (optional `{ x, y, visible }`),
-`lines` (the viewport rows), `scrollback` (history rows; empty unless
-requested), and `cells` (an optional sparse array of per-cell
-`{ col, row, semantic?, style }`, present only when `cells` is true).
+Result: a serialized `ScreenState` — the same struct `phux snapshot`
+emits, with `cells` populated only when `cells` is true. The field
+catalog (schema version, `cursor`, `lines`, `scrollback`, the sparse
+`cells` array) is owned by [`agents.md`](./agents.md) §3.2.
 
 ### 3.3 `phux_send_keys`
 
@@ -155,10 +152,10 @@ Routes input to the resolved pane by id. No attach, no resize.
 Each entry in `keys` is a named key (`Enter`, `Tab`, `C-c`, ...) or a
 literal string, tmux-style.
 
-Result: `{ "sent": true, "pane": "<pane>" }`. Note that `pane` is rendered
-via the `TerminalId` `Debug` formatting, not a stable numeric id —
-`TerminalId` has no `Serialize` impl yet (tracked under phux-93b), so do
-not parse it as a number.
+Result: `{ "sent": true, "pane": "<pane>" }`. `pane` is rendered via the
+`TerminalId` `Debug` formatting, not a stable numeric id — `TerminalId`
+has no `Serialize` impl yet (tracked under phux-93b), so do not parse it
+as a number.
 
 ### 3.4 `phux_run`
 
@@ -172,13 +169,18 @@ POSIX shell.
 | `timeout_secs` | number | no | Default `600`; `0` waits indefinitely. |
 | `socket` | string | no | Override the UDS path (see §2). |
 
-Result on completion: a serialized `phux-client` `RunResult`
-(`{ command, exit_code, output, duration_ms, truncated }`). `truncated`
-is `true` when the command's `BEGIN` marker had scrolled out of the
-viewport, so `output` is best-effort visible context rather than a clean
-capture; a full capture needs scrollback (phux-o1v).
+Result on completion: a serialized `RunResult`
+(`{ command, exit_code, output, duration_ms, truncated }`), shape owned
+by [`agents.md`](./agents.md) §3.3.
 
-Result on timeout: `{ "outcome": "timed_out", "command", "duration_ms" }`.
+**MCP-vs-CLI divergence — the timeout shape.** On timeout the MCP tool
+returns a JSON body: `{ "outcome": "timed_out", "command", "duration_ms" }`.
+The CLI's `run --json` does **not**: it emits no JSON on timeout and
+signals the timeout through exit code `125`
+([`agents.md`](./agents.md) §3.3). An agent driving MCP reads the
+`outcome` body; an agent driving the CLI reads the exit code. This is the
+one genuine shape difference between the two surfaces; everything else is
+name-for-name.
 
 ### 3.5 `phux_wait`
 
@@ -193,8 +195,8 @@ Polls the resolved pane until a condition holds.
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Condition precedence: `until` wins when present (succeed on a substring
-match); otherwise the tool settles on idle, using `idle_ms` or the default
-dwell when `idle_ms` is absent.
+match); otherwise the tool settles on idle, using `idle_ms` or the
+default dwell when `idle_ms` is absent.
 
 Result: `{ "outcome": "met" | "timed_out", "polls": N }`.
 
@@ -215,16 +217,15 @@ Result: the new session's name and seed pane id.
 ### 3.7 Event stream (`phux watch`) — not yet an MCP tool
 
 The push half of the agent surface — a subscribed stream of tagged
-lifecycle / activity events (`title_changed`, `bell`, `dirty`, `idle`,
-`pane_spawned`, `pane_closed`; SPEC §7.5) — ships today as the CLI verb
-[`phux watch`](./agents.md#1-the-structured-cli-surface-verb-catalog),
-the latency-cutting accelerator of `phux_wait`'s poll floor. It is **not**
-exposed as an MCP tool in this pass: MCP `tools/call` is request/response,
-whereas the event stream is a long-lived push, so a streaming `phux_watch`
-tool needs an MCP notification/streaming shape that is a separate ticket.
-The `phux_wait` polling tool remains the MCP-native way to block on a pane
-condition; the event stream is available to MCP hosts that shell out to
-`phux watch --json` in the meantime.
+lifecycle/activity events — ships today as the CLI verb
+[`phux watch`](./agents.md#2-the-structured-cli-surface-verb-catalog), an
+accelerator of `phux_wait`'s poll floor. It is **not** exposed as an MCP
+tool in this pass: MCP `tools/call` is request/response, whereas the
+event stream is a long-lived push, so a streaming `phux_watch` tool needs
+an MCP notification/streaming shape that is a separate ticket. The
+`phux_wait` polling tool remains the MCP-native way to block on a pane
+condition; an MCP host that wants the stream meanwhile shells out to
+`phux watch --json`.
 
 ---
 
@@ -270,10 +271,11 @@ sparse per-cell `cells` array populated.
 
 The MCP tools are name-for-name the CLI's agent subcommands: `phux_ls` ↔
 `phux ls`, and `phux_snapshot` / `phux_send_keys` / `phux_run` /
-`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait` /
-`new` (see [`tui.md`](./tui.md) §1 and §3). Same surface, same client-side
-resolution, same tiebreaks — because the adapter wraps the same
-`phux-client` functions the CLI does.
+`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait`
+/ `new` ([`agents.md`](./agents.md) §1). Same client-side resolution,
+same tiebreaks, because the adapter wraps the same `phux-client`
+functions the CLI does. The one shape difference is the `phux_run`
+timeout body (§3.4).
 
 Per [ADR-0022](../../ADR/0022-tool-for-agents.md), the CLI and its JSON
 schema are the stable agent contract; the wire underneath stays additive
