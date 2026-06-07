@@ -62,7 +62,7 @@ fn build_terminal() -> GhosttyTerminal<'static, 'static> {
 
 fn bench_synthesize(c: &mut Criterion) {
     let terminal = build_terminal();
-    let mut synth = SnapshotSynthesizer::new().expect("SnapshotSynthesizer::new");
+    let synth = SnapshotSynthesizer::new().expect("SnapshotSynthesizer::new");
 
     // Warm up.
     for _ in 0..16 {
@@ -92,7 +92,7 @@ fn dhat_probe() {
     let terminal = build_terminal();
 
     // ---- pooled ----
-    let mut synth = SnapshotSynthesizer::new().expect("SnapshotSynthesizer::new (dhat)");
+    let synth = SnapshotSynthesizer::new().expect("SnapshotSynthesizer::new (dhat)");
     for _ in 0..32 {
         let snap = synth.synthesize(&terminal).expect("dhat warmup synth");
         black_box(snap);
@@ -109,7 +109,7 @@ fn dhat_probe() {
     // ---- one-shot ----
     let before_oneshot = dhat::HeapStats::get();
     for _ in 0..DHAT_ITERS {
-        let mut throwaway = SnapshotSynthesizer::new().expect("dhat oneshot new");
+        let throwaway = SnapshotSynthesizer::new().expect("dhat oneshot new");
         let snap = throwaway.synthesize(&terminal).expect("dhat oneshot synth");
         black_box(snap);
     }
