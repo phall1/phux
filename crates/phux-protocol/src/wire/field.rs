@@ -119,16 +119,6 @@ pub mod input_paste {
     pub const EVENT: u32 = 2;
 }
 
-/// `INPUT_SELECTION` body fields (`docs/spec/input.md` §6).
-pub mod input_selection {
-    /// Target `TerminalId` (positional tagged union).
-    pub const TERMINAL_ID: u32 = 1;
-    /// Selection mode (`u8`).
-    pub const MODE: u32 = 2;
-    /// Rectangular-mode flag (`bool`).
-    pub const RECTANGLE: u32 = 3;
-}
-
 /// `FRAME_ACK` body fields (`docs/spec/proto.md` §7.2 / §8.2).
 pub mod frame_ack {
     /// Acked `TerminalId` (positional tagged union).

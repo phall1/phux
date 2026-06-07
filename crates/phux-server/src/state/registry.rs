@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
-    MetadataStore, Outbound, RenameOutcome, SelectionSpan, ServerState, TerminalInput,
+    MetadataStore, Outbound, RenameOutcome, ServerState, TerminalInput,
 };
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
@@ -29,7 +29,6 @@ impl ServerState {
             attached: HashMap::new(),
             terminal_subscribers: HashMap::new(),
             terminal_inputs: HashMap::new(),
-            client_selections: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
             terminal_tokens: HashMap::new(),
@@ -582,8 +581,6 @@ impl ServerState {
         // same as L3 metadata subscriptions above. Drop them so the map
         // stays bounded across attach churn.
         self.event_subscriptions.remove(&client_id);
-        // Clear all selections this client held on all terminals (phux-dh4).
-        self.clear_client_selections(client_id);
     }
 
     /// Record an agent-event subscription for `client_id` at `scope`
@@ -946,8 +943,6 @@ impl ServerState {
         if let Some(token) = self.terminal_tokens.remove(&terminal) {
             token.cancel();
         }
-        // Clear all selections on this terminal across all clients (phux-dh4).
-        self.clear_terminal_selections(terminal);
     }
 
     /// Look up the [`TerminalHandle`] for `pane`, if registered.
@@ -1134,44 +1129,5 @@ impl ServerState {
             }
         }
         panes
-    }
-
-    /// Store a selection span for a client on a terminal (phux-dh4).
-    pub fn set_selection(
-        &mut self,
-        client_id: ClientId,
-        terminal_id: TerminalId,
-        span: SelectionSpan,
-    ) {
-        self.client_selections
-            .insert((client_id, terminal_id), span);
-    }
-
-    /// Retrieve a selection span for a client on a terminal, if one exists.
-    #[must_use]
-    pub fn get_selection(
-        &self,
-        client_id: ClientId,
-        terminal_id: TerminalId,
-    ) -> Option<SelectionSpan> {
-        self.client_selections
-            .get(&(client_id, terminal_id))
-            .cloned()
-    }
-
-    /// Clear a specific client's selection on a terminal.
-    pub fn clear_selection(&mut self, client_id: ClientId, terminal_id: TerminalId) {
-        self.client_selections.remove(&(client_id, terminal_id));
-    }
-
-    /// Clear all selections for a client (called on detach).
-    pub fn clear_client_selections(&mut self, client_id: ClientId) {
-        self.client_selections.retain(|(c, _t), _| *c != client_id);
-    }
-
-    /// Clear all selections for a terminal (called when terminal exits).
-    pub fn clear_terminal_selections(&mut self, terminal_id: TerminalId) {
-        self.client_selections
-            .retain(|(_c, t), _| *t != terminal_id);
     }
 }

@@ -11,12 +11,12 @@ use super::frame::{
     ErrorCode, FrameKind, MAX_FRAME_LEN, TYPE_ATTACH, TYPE_ATTACHED, TYPE_BELL, TYPE_COMMAND,
     TYPE_COMMAND_RESULT, TYPE_DELETE_METADATA, TYPE_DETACH, TYPE_DETACHED, TYPE_ERROR, TYPE_EVENT,
     TYPE_FRAME_ACK, TYPE_GET_METADATA, TYPE_HELLO, TYPE_HELLO_OK, TYPE_INPUT_FOCUS, TYPE_INPUT_KEY,
-    TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_INPUT_SELECTION, TYPE_LIST_METADATA,
-    TYPE_METADATA_CHANGED, TYPE_METADATA_KEYS, TYPE_METADATA_VALUE, TYPE_PING, TYPE_PONG,
-    TYPE_SET_METADATA, TYPE_SPAWN_TERMINAL, TYPE_SUBSCRIBE_EVENTS, TYPE_SUBSCRIBE_METADATA,
-    TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_RESIZE, TYPE_TERMINAL_SNAPSHOT,
-    TYPE_TERMINAL_SPAWNED, TYPE_VIEWPORT_RESIZE, decode_agent_event, decode_attach_target,
-    decode_command, decode_command_result, decode_env, decode_focus_event, decode_key_event,
+    TYPE_INPUT_MOUSE, TYPE_INPUT_PASTE, TYPE_LIST_METADATA, TYPE_METADATA_CHANGED,
+    TYPE_METADATA_KEYS, TYPE_METADATA_VALUE, TYPE_PING, TYPE_PONG, TYPE_SET_METADATA,
+    TYPE_SPAWN_TERMINAL, TYPE_SUBSCRIBE_EVENTS, TYPE_SUBSCRIBE_METADATA, TYPE_TERMINAL_CLOSED,
+    TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_RESIZE, TYPE_TERMINAL_SNAPSHOT, TYPE_TERMINAL_SPAWNED,
+    TYPE_VIEWPORT_RESIZE, decode_agent_event, decode_attach_target, decode_command,
+    decode_command_result, decode_env, decode_focus_event, decode_key_event,
     decode_metadata_scope_key, decode_mouse_event, decode_paste_event, decode_scope,
     decode_spawn_result, decode_string_list, decode_terminal_id, decode_viewport_info,
 };
@@ -25,7 +25,6 @@ use crate::ids::{GroupId, TerminalId};
 use crate::input::focus::FocusEvent;
 use crate::input::key::KeyEvent;
 use crate::input::mouse::MouseEvent;
-use crate::input::selection::{SelectionEvent, SelectionMode};
 
 /// Decode a sub-record / leaf from a TLV field's value via a positional
 /// [`Decoder`] bounded by the field's bytes.
@@ -563,38 +562,6 @@ impl<'a> Decoder<'a> {
                 FrameKind::InputPaste {
                     terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
                     event: event.ok_or(DecodeError::UnexpectedEof)?,
-                }
-            }
-            TYPE_INPUT_SELECTION => {
-                let mut terminal_id: Option<TerminalId> = None;
-                let mut mode: Option<SelectionMode> = None;
-                let mut rectangle = false;
-                while let Some((id, value)) = self.read_field()? {
-                    match id {
-                        field::input_selection::TERMINAL_ID => {
-                            terminal_id = Some(sub!(value, decode_terminal_id));
-                        }
-                        field::input_selection::MODE => {
-                            let mode_u8 = sub!(value, |d: &mut Decoder<'_>| d.read_u8());
-                            mode = Some(SelectionMode::try_from_u8(mode_u8).ok_or_else(|| {
-                                DecodeError::UnknownEnumValue {
-                                    field: "SelectionMode",
-                                    value: u32::from(mode_u8),
-                                }
-                            })?);
-                        }
-                        field::input_selection::RECTANGLE => {
-                            rectangle = sub!(value, |d: &mut Decoder<'_>| d.read_u8()) != 0;
-                        }
-                        _ => {}
-                    }
-                }
-                FrameKind::InputSelection {
-                    terminal_id: terminal_id.ok_or(DecodeError::UnexpectedEof)?,
-                    event: SelectionEvent {
-                        mode: mode.ok_or(DecodeError::UnexpectedEof)?,
-                        rectangle,
-                    },
                 }
             }
             TYPE_FRAME_ACK => {
