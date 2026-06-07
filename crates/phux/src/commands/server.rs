@@ -83,6 +83,13 @@ pub(crate) fn run_server(
         |cfg| cfg.defaults.term,
     );
 
+    // `defaults.window-size` picks the multi-client geometry policy
+    // (phux-nk07). Same fallback-on-error policy as the other config reads.
+    let window_size = config_loader::load().map_or_else(
+        |_| phux_config::WindowSize::default(),
+        |cfg| cfg.defaults.window_size,
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
@@ -91,6 +98,7 @@ pub(crate) fn run_server(
         history_limit,
         cwd_inheritance,
         term,
+        window_size,
         policy_bundle: None,
     };
 
