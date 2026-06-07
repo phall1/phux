@@ -59,7 +59,17 @@ fn multi_mb_no_newline_burst_does_not_panic() {
             .viewport(80, 24)
             .run(|mut clients| async move {
                 let client = &mut clients[0];
-                let res = client.wait_until(|s| s.contains("NONLDONE")).await;
+                // phux-fheq: the 2 MB no-newline reflow drains legitimately
+                // slowly through the single-thread runtime on a 2-core CI
+                // runner — well past the default 15s WIRE_RECV_TIMEOUT (the
+                // marker arrived ~33s in). Give this one a generous budget so
+                // the slow-but-correct drain isn't mistaken for a hang; a
+                // genuinely wedged pane still fails at the ceiling.
+                let res = client
+                    .wait_until_with_timeout(std::time::Duration::from_secs(180), |s| {
+                        s.contains("NONLDONE")
+                    })
+                    .await;
                 cap.attach_screen(client.screenshot().await.snapshot_text());
                 assert!(
                     res.is_ok(),

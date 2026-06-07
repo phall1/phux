@@ -478,14 +478,38 @@ impl ClientHandle {
     /// # Errors
     /// Returns the rendered screen text if the predicate never held before
     /// the deadline.
-    pub async fn wait_until<P>(&mut self, mut pred: P) -> Result<(), String>
+    pub async fn wait_until<P>(&mut self, pred: P) -> Result<(), String>
+    where
+        P: FnMut(&mut Screen) -> bool,
+    {
+        self.wait_until_with_timeout(WIRE_RECV_TIMEOUT, pred).await
+    }
+
+    /// [`wait_until`](Self::wait_until) with a caller-supplied deadline
+    /// instead of the default [`WIRE_RECV_TIMEOUT`].
+    ///
+    /// Use this only for the rare test whose legitimate drain genuinely
+    /// outlasts the standard budget on a constrained runner — e.g. a
+    /// multi-megabyte no-newline burst whose single-thread reflow on two
+    /// cores takes longer than 15s (phux-fheq). It is NOT a license to
+    /// paper over a hung server: pick the smallest budget that covers the
+    /// real work, and a stalled server still fails at the ceiling.
+    ///
+    /// # Errors
+    /// Returns the rendered screen text if the predicate never held before
+    /// the deadline.
+    pub async fn wait_until_with_timeout<P>(
+        &mut self,
+        budget: Duration,
+        mut pred: P,
+    ) -> Result<(), String>
     where
         P: FnMut(&mut Screen) -> bool,
     {
         if pred(&mut self.screen) {
             return Ok(());
         }
-        let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + budget;
         while tokio::time::Instant::now() < deadline {
             let remaining = deadline - tokio::time::Instant::now();
             // phux-fheq: use the EOF-tolerant reader. Under the tmux

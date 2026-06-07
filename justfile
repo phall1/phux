@@ -56,19 +56,17 @@ test:
 # handshake / snapshot render otherwise misses WIRE_RECV_TIMEOUT), and
 # `--retries=2` absorbs the residual environment-driven flakes (a 2MB-burst
 # read that races a socket close, etc.) the same way the reconnect override in
-# .config/nextest.toml does. One test stays QUARANTINED (`-E`):
-# multi_mb_no_newline_burst (phux-fheq). The EOF/self-exit race is fixed (the
-# seed is long-lived and wait_until is EOF-tolerant), but the 2 MB no-newline
-# drain still legitimately exceeds wait_until's WIRE_RECV_TIMEOUT on the 2-core
-# runner, so the marker doesn't arrive in time — it needs a longer per-test
-# wait budget, not just the EOF fix. attach_detach_churn (phux-uow0) IS fixed
-# and de-quarantined (validated green on the runner).
+# .config/nextest.toml does. Nothing stays quarantined: multi_mb_no_newline_burst
+# (phux-fheq) is fixed — the EOF/self-exit race via the long-lived seed +
+# EOF-tolerant wait_until, AND the slow-drain timeout via a generous per-test
+# wait budget (wait_until_with_timeout, 180s) so the 2 MB no-newline reflow on a
+# 2-core runner isn't read as a hang. attach_detach_churn (phux-uow0) is also
+# fixed and de-quarantined.
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all \
       --test-threads=1 --retries=2
     cargo nextest run -p phux-server --run-ignored ignored-only \
       --test-threads=1 --retries=2 \
-      -E 'not test(=multi_mb_no_newline_burst_does_not_panic)' \
       --test perf_latency --test perf_colored_output \
       --test stress_resize_storm --test stress_resize_extremes \
       --test stress_attach_churn --test stress_lifecycle_churn \
