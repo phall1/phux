@@ -142,6 +142,12 @@ pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
 /// oneshot.
 #[derive(Debug)]
 pub struct SnapshotRequest {
+    /// Requested scrollback history (`phux-9q5f`), carried from the
+    /// `ATTACH.request_scrollback` / `scrollback_limit_lines` pair: `None`
+    /// for viewport only, `Some(0)` for all retained history, `Some(n)` for
+    /// the most-recent `n` rows. The actor primes
+    /// [`SnapshotBytes::scrollback`] accordingly.
+    pub scrollback: Option<u32>,
     /// Channel the actor uses to ship the synthesized snapshot back.
     /// Dropping the sender on the receiver side is benign — the actor
     /// just discards the reply.

@@ -775,6 +775,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         bytes: format!("snap-{i}").into_bytes(),
+                        scrollback: Vec::new(),
                     };
                     let _ = reply.send(payload);
                 }
@@ -935,6 +936,7 @@ mod tests {
                         cols: 80,
                         rows: 24,
                         bytes: b"snap".to_vec(),
+                        scrollback: Vec::new(),
                     })
                     .expect("send snapshot reply");
 

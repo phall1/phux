@@ -985,13 +985,25 @@ impl TerminalActor {
     /// for tests that want to drive the synthesis path synchronously
     /// without going through the actor's `select!` loop.
     fn synthesize(&self) -> Result<SnapshotBytes, crate::grid::SynthesisError> {
+        self.synthesize_with_scrollback(None)
+    }
+
+    /// Synthesize an ATTACH snapshot, optionally priming the client's
+    /// scrollback with retained history rows (`phux-9q5f`). `scrollback`
+    /// follows the [`crate::grid::SnapshotSynthesizer::synthesize_with_scrollback`]
+    /// convention. Exposed for tests that drive the synthesis path
+    /// synchronously without the actor's `select!` loop.
+    fn synthesize_with_scrollback(
+        &self,
+        scrollback: Option<u32>,
+    ) -> Result<SnapshotBytes, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
         // phux-uow0: the full snapshot uses a fresh RenderState internally, so
         // it needs only a shared borrow — taking `&mut` here would falsely
         // serialize it against the per-consumer tick path that also reads
         // `self.synth`.
         let synth = self.synth.borrow();
-        synth.synthesize(&terminal)
+        synth.synthesize_with_scrollback(&terminal, scrollback)
     }
 
     /// Project the current `Terminal` grid into a structured
@@ -1393,7 +1405,7 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.snapshot_rx.recv() => {
-                    let snap = match self.synthesize() {
+                    let snap = match self.synthesize_with_scrollback(req.scrollback) {
                         Ok(s) => s,
                         Err(err) => {
                             warn!(error = %err, "snapshot synthesis failed; replying with empty");
@@ -1401,6 +1413,7 @@ impl TerminalActor {
                                 cols: self.cols,
                                 rows: self.rows,
                                 bytes: Vec::new(),
+                                scrollback: Vec::new(),
                             }
                         }
                     };
@@ -1890,7 +1903,10 @@ mod tests {
                 let (reply_tx, reply_rx) = oneshot::channel();
                 handle
                     .snapshot
-                    .send(SnapshotRequest { reply: reply_tx })
+                    .send(SnapshotRequest {
+                        scrollback: None,
+                        reply: reply_tx,
+                    })
                     .await
                     .expect("send snapshot request");
                 let snap = reply_rx.await.expect("snapshot reply");
@@ -2007,9 +2023,10 @@ mod tests {
                     .expect("actor task panicked");
 
                 let (reply_tx, reply_rx) = oneshot::channel();
-                let _ = handle
-                    .snapshot
-                    .try_send(SnapshotRequest { reply: reply_tx });
+                let _ = handle.snapshot.try_send(SnapshotRequest {
+                    scrollback: None,
+                    reply: reply_tx,
+                });
                 drop(reply_rx);
             })
             .await;
