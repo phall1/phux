@@ -80,6 +80,22 @@ pub trait RenderOverlay {
     /// the overlay; [`OverlayCommand::Stay`] to keep it open and consume
     /// the key.
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand;
+
+    /// Pane dimensions `(cols, rows)` this overlay wants a content backdrop
+    /// for, or `None` if it is a modal overlay that paints its own surface.
+    ///
+    /// Modal overlays (help, palette, prompts) clear the screen and own every
+    /// cell, so they return `None` (the default). The *transparent* copy-mode
+    /// overlay returns `Some`: the dispatcher reads the focused pane's glyphs
+    /// at these dims and feeds them via [`Self::set_backdrop`] so the live
+    /// content shows beneath the selection highlight instead of a blank screen.
+    fn backdrop_dims(&self) -> Option<(u16, u16)> {
+        None
+    }
+
+    /// Receive the focused pane's visible glyph grid (`[row][col]`) to paint
+    /// beneath the overlay. Default no-op; only copy-mode consumes it.
+    fn set_backdrop(&mut self, _grid: Vec<Vec<char>>) {}
 }
 
 /// What an overlay wants the driver to do after [`RenderOverlay::handle_key`].
@@ -179,6 +195,23 @@ impl OverlayState {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.stack.len()
+    }
+
+    /// Pane dimensions the active (top) overlay wants a content backdrop for,
+    /// or `None` when no overlay is active or the active one is modal. The
+    /// dispatcher uses this to decide whether to read the focused pane's
+    /// glyphs and feed them back via [`Self::set_backdrop`] (copy-mode).
+    #[must_use]
+    pub fn backdrop_dims(&self) -> Option<(u16, u16)> {
+        self.stack.last().and_then(|o| o.backdrop_dims())
+    }
+
+    /// Feed the active (top) overlay its content backdrop. No-op when no
+    /// overlay is active or the active one is modal.
+    pub fn set_backdrop(&mut self, grid: Vec<Vec<char>>) {
+        if let Some(top) = self.stack.last_mut() {
+            top.set_backdrop(grid);
+        }
     }
 
     /// Push `overlay` onto the top of the stack. It becomes the input

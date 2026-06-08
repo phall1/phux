@@ -73,6 +73,46 @@ impl std::fmt::Debug for PaneSlot {
     }
 }
 
+/// Read the focused pane's visible glyph grid (`[row][col]`, `cols`x`rows`),
+/// substituting a space for blank or unreadable cells.
+///
+/// Gives the transparent copy-mode overlay a content backdrop to paint beneath
+/// the selection (see [`crate::render::overlay::RenderOverlay::set_backdrop`]).
+/// Cheap enough for copy-mode (a per-keystroke repaint, not the hot output
+/// path); plain glyphs only — cell styling is not reproduced.
+fn read_pane_glyph_grid(slot: &mut PaneSlot, cols: u16, rows: u16) -> Vec<Vec<char>> {
+    (0..rows)
+        .map(|row| {
+            (0..cols)
+                .map(|col| {
+                    slot.renderer
+                        .read_grapheme_at(&slot.terminal, row, col)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(' ')
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// When the active overlay is transparent copy-mode, refresh its backdrop from
+/// the focused pane's current glyphs so the next paint shows live content
+/// instead of a blank screen. No-op for modal overlays, no overlay, or no
+/// focused pane.
+fn refresh_copy_backdrop(
+    overlays: &mut OverlayState,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused: Option<&TerminalId>,
+) {
+    if let Some((cols, rows)) = overlays.backdrop_dims()
+        && let Some(fid) = focused
+        && let Some(slot) = panes.get_mut(fid)
+    {
+        overlays.set_backdrop(read_pane_glyph_grid(slot, cols, rows));
+    }
+}
+
 impl PaneSlot {
     /// Allocate a fresh slot at a known pane size.
     ///
@@ -796,6 +836,7 @@ async fn main_loop<W: super::RenderSink>(
         if needs_resync.is_some_and(|flag| flag.swap(false, Ordering::AcqRel)) {
             if overlays.is_active() {
                 let _ = out.write_all(b"\x1b[2J\x1b[H");
+                refresh_copy_backdrop(&mut overlays, &mut panes, focused_pane.as_ref());
                 let _ = overlays.paint(out, viewport_dims);
             } else if let Some(ls) = workspace.active_window() {
                 paint_full_frame(
@@ -1085,7 +1126,8 @@ async fn main_loop<W: super::RenderSink>(
                 }
                 if overlays.is_active() {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    refresh_copy_backdrop(&mut overlays, &mut panes, focused_pane.as_ref());
+                let _ = overlays.paint(out, viewport_dims);
                 }
             }
 
@@ -1146,7 +1188,8 @@ async fn main_loop<W: super::RenderSink>(
                 }
                 if overlays.is_active() {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    refresh_copy_backdrop(&mut overlays, &mut panes, focused_pane.as_ref());
+                let _ = overlays.paint(out, viewport_dims);
                 }
             }
 
@@ -1203,7 +1246,8 @@ async fn main_loop<W: super::RenderSink>(
                 // user sees the resized layout.
                 if overlays.is_active() {
                     let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    refresh_copy_backdrop(&mut overlays, &mut panes, focused_pane.as_ref());
+                let _ = overlays.paint(out, viewport_dims);
                 } else if let Some(ls) = workspace.active_window() {
                     paint_full_frame(
                         out,

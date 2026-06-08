@@ -97,6 +97,16 @@ pub struct CopyModeOverlay {
     pub pane_cols: u16,
     /// Number of rows in the pane.
     pub pane_rows: u16,
+    /// The focused pane's visible glyphs, `[row][col]`, refreshed by the
+    /// dispatcher each event (see [`RenderOverlay::set_backdrop`]).
+    ///
+    /// Copy-mode is a *transparent* overlay — unlike the modal overlays it
+    /// must show the live pane content beneath the selection highlight, not a
+    /// blank box. The overlay paint system hands `render` an empty buffer, so
+    /// without this backdrop copy-mode would highlight blank cells and blank
+    /// the window. Purely cosmetic: the copied text is extracted from the
+    /// engine (phux-v6jw), never from these glyphs.
+    backdrop: Vec<Vec<char>>,
 }
 
 impl CopyModeOverlay {
@@ -116,6 +126,7 @@ impl CopyModeOverlay {
             mode: SelectionMode::Char,
             pane_cols,
             pane_rows,
+            backdrop: Vec::new(),
         }
     }
 
@@ -182,35 +193,33 @@ impl RenderOverlay for CopyModeOverlay {
             .bg(Color::Blue)
             .fg(Color::White)
             .add_modifier(Modifier::BOLD);
+        let anchor_style = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::UNDERLINED);
 
-        // Paint selection highlight over already-rendered cells.
-        // Buffer coords are (x, y) = (col, row) in outer-viewport space.
+        // Paint the pane backdrop, then the selection highlight on top. The
+        // overlay paint system gives us an empty buffer, so we must fill in the
+        // focused pane's glyphs ourselves or the window paints blank. Buffer
+        // coords are (x, y) = (col, row); `area` is the full viewport at the
+        // origin, so pane-local (row, col) == (row, col) here.
         for row in 0..area.height {
             for col in 0..area.width {
-                let pane_row = area.y + row;
-                let pane_col = area.x + col;
-
-                // Convert outer-viewport coords to pane-local coords.
-                let cell_row = pane_row.saturating_sub(area.y);
-                let cell_col = pane_col.saturating_sub(area.x);
-
-                if range.contains(cell_row, cell_col)
-                    && let Some(cell) = buf.cell_mut(Position::new(pane_col, pane_row))
-                {
-                    // Apply highlight to selected cell — modify existing cell, don't replace.
+                let Some(cell) = buf.cell_mut(Position::new(area.x + col, area.y + row)) else {
+                    continue;
+                };
+                // The pane glyph under this cell (space when the backdrop has
+                // not been refreshed yet, or past the pane's last row/col).
+                let glyph = self
+                    .backdrop
+                    .get(row as usize)
+                    .and_then(|r| r.get(col as usize))
+                    .copied()
+                    .unwrap_or(' ');
+                cell.set_char(glyph);
+                if range.contains(row, col) {
                     cell.set_style(highlight_style);
-                }
-
-                // Draw a cursor marker at the anchor position.
-                if cell_row == self.anchor_row
-                    && cell_col == self.anchor_col
-                    && let Some(cell) = buf.cell_mut(Position::new(pane_col, pane_row))
-                {
-                    cell.set_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::UNDERLINED),
-                    );
+                } else if row == self.anchor_row && col == self.anchor_col {
+                    cell.set_style(anchor_style);
                 }
             }
         }
@@ -237,6 +246,14 @@ impl RenderOverlay for CopyModeOverlay {
                 }
             }
         }
+    }
+
+    fn backdrop_dims(&self) -> Option<(u16, u16)> {
+        Some((self.pane_cols, self.pane_rows))
+    }
+
+    fn set_backdrop(&mut self, grid: Vec<Vec<char>>) {
+        self.backdrop = grid;
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -305,5 +322,47 @@ mod tests {
         let overlay = CopyModeOverlay::new(100, 100, 80, 24);
         assert_eq!(overlay.cursor_row, 23);
         assert_eq!(overlay.cursor_col, 79);
+    }
+
+    #[test]
+    fn copy_mode_requests_backdrop_at_pane_dims() {
+        let overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        assert_eq!(overlay.backdrop_dims(), Some((80, 24)));
+    }
+
+    /// Regression: copy-mode is a transparent overlay; once its backdrop is
+    /// set, `render` must paint the pane glyphs (not leave a blank buffer that
+    /// blanks the window).
+    #[test]
+    fn render_paints_pane_backdrop_not_blank() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::prelude::Position;
+
+        // 5x2 pane (+1 status row); backdrop = two known rows.
+        let mut overlay = CopyModeOverlay::new(0, 0, 5, 2);
+        overlay.set_backdrop(vec!["hello".chars().collect(), "world".chars().collect()]);
+
+        let area = Rect::new(0, 0, 5, 3);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+
+        let row0: String = (0..5)
+            .filter_map(|c| {
+                buf.cell(Position::new(c, 0))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        assert_eq!(
+            row0, "hello",
+            "copy-mode must paint the pane backdrop, not blank the window",
+        );
+        let row1: String = (0..5)
+            .filter_map(|c| {
+                buf.cell(Position::new(c, 1))
+                    .map(|cell| cell.symbol().to_string())
+            })
+            .collect();
+        assert_eq!(row1, "world");
     }
 }
