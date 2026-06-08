@@ -40,6 +40,43 @@ pub enum RenderError {
     Io(#[from] io::Error),
 }
 
+/// A copy-mode selection in pane-local viewport cells (inclusive), for the
+/// renderer to reverse-video while painting (phux copy-mode).
+///
+/// Linear (text-flow) selection, matching the copy-mode overlay: full interior
+/// rows, partial first/last rows. Carrying the highlight here — in the same
+/// per-cell render that emits the pane's real styles — is what lets copy-mode
+/// leave the screen untouched except for inverting the selected cells, instead
+/// of clearing and repainting a separate overlay surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionRect {
+    /// First selected row (inclusive).
+    pub start_row: u16,
+    /// First selected column, on `start_row` (inclusive).
+    pub start_col: u16,
+    /// Last selected row (inclusive).
+    pub end_row: u16,
+    /// Last selected column, on `end_row` (inclusive).
+    pub end_col: u16,
+}
+
+impl SelectionRect {
+    /// Whether the pane-local cell `(row, col)` falls inside the selection.
+    #[must_use]
+    pub const fn contains(self, row: u16, col: u16) -> bool {
+        if row < self.start_row || row > self.end_row {
+            return false;
+        }
+        if row == self.start_row && col < self.start_col {
+            return false;
+        }
+        if row == self.end_row && col > self.end_col {
+            return false;
+        }
+        true
+    }
+}
+
 /// Per-pane render scaffolding.
 ///
 /// Owns the libghostty render iterators so they're reused across frames
@@ -54,6 +91,13 @@ pub struct TerminalRenderer<'alloc> {
     /// (`phux-9gw.1`) can re-anchor its cursor estimate without doing a
     /// second snapshot pass. `None` while the cursor is hidden.
     last_cursor: Option<(u16, u16)>,
+    /// Copy-mode selection to reverse-video on the next render, if any.
+    ///
+    /// Transient: the driver sets it on the focused pane's renderer just
+    /// before a copy-mode repaint and clears it immediately after, so
+    /// ordinary renders are unaffected and no other paint path needs to know
+    /// copy-mode exists.
+    selection: Option<SelectionRect>,
 }
 
 impl<'alloc> TerminalRenderer<'alloc> {
@@ -65,7 +109,15 @@ impl<'alloc> TerminalRenderer<'alloc> {
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
             last_cursor: None,
+            selection: None,
         })
+    }
+
+    /// Set (or clear) the copy-mode selection to reverse-video on the next
+    /// render. Transient — see [`SelectionRect`]; callers set it before a
+    /// copy-mode repaint and clear it (`None`) immediately after.
+    pub const fn set_selection(&mut self, selection: Option<SelectionRect>) {
+        self.selection = selection;
     }
 
     /// Cursor (row, col) as of the most recent [`Self::render`] call.
@@ -267,12 +319,23 @@ impl<'alloc> TerminalRenderer<'alloc> {
                 out.write_all(b"\x1b[0m")?;
                 let mut emitted: Option<EmittedStyle> = None;
 
+                // Copy-mode selection (pane-local cells), reverse-videoed as
+                // each cell is emitted with its real style — see `SelectionRect`.
+                let selection = self.selection;
+                let mut col: u16 = 0;
                 let mut cell_iter = self.cells.update(row)?;
                 while let Some(cell) = cell_iter.next() {
                     let graphemes = cell.graphemes()?;
-                    let style = cell.style()?;
+                    let mut style = cell.style()?;
                     let fg = cell.fg_color()?;
                     let bg = cell.bg_color()?;
+                    // Invert the cell when it falls in the copy-mode selection:
+                    // toggle so an already-reverse cell flips back, making every
+                    // selected cell visibly distinct from its normal state.
+                    if selection.is_some_and(|s| s.contains(row_index, col)) {
+                        style.inverse = !style.inverse;
+                    }
+                    col = col.saturating_add(1);
                     // Coalesce: emit an SGR sequence only when the cell's
                     // effective style differs from the one currently active
                     // on the outer terminal. A run of same-style cells then
@@ -491,6 +554,61 @@ fn emit_cursor_style(
 mod tests {
     use super::*;
     use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
+
+    /// The core copy-mode fix: with a selection set, the renderer emits the
+    /// real pane content and reverse-videos (SGR 7) the selected cells — no
+    /// screen clear, no separate overlay surface.
+    #[test]
+    fn selection_emits_reverse_video_for_selected_cells() {
+        let mut t = fresh(10, 2);
+        t.vt_write(b"hello");
+        let mut r = TerminalRenderer::new().expect("renderer");
+        r.set_selection(Some(SelectionRect {
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 1,
+        }));
+        let mut out: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut out, (0, 0));
+        let s = String::from_utf8_lossy(&out);
+        // Inverse is emitted first in emit_sgr_set, so the param leads the CSI.
+        assert!(
+            s.contains("\x1b[7"),
+            "expected reverse-video (SGR 7) for the selection, got {s:?}"
+        );
+        // The real content is still there (no blank/clear). The glyphs are
+        // split by the selection's SGR runs (`\x1b[7mhe\x1b[0mllo`), so check
+        // the selected and unselected halves separately.
+        assert!(s.contains("he"), "selected glyphs must render, got {s:?}");
+        assert!(
+            s.contains("llo"),
+            "unselected glyphs must render, got {s:?}"
+        );
+        // And without a selection the same render has no reverse-video.
+        r.set_selection(None);
+        let mut plain: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut plain, (0, 0));
+        assert!(!String::from_utf8_lossy(&plain).contains("\x1b[7"));
+    }
+
+    #[test]
+    fn selection_rect_contains_is_linear() {
+        // Linear/text selection: full interior rows, partial first/last rows.
+        let sel = SelectionRect {
+            start_row: 1,
+            start_col: 1,
+            end_row: 3,
+            end_col: 5,
+        };
+        assert!(sel.contains(1, 1)); // start corner
+        assert!(sel.contains(2, 0)); // interior row, any col
+        assert!(sel.contains(3, 5)); // end corner
+        assert!(!sel.contains(0, 1)); // above
+        assert!(!sel.contains(1, 0)); // before start on start row
+        assert!(!sel.contains(3, 6)); // after end on end row
+        assert!(!sel.contains(4, 1)); // below
+    }
 
     fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
         GhosttyTerminal::new(TerminalOptions {

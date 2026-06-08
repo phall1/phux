@@ -46,7 +46,7 @@ use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
 };
 use super::paint::{paint_bar_after_pane, paint_full_frame, pane_viewport};
-use super::render::{TerminalRenderer, write_reset};
+use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::handle_server_frame;
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
@@ -143,6 +143,81 @@ fn coalesce_defer_flags(targets: &[Option<TerminalId>]) -> Vec<bool> {
             })
         })
         .collect()
+}
+
+/// Paint the active overlay layer (called only when an overlay is active).
+///
+/// Copy-mode is **not** a modal overlay: it repaints the focused pane with its
+/// selection reverse-videoed — the live content is otherwise untouched, so
+/// nothing on screen swaps — plus a status line. Every other overlay is modal:
+/// clear the screen and paint its own surface. The branch is chosen by
+/// [`OverlayState::copy_selection`].
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors paint_full_frame's paint context plus the overlay state"
+)]
+fn paint_active_overlay<W: super::RenderSink>(
+    out: &mut W,
+    overlays: &OverlayState,
+    workspace: &Workspace,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused: Option<&TerminalId>,
+    viewport_dims: (u16, u16),
+    status_bar: Option<&mut StatusBarPainter>,
+    session_name: &str,
+) {
+    if let Some(sel) = overlays.copy_selection() {
+        let (Some(ls), Some(fid)) = (workspace.active_window(), focused) else {
+            return;
+        };
+        // Set the selection on the focused renderer for this one paint, repaint
+        // the real frame (the renderer inverts the selected cells with their
+        // own styles), then clear it so ordinary renders are unaffected.
+        if let Some(slot) = panes.get_mut(fid) {
+            slot.renderer.set_selection(Some(sel));
+        }
+        paint_full_frame(
+            out,
+            ls,
+            panes,
+            focused,
+            viewport_dims,
+            status_bar,
+            session_name,
+        );
+        if let Some(slot) = panes.get_mut(fid) {
+            slot.renderer.set_selection(None);
+        }
+        let _ = paint_copy_mode_status(out, sel, viewport_dims);
+    } else {
+        let _ = out.write_all(b"\x1b[2J\x1b[H");
+        let _ = overlays.paint(out, viewport_dims);
+    }
+}
+
+/// Emit the copy-mode status strip over the bottom viewport row, then hide the
+/// hardware cursor (the reverse-video selection is the position indicator).
+fn paint_copy_mode_status<W: Write>(
+    out: &mut W,
+    sel: SelectionRect,
+    viewport_dims: (u16, u16),
+) -> io::Result<()> {
+    let (cols, rows) = viewport_dims;
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    let cell_count =
+        u32::from(sel.end_row - sel.start_row + 1) * u32::from(sel.end_col - sel.start_col + 1);
+    let status =
+        format!(" copy-mode | {cell_count} cell(s) | arrows move | Enter copy | Esc cancel ");
+    write_cup(out, rows - 1, 0)?;
+    // Dark-gray strip: reset, bg 240, bright-white fg. `\x1b[K` fills the rest
+    // of the row with the strip bg; then reset and hide the cursor.
+    out.write_all(b"\x1b[0m\x1b[48;5;240m\x1b[97m")?;
+    let visible: String = status.chars().take(cols as usize).collect();
+    out.write_all(visible.as_bytes())?;
+    out.write_all(b"\x1b[K\x1b[0m\x1b[?25l")?;
+    out.flush()
 }
 
 /// Errors the attach loop can surface to its caller.
@@ -795,8 +870,16 @@ async fn main_loop<W: super::RenderSink>(
         // serviced promptly.
         if needs_resync.is_some_and(|flag| flag.swap(false, Ordering::AcqRel)) {
             if overlays.is_active() {
-                let _ = out.write_all(b"\x1b[2J\x1b[H");
-                let _ = overlays.paint(out, viewport_dims);
+                paint_active_overlay(
+                    out,
+                    &overlays,
+                    &workspace,
+                    &mut panes,
+                    focused_pane.as_ref(),
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    &session_name,
+                );
             } else if let Some(ls) = workspace.active_window() {
                 paint_full_frame(
                     out,
@@ -1084,8 +1167,16 @@ async fn main_loop<W: super::RenderSink>(
                     }
                 }
                 if overlays.is_active() {
-                    let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
                 }
             }
 
@@ -1145,8 +1236,16 @@ async fn main_loop<W: super::RenderSink>(
                     );
                 }
                 if overlays.is_active() {
-                    let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
                 }
             }
 
@@ -1202,8 +1301,16 @@ async fn main_loop<W: super::RenderSink>(
                 // dispatch path triggers a full-frame repaint and the
                 // user sees the resized layout.
                 if overlays.is_active() {
-                    let _ = out.write_all(b"\x1b[2J\x1b[H");
-                    let _ = overlays.paint(out, viewport_dims);
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
                 } else if let Some(ls) = workspace.active_window() {
                     paint_full_frame(
                         out,

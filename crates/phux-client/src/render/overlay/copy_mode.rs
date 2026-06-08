@@ -12,9 +12,9 @@
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 
 use super::{CopyRequest, OverlayCommand, RenderOverlay};
+use crate::attach::render::SelectionRect;
 
 /// How copy-mode interprets the selection rectangle.
 ///
@@ -63,20 +63,6 @@ impl CellRange {
                 end_col: cursor_col,
             }
         }
-    }
-
-    /// Check if a cell is within the selection.
-    const fn contains(self, row: u16, col: u16) -> bool {
-        if row < self.start_row || row > self.end_row {
-            return false;
-        }
-        if row == self.start_row && col < self.start_col {
-            return false;
-        }
-        if row == self.end_row && col > self.end_col {
-            return false;
-        }
-        true
     }
 }
 
@@ -174,69 +160,23 @@ impl CopyModeOverlay {
 }
 
 impl RenderOverlay for CopyModeOverlay {
-    fn render(&self, area: Rect, buf: &mut Buffer) {
-        use ratatui::prelude::Position;
+    /// Copy-mode is **not** a modal overlay and paints nothing of its own.
+    ///
+    /// Unlike help/palette/prompts (which draw a surface onto a cleared
+    /// screen), copy-mode is a selection highlight over the live pane. The
+    /// driver detects it via [`Self::copy_selection`] and repaints the focused
+    /// pane with the selected cells reverse-videoed — the screen content is
+    /// otherwise untouched. So this `render` is intentionally empty.
+    fn render(&self, _area: Rect, _buf: &mut Buffer) {}
 
+    fn copy_selection(&self) -> Option<SelectionRect> {
         let range = self.selection_range();
-        let highlight_style = Style::default()
-            .bg(Color::Blue)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD);
-
-        // Paint selection highlight over already-rendered cells.
-        // Buffer coords are (x, y) = (col, row) in outer-viewport space.
-        for row in 0..area.height {
-            for col in 0..area.width {
-                let pane_row = area.y + row;
-                let pane_col = area.x + col;
-
-                // Convert outer-viewport coords to pane-local coords.
-                let cell_row = pane_row.saturating_sub(area.y);
-                let cell_col = pane_col.saturating_sub(area.x);
-
-                if range.contains(cell_row, cell_col)
-                    && let Some(cell) = buf.cell_mut(Position::new(pane_col, pane_row))
-                {
-                    // Apply highlight to selected cell — modify existing cell, don't replace.
-                    cell.set_style(highlight_style);
-                }
-
-                // Draw a cursor marker at the anchor position.
-                if cell_row == self.anchor_row
-                    && cell_col == self.anchor_col
-                    && let Some(cell) = buf.cell_mut(Position::new(pane_col, pane_row))
-                {
-                    cell.set_style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::UNDERLINED),
-                    );
-                }
-            }
-        }
-
-        // Status line at the bottom: "copy-mode | <N> cell(s) selected"
-        let range = self.selection_range();
-        let cells_selected = u32::from(range.end_row - range.start_row + 1)
-            * u32::from(range.end_col - range.start_col + 1);
-        let status = format!(
-            " copy-mode | {cells_selected} cell(s) selected | (↑↓←→) move | Enter to copy | Esc to cancel "
-        );
-
-        // Paint status line at the bottom of the area.
-        if area.height > 0 {
-            let status_row = area.y + area.height - 1;
-            let status_style = Style::default().bg(Color::DarkGray).fg(Color::White);
-
-            for (col_offset, ch) in status.chars().take(area.width as usize).enumerate() {
-                #[allow(clippy::cast_possible_truncation)]
-                let col = area.x + col_offset as u16;
-                if let Some(cell) = buf.cell_mut(Position::new(col, status_row)) {
-                    cell.set_char(ch);
-                    cell.set_style(status_style);
-                }
-            }
-        }
+        Some(SelectionRect {
+            start_row: range.start_row,
+            start_col: range.start_col,
+            end_row: range.end_row,
+            end_col: range.end_col,
+        })
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -290,20 +230,22 @@ mod tests {
     }
 
     #[test]
-    fn cell_range_contains() {
-        let range = CellRange::from_points(1, 1, 3, 5);
-        assert!(range.contains(1, 1));
-        assert!(range.contains(2, 3));
-        assert!(range.contains(3, 5));
-        assert!(!range.contains(0, 1));
-        assert!(!range.contains(1, 0));
-        assert!(!range.contains(4, 1));
-    }
-
-    #[test]
     fn cursor_clamped_to_pane() {
         let overlay = CopyModeOverlay::new(100, 100, 80, 24);
         assert_eq!(overlay.cursor_row, 23);
         assert_eq!(overlay.cursor_col, 79);
+    }
+
+    #[test]
+    fn copy_selection_tracks_normalized_range() {
+        let mut overlay = CopyModeOverlay::new(2, 3, 80, 24); // anchor = (2, 3)
+        overlay.move_cursor(1, 2); // cursor -> (3, 5)
+        let sel = overlay
+            .copy_selection()
+            .expect("copy-mode always has a selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (2, 3, 3, 5)
+        );
     }
 }

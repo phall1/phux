@@ -28,6 +28,8 @@ use phux_protocol::input::key::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
+use crate::attach::render::SelectionRect;
+
 pub mod copy_mode;
 pub mod help;
 pub mod prompt;
@@ -80,6 +82,19 @@ pub trait RenderOverlay {
     /// the overlay; [`OverlayCommand::Stay`] to keep it open and consume
     /// the key.
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand;
+
+    /// The active copy-mode selection (pane-local cells), or `None`.
+    ///
+    /// `None` for every modal overlay (the default) — they paint their own
+    /// surface and the driver clears the screen for them. Copy-mode returns
+    /// `Some`: it is *not* a modal overlay but a selection highlight over the
+    /// live pane, so the driver repaints the focused pane with these cells
+    /// reverse-videoed (via [`crate::attach::render::TerminalRenderer::set_selection`])
+    /// instead of clearing the screen. Nothing on screen swaps; only the
+    /// selected cells invert.
+    fn copy_selection(&self) -> Option<SelectionRect> {
+        None
+    }
 }
 
 /// What an overlay wants the driver to do after [`RenderOverlay::handle_key`].
@@ -173,6 +188,17 @@ impl OverlayState {
     #[must_use]
     pub const fn is_active(&self) -> bool {
         !self.stack.is_empty()
+    }
+
+    /// The active (top) overlay's copy-mode selection, if it is copy-mode.
+    ///
+    /// `Some` only when copy-mode is the top overlay; the driver uses it to
+    /// repaint the focused pane with the selection reverse-videoed rather than
+    /// clearing the screen for a modal overlay. `None` for modal overlays or
+    /// no overlay.
+    #[must_use]
+    pub fn copy_selection(&self) -> Option<SelectionRect> {
+        self.stack.last().and_then(|o| o.copy_selection())
     }
 
     /// Number of overlays currently stacked (0 when inactive).
