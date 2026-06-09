@@ -80,19 +80,64 @@ pub(crate) fn spawn_terminal_exit_watcher(
         // same as a fired EOF with unknown exit status: in both cases
         // the pane is dead and every subscribed client must be told.
         let exit_status = rx.await.unwrap_or(None);
+        // phux-emdv: gather the broadcast subscriber set AND reap the
+        // dead pane in ONE critical section, BEFORE the awaited
+        // TERMINAL_CLOSED sends. This closes the TOCTOU window that left
+        // a late attacher frozen on a dead pane: previously subscribers
+        // were gathered in one lock, the sends were awaited, and the reap
+        // happened in a SECOND lock — a client whose ATTACH landed in the
+        // gap subscribed to a pane that had already hit EOF, was never in
+        // the broadcast set, and never learned the shell exited. Reaping
+        // up-front removes the pane (and, if last, its session) from the
+        // registry, so any ATTACH that interleaves now either subscribes
+        // to the surviving panes (the dead one is gone from
+        // `attach_snapshot_panes`) or gets `SessionNotFound` — never a
+        // silent subscription to a doomed pane.
+        //
+        // `reap_terminal` clears `terminal_subscribers` for the pane
+        // (via `forget_terminal_bookkeeping`) and retires its wire id, so
+        // both MUST be captured in the same lock before the reap runs.
+        let ReapAndNotify {
+            wire_terminal_id,
+            targets,
+            server_empty,
+            served,
+        } = state.with_mut(|s| {
+            let wire_terminal_id = s.intern_terminal_wire(pane);
+            let targets: Vec<tokio::sync::mpsc::Sender<Outbound>> = s
+                .subscribers_for_terminal(pane)
+                .iter()
+                .filter_map(|cid| s.attached.get(cid).map(|c| c.tx.clone()))
+                .collect();
+            // phux-60s: reap the dead pane, cascading to its window and
+            // session when they empty. Done here (inside the same lock
+            // that gathered subscribers) so no ATTACH can interleave
+            // between "gather" and "reap".
+            let server_empty = s.reap_terminal(pane);
+            let served = s.has_served_client();
+            ReapAndNotify {
+                wire_terminal_id,
+                targets,
+                server_empty,
+                served,
+            }
+        });
+
         // phux-4li.11 / phux-4r1: broadcast the L1 lifecycle event
-        // TERMINAL_CLOSED to every client subscribed to the dying pane.
-        // The server's job ends here — it reports the fact. The detach
-        // policy ("no Terminals left in my collection ⇒ detach") is the
-        // consumer's (the TUI driver folds the pane out of its layout and
-        // detaches itself when the last pane closes); the server no longer
-        // sends `Detached` on EOF (ADR-0015 L1).
-        broadcast_terminal_closed(&state, pane, exit_status).await;
-        // phux-60s: reap the dead pane, cascading to its window and
-        // session when they empty. When the last session is gone the
-        // server has nothing left to serve, so fire the root token —
-        // the tmux server-exit model. Without this the server lingers
-        // forever after every shell exits.
+        // TERMINAL_CLOSED to every client that was subscribed to the
+        // dying pane at reap time. The server's job ends here — it
+        // reports the fact. The detach policy ("no Terminals left in my
+        // collection ⇒ detach") is the consumer's (the TUI driver folds
+        // the pane out of its layout and detaches itself when the last
+        // pane closes); the server no longer sends `Detached` on EOF
+        // (ADR-0015 L1). The sends are awaited off-lock — `with_mut` is
+        // synchronous and must not hold the state borrow across an await.
+        broadcast_terminal_closed(&state, &wire_terminal_id, &targets, exit_status).await;
+
+        // phux-60s: when the last session is gone the server has nothing
+        // left to serve, so fire the root token — the tmux server-exit
+        // model. Without this the server lingers forever after every
+        // shell exits.
         //
         // Two guards keep this from misfiring:
         //   * `has_served_client`: a freshly auto-spawned server whose
@@ -103,8 +148,6 @@ pub(crate) fn spawn_terminal_exit_watcher(
         //   * `!root_token.is_cancelled()`: a Ctrl-C shutdown cancels the
         //     pane actor too, routing through here; don't log a spurious
         //     "self-exit" or double-cancel during normal teardown.
-        let (server_empty, served) =
-            state.with_mut(|s| (s.reap_terminal(pane), s.has_served_client()));
         if server_empty && served && !root_token.is_cancelled() {
             info!("last session reaped after serving clients; server self-exit");
             root_token.cancel();
@@ -112,54 +155,62 @@ pub(crate) fn spawn_terminal_exit_watcher(
     });
 }
 
-/// Emit `TERMINAL_CLOSED { terminal_id, exit_status }` to every client
-/// subscribed to `pane` (phux-4li.11, SPEC §7.2 / §10.1).
+/// Everything the EOF watcher captures under one state lock before it
+/// performs the off-lock, awaited `TERMINAL_CLOSED` fanout (phux-emdv).
 ///
-/// Fanout uses the per-pane subscriber list maintained by
-/// [`crate::state::ServerState::attach`] / [`crate::state::ServerState::detach`].
-/// The wire `TerminalId` is interned via
-/// [`crate::state::ServerState::intern_terminal_wire`]
-/// so the frame carries the same id the client saw on
-/// `TERMINAL_SPAWNED` / `TERMINAL_SNAPSHOT`. The send is best-effort:
-/// a client whose mailbox has closed (it dropped the socket) is
-/// silently skipped — the `reap_terminal` call in the caller handles
-/// server-side state cleanup.
+/// Gathering the subscriber mailboxes, interning the wire id, and reaping
+/// the pane in a single critical section is what closes the TOCTOU race:
+/// no ATTACH can observe a "still alive in the registry but already
+/// EOF'd" pane between the gather and the reap.
+struct ReapAndNotify {
+    /// The pane's wire id, interned before the reap retired it. Reused
+    /// for both the L1 `TERMINAL_CLOSED` fanout and the `PaneClosed`
+    /// agent event so they carry the id the client saw on spawn/snapshot.
+    wire_terminal_id: phux_protocol::ids::TerminalId,
+    /// Outbound mailboxes of every client subscribed to the pane at reap
+    /// time. The L1 `TERMINAL_CLOSED` fanout targets exactly this set.
+    targets: Vec<tokio::sync::mpsc::Sender<Outbound>>,
+    /// `true` iff the reap emptied the last session — the server self-exit
+    /// signal (phux-60s).
+    server_empty: bool,
+    /// Whether any client has ever attached (arms the phux-60s self-exit).
+    served: bool,
+}
+
+/// Emit `TERMINAL_CLOSED { terminal_id, exit_status }` to every client
+/// in `targets` (phux-4li.11, SPEC §7.2 / §10.1).
+///
+/// The subscriber set and `wire_terminal_id` are gathered by the caller
+/// ([`spawn_terminal_exit_watcher`]) in the SAME state lock that reaps the
+/// pane, so they reflect exactly the clients subscribed at reap time. This
+/// function only performs the off-lock work: the awaited L1 fanout and the
+/// `PaneClosed` agent-event broadcast. Both are done off-lock because
+/// `with_mut` is synchronous and the borrow must not be held across an
+/// await (phux-emdv).
+///
+/// The `wire_terminal_id` is the one the client saw on `TERMINAL_SPAWNED`
+/// / `TERMINAL_SNAPSHOT`; the caller interned it before the reap retired
+/// it. The send is best-effort: a client whose mailbox has closed (it
+/// dropped the socket) is silently skipped — `reap_terminal` (already run
+/// by the caller) handled server-side state cleanup.
 pub(crate) async fn broadcast_terminal_closed(
     state: &SharedState,
-    pane: phux_core::ids::TerminalId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    targets: &[tokio::sync::mpsc::Sender<Outbound>],
     exit_status: Option<i32>,
 ) {
-    let targets: Vec<(
-        phux_protocol::ids::TerminalId,
-        tokio::sync::mpsc::Sender<Outbound>,
-    )> = state.with_mut(|s| {
-        let wire_terminal_id = s.intern_terminal_wire(pane);
-        s.subscribers_for_terminal(pane)
-            .iter()
-            .filter_map(|cid| {
-                s.attached
-                    .get(cid)
-                    .map(|c| (wire_terminal_id.clone(), c.tx.clone()))
-            })
-            .collect()
-    });
-    // The wire id is stable for the pane's lifetime; intern it once so
-    // both the L1 `TERMINAL_CLOSED` fanout and the `pane_closed` agent
-    // event below carry the same id the client saw on spawn/snapshot.
-    let wire_terminal_id = state.with_mut(|s| s.intern_terminal_wire(pane));
     if targets.is_empty() {
-        debug!(?pane, "TERMINAL_CLOSED: no L1-subscribed clients to notify");
+        debug!("TERMINAL_CLOSED: no L1-subscribed clients to notify");
     } else {
         debug!(
-            ?pane,
             count = targets.len(),
             ?exit_status,
             "TERMINAL_CLOSED: broadcasting to subscribed clients",
         );
-        for (wire_terminal_id, tx) in targets {
+        for tx in targets {
             let _ = tx
                 .send(Outbound::Frame(FrameKind::TerminalClosed {
-                    terminal_id: wire_terminal_id,
+                    terminal_id: wire_terminal_id.clone(),
                     exit_status,
                 }))
                 .await;
@@ -171,7 +222,7 @@ pub(crate) async fn broadcast_terminal_closed(
     // died, so this MUST run even when the L1 fanout above was empty.
     broadcast_event(
         state,
-        Some(&wire_terminal_id),
+        Some(wire_terminal_id),
         &AgentEvent::PaneClosed { exit_status },
     );
 }
