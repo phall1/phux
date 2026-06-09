@@ -83,6 +83,28 @@ impl LastAckedCursorMode {
             alt_screen_save: terminal.mode(Mode::ALT_SCREEN_SAVE).unwrap_or(false),
         }
     }
+
+    /// A placeholder capture for a raw broadcast-pump consumer, whose
+    /// per-consumer cursor/mode state is never read (the tick path serves
+    /// only tick-managed consumers and `FRAME_ACK` is dropped for raw ones).
+    /// Uses the same safe defaults `capture` falls back to on FFI error, so
+    /// it costs no terminal walk on the human attach path. If such a consumer
+    /// were ever served by the tick, `needs_initial_emit` forces a full pass
+    /// that overwrites this.
+    pub(crate) const fn unprimed() -> Self {
+        Self {
+            cursor_x: None,
+            cursor_y: None,
+            cursor_visible: false,
+            cursor_visual_style: CursorVisualStyle::Block,
+            cursor_blinking: false,
+            bracketed_paste: false,
+            focus_event: false,
+            alt_screen_legacy: false,
+            alt_screen: false,
+            alt_screen_save: false,
+        }
+    }
 }
 
 /// Defensive cap on [`ConsumerSyncState::emit_instants`].

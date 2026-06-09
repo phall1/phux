@@ -67,6 +67,15 @@ pub use tick::*;
 /// `defaults.history-limit` via [`TerminalActor::build_with_token`].
 const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 
+/// Upper bound on consecutive ready PTY chunks coalesced into a single
+/// `vt_write` + broadcast frame per pump wakeup (phux-ahk burst path). A
+/// heavy neovim redraw or p10k repaint arrives as many ~4KB reads; coalescing
+/// collapses the per-chunk Terminal write, broadcast frame, and downstream
+/// socket write into one. Bounded so a process emitting an unbroken stream
+/// can't monopolize the actor's `select!` loop (starving input / snapshot
+/// requests) — at 4KB/chunk this caps one drain at ~256KB.
+const MAX_PTY_COALESCE: usize = 64;
+
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
 /// input encoders, and serves the channels exposed via [`TerminalHandle`].
 ///
@@ -555,26 +564,38 @@ impl TerminalActor {
         wire_terminal_id: u32,
         wants_state_sync: bool,
     ) -> Result<(), ConsumerAttachError> {
-        let terminal = self.terminal.borrow();
-        // Cursor + DEC mode capture happens against a one-shot
-        // `RenderState` so we don't conflict with the shared
-        // synthesizer's borrow used to prime the reference below.
-        // Allocation cost is one libghostty handle; freed at end of scope.
-        let last_cursor_mode = {
-            let mut render_state = RenderState::new()?;
-            let snapshot = render_state.update(&terminal)?;
-            LastAckedCursorMode::capture(&terminal, &snapshot)
+        // Priming the per-consumer reference + cursor/mode capture costs two
+        // full-grid render passes, but a raw broadcast-pump consumer (the
+        // human attach path) never reads either: the tick serves only
+        // tick-managed consumers and `FRAME_ACK` is dropped for raw ones, and
+        // `wants_state_sync` is fixed at registration with no flip path. So
+        // do the work only when this consumer is actually tick-managed; a raw
+        // consumer attaches with an empty reference and a placeholder capture.
+        // (If it were ever tick-served, `needs_initial_emit` forces a full
+        // pass that primes both — see the tick emit gate.)
+        let tick_managed = wants_state_sync || self.consumer_tick_emits;
+        let (last_cursor_mode, reference) = if tick_managed {
+            let terminal = self.terminal.borrow();
+            // Cursor + DEC mode capture happens against a one-shot
+            // `RenderState` so we don't conflict with the shared
+            // synthesizer's borrow used to prime the reference below.
+            let last_cursor_mode = {
+                let mut render_state = RenderState::new()?;
+                let snapshot = render_state.update(&terminal)?;
+                LastAckedCursorMode::capture(&terminal, &snapshot)
+            };
+            // Prime the reference against the live terminal so the next
+            // `synthesize_against_reference` emits only deltas from *now* —
+            // the `TERMINAL_SNAPSHOT` the runtime emits right after this call
+            // already brings the consumer's mirror to this same point.
+            let mut reference = ConsumerReference::new();
+            self.synth
+                .borrow_mut()
+                .prime_reference(&terminal, &mut reference)?;
+            (last_cursor_mode, reference)
+        } else {
+            (LastAckedCursorMode::unprimed(), ConsumerReference::new())
         };
-        // Prime the per-consumer reference grid against the live terminal
-        // so the next `synthesize_against_reference` emits only deltas
-        // from *now* — the `TERMINAL_SNAPSHOT` the runtime emits right
-        // after this call already brings the consumer's mirror to this
-        // same point. Uses the actor's shared synthesizer (its
-        // `RenderState`/iterators); the reference itself is per-consumer.
-        let mut reference = ConsumerReference::new();
-        self.synth
-            .borrow_mut()
-            .prime_reference(&terminal, &mut reference)?;
         self.consumer_states.insert(
             client_id,
             ConsumerSyncState {
@@ -1192,6 +1213,33 @@ impl TerminalActor {
         }
     }
 
+    /// React to PTY EOF (the child went away): detach the PTY-read branch
+    /// and notify the runtime so it can broadcast `TERMINAL_CLOSED`.
+    ///
+    /// Dropping `pty_rx` parks the pump's `select!` arm forever, but the
+    /// actor deliberately stays alive — it must remain reachable for
+    /// late-arriving `SnapshotRequest`s (a client attaching just after the
+    /// child exited) and for orderly shutdown via the cancellation token.
+    /// The child is reaped here so we don't leave a zombie waiting for the
+    /// explicit shutdown signal. (phux-it8: firing `exit_notify` is what
+    /// lets attached clients learn the shell exited instead of freezing in
+    /// alt-screen.)
+    ///
+    /// TODO(phux-9gw): multi-pane lifecycle — when a session has more than
+    /// one pane, a single EOF should switch focus to a sibling rather than
+    /// detach the whole session. Today sessions are 1:1 with panes in
+    /// practice so the simpler "EOF → detach attached" model is correct.
+    fn handle_pty_eof(&mut self) {
+        debug!(
+            "PTY EOF; firing exit_notify and keeping actor alive for late snapshot/input drain"
+        );
+        self.pty_rx = None;
+        let exit_status = self.reap_child_if_any();
+        if let Some(tx) = self.exit_notify.take() {
+            let _ = tx.send(exit_status);
+        }
+    }
+
     /// Tear down the PTY: kill the child if still alive, drop the
     /// master (which sends EOF to the slave and unblocks the reader
     /// thread), and join the bridge threads. Best-effort: errors are
@@ -1326,60 +1374,66 @@ impl TerminalActor {
                 // PTY → Terminal + broadcast.
                 evt = recv_or_pending(self.pty_rx.as_mut()) => {
                     match evt {
-                        Some(PtyEvent::Bytes(chunk)) => {
-                            // One event per PTY chunk drained into the canonical
-                            // Terminal. Trace level: per-chunk volume is the raw
-                            // input rate, useful for "what was the PTY doing
-                            // right before a stall" but far too chatty for the
+                        Some(PtyEvent::Bytes(first)) => {
+                            // Coalesce any chunks already queued behind this one
+                            // into a single Terminal write + broadcast frame
+                            // (phux-ahk burst path). A lone chunk takes the
+                            // fast path below: its `Vec` moves into `Bytes`
+                            // with no copy, exactly as before. Only a genuine
+                            // burst (several reads queued) allocates a join
+                            // buffer.
+                            let mut coalesced: Vec<u8> = Vec::new();
+                            let mut saw_eof = false;
+                            for _ in 0..MAX_PTY_COALESCE {
+                                match self.pty_rx.as_mut().map(mpsc::UnboundedReceiver::try_recv) {
+                                    Some(Ok(PtyEvent::Bytes(more))) => {
+                                        if coalesced.is_empty() {
+                                            coalesced.reserve(first.len() + more.len());
+                                            coalesced.extend_from_slice(&first);
+                                        }
+                                        coalesced.extend_from_slice(&more);
+                                    }
+                                    // A queued EOF: flush the coalesced bytes
+                                    // first, then handle EOF below.
+                                    Some(Ok(PtyEvent::Eof)) => {
+                                        saw_eof = true;
+                                        break;
+                                    }
+                                    // Empty (nothing more ready) or the sender
+                                    // dropped — stop draining. A dropped sender
+                                    // surfaces as EOF on the next pump wakeup.
+                                    _ => break,
+                                }
+                            }
+                            let payload: Bytes = if coalesced.is_empty() {
+                                Bytes::from(first)
+                            } else {
+                                Bytes::from(coalesced)
+                            };
+                            // Trace level: per-wakeup volume is the raw input
+                            // rate, useful for "what was the PTY doing right
+                            // before a stall" but far too chatty for the
                             // default filter — off unless `phux=trace`.
-                            trace!(bytes = chunk.len(), "vt_write: PTY chunk -> Terminal");
-                            self.terminal.borrow_mut().vt_write(&chunk);
+                            trace!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
+                            self.terminal.borrow_mut().vt_write(&payload);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).
                             self.terminal_dirty_since_tick = true;
                             // phux-y2t: source agent events (bell, title,
-                            // dirty) from the just-applied chunk for any
+                            // dirty) from the just-applied bytes for any
                             // event-stream subscriber. No-op without a sink.
-                            self.source_events_from_chunk(&chunk);
+                            self.source_events_from_chunk(&payload);
                             // Broadcast send fails only when no
                             // subscribers exist; that's a normal
                             // steady-state (no attached clients) and
                             // we silently drop.
-                            let _ = self.output_tx.send(Bytes::from(chunk));
+                            let _ = self.output_tx.send(payload);
+                            if saw_eof {
+                                self.handle_pty_eof();
+                            }
                         }
                         Some(PtyEvent::Eof) | None => {
-                            debug!("PTY EOF; firing exit_notify and keeping actor alive for late snapshot/input drain");
-                            // Detach the PTY-read branch: drop the
-                            // receiver so the select! arm parks
-                            // forever. We deliberately do NOT exit —
-                            // the actor must remain reachable for
-                            // late-arriving SnapshotRequests (e.g., a
-                            // client attaching just after the child
-                            // exited) and for an orderly shutdown via
-                            // the cancellation token. Reap the child
-                            // here so we don't leave a zombie waiting
-                            // for the explicit shutdown signal.
-                            //
-                            // phux-it8: fire the `exit_notify` oneshot
-                            // so the runtime can broadcast `Detached`
-                            // to attached clients whose focused pane
-                            // just died (the bug being fixed: client
-                            // would freeze in alt-screen with no
-                            // signal that the shell had exited).
-                            //
-                            // TODO(phux-9gw): multi-pane lifecycle —
-                            // when a session has more than one pane,
-                            // a single EOF should switch focus to a
-                            // sibling rather than detach the whole
-                            // session. Today sessions are 1:1 with
-                            // panes in practice so the simpler
-                            // "EOF → detach attached" model is
-                            // correct.
-                            self.pty_rx = None;
-                            let exit_status = self.reap_child_if_any();
-                            if let Some(tx) = self.exit_notify.take() {
-                                let _ = tx.send(exit_status);
-                            }
+                            self.handle_pty_eof();
                         }
                     }
                 }
@@ -2128,8 +2182,10 @@ mod tests {
         let mut actor = bundle.actor;
         let client = ClientId(7);
         let (tx, _rx) = dummy_outbound();
+        // A tick-managed (state-sync) consumer: priming runs, so the
+        // capture must reflect the live terminal.
         actor
-            .register_consumer(client, tx, 11, false)
+            .register_consumer(client, tx, 11, true)
             .expect("register");
 
         let state = actor.consumer_state(client).expect("state present");
@@ -2144,6 +2200,27 @@ mod tests {
         // updated against the live terminal, not left blank.
         assert_eq!(state.last_cursor_mode.cursor_x, Some(5));
         assert_eq!(state.last_cursor_mode.cursor_y, Some(0));
+    }
+
+    /// A raw broadcast-pump consumer (the human attach path) skips the two
+    /// full-grid render passes priming would cost: its reference and
+    /// cursor/mode capture are never read (the tick serves only tick-managed
+    /// consumers). So it registers with the `unprimed` placeholder, not a
+    /// live capture (phux-ahk register-prime gating).
+    #[test]
+    fn register_raw_consumer_skips_priming() {
+        let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+        let mut actor = bundle.actor;
+        let client = ClientId(7);
+        let (tx, _rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, false)
+            .expect("register");
+
+        let state = actor.consumer_state(client).expect("state present");
+        // Not primed: the placeholder capture, not the seeded cursor at (5, 0).
+        assert_eq!(state.last_cursor_mode.cursor_x, None);
+        assert_eq!(state.last_cursor_mode.cursor_y, None);
     }
 
     /// phux-q0e.2: end-to-end across the actor's `select!` loop —
