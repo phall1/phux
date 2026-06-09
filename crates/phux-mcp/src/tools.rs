@@ -599,15 +599,19 @@ fn pane_value(id: &TerminalId) -> Value {
     json!(format!("{id:?}"))
 }
 
-/// A per-call sentinel nonce for `phux_run` (pid + epoch-nanos), matching
-/// `phux run`'s `run_nonce`. The pid alone is recycled across processes;
-/// mixing in nanoseconds makes a residual sentinel from an earlier run
-/// unable to collide with this one.
+/// A per-call sentinel nonce for `phux_run`, matching `phux run`'s
+/// `run_nonce`: pid (concurrent processes) + epoch-nanos (residual sentinels
+/// from earlier processes) + a process-global monotonic counter so two calls
+/// in one clock tick can't collide. The counter matters most here: an MCP
+/// host can fire `phux_run` calls back-to-back within a single `SystemTime`
+/// tick, which pid+nanos alone would not distinguish.
 fn run_nonce() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    format!("{}x{nanos}", std::process::id())
+    format!("{}x{nanos}x{seq}", std::process::id())
 }
 
 /// Read an optional string argument from a tool's params object.

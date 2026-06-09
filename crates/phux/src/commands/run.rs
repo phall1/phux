@@ -116,15 +116,22 @@ pub(crate) fn print_run_result(result: &phux_client::run::RunResult) {
     );
 }
 
-/// A per-invocation sentinel nonce. The pid is recycled across process
-/// lifetimes, so it alone is not unique over time; mixing in the process
-/// start time (nanoseconds since the epoch) makes a residual sentinel from
-/// an earlier `run` unable to collide with this one.
+/// A per-invocation sentinel nonce, unique across `run` calls.
+///
+/// Three components: the pid disambiguates concurrent processes; the
+/// epoch-nanos make a residual sentinel from an *earlier* process unable to
+/// collide with this one; and a process-global monotonic counter guarantees
+/// uniqueness between two calls in the same process even when they fall in a
+/// single clock tick (`SystemTime` resolution is coarser than nanoseconds, so
+/// back-to-back calls — or an MCP host firing rapid `phux_run`s — could
+/// otherwise share a timestamp).
 pub(crate) fn run_nonce() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    format!("{}x{nanos}", std::process::id())
+    format!("{}x{nanos}x{seq}", std::process::id())
 }
 
 #[cfg(test)]
