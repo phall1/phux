@@ -76,6 +76,31 @@ const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 /// requests) — at 4KB/chunk this caps one drain at ~256KB.
 const MAX_PTY_COALESCE: usize = 64;
 
+/// Byte cap on one coalesced `vt_write` payload. A heavy redraw arrives
+/// as many ~4KB reads; coalescing still collapses them into one frame,
+/// but a single `vt_write` is a synchronous libghostty parse that blocks
+/// the actor loop (and thus the input arm polled before it) for its full
+/// duration. Capping at 48KB keeps a typical neovim / p10k repaint in one
+/// frame while bounding the worst-case parse, so a queued keystroke
+/// interleaves after at most one capped parse. libghostty's VT parser is
+/// a streaming state machine, so splitting the byte stream on this
+/// boundary loses no escape sequence — bytes are never reordered. Paired
+/// with `MAX_INPUT_COALESCE`, this is the load-bearing bound on the output
+/// arm: the two consts together keep either direction from monopolizing
+/// the single-thread actor loop.
+const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
+
+/// Upper bound on input events drained in a single `input_rx` wakeup
+/// before returning to the `select!`. Input events are tiny (one encode +
+/// channel send each) and `input_rx` is a bounded, low-rate single-client
+/// mailbox that empties in microseconds, so in steady state the PTY-output
+/// arm wins as soon as the mailbox drains. This cap bounds a single
+/// pathological batch (a paste that the encoder expands, or a burst of
+/// queued keys) so it cannot inflate one `input_rx` turn without limit; it
+/// does not by itself force a yield to output. The structural output bound
+/// is `MAX_PTY_COALESCE_BYTES`.
+const MAX_INPUT_COALESCE: usize = 16;
+
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
 /// input encoders, and serves the channels exposed via [`TerminalHandle`].
 ///
@@ -1002,6 +1027,29 @@ impl TerminalActor {
         self.terminal_dirty_since_tick = true;
     }
 
+    /// Test-only: install in-memory PTY channels on a no-PTY actor so a
+    /// test can inject a PTY-output burst (the returned
+    /// [`mpsc::UnboundedSender<PtyEvent>`]) and observe the encoded input
+    /// the actor forwards toward the PTY writer thread (the returned
+    /// [`mpsc::UnboundedReceiver<Vec<u8>>`]). Faithful to production
+    /// wiring: queued output is consumed by `vt_write`; serviced input
+    /// surfaces on the writer receiver. `pty` stays `None` — the run loop
+    /// only reads `pty_tx` for input forwarding and `pty` for cwd/EOF,
+    /// neither of which this seam exercises.
+    #[cfg(test)]
+    pub(crate) fn install_test_pty_channels(
+        &mut self,
+    ) -> (
+        mpsc::UnboundedSender<PtyEvent>,
+        mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        let (evt_tx, evt_rx) = mpsc::unbounded_channel::<PtyEvent>();
+        let (writer_tx, writer_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        self.pty_rx = Some(evt_rx);
+        self.pty_tx = Some(writer_tx);
+        (evt_tx, writer_rx)
+    }
+
     /// Synthesize a snapshot of the current `Terminal` state. Exposed
     /// for tests that want to drive the synthesis path synchronously
     /// without going through the actor's `select!` loop.
@@ -1072,6 +1120,30 @@ impl TerminalActor {
                     PasteOutcome::Encoded(bytes) => Ok(Some(bytes.to_vec())),
                     PasteOutcome::Rejected => Ok(None),
                 }
+            }
+        }
+    }
+
+    /// Encode one input event and forward it to the PTY writer thread.
+    /// Shared by the bounded `input_rx` drain in [`Self::run`]. A failed
+    /// encode or a closed writer logs and is dropped — a single bad event
+    /// must not kill the actor.
+    fn service_input(&self, input: &TerminalInput) {
+        match self.encode_input(input) {
+            Ok(Some(bytes)) => {
+                if let Some(tx) = self.pty_tx.as_ref() {
+                    if tx.send(bytes).is_err() {
+                        debug!("PTY writer channel closed; dropping input");
+                    }
+                } else {
+                    trace!(?input, "no PTY; input discarded");
+                }
+            }
+            Ok(None) => {
+                trace!(?input, "input gated/dropped by encoder");
+            }
+            Err(err) => {
+                warn!(error = %err, "input encode failed; dropping event");
             }
         }
     }
@@ -1369,7 +1441,36 @@ impl TerminalActor {
                     return;
                 }
 
-                // PTY → Terminal + broadcast.
+                // Input → PTY. Polled before the PTY-output arm (biased
+                // order) so a queued keystroke is serviced this turn
+                // rather than waiting behind an output burst — the fix for
+                // load-correlated input starvation. Bounded by
+                // `MAX_INPUT_COALESCE`: the arm fires on the first ready
+                // event, then drains up to a capped batch via `try_recv`
+                // so a paste the encoder expands cannot inflate one turn
+                // without limit. The PTY-output arm's structural bound is
+                // `MAX_PTY_COALESCE_BYTES`.
+                Some(input) = self.input_rx.recv() => {
+                    self.service_input(&input);
+                    for _ in 1..MAX_INPUT_COALESCE {
+                        match self.input_rx.try_recv() {
+                            Ok(next) => self.service_input(&next),
+                            // Empty (nothing more ready) or Disconnected —
+                            // stop draining.
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                // PTY → Terminal + broadcast. Polled after the input arm:
+                // when this arm finishes one bounded payload and returns to
+                // the `select!`, the biased re-poll offers `input_rx`
+                // first, so a keystroke queued during the burst is serviced
+                // before the next `vt_write`. When the byte cap stops the
+                // drain mid-burst the arm additionally yields to the
+                // scheduler before re-entering, so sibling tasks on the
+                // LocalSet (and a freshly-queued keystroke) get a turn
+                // between bounded parses rather than after the whole burst.
                 evt = recv_or_pending(self.pty_rx.as_mut()) => {
                     match evt {
                         Some(PtyEvent::Bytes(first)) => {
@@ -1377,12 +1478,38 @@ impl TerminalActor {
                             // into a single Terminal write + broadcast frame
                             // (phux-ahk burst path). A lone chunk takes the
                             // fast path below: its `Vec` moves into `Bytes`
-                            // with no copy, exactly as before. Only a genuine
-                            // burst (several reads queued) allocates a join
-                            // buffer.
+                            // with no copy. Only a genuine burst (several
+                            // reads queued) allocates a join buffer. The drain
+                            // stops on the chunk-count cap, on EOF, or once the
+                            // payload would cross `MAX_PTY_COALESCE_BYTES` — in
+                            // the byte-cap case the crossing chunk is left
+                            // queued for the next turn (mpsc has no peek, so the
+                            // length is checked before `try_recv`).
                             let mut coalesced: Vec<u8> = Vec::new();
                             let mut saw_eof = false;
+                            // `true` when the drain stopped because the next
+                            // chunk would cross the byte cap (more output is
+                            // likely queued) rather than because the queue
+                            // emptied. Drives the post-broadcast yield so a
+                            // sustained burst hands the scheduler a turn
+                            // between bounded parses.
+                            let mut hit_byte_cap = false;
                             for _ in 0..MAX_PTY_COALESCE {
+                                // Length so far: the lone `first` chunk before
+                                // any coalescing, else the join buffer. Stop
+                                // before consuming a chunk that would push the
+                                // payload past the byte cap so each `vt_write`
+                                // is a bounded synchronous parse. The first
+                                // chunk always lands; only coalescing is capped.
+                                let current_len = if coalesced.is_empty() {
+                                    first.len()
+                                } else {
+                                    coalesced.len()
+                                };
+                                if current_len >= MAX_PTY_COALESCE_BYTES {
+                                    hit_byte_cap = true;
+                                    break;
+                                }
                                 match self.pty_rx.as_mut().map(mpsc::UnboundedReceiver::try_recv) {
                                     Some(Ok(PtyEvent::Bytes(more))) => {
                                         if coalesced.is_empty() {
@@ -1428,30 +1555,18 @@ impl TerminalActor {
                             let _ = self.output_tx.send(payload);
                             if saw_eof {
                                 self.handle_pty_eof();
+                            } else if hit_byte_cap {
+                                // A capped payload with more output queued:
+                                // yield so the runtime re-polls (input arm
+                                // first) and sibling LocalSet tasks advance,
+                                // bounding the output arm at the thread level.
+                                // The next loop turn coalesces the next
+                                // bounded payload, so throughput is preserved.
+                                tokio::task::yield_now().await;
                             }
                         }
                         Some(PtyEvent::Eof) | None => {
                             self.handle_pty_eof();
-                        }
-                    }
-                }
-
-                Some(input) = self.input_rx.recv() => {
-                    match self.encode_input(&input) {
-                        Ok(Some(bytes)) => {
-                            if let Some(tx) = self.pty_tx.as_ref() {
-                                if tx.send(bytes).is_err() {
-                                    debug!("PTY writer channel closed; dropping input");
-                                }
-                            } else {
-                                trace!(?input, "no PTY; input discarded");
-                            }
-                        }
-                        Ok(None) => {
-                            trace!(?input, "input gated/dropped by encoder");
-                        }
-                        Err(err) => {
-                            warn!(error = %err, "input encode failed; dropping event");
                         }
                     }
                 }
@@ -1979,6 +2094,104 @@ mod tests {
                 assert!(
                     body.contains("hi there"),
                     "actor-synthesized bytes should contain seeded text"
+                );
+            })
+            .await;
+    }
+
+    /// Interactive-latency regression gate: a queued keystroke must
+    /// interleave with a large pending PTY-output burst rather than wait
+    /// for the entire burst to drain. Pre-queues ~800KB of output (far
+    /// exceeding `MAX_PTY_COALESCE_BYTES`) plus one input event, runs the
+    /// actor, and asserts the input reaches the PTY writer channel while
+    /// the burst is still draining (the cumulative broadcast bytes seen
+    /// at that moment are far below the full burst). Fails if input is
+    /// serviced only after the entire burst drains (output-first ordering
+    /// or an unbounded coalesce that never yields).
+    #[tokio::test(flavor = "current_thread")]
+    async fn input_interleaves_with_a_large_pty_output_burst() {
+        use phux_protocol::input::paste::{PasteEvent, PasteTrust};
+
+        const CHUNK_LEN: usize = 4096;
+        const CHUNK_COUNT: usize = 200;
+        const BURST_BYTES: usize = CHUNK_LEN * CHUNK_COUNT;
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new(80, 24).expect("new");
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                let mut actor = bundle.actor;
+                let (pty_evt_tx, mut writer_rx) = actor.install_test_pty_channels();
+
+                // Subscribe before spawning so no broadcast frame is
+                // missed. This is the deterministic ordering gate: the
+                // cumulative output bytes observed at the instant input
+                // lands must be far below the full burst.
+                let mut out_rx = handle.output.subscribe();
+
+                // Pre-queue a burst far larger than MAX_PTY_COALESCE_BYTES
+                // so it spans many capped vt_writes.
+                let chunk = vec![b'x'; CHUNK_LEN];
+                for _ in 0..CHUNK_COUNT {
+                    pty_evt_tx
+                        .send(PtyEvent::Bytes(chunk.clone()))
+                        .expect("queue burst");
+                }
+                // Queue ONE input event. With bracketed-paste mode 2004
+                // off (a fresh Terminal's default) a Trusted paste of
+                // b"x" encodes to exactly b"x" on the writer channel.
+                handle
+                    .input
+                    .send(TerminalInput::Paste(PasteEvent {
+                        trust: PasteTrust::Trusted,
+                        data: b"x".to_vec(),
+                    }))
+                    .await
+                    .expect("queue input");
+
+                tokio::task::spawn_local(actor.run());
+
+                // The keystroke must be serviced within a bounded budget:
+                // it interleaves, not waits for the whole burst. The
+                // 500ms timeout is a backstop; the byte-ordering check
+                // below is the real gate.
+                let got =
+                    tokio::time::timeout(std::time::Duration::from_millis(500), writer_rx.recv())
+                        .await
+                        .expect("input must be serviced mid-burst, not after it");
+                assert_eq!(
+                    got,
+                    Some(b"x".to_vec()),
+                    "queued keystroke should reach the PTY writer while the burst drains",
+                );
+
+                // Count broadcast bytes the actor has emitted so far.
+                // Account Lagged-skipped frames toward the total (the
+                // broadcast channel is bounded; a fast burst can lag this
+                // receiver) so the ordering gate cannot under-report and
+                // pass spuriously.
+                let mut emitted: usize = 0;
+                loop {
+                    match out_rx.try_recv() {
+                        Ok(bytes) => emitted += bytes.len(),
+                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                            // Each lagged frame is one coalesced payload of
+                            // at most MAX_PTY_COALESCE_BYTES; bound the
+                            // skipped volume by that cap so the assertion
+                            // stays conservative (never under-reports).
+                            let skipped = usize::try_from(n).unwrap_or(usize::MAX);
+                            emitted += skipped.saturating_mul(MAX_PTY_COALESCE_BYTES);
+                        }
+                        Err(_) => break,
+                    }
+                }
+                token.cancel();
+                assert!(
+                    emitted < BURST_BYTES,
+                    "input must land mid-burst: cumulative output {emitted} should be \
+                     below the full burst {BURST_BYTES}",
                 );
             })
             .await;

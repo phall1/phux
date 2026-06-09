@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
-use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, detect_color_support};
+use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
 use phux_protocol::ids::{GroupId, TerminalId};
 use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
@@ -434,13 +434,21 @@ async fn attach_session<W: super::RenderSink>(
     // span's CLOSE duration is the end-to-end attach latency a trace reader
     // wants for "why was the first paint slow." Lifecycle-rate, so info.
     let handshake_span = tracing::info_span!("attach_handshake", ?target);
-    let attached = async {
-        handshake(&mut conn).await?;
+    let (attached, output_mode) = async {
+        let mode = handshake(&mut conn).await?;
         send_attach(&mut conn, target).await?;
-        wait_for_attached(&mut conn).await
+        let attached = wait_for_attached(&mut conn).await?;
+        Ok::<_, AttachError>((attached, mode))
     }
     .instrument(handshake_span)
     .await?;
+    // The output mode is a per-connection HELLO property; `handshake`
+    // runs exactly once per connection and the re-attach loop below reuses
+    // the same `conn` without re-running it, so this bool is stable across
+    // an in-connection session switch. Only a `StateSync` consumer's
+    // `FRAME_ACK`s feed the server's per-seq RTT/backpressure accounting;
+    // a raw consumer's acks are dropped server-side, so the loop skips them.
+    let wants_state_sync = output_mode == OutputMode::StateSync;
 
     // STAGE 2 — server accepted the attach. Now and only now do we flip
     // the outer terminal into raw + alt screen. The guard's Drop runs
@@ -469,17 +477,18 @@ async fn attach_session<W: super::RenderSink>(
     // `exit_after_detach` (which never returns — see its doc comment).
     let mut attached = attached;
     loop {
-        let exit = match main_loop(&mut conn, attached, predict, out, resync).await {
-            Ok(exit) => exit,
-            Err(err) => {
-                // Drain + stop the off-loop writer before propagating; the
-                // RawModeGuard's Drop restores the terminal as we unwind.
-                if let Some(writer) = writer.take() {
-                    writer.shutdown_and_join();
+        let exit =
+            match main_loop(&mut conn, attached, predict, out, resync, wants_state_sync).await {
+                Ok(exit) => exit,
+                Err(err) => {
+                    // Drain + stop the off-loop writer before propagating; the
+                    // RawModeGuard's Drop restores the terminal as we unwind.
+                    if let Some(writer) = writer.take() {
+                        writer.shutdown_and_join();
+                    }
+                    return Err(err);
                 }
-                return Err(err);
-            }
-        };
+            };
         match exit {
             LoopExit::Detached => {
                 // Lifecycle transition (info): the attach loop is exiting.
@@ -572,8 +581,31 @@ fn write_terminal_clear<W: Write>(out: &mut W) -> io::Result<()> {
     out.flush()
 }
 
-/// Send `HELLO` and require `HELLO_OK` before ATTACH.
-async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
+/// Whether to emit a `FRAME_ACK` for an applied `TERMINAL_OUTPUT`.
+///
+/// Acks are load-bearing only for a `StateSync` consumer: the server
+/// folds each into that consumer's per-seq RTT/backpressure accounting
+/// (`on_frame_ack`). A raw broadcast consumer's acks carry no seq the
+/// server tracks, so it drops them — emitting one is a wasted client
+/// write plus a server decode and state lock on the same UDS that carries
+/// keystrokes during a repaint storm. In raw mode the ack is skipped; in
+/// state-sync mode the `(terminal_id, seq)` flows through unchanged.
+///
+/// Not `const`: the `(TerminalId, u64)` it threads carries a non-trivial
+/// destructor (the federation `TerminalId::Satellite` variant owns a
+/// `String`), which a `const fn` may not drop at compile time.
+fn should_emit_frame_ack(
+    wants_state_sync: bool,
+    ack: Option<(TerminalId, u64)>,
+) -> Option<(TerminalId, u64)> {
+    if wants_state_sync { ack } else { None }
+}
+
+/// Send `HELLO` and require `HELLO_OK` before ATTACH. Returns the
+/// [`OutputMode`] the client advertised — a per-connection HELLO
+/// property the caller threads into the session loop to decide whether
+/// `FRAME_ACK` accounting is load-bearing.
+async fn handshake(conn: &mut Connection) -> Result<OutputMode, AttachError> {
     // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
     // `detect_color_support`. The advertised tier feeds the server's
     // per-client `downsample::rewrite_bytes` (SPEC §6.2).
@@ -594,7 +626,7 @@ async fn handshake(conn: &mut Connection) -> Result<(), AttachError> {
     })
     .await?;
     match conn.recv().await? {
-        FrameKind::HelloOk { .. } => Ok(()),
+        FrameKind::HelloOk { .. } => Ok(client_caps.output_mode),
         FrameKind::Error { message, .. } => Err(AttachError::Refused(message)),
         other => Err(AttachError::Protocol(format!(
             "expected HELLO_OK or ERROR after HELLO, got {other:?}",
@@ -704,6 +736,10 @@ async fn main_loop<W: super::RenderSink>(
     // latest state from scratch (a self-contained full frame supersedes the
     // dropped diffs). `None` for the synchronous test sink.
     needs_resync: Option<&AtomicBool>,
+    // Whether this connection negotiated `OutputMode::StateSync`. Gates the
+    // per-frame `FRAME_ACK`: only a state-sync consumer's acks are tracked
+    // server-side, so a raw consumer skips them (see `should_emit_frame_ack`).
+    wants_state_sync: bool,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -919,8 +955,95 @@ async fn main_loop<W: super::RenderSink>(
         tokio::select! {
             biased;
 
-            // Server frames take priority — process them as fast as the
-            // network delivers so the user sees output promptly.
+            // Stdin is polled before inbound frames so a local keystroke
+            // is dispatched promptly rather than waiting behind an output
+            // burst. One read is bounded by `stdin_buf`; the inbound arm is
+            // bounded by `FRAME_COALESCE_CAP`, so neither starves the other.
+            n = stdin.read(&mut stdin_buf) => {
+                let n = n.map_err(AttachError::Io)?;
+                if n == 0 {
+                    // Stdin EOF — outer terminal closed. Detach cleanly.
+                    if !detach_pending {
+                        conn.send(&FrameKind::Detach).await?;
+                        detach_pending = true;
+                    }
+                    continue;
+                }
+                let events = parser.feed(&stdin_buf[..n]);
+                let mut ctx = DispatchCtx {
+                    resolver: resolver.as_mut(),
+                    workspace: &mut workspace,
+                    viewport: viewport_dims,
+                    next_request_id: &mut next_request_id,
+                    pending_splits: &mut pending_splits,
+                    pending_windows: &mut pending_windows,
+                    overlays: &mut overlays,
+                    keybindings: keybindings_snapshot.as_ref(),
+                    theme: &theme,
+                    sessions: &sessions,
+                    focused_session,
+                    session_name: &mut session_name,
+                    switch_request: &mut switch_request,
+                };
+                let layout_changed = dispatch_input_events(
+                    out,
+                    conn,
+                    events,
+                    &mut focused_pane,
+                    &mut detach_pending,
+                    &mut predict,
+                    &overlay,
+                    &mut panes,
+                    &mut ctx,
+                )
+                .await?;
+                // phux-eb0: a committed `switch-session` ends this loop so
+                // the outer driver re-attaches. Return BEFORE any repaint
+                // — the new session's ATTACHED + snapshot will repaint.
+                if let Some(target) = switch_request.take() {
+                    return Ok(LoopExit::SwitchTo(target));
+                }
+                if layout_changed {
+                    if let Some(sb) = status_bar.as_mut() {
+                        sb.set_windows(window_infos(&workspace));
+                    }
+                    // phux-5ke.4: on overlay dismiss the dispatcher
+                    // sets layout_changed=true; the full-frame repaint
+                    // below restores pane content under the now-gone
+                    // modal. When the overlay is still active (e.g.
+                    // a push happened in the same batch) we skip the
+                    // pane repaint and go straight to overlay paint.
+                    if !overlays.is_active()
+                        && let Some(ls) = workspace.active_window()
+                    {
+                        paint_full_frame(
+                            out,
+                            ls,
+                            &mut panes,
+                            focused_pane.as_ref(),
+                            viewport_dims,
+                            status_bar.as_mut(),
+                            &session_name,
+                        );
+                    }
+                }
+                if overlays.is_active() {
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        &session_name,
+                    );
+                }
+            }
+
+            // Inbound frames are drained in a `FRAME_COALESCE_CAP`-bounded
+            // batch so a redraw burst paints once; bounded so it cannot
+            // starve the stdin arm polled above it.
             frame = conn.recv() => {
                 match frame {
                     Ok(first) => {
@@ -1002,7 +1125,13 @@ async fn main_loop<W: super::RenderSink>(
                         // against the acked reference. Without this the
                         // server re-emits an ever-growing unacked delta
                         // forever (see `tick_emit`). Cumulative per SPEC §12.2.
-                        if let Some((terminal_id, seq)) = outcome.ack {
+                        // Gated on the negotiated mode: a raw consumer's acks
+                        // are dropped server-side, so skipping them removes a
+                        // wasted write on the keystroke-carrying UDS during a
+                        // repaint burst.
+                        if let Some((terminal_id, seq)) =
+                            should_emit_frame_ack(wants_state_sync, outcome.ack)
+                        {
                             conn.send(&FrameKind::FrameAck { terminal_id, seq }).await?;
                         }
                         // phux-4li.12: a layout mutation triggered by a
@@ -1094,89 +1223,6 @@ async fn main_loop<W: super::RenderSink>(
                         return Ok(LoopExit::Detached);
                     }
                     Err(err) => return Err(err),
-                }
-            }
-
-            // Stdin → upstream. `read` returns 0 on EOF (terminal closed).
-            n = stdin.read(&mut stdin_buf) => {
-                let n = n.map_err(AttachError::Io)?;
-                if n == 0 {
-                    // Stdin EOF — outer terminal closed. Detach cleanly.
-                    if !detach_pending {
-                        conn.send(&FrameKind::Detach).await?;
-                        detach_pending = true;
-                    }
-                    continue;
-                }
-                let events = parser.feed(&stdin_buf[..n]);
-                let mut ctx = DispatchCtx {
-                    resolver: resolver.as_mut(),
-                    workspace: &mut workspace,
-                    viewport: viewport_dims,
-                    next_request_id: &mut next_request_id,
-                    pending_splits: &mut pending_splits,
-                    pending_windows: &mut pending_windows,
-                    overlays: &mut overlays,
-                    keybindings: keybindings_snapshot.as_ref(),
-                    theme: &theme,
-                    sessions: &sessions,
-                    focused_session,
-                    session_name: &mut session_name,
-                    switch_request: &mut switch_request,
-                };
-                let layout_changed = dispatch_input_events(
-                    out,
-                    conn,
-                    events,
-                    &mut focused_pane,
-                    &mut detach_pending,
-                    &mut predict,
-                    &overlay,
-                    &mut panes,
-                    &mut ctx,
-                )
-                .await?;
-                // phux-eb0: a committed `switch-session` ends this loop so
-                // the outer driver re-attaches. Return BEFORE any repaint
-                // — the new session's ATTACHED + snapshot will repaint.
-                if let Some(target) = switch_request.take() {
-                    return Ok(LoopExit::SwitchTo(target));
-                }
-                if layout_changed {
-                    if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(window_infos(&workspace));
-                    }
-                    // phux-5ke.4: on overlay dismiss the dispatcher
-                    // sets layout_changed=true; the full-frame repaint
-                    // below restores pane content under the now-gone
-                    // modal. When the overlay is still active (e.g.
-                    // a push happened in the same batch) we skip the
-                    // pane repaint and go straight to overlay paint.
-                    if !overlays.is_active()
-                        && let Some(ls) = workspace.active_window()
-                    {
-                        paint_full_frame(
-                            out,
-                            ls,
-                            &mut panes,
-                            focused_pane.as_ref(),
-                            viewport_dims,
-                            status_bar.as_mut(),
-                            &session_name,
-                        );
-                    }
-                }
-                if overlays.is_active() {
-                    paint_active_overlay(
-                        out,
-                        &overlays,
-                        &workspace,
-                        &mut panes,
-                        focused_pane.as_ref(),
-                        viewport_dims,
-                        status_bar.as_mut(),
-                        &session_name,
-                    );
                 }
             }
 
@@ -1923,6 +1969,31 @@ mod tests {
         );
         assert_eq!(coalesce_defer_flags(&[None, None]), vec![false, false]);
         assert_eq!(coalesce_defer_flags(&[]), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn raw_consumer_does_not_emit_frame_ack() {
+        let ack = Some((TerminalId::local(7), 42u64));
+        assert_eq!(
+            should_emit_frame_ack(false, ack),
+            None,
+            "raw mode must skip the ack even when the frame carries a seq"
+        );
+    }
+
+    #[test]
+    fn state_sync_consumer_emits_frame_ack() {
+        let ack = Some((TerminalId::local(7), 42u64));
+        assert_eq!(
+            should_emit_frame_ack(true, ack.clone()),
+            ack,
+            "state-sync mode must forward the ack the server tracks"
+        );
+        assert_eq!(
+            should_emit_frame_ack(true, None),
+            None,
+            "seq=0 / no-ack frames are never acked regardless of mode"
+        );
     }
 
     #[test]
