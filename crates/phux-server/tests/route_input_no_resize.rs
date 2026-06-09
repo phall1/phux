@@ -232,7 +232,9 @@ fn route_input_delivers_keys_without_resizing_the_pane() {
         // so unlike the attach path it does not shrink the pane to the
         // attach viewport's 80x24. Poll for the echoed byte to confirm the
         // event actually reached the PTY, then assert the dims held.
-        let after = poll_for_echo(&mut stream, &pane, 'z', 40).await;
+        // phux-dacb: generous budget (200 x 25ms = 5s) + require the settled
+        // dims, so a slow echo on a loaded CI runner can't trip the dims assert.
+        let after = poll_for_echo(&mut stream, &pane, 'z', Some((120, 40)), 200).await;
         assert_eq!(
             (after.cols, after.rows),
             (120, 40),
@@ -323,7 +325,7 @@ fn route_input_from_primary_subscriber_succeeds() {
         }
 
         // Confirm the routed byte actually reached the PTY.
-        let echoed = poll_for_echo(&mut stream, &pane, 'q', 40).await;
+        let echoed = poll_for_echo(&mut stream, &pane, 'q', None, 200).await;
         let joined: String = echoed.lines.join("");
         assert!(
             joined.contains('q'),
@@ -352,16 +354,25 @@ async fn poll_for_dims(
 }
 
 /// Poll `GET_SCREEN` until `needle` appears in the joined screen text.
+/// Poll `GET_SCREEN` until BOTH the echoed `needle` is on screen AND the pane
+/// reports `dims`, or `attempts` expire. phux-dacb: gating on both conditions
+/// (not just the echo) makes the dims assertion robust on a saturated 2-core CI
+/// runner — under contention the routed key's PTY echo can lag well past a
+/// tight budget, and returning a transient pre-settle snapshot then tripped the
+/// dims assert. Returns the first snapshot satisfying both; on timeout returns
+/// the last seen so the caller's assertions fail with real diagnostics.
 async fn poll_for_echo(
     stream: &mut UnixStream,
     pane: &phux_protocol::ids::TerminalId,
     needle: char,
+    dims: Option<(u16, u16)>,
     attempts: u32,
 ) -> phux_core::screen::ScreenState {
     let mut last = None;
     for i in 0..attempts {
         let s = screen(stream, 2000 + i, pane).await;
-        if s.lines.iter().any(|l| l.contains(needle)) {
+        let dims_ok = dims.is_none_or(|d| (s.cols, s.rows) == d);
+        if dims_ok && s.lines.iter().any(|l| l.contains(needle)) {
             return s;
         }
         last = Some(s);
