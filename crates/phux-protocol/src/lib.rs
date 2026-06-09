@@ -38,6 +38,9 @@ pub mod ids;
 #[cfg(feature = "server")]
 pub mod policy;
 
+#[cfg(feature = "server")]
+pub mod sgr;
+
 pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet,

@@ -32,6 +32,7 @@ use std::io::Write as _;
 use phux_core::screen::{
     CellColor, CellInfo, CellStyle, CursorState, SCHEMA_VERSION, ScreenState, SemanticContent,
 };
+use phux_protocol::sgr::write_reset_and_sgr;
 
 use libghostty_vt::{
     RenderState, Terminal as GhosttyTerminal,
@@ -156,7 +157,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         // 2. Walk every row + cell, emitting SGR deltas and graphemes. The
         //    fresh render state above guarantees a full observation; the inner
         //    cell loop is shared via [`emit_cell`].
-        let mut prev_style: Option<Style> = None;
+        let mut prev_style: Option<Pen> = None;
         let mut row_iter = rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
         while let Some(row) = row_iter.next() {
@@ -521,7 +522,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 // Select the screen buffer before painting (phux-99n).
                 emit_screen_mode(&mut out, terminal)?;
 
-                let mut prev_style: Option<Style> = None;
+                let mut prev_style: Option<Pen> = None;
                 let mut row_iter = self.rows.update(&snapshot)?;
                 let mut row_index: u16 = 0;
                 while let Some(row) = row_iter.next() {
@@ -549,7 +550,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 // No reset preamble — the mirror's state outside the dirty
                 // rows is unchanged.
                 let mut out: Vec<u8> = Vec::with_capacity(usize::from(cols) * usize::from(rows_n));
-                let mut prev_style: Option<Style> = None;
+                let mut prev_style: Option<Pen> = None;
                 let mut row_iter = self.rows.update(&snapshot)?;
                 let mut row_index: u16 = 0;
                 while let Some(row) = row_iter.next() {
@@ -696,7 +697,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 // per-row byte sequence is self-contained and comparable
                 // across ticks regardless of neighbouring rows.
                 row_scratch.clear();
-                let mut prev_style: Option<Style> = None;
+                let mut prev_style: Option<Pen> = None;
                 let mut cell_iter = self.cells.update(row)?;
                 while let Some(cell) = cell_iter.next() {
                     emit_cell(cell, row_scratch, &mut prev_style)?;
@@ -803,7 +804,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 break;
             }
             let mut body: Vec<u8> = Vec::with_capacity(usize::from(cols));
-            let mut prev_style: Option<Style> = None;
+            let mut prev_style: Option<Pen> = None;
             let mut cell_iter = self.cells.update(row)?;
             while let Some(cell) = cell_iter.next() {
                 emit_cell(cell, &mut body, &mut prev_style)?;
@@ -840,16 +841,27 @@ pub struct SnapshotBytes {
     pub scrollback: Vec<u8>,
 }
 
+/// The active SGR pen tracked across cells: the libghostty [`Style`] plus the
+/// resolved foreground/background.
+///
+/// Colors are part of the key (not just the style's attribute flags) because
+/// adjacent cells that differ *only* in color — multi-color `ls`, syntax
+/// highlighting, a p10k prompt — must re-emit an SGR delta, or the second
+/// color is lost. The live path forwards raw PTV bytes (byte-faithful), so a
+/// color-only gate miss surfaced only as a color glitch right after the
+/// attach/resize snapshot resync.
+type Pen = (Style, Option<RgbColor>, Option<RgbColor>);
+
 /// Per-cell emission shared by the full ([`SnapshotSynthesizer::synthesize`])
 /// and incremental ([`SnapshotSynthesizer::synthesize_incremental`]) paths.
 ///
-/// Tracks the active SGR pen via `prev_style`, skips wide-cell tails
+/// Tracks the active SGR pen via `prev` (see [`Pen`]), skips wide-cell tails
 /// (`CellWide::SpacerTail`, see the comment in the body), and emits the
 /// cell's grapheme cluster (or a space for genuinely-blank cells).
 fn emit_cell(
     cell: &CellIteration<'_, '_>,
     out: &mut Vec<u8>,
-    prev_style: &mut Option<Style>,
+    prev: &mut Option<Pen>,
 ) -> Result<(), SynthesisError> {
     // Discriminate wide-cell tails (the right half of a double-width
     // glyph) from genuinely-blank cells. The base grapheme on the wide
@@ -862,6 +874,30 @@ fn emit_cell(
         return Ok(());
     }
 
+    let len = cell.graphemes_len()?;
+
+    // Reproduce the cell's pen (attributes + resolved fg/bg) whenever it
+    // differs from the previous cell. This runs for blank cells too: a
+    // colored-but-glyphless cell (a `colorcolumn` fill, a statusline tail, a
+    // p10k right-prompt pad) must carry its background, and emitting the space
+    // before reading the style — as this did previously — dropped that
+    // background on the synthesized snapshot.
+    let style = cell.style()?;
+    let fg = cell.fg_color()?;
+    let bg = cell.bg_color()?;
+    let pen = (style, fg, bg);
+    if prev.as_ref() != Some(&pen) {
+        write_reset_and_sgr(out, &style, fg, bg);
+        *prev = Some(pen);
+    }
+
+    if len == 0 {
+        // Genuinely blank cell — emit a space so the column advances and the
+        // background set above fills it. (Wide-tail case was handled above.)
+        out.push(b' ');
+        return Ok(());
+    }
+
     // Read the grapheme cluster into a stack buffer rather than the
     // allocating [`CellIteration::graphemes`] (`vec!['\0'; len]` per cell).
     // The emit path visits every cell of every changed row each tick under
@@ -869,20 +905,6 @@ fn emit_cell(
     // (~50 allocations per row in the bursty-colored-output stress probe).
     // `GRAPHEME_INLINE` covers the common base-codepoint-plus-a-few-marks
     // case; deeper clusters fall back to a one-shot heap retry.
-    let len = cell.graphemes_len()?;
-    if len == 0 {
-        // Genuinely blank cell — emit a space so the column advances.
-        // (Wide-tail case was handled above.)
-        out.push(b' ');
-        return Ok(());
-    }
-
-    let style = cell.style()?;
-    let fg = cell.fg_color()?;
-    let bg = cell.bg_color()?;
-    emit_sgr_delta(out, prev_style.as_ref(), &style, fg, bg);
-    *prev_style = Some(style);
-
     let mut inline = [char::from(0u8); GRAPHEME_INLINE];
     if len <= GRAPHEME_INLINE {
         cell.graphemes_buf(&mut inline[..len])?;
@@ -1083,88 +1105,6 @@ fn write_cup(out: &mut Vec<u8>, row: u16, col: u16) {
     let _ = write!(out, "\x1b[{r};{c}H");
 }
 
-/// Emit SGR parameters representing `style` + colors, prefixed by a
-/// reset so the parameter list is independent of `prev`. Skip emission
-/// entirely if nothing changed.
-fn emit_sgr_delta(
-    out: &mut Vec<u8>,
-    prev: Option<&Style>,
-    style: &Style,
-    fg: Option<RgbColor>,
-    bg: Option<RgbColor>,
-) {
-    let same = prev.is_some_and(|p| styles_equal(p, style));
-    let touched = !same || prev.is_none();
-    if !touched {
-        return;
-    }
-    // Always reset first — keeps the parameter list independent of state.
-    out.extend_from_slice(b"\x1b[0m");
-
-    let mut wrote_any = false;
-    let sep = |out: &mut Vec<u8>, wrote: &mut bool| {
-        if *wrote {
-            out.push(b';');
-        } else {
-            out.extend_from_slice(b"\x1b[");
-            *wrote = true;
-        }
-    };
-    if style.bold {
-        sep(out, &mut wrote_any);
-        out.push(b'1');
-    }
-    if style.faint {
-        sep(out, &mut wrote_any);
-        out.push(b'2');
-    }
-    if style.italic {
-        sep(out, &mut wrote_any);
-        out.push(b'3');
-    }
-    if style.blink {
-        sep(out, &mut wrote_any);
-        out.push(b'5');
-    }
-    if style.inverse {
-        sep(out, &mut wrote_any);
-        out.push(b'7');
-    }
-    if style.invisible {
-        sep(out, &mut wrote_any);
-        out.push(b'8');
-    }
-    if style.strikethrough {
-        sep(out, &mut wrote_any);
-        out.push(b'9');
-    }
-    if let Some(rgb) = fg {
-        sep(out, &mut wrote_any);
-        let _ = write!(out, "38;2;{};{};{}", rgb.r, rgb.g, rgb.b);
-    }
-    if let Some(rgb) = bg {
-        sep(out, &mut wrote_any);
-        let _ = write!(out, "48;2;{};{};{}", rgb.r, rgb.g, rgb.b);
-    }
-    if wrote_any {
-        out.push(b'm');
-    } else {
-        // Already reset above; nothing else to emit. The reset is the
-        // SGR. No-op past the `\x1b[0m` we already wrote.
-    }
-}
-
-const fn styles_equal(a: &Style, b: &Style) -> bool {
-    a.bold == b.bold
-        && a.faint == b.faint
-        && a.italic == b.italic
-        && a.blink == b.blink
-        && a.inverse == b.inverse
-        && a.invisible == b.invisible
-        && a.strikethrough == b.strikethrough
-        && a.overline == b.overline
-}
-
 fn emit_cursor_style(out: &mut Vec<u8>, style: CursorVisualStyle, blinking: bool) {
     // DECSCUSR: `CSI <n> SP q`. Block/blink=1, Block/steady=2,
     // Underline/blink=3, steady=4, Bar/blink=5, steady=6. BlockHollow has
@@ -1334,6 +1274,99 @@ mod tests {
             i += 1;
         }
         grid
+    }
+
+    /// A reconstructed cell's `(grapheme, fg, bg, underline, overline)` —
+    /// enough to assert *color* fidelity, which `render_grid` (graphemes only)
+    /// cannot.
+    type StyledCell = (char, Option<RgbColor>, Option<RgbColor>, bool, bool);
+
+    /// Per-cell styled view of the first row, for color round-trip asserts.
+    fn row0_styled(t: &GhosttyTerminal<'_, '_>) -> Vec<StyledCell> {
+        let mut rs = RenderState::new().expect("RenderState::new");
+        let snap = rs.update(t).expect("update");
+        let mut row_iter_storage = RowIterator::new().expect("RowIterator::new");
+        let mut cell_iter_storage = CellIterator::new().expect("CellIterator::new");
+        let mut row_iter = row_iter_storage.update(&snap).expect("row update");
+        let row = row_iter.next().expect("at least one row");
+        let mut cell_iter = cell_iter_storage.update(row).expect("cell update");
+        let mut out = Vec::new();
+        while let Some(cell) = cell_iter.next() {
+            let wide = cell.raw_cell().expect("raw_cell").wide().expect("wide");
+            if matches!(wide, CellWide::SpacerTail) {
+                continue;
+            }
+            let g = cell.graphemes().expect("graphemes");
+            let ch = g.first().copied().unwrap_or(' ');
+            let style = cell.style().expect("style");
+            out.push((
+                ch,
+                cell.fg_color().expect("fg"),
+                cell.bg_color().expect("bg"),
+                !matches!(style.underline, libghostty_vt::style::Underline::None),
+                style.overline,
+            ));
+        }
+        out
+    }
+
+    /// Drive `source` with `vt`, synthesize a full snapshot, replay it into a
+    /// fresh client terminal exactly as the wire client does, and return the
+    /// reconstructed first row's styled cells.
+    fn round_trip_row0(vt: &[u8]) -> Vec<StyledCell> {
+        let mut source = fresh(40, 4);
+        source.vt_write(vt);
+        let snap = synthesize(&source).expect("synth");
+        let mut client = fresh(40, 4);
+        client.vt_write(&snap.bytes);
+        row0_styled(&client)
+    }
+
+    /// A pure color change between two same-attribute runs (red text then blue
+    /// text, as `ls --color` / syntax highlighting emit) must survive the
+    /// snapshot — the delta gate previously keyed on attribute flags only and
+    /// dropped the second color, so it reappeared in the first run's color.
+    #[test]
+    fn snapshot_preserves_adjacent_color_change() {
+        let cells = round_trip_row0(b"\x1b[31mAB\x1b[34mCD\x1b[0m");
+        let fg = |c: char| cells.iter().find(|x| x.0 == c).map(|x| x.1);
+        assert_ne!(
+            fg('A'),
+            fg('C'),
+            "red AB and blue CD must reconstruct as different foregrounds"
+        );
+        // Both runs are colored (neither collapsed to the default).
+        assert!(fg('A').flatten().is_some(), "AB keeps a foreground");
+        assert!(fg('C').flatten().is_some(), "CD keeps a foreground");
+    }
+
+    /// A colored-but-blank region (e.g. a `colorcolumn` fill or p10k prompt
+    /// pad: `\x1b[44m` then spaces) must keep its background through the
+    /// snapshot. `emit_cell` previously pushed the space before reading the
+    /// style, dropping the background of glyphless cells.
+    #[test]
+    fn snapshot_preserves_blank_cell_background() {
+        let cells = round_trip_row0(b"X\x1b[44m   \x1b[0mY");
+        // Cells 1..=3 are blue-background spaces between X and Y.
+        let blank_bg = cells[1].2;
+        assert!(
+            blank_bg.is_some(),
+            "blue-background blanks must reconstruct with a background, got {blank_bg:?}"
+        );
+        assert_eq!(cells[1].0, ' ', "the colored region is blank");
+        assert_eq!(cells[1].2, cells[2].2, "the whole blue run shares one bg");
+    }
+
+    /// Underline and overline must survive the snapshot — both emitters used
+    /// to drop them, flattening neovim undercurls and p10k underlined segments.
+    #[test]
+    fn snapshot_preserves_underline_and_overline() {
+        // SGR 4 = underline, 53 = overline.
+        let cells = round_trip_row0(b"\x1b[4mU\x1b[0m\x1b[53mO\x1b[0m");
+        let u = cells.iter().find(|x| x.0 == 'U').expect("U cell");
+        assert!(u.3, "underline must reconstruct");
+        let o = cells.iter().find(|x| x.0 == 'O').expect("O cell");
+        assert!(o.4, "overline must reconstruct");
     }
 
     #[test]

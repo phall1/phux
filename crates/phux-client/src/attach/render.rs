@@ -28,6 +28,7 @@ use libghostty_vt::{
     render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
     style::{RgbColor, Style},
 };
+use phux_protocol::sgr::write_reset_and_sgr;
 
 /// Errors the renderer can surface.
 #[derive(Debug, thiserror::Error)]
@@ -478,59 +479,13 @@ fn emit_sgr_set(
     fg: Option<RgbColor>,
     bg: Option<RgbColor>,
 ) -> io::Result<()> {
-    out.write_all(b"\x1b[0m")?;
-
-    let mut wrote_any = false;
-    macro_rules! sep {
-        ($w:expr, $flag:expr) => {{
-            if $flag {
-                $w.write_all(b";")?;
-            } else {
-                $w.write_all(b"\x1b[")?;
-                $flag = true;
-            }
-        }};
-    }
-    if style.bold {
-        sep!(out, wrote_any);
-        out.write_all(b"1")?;
-    }
-    if style.faint {
-        sep!(out, wrote_any);
-        out.write_all(b"2")?;
-    }
-    if style.italic {
-        sep!(out, wrote_any);
-        out.write_all(b"3")?;
-    }
-    if style.blink {
-        sep!(out, wrote_any);
-        out.write_all(b"5")?;
-    }
-    if style.inverse {
-        sep!(out, wrote_any);
-        out.write_all(b"7")?;
-    }
-    if style.invisible {
-        sep!(out, wrote_any);
-        out.write_all(b"8")?;
-    }
-    if style.strikethrough {
-        sep!(out, wrote_any);
-        out.write_all(b"9")?;
-    }
-    if let Some(rgb) = fg {
-        sep!(out, wrote_any);
-        write!(out, "38;2;{};{};{}", rgb.r, rgb.g, rgb.b)?;
-    }
-    if let Some(rgb) = bg {
-        sep!(out, wrote_any);
-        write!(out, "48;2;{};{};{}", rgb.r, rgb.g, rgb.b)?;
-    }
-    if wrote_any {
-        out.write_all(b"m")?;
-    }
-    Ok(())
+    // Encode via the shared server/client SGR emitter (phux-protocol) so the
+    // two ends cannot drift — they previously both dropped underline/overline.
+    // Build into a small scratch buffer (this runs once per coalesced style
+    // run, not per cell) then write it in one call.
+    let mut buf = Vec::with_capacity(32);
+    write_reset_and_sgr(&mut buf, style, fg, bg);
+    out.write_all(&buf)
 }
 
 fn emit_cursor_style(
