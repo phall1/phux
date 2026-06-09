@@ -29,7 +29,7 @@ use std::time::Duration;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_server::state::TerminalInput;
-use phux_server::terminal_actor::{ResizeRequest, SnapshotRequest, TerminalActor};
+use phux_server::terminal_actor::{PaneOutput, ResizeRequest, SnapshotRequest, TerminalActor};
 use portable_pty::CommandBuilder;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -39,7 +39,7 @@ use tokio::time::timeout;
 /// the accumulated buffer on success; panics on timeout (so callers
 /// don't need to thread Result everywhere).
 async fn collect_until(
-    rx: &mut tokio::sync::broadcast::Receiver<bytes::Bytes>,
+    rx: &mut tokio::sync::broadcast::Receiver<PaneOutput>,
     needle: &[u8],
     deadline: Duration,
 ) -> Vec<u8> {
@@ -47,7 +47,7 @@ async fn collect_until(
         let mut acc: Vec<u8> = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(chunk) => {
+                Ok(PaneOutput::Live(chunk) | PaneOutput::Resync { bytes: chunk, .. }) => {
                     acc.extend_from_slice(&chunk);
                     if needle.is_empty() || acc.windows(needle.len()).any(|w| w == needle) {
                         return acc;

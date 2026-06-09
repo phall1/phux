@@ -652,7 +652,6 @@ mod tests {
     #[test]
     fn viewport_resize_sends_to_terminal_actor_resize_channel() {
         use crate::terminal_actor::TerminalHandle;
-        use bytes::Bytes;
         use phux_core::ids::TerminalId as CoreTerminalId;
         use tokio::sync::{broadcast, mpsc};
 
@@ -667,7 +666,8 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (screen_tx, _screen_rx) = mpsc::channel(8);
         let (pwd_tx, _pwd_rx) = mpsc::channel(8);
-        let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+        let (output_tx, _output_rx_seed) =
+            broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
         let (resize_tx, mut resize_rx) = mpsc::channel::<ResizeRequest>(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
         let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
@@ -744,7 +744,6 @@ mod tests {
     async fn handle_attach_fans_out_snapshot_requests_concurrently() {
         use std::time::Duration;
 
-        use bytes::Bytes;
         use phux_core::ids::TerminalId as CoreTerminalId;
         use tokio::sync::{broadcast, mpsc, oneshot};
         use tokio::task::LocalSet;
@@ -783,7 +782,8 @@ mod tests {
                     let (snapshot_tx, snapshot_rx) = mpsc::channel(8);
                     let (screen_tx, _screen_rx) = mpsc::channel(8);
                     let (pwd_tx, _pwd_rx) = mpsc::channel(8);
-                    let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+                    let (output_tx, _output_rx_seed) =
+                        broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
                     let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                     let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
                     let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);
@@ -914,7 +914,6 @@ mod tests {
         reason = "linear setup-attach-observe-detach-observe body; splitting would scatter the lifecycle proof"
     )]
     async fn attach_registers_and_detach_unregisters_consumer_lifecycle() {
-        use bytes::Bytes;
         use phux_core::ids::TerminalId as CoreTerminalId;
         use tokio::sync::{broadcast, mpsc};
         use tokio::task::LocalSet;
@@ -935,7 +934,8 @@ mod tests {
                 let (snapshot_tx, mut snapshot_rx) = mpsc::channel::<SnapshotRequest>(8);
                 let (screen_tx, _screen_rx) = mpsc::channel(8);
                 let (pwd_tx, _pwd_rx) = mpsc::channel(8);
-                let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+                let (output_tx, _output_rx_seed) =
+                    broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
                 let (resize_tx, _resize_rx) = mpsc::channel::<ResizeRequest>(8);
                 let (consumer_attach_tx, mut consumer_attach_rx) =
                     mpsc::channel::<ConsumerAttachRequest>(8);

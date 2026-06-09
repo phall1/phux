@@ -338,7 +338,6 @@ mod tests {
 
     use super::*;
     use crate::terminal_actor::TerminalHandle;
-    use bytes::Bytes;
     use phux_protocol::caps::{ClientCapabilities, ColorSupport, LayerSet};
 
     use phux_protocol::wire::frame::{FrameKind, Scope};
@@ -354,7 +353,8 @@ mod tests {
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (screen_tx, _screen_rx) = mpsc::channel(8);
         let (pwd_tx, _pwd_rx) = mpsc::channel(8);
-        let (output_tx, _output_rx_seed) = broadcast::channel::<Bytes>(8);
+        let (output_tx, _output_rx_seed) =
+            broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
         let (resize_tx, _resize_rx) = mpsc::channel(8);
         let (consumer_attach_tx, _consumer_attach_rx) = mpsc::channel(8);
         let (consumer_detach_tx, _consumer_detach_rx) = mpsc::channel(8);

@@ -135,6 +135,44 @@ pub const DEFAULT_INPUT_MAILBOX: usize = 64;
 /// slow subscriber falls behind and gets a `RecvError::Lagged`.
 pub const DEFAULT_OUTPUT_BROADCAST: usize = 256;
 
+/// Payload of the per-pane output broadcast ([`TerminalHandle::output`]).
+///
+/// Subscribers (the per-attach output pumps in `runtime::attach`) map each
+/// variant to a distinct wire frame:
+///
+/// * [`PaneOutput::Live`] → `TERMINAL_OUTPUT` — a post-snapshot byte delta.
+/// * [`PaneOutput::Resync`] → `TERMINAL_SNAPSHOT` — the full post-reflow
+///   grid, carrying the new `(cols, rows)` so the client mirror RESIZES to
+///   them and repaints from authoritative state.
+///
+/// Routing the resize-resync as a `TERMINAL_SNAPSHOT` (rather than raw
+/// output) is load-bearing. The client resizes its libghostty mirror ONLY
+/// on `TERMINAL_SNAPSHOT` (ADR-0013 / phux-wurs: the mirror's grid size is
+/// server-authoritative and never guessed from a client-side rect). A
+/// resync delivered as `TERMINAL_OUTPUT` would `vt_write` into a mirror
+/// still at its old size, so a resize that GROWS a pane — kill-pane reflow
+/// promoting the survivor, or enlarging the outer window — could never fill
+/// the freed space (phux-3ns5). The snapshot path resizes first, then
+/// applies the synthesized grid, so grow and shrink both reconverge.
+#[derive(Clone, Debug)]
+pub enum PaneOutput {
+    /// Live PTY byte chunk forwarded as `TERMINAL_OUTPUT`.
+    Live(Bytes),
+    /// Post-resize grid resync forwarded as `TERMINAL_SNAPSHOT` at the
+    /// carried dims (phux-8v1 reconverge mechanism + phux-3ns5 mirror
+    /// resize). `bytes` is the synthesized grid replay (with its
+    /// `DECSTR + ED2 + home` reset preamble); `cols`/`rows` are the
+    /// post-reflow grid size the client mirror must adopt.
+    Resync {
+        /// Post-reflow grid width the client mirror resizes to.
+        cols: u16,
+        /// Post-reflow grid height the client mirror resizes to.
+        rows: u16,
+        /// Synthesized grid replay (with reset preamble) for `vt_write`.
+        bytes: Bytes,
+    },
+}
+
 /// Request for the pane's current `vt_replay_bytes` snapshot.
 ///
 /// Sent by the ATTACH handler on the per-client task; the actor walks
@@ -253,8 +291,9 @@ pub struct TerminalHandle {
     /// `CommandBuilder.cwd` with it.
     pub pwd: mpsc::Sender<PwdRequest>,
     /// Output broadcast channel; subscribers receive every PTY byte
-    /// chunk forwarded by the actor.
-    pub output: broadcast::Sender<Bytes>,
+    /// chunk ([`PaneOutput::Live`]) plus post-resize grid resyncs
+    /// ([`PaneOutput::Resync`]) forwarded by the actor.
+    pub output: broadcast::Sender<PaneOutput>,
     /// Resize control channel. The actor honours each request by
     /// resizing libghostty's `Terminal` and the PTY winsize ioctl, and
     /// (when [`ResizeRequest::resync_clients`] is set) re-broadcasting a

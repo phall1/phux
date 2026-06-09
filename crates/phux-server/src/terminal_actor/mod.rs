@@ -212,7 +212,7 @@ pub struct TerminalActor {
     /// dropped on shutdown to send EOF to the slave and tear down the
     /// reader/writer threads.
     pty: Option<PtyOwned>,
-    output_tx: broadcast::Sender<Bytes>,
+    output_tx: broadcast::Sender<PaneOutput>,
     /// One-shot fired when the actor observes PTY EOF. Paired with the
     /// matching receiver in [`TerminalActorBundle::exit_notify`]; the
     /// runtime uses it to drive client-detach on shell exit (phux-it8).
@@ -1241,7 +1241,16 @@ impl TerminalActor {
             Ok(snap) => {
                 // A `Lagged`/no-receiver send error is benign here — the
                 // next PTY output or a re-attach snapshot re-syncs.
-                let _ = self.output_tx.send(Bytes::from(snap.bytes));
+                // phux-3ns5: ship the post-reflow grid as a `Resync` (→
+                // `TERMINAL_SNAPSHOT`) carrying the settled dims, so the
+                // client mirror resizes to `(cols, rows)` before applying
+                // the replay. Delivered as raw output it could not resize
+                // the mirror, stranding a resize-grow with blank space.
+                let _ = self.output_tx.send(PaneOutput::Resync {
+                    cols: self.cols,
+                    rows: self.rows,
+                    bytes: Bytes::from(snap.bytes),
+                });
             }
             Err(err) => {
                 warn!(
@@ -1552,7 +1561,7 @@ impl TerminalActor {
                             // subscribers exist; that's a normal
                             // steady-state (no attached clients) and
                             // we silently drop.
-                            let _ = self.output_tx.send(payload);
+                            let _ = self.output_tx.send(PaneOutput::Live(payload));
                             if saw_eof {
                                 self.handle_pty_eof();
                             } else if hit_byte_cap {
@@ -2175,7 +2184,9 @@ mod tests {
                 let mut emitted: usize = 0;
                 loop {
                     match out_rx.try_recv() {
-                        Ok(bytes) => emitted += bytes.len(),
+                        Ok(PaneOutput::Live(bytes) | PaneOutput::Resync { bytes, .. }) => {
+                            emitted += bytes.len();
+                        }
                         Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                             // Each lagged frame is one coalesced payload of
                             // at most MAX_PTY_COALESCE_BYTES; bound the
@@ -3176,13 +3187,18 @@ mod tests {
 
                 // Collect broadcast bytes for a bounded window and look
                 // for the snapshot. `recv` resolves as soon as the resize
-                // broadcast lands.
+                // broadcast lands. phux-3ns5: the resync rides a
+                // `PaneOutput::Resync` carrying the post-reflow dims, so
+                // also capture them to assert the client mirror is told to
+                // resize to 40x10.
                 let mut acc: Vec<u8> = Vec::new();
+                let mut resync_dims: Option<(u16, u16)> = None;
                 for _ in 0..32 {
                     match tokio::time::timeout(std::time::Duration::from_millis(100), out.recv())
                         .await
                     {
-                        Ok(Ok(bytes)) => {
+                        Ok(Ok(PaneOutput::Resync { cols, rows, bytes })) => {
+                            resync_dims = Some((cols, rows));
                             acc.extend_from_slice(&bytes);
                             if contains_subslice(&acc, b"\x1b[!p")
                                 && contains_subslice(&acc, b"phux8v1-marker")
@@ -3190,10 +3206,16 @@ mod tests {
                                 break;
                             }
                         }
+                        Ok(Ok(PaneOutput::Live(bytes))) => acc.extend_from_slice(&bytes),
                         Ok(Err(_)) => break, // channel closed
                         Err(_) => tokio::task::yield_now().await, // timeout tick
                     }
                 }
+                assert_eq!(
+                    resync_dims,
+                    Some((40, 10)),
+                    "resize resync must carry the post-reflow grid dims (phux-3ns5)",
+                );
 
                 assert!(
                     contains_subslice(&acc, b"\x1b[!p"),
@@ -3249,18 +3271,20 @@ mod tests {
                 // coalesced snapshot has fired.
                 tokio::time::sleep(RESIZE_RESYNC_DEBOUNCE * 4).await;
 
-                // Count snapshot-bearing broadcasts. Debounced => exactly 1.
+                // Count resync broadcasts. Debounced => exactly 1.
+                // phux-3ns5: each resync is a `PaneOutput::Resync`, so the
+                // variant itself is the count (no preamble sniffing needed).
                 let mut snapshots = 0usize;
                 loop {
                     match out.try_recv() {
-                        Ok(bytes) => {
-                            if contains_subslice(&bytes, b"\x1b[!p") {
-                                snapshots += 1;
-                            }
+                        Ok(PaneOutput::Resync { bytes, .. }) => {
+                            debug_assert!(contains_subslice(&bytes, b"\x1b[!p"));
+                            snapshots += 1;
                         }
-                        // Lagged: skip and keep draining (no-op falls
-                        // through to the loop's next iteration).
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                        // Live output and a lagged drop are both "not a
+                        // resync" — skip and keep draining.
+                        Ok(PaneOutput::Live(_))
+                        | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
                         Err(_) => break,
                     }
                 }

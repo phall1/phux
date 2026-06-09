@@ -18,7 +18,24 @@ use super::{
     spawn_pane_with_pty,
 };
 use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
-use crate::terminal_actor::{ConsumerAttachRequest, PwdRequest, ResizeRequest, SnapshotRequest};
+use crate::terminal_actor::{
+    ConsumerAttachRequest, PaneOutput, PwdRequest, ResizeRequest, SnapshotRequest,
+};
+
+/// Adapt a broadcast byte chunk to a client's capabilities for the wire:
+/// a capable client gets the refcounted bytes verbatim (no copy); an
+/// incapable one gets an SGR-downsampled rewrite. Shared by both output
+/// pumps (the attach pump and the `SPAWN_TERMINAL` pump).
+fn downsample_for_caps(
+    bytes: &bytes::Bytes,
+    caps: phux_protocol::ClientCapabilities,
+) -> bytes::Bytes {
+    if crate::downsample::caps_pass_through(caps) {
+        bytes.clone()
+    } else {
+        crate::downsample::rewrite_bytes_with_caps(bytes, caps).into()
+    }
+}
 
 /// Tuple bundling everything `handle_attach` needs after it's done
 /// touching `ServerState`. Cloned out of the critical section so the
@@ -588,26 +605,30 @@ pub(crate) async fn handle_spawn_terminal(
             let mut seq: u64 = 0;
             loop {
                 match output_rx.recv().await {
-                    Ok(bytes) => {
-                        seq = seq.wrapping_add(1);
-                        // Fast path: capable client needs no rewrite — forward
-                        // the refcounted broadcast bytes with no copy.
-                        let out_bytes: bytes::Bytes =
-                            if crate::downsample::caps_pass_through(client_caps) {
-                                bytes.clone()
-                            } else {
-                                crate::downsample::rewrite_bytes_with_caps(&bytes, client_caps)
-                                    .into()
-                            };
-                        if pump_out_tx
-                            .send(Outbound::Frame(FrameKind::TerminalOutput {
-                                terminal_id: pump_wire_terminal_id.clone(),
-                                seq,
-                                bytes: out_bytes,
-                            }))
-                            .await
-                            .is_err()
-                        {
+                    Ok(msg) => {
+                        // phux-3ns5: same Live→OUTPUT / Resync→SNAPSHOT
+                        // mapping as the main attach pump.
+                        let frame = match msg {
+                            PaneOutput::Live(bytes) => {
+                                seq = seq.wrapping_add(1);
+                                FrameKind::TerminalOutput {
+                                    terminal_id: pump_wire_terminal_id.clone(),
+                                    seq,
+                                    bytes: downsample_for_caps(&bytes, client_caps),
+                                }
+                            }
+                            PaneOutput::Resync { cols, rows, bytes } => {
+                                FrameKind::TerminalSnapshot {
+                                    terminal_id: pump_wire_terminal_id.clone(),
+                                    cols,
+                                    rows,
+                                    vt_replay_bytes: downsample_for_caps(&bytes, client_caps)
+                                        .into(),
+                                    scrollback_bytes: None,
+                                }
+                            }
+                        };
+                        if pump_out_tx.send(Outbound::Frame(frame)).await.is_err() {
                             break;
                         }
                     }
@@ -893,29 +914,34 @@ pub(crate) async fn handle_attach(
                 let mut seq: u64 = 0;
                 loop {
                     match output_rx.recv().await {
-                        Ok(bytes) => {
-                            seq = seq.wrapping_add(1);
-                            // Fast path: capable client needs no rewrite —
-                            // forward the refcounted broadcast bytes, no copy.
-                            let out_bytes: bytes::Bytes =
-                                if crate::downsample::caps_pass_through(pump_client_caps) {
-                                    bytes.clone()
-                                } else {
-                                    crate::downsample::rewrite_bytes_with_caps(
-                                        &bytes,
-                                        pump_client_caps,
-                                    )
-                                    .into()
-                                };
-                            if pump_out_tx
-                                .send(Outbound::Frame(FrameKind::TerminalOutput {
-                                    terminal_id: pump_wire_terminal_id.clone(),
-                                    seq,
-                                    bytes: out_bytes,
-                                }))
-                                .await
-                                .is_err()
-                            {
+                        Ok(msg) => {
+                            // phux-3ns5: `Live` chunks forward as
+                            // TERMINAL_OUTPUT (seq'd delta); `Resync`
+                            // forwards as TERMINAL_SNAPSHOT carrying the
+                            // post-reflow dims so the client mirror resizes
+                            // and repaints from authoritative state.
+                            let frame = match msg {
+                                PaneOutput::Live(bytes) => {
+                                    seq = seq.wrapping_add(1);
+                                    let out_bytes = downsample_for_caps(&bytes, pump_client_caps);
+                                    FrameKind::TerminalOutput {
+                                        terminal_id: pump_wire_terminal_id.clone(),
+                                        seq,
+                                        bytes: out_bytes,
+                                    }
+                                }
+                                PaneOutput::Resync { cols, rows, bytes } => {
+                                    let out_bytes = downsample_for_caps(&bytes, pump_client_caps);
+                                    FrameKind::TerminalSnapshot {
+                                        terminal_id: pump_wire_terminal_id.clone(),
+                                        cols,
+                                        rows,
+                                        vt_replay_bytes: out_bytes.into(),
+                                        scrollback_bytes: None,
+                                    }
+                                }
+                            };
+                            if pump_out_tx.send(Outbound::Frame(frame)).await.is_err() {
                                 // Client mailbox closed (detach or disconnect).
                                 break;
                             }

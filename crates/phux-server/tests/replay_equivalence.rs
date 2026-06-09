@@ -61,7 +61,7 @@ use common::screen::Screen;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_server::grid::SnapshotBytes;
 use phux_server::state::TerminalInput;
-use phux_server::terminal_actor::{ResizeRequest, SnapshotRequest, TerminalActor};
+use phux_server::terminal_actor::{PaneOutput, ResizeRequest, SnapshotRequest, TerminalActor};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -118,12 +118,12 @@ async fn release_block(input: &mpsc::Sender<TerminalInput>) {
 /// Drain the broadcast until `needle` appears in the accumulated bytes,
 /// returning everything received. Panics on the deadline (a stuck pane is a
 /// loud failure, not a silent pass).
-async fn collect_until(rx: &mut Receiver<bytes::Bytes>, needle: &[u8]) -> Vec<u8> {
+async fn collect_until(rx: &mut Receiver<PaneOutput>, needle: &[u8]) -> Vec<u8> {
     let work = async {
         let mut acc: Vec<u8> = Vec::new();
         loop {
             match rx.recv().await {
-                Ok(chunk) => {
+                Ok(PaneOutput::Live(chunk) | PaneOutput::Resync { bytes: chunk, .. }) => {
                     acc.extend_from_slice(&chunk);
                     if acc.windows(needle.len()).any(|w| w == needle) {
                         return acc;
@@ -152,11 +152,13 @@ async fn collect_until(rx: &mut Receiver<bytes::Bytes>, needle: &[u8]) -> Vec<u8
 /// sentinel has been observed, to fold trailing bytes (e.g. the resize resync
 /// snapshot) into the collected stream. A lag here is still a hard failure: a
 /// dropped chunk breaks totality.
-fn drain_pending(rx: &mut Receiver<bytes::Bytes>) -> Vec<u8> {
+fn drain_pending(rx: &mut Receiver<PaneOutput>) -> Vec<u8> {
     let mut acc = Vec::new();
     loop {
         match rx.try_recv() {
-            Ok(chunk) => acc.extend_from_slice(&chunk),
+            Ok(PaneOutput::Live(chunk) | PaneOutput::Resync { bytes: chunk, .. }) => {
+                acc.extend_from_slice(&chunk);
+            }
             Err(TryRecvError::Empty | TryRecvError::Closed) => return acc,
             Err(TryRecvError::Lagged(n)) => {
                 panic!("broadcast lagged by {n} during drain; replay totality cannot hold")
