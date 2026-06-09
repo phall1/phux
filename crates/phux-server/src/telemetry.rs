@@ -221,8 +221,14 @@ pub fn default_client_log_path() -> PathBuf {
     dir
 }
 
-/// `$XDG_STATE_HOME/phux` (or `$HOME/.local/state/phux`).
-fn client_state_dir() -> PathBuf {
+/// phux's per-user state directory: `$XDG_STATE_HOME/phux` (or
+/// `$HOME/.local/state/phux` when `XDG_STATE_HOME` is unset/empty).
+///
+/// The home for state that should survive across runs but isn't config: client
+/// logs (per-pid), and the auto-provisioned remote-consumer TLS cert + token
+/// store (ADR-0031).
+#[must_use]
+pub fn state_dir() -> PathBuf {
     let base = std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map_or_else(
@@ -235,6 +241,11 @@ fn client_state_dir() -> PathBuf {
             PathBuf::from,
         );
     base.join("phux")
+}
+
+/// `$XDG_STATE_HOME/phux` (or `$HOME/.local/state/phux`).
+fn client_state_dir() -> PathBuf {
+    state_dir()
 }
 
 /// Install the process-global `tracing` subscriber for a **server /

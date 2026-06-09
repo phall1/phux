@@ -14,17 +14,26 @@
 //!   path works on both ends). Text/ping/pong frames are ignored; a Close
 //!   message is EOF.
 
+#![allow(
+    clippy::future_not_send,
+    reason = "single-threaded tokio runtime per ADR-0003; the token-auth accept path captures !Send Rc state and never crosses threads"
+)]
+
+pub mod tls;
+
 use std::io;
 use std::net::SocketAddr;
 
 use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
 use phux_protocol::policy::{PeerIdentity, TransportType};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream, UnixListener};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request};
 
 use phux_protocol::wire::frame::MAX_FRAME_LEN;
 
@@ -158,17 +167,104 @@ const fn peer_identity_from_uds(_stream: &tokio::net::UnixStream) -> PeerIdentit
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
 
-type Ws = WebSocketStream<TcpStream>;
+/// The byte stream under a WebSocket: plaintext TCP (local browser client,
+/// loopback only) or TLS (remote consumer over `wss://`, ADR-0031). Both ends
+/// are `Unpin`, so the `AsyncRead`/`AsyncWrite` forwarding below projects with
+/// `Pin::new` and needs no `unsafe`.
+pub(crate) enum ServerStream {
+    /// Plaintext TCP — the loopback browser-client path.
+    Plain(TcpStream),
+    /// TLS-terminated — the authenticated remote-consumer path. Boxed because
+    /// `TlsStream` is large and the `Plain` variant should stay cheap.
+    Tls(Box<tokio_rustls::server::TlsStream<TcpStream>>),
+}
+
+impl tokio::io::AsyncRead for ServerStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for ServerStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Self::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Self::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Self::Tls(s) => std::pin::Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+type Ws = WebSocketStream<ServerStream>;
 
 /// WebSocket listener: TCP + RFC 6455 upgrade, then one binary message per frame.
+///
+/// Optionally TLS-terminated and token-authenticated for remote consumers
+/// (ADR-0031). When `tls` is set, each connection is wrapped in TLS before the
+/// upgrade; when `tokens` is set, the upgrade request must carry a valid
+/// `Authorization: Bearer <hex>` or the handshake is refused with HTTP 401.
+/// Both unset is the historical loopback browser-client path.
 pub(crate) struct WsListener {
     tcp: TcpListener,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+    tokens: Option<std::sync::Arc<crate::auth::TokenStore>>,
 }
 
 impl WsListener {
+    /// Bind a plaintext, unauthenticated listener (loopback browser client).
     pub(crate) async fn bind(addr: SocketAddr) -> io::Result<Self> {
         Ok(Self {
             tcp: TcpListener::bind(addr).await?,
+            tls: None,
+            tokens: None,
+        })
+    }
+
+    /// Bind a TLS-terminated, token-authenticated listener for remote consumers.
+    ///
+    /// TLS is mandatory here: the bearer token is sent in the (TLS-protected)
+    /// handshake, so there is no token-over-plaintext path. ADR-0031's
+    /// no-plaintext-remote invariant is enforced by this constructor being the
+    /// only way to attach a token store.
+    pub(crate) async fn bind_secure(
+        addr: SocketAddr,
+        tls: tokio_rustls::TlsAcceptor,
+        tokens: std::sync::Arc<crate::auth::TokenStore>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            tcp: TcpListener::bind(addr).await?,
+            tls: Some(tls),
+            tokens: Some(tokens),
         })
     }
 
@@ -225,22 +321,201 @@ impl Incoming for WsListener {
 
     async fn accept(&self) -> io::Result<(WsReader, WsWriter, PeerIdentity)> {
         let (tcp, peer) = self.tcp.accept().await?;
+
+        // TLS handshake first (if configured), so the bearer token in the
+        // upgrade request is already encrypted when we read it.
+        let stream = match &self.tls {
+            Some(acceptor) => ServerStream::Tls(Box::new(acceptor.accept(tcp).await?)),
+            None => ServerStream::Plain(tcp),
+        };
+
+        // WebSocket upgrade. With a token store, validate the
+        // `Authorization: Bearer` header during the handshake and refuse with
+        // HTTP 401 before any phux frame is read; the matched device's
+        // (non-reversible) id is captured for the peer identity. Without one,
+        // this is the historical anonymous browser-client path.
+        let (ws, device_id) = match &self.tokens {
+            Some(store) => {
+                let store = store.clone();
+                let captured: std::rc::Rc<std::cell::RefCell<Option<String>>> =
+                    std::rc::Rc::new(std::cell::RefCell::new(None));
+                let sink = captured.clone();
+                let ws = tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, resp| {
+                    authorize_request(req, &store).map_or_else(
+                        || Err(unauthorized_response()),
+                        |id| {
+                            *sink.borrow_mut() = Some(id);
+                            Ok(resp)
+                        },
+                    )
+                })
+                .await
+                .map_err(io::Error::other)?;
+                let id = captured.borrow_mut().take();
+                (ws, id)
+            }
+            None => (
+                tokio_tungstenite::accept_async(stream)
+                    .await
+                    .map_err(io::Error::other)?,
+                None,
+            ),
+        };
+
+        // An authenticated remote consumer is a first-class peer: its
+        // device id rides `mcp_host_key` (the existing attestation slot), so
+        // policy and audit see a non-anonymous identity rather than the
+        // `uid: 0` stamp the plaintext browser path carries.
         let peer_identity = PeerIdentity {
             uid: 0,
             pid: None,
             exe_path: None,
-            mcp_host_key: None,
+            mcp_host_key: device_id,
             transport: TransportType::WebSocket,
             source_addr: Some(peer.ip()),
         };
-        let ws = tokio_tungstenite::accept_async(tcp)
-            .await
-            .map_err(io::Error::other)?;
+
         let (tx, rx) = ws.split();
         Ok((WsReader { rx }, WsWriter { tx }, peer_identity))
     }
 
     fn kind(&self) -> &'static str {
         "ws"
+    }
+}
+
+/// Extract and verify the `Authorization: Bearer <hex>` pairing token from a
+/// WebSocket upgrade request. Returns a non-reversible device id (a short
+/// SHA-256 prefix of the *presented* token) on success, `None` on a missing,
+/// malformed, or unrecognized token.
+fn authorize_request(req: &Request, store: &crate::auth::TokenStore) -> Option<String> {
+    let header = req.headers().get("authorization")?.to_str().ok()?;
+    let token_hex = header
+        .strip_prefix("Bearer ")
+        .or_else(|| header.strip_prefix("bearer "))?
+        .trim();
+    let token = hex::decode(token_hex).ok()?;
+    if !store.verify(&token) {
+        return None;
+    }
+    // Device id is derived from the presented token (not from which stored
+    // token matched), so deriving it never branches on the constant-time
+    // comparison and never logs the secret itself.
+    let digest = Sha256::digest(&token);
+    Some(hex::encode(&digest[..8]))
+}
+
+/// The HTTP 401 the handshake returns when the pairing token is absent or
+/// invalid. The body is deliberately generic — it does not distinguish
+/// "missing" from "wrong" so it leaks nothing about the token namespace.
+fn unauthorized_response() -> ErrorResponse {
+    use tokio_tungstenite::tungstenite::http::StatusCode;
+    let mut resp = ErrorResponse::new(Some("missing or invalid pairing token".to_owned()));
+    *resp.status_mut() = StatusCode::UNAUTHORIZED;
+    resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    const TEST_TOKEN: [u8; crate::auth::TOKEN_LEN] = [0x11; crate::auth::TOKEN_LEN];
+
+    /// A token-gated listener bound to an ephemeral loopback port, with one
+    /// known token. TLS is off so the test exercises the token handshake and
+    /// frame path without the TLS machinery (covered in `tls`'s own tests).
+    async fn token_listener() -> (WsListener, SocketAddr, String) {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let token_hex = hex::encode(TEST_TOKEN);
+        writeln!(file, "{token_hex}").unwrap();
+        let store = crate::auth::TokenStore::load(file.path()).unwrap();
+
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let listener = WsListener {
+            tcp,
+            tls: None,
+            tokens: Some(Arc::new(store)),
+        };
+        (listener, addr, token_hex)
+    }
+
+    /// A `ws://` client upgrade request carrying `Authorization: Bearer <hex>`.
+    fn bearer_request(addr: SocketAddr, token_hex: &str) -> Request {
+        let mut req = format!("ws://{addr}/").into_client_request().unwrap();
+        req.headers_mut().insert(
+            "authorization",
+            format!("Bearer {token_hex}").parse().unwrap(),
+        );
+        req
+    }
+
+    #[tokio::test]
+    async fn valid_token_upgrades_and_round_trips_a_frame() {
+        let (listener, addr, token_hex) = token_listener().await;
+
+        // One complete framed message: 4-byte length prefix (body = 3) + body.
+        let frame: Vec<u8> = vec![0, 0, 0, 3, 0xde, 0xad, 0xbe];
+
+        let server = async {
+            let (mut reader, _writer, peer) = listener.accept().await.unwrap();
+            let got = reader.read_frame().await.unwrap();
+            (got, peer)
+        };
+        let client = async {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let (mut ws, _resp) =
+                tokio_tungstenite::client_async(bearer_request(addr, &token_hex), tcp)
+                    .await
+                    .expect("valid token must upgrade");
+            ws.send(Message::Binary(frame.clone())).await.unwrap();
+            // Hold the connection open until the server has read.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        let ((got, peer), ()) = tokio::join!(server, client);
+        assert_eq!(got.unwrap().as_ref(), frame.as_slice(), "frame round-trips");
+        assert_eq!(peer.transport, TransportType::WebSocket);
+        assert!(
+            peer.mcp_host_key.is_some(),
+            "an authenticated remote peer is non-anonymous"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_token_is_refused_at_the_handshake() {
+        let (listener, addr, _token_hex) = token_listener().await;
+        let wrong = hex::encode([0x22u8; crate::auth::TOKEN_LEN]);
+
+        let server = async { listener.accept().await };
+        let client = async {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            tokio_tungstenite::client_async(bearer_request(addr, &wrong), tcp).await
+        };
+
+        let (server_res, client_res) = tokio::join!(server, client);
+        assert!(server_res.is_err(), "server rejects the unknown token");
+        assert!(client_res.is_err(), "client upgrade fails with HTTP 401");
+    }
+
+    #[tokio::test]
+    async fn missing_authorization_header_is_refused() {
+        let (listener, addr, _token_hex) = token_listener().await;
+
+        let server = async { listener.accept().await };
+        let client = async {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let req = format!("ws://{addr}/").into_client_request().unwrap();
+            tokio_tungstenite::client_async(req, tcp).await
+        };
+
+        let (server_res, client_res) = tokio::join!(server, client);
+        assert!(server_res.is_err());
+        assert!(client_res.is_err());
     }
 }

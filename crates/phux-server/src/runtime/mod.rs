@@ -28,6 +28,7 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -361,7 +362,7 @@ impl ServerRuntime {
                 // Opt-in via `PHUX_WS_ADDR` (e.g. "127.0.0.1:8787"); UDS is
                 // always on.
                 let ws_addr = std::env::var("PHUX_WS_ADDR").ok().and_then(|raw| {
-                    match raw.parse::<std::net::SocketAddr>() {
+                    match raw.parse::<SocketAddr>() {
                         Ok(addr) => Some(addr),
                         Err(err) => {
                             warn!(addr = %raw, error = %err, "invalid PHUX_WS_ADDR; WebSocket transport disabled");
@@ -369,24 +370,20 @@ impl ServerRuntime {
                         }
                     }
                 });
-                match ws_addr {
-                    Some(addr) => match crate::transport::WsListener::bind(addr).await {
-                        Ok(ws) => {
-                            let bound = ws.local_addr().map(|a| a.to_string()).unwrap_or_default();
-                            info!(addr = %bound, "phux-server also listening on WebSocket");
-                            // Both loops run until the root token cancels;
-                            // whichever returns first ends the server (on
-                            // shutdown both observe the cancellation).
-                            tokio::select! {
-                                r = accept_loop(&listener, state.clone(), root_token.clone()) => r,
-                                r = accept_loop(&ws, state, root_token) => r,
-                            }
+                let ws_listener = match ws_addr {
+                    Some(addr) => build_ws_listener(addr).await,
+                    None => None,
+                };
+                match ws_listener {
+                    Some(ws) => {
+                        // Both loops run until the root token cancels;
+                        // whichever returns first ends the server (on
+                        // shutdown both observe the cancellation).
+                        tokio::select! {
+                            r = accept_loop(&listener, state.clone(), root_token.clone()) => r,
+                            r = accept_loop(&ws, state, root_token) => r,
                         }
-                        Err(err) => {
-                            warn!(addr = %addr, error = %err, "failed to bind WebSocket; UDS only");
-                            accept_loop(&listener, state, root_token).await
-                        }
-                    },
+                    }
                     None => accept_loop(&listener, state, root_token).await,
                 }
             })
@@ -412,6 +409,96 @@ impl ServerRuntime {
 ///
 /// Public-ish (`pub(crate)`) so tests can drive it directly inside
 /// their own `LocalSet`.
+/// Build the optional WebSocket listener for `PHUX_WS_ADDR`, applying the
+/// ADR-0031 remote-consumer policy. Returns `None` (WebSocket disabled, UDS
+/// only) on any setup failure rather than failing the whole server.
+///
+/// **The bind address is the toggle, so there is no remote-mode setup friction:**
+///
+/// * **Loopback address → plaintext, unauthenticated.** The local browser-client
+///   dev path; zero config.
+/// * **Routable address → TLS + bearer-token auth, auto-provisioned.** Binding to
+///   anything off-loopback is treated as exposing the server, so phux generates
+///   and persists a self-signed certificate (if none is configured) and reads
+///   the default token store — no openssl, no manual PEM. The operator just runs
+///   `phux pair` to mint a device token. Plaintext never reaches a routable
+///   address (ADR-0031 no-plaintext-remote invariant).
+///
+/// `PHUX_WS_SECURE=1` forces the secure path on a loopback address (for testing
+/// the remote path locally). `PHUX_WS_TLS_CERT` + `PHUX_WS_TLS_KEY` override the
+/// auto-generated certificate with an operator-supplied one; `PHUX_WS_TOKENS`
+/// overrides the default token-store path.
+async fn build_ws_listener(addr: SocketAddr) -> Option<crate::transport::WsListener> {
+    let force_secure = std::env::var_os("PHUX_WS_SECURE").is_some_and(|v| !v.is_empty());
+    let secure = !addr.ip().is_loopback() || force_secure;
+
+    if !secure {
+        return match crate::transport::WsListener::bind(addr).await {
+            Ok(ws) => {
+                let bound = ws.local_addr().map(|a| a.to_string()).unwrap_or_default();
+                info!(addr = %bound, "WebSocket listening (plaintext, loopback)");
+                Some(ws)
+            }
+            Err(err) => {
+                warn!(addr = %addr, error = %err, "failed to bind WebSocket; UDS only");
+                None
+            }
+        };
+    }
+
+    // Secure path. Operator-supplied cert overrides the auto-generated one;
+    // otherwise provision a persisted self-signed cert at the default paths.
+    let cert_env = std::env::var_os("PHUX_WS_TLS_CERT").map(PathBuf::from);
+    let key_env = std::env::var_os("PHUX_WS_TLS_KEY").map(PathBuf::from);
+    let operator_cert = cert_env.is_some() || key_env.is_some();
+    let cert_path = cert_env.unwrap_or_else(crate::transport::tls::default_cert_path);
+    let key_path = key_env.unwrap_or_else(crate::transport::tls::default_key_path);
+    if !operator_cert
+        && let Err(err) = crate::transport::tls::ensure_self_signed(&cert_path, &key_path)
+    {
+        error!(error = %err, "failed to provision self-signed certificate; WebSocket disabled");
+        return None;
+    }
+    let acceptor = match crate::transport::tls::acceptor_from_pem(&cert_path, &key_path) {
+        Ok(acceptor) => acceptor,
+        Err(err) => {
+            error!(error = %err, "TLS setup failed; WebSocket disabled");
+            return None;
+        }
+    };
+
+    let tokens_path = std::env::var_os("PHUX_WS_TOKENS")
+        .map_or_else(crate::auth::default_token_store_path, PathBuf::from);
+    let store = match crate::auth::TokenStore::load(&tokens_path) {
+        Ok(store) => store,
+        Err(err) => {
+            error!(error = %err, path = %tokens_path.display(), "failed to load token store; WebSocket disabled");
+            return None;
+        }
+    };
+    if store.is_empty() {
+        warn!(
+            path = %tokens_path.display(),
+            "no pairing tokens; every remote consumer is rejected until `phux pair`"
+        );
+    }
+    let token_count = store.len();
+
+    match crate::transport::WsListener::bind_secure(addr, acceptor, std::sync::Arc::new(store))
+        .await
+    {
+        Ok(ws) => {
+            let bound = ws.local_addr().map(|a| a.to_string()).unwrap_or_default();
+            info!(addr = %bound, tokens = token_count, "WebSocket listening with TLS + token auth");
+            Some(ws)
+        }
+        Err(err) => {
+            warn!(addr = %addr, error = %err, "failed to bind secure WebSocket; UDS only");
+            None
+        }
+    }
+}
+
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
 pub(crate) async fn send_error(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
