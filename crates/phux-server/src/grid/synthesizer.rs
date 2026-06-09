@@ -32,7 +32,7 @@ use std::io::Write as _;
 use phux_core::screen::{
     CellColor, CellInfo, CellStyle, CursorState, SCHEMA_VERSION, ScreenState, SemanticContent,
 };
-use phux_protocol::sgr::write_reset_and_sgr;
+use phux_protocol::sgr::{write_reset_and_sgr, write_reset_and_sgr_unresolved};
 
 use libghostty_vt::{
     RenderState, Terminal as GhosttyTerminal,
@@ -222,35 +222,90 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         let Some(want) = scrollback else {
             return Ok(snap);
         };
-        let lines = Self::scrollback_lines(terminal, want)?;
-        if lines.is_empty() {
-            return Ok(snap);
+        // phux-q0x7: reproduce the history rows WITH their per-cell SGR styling
+        // (palette stays palette via `write_reset_and_sgr_unresolved`), so
+        // scrolled-back content matches its original colors instead of the
+        // plain-text v1 (phux-9q5f). The viewport `bytes` replay already
+        // carries full SGR; this brings history to parity.
+        snap.scrollback = Self::scrollback_styled_bytes(terminal, want, snap.rows)?;
+        Ok(snap)
+    }
+
+    /// Reproduce history rows `[start, total)` as a styled VT byte sequence:
+    /// per-cell SGR deltas (via [`write_reset_and_sgr_unresolved`]) plus
+    /// graphemes, rows joined by CRLF, terminated by an SGR reset and a
+    /// `min(rows, history)` `SU` so the still-visible remainder scrolls off the
+    /// top into the client's scrollback (leaving a blank viewport for the
+    /// `bytes` replay). Empty when the pane has no history (alt-screen panes
+    /// retain none). Side-effect-free: reads via `grid_ref(Point::History)`
+    /// which neither scrolls nor mutates the canonical Terminal (phux-q0x7).
+    fn scrollback_styled_bytes(
+        terminal: &GhosttyTerminal<'alloc, '_>,
+        want: u32,
+        viewport_rows: u16,
+    ) -> Result<Vec<u8>, SynthesisError> {
+        let total = terminal.scrollback_rows()?;
+        if total == 0 {
+            return Ok(Vec::new());
         }
-        // Reproduce the history as plain text, one row per line, joined by
-        // CRLF with no trailing newline so the cursor stays in-grid. A fresh
-        // client Terminal naturally scrolls the overflow into history during
-        // this write; `min(rows, lines)` then SU's the still-visible remainder
-        // off the top, leaving every history row in scrollback and a blank
-        // viewport for the `bytes` replay to repaint.
-        let mut out: Vec<u8> = Vec::with_capacity(lines.iter().map(|l| l.len() + 2).sum::<usize>());
-        for (i, line) in lines.iter().enumerate() {
-            if i > 0 {
+        let cols = terminal.cols()?;
+        let start = if want == SCROLLBACK_ALL {
+            0
+        } else {
+            total.saturating_sub(usize::try_from(want).unwrap_or(usize::MAX))
+        };
+
+        let mut out: Vec<u8> = Vec::with_capacity((total - start) * usize::from(cols));
+        let mut row_count: usize = 0;
+        for y in start..total {
+            if row_count > 0 {
                 out.extend_from_slice(b"\r\n");
             }
-            out.extend_from_slice(line.as_bytes());
+            let y = u32::try_from(y).unwrap_or(u32::MAX);
+            // Fresh pen per row so the row's byte sequence is self-contained.
+            let mut prev_style: Option<Style> = None;
+            for x in 0..cols {
+                let point = Point::History(PointCoordinate { x, y });
+                let grid_ref = terminal.grid_ref(point)?;
+                if matches!(grid_ref.cell()?.wide()?, CellWide::SpacerTail) {
+                    // Right half of a wide glyph: the base cell already
+                    // advanced both columns; emitting here would clobber it.
+                    continue;
+                }
+                let style = grid_ref.style()?;
+                if prev_style.as_ref() != Some(&style) {
+                    write_reset_and_sgr_unresolved(&mut out, &style);
+                    prev_style = Some(style);
+                }
+                // Read the grapheme cluster; an empty cluster is a blank cell
+                // (advances one column with a space — which carries the bg set
+                // above, matching the viewport `emit_cell` blank-cell handling).
+                let mut inline = [char::from(0u8); GRAPHEME_INLINE];
+                match grid_ref.graphemes(&mut inline) {
+                    Ok(0) => out.push(b' '),
+                    Ok(n) => encode_graphemes(&mut out, &inline[..n]),
+                    Err(libghostty_vt::Error::OutOfSpace { required }) => {
+                        let mut heap = vec![char::from(0u8); required];
+                        let n = grid_ref.graphemes(&mut heap)?;
+                        encode_graphemes(&mut out, &heap[..n]);
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+            }
+            row_count += 1;
         }
-        let visible = u16::try_from(lines.len())
-            .unwrap_or(snap.rows)
-            .min(snap.rows);
-        // SGR reset before the scroll so the blanked rows carry no pen.
+        if row_count == 0 {
+            return Ok(Vec::new());
+        }
+        // Reset the pen, then SU the still-visible history off the top.
         out.extend_from_slice(b"\x1b[0m");
+        let visible = u16::try_from(row_count)
+            .unwrap_or(viewport_rows)
+            .min(viewport_rows);
         if visible > 0 {
-            // Format the digits straight into `out` (same as `write_cup`)
-            // rather than allocating a throwaway `String` just to copy it.
             let _ = write!(out, "\x1b[{visible}S");
         }
-        snap.scrollback = out;
-        Ok(snap)
+        Ok(out)
     }
 
     /// Walk `terminal`'s viewport into a structured [`ScreenState`] — the

@@ -34,28 +34,74 @@ pub fn write_reset_and_sgr(
 ) {
     // Always reset first — keeps the parameter list independent of prior state.
     out.extend_from_slice(b"\x1b[0m");
-
-    // Open `CSI` on the first parameter, emit `;` between subsequent ones.
     let mut wrote_any = false;
-    let sep = |out: &mut Vec<u8>, wrote: &mut bool| {
-        if *wrote {
-            out.push(b';');
-        } else {
-            out.extend_from_slice(b"\x1b[");
-            *wrote = true;
-        }
-    };
+    write_attrs(out, style, &mut wrote_any);
+    // Resolved truecolor fg/bg: the viewport renderer already resolved
+    // palette/default to concrete RGB (via `CellIteration::fg_color`/`bg_color`).
+    if let Some(rgb) = fg {
+        sgr_sep(out, &mut wrote_any);
+        let _ = write!(out, "38;2;{};{};{}", rgb.r, rgb.g, rgb.b);
+    }
+    if let Some(rgb) = bg {
+        sgr_sep(out, &mut wrote_any);
+        let _ = write!(out, "48;2;{};{};{}", rgb.r, rgb.g, rgb.b);
+    }
+    write_underline_color(out, style, &mut wrote_any);
+    if wrote_any {
+        out.push(b'm');
+    }
+    // else: the leading `\x1b[0m` is the whole sequence (default pen).
+}
 
+/// Like [`write_reset_and_sgr`] but sources foreground/background from the
+/// `Style`'s own [`StyleColor`] fields rather than a separately-resolved
+/// `RgbColor`.
+///
+/// Used where no resolved-RGB accessor exists: the scrollback history walk
+/// reads cells via `Terminal::grid_ref` (which exposes `style()` but not the
+/// render iterator's resolved colors), so palette colors are emitted as
+/// `38;5;n` / `48;5;n` and the client resolves them against its own palette —
+/// preserving palette semantics rather than baking a server-resolved RGB
+/// (phux-q0x7). A `StyleColor::None` (default) color emits nothing; the leading
+/// reset already restored the default pen. The text attributes and underline
+/// color share the exact same emitters as [`write_reset_and_sgr`], so the two
+/// encoders cannot drift.
+pub fn write_reset_and_sgr_unresolved(out: &mut Vec<u8>, style: &Style) {
+    out.extend_from_slice(b"\x1b[0m");
+    let mut wrote_any = false;
+    write_attrs(out, style, &mut wrote_any);
+    write_style_color(out, &mut wrote_any, style.fg_color, true);
+    write_style_color(out, &mut wrote_any, style.bg_color, false);
+    write_underline_color(out, style, &mut wrote_any);
+    if wrote_any {
+        out.push(b'm');
+    }
+}
+
+/// Open `CSI` on the first parameter, emit `;` between subsequent ones.
+fn sgr_sep(out: &mut Vec<u8>, wrote: &mut bool) {
+    if *wrote {
+        out.push(b';');
+    } else {
+        out.extend_from_slice(b"\x1b[");
+        *wrote = true;
+    }
+}
+
+/// Emit the boolean / underline-style text attributes (everything except the
+/// fg/bg and underline colors). Shared by both encoders so the attribute set
+/// can never drift between the resolved and unresolved paths.
+fn write_attrs(out: &mut Vec<u8>, style: &Style, wrote_any: &mut bool) {
     if style.bold {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'1');
     }
     if style.faint {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'2');
     }
     if style.italic {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'3');
     }
     // Underline: plain `4` (single) and `21` (double), plus the colon
@@ -63,7 +109,7 @@ pub fn write_reset_and_sgr(
     // Kitty/ITU underline extension that libghostty parses and emits. The
     // non-`None` cases all open a parameter; only the SGR digits differ.
     if !matches!(style.underline, Underline::None) {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         match style.underline {
             Underline::Double => out.extend_from_slice(b"21"),
             Underline::Curly => out.extend_from_slice(b"4:3"),
@@ -76,51 +122,60 @@ pub fn write_reset_and_sgr(
         }
     }
     if style.blink {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'5');
     }
     if style.inverse {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'7');
     }
     if style.invisible {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'8');
     }
     if style.strikethrough {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.push(b'9');
     }
     if style.overline {
-        sep(out, &mut wrote_any);
+        sgr_sep(out, wrote_any);
         out.extend_from_slice(b"53");
     }
-    if let Some(rgb) = fg {
-        sep(out, &mut wrote_any);
-        let _ = write!(out, "38;2;{};{};{}", rgb.r, rgb.g, rgb.b);
+}
+
+/// Emit an SGR foreground (`is_fg == true`) or background color from a
+/// [`StyleColor`]. `None` (default) emits nothing.
+fn write_style_color(out: &mut Vec<u8>, wrote_any: &mut bool, color: StyleColor, is_fg: bool) {
+    let base = if is_fg { 38 } else { 48 };
+    match color {
+        StyleColor::None => {}
+        StyleColor::Palette(idx) => {
+            sgr_sep(out, wrote_any);
+            let _ = write!(out, "{base};5;{}", idx.0);
+        }
+        StyleColor::Rgb(rgb) => {
+            sgr_sep(out, wrote_any);
+            let _ = write!(out, "{base};2;{};{};{}", rgb.r, rgb.g, rgb.b);
+        }
     }
-    if let Some(rgb) = bg {
-        sep(out, &mut wrote_any);
-        let _ = write!(out, "48;2;{};{};{}", rgb.r, rgb.g, rgb.b);
-    }
-    // Underline color (SGR 58), emitted when set so colored undercurls (nvim
-    // LSP diagnostics) survive. Independent of the underline-style parameter.
+}
+
+/// Emit the underline color (SGR 58) from `style.underline_color` when set so
+/// colored undercurls (nvim LSP diagnostics) survive. Independent of the
+/// underline-style parameter. Shared by both encoders.
+fn write_underline_color(out: &mut Vec<u8>, style: &Style, wrote_any: &mut bool) {
     match style.underline_color {
         StyleColor::None => {}
         StyleColor::Palette(idx) => {
-            sep(out, &mut wrote_any);
+            sgr_sep(out, wrote_any);
             let _ = write!(out, "58:5:{}", idx.0);
         }
         StyleColor::Rgb(rgb) => {
-            sep(out, &mut wrote_any);
+            sgr_sep(out, wrote_any);
             // Empty color-space-id field per the ITU-T form: `58:2::r:g:b`.
             let _ = write!(out, "58:2::{}:{}:{}", rgb.r, rgb.g, rgb.b);
         }
     }
-    if wrote_any {
-        out.push(b'm');
-    }
-    // else: the leading `\x1b[0m` is the whole sequence (default pen).
 }
 
 #[cfg(test)]
@@ -158,6 +213,53 @@ mod tests {
             ..Style::default()
         };
         assert_eq!(encode(&double, None, None), "\x1b[0m\x1b[21m");
+    }
+
+    fn encode_unresolved(style: &Style) -> String {
+        let mut out = Vec::new();
+        write_reset_and_sgr_unresolved(&mut out, style);
+        String::from_utf8(out).expect("ascii")
+    }
+
+    #[test]
+    fn unresolved_default_pen_is_just_a_reset() {
+        assert_eq!(encode_unresolved(&Style::default()), "\x1b[0m");
+    }
+
+    #[test]
+    fn unresolved_emits_palette_fg_bg_as_indexed() {
+        // phux-q0x7: a palette-colored history cell keeps its palette index
+        // (38;5;n / 48;5;n) rather than a server-resolved truecolor.
+        let s = Style {
+            fg_color: StyleColor::Palette(PaletteIndex(31)),
+            bg_color: StyleColor::Palette(PaletteIndex(236)),
+            ..Style::default()
+        };
+        assert_eq!(encode_unresolved(&s), "\x1b[0m\x1b[38;5;31;48;5;236m");
+    }
+
+    #[test]
+    fn unresolved_emits_rgb_and_attrs() {
+        let s = Style {
+            bold: true,
+            fg_color: StyleColor::Rgb(RgbColor { r: 1, g: 2, b: 3 }),
+            ..Style::default()
+        };
+        assert_eq!(encode_unresolved(&s), "\x1b[0m\x1b[1;38;2;1;2;3m");
+    }
+
+    #[test]
+    fn unresolved_matches_resolved_for_attrs_only() {
+        // Attribute-only styles must encode identically on both paths (shared
+        // `write_attrs`), so the two encoders cannot drift.
+        let s = Style {
+            bold: true,
+            italic: true,
+            underline: Underline::Curly,
+            overline: true,
+            ..Style::default()
+        };
+        assert_eq!(encode_unresolved(&s), encode(&s, None, None));
     }
 
     #[test]
