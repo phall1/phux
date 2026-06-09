@@ -8,6 +8,7 @@
 
 #![deny(missing_docs)]
 
+pub mod auth;
 pub mod cwd_query;
 pub mod downsample;
 pub mod extract;

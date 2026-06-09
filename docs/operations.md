@@ -101,6 +101,55 @@ Future transports:
 - **SSH:** Reuses established SSH auth; inherits SSH's trust model.
 - **QUIC (future):** Certificate-based (mutual TLS, future); no encryption on the wire yet.
 
+### Remote consumer trust model (opt-in)
+
+A remote consumer (the native mobile app) can attach over the network without
+an SSH tunnel, behind TLS plus a bearer pairing token
+([ADR-0031](../ADR/0031-remote-consumer-auth-and-encryption.md)). This is the
+nearer-term, single-server path, distinct from the federation hub above.
+
+The bind address (`PHUX_WS_ADDR`) is the toggle, so there is no remote-mode
+setup friction:
+
+- **Loopback address → plaintext, unauthenticated.** The historical
+  browser-client dev path; zero config.
+- **Routable address → TLS + token, auto-provisioned.** Binding off-loopback is
+  treated as exposing the server: phux generates and persists a self-signed
+  certificate (under the state dir) if none is configured, and reads the default
+  token store. It terminates TLS and requires an `Authorization: Bearer <token>`
+  in the WebSocket upgrade; a missing or unrecognized token is refused with HTTP
+  401 before any phux frame is read. Plaintext never reaches a routable address.
+  Tokens are minted with `phux pair`, which prints the token once alongside the
+  certificate's SHA-256 fingerprint to pin out-of-band. Revoke a device by
+  deleting its line from the token file (effective on server restart).
+
+`PHUX_WS_SECURE=1` forces the secure path on a loopback address (to exercise the
+remote path locally); `PHUX_WS_TLS_CERT` + `PHUX_WS_TLS_KEY` substitute an
+operator-supplied certificate for the auto-generated one; `PHUX_WS_TOKENS`
+overrides the token-store path.
+
+**What this means:**
+- The trust boundary widens past the OS user: an authenticated network peer is a
+  first-class consumer whose proof is a bearer token over TLS. This is a larger
+  attack surface than local UDS; it is off by default and engages only when the
+  three variables above are all set.
+- The token is a bearer credential — anyone holding it is the device until the
+  token is revoked. The store is owner-only (`0o600`); the comparison is
+  constant-time; tokens are 256-bit from the OS CSPRNG. A client certificate
+  (mutual TLS) is the stronger v0.2 hardening recorded in ADR-0031.
+- Certificate lifecycle is an operator responsibility, like socket permissions.
+  With a self-signed certificate, verifying the `phux pair` fingerprint on the
+  device's first connect is what closes the trust-on-first-use MITM window.
+
+### Output mode for remote consumers
+
+A remote phone link is high-latency and may be lossy. A remote consumer SHOULD
+request `OutputMode::StateSync` ([ADR-0018](../ADR/0018-lazy-state-synchronization.md))
+at HELLO rather than the default `OutputMode::Raw`: StateSync ships the minimum
+VT to move the consumer's last-acked state to canonical per tick, coalescing
+floods and pacing per-consumer RTT. Raw stays the default for local interactive
+peers, where byte-faithful pass-through is lowest-latency on a fast link.
+
 ### Known limitations
 
 - **No encryption on local UDS:** Contents flow plaintext through the socket. Roadmap does not include local TLS; if confidentiality is required, delegate to the transport layer (SSH, VPN).

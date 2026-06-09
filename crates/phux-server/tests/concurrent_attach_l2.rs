@@ -436,8 +436,12 @@ fn concurrent_attach_l1_snapshot_consistency() {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
 
-        // Seed with a simple command
-        let cmd = CommandBuilder::new("/bin/sh");
+        // Seed a pane that stays quiescent: `cat` with no args blocks on stdin
+        // and emits nothing, so the grid is stable. This test asserts that two
+        // *concurrent* attaches synthesize byte-identical TERMINAL_SNAPSHOTs,
+        // which is only well-defined when the pane is not writing — a shell's
+        // async prompt would land between the two captures and race the bytes.
+        let cmd = CommandBuilder::new("/bin/cat");
         let (shutdown_tx, server_handle) =
             spawn_server_with_seed_cmd(socket_path.clone(), "default", cmd);
 

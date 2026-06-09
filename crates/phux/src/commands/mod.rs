@@ -13,6 +13,7 @@ pub(crate) mod config;
 pub(crate) mod kill;
 pub(crate) mod ls;
 pub(crate) mod new;
+pub(crate) mod pair;
 pub(crate) mod rename;
 pub(crate) mod run;
 pub(crate) mod send_keys;
@@ -381,6 +382,29 @@ pub(crate) enum Command {
 
         #[command(subcommand)]
         action: TagAction,
+    },
+
+    /// Mint a pairing token for a remote consumer (ADR-0031).
+    ///
+    /// Remote consumers (e.g. the native mobile app) attach over `wss://`
+    /// without an SSH tunnel: TLS encrypts the link and an opaque bearer
+    /// token authenticates the device. This mints one token into the store
+    /// the server reads (`PHUX_WS_TOKENS`) and prints it once alongside the
+    /// server certificate's SHA-256 fingerprint. Pair both into the device:
+    /// the token is the credential, and verifying the fingerprint on first
+    /// connect defeats a man-in-the-middle. Revoke a device by deleting its
+    /// line from the token file.
+    ///
+    /// This never contacts a running server — it only writes the token file.
+    Pair {
+        /// Token store to append to. Defaults to `PHUX_WS_TOKENS`.
+        #[arg(long, value_name = "PATH")]
+        tokens: Option<std::path::PathBuf>,
+
+        /// Server certificate PEM, used to print the pairing fingerprint.
+        /// Defaults to `PHUX_WS_TLS_CERT`.
+        #[arg(long, value_name = "PATH")]
+        cert: Option<std::path::PathBuf>,
     },
 }
 
