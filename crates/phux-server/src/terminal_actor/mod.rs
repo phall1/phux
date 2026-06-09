@@ -1862,6 +1862,18 @@ impl TerminalActor {
         // consumers; the per-consumer state lives in each `reference`.
         let terminal = self.terminal.borrow();
         let mut synth = self.synth.borrow_mut();
+        // phux-ahk.2: render the grid ONCE for this tick (the consumer-
+        // independent snapshot + per-row cell render + cursor/mode FFI +
+        // epilogue/screen-toggle precompute). Each consumer below then only
+        // DIFFS against the shared result via `diff_consumer`, so a pane with
+        // N state-sync consumers renders once, not N times.
+        let (tick_cols, tick_rows, tick_live_cm) = match synth.prepare_tick(&terminal) {
+            Ok(t) => t,
+            Err(err) => {
+                warn!(error = %err, "state-sync tick: prepare_tick failed; skipping tick");
+                return;
+            }
+        };
         // Consumers whose outbound mailbox is `Closed` (receiver dropped)
         // are reaped after the loop so a missed detach (phux-ddg) does not
         // leave a dead `ConsumerReference` to be re-rendered forever.
@@ -1947,20 +1959,11 @@ impl TerminalActor {
                 wire_terminal_id = state.wire_terminal_id,
             )
             .entered();
-            let bytes = match synth.synthesize_against_reference(&terminal, &mut state.reference) {
-                Ok(snap) => snap.bytes,
-                Err(err) => {
-                    warn!(
-                        ?client_id,
-                        wire_terminal_id = state.wire_terminal_id,
-                        error = %err,
-                        "state-sync tick: synthesize_against_reference failed; skipping consumer",
-                    );
-                    // The held `permit` drops here, releasing the reserved
-                    // slot back to the mailbox — nothing was shipped.
-                    continue;
-                }
-            };
+            // diff_consumer is infallible (the fallible render happened once in
+            // `prepare_tick` above); it returns this consumer's delta bytes.
+            let bytes = synth
+                .diff_consumer(tick_cols, tick_rows, tick_live_cm, &mut state.reference)
+                .bytes;
             if bytes.is_empty() {
                 // Byte-identical to this consumer's reference; nothing to
                 // send this tick. The reserved permit drops unused. A closed

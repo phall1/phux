@@ -84,14 +84,24 @@ pub struct SnapshotSynthesizer<'alloc> {
     render_state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
-    /// Reusable per-row scratch buffer for the per-consumer diff
-    /// ([`Self::synthesize_against_reference`]). Each tick renders every
-    /// row's body into this buffer and compares it against the consumer's
-    /// reference; a fresh `Vec<u8>` per row would allocate `rows` times per
-    /// consumer per tick under heavy output. The buffer is `clear()`-ed
-    /// (capacity retained) between rows, so steady-state ticks allocate
-    /// nothing here.
-    row_scratch: Vec<u8>,
+    /// phux-ahk.2: per-tick rendered row bodies, shared across all
+    /// consumers of this pane. [`Self::prepare_tick`] renders every row
+    /// ONCE into these buffers; each consumer's [`Self::diff_consumer`]
+    /// then compares them against its own [`ConsumerReference`]. Reused
+    /// across ticks (each row buffer is `clear()`-ed and refilled, so
+    /// steady state allocates nothing). Replaces the prior model where
+    /// every consumer re-rendered the whole grid (N full renders + 5N
+    /// mode-FFI calls for N consumers on one shared pane).
+    tick_rows: Vec<Vec<u8>>,
+    /// phux-ahk.2: the cursor/mode epilogue bytes for the current tick,
+    /// computed once in [`Self::prepare_tick`] (consumer-independent) and
+    /// appended by each consumer's non-empty diff.
+    tick_epilogue: Vec<u8>,
+    /// phux-ahk.2: the screen-buffer select bytes for the current tick
+    /// (enter/leave alt screen), computed once; emitted by a consumer's
+    /// diff only when that consumer's reference disagrees with the live
+    /// alt-screen state.
+    tick_screen_toggle: Vec<u8>,
 }
 
 impl<'alloc> SnapshotSynthesizer<'alloc> {
@@ -101,7 +111,9 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             render_state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
-            row_scratch: Vec::new(),
+            tick_rows: Vec::new(),
+            tick_epilogue: Vec::new(),
+            tick_screen_toggle: Vec::new(),
         })
     }
 
@@ -642,43 +654,111 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         reference: &mut ConsumerReference,
     ) -> Result<SnapshotBytes, SynthesisError> {
-        // Where the per-tick, per-consumer CPU goes (row walk + cell render
-        // + diff). Debug level so the default `phux=info` filter leaves it
-        // disabled and free; when `phux=debug` is captured, the span's CLOSE
-        // duration is the headline server-side lag signal, and the recorded
-        // `changed_row_count` / `out_bytes` say how much this tick repainted.
-        // Declared `Empty` and filled before each return.
-        let synth_ref_span = tracing::debug_span!(
-            "synthesize_against_reference",
-            changed_row_count = tracing::field::Empty,
-            out_bytes = tracing::field::Empty,
-        )
-        .entered();
+        // phux-ahk.2: render the tick once (consumer-independent), then diff
+        // this single consumer against it. `tick_emit` uses `prepare_tick` +
+        // `diff_consumer` directly so a pane with N consumers renders ONCE;
+        // this wrapper keeps the original one-call API for single-consumer
+        // callers and the unit tests.
+        let (cols, rows_n, live_cm) = self.prepare_tick(terminal)?;
+        Ok(self.diff_consumer(cols, rows_n, live_cm, reference))
+    }
+
+    /// phux-ahk.2: render the current grid ONCE per tick into the shared
+    /// `tick_*` buffers; returns the consumer-independent `(cols, rows,
+    /// live_cm)`. Each consumer's [`Self::diff_consumer`] then diffs against
+    /// these buffers, so a pane with N state-sync consumers renders the grid
+    /// once (not N times) and runs the cursor/mode FFI once (not 5N times).
+    ///
+    /// Hoisted here (all consumer-independent): the `RenderState::update`
+    /// snapshot, the full per-row cell render, the cursor/mode capture, and
+    /// the epilogue + screen-toggle byte precompute. Both the epilogue and the
+    /// screen-toggle reflect live state and are byte-identical for every
+    /// consumer; only *whether* to emit the screen toggle is per-consumer and
+    /// stays in [`Self::diff_consumer`].
+    pub(crate) fn prepare_tick(
+        &mut self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+    ) -> Result<(u16, u16, ReferenceCursorMode), SynthesisError> {
+        let _span = tracing::debug_span!("prepare_tick").entered();
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
 
-        // Resize the reference to the current geometry. A dimension change
-        // (reflow) is handled by clearing the reference so every row is
-        // treated as changed: the resize resync path emits a fresh
-        // snapshot, but should this diff run mid-resize the safe behavior
-        // is a full repaint rather than a stale partial diff.
+        // Size the shared row buffer to the grid and clear every in-range
+        // buffer (capacity retained) so a row the iterator does not yield
+        // can't leave stale content from a prior tick.
+        let rows_usize = usize::from(rows_n);
+        if self.tick_rows.len() < rows_usize {
+            self.tick_rows.resize_with(rows_usize, Vec::new);
+        } else {
+            self.tick_rows.truncate(rows_usize);
+        }
+        for body in &mut self.tick_rows {
+            body.clear();
+        }
+
+        // Render each row body into its shared buffer with a fresh SGR pen so
+        // the per-row byte sequence is self-contained and comparable across
+        // ticks regardless of neighbouring rows.
+        {
+            let tick_rows = &mut self.tick_rows;
+            let mut row_iter = self.rows.update(&snapshot)?;
+            let mut row_index: usize = 0;
+            while let Some(row) = row_iter.next() {
+                if row_index >= rows_usize {
+                    break;
+                }
+                let body = &mut tick_rows[row_index];
+                let mut prev_style: Option<Pen> = None;
+                let mut cell_iter = self.cells.update(row)?;
+                while let Some(cell) = cell_iter.next() {
+                    emit_cell(cell, body, &mut prev_style)?;
+                }
+                row_index += 1;
+            }
+        }
+
+        // Cursor/mode + epilogue + screen toggle: consumer-independent, so
+        // capture/precompute them once while the snapshot is live.
+        let live_cm = ReferenceCursorMode::capture(&snapshot, terminal)?;
+        self.tick_epilogue.clear();
+        emit_epilogue(&mut self.tick_epilogue, &snapshot, terminal)?;
+        self.tick_screen_toggle.clear();
+        emit_screen_mode(&mut self.tick_screen_toggle, terminal)?;
+        Ok((cols, rows_n, live_cm))
+    }
+
+    /// phux-ahk.2: diff one consumer against the shared `tick_*` buffers
+    /// produced by the preceding [`Self::prepare_tick`]. Advances the
+    /// consumer's reference (emit-once: the reference reflects the rendered
+    /// state before the frame ships) and returns the per-consumer delta. An
+    /// empty body means the consumer is byte-identical to the rendered tick.
+    pub(crate) fn diff_consumer(
+        &self,
+        cols: u16,
+        rows_n: u16,
+        live_cm: ReferenceCursorMode,
+        reference: &mut ConsumerReference,
+    ) -> SnapshotBytes {
+        let span = tracing::debug_span!(
+            "diff_consumer",
+            changed_row_count = tracing::field::Empty,
+            out_bytes = tracing::field::Empty,
+        )
+        .entered();
+        // A dimension change clears the reference so every row repaints (a
+        // mid-resize diff falls back to a full repaint rather than a stale
+        // partial diff; the resize resync path emits a fresh snapshot anyway).
         if reference.cols != cols || reference.rows != rows_n {
             reference.reset_geometry(cols, rows_n);
         }
 
-        // Render each row's body into the reusable scratch buffer and diff
-        // against the reference. A changed row's index is recorded and its
-        // freshly-rendered body is committed into the reference immediately
-        // by swapping the scratch buffer with the reference's stored body
-        // (so the reference's old allocation becomes the next row's scratch
-        // — no per-row heap allocation under churn). The `out` diff is then
-        // built from the just-committed reference bodies. Emit-once still
-        // holds: the reference reflects the rendered state before the frame
-        // ships. The walk is scoped so the disjoint `&mut` borrows of the
-        // reference's fields (so the per-row swap and the changed-index push
-        // don't alias each other through `reference`) drop before the
-        // cursor/mode reads below.
+        // Diff each rendered row against the reference and commit changed rows
+        // into the reference. Unlike the prior single-consumer swap, this
+        // copies (clone) because `tick_rows` is shared and must survive for
+        // the other consumers in this tick. `tick_rows` and `rows_body` are
+        // both `rows_n` long (prepare_tick + reset_geometry), so the zip walks
+        // every row.
         {
             let ConsumerReference {
                 rows_body,
@@ -686,72 +766,37 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
                 ..
             } = &mut *reference;
             changed.clear();
-            let row_scratch = &mut self.row_scratch;
-            let mut row_iter = self.rows.update(&snapshot)?;
-            let mut row_index: u16 = 0;
-            while let Some(row) = row_iter.next() {
-                if row_index >= rows_n {
-                    break;
+            for (idx, (rendered, stored)) in
+                self.tick_rows.iter().zip(rows_body.iter_mut()).enumerate()
+            {
+                if *stored != *rendered {
+                    stored.clear();
+                    stored.extend_from_slice(rendered);
+                    changed.push(u16::try_from(idx).unwrap_or(u16::MAX));
                 }
-                // Each row body is rendered with a fresh SGR pen so the
-                // per-row byte sequence is self-contained and comparable
-                // across ticks regardless of neighbouring rows.
-                row_scratch.clear();
-                let mut prev_style: Option<Pen> = None;
-                let mut cell_iter = self.cells.update(row)?;
-                while let Some(cell) = cell_iter.next() {
-                    emit_cell(cell, row_scratch, &mut prev_style)?;
-                }
-                let idx = usize::from(row_index);
-                if rows_body[idx] != *row_scratch {
-                    // Commit the new body into the reference by swapping; the
-                    // displaced (old) buffer is reused as the next row's
-                    // scratch.
-                    std::mem::swap(&mut rows_body[idx], row_scratch);
-                    changed.push(row_index);
-                }
-                row_index += 1;
             }
         }
 
-        // Re-establish cursor + mode bits. Diff them flat against the
-        // reference; cursor placement can move without any row changing
-        // (a bare CUP onto an unchanged cell), so we capture the live
-        // cursor/mode and compare.
-        let live_cm = ReferenceCursorMode::capture(&snapshot, terminal)?;
         let cursor_mode_changed = reference.cursor_mode != live_cm;
-
         if reference.changed_scratch.is_empty() && !cursor_mode_changed {
-            // Byte-identical to the reference: nothing to ship.
-            synth_ref_span.record("changed_row_count", 0_usize);
-            synth_ref_span.record("out_bytes", 0_usize);
-            return Ok(SnapshotBytes {
+            span.record("changed_row_count", 0_usize);
+            span.record("out_bytes", 0_usize);
+            return SnapshotBytes {
                 cols,
                 rows: rows_n,
                 bytes: Vec::new(),
                 scrollback: Vec::new(),
-            });
+            };
         }
         let changed_row_count = reference.changed_scratch.len();
 
-        // Build the diff: per changed row, CUP to its start then the body.
-        // No reset preamble — the mirror's untouched rows stay as they are.
         let mut out: Vec<u8> = Vec::new();
-
-        // If the screen buffer changed since the reference (e.g. a program
-        // entered/left the alt screen mid-session), toggle it FIRST, before
-        // the row paint — same ordering rationale as the full path
-        // (phux-99n). We emit the toggle only on an actual transition: an
-        // unconditional `?1049h` while already on the alt screen would
-        // clear the very buffer we are about to diff into.
+        // Screen-buffer toggle FIRST, only on an actual alt-screen transition
+        // for THIS consumer (phux-99n ordering). The toggle bytes were
+        // precomputed in `prepare_tick`.
         if reference.cursor_mode.alt_screen_set() != live_cm.alt_screen_set() {
-            emit_screen_mode(&mut out, terminal)?;
+            out.extend_from_slice(&self.tick_screen_toggle);
         }
-
-        // The reference bodies already hold the just-rendered state (swapped
-        // in above), so read them back for the changed indices. Disjoint
-        // immutable borrows of the two fields so the index iteration and the
-        // body read don't alias through `reference`.
         let ConsumerReference {
             rows_body,
             changed_scratch: changed,
@@ -766,20 +811,17 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         }
         // Always re-emit the cursor/mode epilogue on a non-empty tick (the
         // changed rows moved the cursor as a side effect of painting).
-        emit_epilogue(&mut out, &snapshot, terminal)?;
-
-        // Emit-once: the reference row bodies were committed during the
-        // walk above (swap); commit the cursor/mode too.
+        out.extend_from_slice(&self.tick_epilogue);
         reference.cursor_mode = live_cm;
 
-        synth_ref_span.record("changed_row_count", changed_row_count);
-        synth_ref_span.record("out_bytes", out.len());
-        Ok(SnapshotBytes {
+        span.record("changed_row_count", changed_row_count);
+        span.record("out_bytes", out.len());
+        SnapshotBytes {
             cols,
             rows: rows_n,
             bytes: out,
             scrollback: Vec::new(),
-        })
+        }
     }
 
     /// Prime `reference` to the current `terminal` state without emitting
@@ -1032,6 +1074,28 @@ fn cell_color(resolved: Option<RgbColor>, raw: StyleColor) -> CellColor {
 ///
 /// Identical to the tail of `synthesize` from before the
 /// full/incremental split was introduced.
+///
+/// # Snapshot/resync fidelity is grid-content-authoritative by design (phux-e3mo)
+///
+/// This epilogue is the SHARED contract between the full-snapshot path and
+/// the per-consumer state-sync diff. Two known low-severity gaps are
+/// intentionally NOT corrected here:
+///
+/// * Post-snapshot SGR continuity: the snapshot epilogue resets SGR to 0
+///   and the live broadcast pump then resumes raw relative PTY deltas;
+///   there is no guarantee the client mirror's pen matches the server's at
+///   the snapshot boundary (a plausible narrow-window color glitch right
+///   after attach that self-heals on the next prompt redraw).
+/// * Off-viewport cursor: a snapshot whose cursor is not in the viewport
+///   homes to `ESC[H` (a possible top-left flash) rather than hiding it.
+///
+/// Both self-heal on the next live frame. Correcting them means changing
+/// this shared contract — which the state-sync path also depends on — and
+/// is deliberately deferred until there is a reproducing capture (e.g. a
+/// real p10k session) proving the mechanism, rather than churning a
+/// load-bearing path speculatively. Snapshot fidelity is grid-content
+/// authoritative; transient pen/cursor reconvergence is the live stream's
+/// job.
 fn emit_epilogue(
     out: &mut Vec<u8>,
     snapshot: &Snapshot<'_, '_>,
