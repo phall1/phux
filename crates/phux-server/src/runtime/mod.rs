@@ -464,7 +464,7 @@ mod tests {
                         .send(Outbound::Frame(FrameKind::TerminalOutput {
                             terminal_id: pump_terminal_id.clone(),
                             seq,
-                            bytes: bytes.to_vec(),
+                            bytes,
                         }))
                         .await
                         .is_err()

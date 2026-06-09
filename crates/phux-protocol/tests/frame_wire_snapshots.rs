@@ -337,7 +337,7 @@ fn snap_terminal_output_hello_world() {
     let frame = FrameKind::TerminalOutput {
         terminal_id: TerminalId::local(1),
         seq: 0,
-        bytes: b"hello world\r\n".to_vec(),
+        bytes: bytes::Bytes::from_static(b"hello world\r\n"),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -347,7 +347,7 @@ fn snap_terminal_output_empty_bytes() {
     let frame = FrameKind::TerminalOutput {
         terminal_id: TerminalId::local(0x0000_002A),
         seq: 1,
-        bytes: Vec::new(),
+        bytes: bytes::Bytes::new(),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -359,7 +359,7 @@ fn snap_terminal_output_with_sgr() {
     let frame = FrameKind::TerminalOutput {
         terminal_id: TerminalId::local(7),
         seq: 42,
-        bytes: b"\x1b[1;31mERR\x1b[0m".to_vec(),
+        bytes: bytes::Bytes::from_static(b"\x1b[1;31mERR\x1b[0m"),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

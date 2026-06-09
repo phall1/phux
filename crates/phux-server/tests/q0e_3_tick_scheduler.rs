@@ -80,7 +80,7 @@ fn terminal_outputs(items: &[Outbound]) -> Vec<(u32, u64, &[u8])> {
             }) => Some((
                 terminal_id.local_id().expect("v0.1 local id"),
                 *seq,
-                bytes.as_slice(),
+                bytes.as_ref(),
             )),
             Outbound::Frame(_) => None,
         })

@@ -401,7 +401,7 @@ proptest! {
         seq in any::<u64>(),
         bytes in arb_vt_bytes(),
     ) {
-        let frame = FrameKind::TerminalOutput { terminal_id, seq, bytes };
+        let frame = FrameKind::TerminalOutput { terminal_id, seq, bytes: bytes.into() };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
         let (decoded, tail) = FrameKind::decode(&buf).unwrap();
@@ -651,7 +651,7 @@ fn pane_output_round_trip_hello_world() {
     let frame = FrameKind::TerminalOutput {
         terminal_id: TerminalId::local(1),
         seq: 0,
-        bytes: b"hello world\r\n".to_vec(),
+        bytes: bytes::Bytes::from_static(b"hello world\r\n"),
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);

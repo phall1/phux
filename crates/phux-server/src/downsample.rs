@@ -39,6 +39,21 @@ pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
     rewrite_bytes_with_caps(input, ClientCapabilities::new().with_color_support(support))
 }
 
+/// `true` when the client's caps need no VT rewriting — the bytes can be
+/// forwarded verbatim.
+///
+/// A truecolor client with every image, keyboard and hyperlink capability
+/// permissive triggers no quantisation or escape dropping, so callers can
+/// skip [`rewrite_bytes_with_caps`] entirely and forward the source buffer
+/// (e.g. the refcounted broadcast [`bytes::Bytes`]) without a copy.
+#[must_use]
+pub fn caps_pass_through(caps: ClientCapabilities) -> bool {
+    matches!(caps.color_support, ColorSupport::TrueColor)
+        && caps.image_protocols == phux_protocol::caps::ImageProtocolSet::all()
+        && caps.kbd_protocols == phux_protocol::caps::KeyboardProtocolSet::all()
+        && caps.hyperlinks
+}
+
 /// Rewrite an outbound VT byte stream to fit the full client capability
 /// set per SPEC §6.2.
 ///
@@ -48,11 +63,7 @@ pub fn rewrite_bytes(input: &[u8], support: ColorSupport) -> Vec<u8> {
 #[must_use]
 pub fn rewrite_bytes_with_caps(input: &[u8], caps: ClientCapabilities) -> Vec<u8> {
     // Fast path: nothing to rewrite or drop. Hot path on capable clients.
-    if matches!(caps.color_support, ColorSupport::TrueColor)
-        && caps.image_protocols == phux_protocol::caps::ImageProtocolSet::all()
-        && caps.kbd_protocols == phux_protocol::caps::KeyboardProtocolSet::all()
-        && caps.hyperlinks
-    {
+    if caps_pass_through(caps) {
         return input.to_vec();
     }
 

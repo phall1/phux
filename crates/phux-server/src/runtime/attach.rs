@@ -590,12 +590,20 @@ pub(crate) async fn handle_spawn_terminal(
                 match output_rx.recv().await {
                     Ok(bytes) => {
                         seq = seq.wrapping_add(1);
-                        let bytes = crate::downsample::rewrite_bytes_with_caps(&bytes, client_caps);
+                        // Fast path: capable client needs no rewrite — forward
+                        // the refcounted broadcast bytes with no copy.
+                        let out_bytes: bytes::Bytes =
+                            if crate::downsample::caps_pass_through(client_caps) {
+                                bytes.clone()
+                            } else {
+                                crate::downsample::rewrite_bytes_with_caps(&bytes, client_caps)
+                                    .into()
+                            };
                         if pump_out_tx
                             .send(Outbound::Frame(FrameKind::TerminalOutput {
                                 terminal_id: pump_wire_terminal_id.clone(),
                                 seq,
-                                bytes,
+                                bytes: out_bytes,
                             }))
                             .await
                             .is_err()
@@ -887,15 +895,23 @@ pub(crate) async fn handle_attach(
                     match output_rx.recv().await {
                         Ok(bytes) => {
                             seq = seq.wrapping_add(1);
-                            let bytes = crate::downsample::rewrite_bytes_with_caps(
-                                &bytes,
-                                pump_client_caps,
-                            );
+                            // Fast path: capable client needs no rewrite —
+                            // forward the refcounted broadcast bytes, no copy.
+                            let out_bytes: bytes::Bytes =
+                                if crate::downsample::caps_pass_through(pump_client_caps) {
+                                    bytes.clone()
+                                } else {
+                                    crate::downsample::rewrite_bytes_with_caps(
+                                        &bytes,
+                                        pump_client_caps,
+                                    )
+                                    .into()
+                                };
                             if pump_out_tx
                                 .send(Outbound::Frame(FrameKind::TerminalOutput {
                                     terminal_id: pump_wire_terminal_id.clone(),
                                     seq,
-                                    bytes,
+                                    bytes: out_bytes,
                                 }))
                                 .await
                                 .is_err()

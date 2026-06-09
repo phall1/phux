@@ -1230,9 +1230,7 @@ impl TerminalActor {
     /// detach the whole session. Today sessions are 1:1 with panes in
     /// practice so the simpler "EOF → detach attached" model is correct.
     fn handle_pty_eof(&mut self) {
-        debug!(
-            "PTY EOF; firing exit_notify and keeping actor alive for late snapshot/input drain"
-        );
+        debug!("PTY EOF; firing exit_notify and keeping actor alive for late snapshot/input drain");
         self.pty_rx = None;
         let exit_status = self.reap_child_if_any();
         if let Some(tx) = self.exit_notify.take() {
@@ -1855,7 +1853,7 @@ impl TerminalActor {
             let frame = FrameKind::TerminalOutput {
                 terminal_id: phux_protocol::ids::TerminalId::local(state.wire_terminal_id),
                 seq,
-                bytes,
+                bytes: bytes.into(),
             };
             // Infallible: we hold a reserved permit, so this cannot block,
             // drop, or fail. This preserves the actor's single-poll-budget

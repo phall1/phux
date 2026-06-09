@@ -441,7 +441,7 @@ impl<'a> Decoder<'a> {
             TYPE_TERMINAL_OUTPUT => {
                 let mut terminal_id: Option<TerminalId> = None;
                 let mut seq = 0u64;
-                let mut bytes: Vec<u8> = Vec::new();
+                let mut bytes = bytes::Bytes::new();
                 while let Some((id, value)) = self.read_field()? {
                     match id {
                         field::terminal_output::TERMINAL_ID => {
@@ -450,7 +450,9 @@ impl<'a> Decoder<'a> {
                         field::terminal_output::SEQ => {
                             seq = sub!(value, |d: &mut Decoder<'_>| d.read_u64_be());
                         }
-                        field::terminal_output::BYTES => bytes = value.to_vec(),
+                        field::terminal_output::BYTES => {
+                            bytes = bytes::Bytes::copy_from_slice(value);
+                        }
                         _ => {}
                     }
                 }

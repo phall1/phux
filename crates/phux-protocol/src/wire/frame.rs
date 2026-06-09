@@ -1156,8 +1156,9 @@ pub enum FrameKind {
         /// Monotonic per-terminal sequence id (`docs/spec/proto.md` §8).
         seq: u64,
         /// VT bytes from the PTY (possibly downsampled per
-        /// [`crate::caps::ColorSupport`]).
-        bytes: Vec<u8>,
+        /// [`crate::caps::ColorSupport`]). Refcounted [`bytes::Bytes`] so the
+        /// server can forward verbatim chunks to capable clients with no copy.
+        bytes: bytes::Bytes,
     },
 
     /// `ATTACH` — client requests to attach to a session (`docs/spec/L1.md` §7).

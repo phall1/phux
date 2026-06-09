@@ -1127,7 +1127,7 @@ mod tests {
             FrameKind::TerminalOutput {
                 terminal_id: terminal_id.clone(),
                 seq,
-                bytes: bytes.to_vec(),
+                bytes: bytes::Bytes::copy_from_slice(bytes),
             },
             panes,
             layout,
