@@ -70,13 +70,19 @@ pub(super) fn paint_focused_pane<W: Write>(
             h: pane_dims.1,
         });
     let slot = panes.get_mut(focused)?;
-    let _ = safe_resize(&mut slot.terminal, rect.w, rect.h);
+    // The mirror grid size is server-authoritative (set only at the
+    // snapshot / resize-ack handler); the layout rect clips and positions
+    // the paint but never resizes the pane's libghostty Terminal. Resizing
+    // the alt-screen mirror to a transient client-rect width during a resize
+    // handshake strands previous-screen content in the dropped columns (the
+    // ghost cells — alt screen does not reflow), which `render_at` would then
+    // faithfully paint. Clipping confines the paint to the rect instead.
     let _ = if force_full {
         slot.renderer
-            .render_at_full(&slot.terminal, out, (rect.x, rect.y))
+            .render_at_full(&slot.terminal, out, (rect.x, rect.y), (rect.w, rect.h))
     } else {
         slot.renderer
-            .render_at(&slot.terminal, out, (rect.x, rect.y))
+            .render_at(&slot.terminal, out, (rect.x, rect.y), (rect.w, rect.h))
     };
     slot.renderer.last_cursor()
 }
@@ -164,14 +170,17 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
             continue;
         }
         if let Some(slot) = panes.get_mut(id) {
-            let _ = safe_resize(&mut slot.terminal, rect.w, rect.h);
             // Force a full redraw: the ED2 above cleared the screen, so
             // an incremental "only dirty rows" paint would leave a pane
             // whose content is unchanged (the survivor of a split/resize)
-            // blank.
-            let _ = slot
-                .renderer
-                .render_at_full(&slot.terminal, out, (rect.x, rect.y));
+            // blank. The rect clips the paint; it never resizes the
+            // server-authoritative mirror grid.
+            let _ = slot.renderer.render_at_full(
+                &slot.terminal,
+                out,
+                (rect.x, rect.y),
+                (rect.w, rect.h),
+            );
         }
     }
     let _ = crate::render::chrome::dividers::render_dividers(out, &multi, focused_pane);
@@ -560,6 +569,82 @@ mod tests {
         assert!(
             second_s.contains("\x1b[24;1H"),
             "clobbered bar must re-emit its row even when unchanged; out = {second_s:?}"
+        );
+    }
+
+    /// phux-wurs: `paint_focused_pane` must NOT resize the pane's libghostty
+    /// mirror to the client layout rect. The mirror grid size is
+    /// server-authoritative (set only at the snapshot / resize-ack handler).
+    /// Resizing the alt-screen mirror to a transient client-rect width during
+    /// a resize handshake strands previous-screen content in the dropped
+    /// columns (the right-side ghost), because the alternate screen does not
+    /// reflow. Single-pane (`tree: None`) takes the full-viewport rect
+    /// fallback, so the rect width (M) differs from the mirror width (N).
+    #[test]
+    fn paint_focused_pane_does_not_resize_server_authoritative_mirror() {
+        use libghostty_vt::TerminalOptions;
+
+        let id = TerminalId::local(1);
+        // Single-pane: no layout tree ⇒ compute_layout yields no rect, so
+        // paint_focused_pane falls back to the full pane viewport.
+        let layout = LayoutState {
+            tree: None,
+            focus: Some(id.clone()),
+        };
+
+        // Mirror is server-authoritative at 20x4 on the ALT screen, filled
+        // with full-width content (the "top-of-file" the ghost is made of).
+        let mirror_cols = 20u16;
+        let mirror_rows = 4u16;
+        let mut slot = PaneSlot::new_with_size(mirror_cols, mirror_rows).expect("slot");
+        slot.terminal.vt_write(b"\x1b[?1049h"); // enter alt screen (no reflow)
+        slot.terminal
+            .vt_write(b"ABCDEFGHIJKLMNOPQRST\r\nABCDEFGHIJKLMNOPQRST");
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), slot);
+
+        // Client viewport is far wider/taller than the mirror, so the rect
+        // (M) disagrees with the mirror (N). With a bar, pane_dims = (80, 23).
+        let viewport = (80u16, 24u16);
+        let mut out: Vec<u8> = Vec::new();
+        let _ = paint_focused_pane(&mut out, &layout, &mut panes, &id, viewport, true, false);
+
+        // The mirror grid size is unchanged — the layout rect did not resize it.
+        let slot = panes.get(&id).expect("slot");
+        assert_eq!(
+            slot.terminal.cols().expect("cols"),
+            mirror_cols,
+            "focused paint must not widen the server-authoritative mirror"
+        );
+        assert_eq!(
+            slot.terminal.rows().expect("rows"),
+            mirror_rows,
+            "focused paint must not grow the server-authoritative mirror"
+        );
+
+        // And the paint is clipped to the mirror's real width: no spill past
+        // column 20 (the rect is 80 wide, but the mirror is only 20).
+        // Reference: re-read the mirror grid and confirm the painted glyphs
+        // match, with nothing beyond. A spill would emit extra glyphs from a
+        // stale wider grid; here the grid is 20 wide so the clip equals the
+        // mirror. The regression we guard is the resize, asserted above.
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains('A') && s.contains('T'), "content painted; {s:?}");
+
+        // A no-grow probe via an explicit alt-screen reference: a 20-wide
+        // mirror written the same way, never resized, has the identical grid.
+        let mut reference = GhosttyTerminal::new(TerminalOptions {
+            cols: mirror_cols,
+            rows: mirror_rows,
+            max_scrollback: 10_000,
+        })
+        .expect("reference");
+        reference.vt_write(b"\x1b[?1049h");
+        reference.vt_write(b"ABCDEFGHIJKLMNOPQRST\r\nABCDEFGHIJKLMNOPQRST");
+        assert_eq!(
+            reference.cols().expect("ref cols"),
+            slot.terminal.cols().expect("slot cols"),
+            "mirror width must equal the never-resized reference"
         );
     }
 }

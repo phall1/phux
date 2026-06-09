@@ -243,22 +243,38 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // layout. Single-pane / no layout: anchor at (0,0).
             let has_bar = status_bar.is_some();
             let pane_dims = pane_viewport(viewport_dims, has_bar);
-            let origin = workspace
+            // The pane's outer-viewport Rect: origin positions the paint,
+            // (w, h) clips it. Multi-pane: ask the layout. Single-pane / no
+            // layout: anchor at (0,0) spanning the full pane viewport.
+            let rect = workspace
                 .active_window()
                 .filter(|ls| ls.tree.is_some())
                 .and_then(|ls| {
                     super::multi_pane::compute_layout(ls, pane_dims)
                         .rects
                         .get(&terminal_id)
-                        .map(|r| (r.x, r.y))
+                        .copied()
                 })
-                .unwrap_or((0, 0));
+                .unwrap_or(crate::layout::Rect {
+                    x: 0,
+                    y: 0,
+                    w: pane_dims.0,
+                    h: pane_dims.1,
+                });
+            let origin = (rect.x, rect.y);
             let slot = match panes.entry(terminal_id.clone()) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                 std::collections::hash_map::Entry::Vacant(v) => {
                     v.insert(PaneSlot::new_with_size(cols, rows)?)
                 }
             };
+            // The mirror grid size is server-authoritative: the TERMINAL_SNAPSHOT
+            // carries the server's `(cols, rows)` and this is the ONE place that
+            // resizes the pane's libghostty Terminal to them (alongside a future
+            // server resize-ack). The client layout rect clips and positions
+            // rendering but NEVER calls `resize()` on the mirror — resizing the
+            // alt-screen mirror to a transient client-rect size during a resize
+            // handshake strands previous-screen content (the ghost cells).
             super::paint::safe_resize(&mut slot.terminal, cols, rows)?;
             // phux-flywheel: time the snapshot VT-apply (scrollback +
             // visible replay into the libghostty mirror) under its own
@@ -295,7 +311,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // separately from the `vt_apply` above.
                     let _paint_trigger =
                         tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
-                    let _ = slot.renderer.render_at(&slot.terminal, out, origin);
+                    let _ = slot
+                        .renderer
+                        .render_at(&slot.terminal, out, origin, (rect.w, rect.h));
                     if let Some((row, col)) = slot.renderer.last_cursor() {
                         predict.set_cursor(row, col);
                     }
@@ -342,9 +360,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     .unwrap_or_default();
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ = slot
-                            .renderer
-                            .render_at(&slot.terminal, out, (rect.x, rect.y));
+                        let _ = slot.renderer.render_at(
+                            &slot.terminal,
+                            out,
+                            (rect.x, rect.y),
+                            (rect.w, rect.h),
+                        );
                     }
                     // The render above left the host cursor inside the
                     // non-focused pane; restore the focused pane's cursor so it
@@ -428,7 +449,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
                 let has_bar = status_bar.is_some();
                 let pane_dims = pane_viewport(viewport_dims, has_bar);
-                let expected_dims = workspace
+                // Best-known dims for sizing a freshly-allocated slot only. An
+                // existing slot's libghostty grid is server-authoritative and
+                // must NOT be resized here: the server authored these bytes for
+                // its own grid size, and resizing the alt-screen mirror to a
+                // transient client-rect size during a resize handshake strands
+                // previous-screen content in the dropped columns (the ghost
+                // cells — the alt screen does not reflow). The mirror is resized
+                // only at the TERMINAL_SNAPSHOT resync (and a future resize-ack);
+                // here we just feed bytes in.
+                let initial_dims = workspace
                     .active_window()
                     .and_then(|ls| {
                         super::multi_pane::compute_layout(ls, pane_dims)
@@ -436,19 +466,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             .get(&terminal_id)
                             .map(|r| (r.w, r.h))
                     })
-                    .or_else(|| {
-                        panes.get_mut(&terminal_id).and_then(|slot| {
-                            Some((slot.terminal.cols().ok()?, slot.terminal.rows().ok()?))
-                        })
-                    })
                     .unwrap_or(pane_dims);
                 let slot = match panes.entry(terminal_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                     std::collections::hash_map::Entry::Vacant(v) => {
-                        v.insert(PaneSlot::new_with_size(expected_dims.0, expected_dims.1)?)
+                        v.insert(PaneSlot::new_with_size(initial_dims.0, initial_dims.1)?)
                     }
                 };
-                super::paint::safe_resize(&mut slot.terminal, expected_dims.0, expected_dims.1)?;
                 slot.terminal.vt_write(&bytes);
             }
             // The libghostty mirror is now warm even for panes in a
@@ -544,9 +568,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 let rects = super::multi_pane::compute_layout(active_ls, pane_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ = slot
-                            .renderer
-                            .render_at(&slot.terminal, out, (rect.x, rect.y));
+                        let _ = slot.renderer.render_at(
+                            &slot.terminal,
+                            out,
+                            (rect.x, rect.y),
+                            (rect.w, rect.h),
+                        );
                     }
                     // Restore the focused pane's cursor: the render above
                     // left the host cursor inside the non-focused pane.

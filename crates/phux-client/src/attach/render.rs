@@ -233,19 +233,25 @@ impl<'alloc> TerminalRenderer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
     ) -> Result<Dirty, RenderError> {
-        self.render_at(terminal, out, (0, 0))
+        // No pane rect to clip against; the terminal's own grid defines the
+        // extent (`u16::MAX` clamps to the grid size on both axes).
+        self.render_at(terminal, out, (0, 0), (u16::MAX, u16::MAX))
     }
 
     /// Render `terminal` into the outer viewport with its top-left at
-    /// `origin = (x, y)` in outer-viewport cell coordinates.
+    /// `origin = (x, y)` in outer-viewport cell coordinates, clipped to
+    /// `clip = (cols, rows)` of the pane's render rect.
     ///
-    /// The terminal's own `(cols, rows)` define the painted extent; the
-    /// caller is responsible for sizing the terminal to its pane's
-    /// `Rect` before calling. Every row CUP is shifted by `origin.1` and
-    /// every column by `origin.0`; the final cursor placement (cached in
-    /// [`Self::last_cursor`]) is reported in **outer-viewport**
-    /// coordinates, not pane-local — that's what the predictive-echo
-    /// overlay needs for direct stdout writes.
+    /// The painted extent is `min(terminal grid, clip)` on each axis. The
+    /// mirror's libghostty grid size is server-authoritative and may
+    /// transiently exceed the client's layout rect during a resize
+    /// handshake; `clip` confines the paint to the rect so a wider mirror
+    /// never spills past the rect (into a divider or a neighbour pane) and
+    /// a narrower mirror never paints beyond its own grid. Every row CUP is
+    /// shifted by `origin.1` and every column by `origin.0`; the final
+    /// cursor placement (cached in [`Self::last_cursor`]) is reported in
+    /// **outer-viewport** coordinates, not pane-local — that's what the
+    /// predictive-echo overlay needs for direct stdout writes.
     ///
     /// Multi-pane drivers call this once per visible pane; dividers are
     /// painted separately via
@@ -255,8 +261,9 @@ impl<'alloc> TerminalRenderer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
+        clip: (u16, u16),
     ) -> Result<Dirty, RenderError> {
-        self.render_at_inner(terminal, out, origin, false)
+        self.render_at_inner(terminal, out, origin, clip, false)
     }
 
     /// Like [`Self::render_at`] but unconditionally repaints every row,
@@ -275,8 +282,9 @@ impl<'alloc> TerminalRenderer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
+        clip: (u16, u16),
     ) -> Result<Dirty, RenderError> {
-        self.render_at_inner(terminal, out, origin, true)
+        self.render_at_inner(terminal, out, origin, clip, true)
     }
 
     fn render_at_inner(
@@ -284,9 +292,11 @@ impl<'alloc> TerminalRenderer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         out: &mut impl Write,
         origin: (u16, u16),
+        clip: (u16, u16),
         force_full: bool,
     ) -> Result<Dirty, RenderError> {
         let (ox, oy) = origin;
+        let (clip_cols, clip_rows) = clip;
         let snapshot = self.state.update(terminal)?;
         let dirty = if force_full {
             Dirty::Full
@@ -305,7 +315,12 @@ impl<'alloc> TerminalRenderer<'alloc> {
         // `Dirty::Partial` skip rows whose per-row dirty bit is clear.
         let mut row_iter = self.rows.update(&snapshot)?;
         let mut row_index: u16 = 0;
-        let rows_total = snapshot.rows()?;
+        // Clip to the render rect: a server-authoritative mirror may be
+        // larger than the client's layout rect during a resize handshake;
+        // painting past the rect would spill into a divider or neighbour
+        // pane. `min` also keeps a smaller mirror within its own grid.
+        let rows_total = snapshot.rows()?.min(clip_rows);
+        let cols_total = snapshot.cols()?.min(clip_cols);
         while let Some(row) = row_iter.next() {
             if row_index >= rows_total {
                 break;
@@ -326,6 +341,9 @@ impl<'alloc> TerminalRenderer<'alloc> {
                 let mut col: u16 = 0;
                 let mut cell_iter = self.cells.update(row)?;
                 while let Some(cell) = cell_iter.next() {
+                    if col >= cols_total {
+                        break;
+                    }
                     let graphemes = cell.graphemes()?;
                     let mut style = cell.style()?;
                     let fg = cell.fg_color()?;
@@ -525,7 +543,7 @@ mod tests {
             end_col: 1,
         }));
         let mut out: Vec<u8> = Vec::new();
-        let _ = r.render_at_full(&t, &mut out, (0, 0));
+        let _ = r.render_at_full(&t, &mut out, (0, 0), (10, 2));
         let s = String::from_utf8_lossy(&out);
         // Inverse is emitted first in emit_sgr_set, so the param leads the CSI.
         assert!(
@@ -543,7 +561,7 @@ mod tests {
         // And without a selection the same render has no reverse-video.
         r.set_selection(None);
         let mut plain: Vec<u8> = Vec::new();
-        let _ = r.render_at_full(&t, &mut plain, (0, 0));
+        let _ = r.render_at_full(&t, &mut plain, (0, 0), (10, 2));
         assert!(!String::from_utf8_lossy(&plain).contains("\x1b[7"));
     }
 
@@ -875,6 +893,70 @@ mod tests {
         assert_eq!(
             src, reconstructed,
             "default-gap row round-trips identically"
+        );
+    }
+
+    /// phux-wurs: the render must clip to the pane's rect, not to the
+    /// (server-authoritative) mirror grid. When the mirror is WIDER than the
+    /// rect — the resize-handshake window where the server's grid is still
+    /// width N while the client layout reports width M < N — `render_at` must
+    /// emit at most M columns per row. Painting the mirror's full width would
+    /// spill prior content past the rect (the ghost cells / divider overrun).
+    #[test]
+    fn render_at_clips_columns_to_rect_not_mirror_width() {
+        // Mirror is 20 cols wide, full of distinct content across the row.
+        let mirror_cols = 20u16;
+        let mut terminal = fresh(mirror_cols, 1);
+        terminal.vt_write(b"ABCDEFGHIJKLMNOPQRST"); // 20 glyphs, cols 0..20
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        // Rect is only 12 cols wide.
+        let rect_cols = 12u16;
+        let mut out: Vec<u8> = Vec::new();
+        let _ = renderer
+            .render_at(&terminal, &mut out, (0, 0), (rect_cols, 1))
+            .expect("render");
+        let s = String::from_utf8_lossy(&out);
+        // Columns inside the rect (0..12 ⇒ 'A'..'L') are painted.
+        assert!(
+            s.contains('A') && s.contains('L'),
+            "in-rect glyphs must paint; out = {s:?}"
+        );
+        // Columns past the rect (12..20 ⇒ 'M'..'T') must NOT be emitted — they
+        // would land beyond the pane's rect (divider / neighbour pane), which
+        // is exactly the right-side ghost.
+        for ch in ['M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T'] {
+            assert!(
+                !s.contains(ch),
+                "column {ch} past the rect must not be painted; out = {s:?}"
+            );
+        }
+    }
+
+    /// phux-wurs: the row walk clips to the rect height too — a mirror taller
+    /// than the rect must not paint rows below the rect.
+    #[test]
+    fn render_at_clips_rows_to_rect_not_mirror_height() {
+        let cols = 6u16;
+        let mut terminal = fresh(cols, 4);
+        terminal.vt_write(b"row0\r\nrow1\r\nrow2\r\nrow3");
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        // Rect is only 2 rows tall.
+        let mut out: Vec<u8> = Vec::new();
+        let _ = renderer
+            .render_at(&terminal, &mut out, (0, 0), (cols, 2))
+            .expect("render");
+        let s = String::from_utf8_lossy(&out);
+        // Rows 0..2 emit a CUP (1-based rows 1 and 2); row 2/3 (1-based 3/4)
+        // must not.
+        assert!(s.contains("\x1b[1;1H"), "row 0 CUP missing; out = {s:?}");
+        assert!(s.contains("\x1b[2;1H"), "row 1 CUP missing; out = {s:?}");
+        assert!(
+            !s.contains("\x1b[3;1H"),
+            "row 2 past the rect must not paint; out = {s:?}"
+        );
+        assert!(
+            !s.contains("\x1b[4;1H"),
+            "row 3 past the rect must not paint; out = {s:?}"
         );
     }
 }
