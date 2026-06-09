@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
-    MetadataStore, Outbound, RenameOutcome, ServerState, TerminalInput,
+    MetadataStore, Outbound, RenameOutcome, ServerState,
 };
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
@@ -28,7 +28,6 @@ impl ServerState {
             registry: Registry::new(),
             attached: HashMap::new(),
             terminal_subscribers: HashMap::new(),
-            terminal_inputs: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
             terminal_tokens: HashMap::new(),
@@ -702,7 +701,6 @@ impl ServerState {
         if let Some(token) = self.terminal_tokens.remove(&pane) {
             token.cancel();
         }
-        self.terminal_inputs.remove(&pane);
         self.terminal_subscribers.remove(&pane);
         if let Some(wire) = self.terminal_wire_forward.remove(&pane) {
             self.terminal_wire_reverse.remove(&wire);
@@ -753,16 +751,6 @@ impl ServerState {
             .filter(|(_, subs)| subs.contains(&client_id))
             .filter_map(|(terminal, _)| self.terminal_handle(*terminal).cloned())
             .collect()
-    }
-
-    /// Append `input` to the per-pane log. The log is shared across all
-    /// attached clients of the pane's session; this is the merge point for
-    /// multi-client keystrokes.
-    pub fn record_terminal_input(&mut self, terminal: TerminalId, input: TerminalInput) {
-        self.terminal_inputs
-            .entry(terminal)
-            .or_default()
-            .push(input);
     }
 
     /// Look up the active pane of the active window of `session`, if any.
@@ -864,20 +852,6 @@ impl ServerState {
     pub fn add_pane_to_session(&mut self, session: SessionId) -> Option<TerminalId> {
         let wid = self.registry.session(session)?.windows.first().copied()?;
         self.registry.new_terminal(wid).ok()
-    }
-
-    /// Test-only: snapshot the per-pane input log.
-    ///
-    /// Exposed behind `#[cfg(test)]` so integration tests can assert
-    /// keystroke merge ordering and no-dup invariants without needing to
-    /// drain a real PTY consumer.
-    #[cfg(test)]
-    #[must_use]
-    pub fn terminal_input_log_for(&self, terminal: TerminalId) -> Vec<TerminalInput> {
-        self.terminal_inputs
-            .get(&terminal)
-            .cloned()
-            .unwrap_or_default()
     }
 
     /// Record a freshly-spawned [`TerminalHandle`] against `pane` and

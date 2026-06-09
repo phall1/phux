@@ -10,11 +10,10 @@
 //!   server-assigned monotonic [`ClientId`].
 //! * The list of subscribers per pane — used to fan diffs out to every client
 //!   that is currently observing a pane.
-//! * A per-pane input log (`terminal_inputs`) where every keystroke, mouse event,
-//!   focus change, and paste recorded against a pane is appended. The PTY
-//!   side of the pipeline (PTY writer task) reads from this log; for
-//!   `phux-byc.4` it serves both as the merge point for multi-client input
-//!   and as the inspection surface for tests.
+//!
+//! Client input is not buffered here: [`TerminalInput`] events flow directly
+//! onto the per-pane [`crate::terminal_actor::TerminalActor`]'s input mailbox,
+//! which encodes them to PTY bytes (see `runtime::commands`).
 //!
 //! # Concurrency model
 //!
@@ -81,13 +80,6 @@ pub struct ServerState {
     /// For each pane, the clients currently observing it (and thus eligible
     /// to receive `TERMINAL_OUTPUT` frames for it).
     pub terminal_subscribers: HashMap<TerminalId, Vec<ClientId>>,
-    /// Per-pane input log. Inputs from all attached clients are merged into
-    /// the same vec in arrival order; the PTY writer task drains it.
-    ///
-    /// For `phux-byc.4` no draining consumer exists yet — the log
-    /// accumulates and tests inspect it via the test-only
-    /// `terminal_input_log_for` accessor.
-    terminal_inputs: HashMap<TerminalId, Vec<TerminalInput>>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
@@ -607,38 +599,6 @@ mod tests {
             s.terminal_from_wire(&wire).is_none(),
             "wire id retired on reap",
         );
-    }
-
-    #[test]
-    fn record_terminal_input_appends_in_call_order() {
-        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-        let mut s = ServerState::new();
-        let (_sid, _wid, pid) = s.seed_session("default");
-
-        let mk = |k: PhysicalKey, text: &str| KeyEvent {
-            action: KeyAction::Press,
-            key: k,
-            mods: ModSet::empty(),
-            consumed_mods: ModSet::empty(),
-            composing: false,
-            text: Some(text.to_owned()),
-            unshifted_codepoint: Some(text.chars().next().unwrap() as u32),
-        };
-
-        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::A, "a")));
-        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::B, "b")));
-        s.record_terminal_input(pid, TerminalInput::Key(mk(PhysicalKey::C, "c")));
-
-        let log = s.terminal_input_log_for(pid);
-        assert_eq!(log.len(), 3);
-        let texts: Vec<String> = log
-            .into_iter()
-            .map(|pi| match pi {
-                TerminalInput::Key(k) => k.text.unwrap_or_default(),
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(texts, vec!["a", "b", "c"]);
     }
 
     #[test]
