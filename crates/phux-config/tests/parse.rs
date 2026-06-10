@@ -10,7 +10,9 @@
 
 use std::path::PathBuf;
 
-use phux_config::{Config, ConfigError, CwdInheritance, DefaultsCfg, WindowSize, parse_str};
+use phux_config::{
+    Config, ConfigError, CwdInheritance, DefaultsCfg, SidebarPosition, WindowSize, parse_str,
+};
 
 /// The canonical example from `docs/consumers/tui.md` §4.2.
 const CANONICAL: &str = r##"
@@ -234,6 +236,56 @@ predictive-echo = 1
     );
     // The offending value sits on line 3 (leading newline + section line + value line).
     assert_eq!(line, 3, "error should point at the broken value line");
+}
+
+// ---------------------------------------------------------------------------
+// [sidebar]  (phux-4h5a)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sidebar_defaults_to_disabled_when_absent() {
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert!(!cfg.sidebar.enabled, "sidebar is off by default");
+    assert_eq!(cfg.sidebar.width, 20, "default width");
+    assert_eq!(cfg.sidebar.position, SidebarPosition::Left);
+}
+
+#[test]
+fn sidebar_enabled_parses_and_round_trips() {
+    let input = r#"
+[sidebar]
+enabled  = true
+width    = 30
+position = "right"
+"#;
+    let cfg = parse_str(input, &path()).expect("[sidebar] parses");
+    assert!(cfg.sidebar.enabled);
+    assert_eq!(cfg.sidebar.width, 30);
+    assert_eq!(cfg.sidebar.position, SidebarPosition::Right);
+
+    let reser = toml::to_string(&cfg).expect("reserialize");
+    let reparsed = parse_str(&reser, &path()).expect("reparse");
+    assert_eq!(cfg, reparsed);
+}
+
+#[test]
+fn sidebar_unknown_position_is_rejected() {
+    let input = r#"
+[sidebar]
+position = "floating"
+"#;
+    let err = parse_str(input, &path()).expect_err("unknown position rejected");
+    assert!(matches!(err, ConfigError::Parse { .. }));
+}
+
+#[test]
+fn sidebar_unknown_field_is_rejected() {
+    let input = r"
+[sidebar]
+wdith = 20
+";
+    let err = parse_str(input, &path()).expect_err("typo rejected by deny_unknown_fields");
+    assert!(matches!(err, ConfigError::Parse { .. }));
 }
 
 // ---------------------------------------------------------------------------
