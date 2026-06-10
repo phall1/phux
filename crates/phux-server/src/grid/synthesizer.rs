@@ -318,7 +318,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// no attach, no resize. `pane` is the wire-local id stamped into the
     /// result for the caller.
     pub fn screen_state(
-        &mut self,
+        &self,
         terminal: &GhosttyTerminal<'alloc, '_>,
         pane: u32,
     ) -> Result<ScreenState, SynthesisError> {
@@ -351,8 +351,15 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
     /// non-default style or a semantic mark are emitted, in row-major order,
     /// skipping wide-cell tails — see the private `collect_cell`. When `false`,
     /// `cells` is left `None` and the walk pays nothing (`phux-8yl`).
+    #[allow(
+        clippy::unused_self,
+        reason = "intentionally stateless — reads through a fresh RenderState \
+                  each call (the pooled cache served stale rows after a resize; \
+                  see the body comment) — but stays a method on \
+                  SnapshotSynthesizer for API symmetry, matching `synthesize`"
+    )]
     pub fn screen_state_with_scrollback(
-        &mut self,
+        &self,
         terminal: &GhosttyTerminal<'alloc, '_>,
         pane: u32,
         scrollback: Option<u32>,
@@ -367,7 +374,23 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             Some(want) => Self::scrollback_lines(terminal, want)?,
         };
 
-        let snapshot = self.render_state.update(terminal)?;
+        // Fresh render state + iterators per call, NOT the pooled
+        // `self.render_state`/`self.rows`/`self.cells`. The pooled state
+        // can serve stale rows: after a `TERMINAL_RESIZE` raced an
+        // attach/resync snapshot (which walks the grid through its own
+        // fresh state), the pooled cache reported the new dims yet kept
+        // returning the pre-write (empty) row bodies for every later
+        // update — a `GET_SCREEN` poller then never saw content that a
+        // fresh state read back correctly microseconds later (the
+        // route_input_no_resize CI flake; same failure class as the
+        // attach_detach_churn flakes fixed in `synthesize`, phux-uow0).
+        // A fresh state has no prior cache, so its first `update`
+        // observes every row as it is now. GET_SCREEN is an agent-paced
+        // control call (a few Hz), so the extra FFI allocation is noise.
+        let mut render_state = RenderState::new()?;
+        let mut rows_pool = RowIterator::new()?;
+        let mut cells_pool = CellIterator::new()?;
+        let snapshot = render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
 
@@ -382,7 +405,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         let mut cell_infos: Option<Vec<CellInfo>> = cells.then(Vec::new);
 
         let mut lines: Vec<String> = Vec::with_capacity(usize::from(rows_n));
-        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_iter = rows_pool.update(&snapshot)?;
         let mut row_index: u16 = 0;
         while let Some(row) = row_iter.next() {
             if row_index >= rows_n {
@@ -390,7 +413,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             }
             let mut buf = String::with_capacity(usize::from(cols));
             let mut col_index: u16 = 0;
-            let mut cell_iter = self.cells.update(row)?;
+            let mut cell_iter = cells_pool.update(row)?;
             while let Some(cell) = cell_iter.next() {
                 let wide = cell.raw_cell()?.wide()?;
                 if matches!(wide, CellWide::SpacerTail) {
@@ -1312,7 +1335,7 @@ mod tests {
         assert_eq!(render_grid(&client), render_grid(&source));
 
         // History matches, row for row, with nothing dropped.
-        let mut sb_synth = SnapshotSynthesizer::new().expect("synth2");
+        let sb_synth = SnapshotSynthesizer::new().expect("synth2");
         let source_hist = sb_synth
             .screen_state_with_scrollback(&source, 0, Some(SCROLLBACK_ALL), false)
             .expect("source history")
@@ -1347,7 +1370,7 @@ mod tests {
         client.vt_write(&snap.scrollback);
         client.vt_write(&snap.bytes);
 
-        let mut sb_synth = SnapshotSynthesizer::new().expect("synth2");
+        let sb_synth = SnapshotSynthesizer::new().expect("synth2");
         let client_hist = sb_synth
             .screen_state_with_scrollback(&client, 0, Some(SCROLLBACK_ALL), false)
             .expect("client history")
@@ -1493,7 +1516,7 @@ mod tests {
         // The agent-surface read path: walk the grid into structured text.
         let mut t = fresh(20, 5);
         t.vt_write(b"hello\r\nworld");
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth.screen_state(&t, 7).expect("screen_state");
 
         assert_eq!(screen.schema_version, SCHEMA_VERSION);
@@ -1515,7 +1538,7 @@ mod tests {
         // cells projection — back-compat with the pre-phux-8yl shape.
         let mut t = fresh(20, 3);
         t.vt_write(b"hello");
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth.screen_state(&t, 1).expect("screen_state");
         assert!(screen.cells.is_none(), "cells = false leaves cells None");
     }
@@ -1530,7 +1553,7 @@ mod tests {
         // ESC[1;31m = bold + red fg; "HI"; ESC[0m reset; " ok".
         t.vt_write(b"\x1b[1;31mHI\x1b[0m ok");
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 1, None, true)
             .expect("screen_state_with_scrollback");
@@ -1575,7 +1598,7 @@ mod tests {
         // OSC 133 ; B  -> command (input) start. Then "ls" is input.
         t.vt_write(b"\x1b]133;B\x07ls");
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 1, None, true)
             .expect("screen_state_with_scrollback");
@@ -1614,7 +1637,7 @@ mod tests {
         t.vt_write("你".as_bytes());
         t.vt_write(b"\x1b[1mX");
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 1, None, true)
             .expect("screen_state_with_scrollback");
@@ -1655,7 +1678,7 @@ mod tests {
         t.vt_write(b"\x1b[1m");
         t.vt_write("abc你d".as_bytes());
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 1, None, true)
             .expect("screen_state_with_scrollback");
@@ -1699,7 +1722,7 @@ mod tests {
         // Sanity: libghostty must actually be retaining the two scrolled rows.
         assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 2);
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 7, Some(SCROLLBACK_ALL), false)
             .expect("screen_state_with_scrollback");
@@ -1725,7 +1748,7 @@ mod tests {
         t.vt_write(b"line1\r\nline2\r\nline3\r\nline4\r\nline5");
         assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 3);
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 1, Some(2), false)
             .expect("screen_state_with_scrollback");
@@ -1744,7 +1767,7 @@ mod tests {
         t.vt_write(b"a\r\nb\r\nc\r\nd\r\ne");
         assert!(t.scrollback_rows().expect("scrollback_rows") > 0);
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let none = synth
             .screen_state_with_scrollback(&t, 0, None, false)
             .expect("with None");
@@ -1763,7 +1786,7 @@ mod tests {
         t.vt_write(b"only one line");
         assert_eq!(t.scrollback_rows().expect("scrollback_rows"), 0);
 
-        let mut synth = SnapshotSynthesizer::new().expect("synth");
+        let synth = SnapshotSynthesizer::new().expect("synth");
         let screen = synth
             .screen_state_with_scrollback(&t, 0, Some(SCROLLBACK_ALL), false)
             .expect("screen_state_with_scrollback");
@@ -1858,7 +1881,7 @@ mod tests {
 
         // Client 2's register_consumer primes a SEPARATE per-consumer reference,
         // whose update consumes the Terminal's freshly-set dirty bits.
-        let mut other = SnapshotSynthesizer::new().expect("other");
+        let other = SnapshotSynthesizer::new().expect("other");
         let _ = other.screen_state(&t, 0).expect("other screen_state");
 
         // Client 2's snapshot via the SHARED synthesizer must still carry MARKER.

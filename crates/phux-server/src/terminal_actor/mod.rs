@@ -1085,7 +1085,10 @@ impl TerminalActor {
         cells: bool,
     ) -> Result<phux_core::screen::ScreenState, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
-        let mut synth = self.synth.borrow_mut();
+        // Shared borrow: the read goes through a fresh per-call
+        // `RenderState` (see the synthesizer body), so it never contends
+        // with the tick path's `&mut` use of the pooled state.
+        let synth = self.synth.borrow();
         synth.screen_state_with_scrollback(&terminal, pane, scrollback, cells)
     }
 
