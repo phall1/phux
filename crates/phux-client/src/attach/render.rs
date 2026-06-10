@@ -345,7 +345,30 @@ impl<'alloc> TerminalRenderer<'alloc> {
         };
 
         match dirty {
-            Dirty::Clean => return Ok(dirty),
+            Dirty::Clean => {
+                // No row content changed, but the cursor may have MOVED — a
+                // pure cursor advance (arrow-key navigation within a command
+                // line, accepting a zsh autosuggestion, vi-mode motions).
+                // libghostty marks no row dirty for that, so without this the
+                // on-screen cursor lags a frame: it wouldn't move until the
+                // next keystroke dirtied a cell. Reposition + refresh the
+                // cached cursor when it changed; emit nothing when it didn't,
+                // preserving the zero-byte idle repaint.
+                let new_local = snapshot.cursor_viewport()?.map(|v| (v.y, v.x));
+                let new_abs = new_local.map(|(y, x)| (y.saturating_add(oy), x.saturating_add(ox)));
+                if new_abs != self.last_cursor {
+                    if let Some((abs_y, abs_x)) = new_abs {
+                        write_cup(out, abs_y, abs_x)?;
+                        if snapshot.cursor_visible()? {
+                            out.write_all(b"\x1b[?25h")?;
+                        }
+                        out.flush()?;
+                    }
+                    self.last_cursor = new_abs;
+                    self.last_cursor_local = new_local;
+                }
+                return Ok(dirty);
+            }
             Dirty::Partial | Dirty::Full => {
                 out.write_all(b"\x1b[?25l")?;
             }
@@ -713,6 +736,43 @@ mod tests {
             second.is_empty(),
             "unchanged repaint must emit zero bytes; got {:?}",
             String::from_utf8_lossy(&second)
+        );
+    }
+
+    /// A pure cursor move — no cell changed, so libghostty reports
+    /// `Dirty::Clean` — must still reposition the on-screen cursor (and
+    /// refresh `last_cursor`), or the cursor lags a frame behind arrow-key
+    /// navigation / autosuggestion-accept until the next dirtying keystroke.
+    #[test]
+    fn cursor_only_move_repositions_on_a_clean_render() {
+        let mut terminal = fresh(10, 2);
+        terminal.vt_write(b"hello"); // cursor lands at (row 0, col 5)
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut first = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut first)
+            .expect("first render");
+        assert_eq!(renderer.last_cursor(), Some((0, 5)));
+
+        // Move the cursor only — `\x1b[1;3H` ⇒ row 0, col 2 — no cell changes.
+        terminal.vt_write(b"\x1b[1;3H");
+        let mut second = Vec::new();
+        let dirty = renderer
+            .render(&terminal, &mut second)
+            .expect("second render");
+        assert!(
+            matches!(dirty, Dirty::Clean),
+            "a cursor-only move leaves rows Clean, got {dirty:?}"
+        );
+        let s = String::from_utf8_lossy(&second);
+        assert!(
+            s.contains("\x1b[1;3H"),
+            "Clean render must reposition the cursor to (0,2) ⇒ CUP 1;3; got {s:?}"
+        );
+        assert_eq!(
+            renderer.last_cursor(),
+            Some((0, 2)),
+            "cached cursor must follow the move so the bar-restore agrees"
         );
     }
 
