@@ -118,9 +118,9 @@ pub(super) fn reanchor_predict_to_pane(
     fid: &TerminalId,
 ) {
     let Some(slot) = panes.get(fid) else {
-        // No slot yet — drop stale predictions; the pane's first snapshot
-        // will set the viewport + cursor.
-        predict.clear();
+        // No slot yet — suspend until the pane's first snapshot syncs the
+        // cursor and re-arms prediction.
+        predict.suspend();
         return;
     };
     let cols = slot.terminal.cols().unwrap_or(0);
@@ -131,9 +131,15 @@ pub(super) fn reanchor_predict_to_pane(
     } else {
         predict.clear();
     }
-    // Pane-local cursor; the overlay re-adds the pane origin when painting.
-    let (row, col) = slot.renderer.last_cursor_local().unwrap_or((0, 0));
-    predict.set_cursor(row, col);
+    // Anchor on the pane's authoritative pane-local cursor; the overlay
+    // re-adds the pane origin when painting. If the pane has not rendered yet
+    // (a freshly split pane), there is NO real cursor — suspend rather than
+    // anchor at (0, 0), or a quick keystroke echoes a ghost glyph at the
+    // screen's top-left that the pane never overwrites (phux-7ry0 follow-up).
+    match slot.renderer.last_cursor_local() {
+        Some((row, col)) => predict.set_cursor(row, col),
+        None => predict.suspend(),
+    }
 }
 
 /// Window before a parser-pending bare ESC is interpreted as the Escape

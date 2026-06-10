@@ -161,6 +161,16 @@ pub struct PredictionState {
     /// prompt. Without OSC-133 shell integration this typed-input anchor
     /// is the safe signal available entirely client-side.
     prompt_boundary: Option<(u16, u16)>,
+    /// When `true`, [`Self::predict_key`] is a no-op until an authoritative
+    /// cursor sync ([`Self::set_cursor`]) re-arms it.
+    ///
+    /// Set by [`Self::suspend`] when the driver re-anchors to a pane whose
+    /// cursor is not yet known — a freshly split pane that has not rendered.
+    /// Without this, the re-anchor would fall back to `(0, 0)` and a quick
+    /// keystroke would echo a predicted glyph at the screen's top-left, where
+    /// the real pane never overwrites it — a lingering ghost after a fast
+    /// split / focus change (phux-7ry0 follow-up). Defaults to `false` (armed).
+    suspended: bool,
 }
 
 impl PredictionState {
@@ -176,7 +186,28 @@ impl PredictionState {
             cols,
             rows,
             prompt_boundary: None,
+            suspended: false,
         }
+    }
+
+    /// Suspend prediction until the next authoritative cursor sync.
+    ///
+    /// Drops the pending queue and the prompt anchor, and makes
+    /// [`Self::predict_key`] a no-op until [`Self::set_cursor`] re-arms it.
+    /// The driver calls this when it re-anchors to a pane with no known
+    /// cursor (a freshly split pane that has not rendered): predicting then
+    /// would echo at a guessed `(0, 0)` and strand a ghost glyph at the
+    /// screen's top-left.
+    pub fn suspend(&mut self) {
+        self.pending.clear();
+        self.prompt_boundary = None;
+        self.suspended = true;
+    }
+
+    /// Whether prediction is currently suspended (see [`Self::suspend`]).
+    #[must_use]
+    pub const fn is_suspended(&self) -> bool {
+        self.suspended
     }
 
     /// Whether predictive echo is currently on.
@@ -225,6 +256,10 @@ impl PredictionState {
         }
         self.cursor_row = new_row;
         self.cursor_col = col.min(self.cols.saturating_sub(1));
+        // An authoritative cursor (snapshot render or output reconcile) means
+        // we now know where the focused pane's cursor is — re-arm prediction
+        // if a re-anchor had suspended it.
+        self.suspended = false;
     }
 
     /// Number of predictions waiting for confirmation.
@@ -326,6 +361,12 @@ impl PredictionState {
     {
         if !self.cfg.enabled {
             return PredictionOutcome::Disabled;
+        }
+        // Suspended after a re-anchor to a pane with no known cursor: predict
+        // nothing until an authoritative cursor sync re-arms us, so a fast
+        // keystroke after a split can't echo a ghost at the guessed (0, 0).
+        if self.suspended {
+            return PredictionOutcome::Skipped;
         }
         // Reject any non-Press action — repeats and releases produce
         // their own server-side echo path we don't model yet.
@@ -756,6 +797,40 @@ mod tests {
         assert_eq!(p.row, 0);
         assert_eq!(p.kind, PredictionKind::Insert);
         assert_eq!(s.cursor_col, 1);
+    }
+
+    #[test]
+    fn suspended_predict_key_is_a_no_op_until_set_cursor_rearms() {
+        // The split-ghost guard: after a re-anchor to a not-yet-rendered pane
+        // the driver suspends; a quick keystroke must NOT queue a prediction
+        // (which would otherwise echo at the guessed (0,0)). The first
+        // authoritative cursor sync re-arms.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.suspend();
+        assert!(s.is_suspended());
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0, "suspended: nothing queued, no ghost");
+
+        // An authoritative cursor sync re-arms prediction.
+        s.set_cursor(3, 5);
+        assert!(!s.is_suspended());
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Predicted);
+        let p = s.pending().next().expect("one prediction");
+        assert_eq!(
+            (p.row, p.col),
+            (3, 5),
+            "echo at the synced cursor, not (0,0)"
+        );
+    }
+
+    #[test]
+    fn suspend_drops_any_pending_predictions() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Predicted);
+        assert_eq!(s.pending_len(), 1);
+        s.suspend();
+        assert_eq!(s.pending_len(), 0, "suspend clears the queue");
+        assert!(s.is_suspended());
     }
 
     #[test]
