@@ -454,12 +454,14 @@ pub struct ExperimentalCfg {
     /// the algorithm and `crates/phux-client/src/predict/` for the
     /// implementation.
     ///
-    /// Default `true` (phux-51n6): the predicted classes are the
-    /// conservative mosh-proven subset and reconciliation stomps a wrong
-    /// guess on the next authoritative frame, so the failure mode is a
-    /// brief underlined flicker — while the win is shell typing that no
-    /// longer waits a full client-server round trip per keystroke. Set
-    /// `false` to keep echo strictly authoritative.
+    /// Default `false` (phux-pxaj): predictive echo is experimental and
+    /// mispredicts in common real-world cases — notably vi-mode shells, where
+    /// normal-mode keys are commands the client paints as inserts, and fast
+    /// layout / alt-screen transitions. Until those are clean it is opt-in.
+    /// Set `true` to engage Mosh-class local echo (the predicted classes are
+    /// the conservative mosh-proven subset; a wrong guess is stomped by the
+    /// next authoritative frame, so the failure mode is a brief underlined
+    /// flicker in exchange for typing that doesn't wait a round trip per key).
     #[serde(default = "default_predictive_echo", rename = "predictive-echo")]
     pub predictive_echo: bool,
 }
@@ -474,7 +476,7 @@ impl Default for ExperimentalCfg {
 
 /// Serde default for [`ExperimentalCfg::predictive_echo`].
 const fn default_predictive_echo() -> bool {
-    true
+    false
 }
 
 // ---------------------------------------------------------------------------
