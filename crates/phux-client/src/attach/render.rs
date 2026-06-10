@@ -87,11 +87,25 @@ pub struct TerminalRenderer<'alloc> {
     state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
-    /// Last-seen authoritative cursor position (viewport coords). Updated
-    /// at the end of [`Self::render`] so the predictive-echo layer
-    /// (`phux-9gw.1`) can re-anchor its cursor estimate without doing a
-    /// second snapshot pass. `None` while the cursor is hidden.
+    /// Last-seen authoritative cursor position (outer-viewport coords:
+    /// pane-local cursor plus [`Self::last_origin`]). Updated at the end of
+    /// [`Self::render`]. The host-cursor restore paths read this. `None`
+    /// while the cursor is hidden.
     last_cursor: Option<(u16, u16)>,
+    /// Pane-local cursor `(row, col)` as of the most recent render — the
+    /// libghostty viewport cursor BEFORE [`Self::last_origin`] is added.
+    /// This is the authoritative anchor the predictive-echo layer
+    /// (`phux-9gw.1`) re-syncs from: predictions are pane-local, so feeding
+    /// the layer the outer-absolute [`Self::last_cursor`] instead would
+    /// clamp a lower pane's cursor up into the wrong region (the mid-screen
+    /// ghost echo after a split, phux-7ry0). `None` while the cursor is hidden.
+    last_cursor_local: Option<(u16, u16)>,
+    /// Outer-viewport origin `(x, y)` of the most recent `render_at` paint.
+    /// The predictive-echo overlay adds this to each pane-local prediction
+    /// so a pane offset from the viewport origin (any split that isn't the
+    /// top-left leaf) paints its echo over the pane's real cells rather than
+    /// at the viewport-absolute coordinate. Defaults to `(0, 0)`.
+    last_origin: (u16, u16),
     /// Copy-mode selection to reverse-video on the next render, if any.
     ///
     /// Transient: the driver sets it on the focused pane's renderer just
@@ -110,6 +124,8 @@ impl<'alloc> TerminalRenderer<'alloc> {
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
             last_cursor: None,
+            last_cursor_local: None,
+            last_origin: (0, 0),
             selection: None,
         })
     }
@@ -128,6 +144,25 @@ impl<'alloc> TerminalRenderer<'alloc> {
     #[must_use]
     pub const fn last_cursor(&self) -> Option<(u16, u16)> {
         self.last_cursor
+    }
+
+    /// Pane-local cursor `(row, col)` as of the most recent render — the
+    /// cursor BEFORE the pane's outer-viewport origin is added. The
+    /// predictive-echo layer re-anchors from this (predictions are
+    /// pane-local); see [`Self::last_cursor_local`]'s field docs for why
+    /// feeding it [`Self::last_cursor`] strands the echo mid-screen
+    /// (phux-7ry0). `None` if the cursor was hidden or no render has occurred.
+    #[must_use]
+    pub const fn last_cursor_local(&self) -> Option<(u16, u16)> {
+        self.last_cursor_local
+    }
+
+    /// Outer-viewport origin `(x, y)` of the most recent `render_at` paint.
+    /// The predictive-echo overlay adds this to each pane-local prediction
+    /// to position it over the focused pane's cells.
+    #[must_use]
+    pub const fn last_origin(&self) -> (u16, u16) {
+        self.last_origin
     }
 
     /// Read the base grapheme of the cell at `(row, col)` in `terminal`.
@@ -297,6 +332,11 @@ impl<'alloc> TerminalRenderer<'alloc> {
     ) -> Result<Dirty, RenderError> {
         let (ox, oy) = origin;
         let (clip_cols, clip_rows) = clip;
+        // Record where this pane is anchored before any early-return: the
+        // predictive-echo overlay reads `last_origin` to place pane-local
+        // echoes, and the pane stays at this origin even on a clean (no-op)
+        // render.
+        self.last_origin = origin;
         let snapshot = self.state.update(terminal)?;
         let dirty = if force_full {
             Dirty::Full
@@ -392,8 +432,12 @@ impl<'alloc> TerminalRenderer<'alloc> {
             let abs_y = viewport.y.saturating_add(oy);
             let abs_x = viewport.x.saturating_add(ox);
             write_cup(out, abs_y, abs_x)?;
+            // Cache the pane-local cursor (pre-offset) for the predict layer
+            // alongside the outer-absolute one for the host-cursor restore.
+            self.last_cursor_local = Some((viewport.y, viewport.x));
             Some((abs_y, abs_x))
         } else {
+            self.last_cursor_local = None;
             None
         };
         if snapshot.cursor_visible()? {
@@ -604,6 +648,40 @@ mod tests {
         // Should contain the literal characters "a" and "b" somewhere.
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains('a') && s.contains('b'));
+    }
+
+    /// phux-7ry0 regression: rendering a pane at a non-zero outer origin
+    /// (a lower split leaf) must cache the cursor BOTH ways — outer-absolute
+    /// in `last_cursor` (for the host-cursor restore) and pane-local in
+    /// `last_cursor_local` (for the predictive-echo anchor) — and record the
+    /// paint origin. Feeding the predict layer the outer-absolute cursor was
+    /// the bug: its pane-grid clamp dragged a lower pane's cursor up into the
+    /// middle of the screen (the ghost echo).
+    #[test]
+    fn render_at_offset_caches_pane_local_cursor_and_origin() {
+        let mut terminal = fresh(5, 2);
+        terminal.vt_write(b"ab"); // cursor lands pane-local at (row 0, col 2)
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut buf = Vec::new();
+        // Paint as the bottom leaf of a 24-row split: origin (x=0, y=13).
+        let _ = renderer
+            .render_at(&terminal, &mut buf, (0, 13), (5, 2))
+            .expect("render_at");
+        assert_eq!(
+            renderer.last_cursor_local(),
+            Some((0, 2)),
+            "pane-local cursor must be origin-free (the predict anchor)"
+        );
+        assert_eq!(
+            renderer.last_cursor(),
+            Some((13, 2)),
+            "outer cursor must include the pane origin offset"
+        );
+        assert_eq!(
+            renderer.last_origin(),
+            (0, 13),
+            "last_origin must record where the pane was painted"
+        );
     }
 
     /// Incremental-paint baseline: a second `render` of a terminal with no

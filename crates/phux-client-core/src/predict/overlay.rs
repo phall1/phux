@@ -38,6 +38,14 @@ impl Overlay {
     /// number of cells painted so callers can flush (or skip the flush)
     /// based on whether anything was drawn.
     ///
+    /// Predictions are stored in **pane-local** coordinates (0-based within
+    /// the focused pane's grid). `origin` is that pane's outer-viewport
+    /// top-left `(x, y)`; every prediction's CUP is shifted by it so a pane
+    /// offset from the viewport origin (any split that isn't the top-left
+    /// leaf) paints its echo over the pane's real cells rather than at the
+    /// viewport-absolute coordinate — the mid-screen ghost echo otherwise
+    /// (phux-7ry0). Single-pane callers pass `(0, 0)`.
+    ///
     /// The cursor position after this call is left at the end of the
     /// last painted cell; the renderer's next pass will reposition.
     /// On an empty queue this is a no-op (no bytes written, no flush).
@@ -45,7 +53,13 @@ impl Overlay {
         clippy::unused_self,
         reason = "ZST today; reserved as the natural attach point for future per-overlay state (TTL, decoration palette)"
     )]
-    pub fn render(&self, state: &PredictionState, out: &mut impl Write) -> io::Result<usize> {
+    pub fn render(
+        &self,
+        state: &PredictionState,
+        origin: (u16, u16),
+        out: &mut impl Write,
+    ) -> io::Result<usize> {
+        let (ox, oy) = origin;
         let mut count = 0;
         for p in state.pending() {
             // Pure cursor-motion predictions paint no cell. Reconcile
@@ -58,7 +72,7 @@ impl Overlay {
             ) {
                 continue;
             }
-            write_cup(out, p.row, p.col)?;
+            write_cup(out, p.row.saturating_add(oy), p.col.saturating_add(ox))?;
             // Reset → underline. We don't merge with the renderer's SGR
             // because we paint after it; what we emit here is a fresh
             // SGR scope owned by the prediction layer.
@@ -111,7 +125,9 @@ mod tests {
     fn empty_queue_writes_nothing() {
         let state = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let mut buf = Vec::new();
-        let n = Overlay.render(&state, &mut buf).expect("overlay render");
+        let n = Overlay
+            .render(&state, (0, 0), &mut buf)
+            .expect("overlay render");
         assert_eq!(n, 0);
         assert!(buf.is_empty());
     }
@@ -121,7 +137,7 @@ mod tests {
         let mut state = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         state.predict_key(&key_text("z"));
         let mut buf = Vec::new();
-        let n = Overlay.render(&state, &mut buf).expect("render");
+        let n = Overlay.render(&state, (0, 0), &mut buf).expect("render");
         assert_eq!(n, 1);
         let s = String::from_utf8(buf).expect("utf8");
         // CUP at row 1, col 1 (0-indexed → 1-indexed for VT100).
@@ -139,7 +155,7 @@ mod tests {
             state.predict_key(&key_text(ch));
         }
         let mut buf = Vec::new();
-        let n = Overlay.render(&state, &mut buf).expect("render");
+        let n = Overlay.render(&state, (0, 0), &mut buf).expect("render");
         assert_eq!(n, 2);
         let s = String::from_utf8(buf).expect("utf8");
         let h_pos = s.find('h').expect("h painted");
@@ -147,5 +163,38 @@ mod tests {
         assert!(h_pos < i_pos, "predictions painted left-to-right");
         // Second prediction lands at col 2 (1-indexed: "\x1b[1;2H").
         assert!(s.contains("\x1b[1;2H"));
+    }
+
+    /// phux-7ry0 regression: predictions are pane-local; a non-origin pane
+    /// (e.g. the bottom leaf of a horizontal split) must paint its echo
+    /// shifted by the pane's outer-viewport origin, NOT at the pane-local
+    /// coordinate. Before the fix the overlay painted at the raw pane-local
+    /// (or, symmetrically, a mid-screen-clamped) position — the ghost echo.
+    #[test]
+    fn origin_offsets_every_prediction_cup() {
+        let mut state = PredictionState::new(PredictiveConfig::enabled(), 80, 12);
+        // First insert anchors at pane-local (0, 0).
+        state.predict_key(&key_text("a"));
+        state.predict_key(&key_text("b"));
+        let mut buf = Vec::new();
+        // Bottom pane of a 24-row split sits at outer origin (x=0, y=13).
+        let n = Overlay.render(&state, (0, 13), &mut buf).expect("render");
+        assert_eq!(n, 2);
+        let s = String::from_utf8(buf).expect("utf8");
+        // Pane-local (0,0)+origin(0,13) ⇒ 1-based CUP row 14, col 1.
+        assert!(
+            s.contains("\x1b[14;1H"),
+            "first echo must land at the pane origin row, not the viewport top; out = {s:?}"
+        );
+        // Pane-local (0,1)+origin ⇒ row 14, col 2.
+        assert!(
+            s.contains("\x1b[14;2H"),
+            "second echo off-by-origin; out = {s:?}"
+        );
+        // It must NOT paint at the viewport-absolute pane-local row 1.
+        assert!(
+            !s.contains("\x1b[1;1H"),
+            "echo leaked to the viewport top (the ghost); out = {s:?}"
+        );
     }
 }
