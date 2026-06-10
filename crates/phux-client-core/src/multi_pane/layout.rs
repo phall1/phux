@@ -41,6 +41,35 @@ pub struct PaneLayout {
 /// `dividers.is_empty()` and `rects.len() == 1`.
 #[must_use]
 pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLayout {
+    let (cols, rows) = viewport_dims;
+    compute_layout_in(
+        layout,
+        Rect {
+            x: 0,
+            y: 0,
+            w: cols,
+            h: rows,
+        },
+        viewport_dims,
+    )
+}
+
+/// Tile the panes into `content`, an arbitrary sub-rectangle of the viewport.
+///
+/// Like [`compute_layout`] but inset: chrome that reserves edge space (a left
+/// sidebar, say) passes the
+/// residual content `Rect` so the pane rects, divider cells, and — via the
+/// matching [`pane_rects_in`] used by reflow — the PTY sizing all agree on
+/// the same offset. `viewport_dims` is still the **full** viewport: divider
+/// rasterization clamps against it, so an inset pane's divider never escapes
+/// the screen. With `content` at `(0, 0)` spanning the whole viewport this
+/// is exactly [`compute_layout`].
+#[must_use]
+pub fn compute_layout_in(
+    layout: &LayoutState,
+    content: Rect,
+    viewport_dims: (u16, u16),
+) -> PaneLayout {
     let Some(tree) = layout.tree.as_ref() else {
         return PaneLayout {
             viewport: viewport_dims,
@@ -48,8 +77,7 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
             dividers: Vec::new(),
         };
     };
-    let (cols, rows) = viewport_dims;
-    if cols == 0 || rows == 0 {
+    if content.w == 0 || content.h == 0 {
         return PaneLayout {
             viewport: viewport_dims,
             rects: HashMap::new(),
@@ -57,27 +85,19 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
         };
     }
 
-    // Walk the tree once, allocating outer-viewport rects to leaves and
+    // Walk the tree once, allocating rects to leaves within `content` and
     // emitting one `DividerSegment` per interior split. Both share the
     // same divider-budget math: each Horizontal split eats one column
     // from its bounds, each Vertical split eats one row.
     let mut segments: Vec<DividerSegment> = Vec::new();
     let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
-    walk_layout(
-        tree,
-        Rect {
-            x: 0,
-            y: 0,
-            w: cols,
-            h: rows,
-        },
-        &mut segments,
-        &mut rects,
-    );
+    walk_layout(tree, content, &mut segments, &mut rects);
 
     // Rasterize the segments into per-cell divider entries, resolving
-    // junctions and heavy/light weights against the focused pane.
-    let dividers = rasterize(&segments, layout.focus.as_ref(), &rects, (cols, rows));
+    // junctions and heavy/light weights against the focused pane. Clamp to
+    // the full viewport, not `content` — segments already carry inset
+    // coordinates, and the clamp only guards the screen edge.
+    let dividers = rasterize(&segments, layout.focus.as_ref(), &rects, viewport_dims);
 
     PaneLayout {
         viewport: viewport_dims,
@@ -104,9 +124,7 @@ pub fn compute_layout(layout: &LayoutState, viewport_dims: (u16, u16)) -> PaneLa
 /// full pane viewport, never a pre-deducted content rectangle.
 #[must_use]
 pub fn pane_rects(tree: &LayoutNode, viewport_dims: (u16, u16)) -> HashMap<TerminalId, Rect> {
-    let mut segments: Vec<DividerSegment> = Vec::new();
-    let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
-    walk_layout(
+    pane_rects_in(
         tree,
         Rect {
             x: 0,
@@ -114,8 +132,18 @@ pub fn pane_rects(tree: &LayoutNode, viewport_dims: (u16, u16)) -> HashMap<Termi
             w: viewport_dims.0,
             h: viewport_dims.1,
         },
-        &mut segments,
-        &mut rects,
-    );
+    )
+}
+
+/// Tile leaf rects into `content`, an arbitrary sub-rectangle.
+///
+/// The reflow counterpart to [`compute_layout_in`] (and the inset analogue of
+/// [`pane_rects`]), so an inset chrome like a sidebar sizes each pane's PTY to
+/// the same rect it is painted into.
+#[must_use]
+pub fn pane_rects_in(tree: &LayoutNode, content: Rect) -> HashMap<TerminalId, Rect> {
+    let mut segments: Vec<DividerSegment> = Vec::new();
+    let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
+    walk_layout(tree, content, &mut segments, &mut rects);
     rects
 }

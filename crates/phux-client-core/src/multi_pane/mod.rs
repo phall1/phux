@@ -34,7 +34,7 @@ pub mod mouse;
 /// Rasterize the composition (pane interiors + divider segments) for paint.
 pub mod rasterize;
 
-pub use layout::{PaneLayout, compute_layout, pane_rects};
+pub use layout::{PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in};
 pub use mouse::{RouteDecision, route_mouse_event};
 pub use rasterize::DividerCell;
 
@@ -121,6 +121,72 @@ mod tests {
         assert_eq!(out.dividers.len(), 24);
         for cell in &out.dividers {
             assert_eq!(cell.x, ra.w);
+        }
+    }
+
+    #[test]
+    fn compute_layout_in_insets_rects_and_dividers_by_content_origin() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        // Reserve a 20-col left sidebar: panes tile into x=20..80.
+        let content = Rect {
+            x: 20,
+            y: 0,
+            w: 60,
+            h: 24,
+        };
+        let out = compute_layout_in(&state, content, (80, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        // Left pane starts at the content origin, not the viewport origin.
+        assert_eq!(ra.x, 20, "left pane inset by the sidebar width");
+        assert_eq!(rb.x, ra.x + ra.w + 1, "right pane past the divider");
+        // Panes + divider exactly fill the content width.
+        assert_eq!(ra.w + rb.w + 1, 60);
+        // Dividers fall inside the content area — never in the reserved zone.
+        assert!(!out.dividers.is_empty());
+        for cell in &out.dividers {
+            assert!(cell.x >= 20, "divider escaped into the sidebar: {cell:?}");
+            assert!(cell.x < 80, "divider escaped the screen: {cell:?}");
+        }
+    }
+
+    #[test]
+    fn compute_layout_in_full_viewport_matches_compute_layout() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let full = Rect {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 24,
+        };
+        assert_eq!(
+            compute_layout_in(&state, full, (80, 24)),
+            compute_layout(&state, (80, 24)),
+            "content == full viewport is the identity case"
+        );
+    }
+
+    #[test]
+    fn pane_rects_in_offsets_every_leaf_by_the_top_inset() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
+        let content = Rect {
+            x: 0,
+            y: 5,
+            w: 80,
+            h: 19,
+        };
+        let rects = pane_rects_in(&tree, content);
+        assert_eq!(rects.len(), 2);
+        for r in rects.values() {
+            assert!(r.y >= 5, "pane above the reserved top inset: {r:?}");
         }
     }
 
