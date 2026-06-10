@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, error};
 
 /// Default PTY read chunk size. Mirrors the example. Sized comfortably
 /// above the typical libghostty escape-sequence span so a single read
@@ -228,6 +228,7 @@ pub(crate) fn spawn_pty(
                         break;
                     }
                     Ok(n) => {
+                        debug!(n, "pty read");
                         if pty_tx_to_actor
                             .send(PtyEvent::Bytes(buf[..n].to_vec()))
                             .is_err()
@@ -249,13 +250,22 @@ pub(crate) fn spawn_pty(
     let writer_thread = std::thread::Builder::new()
         .name("phux-pty-writer".to_owned())
         .spawn(move || {
+            // A write/flush error is terminal for the pane's input path:
+            // the thread exits and every byte queued after it is dropped
+            // on the floor (the channel sender stays alive and `send`
+            // keeps succeeding). Log loudly — without this line the
+            // failure is invisible: output, snapshots, and command acks
+            // all keep working while input silently goes nowhere.
             while let Some(bytes) = input_rx_for_writer.blocking_recv() {
-                if writer.write_all(&bytes).is_err() {
+                if let Err(err) = writer.write_all(&bytes) {
+                    error!(?err, "pty writer: write failed; pane input is now dead");
                     break;
                 }
-                if writer.flush().is_err() {
+                if let Err(err) = writer.flush() {
+                    error!(?err, "pty writer: flush failed; pane input is now dead");
                     break;
                 }
+                debug!(len = bytes.len(), "pty write flushed");
             }
         })
         .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;

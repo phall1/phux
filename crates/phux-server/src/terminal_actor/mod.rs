@@ -1085,7 +1085,10 @@ impl TerminalActor {
         cells: bool,
     ) -> Result<phux_core::screen::ScreenState, crate::grid::SynthesisError> {
         let terminal = self.terminal.borrow();
-        let mut synth = self.synth.borrow_mut();
+        // Shared borrow: the read goes through a fresh per-call
+        // `RenderState` (see the synthesizer body), so it never contends
+        // with the tick path's `&mut` use of the pooled state.
+        let synth = self.synth.borrow();
         synth.screen_state_with_scrollback(&terminal, pane, scrollback, cells)
     }
 
@@ -1129,18 +1132,29 @@ impl TerminalActor {
     /// encode or a closed writer logs and is dropped — a single bad event
     /// must not kill the actor.
     fn service_input(&self, input: &TerminalInput) {
+        // Every arm below logs at debug or above: a dropped or empty input
+        // is invisible to the caller (ROUTE_INPUT acks Ok regardless, per
+        // SPEC §9 fire-and-forget), so this log is the only witness when a
+        // key vanishes between the mailbox and the PTY.
         match self.encode_input(input) {
             Ok(Some(bytes)) => {
+                if bytes.is_empty() {
+                    debug!(?input, "input encoded to zero bytes; nothing to write");
+                    return;
+                }
                 if let Some(tx) = self.pty_tx.as_ref() {
+                    let len = bytes.len();
                     if tx.send(bytes).is_err() {
                         debug!("PTY writer channel closed; dropping input");
+                    } else {
+                        debug!(len, "input queued to PTY writer");
                     }
                 } else {
-                    trace!(?input, "no PTY; input discarded");
+                    debug!(?input, "no PTY; input discarded");
                 }
             }
             Ok(None) => {
-                trace!(?input, "input gated/dropped by encoder");
+                debug!(?input, "input gated/dropped by encoder");
             }
             Err(err) => {
                 warn!(error = %err, "input encode failed; dropping event");
@@ -1239,6 +1253,10 @@ impl TerminalActor {
         }
         match self.synthesize() {
             Ok(snap) => {
+                debug!(
+                    bytes = snap.bytes.len(),
+                    "resize resync: snapshot broadcast"
+                );
                 // A `Lagged`/no-receiver send error is benign here — the
                 // next PTY output or a re-attach snapshot re-syncs.
                 // phux-3ns5: ship the post-reflow grid as a `Resync` (→
@@ -1278,18 +1296,35 @@ impl TerminalActor {
     /// wire per the SPEC §10.1 compact-subset rule.
     fn reap_child_if_any(&mut self) -> Option<i32> {
         let pty = self.pty.as_mut()?;
-        match pty.child.try_wait() {
-            Ok(Some(status)) => {
-                debug!(?status, "child reaped on PTY EOF");
-                exit_status_to_wire(&status)
-            }
-            Ok(None) => {
-                trace!("PTY EOF but child still alive — leaving to shutdown path");
-                None
-            }
-            Err(err) => {
-                debug!(?err, "child try_wait failed on PTY EOF");
-                None
+        // PTY EOF races the child becoming waitable: the master reads EOF
+        // the moment the last slave fd closes, which can be a hair before
+        // the kernel marks the process reapable. A single `try_wait` here
+        // reported `exit_status: None` for children that exited cleanly
+        // microseconds later, so TERMINAL_CLOSED lied to agents reading
+        // exit codes. Retry briefly. The blocking sleep is deliberate:
+        // this runs on the single current-thread runtime, but only once
+        // per pane lifetime, and the budget is small; an async retry would
+        // need to move `child` out of `self.pty`, which the shutdown path
+        // still owns. A child that closed its slave but keeps running
+        // (a daemonizer) exhausts the budget and reports `None`, as before.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        loop {
+            match pty.child.try_wait() {
+                Ok(Some(status)) => {
+                    debug!(?status, "child reaped on PTY EOF");
+                    return exit_status_to_wire(&status);
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(None) => {
+                    trace!("PTY EOF but child still alive — leaving to shutdown path");
+                    return None;
+                }
+                Err(err) => {
+                    debug!(?err, "child try_wait failed on PTY EOF");
+                    return None;
+                }
             }
         }
     }
@@ -1544,11 +1579,13 @@ impl TerminalActor {
                             } else {
                                 Bytes::from(coalesced)
                             };
-                            // Trace level: per-wakeup volume is the raw input
-                            // rate, useful for "what was the PTY doing right
-                            // before a stall" but far too chatty for the
-                            // default filter — off unless `phux=trace`.
-                            trace!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
+                            // Debug level deliberately (was trace): this is
+                            // the pump's only witness line, and the lost-echo
+                            // forensics (phux-dacb follow-up) need it inside
+                            // the test capture's debug filter. Per-wakeup, so
+                            // it costs one line per coalesced read, not per
+                            // byte.
+                            debug!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
                             self.terminal.borrow_mut().vt_write(&payload);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).

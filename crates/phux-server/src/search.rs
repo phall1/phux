@@ -180,7 +180,7 @@ pub enum Scope {
 /// arena the `terminal` was built in (mirroring
 /// [`SnapshotSynthesizer::screen_state_with_scrollback`]).
 pub fn search<'alloc>(
-    synth: &mut SnapshotSynthesizer<'alloc>,
+    synth: &SnapshotSynthesizer<'alloc>,
     terminal: &GhosttyTerminal<'alloc, '_>,
     needle: &str,
     scope: Scope,
@@ -220,8 +220,8 @@ pub fn search_oneshot(
     scope: Scope,
     opts: SearchOptions,
 ) -> Result<Vec<Match>, SynthesisError> {
-    let mut synth = SnapshotSynthesizer::new()?;
-    search(&mut synth, terminal, needle, scope, opts)
+    let synth = SnapshotSynthesizer::new()?;
+    search(&synth, terminal, needle, scope, opts)
 }
 
 /// Append every (non-overlapping) hit of `needle` in `line` to `out`.

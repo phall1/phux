@@ -49,6 +49,7 @@ use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
+use crate::common::tracing_capture::TracingCapture;
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, WIRE_RECV_TIMEOUT, attach_by_name, recv_typed, run_local, send_frame,
     spawn_server_with_seed_cmd, wait_for_socket,
@@ -170,6 +171,13 @@ async fn screen(
 #[test]
 fn route_input_delivers_keys_without_resizing_the_pane() {
     run_local(async {
+        // CI-flake forensics: this test has failed on the 2-core runner
+        // with an empty screen after the full echo budget — a lost input
+        // byte, not a slow one. The capture dumps the server's debug log
+        // (pty-writer death, ROUTE_INPUT mailbox drops) on panic so the
+        // next occurrence identifies the seam instead of re-opening the
+        // guessing game (phux-dacb history).
+        let _cap = TracingCapture::install("route_input_no_resize");
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
         let (_shutdown_tx, _server) =

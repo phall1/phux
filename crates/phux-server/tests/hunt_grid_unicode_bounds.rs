@@ -33,7 +33,7 @@ fn probe_zwj_emoji_extract() {
     // Family emoji: 👨‍👩‍👧 is multiple codepoints joined by ZWJ, one grapheme,
     // width 2. Followed by ASCII "END".
     t.vt_write("👨‍👩‍👧END".as_bytes());
-    let mut synth = SnapshotSynthesizer::new().unwrap();
+    let synth = SnapshotSynthesizer::new().unwrap();
     let screen = synth.screen_state(&t, 0).unwrap();
     eprintln!("row0 = {:?}", screen.lines[0]);
     let hits = search_oneshot(&t, "END", Scope::AllHistory, vp()).unwrap();
@@ -54,7 +54,7 @@ fn probe_scrollback_overflow_bounds() {
     }
     let total = t.scrollback_rows().unwrap();
     eprintln!("scrollback_rows after 100 lines, max=5: {total}");
-    let mut synth = SnapshotSynthesizer::new().unwrap();
+    let synth = SnapshotSynthesizer::new().unwrap();
     let screen = synth
         .screen_state_with_scrollback(&t, 0, Some(SCROLLBACK_ALL), false)
         .unwrap();
@@ -83,7 +83,7 @@ fn probe_combining_mark_midcluster() {
     let mut t = fresh(20, 2, 100);
     // "e" + combining acute (U+0301) is one grapheme "é". Then "xy".
     t.vt_write("e\u{301}xy".as_bytes());
-    let mut synth = SnapshotSynthesizer::new().unwrap();
+    let synth = SnapshotSynthesizer::new().unwrap();
     let screen = synth.screen_state(&t, 0).unwrap();
     eprintln!(
         "row0 = {:?} chars={:?}",

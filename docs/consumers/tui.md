@@ -418,18 +418,19 @@ or session comes into being:
   consumers and config can target a stable name.
 
 **Experimental knobs** live under `[experimental]`. Today the only key
-is `predictive-echo` (boolean, default `false`), which engages Mosh-class
+is `predictive-echo` (boolean, default `true`), which engages Mosh-class
 predictive local echo in `phux attach` — a client-side guess for the
 next keystroke, rendered with an underline, that is reconciled when the
-server's authoritative output arrives. The flag is opt-in because the
-safe-prediction set is intentionally narrow (printable ASCII and
-end-of-line backspace only) and the wider rollout will widen it in
-follow-ups; anything under `[experimental]` may be renamed or removed
-without a SemVer bump.
+server's authoritative output arrives. The prediction set is the
+conservative mosh-proven subset (single-grapheme inserts, end-of-line
+backspace, Ctrl-U at a known prompt boundary, Enter, left/right arrows
+over known cells); a wrong guess is stomped by the next authoritative
+frame. Set it to `false` to keep echo strictly authoritative; anything
+under `[experimental]` may be renamed or removed without a SemVer bump.
 
 ```toml
 [experimental]
-predictive-echo = true
+predictive-echo = false
 ```
 
 ### 4.3 Reloading

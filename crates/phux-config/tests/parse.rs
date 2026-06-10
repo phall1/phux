@@ -189,17 +189,31 @@ predictive-echo = true
 }
 
 #[test]
-fn experimental_predictive_echo_defaults_false_when_absent() {
-    // No [experimental] section at all: the field must default to false.
+fn experimental_predictive_echo_defaults_true_when_absent() {
+    // No [experimental] section at all: the field defaults ON (phux-51n6).
     let cfg = parse_str("", &path()).expect("empty parses");
     assert!(
-        !cfg.experimental.predictive_echo,
-        "absent [experimental] section must leave predictive-echo at its false default"
+        cfg.experimental.predictive_echo,
+        "absent [experimental] section must leave predictive-echo at its true default"
     );
 
     // Empty [experimental] table is also valid and yields the same default.
     let cfg2 = parse_str("[experimental]\n", &path()).expect("empty section parses");
-    assert!(!cfg2.experimental.predictive_echo);
+    assert!(cfg2.experimental.predictive_echo);
+}
+
+#[test]
+fn experimental_predictive_echo_false_parses() {
+    // The opt-out must stick: an explicit `false` overrides the on-default.
+    let input = r"
+[experimental]
+predictive-echo = false
+";
+    let cfg = parse_str(input, &path()).expect("[experimental] section parses");
+    assert!(
+        !cfg.experimental.predictive_echo,
+        "predictive-echo = false should land as false in the typed view"
+    );
 }
 
 #[test]
