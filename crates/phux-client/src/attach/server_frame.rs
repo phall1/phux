@@ -1030,6 +1030,20 @@ fn reconcile_loaded_layout(
         .as_ref()
         .map(crate::layout::leaves)
         .unwrap_or_default();
+    // Layout metadata is group-scoped and shared across every session (one
+    // `DEFAULT_GROUP_ID`), so a freshly created session reads its sibling's
+    // persisted tree. If this session's own ATTACHED focused pane is not a
+    // leaf of the loaded tree, that tree belongs to a DIFFERENT session — its
+    // leaves reference terminals this session will never own, which would
+    // render as dead/empty panes. Discard it and start from a clean
+    // single-pane layout of the real pane (phux-jy4t). Per-session layout
+    // isolation (the proper fix, session-keyed metadata) is a follow-up.
+    if let Some(focus) = bootstrap_focus
+        && !tree_leaves.is_empty()
+        && !tree_leaves.contains(focus)
+    {
+        return LayoutState::single(focus.clone());
+    }
     let focus_ok = state
         .focus
         .as_ref()
@@ -1085,6 +1099,70 @@ mod tests {
 
     fn tid(id: u32) -> TerminalId {
         TerminalId::local(id)
+    }
+
+    fn split2(a: u32, b: u32, focus: u32) -> LayoutState {
+        LayoutState {
+            tree: Some(LayoutNode::Split {
+                dir: SplitDir::Horizontal,
+                ratio: 0.5,
+                left: Box::new(LayoutNode::Leaf(tid(a))),
+                right: Box::new(LayoutNode::Leaf(tid(b))),
+            }),
+            focus: Some(tid(focus)),
+        }
+    }
+
+    /// phux-jy4t: a freshly created session reads the group-shared layout
+    /// metadata, which holds a DIFFERENT session's tree. When this session's
+    /// real ATTACHED pane is not a leaf of that tree, the loaded layout is
+    /// foreign and must be discarded for a clean single pane — not rendered
+    /// as the old layout with dead/empty panes.
+    #[test]
+    fn reconcile_discards_a_foreign_session_layout() {
+        let foreign = split2(1, 2, 1); // leaves {1, 2}, from another session
+        let out = super::reconcile_loaded_layout(foreign, Some(&tid(9)), &HashMap::new());
+        let leaves = out
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        assert_eq!(
+            leaves,
+            vec![tid(9)],
+            "foreign layout discarded → clean single pane of the real terminal"
+        );
+        assert_eq!(out.focus, Some(tid(9)));
+    }
+
+    #[test]
+    fn reconcile_keeps_a_layout_that_contains_the_session_pane() {
+        // Legitimate re-attach: the session's focused pane IS a leaf, so the
+        // multi-pane tree is preserved (not discarded).
+        let own = split2(1, 2, 1);
+        let out = super::reconcile_loaded_layout(own, Some(&tid(1)), &HashMap::new());
+        let leaves = out
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        assert!(
+            leaves.contains(&tid(1)) && leaves.contains(&tid(2)),
+            "the session's own layout must be kept: {leaves:?}"
+        );
+    }
+
+    #[test]
+    fn reconcile_without_bootstrap_focus_keeps_the_tree() {
+        // No ATTACHED focus to validate against ⇒ don't discard.
+        let tree = split2(1, 2, 1);
+        let out = super::reconcile_loaded_layout(tree, None, &HashMap::new());
+        let leaves = out
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        assert_eq!(leaves.len(), 2, "no focus to validate ⇒ tree preserved");
     }
 
     /// Build a `panes` map with a warm [`PaneSlot`] per supplied id.
