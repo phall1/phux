@@ -90,15 +90,16 @@ The longer version, with the diagrams: [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
 
 ## Status
 
-phux is v0.1. The line between what's solid and what's still a promise is kept
-honest here:
+phux is v0.0.x. The line between what's solid and what's still a promise is
+kept honest here:
 
 **Stable — won't move under you**
 - The TUI: attach / detach / reattach, multi-pane splits, status bar,
   keybindings, multiple clients on one session
 - Full modern-protocol passthrough (Kitty keyboard, truecolor, OSC 8, OSC 133,
   images) — the parser is identical on both ends
-- The wire, version-negotiated. `phux-protocol` is published on crates.io.
+- The wire, version-negotiated. `phux-protocol` is the crate boundary; its
+  first crates.io publish is pending.
 
 **Real and tested — the API may still move before 1.0**
 - The headless verbs: `ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`,

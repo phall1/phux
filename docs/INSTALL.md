@@ -6,7 +6,7 @@ last-reviewed: 2026-06-09
 
 # Install
 
-**TL;DR.** Source is the install path today. The Nix dev shell pins the full toolchain — including the Zig compiler libghostty's build needs — so the build is reproducible on any supported platform. A Homebrew tap ([`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)) exists and the release pipeline targets it; the first bottles have not shipped yet. There is no `cargo install phux`; only `phux-protocol` is published, and the binary ships via source (and brew, once bottles land).
+**TL;DR.** Source is the install path today. The Nix dev shell pins the full toolchain — including the Zig compiler libghostty's build needs — so the build is reproducible on any supported platform. A Homebrew tap ([`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)) exists and the release pipeline targets it; the first bottles have not shipped yet. There is no `cargo install phux`, and nothing is on crates.io yet — `phux-protocol` is the one crate slated for it ([`RELEASING.md`](./RELEASING.md) tracks both first publishes).
 
 ---
 
