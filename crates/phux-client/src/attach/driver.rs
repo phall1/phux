@@ -207,6 +207,7 @@ fn paint_active_overlay<W: super::RenderSink>(
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
     session_name: &str,
+    theme: &crate::render::Theme,
 ) {
     if let Some(sel) = overlays.copy_selection() {
         let (Some(ls), Some(fid)) = (workspace.active_window(), focused) else {
@@ -230,7 +231,7 @@ fn paint_active_overlay<W: super::RenderSink>(
         if let Some(slot) = panes.get_mut(fid) {
             slot.renderer.set_selection(None);
         }
-        let _ = paint_copy_mode_status(out, sel, viewport_dims);
+        let _ = paint_copy_mode_status(out, sel, viewport_dims, theme);
     } else if let Some(clip) = overlays.active_bounds(viewport_dims) {
         // Floating modal (help / prompt / command palette / pickers): keep
         // the live panes visible by repainting the base frame, then emit
@@ -247,7 +248,7 @@ fn paint_active_overlay<W: super::RenderSink>(
                 session_name,
             );
         }
-        let _ = overlays.paint_clipped(out, viewport_dims, clip);
+        let _ = overlays.paint_clipped(out, viewport_dims, clip, theme.shadow);
     } else {
         // Full-screen overlay (no bounded region): clear + paint.
         let _ = out.write_all(b"\x1b[2J\x1b[H");
@@ -261,6 +262,7 @@ fn paint_copy_mode_status<W: Write>(
     out: &mut W,
     sel: SelectionRect,
     viewport_dims: (u16, u16),
+    theme: &crate::render::Theme,
 ) -> io::Result<()> {
     let (cols, rows) = viewport_dims;
     if rows == 0 || cols == 0 {
@@ -271,9 +273,11 @@ fn paint_copy_mode_status<W: Write>(
     let status =
         format!(" copy-mode | {cell_count} cell(s) | arrows move | Enter copy | Esc cancel ");
     write_cup(out, rows - 1, 0)?;
-    // Dark-gray strip: reset, bg 240, bright-white fg. `\x1b[K` fills the rest
-    // of the row with the strip bg; then reset and hide the cursor.
-    out.write_all(b"\x1b[0m\x1b[48;5;240m\x1b[97m")?;
+    // Selection strip from the theme (`selection_bg`/`selection_fg`). `\x1b[K`
+    // fills the rest of the row with the strip bg; then reset + hide the cursor.
+    out.write_all(b"\x1b[0m")?;
+    crate::render::write_sgr_color(out, theme.selection_bg, false)?;
+    crate::render::write_sgr_color(out, theme.selection_fg, true)?;
     let visible: String = status.chars().take(cols as usize).collect();
     out.write_all(visible.as_bytes())?;
     out.write_all(b"\x1b[K\x1b[0m\x1b[?25l")?;
@@ -982,6 +986,7 @@ async fn main_loop<W: super::RenderSink>(
                     viewport_dims,
                     status_bar.as_mut(),
                     &session_name,
+                    &theme,
                 );
             } else if let Some(ls) = workspace.active_window() {
                 paint_full_frame(
@@ -1110,6 +1115,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
+                        &theme,
                     );
                 }
             }
@@ -1364,6 +1370,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
+                        &theme,
                     );
                 }
             }
@@ -1444,6 +1451,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
+                        &theme,
                     );
                 } else if let Some(ls) = workspace.active_window() {
                     paint_full_frame(

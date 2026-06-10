@@ -80,6 +80,10 @@ impl<'a> Modal<'a> {
     pub fn render_into(&self, area: Rect, buf: &mut Buffer) {
         let block = Block::default()
             .borders(Borders::ALL)
+            // Fill the box with the theme surface so the modal reads as a
+            // solid panel floating over the live panes. Default `Reset`
+            // inherits the terminal background (no visible change).
+            .style(Style::default().bg(self.theme.surface))
             .border_style(Style::default().fg(self.theme.border))
             .title(Span::styled(
                 format!(" {} ", self.title),

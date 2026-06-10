@@ -80,6 +80,28 @@ pub(super) fn emit_cell_sgr(
     Ok(())
 }
 
+/// Emit a standalone foreground (`fg = true`) or background SGR for `color`.
+///
+/// For chrome painted outside the ratatui-buffer path (e.g. the copy-mode
+/// status strip the driver writes directly). Unlike `color_rgb`, indexed
+/// colors are preserved as `38;5;n` / `48;5;n` rather than flattened, so a
+/// theme's `Indexed(240)` renders as the terminal's palette entry 240.
+/// `Color::Reset` emits nothing (the caller's prior `\x1b[0m` stands).
+pub fn write_sgr_color(out: &mut impl Write, color: Color, fg: bool) -> io::Result<()> {
+    let kind = if fg { 38 } else { 48 };
+    match color {
+        Color::Reset => Ok(()),
+        Color::Indexed(n) => write!(out, "\x1b[{kind};5;{n}m"),
+        other => {
+            if let Some((k, r, g, b)) = color_rgb(other, fg) {
+                write!(out, "\x1b[{k};2;{r};{g};{b}m")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Convert a ratatui [`Color`] into a 24-bit SGR triple, plus the SGR
 /// kind prefix (`"38"` foreground / `"48"` background). Returns `None`
 /// for `Color::Reset` (no override). Indexed ANSI colors map to a small
@@ -108,4 +130,36 @@ const fn color_rgb(color: Color, fg: bool) -> Option<(&'static str, u8, u8, u8)>
         Color::Indexed(_) => (200, 200, 200),
     };
     Some((kind, r, g, b))
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    fn sgr(color: Color, fg: bool) -> String {
+        let mut out = Vec::new();
+        write_sgr_color(&mut out, color, fg).expect("write");
+        String::from_utf8(out).expect("utf8")
+    }
+
+    #[test]
+    fn indexed_color_is_preserved_not_flattened() {
+        // The reason this helper exists: the buffer path flattens Indexed to
+        // a gray; here it must emit the real palette index.
+        assert_eq!(sgr(Color::Indexed(240), false), "\x1b[48;5;240m");
+        assert_eq!(sgr(Color::Indexed(12), true), "\x1b[38;5;12m");
+    }
+
+    #[test]
+    fn rgb_and_named_emit_truecolor() {
+        assert_eq!(sgr(Color::Rgb(10, 20, 30), false), "\x1b[48;2;10;20;30m");
+        assert_eq!(sgr(Color::White, true), "\x1b[38;2;255;255;255m");
+    }
+
+    #[test]
+    fn reset_emits_nothing() {
+        assert_eq!(sgr(Color::Reset, true), "");
+        assert_eq!(sgr(Color::Reset, false), "");
+    }
 }

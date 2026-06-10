@@ -25,4 +25,7 @@ pub mod overlay;
 mod sgr;
 pub mod theme;
 
+/// Color-preserving SGR emitter for chrome painted outside the ratatui-buffer
+/// path (the driver's copy-mode status strip).
+pub use sgr::write_sgr_color;
 pub use theme::Theme;

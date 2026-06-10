@@ -27,6 +27,7 @@ use std::io::{self, Write};
 use phux_protocol::input::key::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use crate::attach::render::SelectionRect;
 
@@ -305,17 +306,21 @@ impl OverlayState {
         emit_buffer(out, &buf)
     }
 
-    /// Paint the overlay stack but emit **only** the cells inside `clip`.
+    /// Paint the overlay stack but emit **only** the cells inside `clip`
+    /// (plus a one-cell drop shadow below + right of it).
     ///
     /// This is the floating-modal path: the caller has already painted the
     /// live panes as the base frame, so emitting only the modal's bounded
-    /// region leaves the panes visible around it. Cells outside `clip` are
-    /// never written, so nothing erases the panes. No-op when inactive.
+    /// region leaves the panes visible around it. Cells outside `clip` (and
+    /// the shadow) are never written, so nothing erases the panes. The
+    /// `shadow` color gives the box depth over the panes; pass `Color::Reset`
+    /// to disable it. No-op when inactive.
     pub fn paint_clipped(
         &self,
         out: &mut impl Write,
         viewport_dims: (u16, u16),
         clip: Rect,
+        shadow: Color,
     ) -> io::Result<()> {
         if self.stack.is_empty() {
             return Ok(());
@@ -325,7 +330,7 @@ impl OverlayState {
         for overlay in &self.stack {
             overlay.render(area, &mut buf);
         }
-        emit_buffer_clipped(out, &buf, clip.intersection(area))
+        emit_buffer_clipped(out, &mut buf, clip.intersection(area), shadow)
     }
 }
 
@@ -370,40 +375,99 @@ fn emit_buffer(out: &mut impl Write, buf: &Buffer) -> io::Result<()> {
 }
 
 /// Emit only the cells of `buf` that fall inside `clip` (a floating modal's
-/// bounded region), leaving everything else on screen untouched.
+/// bounded region), plus a one-cell drop shadow below + right of it, leaving
+/// everything else on screen untouched.
 ///
 /// The caller paints the live panes first; this writes the modal box on top
-/// without erasing the panes around it. Like [`emit_buffer`] it hides the
-/// cursor and emits a per-row CUP + per-cell SGR delta, but each row's CUP
-/// targets `clip`'s left edge and only `clip.width` cells are written.
-fn emit_buffer_clipped(out: &mut impl Write, buf: &Buffer, clip: Rect) -> io::Result<()> {
+/// without erasing the panes around it. Each row CUPs to its own left edge so
+/// only the box (and shadow band) cells are written. The shadow band is
+/// painted into `buf` as `shadow`-bg spaces; the two outer corners (top-right
+/// of the box, bottom-left of the shadow) are deliberately skipped so the L
+/// reads as a shadow rather than a full rectangle. Pass `Color::Reset` to
+/// disable the shadow.
+fn emit_buffer_clipped(
+    out: &mut impl Write,
+    buf: &mut Buffer,
+    clip: Rect,
+    shadow: Color,
+) -> io::Result<()> {
     if clip.width == 0 || clip.height == 0 {
         return Ok(());
     }
-    out.write_all(b"\x1b[?25l")?;
-    for row in clip.y..clip.y.saturating_add(clip.height) {
-        // CUP to the clip's left column on this row (1-based).
-        write!(out, "\x1b[{};{}H", row + 1, clip.x + 1)?;
-        out.write_all(b"\x1b[0m")?;
-        let mut prev_styled = false;
-        for col in clip.x..clip.x.saturating_add(clip.width) {
-            let cell = &buf[(col, row)];
-            crate::render::sgr::emit_cell_sgr(out, cell, &mut prev_styled)?;
-            let sym = cell.symbol();
-            if sym.is_empty() {
-                out.write_all(b" ")?;
-            } else {
-                out.write_all(sym.as_bytes())?;
+    let vp_w = buf.area.width;
+    let vp_h = buf.area.height;
+    let bx = clip.x;
+    let by = clip.y;
+    let rx = clip.x + clip.width; // box right edge (exclusive) = shadow column
+    let ry = clip.y + clip.height; // box bottom edge (exclusive) = shadow row
+    // The shadow bands exist only where there's a pane cell to cast onto.
+    let shadow_col = !matches!(shadow, Color::Reset) && rx < vp_w;
+    let shadow_row = !matches!(shadow, Color::Reset) && ry < vp_h;
+    let shadow_style = ratatui::style::Style::default().bg(shadow);
+    if shadow_col {
+        // Right band: beside the box's lower rows + the bottom-right corner.
+        for y in (by + 1)..=ry.min(vp_h - 1) {
+            if let Some(cell) = buf.cell_mut((rx, y)) {
+                cell.set_symbol(" ");
+                cell.set_style(shadow_style);
             }
         }
-        if prev_styled {
-            out.write_all(b"\x1b[0m")?;
+    }
+    if shadow_row {
+        // Bottom band: beneath the box, starting one cell in (skip the corner).
+        for x in (bx + 1)..=rx.min(vp_w - 1) {
+            if let Some(cell) = buf.cell_mut((x, ry)) {
+                cell.set_symbol(" ");
+                cell.set_style(shadow_style);
+            }
         }
+    }
+
+    out.write_all(b"\x1b[?25l")?;
+    // Box rows. The top row omits the right shadow cell (no shadow above the
+    // box); lower rows extend one cell right to include the shadow column.
+    for row in by..ry {
+        let end = if shadow_col && row > by { rx + 1 } else { rx };
+        emit_row_span(out, buf, row, bx, end)?;
+    }
+    // Bottom shadow row, skipping the bottom-left corner (start at bx + 1).
+    if shadow_row {
+        let end = if shadow_col { rx + 1 } else { rx };
+        emit_row_span(out, buf, ry, bx + 1, end)?;
     }
     // Park the (hidden) cursor at the modal origin; the next pane repaint on
     // dismiss emits its own DECTCEM.
-    write!(out, "\x1b[{};{}H", clip.y + 1, clip.x + 1)?;
+    write!(out, "\x1b[{};{}H", by + 1, bx + 1)?;
     out.flush()
+}
+
+/// Emit cells `[start_col, end_col)` of `row` from `buf` with a leading CUP to
+/// the row's start column and a per-cell SGR delta. Shared by the box rows and
+/// the shadow band in [`emit_buffer_clipped`].
+fn emit_row_span(
+    out: &mut impl Write,
+    buf: &Buffer,
+    row: u16,
+    start_col: u16,
+    end_col: u16,
+) -> io::Result<()> {
+    write!(out, "\x1b[{};{}H", row + 1, start_col + 1)?;
+    out.write_all(b"\x1b[0m")?;
+    let mut prev_styled = false;
+    for col in start_col..end_col {
+        let cell = &buf[(col, row)];
+        crate::render::sgr::emit_cell_sgr(out, cell, &mut prev_styled)?;
+        let sym = cell.symbol();
+        if sym.is_empty() {
+            out.write_all(b" ")?;
+        } else {
+            out.write_all(sym.as_bytes())?;
+        }
+    }
+    if prev_styled {
+        out.write_all(b"\x1b[0m")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -618,7 +682,9 @@ mod tests {
         let rect = Rect::new(5, 3, 10, 4);
         s.push(Box::new(Bounded { rect }));
         let mut out = Vec::new();
-        s.paint_clipped(&mut out, (40, 12), rect).expect("paint");
+        // Color::Reset disables the drop shadow ⇒ only the box rows emit.
+        s.paint_clipped(&mut out, (40, 12), rect, Color::Reset)
+            .expect("paint");
         let txt = String::from_utf8_lossy(&out);
         // Content inside the clip is emitted...
         assert!(txt.contains("INSIDE"), "modal content must paint: {txt:?}");
@@ -633,11 +699,36 @@ mod tests {
             txt.contains("\x1b[4;6H"),
             "clip-origin CUP missing: {txt:?}"
         );
-        // No CUP lands on a row above the clip (row 1).
+        // No CUP lands above the clip (row 1) or below it — with the shadow
+        // disabled the box bottom (row 7, 0-based) emits no row-8 CUP.
         assert!(
-            !txt.contains("\x1b[1;"),
+            !txt.contains("\x1b[1;") && !txt.contains("\x1b[8;"),
             "no CUP may target a row outside the clip: {txt:?}"
         );
+    }
+
+    #[test]
+    fn paint_clipped_draws_a_drop_shadow_below_and_right() {
+        let mut s = OverlayState::new();
+        let rect = Rect::new(5, 3, 10, 4);
+        s.push(Box::new(Bounded { rect }));
+        let mut out = Vec::new();
+        s.paint_clipped(&mut out, (40, 12), rect, Color::Rgb(20, 20, 30))
+            .expect("paint");
+        let txt = String::from_utf8_lossy(&out);
+        // A shadow row emits just below the box: box bottom row is 6 (0-based)
+        // so the shadow row is 7 ⇒ 1-based CUP row 8, started one cell in
+        // (x = 6 ⇒ col 7) to skip the bottom-left corner.
+        assert!(txt.contains("\x1b[8;7H"), "shadow row CUP missing: {txt:?}");
+        // The shadow paints as a truecolor background.
+        assert!(
+            txt.contains("48;2;20;20;30"),
+            "shadow bg SGR missing: {txt:?}"
+        );
+        // The modal content is still painted over the panes.
+        assert!(txt.contains("INSIDE"), "modal content missing: {txt:?}");
+        // Still nothing leaks to the viewport origin.
+        assert!(!txt.contains("OUTSIDE"), "outside-clip leak: {txt:?}");
     }
 
     #[test]
