@@ -99,12 +99,17 @@ impl PaneSlot {
     }
 }
 
-/// Idle window before a parser-pending bare ESC is interpreted as the
-/// Escape key. Chosen to be long enough to absorb same-burst arrival of
-/// `ESC [` / `ESC O` sequences over local UDS-or-PTY paths (which are
-/// effectively zero-latency), but short enough that the user's perception
-/// of pressing Escape stays snappy. xterm uses ~50ms by default; we match.
-const ESC_FLUSH_IDLE: Duration = Duration::from_millis(50);
+/// Window before a parser-pending bare ESC is interpreted as the Escape
+/// key, anchored to when the ESC became pending (see `esc_deadline` in
+/// `main_loop`). The client reads stdin from the *outer* terminal, which
+/// writes a key's full `ESC [`/`ESC O` sequence in one burst — a split
+/// only happens at a read-buffer boundary — so a short window suffices to
+/// disambiguate. It must stay short: a modal-editor user pays this window
+/// on EVERY bare Escape, and the inner application (vim's `ttimeoutlen`,
+/// readline's `keyseq-timeout`) then stacks its own on top. tmux installs
+/// ship `escape-time 0..10` for the same reason; 10ms keeps Escape under
+/// the perception floor while still absorbing split sequences.
+const ESC_FLUSH_IDLE: Duration = Duration::from_millis(10);
 
 /// phux-jhv8: upper bound on how many already-queued frames one `recv`
 /// wake-up drains before painting. A back-to-back output burst (nvim
@@ -836,6 +841,13 @@ async fn main_loop<W: super::RenderSink>(
     let mut sigterm = signal(SignalKind::terminate()).map_err(AttachError::Io)?;
     let mut sighup = signal(SignalKind::hangup()).map_err(AttachError::Io)?;
     let mut detach_pending = false;
+    // Bare-ESC disambiguation deadline, anchored to the iteration where the
+    // parser first went pending. Re-creating the sleep each loop pass (the
+    // pre-anchor behavior) restarted the full window whenever ANY other arm
+    // fired first — under a steady output stream (status-line clock, shell
+    // highlight repaints) a lone Escape could be deferred far past the
+    // intended window. `None` ⇔ nothing pending.
+    let mut esc_deadline: Option<tokio::time::Instant> = None;
     // phux-eb0: set by `apply_action_effects` when the user commits a
     // `switch-session`. Checked after each input-dispatch batch; a value
     // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
@@ -930,14 +942,20 @@ async fn main_loop<W: super::RenderSink>(
         }
 
         // Arm the bare-ESC idle timer only when the parser has pending
-        // state. When no flush is pending we substitute a never-resolving
-        // future so the select! arm parks forever; this keeps the steady-
-        // state cost at one always-`Pending` future and avoids unused-
-        // `Option` branches inside `select!`.
-        let flush_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = if parser.has_pending() {
-            Box::pin(tokio::time::sleep(ESC_FLUSH_IDLE))
+        // state, anchored to the first iteration that saw it (the deadline
+        // survives other arms firing — see `esc_deadline`). When no flush
+        // is pending we substitute a never-resolving future so the select!
+        // arm parks forever; this keeps the steady-state cost at one
+        // always-`Pending` future and avoids unused-`Option` branches
+        // inside `select!`.
+        if parser.has_pending() {
+            esc_deadline.get_or_insert_with(|| tokio::time::Instant::now() + ESC_FLUSH_IDLE);
         } else {
-            Box::pin(std::future::pending::<()>())
+            esc_deadline = None;
+        }
+        let flush_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = match esc_deadline {
+            Some(deadline) => Box::pin(tokio::time::sleep_until(deadline)),
+            None => Box::pin(std::future::pending::<()>()),
         };
 
         // phux-nz4.5: per-bar repaint cadence. Driven by the slowest
