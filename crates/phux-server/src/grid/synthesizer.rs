@@ -102,6 +102,15 @@ pub struct SnapshotSynthesizer<'alloc> {
     /// diff only when that consumer's reference disagrees with the live
     /// alt-screen state.
     tick_screen_toggle: Vec<u8>,
+    /// phux-5pyx: the `(cols, rows)` the pooled `render_state` last walked,
+    /// so a resize can be detected and the pool rebuilt. libghostty's per-row
+    /// dirty bits live on the `Terminal` and are cleared by whichever
+    /// `RenderState` reads a row first; after a `TERMINAL_RESIZE` raced a
+    /// fresh-state walk (the `GET_SCREEN` path, which goes fresh per call for
+    /// exactly this reason), the pooled cache reports the new dims yet keeps
+    /// returning the pre-resize row bodies. Rebuilding the pool on a dims
+    /// change hands the next walk a clean cache. `None` until the first walk.
+    last_dims: Option<(u16, u16)>,
 }
 
 impl<'alloc> SnapshotSynthesizer<'alloc> {
@@ -114,7 +123,34 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
             tick_rows: Vec::new(),
             tick_epilogue: Vec::new(),
             tick_screen_toggle: Vec::new(),
+            last_dims: None,
         })
+    }
+
+    /// Rebuild the pooled `render_state` + iterators when `terminal`'s
+    /// dimensions have changed since the last pooled walk (phux-5pyx).
+    ///
+    /// Every pooled-state path ([`Self::prepare_tick`],
+    /// [`Self::synthesize_incremental`], [`Self::mark_synced`],
+    /// [`Self::prime_reference`]) calls this immediately before
+    /// `self.render_state.update`. After a resize the pooled cache can serve
+    /// stale row bodies (see [`Self::last_dims`]); a fresh pool has no prior
+    /// cache, so its first `update` observes every row as it is now — the
+    /// same root fix the fresh-per-call `GET_SCREEN` path
+    /// ([`Self::screen_state_with_scrollback`]) uses, scoped here to the rare
+    /// resize tick instead of every call.
+    fn refresh_pool_on_resize(
+        &mut self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+    ) -> Result<(), SynthesisError> {
+        let live = (terminal.cols()?, terminal.rows()?);
+        if self.last_dims != Some(live) {
+            self.render_state = RenderState::new()?;
+            self.rows = RowIterator::new()?;
+            self.cells = CellIterator::new()?;
+            self.last_dims = Some(live);
+        }
+        Ok(())
     }
 
     /// Walk `terminal`'s viewport and emit a VT byte sequence that
@@ -543,6 +579,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         &mut self,
         terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<(), SynthesisError> {
+        self.refresh_pool_on_resize(terminal)?;
         let snapshot = self.render_state.update(terminal)?;
         let rows_n = snapshot.rows()?;
         // Walk rows and clear each dirty bit. The row-level clear is
@@ -589,6 +626,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         &mut self,
         terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<SnapshotBytes, SynthesisError> {
+        self.refresh_pool_on_resize(terminal)?;
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
@@ -758,6 +796,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
     ) -> Result<(u16, u16, ReferenceCursorMode), SynthesisError> {
         let _span = tracing::debug_span!("prepare_tick").entered();
+        self.refresh_pool_on_resize(terminal)?;
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
@@ -912,6 +951,7 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         terminal: &GhosttyTerminal<'alloc, '_>,
         reference: &mut ConsumerReference,
     ) -> Result<(), SynthesisError> {
+        self.refresh_pool_on_resize(terminal)?;
         let snapshot = self.render_state.update(terminal)?;
         let cols = snapshot.cols()?;
         let rows_n = snapshot.rows()?;
@@ -1302,6 +1342,49 @@ mod tests {
         assert!(snap.bytes.starts_with(b"\x1b[!p\x1b[2J\x1b[H"));
         // No scrollback requested ⇒ no scrollback-priming bytes.
         assert!(snap.scrollback.is_empty());
+    }
+
+    /// phux-5pyx: behavioural lock for the resize → pooled-tick path.
+    ///
+    /// Drives two `prepare_tick`s across a resize, with a fresh-state walk
+    /// (the `GET_SCREEN` path) interleaved, and asserts the second tick reports
+    /// the new dims and the post-resize content. NOTE: this is a forward-
+    /// looking correctness assertion, not a fail-without-the-fix guard — the
+    /// original staleness was a timing-dependent shared-dirty-bit race that
+    /// does not reproduce deterministically in a single-threaded unit test
+    /// (the bead notes "No repro today"). It pins the contract the
+    /// dims-change pool rebuild upholds for the `StateSync` consumers to come.
+    #[test]
+    fn prepare_tick_serves_fresh_rows_after_resize() {
+        let mut term = fresh(10, 2);
+        term.vt_write(b"AA");
+        let mut synth = SnapshotSynthesizer::new().expect("synth");
+
+        let (c0, r0, _) = synth.prepare_tick(&term).expect("tick0");
+        assert_eq!((c0, r0), (10, 2));
+        assert!(
+            synth.tick_rows.iter().any(|b| b.contains(&b'A')),
+            "first tick should render the 'A' content"
+        );
+
+        // Grow the grid and overwrite row 0, then race a fresh-state walk
+        // that consumes the terminal's per-row dirty bits.
+        term.resize(10, 4, 0, 0).expect("resize");
+        term.vt_write(b"\x1b[1;1HZZ");
+        let _ = synth.screen_state(&term, 0).expect("fresh walk");
+
+        let (c1, r1, _) = synth.prepare_tick(&term).expect("tick1");
+        assert_eq!((c1, r1), (10, 4), "second tick must observe the new dims");
+        assert_eq!(
+            synth.tick_rows.len(),
+            4,
+            "row buffer resized to the new grid"
+        );
+        assert!(
+            synth.tick_rows.iter().any(|b| b.contains(&b'Z')),
+            "post-resize tick must serve the fresh 'ZZ', not the stale cache"
+        );
+        assert_eq!(synth.last_dims, Some((10, 4)), "pool tracks the live dims");
     }
 
     /// phux-9q5f: a scrollback-bearing snapshot, applied to a fresh client
