@@ -151,13 +151,17 @@ impl HelpOverlay {
 
 impl RenderOverlay for HelpOverlay {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        // ~70% of the viewport, min 40x10, clamped to the outer rect.
-        let modal_area = centered(area, 7, 40, 10);
+        let modal_area = self.bounds(area).unwrap_or(area);
         let body = self.chord_table().body_lines();
         Modal::new(&self.theme, "phux help", body)
             .footer(self.footer())
             .wrap(true)
             .render_into(modal_area, buf);
+    }
+
+    fn bounds(&self, area: Rect) -> Option<Rect> {
+        // ~70% of the viewport, min 40x10, clamped to the outer rect.
+        Some(centered(area, 7, 40, 10))
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {

@@ -231,7 +231,25 @@ fn paint_active_overlay<W: super::RenderSink>(
             slot.renderer.set_selection(None);
         }
         let _ = paint_copy_mode_status(out, sel, viewport_dims);
+    } else if let Some(clip) = overlays.active_bounds(viewport_dims) {
+        // Floating modal (help / prompt / command palette / pickers): keep
+        // the live panes visible by repainting the base frame, then emit
+        // only the modal's bounded region on top. No `\x1b[2J` — the panes
+        // surround the box instead of vanishing behind a full-screen clear.
+        if let Some(ls) = workspace.active_window() {
+            paint_full_frame(
+                out,
+                ls,
+                panes,
+                focused,
+                viewport_dims,
+                status_bar,
+                session_name,
+            );
+        }
+        let _ = overlays.paint_clipped(out, viewport_dims, clip);
     } else {
+        // Full-screen overlay (no bounded region): clear + paint.
         let _ = out.write_all(b"\x1b[2J\x1b[H");
         let _ = overlays.paint(out, viewport_dims);
     }

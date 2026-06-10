@@ -129,6 +129,10 @@ impl RenderOverlay for PromptOverlay {
         Modal::new(&self.theme, self.title.clone(), vec![line]).render_into(modal_area, buf);
     }
 
+    fn bounds(&self, area: Rect) -> Option<Rect> {
+        Some(Self::modal_area(area))
+    }
+
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
         // Press-only; ignore release/repeat so a held key doesn't double.
         if key.action != KeyAction::Press {
