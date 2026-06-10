@@ -32,6 +32,10 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusCfg,
 
+    /// Window sidebar (`[sidebar]`). Off by default.
+    #[serde(default)]
+    pub sidebar: SidebarCfg,
+
     /// Event hooks (`[[hooks.<name>]]`).
     ///
     /// Keyed by hook name (e.g. `pane-exit`, `after-new-pane`); each
@@ -338,6 +342,51 @@ pub struct StatusCfg {
     /// Right slot.
     #[serde(default)]
     pub right: Vec<Widget>,
+}
+
+/// `[sidebar]` — the Warp-style window sidebar (phux-4h5a).
+///
+/// A vertical strip listing the session's windows as tabs, each labelled by
+/// its OSC title (falling back to the window name), the focused one
+/// highlighted. Off by default; when `enabled`, it reserves `width` columns
+/// on `position`, and the panes tile into the remaining area.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SidebarCfg {
+    /// Show the sidebar. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Width in columns when shown. Default `20`.
+    #[serde(default = "default_sidebar_width")]
+    pub width: u16,
+    /// Which edge the sidebar docks to. Default `left`.
+    #[serde(default)]
+    pub position: SidebarPosition,
+}
+
+impl Default for SidebarCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: default_sidebar_width(),
+            position: SidebarPosition::default(),
+        }
+    }
+}
+
+const fn default_sidebar_width() -> u16 {
+    20
+}
+
+/// Which edge the [`SidebarCfg`] docks to.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarPosition {
+    /// Dock on the left (default).
+    #[default]
+    Left,
+    /// Dock on the right.
+    Right,
 }
 
 /// A status-bar widget.
