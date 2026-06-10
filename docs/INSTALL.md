@@ -1,29 +1,14 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-06-09
 ---
 
 # Install
 
-**TL;DR.** Homebrew on macOS and Linux x86_64 is the one-liner for the binary. Building from source — including any platform the bottle doesn't cover yet — uses the Nix dev shell, which QUICKSTART.md owns. There is no `cargo install phux` yet; only `phux-protocol` is published, and the binary ships via brew and source.
+**TL;DR.** Source is the install path today. The Nix dev shell pins the full toolchain — including the Zig compiler libghostty's build needs — so the build is reproducible on any supported platform. A Homebrew tap ([`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)) exists and the release pipeline targets it; the first bottles have not shipped yet. There is no `cargo install phux`; only `phux-protocol` is published, and the binary ships via source (and brew, once bottles land).
 
 ---
-
-## Homebrew
-
-macOS and Linux, x86_64:
-
-```sh
-brew install phall1/phux/phux
-phux            # auto-spawns a server and attaches
-```
-
-`phux` with no arguments auto-spawns a server and attaches to it. Detach with
-`Ctrl-A d`; run `phux` again to re-attach.
-
-Apple Silicon and Linux aarch64 build from source today; a bottle for them is
-tracked, not in the tap yet (see the matrix below).
 
 ## From source
 
@@ -39,6 +24,22 @@ cd phux
 nix develop          # or `direnv allow` once, then it loads on cd
 cargo run --bin phux # auto-spawns a server and attaches
 ```
+
+`phux` with no arguments auto-spawns a server and attaches to it. Detach with
+`Ctrl-A d`; run `phux` again to re-attach.
+
+## Homebrew
+
+Not live yet. The tap is [`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)
+and the release workflow regenerates `Formula/phux.rb` on each `v*` tag; the
+first release with bottles is tracked in [`RELEASING.md`](./RELEASING.md). Once
+it ships, the install is:
+
+```sh
+brew install phall1/phux/phux
+```
+
+Until then, build from source.
 
 ## Drive it from an agent
 
@@ -57,7 +58,7 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 | Platform | Status |
 |---|---|
 | macOS (Apple Silicon) | Source: yes. Bottle: not yet. |
-| macOS (x86_64) | Brew + source |
-| Linux x86_64 | Brew + source |
+| macOS (x86_64) | Source: yes. Bottle: not yet. |
+| Linux x86_64 | Source: yes. Bottle: not yet. |
 | Linux aarch64 | Source: yes. Bottle: not yet. |
 | Windows | No. Not on the near roadmap. |

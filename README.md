@@ -36,15 +36,18 @@ attached to them are people.
 ## Try it
 
 ```sh
-brew install phall1/phux/phux
-phux
+git clone https://github.com/phall1/phux
+cd phux
+nix develop          # pins the toolchain, including the zig libghostty needs
+cargo run --bin phux
 ```
 
 You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive —
-and run `phux` again to come back to exactly where you were.
+and run `phux` again to come back to exactly where you were. Full setup details
+(off-Nix pins, the agent binaries) are in [INSTALL.md](./docs/INSTALL.md).
 
-No Homebrew, or want to build from source? [Install from source](./docs/INSTALL.md):
-a Nix dev shell and one `cargo run`.
+A Homebrew tap exists; the first bottles haven't shipped. Until they do, the
+source build above is the install path.
 
 ## The wire, without a TTY
 
