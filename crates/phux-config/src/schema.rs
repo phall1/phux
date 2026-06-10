@@ -394,7 +394,7 @@ pub struct HookEntry {
 ///
 /// Anything here may be renamed, repurposed, or removed without a
 /// `SemVer` bump. Set explicitly only if you accept that contract.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentalCfg {
     /// Engage Mosh-class predictive local echo in `phux attach`.
@@ -404,8 +404,28 @@ pub struct ExperimentalCfg {
     /// `PredictiveConfig { enabled: true, .. }`. See `phux-9gw.1` for
     /// the algorithm and `crates/phux-client/src/predict/` for the
     /// implementation.
-    #[serde(default, rename = "predictive-echo")]
+    ///
+    /// Default `true` (phux-51n6): the predicted classes are the
+    /// conservative mosh-proven subset and reconciliation stomps a wrong
+    /// guess on the next authoritative frame, so the failure mode is a
+    /// brief underlined flicker — while the win is shell typing that no
+    /// longer waits a full client-server round trip per keystroke. Set
+    /// `false` to keep echo strictly authoritative.
+    #[serde(default = "default_predictive_echo", rename = "predictive-echo")]
     pub predictive_echo: bool,
+}
+
+impl Default for ExperimentalCfg {
+    fn default() -> Self {
+        Self {
+            predictive_echo: default_predictive_echo(),
+        }
+    }
+}
+
+/// Serde default for [`ExperimentalCfg::predictive_echo`].
+const fn default_predictive_echo() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
