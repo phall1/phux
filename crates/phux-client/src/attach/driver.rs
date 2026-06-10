@@ -99,6 +99,43 @@ impl PaneSlot {
     }
 }
 
+/// Re-anchor the predictive-echo layer to a (newly) focused pane (phux-7ry0).
+///
+/// Predictions are pane-local, but the layer carries a single cursor anchor +
+/// viewport. On a focus change it still holds the *previous* pane's bounds and
+/// cursor; left stale, the first keystroke into the new pane echoes at the old
+/// pane's coordinates — and because the pane-grid bounds clamp the next
+/// outer-absolute resync, that lands mid-screen (the ghost echo after a split).
+///
+/// Reset the viewport to the new pane's grid and the cursor to its
+/// authoritative pane-local position (or `(0, 0)` for a freshly spawned pane
+/// that has not rendered yet), dropping any predictions anchored to the old
+/// pane. Called from every focus-change site: click-to-focus, keybinding pane
+/// navigation, and split (the new pane becomes focused).
+pub(super) fn reanchor_predict_to_pane(
+    predict: &mut PredictionState,
+    panes: &HashMap<TerminalId, PaneSlot>,
+    fid: &TerminalId,
+) {
+    let Some(slot) = panes.get(fid) else {
+        // No slot yet — drop stale predictions; the pane's first snapshot
+        // will set the viewport + cursor.
+        predict.clear();
+        return;
+    };
+    let cols = slot.terminal.cols().unwrap_or(0);
+    let rows = slot.terminal.rows().unwrap_or(0);
+    if cols > 0 && rows > 0 {
+        // `set_viewport` drops the pending queue + the prompt-boundary anchor.
+        predict.set_viewport(cols, rows);
+    } else {
+        predict.clear();
+    }
+    // Pane-local cursor; the overlay re-adds the pane origin when painting.
+    let (row, col) = slot.renderer.last_cursor_local().unwrap_or((0, 0));
+    predict.set_cursor(row, col);
+}
+
 /// Window before a parser-pending bare ESC is interpreted as the Escape
 /// key, anchored to when the ESC became pending (see `esc_deadline` in
 /// `main_loop`). The client reads stdin from the *outer* terminal, which
@@ -1323,7 +1360,22 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_dims = viewport_dims;
                 let viewport = current_viewport_or_default();
                 viewport_dims = (viewport.cols.max(1), viewport.rows.max(1));
-                predict.set_viewport(viewport.cols, viewport.rows);
+                // Bound predict to the FOCUSED pane's current grid, not the
+                // whole viewport — predictions are pane-local (phux-7ry0). The
+                // pane grids resize on the server's resize-ack snapshot, which
+                // re-syncs predict again; this just keeps the transient
+                // post-SIGWINCH bounds pane-shaped. Single-pane / unknown
+                // falls back to the viewport.
+                let (predict_cols, predict_rows) = focused_pane
+                    .as_ref()
+                    .and_then(|fid| panes.get(fid))
+                    .map_or((viewport.cols, viewport.rows), |s| {
+                        (
+                            s.terminal.cols().unwrap_or(viewport.cols),
+                            s.terminal.rows().unwrap_or(viewport.rows),
+                        )
+                    });
+                predict.set_viewport(predict_cols, predict_rows);
                 conn.send(&viewport_resize_frame(viewport)).await?;
 
                 // Multi-pane: emit one TERMINAL_RESIZE per leaf whose

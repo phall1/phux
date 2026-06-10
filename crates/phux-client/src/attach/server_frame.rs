@@ -314,7 +314,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     let _ = slot
                         .renderer
                         .render_at(&slot.terminal, out, origin, (rect.w, rect.h));
-                    if let Some((row, col)) = slot.renderer.last_cursor() {
+                    // Re-anchor the predict layer in PANE-LOCAL coordinates
+                    // (predictions are pane-local; the overlay re-adds the
+                    // origin). Feeding the outer-absolute `last_cursor` here
+                    // clamps a lower pane's cursor up into the wrong region —
+                    // the mid-screen ghost echo after a split (phux-7ry0).
+                    if let Some((row, col)) = slot.renderer.last_cursor_local() {
                         predict.set_cursor(row, col);
                     }
                     // Snapshot is authoritative — predict-overlay only
@@ -500,14 +505,26 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 let _paint_trigger =
                     tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
                 let has_bar = status_bar.is_some();
-                let focused_cursor =
+                let _ =
                     paint_focused_pane(out, active_ls, panes, fid, viewport_dims, has_bar, false);
+                // The reconcile + overlay work entirely in PANE-LOCAL
+                // coordinates (predictions are pane-local; the cell reader
+                // indexes the pane's own grid). `focused_cursor` (outer) is
+                // kept only for the host-cursor restore in the bar paint.
+                let (focused_cursor, focused_cursor_local, pane_origin) =
+                    panes.get(fid).map_or((None, None, (0, 0)), |s| {
+                        (
+                            s.renderer.last_cursor(),
+                            s.renderer.last_cursor_local(),
+                            s.renderer.last_origin(),
+                        )
+                    });
                 // Per-cell match reconcile (phux-9gw.1.1): walk pending
                 // predictions against the freshly painted cell grid;
                 // confirmed predictions drop, contradictions drop their
                 // suffix, predictions still ahead of confirmed state
                 // stay alive. See [`crate::predict`] for the truth table.
-                if let Some((row, col)) = focused_cursor {
+                if let Some((row, col)) = focused_cursor_local {
                     let _stats = reconcile_terminal_output_per_cell(predict, row, col, |r, c| {
                         panes.get_mut(fid).and_then(|s| {
                             // Read the full grapheme cluster, not just the
@@ -528,9 +545,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     predict.clear();
                 }
                 // Overlay paints any predictions still alive (the tail
-                // of a partial confirmation). On a fully-drained queue
-                // this is a no-op.
-                let _ = overlay.render(predict, out);
+                // of a partial confirmation), shifted by the focused pane's
+                // outer origin. On a fully-drained queue this is a no-op.
+                let _ = overlay.render(predict, pane_origin, out);
                 // phux-9xn: compute the focused pane's Rect origin so
                 // the bar paint can park the cursor there if
                 // `last_cursor` is None. Without this fallback the
@@ -749,6 +766,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             focused_pane.clone_from(
                                 &workspace.active_window().and_then(|ls| ls.focus.clone()),
                             );
+                            // Re-anchor predictive echo to the freshly
+                            // focused pane (phux-7ry0). The split leaves the
+                            // predict layer holding the previous pane's
+                            // viewport + cursor; a keystroke before the new
+                            // pane's first snapshot would otherwise echo at
+                            // the old pane's coordinates (mid-screen ghost).
+                            if let Some(fid) = focused_pane.as_ref() {
+                                super::driver::reanchor_predict_to_pane(predict, panes, fid);
+                            }
                             Ok(FrameOutcome {
                                 layout_replaced: true,
                                 emit_set_metadata: true,

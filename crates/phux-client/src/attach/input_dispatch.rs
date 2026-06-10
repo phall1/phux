@@ -174,6 +174,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                             focused_pane,
                             detach_pending,
                             predict,
+                            panes,
                         )
                         .await?
                         {
@@ -226,6 +227,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         focused_pane,
                         detach_pending,
                         predict,
+                        panes,
                     )
                     .await?
                     {
@@ -260,11 +262,12 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                             ls.focus = Some(target.clone());
                         }
                         *focused_pane = Some(target.clone());
-                        // The predict overlay is anchored to the old
-                        // pane's cursor; dropping the queue avoids a
-                        // stale ghost echo painting into the new pane
-                        // before the next TERMINAL_OUTPUT reconciles.
-                        predict.clear();
+                        // Re-anchor predict to the clicked pane: drop the
+                        // old pane's queue AND reset the cursor + viewport
+                        // to the new pane, so a keystroke before the next
+                        // reconcile echoes at the right place rather than
+                        // the old pane's (mid-screen) coordinates (phux-7ry0).
+                        super::driver::reanchor_predict_to_pane(predict, panes, &target);
                         // Heavy-edge chrome moves with focus; repaint
                         // dividers + all leaves so the focused pane's
                         // surrounding edges render heavy.
@@ -340,9 +343,17 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     }
     // Paint the prediction overlay once per dispatch batch so a burst of
     // keystrokes produces a single positioned write run, not one per
-    // event. The overlay is a no-op on an empty queue.
+    // event. The overlay is a no-op on an empty queue. Predictions are
+    // pane-local; shift them by the focused pane's render origin so a
+    // non-top-left pane echoes over its own cells (phux-7ry0).
     if predicted_any {
-        let _ = overlay.render(predict, out);
+        let origin = ctx
+            .workspace
+            .active_window()
+            .and_then(|w| w.focus.as_ref())
+            .and_then(|fid| panes.get(fid))
+            .map_or((0, 0), |s| s.renderer.last_origin());
+        let _ = overlay.render(predict, origin, out);
     }
     // Hand the layout-mutation signal back to `main_loop`, which holds
     // the status-bar painter and session name needed for a proper full
@@ -362,6 +373,10 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     clippy::future_not_send,
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "shares the dispatch loop's transport + render + predict context; phux-7ry0 added the focused-pane map for the predict re-anchor"
+)]
 async fn apply_action_effects<W: super::RenderSink>(
     effects: ActionEffects,
     out: &mut W,
@@ -370,12 +385,20 @@ async fn apply_action_effects<W: super::RenderSink>(
     focused_pane: &mut Option<TerminalId>,
     detach_pending: &mut bool,
     predict: &mut PredictionState,
+    panes: &HashMap<TerminalId, PaneSlot>,
 ) -> Result<bool, AttachError> {
     let layout_changed = effects.layout_mutated;
-    if effects.set_focus.is_some() {
-        *focused_pane = effects.set_focus;
-    }
-    if effects.clear_predict {
+    if let Some(target) = effects.set_focus {
+        *focused_pane = Some(target);
+        // Focus moved (keybinding pane navigation) — re-anchor predict to
+        // the new pane: reset its cursor + viewport and drop the old pane's
+        // queue, so a keystroke before the next reconcile echoes at the
+        // right place rather than the old pane's (mid-screen) coordinates
+        // (phux-7ry0). Subsumes the plain `clear_predict` drop below.
+        if let Some(fid) = focused_pane.as_ref() {
+            super::driver::reanchor_predict_to_pane(predict, panes, fid);
+        }
+    } else if effects.clear_predict {
         predict.clear();
     }
     if effects.set_metadata {
