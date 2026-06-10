@@ -39,35 +39,39 @@ lint:
 test:
     cargo nextest run --workspace --all-features
 
-# They are `#[ignore]`d so the default `test`/`ci` run stays deterministic
-# — in the full parallel pool the real-PTY server spawns starve and the
-# load-sensitive timing assertions trip. Run on demand (they pass reliably
-# one binary at a time). CI may invoke this as a separate step.
-#
-# This lane covers the heavy e2e/flywheel tests: the binary-level
-# `run_wait_e2e` subprocess tests AND the in-process flywheel suite (the
-# wall-clock `perf_latency` gate + the resize-storm / attach-churn stress
-# tests). All spin a real server + PTY, so they live here, not in the
-# default `just test` / `just ci` pool.
-# phux-uow0: every test here spawns a real phux server + PTY child. They are
-# `#[ignore]`d out of the default pool precisely because they "starve in the
-# full parallel pool" (see their ignore reasons), and on a 2-core CI runner
-# they are doubly sensitive: serial removes CPU contention (a fresh attach
-# handshake / snapshot render otherwise misses WIRE_RECV_TIMEOUT), and
-# `--retries=2` absorbs the residual environment-driven flakes (a 2MB-burst
-# read that races a socket close, etc.) the same way the reconnect override in
-# .config/nextest.toml does. Nothing stays quarantined: multi_mb_no_newline_burst
-# (phux-fheq) is fixed — the EOF/self-exit race via the long-lived seed +
-# EOF-tolerant wait_until, AND the slow-drain timeout via a generous per-test
-# wait budget (wait_until_with_timeout, 180s) so the 2 MB no-newline reflow on a
-# 2-core runner isn't read as a hang. attach_detach_churn (phux-uow0) is also
-# fixed and de-quarantined.
+# Fast e2e lane — gates every PR (the `e2e` step in ci.yml). Covers the
+# headless agent-surface contract (`run_wait_e2e`) plus the wall-clock perf
+# gates (`perf_latency`, `perf_colored_output`). These spin a real server +
+# PTY, so they are `#[ignore]`d out of the default `just test` pool and run
+# serially with `--retries=2`: serial removes the CPU contention that makes
+# a fresh attach handshake / snapshot render miss `WIRE_RECV_TIMEOUT`, and
+# the retries absorb residual environment-driven flakes (mirroring the
+# reconnect override in .config/nextest.toml). Finishes in minutes — fast
+# enough to block a PR on.
+
+# Fast e2e lane (run_wait_e2e + perf gates) — gates every PR.
 e2e:
     cargo nextest run -p phux --test run_wait_e2e --run-ignored all \
       --test-threads=1 --retries=2
     cargo nextest run -p phux-server --run-ignored ignored-only \
       --test-threads=1 --retries=2 \
-      --test perf_latency --test perf_colored_output \
+      --test perf_latency --test perf_colored_output
+
+# Heavy stress/flywheel lane — runs OFF the PR critical path (the `stress`
+# GitHub workflow: post-merge on `main` + nightly). Resize/output/lifecycle
+# storms that hammer a real server + PTY. They are CPU-starvation-sensitive:
+# the server is one current-thread runtime, and on a 2-core runner the
+# output-flood-vs-resize-reflow feedback loop balloons a sub-second test
+# into minutes (e.g. both_axes_shrink_storm_under_output: ~0.3s on a
+# multi-core box, ~13 min on a 2-core runner). That cost is pure CPU
+# starvation, not a code defect — so these run where they don't block a PR,
+# never as a `just ci` gate. Run locally any time (one binary at a time,
+# they pass reliably).
+
+# Heavy stress storms — off the PR path (post-merge + nightly stress.yml).
+stress:
+    cargo nextest run -p phux-server --run-ignored ignored-only \
+      --test-threads=1 --retries=2 \
       --test stress_resize_storm --test stress_resize_extremes \
       --test stress_attach_churn --test stress_lifecycle_churn \
       --test stress_output_extremes --test stress_spawn_kill
