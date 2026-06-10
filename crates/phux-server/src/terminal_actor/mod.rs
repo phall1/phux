@@ -1281,18 +1281,35 @@ impl TerminalActor {
     /// wire per the SPEC §10.1 compact-subset rule.
     fn reap_child_if_any(&mut self) -> Option<i32> {
         let pty = self.pty.as_mut()?;
-        match pty.child.try_wait() {
-            Ok(Some(status)) => {
-                debug!(?status, "child reaped on PTY EOF");
-                exit_status_to_wire(&status)
-            }
-            Ok(None) => {
-                trace!("PTY EOF but child still alive — leaving to shutdown path");
-                None
-            }
-            Err(err) => {
-                debug!(?err, "child try_wait failed on PTY EOF");
-                None
+        // PTY EOF races the child becoming waitable: the master reads EOF
+        // the moment the last slave fd closes, which can be a hair before
+        // the kernel marks the process reapable. A single `try_wait` here
+        // reported `exit_status: None` for children that exited cleanly
+        // microseconds later, so TERMINAL_CLOSED lied to agents reading
+        // exit codes. Retry briefly. The blocking sleep is deliberate:
+        // this runs on the single current-thread runtime, but only once
+        // per pane lifetime, and the budget is small; an async retry would
+        // need to move `child` out of `self.pty`, which the shutdown path
+        // still owns. A child that closed its slave but keeps running
+        // (a daemonizer) exhausts the budget and reports `None`, as before.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+        loop {
+            match pty.child.try_wait() {
+                Ok(Some(status)) => {
+                    debug!(?status, "child reaped on PTY EOF");
+                    return exit_status_to_wire(&status);
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Ok(None) => {
+                    trace!("PTY EOF but child still alive — leaving to shutdown path");
+                    return None;
+                }
+                Err(err) => {
+                    debug!(?err, "child try_wait failed on PTY EOF");
+                    return None;
+                }
             }
         }
     }
