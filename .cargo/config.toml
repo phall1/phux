@@ -2,3 +2,21 @@
 # under corp proxies / SSH agents; matches the nix dev shell's git.
 [net]
 git-fetch-with-cli = true
+
+# Fast linker on Linux. `mold` replaces the bottleneck link step of
+# incremental dev/test builds (every `cargo check --all-targets` /
+# `nextest run` relinks dozens of test binaries); it routinely cuts link
+# time by an order of magnitude versus bfd/gold. Provided by the nix dev
+# shell on Linux only (flake.nix gates `mold` on stdenv.isLinux). This does
+# NOT touch libghostty-vt's zig-built static lib — zig does its own linking
+# in build.rs — so the dominant cold-build cost is unaffected; this speeds
+# the Rust relink, which is what iteration actually pays for.
+#
+# macOS is intentionally absent: Apple's default linker (ld-prime, Xcode
+# 15+) is already fast, and forcing ld64.lld there risks framework/dylib
+# link breakage for no real gain.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

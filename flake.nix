@@ -42,6 +42,14 @@
             pkgs.cargo-watch
             pkgs.cargo-insta
             pkgs.cargo-mutants
+            # Build observability (`just timings` / `just llvm-lines` /
+            # `just bloat`). cargo-llvm-lines reads the `llvm-tools-preview`
+            # component already pinned in rust-toolchain.toml; cargo-bloat
+            # attributes release binary size by crate/function. Pinned here
+            # (not cargo-install like samply) so the recipes work out of the
+            # box in the dev shell and versions stay reproducible.
+            pkgs.cargo-llvm-lines
+            pkgs.cargo-bloat
             # Web client (clients/phux-web, clients/phux-vt-web) toolchain.
             # wasm-bindgen-cli MUST match the `wasm-bindgen` crate version
             # pinned in the client manifests (=0.2.121); the test harness
@@ -55,7 +63,12 @@
             pkgs.shellcheck
             # Debugging.
             pkgs.lldb
-          ];
+          ]
+          # Fast linker for Linux builds (CI + Linux contributors). `mold`
+          # backs the `-fuse-ld=mold` rustflags in .cargo/config.toml for the
+          # linux-gnu targets; it has no mach-o backend, so it is Linux-only
+          # and macOS keeps Apple's default linker (already the fast path).
+          ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.mold ];
 
           env.RUST_BACKTRACE = "1";
 

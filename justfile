@@ -196,3 +196,49 @@ profile *ARGS:
     @echo "Profile written to target/samply-profile.json"
     @echo "  View it with:  samply load target/samply-profile.json"
     @echo "  (opens https://profiler.firefox.com in your browser)"
+
+# --- Build observability ---------------------------------------------------
+# Three lenses on "why is the build this slow / this big". Honest caveat:
+# the dominant COLD-build cost is libghostty-vt's zig blob (a build.rs
+# shell-out to zig), which none of these three see — they profile the Rust
+# side. For the zig cost, lean on the CPU-keyed CI cache and not rebuilding
+# per-worktree. These tools find the *Rust* wins: critical-path crates,
+# monomorphization bloat, and binary size.
+
+# Cargo's built-in compile-time report -> target/cargo-timings/. Shows the
+# per-crate timeline, the critical path (the longest dependency chain
+# gating everything else), and the codegen-vs-frontend split. Pass extra
+# args to change profile:
+#   just timings                 # debug, --all-targets (dev iteration cost)
+#   just timings --release       # the release/LTO timeline
+# CAVEAT: a WARM build's timeline is near-empty because cached crates don't
+# recompile. For a true cold picture, `cargo clean` first — or use the
+# `build-timings` GitHub workflow, which always builds cold.
+
+# HTML compile-time report (critical path, codegen vs frontend).
+timings *ARGS:
+    cargo build --workspace --all-targets --timings {{ARGS}}
+    @echo "report -> target/cargo-timings/cargo-timing.html"
+
+# LLVM IR lines emitted per (generic) function for one crate — the
+# monomorphization-bloat view. A helper instantiated for hundreds of type
+# combinations shows up at the top; the fix is usually `#[inline(never)]`
+# or pulling the type-independent body into a non-generic fn. Reads the
+# `llvm-tools-preview` component (pinned in rust-toolchain.toml).
+#   just llvm-lines                     # phux-protocol lib (default)
+#   just llvm-lines phux-server         # another crate's lib
+#   just llvm-lines phux --bin phux     # a specific binary target
+
+# Per-function LLVM IR line counts (monomorphization bloat) for one crate.
+llvm-lines PKG='phux-protocol' *ARGS:
+    cargo llvm-lines -p {{PKG}} {{ARGS}}
+
+# Attribute release binary size. Defaults to a by-crate breakdown of the
+# `phux` binary; pass args for the per-function view or another target:
+#   just bloat                   # size by crate (the phux binary)
+#   just bloat -n 30             # top 30 individual functions
+#   just bloat --bin phux-mcp    # a different binary
+
+# Attribute release binary size by crate (or per-fn with args).
+bloat *ARGS:
+    cargo bloat --release --bin phux {{ if ARGS == "" { "--crates" } else { ARGS } }}
