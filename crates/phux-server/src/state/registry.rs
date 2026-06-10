@@ -20,6 +20,19 @@ use super::{
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
 
+/// Derive the per-cell pixel size implied by one client's viewport report:
+/// `pixel / cells`, floored. `None` when the report carries no pixel metrics
+/// or they are degenerate — zero cells, or a pixel field smaller than the
+/// cell count (a sub-pixel cell is a bogus report, not a tiny font).
+fn viewport_cell_px(v: &phux_protocol::wire::frame::ViewportInfo) -> Option<(u16, u16)> {
+    if v.cols == 0 || v.rows == 0 {
+        return None;
+    }
+    let w = v.pixel_w? / v.cols;
+    let h = v.pixel_h? / v.rows;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
 impl ServerState {
     /// Build an empty state.
     #[must_use]
@@ -27,6 +40,7 @@ impl ServerState {
         Self {
             registry: Registry::new(),
             attached: HashMap::new(),
+            viewport_clock: 0,
             terminal_subscribers: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
@@ -191,7 +205,9 @@ impl ServerState {
         viewport: phux_protocol::wire::frame::ViewportInfo,
     ) {
         if let Some(c) = self.attached.get_mut(&client) {
+            self.viewport_clock += 1;
             c.viewport = Some(viewport);
+            c.viewport_seq = self.viewport_clock;
         }
     }
 
@@ -237,6 +253,32 @@ impl ServerState {
                 acc
             }
         }
+    }
+
+    /// Resolve the per-cell pixel size a Terminal should report — via the
+    /// PTY `winsize` pixel fields and XTWINOPS size replies — from the most
+    /// recent usable pixel report among the Terminal's subscribers.
+    ///
+    /// The resolved unit is *cell* size, not total pixels: the authoritative
+    /// grid from [`Self::resolve_terminal_geometry`] may match no single
+    /// client's viewport, so the Terminal's pixel size is `cells x cell size`
+    /// computed at the point of use. That keeps the kernel-reported geometry
+    /// self-consistent (`ws_xpixel / ws_col` is exactly the cell width —
+    /// the division `kitten icat`-style preflights perform).
+    ///
+    /// Recency — not the `window-size` policy — picks the donor viewport:
+    /// cell pixel size is a property of one physical display, and min/max
+    /// over mixed-DPI viewports would synthesize a cell belonging to no real
+    /// screen. `None` until some subscriber announces a viewport with usable
+    /// pixel metrics; callers then leave the Terminal's pixel state alone.
+    #[must_use]
+    pub fn resolve_terminal_cell_px(&self, terminal: TerminalId) -> Option<(u16, u16)> {
+        self.subscribers_for_terminal(terminal)
+            .iter()
+            .filter_map(|cid| self.attached.get(cid))
+            .filter_map(|c| Some((c.viewport_seq, viewport_cell_px(c.viewport.as_ref()?)?)))
+            .max_by_key(|&(seq, _)| seq)
+            .map(|(_, cell)| cell)
     }
 
     /// Read the frozen session-creation directory recorded for `session`
@@ -463,6 +505,7 @@ impl ServerState {
                 tx,
                 client_caps,
                 viewport: None,
+                viewport_seq: 0,
             },
         );
         // The server has now served at least one client, so the
