@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+readme = "README.md"
+keywords = ["terminal", "multiplexer", "protocol", "pty", "tui"]
+categories = ["command-line-interface", "network-programming", "encoding"]
 
 [lints]
 workspace = true
