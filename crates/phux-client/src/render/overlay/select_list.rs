@@ -232,6 +232,10 @@ impl RenderOverlay for SelectList {
             .render_into(modal_area, buf);
     }
 
+    fn bounds(&self, area: Rect) -> Option<Rect> {
+        Some(Self::modal_area(area))
+    }
+
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
         if key.action != KeyAction::Press {
             return OverlayCommand::Stay;

@@ -83,6 +83,21 @@ pub trait RenderOverlay {
     /// the key.
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand;
 
+    /// The painted region of this overlay inside `area`, or `None` if it
+    /// paints the whole viewport.
+    ///
+    /// A bounded overlay (every modal: help, prompt, command palette,
+    /// pickers) returns the centered `Rect` it draws into. The driver uses
+    /// it to **float** the modal: it repaints the live panes as the base
+    /// frame and then emits only this region on top, so the panes stay
+    /// visible around the box instead of vanishing behind a full-screen
+    /// clear (the "overlay overflows the whole screen" bug). Default `None`
+    /// keeps the legacy full-screen behaviour for any overlay that genuinely
+    /// owns the entire viewport.
+    fn bounds(&self, _area: Rect) -> Option<Rect> {
+        None
+    }
+
     /// The active copy-mode selection (pane-local cells), or `None`.
     ///
     /// `None` for every modal overlay (the default) — they paint their own
@@ -247,6 +262,29 @@ impl OverlayState {
         }
     }
 
+    /// The bounding `Rect` to float the active overlay stack within, or
+    /// `None` if any stacked overlay paints the whole viewport.
+    ///
+    /// Returns the union of every stacked overlay's [`RenderOverlay::bounds`].
+    /// When `Some`, the driver paints the live panes as a base frame and
+    /// emits only this region on top (a true floating modal); when `None`,
+    /// it falls back to the full-screen clear+paint. Copy-mode is handled
+    /// earlier (via [`Self::copy_selection`]) and never reaches here.
+    #[must_use]
+    pub fn active_bounds(&self, viewport_dims: (u16, u16)) -> Option<Rect> {
+        if self.stack.is_empty() {
+            return None;
+        }
+        let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
+        let mut union: Option<Rect> = None;
+        for overlay in &self.stack {
+            // Any full-screen overlay forces the whole-viewport path.
+            let b = overlay.bounds(area)?;
+            union = Some(union.map_or(b, |u| u.union(b)));
+        }
+        union
+    }
+
     /// Paint the overlay stack into a fresh full-viewport buffer and emit
     /// it to `out` as VT bytes. No-op when no overlay is active.
     ///
@@ -265,6 +303,29 @@ impl OverlayState {
             overlay.render(area, &mut buf);
         }
         emit_buffer(out, &buf)
+    }
+
+    /// Paint the overlay stack but emit **only** the cells inside `clip`.
+    ///
+    /// This is the floating-modal path: the caller has already painted the
+    /// live panes as the base frame, so emitting only the modal's bounded
+    /// region leaves the panes visible around it. Cells outside `clip` are
+    /// never written, so nothing erases the panes. No-op when inactive.
+    pub fn paint_clipped(
+        &self,
+        out: &mut impl Write,
+        viewport_dims: (u16, u16),
+        clip: Rect,
+    ) -> io::Result<()> {
+        if self.stack.is_empty() {
+            return Ok(());
+        }
+        let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
+        let mut buf = Buffer::empty(area);
+        for overlay in &self.stack {
+            overlay.render(area, &mut buf);
+        }
+        emit_buffer_clipped(out, &buf, clip.intersection(area))
     }
 }
 
@@ -305,6 +366,43 @@ fn emit_buffer(out: &mut impl Write, buf: &Buffer) -> io::Result<()> {
     // cursor visible. Stays hidden until the overlay dismisses and the
     // pane re-paint emits its own DECTCEM.
     out.write_all(b"\x1b[1;1H")?;
+    out.flush()
+}
+
+/// Emit only the cells of `buf` that fall inside `clip` (a floating modal's
+/// bounded region), leaving everything else on screen untouched.
+///
+/// The caller paints the live panes first; this writes the modal box on top
+/// without erasing the panes around it. Like [`emit_buffer`] it hides the
+/// cursor and emits a per-row CUP + per-cell SGR delta, but each row's CUP
+/// targets `clip`'s left edge and only `clip.width` cells are written.
+fn emit_buffer_clipped(out: &mut impl Write, buf: &Buffer, clip: Rect) -> io::Result<()> {
+    if clip.width == 0 || clip.height == 0 {
+        return Ok(());
+    }
+    out.write_all(b"\x1b[?25l")?;
+    for row in clip.y..clip.y.saturating_add(clip.height) {
+        // CUP to the clip's left column on this row (1-based).
+        write!(out, "\x1b[{};{}H", row + 1, clip.x + 1)?;
+        out.write_all(b"\x1b[0m")?;
+        let mut prev_styled = false;
+        for col in clip.x..clip.x.saturating_add(clip.width) {
+            let cell = &buf[(col, row)];
+            crate::render::sgr::emit_cell_sgr(out, cell, &mut prev_styled)?;
+            let sym = cell.symbol();
+            if sym.is_empty() {
+                out.write_all(b" ")?;
+            } else {
+                out.write_all(sym.as_bytes())?;
+            }
+        }
+        if prev_styled {
+            out.write_all(b"\x1b[0m")?;
+        }
+    }
+    // Park the (hidden) cursor at the modal origin; the next pane repaint on
+    // dismiss emits its own DECTCEM.
+    write!(out, "\x1b[{};{}H", clip.y + 1, clip.x + 1)?;
     out.flush()
 }
 
@@ -449,6 +547,97 @@ mod tests {
         let mut buf = Vec::new();
         s.paint(&mut buf, (80, 24)).expect("paint");
         assert!(buf.is_empty());
+    }
+
+    /// A bounded overlay that paints a sentinel OUTSIDE its bounds (at the
+    /// viewport origin) and content INSIDE — so a clipped emit can be proven
+    /// to drop the outside sentinel.
+    struct Bounded {
+        rect: Rect,
+    }
+    impl RenderOverlay for Bounded {
+        fn render(&self, _area: Rect, buf: &mut Buffer) {
+            buf.set_string(0, 0, "OUTSIDE", ratatui::style::Style::default());
+            buf.set_string(
+                self.rect.x,
+                self.rect.y,
+                "INSIDE",
+                ratatui::style::Style::default(),
+            );
+        }
+        fn handle_key(&mut self, _key: &KeyEvent) -> OverlayCommand {
+            OverlayCommand::Stay
+        }
+        fn bounds(&self, _area: Rect) -> Option<Rect> {
+            Some(self.rect)
+        }
+    }
+
+    #[test]
+    fn active_bounds_none_for_full_screen_overlay() {
+        // EscDismiss uses the default `bounds` (None) ⇒ full-screen path.
+        let mut s = OverlayState::new();
+        s.push(Box::new(EscDismiss));
+        assert_eq!(s.active_bounds((80, 24)), None);
+    }
+
+    #[test]
+    fn active_bounds_returns_overlay_rect() {
+        let mut s = OverlayState::new();
+        let rect = Rect::new(5, 3, 10, 4);
+        s.push(Box::new(Bounded { rect }));
+        assert_eq!(s.active_bounds((40, 12)), Some(rect));
+    }
+
+    #[test]
+    fn active_bounds_unions_the_stack() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(Bounded {
+            rect: Rect::new(2, 2, 4, 4),
+        }));
+        s.push(Box::new(Bounded {
+            rect: Rect::new(10, 8, 4, 4),
+        }));
+        // Union bounding box spans x∈[2,14), y∈[2,12).
+        assert_eq!(s.active_bounds((40, 20)), Some(Rect::new(2, 2, 12, 10)));
+    }
+
+    #[test]
+    fn active_bounds_none_if_any_overlay_full_screen() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(Bounded {
+            rect: Rect::new(2, 2, 4, 4),
+        }));
+        s.push(Box::new(EscDismiss)); // default bounds = None
+        assert_eq!(s.active_bounds((40, 20)), None);
+    }
+
+    #[test]
+    fn paint_clipped_emits_only_within_the_clip() {
+        let mut s = OverlayState::new();
+        let rect = Rect::new(5, 3, 10, 4);
+        s.push(Box::new(Bounded { rect }));
+        let mut out = Vec::new();
+        s.paint_clipped(&mut out, (40, 12), rect).expect("paint");
+        let txt = String::from_utf8_lossy(&out);
+        // Content inside the clip is emitted...
+        assert!(txt.contains("INSIDE"), "modal content must paint: {txt:?}");
+        // ...but the sentinel at (0,0) — outside the clip — is NOT, so the
+        // panes there are left untouched (the floating-modal invariant).
+        assert!(
+            !txt.contains("OUTSIDE"),
+            "cells outside the clip must never be emitted: {txt:?}"
+        );
+        // The first row CUP targets the clip origin (row 4, col 6, 1-based).
+        assert!(
+            txt.contains("\x1b[4;6H"),
+            "clip-origin CUP missing: {txt:?}"
+        );
+        // No CUP lands on a row above the clip (row 1).
+        assert!(
+            !txt.contains("\x1b[1;"),
+            "no CUP may target a row outside the clip: {txt:?}"
+        );
     }
 
     #[test]
