@@ -960,7 +960,7 @@ async fn main_loop<W: super::RenderSink>(
     // phux-4li.17: seed the window/tab strip from the bootstrap layout so
     // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
     if let Some(sb) = status_bar.as_mut() {
-        sb.set_windows(window_infos(&workspace));
+        sb.set_windows(window_infos(&workspace, &panes));
     }
 
     loop {
@@ -1078,7 +1078,7 @@ async fn main_loop<W: super::RenderSink>(
                 }
                 if layout_changed {
                     if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(window_infos(&workspace));
+                        sb.set_windows(window_infos(&workspace, &panes));
                     }
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
@@ -1266,7 +1266,7 @@ async fn main_loop<W: super::RenderSink>(
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
                             if let Some(sb) = status_bar.as_mut() {
-                                sb.set_windows(window_infos(&workspace));
+                                sb.set_windows(window_infos(&workspace, &panes));
                             }
                             if !overlays.is_active()
                                 && let Some(ls) = workspace.active_window()
@@ -1338,7 +1338,7 @@ async fn main_loop<W: super::RenderSink>(
                     return Ok(LoopExit::SwitchTo(target));
                 }
                 if layout_changed && let Some(sb) = status_bar.as_mut() {
-                    sb.set_windows(window_infos(&workspace));
+                    sb.set_windows(window_infos(&workspace, &panes));
                 }
                 if layout_changed
                     && !overlays.is_active()
@@ -1583,14 +1583,39 @@ fn build_resolver() -> Option<phux_config::keybind::Resolver> {
 /// phux-ahv.3: snapshot the current [`Workspace`] as the `windows`
 /// widget's input — display order with the active window flagged. The
 /// `windows` status-bar widget formats and styles these.
-fn window_infos(workspace: &Workspace) -> Vec<phux_config::widget::WindowInfo> {
+/// Snapshot the window/tab strip, preferring each window's live OSC
+/// title over its stored name.
+///
+/// A window's display label is the OSC 0/2 title of its focused leaf — the
+/// title the running program set (a shell shows the cwd/command, `vim` the
+/// file, an agent its task) — read straight from that pane's client-side
+/// libghostty mirror ([`PaneSlot::terminal`]). This is the tmux
+/// "automatic-rename" behaviour and Warp's tab titling, entirely
+/// client-local: titles flow in the PTY VT the mirror already consumes, so
+/// no wire frame or L3 key is involved. When the focused leaf has no slot
+/// yet or its title is empty, fall back to the window's stored `name`.
+fn window_infos(
+    workspace: &Workspace,
+    panes: &HashMap<TerminalId, PaneSlot>,
+) -> Vec<phux_config::widget::WindowInfo> {
     workspace
         .windows
         .iter()
         .enumerate()
-        .map(|(i, w)| phux_config::widget::WindowInfo {
-            name: w.name.clone(),
-            active: i == workspace.active,
+        .map(|(i, w)| {
+            let title = w
+                .state
+                .focus
+                .as_ref()
+                .and_then(|fid| panes.get(fid))
+                .and_then(|slot| slot.terminal.title().ok())
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(ToOwned::to_owned);
+            phux_config::widget::WindowInfo {
+                name: title.unwrap_or_else(|| w.name.clone()),
+                active: i == workspace.active,
+            }
         })
         .collect()
 }
@@ -2057,6 +2082,52 @@ mod tests {
         );
         assert_eq!(coalesce_defer_flags(&[None, None]), vec![false, false]);
         assert_eq!(coalesce_defer_flags(&[]), Vec::<bool>::new());
+    }
+
+    #[test]
+    fn window_infos_prefers_osc_title_over_stored_name() {
+        // A program in the focused leaf sets an OSC 2 window title; the tab
+        // strip must show it (tmux automatic-rename / Warp tab titling).
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
+        panes.insert(id, slot);
+
+        let infos = window_infos(&workspace, &panes);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(
+            infos[0].name, "~/src/phux",
+            "the OSC title should label the tab, overriding the stored name"
+        );
+        assert!(infos[0].active);
+    }
+
+    #[test]
+    fn window_infos_falls_back_to_stored_name_without_title() {
+        // No OSC title set ⇒ the window's stored name ("1" for the first).
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id, PaneSlot::new_with_size(80, 24).expect("slot"));
+
+        let infos = window_infos(&workspace, &panes);
+        assert_eq!(infos[0].name, "1");
+    }
+
+    #[test]
+    fn window_infos_ignores_a_whitespace_only_title() {
+        // A title of only spaces is not a useful label; fall back to the name.
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;   \x07");
+        panes.insert(id, slot);
+
+        let infos = window_infos(&workspace, &panes);
+        assert_eq!(infos[0].name, "1");
     }
 
     #[test]
