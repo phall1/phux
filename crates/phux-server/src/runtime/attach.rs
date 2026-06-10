@@ -1070,9 +1070,12 @@ pub(crate) fn apply_attach_viewport(
             // ATTACH-time resize: do NOT resync — the attach handshake
             // already sends an authoritative TERMINAL_SNAPSHOT, and a
             // resync broadcast here would race ahead of it (phux-8v1).
+            // Pixel geometry rides along (most recent usable subscriber
+            // report — normally the viewport recorded above).
             match pane.handle.resize.try_send(ResizeRequest {
                 cols,
                 rows,
+                cell_px: s.resolve_terminal_cell_px(pane.terminal_id),
                 resync_clients: false,
             }) {
                 Ok(()) => {}

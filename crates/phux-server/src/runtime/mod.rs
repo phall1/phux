@@ -720,9 +720,26 @@ mod tests {
             observed.resync_clients,
             "a live VIEWPORT_RESIZE must request a client resync (phux-8v1)",
         );
+        assert_eq!(
+            observed.cell_px, None,
+            "a pixel-less viewport report must not invent a cell size",
+        );
         assert!(
             resize_rx.try_recv().is_err(),
             "exactly one resize request should be queued — got more",
+        );
+
+        // A pixel-bearing report resolves the per-cell size and rides the
+        // same request: 1320x750 px over 132x50 cells -> 10x15 px cells.
+        let viewport = ViewportInfo::new(132, 50).with_pixels(Some(1320), Some(750));
+        handle_viewport_resize(&state, client_id, &viewport);
+        let observed = resize_rx
+            .try_recv()
+            .expect("second resize request must be queued on the channel");
+        assert_eq!(
+            observed.cell_px,
+            Some((10, 15)),
+            "the resolved cell pixel size must reach the actor",
         );
     }
 

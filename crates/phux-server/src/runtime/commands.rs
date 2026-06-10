@@ -193,10 +193,13 @@ pub(crate) fn handle_terminal_resize(
             return;
         };
         // Live per-pane resize (TERMINAL_RESIZE): resync clients so their
-        // mirrors reconverge after reflow (phux-8v1).
+        // mirrors reconverge after reflow (phux-8v1). An agent's explicit
+        // resize carries cell counts only — no pixel truth — so the actor
+        // keeps its last-known cell pixel size.
         match handle.resize.try_send(ResizeRequest {
             cols,
             rows,
+            cell_px: None,
             resync_clients: true,
         }) {
             Ok(()) => {}
@@ -1024,6 +1027,11 @@ pub(crate) fn handle_viewport_resize(
         if let Some(pane) = s.registry.terminal_mut(terminal_id) {
             pane.dims = (cols, rows);
         }
+        // Pixel geometry rides along: the most recent usable pixel report
+        // among this Terminal's subscribers — normally the viewport just
+        // recorded above — fixes the cell size the PTY winsize and
+        // XTWINOPS replies advertise.
+        let cell_px = s.resolve_terminal_cell_px(terminal_id);
         // Fan the resize out to the TerminalActor so libghostty's
         // `Terminal::set_size` and the PTY `winsize` ioctl get
         // updated. byc.5 added the `resize` channel on `TerminalHandle`;
@@ -1043,6 +1051,7 @@ pub(crate) fn handle_viewport_resize(
             match handle.resize.try_send(ResizeRequest {
                 cols,
                 rows,
+                cell_px,
                 resync_clients: true,
             }) {
                 Ok(()) => {}

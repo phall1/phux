@@ -31,10 +31,12 @@
 //! standard cheap-clone byte buffer in the tokio ecosystem; `Vec<u8>`
 //! would also work but at the cost of a full clone per subscriber.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use bytes::Bytes;
+use libghostty_vt::terminal::SizeReportSize;
 use libghostty_vt::{RenderState, Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::ClientId;
 use phux_protocol::wire::frame::{AgentEvent, FrameKind, TerminalEventType};
@@ -287,6 +289,18 @@ pub struct TerminalActor {
     wire_terminal_id: u32,
     cols: u16,
     rows: u16,
+    /// Last-known per-cell pixel size `(width, height)` from the most
+    /// recent [`ResizeRequest`] that carried one. Sticky: a pixel-less
+    /// resize (agent `TERMINAL_RESIZE`) keeps the established value.
+    /// `(0, 0)` until any client reports pixel metrics — the PTY winsize
+    /// and size reports then honestly carry zero, matching a terminal
+    /// that does not know its pixel geometry.
+    cell_px: (u16, u16),
+    /// Current grid + cell geometry shared with the libghostty `on_size`
+    /// callback, which answers XTWINOPS size queries (CSI 14/16/18 t)
+    /// synchronously inside `vt_write` — while `handle_resize` is the
+    /// writer. Updated after every applied resize.
+    size_report: Rc<Cell<SizeReportSize>>,
 }
 
 /// Errors surfaced while constructing a [`TerminalActor`].
@@ -441,7 +455,7 @@ impl TerminalActor {
         max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
-        let terminal = GhosttyTerminal::new(TerminalOptions {
+        let mut terminal = GhosttyTerminal::new(TerminalOptions {
             cols,
             rows,
             // `defaults.history-limit` is a `u32` on the wire/config; the
@@ -449,6 +463,12 @@ impl TerminalActor {
             // supported targets.
             max_scrollback: max_scrollback as usize,
         })?;
+        let size_report = Rc::new(Cell::new(SizeReportSize {
+            rows,
+            columns: cols,
+            cell_width: 0,
+            cell_height: 0,
+        }));
         let synth = SnapshotSynthesizer::new()?;
         let key_enc = PerTerminalKeyEncoder::new()?;
         let mouse_enc = PerTerminalMouseEncoder::new()?;
@@ -478,6 +498,7 @@ impl TerminalActor {
         } else {
             (None, None, None)
         };
+        Self::install_effects(&mut terminal, &size_report, pty_tx.as_ref())?;
 
         let actor = Self {
             terminal: RefCell::new(terminal),
@@ -524,6 +545,8 @@ impl TerminalActor {
             wire_terminal_id: 0,
             cols,
             rows,
+            cell_px: (0, 0),
+            size_report,
         };
         let handle = TerminalHandle {
             input: input_tx,
@@ -546,6 +569,48 @@ impl TerminalActor {
             token: bundle_token,
             exit_notify: Some(exit_rx),
         })
+    }
+
+    /// Install the libghostty effect handlers the actor relies on.
+    ///
+    /// `on_size` answers XTWINOPS size queries (CSI 14/16/18 t) from the
+    /// shared geometry cell; `handle_resize` keeps it current. Without
+    /// this callback libghostty silently drops the query and pixel-aware
+    /// programs (`kitten icat` preflights, sixel sizers) see a mute
+    /// terminal even though the kernel winsize carries pixel dims.
+    ///
+    /// `on_pty_write` routes terminal-generated replies (XTWINOPS size
+    /// reports, DECRQM mode reports, CSI 21 t title reports, mode-2048
+    /// in-band resize notifications) back to the child through the same
+    /// writer bridge that carries client input; libghostty discards
+    /// every reply when it is absent. The callback fires synchronously
+    /// inside `vt_write` while the actor holds the `Terminal` borrow, so
+    /// it must not touch the terminal — a channel send is safe. The
+    /// sender it captures is WEAK: the closure lives in the Terminal's
+    /// vtable, which the actor owns through `shutdown_pty` — a strong
+    /// clone there would keep the writer-bridge channel open while
+    /// `shutdown_pty` joins the writer thread (which only exits on
+    /// channel close), deadlocking teardown.
+    fn install_effects(
+        terminal: &mut GhosttyTerminal<'static, 'static>,
+        size_report: &Rc<Cell<SizeReportSize>>,
+        pty_tx: Option<&mpsc::UnboundedSender<Vec<u8>>>,
+    ) -> Result<(), TerminalActorError> {
+        terminal.on_size({
+            let size_report = Rc::clone(size_report);
+            move |_term| Some(size_report.get())
+        })?;
+        if let Some(tx) = pty_tx {
+            let tx = tx.downgrade();
+            terminal.on_pty_write(move |_term, bytes| {
+                // No upgrade ⇒ the writer bridge (and child) are gone;
+                // the reply has no recipient. Drop it.
+                if let Some(tx) = tx.upgrade() {
+                    let _ = tx.send(bytes.to_vec());
+                }
+            })?;
+        }
+        Ok(())
     }
 
     /// Test-only constructor: write `bytes` into the actor's `Terminal`
@@ -1164,7 +1229,7 @@ impl TerminalActor {
 
     /// Apply a resize to both the libghostty `Terminal` and the PTY
     /// kernel-side winsize. Idempotent; logs and continues on errors.
-    fn handle_resize(&mut self, cols: u16, rows: u16) {
+    fn handle_resize(&mut self, cols: u16, rows: u16, cell_px: Option<(u16, u16)>) {
         // libghostty has no concept of a zero-dimension grid: a 0-col or
         // 0-row resize fails with `InvalidValue` and leaves the grid at its
         // prior size. SPEC §10.5 already treats a zero-dimension viewport as
@@ -1173,10 +1238,16 @@ impl TerminalActor {
         // terminal collapsing to nothing) can never reach libghostty.
         let cols = cols.max(1);
         let rows = rows.max(1);
+        // Sticky cell size: see the `ResizeRequest::cell_px` doc.
+        if let Some(cell) = cell_px {
+            self.cell_px = cell;
+        }
+        let (cell_w, cell_h) = self.cell_px;
 
-        // `Terminal::resize` takes pixel dims for image-protocol sizing;
-        // pass 0 (server does not maintain pixel metrics — clients
-        // own pixel rendering per ADR-0013).
+        // `Terminal::resize` takes the per-cell pixel size and derives the
+        // terminal's pixel dimensions (`cells x cell size`) for XTWINOPS
+        // size reports, mode-2048 in-band notifications, and image
+        // protocols. `(0, 0)` while no client has reported pixel metrics.
         //
         // A both-axes shrink in a single resize() call once overflowed
         // libghostty's `PageList.resizeCols` (phux-y06, the SIGABRT
@@ -1185,7 +1256,7 @@ impl TerminalActor {
         // overflow"), so a both-shrink is a single safe call.
         let applied = {
             let mut term = self.terminal.borrow_mut();
-            let result = term.resize(cols, rows, 0, 0);
+            let result = term.resize(cols, rows, u32::from(cell_w), u32::from(cell_h));
             if let Err(err) = result {
                 warn!(?err, cols, rows, "terminal resize failed");
             }
@@ -1197,15 +1268,24 @@ impl TerminalActor {
         };
         self.cols = applied.0;
         self.rows = applied.1;
+        self.size_report.set(SizeReportSize {
+            rows: applied.1,
+            columns: applied.0,
+            cell_width: u32::from(cell_w),
+            cell_height: u32::from(cell_h),
+        });
         // A resize reflows the grid: every consumer reference is rebuilt
         // on the next diff, so force the next tick to walk (phux-4l0).
         self.terminal_dirty_since_tick = true;
         if let Some(pty) = &self.pty {
+            // The kernel `winsize` pixel fields are the whole text area;
+            // saturate rather than wrap if an enormous grid on a dense
+            // display overflows the u16 (the kernel field is no wider).
             let size = PtySize {
                 rows: applied.1,
                 cols: applied.0,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: applied.0.saturating_mul(cell_w),
+                pixel_height: applied.1.saturating_mul(cell_h),
             };
             if let Ok(master) = pty.master.lock()
                 && let Err(err) = master.resize(size)
@@ -1671,7 +1751,7 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.resize_rx.recv() => {
-                    self.handle_resize(req.cols, req.rows);
+                    self.handle_resize(req.cols, req.rows, req.cell_px);
                     // phux-8v1: re-broadcast a full snapshot for live
                     // resizes so client mirrors reconverge after their
                     // independent reflow. Suppressed for the ATTACH-time
@@ -3174,6 +3254,7 @@ mod tests {
                     .send(ResizeRequest {
                         cols: 120,
                         rows: 40,
+                        cell_px: None,
                         resync_clients: false,
                     })
                     .await
@@ -3185,6 +3266,168 @@ mod tests {
                     tokio::task::yield_now().await;
                 }
 
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// A resize carrying cell pixel metrics must land in the kernel
+    /// winsize: `ws_xpixel`/`ws_ypixel` = cells x cell size. TIOCGWINSZ
+    /// is the first thing pixel-aware programs (`kitten icat`, sixel
+    /// sizers) consult; without the `cell_px` plumbing it reads 0x0.
+    /// A later pixel-less resize (agent `TERMINAL_RESIZE`) must keep the
+    /// established cell size rather than zeroing the pixel fields.
+    #[tokio::test(flavor = "current_thread")]
+    async fn resize_with_cell_px_updates_pty_winsize_pixels() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let cmd = CommandBuilder::new("/bin/cat");
+                let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn");
+                let master = std::sync::Arc::clone(&bundle.actor.pty.as_ref().expect("pty").master);
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                // Poll the kernel winsize until it reaches `want` (the
+                // resize mailbox is async); bail out after a bounded wait.
+                let wait_for = async |want: (u16, u16, u16, u16)| {
+                    let read = || {
+                        let got = master
+                            .lock()
+                            .expect("master lock")
+                            .get_size()
+                            .expect("size");
+                        (got.cols, got.rows, got.pixel_width, got.pixel_height)
+                    };
+                    for _ in 0..200 {
+                        if read() == want {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    panic!(
+                        "winsize never reached {want:?}; kernel reports {:?}",
+                        read()
+                    );
+                };
+
+                // 100x40 cells at 9x18 px per cell: 900x720 px text area.
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 100,
+                        rows: 40,
+                        cell_px: Some((9, 18)),
+                        resync_clients: false,
+                    })
+                    .await
+                    .expect("send resize");
+                wait_for((100, 40, 900, 720)).await;
+
+                // Pixel-less resize: grid changes, cell size sticks.
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 90,
+                        rows: 30,
+                        cell_px: None,
+                        resync_clients: false,
+                    })
+                    .await
+                    .expect("send resize");
+                wait_for((90, 30, 810, 540)).await;
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// End-to-end XTWINOPS: a PTY child queries `CSI 14 t` (text area in
+    /// pixels) and `CSI 18 t` (text area in cells) and must receive the
+    /// geometry the most recent resize established. Exercises the whole
+    /// reply path — libghostty parses the query from PTY output, the
+    /// `on_size` callback supplies the shared geometry, and `on_pty_write`
+    /// routes the encoded reply back into the PTY writer bridge. The
+    /// asserted bytes come back via tty echo of the child's input.
+    #[tokio::test(flavor = "current_thread")]
+    async fn xtwinops_size_queries_answered_from_resized_geometry() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut cmd = CommandBuilder::new("/bin/sh");
+                // One query pair per input line, so the test can re-trigger
+                // if an early line raced the resize.
+                cmd.args(["-c", r"while read _; do printf '\033[14t\033[18t'; done"]);
+                let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn");
+                let pty_in = bundle.actor.pty_tx.clone().expect("pty writer");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let mut out = handle.output.subscribe();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 100,
+                        rows: 40,
+                        cell_px: Some((9, 18)),
+                        resync_clients: false,
+                    })
+                    .await
+                    .expect("send resize");
+                // Let the actor drain the resize before the first query.
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+
+                // CSI 14 t reply: ESC [ 4 ; height_px ; width_px t.
+                // CSI 18 t reply: ESC [ 8 ; rows ; cols t.
+                // The replies surface as tty ECHO of the child's input, and
+                // ECHOCTL (in the default lflags) renders the ESC byte in
+                // caret notation — `^[` — so accept either spelling.
+                let seen = |acc: &[u8], tail: &[u8]| {
+                    contains_subslice(acc, &[b"\x1b[", tail].concat())
+                        || contains_subslice(acc, &[b"^[[", tail].concat())
+                };
+                let mut acc: Vec<u8> = Vec::new();
+                let mut found = false;
+                for round in 0..64 {
+                    if round % 16 == 0 {
+                        pty_in.send(b"go\n".to_vec()).expect("pty write");
+                    }
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), out.recv())
+                        .await
+                    {
+                        Ok(Ok(PaneOutput::Live(bytes))) => acc.extend_from_slice(&bytes),
+                        Ok(Ok(PaneOutput::Resync { bytes, .. })) => {
+                            acc.extend_from_slice(&bytes);
+                        }
+                        Ok(Err(_)) => break, // channel closed
+                        Err(_) => {}         // timeout tick; retry
+                    }
+                    if seen(&acc, b"4;720;900t") && seen(&acc, b"8;40;100t") {
+                        found = true;
+                        break;
+                    }
+                }
+                assert!(
+                    found,
+                    "XTWINOPS replies never observed; output so far: {:?}",
+                    String::from_utf8_lossy(&acc),
+                );
+
+                // The writer bridge exits on channel close; `shutdown_pty`
+                // joins it, so the test's sender clone must drop first.
+                drop(pty_in);
                 token.cancel();
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
                     .await
@@ -3220,6 +3463,7 @@ mod tests {
                     .send(ResizeRequest {
                         cols: 40,
                         rows: 10,
+                        cell_px: None,
                         resync_clients: true,
                     })
                     .await
@@ -3302,7 +3546,7 @@ mod tests {
                 for w in [70u16, 60, 50, 60, 70, 80, 90, 100] {
                     handle
                         .resize
-                        .send(ResizeRequest { cols: w, rows: 24, resync_clients: true })
+                        .send(ResizeRequest { cols: w, rows: 24, cell_px: None, resync_clients: true })
                         .await
                         .expect("send resize");
                 }
@@ -3381,6 +3625,7 @@ mod tests {
                         .send(ResizeRequest {
                             cols,
                             rows,
+                            cell_px: None,
                             resync_clients: false,
                         })
                         .await
@@ -3398,6 +3643,7 @@ mod tests {
                     .send(ResizeRequest {
                         cols: 100,
                         rows: 30,
+                        cell_px: None,
                         resync_clients: false,
                     })
                     .await

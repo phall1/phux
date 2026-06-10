@@ -47,6 +47,13 @@ pub struct AttachedClient {
     /// last-writer-wins resize, where two differently-sized clients thrashed
     /// each other's grid. `None` until the client announces a viewport.
     pub viewport: Option<phux_protocol::wire::frame::ViewportInfo>,
+    /// Stamp from [`super::ServerState`]'s viewport clock, taken when
+    /// `viewport` was last set. Orders viewport announcements across
+    /// clients so cell-pixel resolution
+    /// ([`super::ServerState::resolve_terminal_cell_px`]) can prefer the
+    /// most recent usable pixel report. `0` until the client announces
+    /// a viewport.
+    pub viewport_seq: u64,
 }
 
 /// One pane target in an ATTACH snapshot pass.

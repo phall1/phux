@@ -260,6 +260,15 @@ pub struct ResizeRequest {
     pub cols: u16,
     /// New grid height in cells.
     pub rows: u16,
+    /// Pixel size of one cell `(width, height)` on the donor display, as
+    /// resolved by [`crate::state::ServerState::resolve_terminal_cell_px`].
+    /// The actor multiplies it out to the PTY `winsize` pixel fields and
+    /// libghostty's pixel dimensions (XTWINOPS size replies, image
+    /// protocols). `None` ⇒ no pixel truth in this request; the actor
+    /// keeps its last-known cell size so a pixel-less resize (e.g. an
+    /// agent's `TERMINAL_RESIZE`) cannot zero out geometry a real client
+    /// already established.
+    pub cell_px: Option<(u16, u16)>,
     /// Re-broadcast a full snapshot after reflow (live resize) vs stay
     /// quiet (attach-time resize). See the type-level doc.
     pub resync_clients: bool,

@@ -250,6 +250,11 @@ pub struct ServerState {
     /// via `CreateIfMissing`. Without this guard the auto-spawn → attach
     /// flow races the server's own self-exit.
     has_served_client: bool,
+    /// Monotonic stamp handed out on every viewport announcement
+    /// ([`Self::set_client_viewport`]). Orders announcements across
+    /// clients so [`Self::resolve_terminal_cell_px`] can pick the most
+    /// recent usable pixel report deterministically.
+    viewport_clock: u64,
     /// Optional policy extension bundle. Defaults to permissive.
     policy_bundle: crate::policy::PolicyBundle,
     /// Per-client peer identities, keyed by server-assigned client id.
@@ -480,6 +485,54 @@ mod tests {
         s.set_window_size(WindowSize::Smallest);
         s.set_client_viewport(small, ViewportInfo::new(0, 0));
         assert_eq!(s.resolve_terminal_geometry(pid, None), Some((120, 48)));
+    }
+
+    #[test]
+    fn resolve_cell_px_prefers_most_recent_usable_pixel_report() {
+        use phux_protocol::wire::frame::ViewportInfo;
+
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let retina = s.new_client_id();
+        let lodpi = s.new_client_id();
+        s.attach_default_caps(retina, "default", mk_tx()).unwrap();
+        s.attach_default_caps(lodpi, "default", mk_tx()).unwrap();
+
+        // No viewports yet: no pixel truth.
+        assert_eq!(s.resolve_terminal_cell_px(pid), None);
+
+        // A viewport without pixel metrics contributes nothing.
+        s.set_client_viewport(retina, ViewportInfo::new(120, 48));
+        assert_eq!(s.resolve_terminal_cell_px(pid), None);
+
+        // 120x48 cells over 1920x1440 px -> 16x30 px cells.
+        s.set_client_viewport(
+            retina,
+            ViewportInfo::new(120, 48).with_pixels(Some(1920), Some(1440)),
+        );
+        assert_eq!(s.resolve_terminal_cell_px(pid), Some((16, 30)));
+
+        // A later report from another display wins on recency...
+        s.set_client_viewport(
+            lodpi,
+            ViewportInfo::new(80, 24).with_pixels(Some(640), Some(384)),
+        );
+        assert_eq!(s.resolve_terminal_cell_px(pid), Some((8, 16)));
+
+        // ...but a later report WITHOUT usable pixels does not erase the
+        // best available truth: degenerate (sub-pixel cell) and absent
+        // metrics are both skipped, falling back to the retina report.
+        s.set_client_viewport(
+            lodpi,
+            ViewportInfo::new(80, 24).with_pixels(Some(79), Some(23)),
+        );
+        assert_eq!(s.resolve_terminal_cell_px(pid), Some((16, 30)));
+        s.set_client_viewport(lodpi, ViewportInfo::new(80, 24));
+        assert_eq!(s.resolve_terminal_cell_px(pid), Some((16, 30)));
+
+        // Detach drops the donor's report with it.
+        s.detach(retina);
+        assert_eq!(s.resolve_terminal_cell_px(pid), None);
     }
 
     #[test]

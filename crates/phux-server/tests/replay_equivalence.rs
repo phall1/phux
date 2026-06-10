@@ -325,6 +325,7 @@ fn snapshot_plus_output_reconstructs_server_grid_across_resize() {
             .send(ResizeRequest {
                 cols: 100,
                 rows: 30,
+                cell_px: None,
                 resync_clients: true,
             })
             .await

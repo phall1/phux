@@ -363,6 +363,7 @@ fn resize_path_does_not_panic_against_pty() {
             .send(ResizeRequest {
                 cols: 120,
                 rows: 40,
+                cell_px: Some((8, 16)),
                 resync_clients: true,
             })
             .await
