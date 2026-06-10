@@ -1,0 +1,49 @@
+# phux stress lane — the heavy resize/output/lifecycle storm suite.
+#
+# Why this is NOT in ci.yml: these tests are CPU-starvation-sensitive. The
+# server is a single current-thread runtime; on the 2-core GitHub runner the
+# output-flood-vs-resize-reflow feedback loop turns a sub-second test into a
+# multi-minute grind (a single resize-storm test measured ~0.3s on a
+# multi-core box vs ~13 min on the 2-core runner — pure CPU starvation, not
+# a code defect). Gating PRs on that is a ~25-min wall for no added safety
+# signal a fast machine wouldn't already give. So the stress suite runs here
+# instead: post-merge on `main` (catch a regression the moment it lands) and
+# nightly (catch environment drift), never blocking a PR.
+#
+# Build+run stay on one runner (matching ci.yml): libghostty-vt's build.rs
+# lets zig auto-detect the host CPU, so an artifact built on one runner can
+# SIGILL on another. The CPU-fingerprinted cache key keeps native artifacts
+# pinned to matching hardware.
+
+name: stress
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *" # nightly 07:00 UTC
+  workflow_dispatch:
+
+# Don't pile up: a newer main push supersedes an in-flight stress run on the
+# same ref. Never cancel a scheduled run (we want the nightly coverage).
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    name: stress
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: CPU fingerprint
+        run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: stress suite
+        run: nix develop -c just stress
