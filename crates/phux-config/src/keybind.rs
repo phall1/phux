@@ -161,14 +161,8 @@ impl Ord for KeyChord {
 }
 
 /// A whitespace-separated list of [`KeyChord`]s, e.g. `C-b c`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeybindSequence(pub Vec<KeyChord>);
-
-impl std::hash::Hash for KeybindSequence {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
 
 /// The result of a fully-matched binding: an action name plus any
 /// inline-table parameters carried by [`Action::Parameterized`].
@@ -500,38 +494,13 @@ pub fn parse_chord_sequence(s: &str) -> Result<KeybindSequence, KeybindError> {
     Ok(KeybindSequence(chords))
 }
 
-/// Parse a single TOML chord string (e.g. `"F1"`, `"C-a"`, `"M-S-Tab"`)
-/// into the [`KeyChord`] a live [`KeyEvent`] can be compared against.
-///
-/// # Return type
-///
-/// This deliberately returns a [`KeyChord`], not a [`KeyEvent`]. A
-/// [`KeyEvent`] carries runtime-only fields a config string cannot
-/// supply — `action` (press/release/repeat), `consumed_mods`,
-/// `composing`, `text`, and `unshifted_codepoint`. Synthesizing a
-/// [`KeyEvent`] would force arbitrary choices for all of them and then
-/// invite a brittle full-struct `==`. The thing a consumer actually
-/// wants is "does this live event match this configured chord?", so the
-/// chord is the comparison-ready value and [`KeyChord::matches_event`]
-/// is the comparison. This is a thin wrapper over [`parse_chord`];
-/// callers that already hold a [`KeyChord`] can skip it.
-///
-/// # Errors
-///
-/// Returns [`KeybindError`] when the string is malformed or names an
-/// unknown key (see [`parse_chord`]).
-pub fn chord_str_to_key_chord(s: &str) -> Result<KeyChord, KeybindError> {
-    parse_chord(s)
-}
-
 /// Does a live [`KeyEvent`] match the chord spelled by `s`?
 ///
-/// Convenience wrapper: parses `s` via [`chord_str_to_key_chord`] then
-/// delegates to [`KeyChord::matches_event`]. A parse error yields `false`
-/// — a chord string that doesn't parse can't match any event. Callers
-/// that need to distinguish "no match" from "bad config" should parse
-/// once up front with [`chord_str_to_key_chord`] and keep the
-/// [`KeyChord`].
+/// Convenience wrapper: parses `s` via [`parse_chord`] then delegates to
+/// [`KeyChord::matches_event`]. A parse error yields `false` — a chord
+/// string that doesn't parse can't match any event. Callers that need to
+/// distinguish "no match" from "bad config" should parse once up front
+/// with [`parse_chord`] and keep the [`KeyChord`].
 #[must_use]
 pub fn chord_str_matches_event(s: &str, ev: &KeyEvent) -> bool {
     parse_chord(s).is_ok_and(|chord| chord.matches_event(ev))
@@ -713,14 +682,6 @@ mod tests {
             text: None,
             unshifted_codepoint: None,
         }
-    }
-
-    #[test]
-    fn chord_str_to_key_chord_matches_parse_chord() {
-        assert_eq!(
-            chord_str_to_key_chord("C-a").expect("parses"),
-            parse_chord("C-a").expect("parses")
-        );
     }
 
     #[test]

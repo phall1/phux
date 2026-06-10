@@ -286,19 +286,6 @@ impl SharedState {
         Self(state)
     }
 
-    /// Wrap a caller-built state. Useful when the caller has already pre-
-    /// seeded sessions via `seed_session` and wants the prepared state
-    /// shared across tasks.
-    #[must_use]
-    pub fn from_state(state: ServerState) -> Self {
-        #[allow(
-            clippy::arc_with_non_send_sync,
-            reason = "single-threaded current-thread runtime; Mutex+Arc safety not required"
-        )]
-        let wrapped = Arc::new(Mutex::new(state));
-        Self(wrapped)
-    }
-
     /// Lock the state. Prefer [`Self::with`] / [`Self::with_mut`] when
     /// possible.
     ///

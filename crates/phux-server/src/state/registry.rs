@@ -292,14 +292,6 @@ impl ServerState {
         &self.metadata
     }
 
-    /// Mutably borrow the L3 metadata store. Use the higher-level
-    /// [`Self::metadata_set`] / [`Self::metadata_delete`] /
-    /// [`Self::metadata_subscribe`] helpers when you also want the
-    /// subscriber-fanout side effects.
-    pub const fn metadata_mut(&mut self) -> &mut MetadataStore {
-        &mut self.metadata
-    }
-
     /// Record the layer set advertised by `client_id` in HELLO. Called
     /// from the runtime's HELLO handler. Re-set is idempotent (the
     /// most recent HELLO wins, matching `ColorSupport`).

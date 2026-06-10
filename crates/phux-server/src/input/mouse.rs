@@ -85,11 +85,6 @@ impl PerTerminalMouseEncoder {
         self.encoder.encode_to_vec(&lg_event, &mut self.buf)?;
         Ok(&self.buf)
     }
-
-    /// Access the underlying libghostty encoder for size / dedup tuning.
-    pub const fn inner_mut(&mut self) -> &mut LgMouseEncoder<'static> {
-        &mut self.encoder
-    }
 }
 
 #[cfg(test)]

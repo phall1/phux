@@ -314,16 +314,5 @@ pub const SESSION_ID_TAG_LOCAL: u32 = 0;
 /// `SessionId::Satellite` tag (reserved for v0.2+; decoders MUST reject).
 pub const SESSION_ID_TAG_SATELLITE: u32 = 1;
 
-// -----------------------------------------------------------------------------
-// `TerminalId` tagged union — ADR-0016 §Decision (phux-vp0.4)
-// -----------------------------------------------------------------------------
-//
-// The wire-side tag bytes (`u8`) live in `crate::ids` alongside the
-// [`TerminalId`](crate::ids::TerminalId) definition. They are re-exported here
-// so call sites that already import `wire::field::*` for TLV constants can
-// spell the tags without an extra `use`. This is a re-export, not a renumber.
-
-/// Wire tag byte for `TerminalId::Local` (see [`crate::ids::TERMINAL_ID_TAG_LOCAL`]).
-pub const TERMINAL_ID_TAG_LOCAL: u8 = crate::ids::TERMINAL_ID_TAG_LOCAL;
-/// Wire tag byte for `TerminalId::Satellite` (see [`crate::ids::TERMINAL_ID_TAG_SATELLITE`]).
-pub const TERMINAL_ID_TAG_SATELLITE: u8 = crate::ids::TERMINAL_ID_TAG_SATELLITE;
+// The `TerminalId` wire-side tag bytes (`u8`) live in `crate::ids` alongside the
+// [`TerminalId`](crate::ids::TerminalId) definition — ADR-0016 §Decision.
