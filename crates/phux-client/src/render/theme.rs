@@ -73,6 +73,20 @@ pub struct Theme {
     pub section_header: Color,
     /// Error / alarm text.
     pub error: Color,
+    /// Modal interior background — the "panel" fill behind a floating
+    /// modal's body. Defaults to `Reset` (inherit the terminal background)
+    /// so the box reads as transparent unless a theme opts into a tint.
+    pub surface: Color,
+    /// Drop-shadow color painted one cell below + right of a floating
+    /// modal, giving it depth over the live panes. A subtle dark by
+    /// default so it reads as a shadow on most terminals.
+    pub shadow: Color,
+    /// Foreground of selection chrome: the copy-mode status strip (and
+    /// future selected list rows).
+    pub selection_fg: Color,
+    /// Background of selection chrome: the copy-mode status strip (and
+    /// future selected list rows).
+    pub selection_bg: Color,
 }
 
 impl Default for Theme {
@@ -91,6 +105,15 @@ impl Default for Theme {
             title: Color::Cyan,
             section_header: Color::Yellow,
             error: Color::Red,
+            // Reset = no fill (inherit terminal bg); opt-in via config.
+            surface: Color::Reset,
+            // A near-black slate that reads as a shadow on dark and light
+            // terminals alike.
+            shadow: Color::Rgb(28, 28, 38),
+            // Reproduces the copy-mode strip's prior look (bright white on
+            // dark gray) now that it routes through the theme.
+            selection_fg: Color::White,
+            selection_bg: Color::Indexed(240),
         }
     }
 }
@@ -139,6 +162,10 @@ impl Theme {
             "title" => Some(&mut self.title),
             "section_header" => Some(&mut self.section_header),
             "error" => Some(&mut self.error),
+            "surface" => Some(&mut self.surface),
+            "shadow" => Some(&mut self.shadow),
+            "selection_fg" => Some(&mut self.selection_fg),
+            "selection_bg" => Some(&mut self.selection_bg),
             _ => None,
         }
     }
@@ -175,6 +202,27 @@ mod tests {
         assert_eq!(t.title, Color::Cyan);
         assert_eq!(t.section_header, Color::Yellow);
         assert_eq!(t.error, Color::Red);
+        // Design tokens added for floating-modal depth + selection chrome.
+        assert_eq!(t.surface, Color::Reset);
+        assert_eq!(t.shadow, Color::Rgb(28, 28, 38));
+        assert_eq!(t.selection_fg, Color::White);
+        assert_eq!(t.selection_bg, Color::Indexed(240));
+    }
+
+    #[test]
+    fn surface_and_selection_slots_are_overridable() {
+        let t = Theme::from_cfg(&cfg(&[
+            ("surface", "#1e1e2e"),
+            ("shadow", "#000000"),
+            ("selection_bg", "blue"),
+            ("selection_fg", "15"),
+        ]));
+        assert_eq!(t.surface, Color::Rgb(0x1e, 0x1e, 0x2e));
+        assert_eq!(t.shadow, Color::Rgb(0, 0, 0));
+        assert_eq!(t.selection_bg, Color::Blue);
+        assert_eq!(t.selection_fg, Color::Indexed(15));
+        // Untouched slots keep their defaults.
+        assert_eq!(t.accent, Color::Cyan);
     }
 
     #[test]
