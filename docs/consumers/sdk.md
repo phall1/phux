@@ -60,7 +60,7 @@ rather than shelling out to the CLI. It is L1-shaped: no `Session`, no
 [CLI agent surface](./agents.md) documents (`ScreenState`, `RunResult`,
 `WaitOutcome`), which are the stable agent contract.
 
-Divergence, marked honestly: parts of the `Agent` handle are designed, not
+Divergence: parts of the `Agent` handle are designed, not
 built. `subscribe_events` and `send_signal` are present in the type surface
 but currently stubs, and the push-event story they front (`watch`) is the one
 documented in [`agents.md`](./agents.md). Treat the handle's event and signal
