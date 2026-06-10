@@ -32,6 +32,7 @@ use tempfile::TempDir;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
+use crate::common::tracing_capture::TracingCapture;
 use crate::common::{
     SOCKET_CONNECT_DEADLINE, attach_by_name, recv_typed, run_local, send_frame,
     spawn_server_with_seed_cmd, wait_for_socket,
@@ -89,6 +90,11 @@ async fn collect_events(stream: &mut UnixStream, deadline: Duration) -> Vec<Agen
 #[test]
 fn subscribed_client_receives_title_bell_and_pane_closed_events() {
     run_local(async {
+        // CI-flake forensics: this test once saw `exit_status: None` where
+        // a clean exit should report `Some(0)` (the EOF-vs-waitable reap
+        // race). The capture dumps the server's debug log on panic so any
+        // recurrence shows the reap path's own telemetry.
+        let _cap = TracingCapture::install("agent_events");
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
 

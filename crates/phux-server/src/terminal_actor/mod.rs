@@ -1132,18 +1132,29 @@ impl TerminalActor {
     /// encode or a closed writer logs and is dropped — a single bad event
     /// must not kill the actor.
     fn service_input(&self, input: &TerminalInput) {
+        // Every arm below logs at debug or above: a dropped or empty input
+        // is invisible to the caller (ROUTE_INPUT acks Ok regardless, per
+        // SPEC §9 fire-and-forget), so this log is the only witness when a
+        // key vanishes between the mailbox and the PTY.
         match self.encode_input(input) {
             Ok(Some(bytes)) => {
+                if bytes.is_empty() {
+                    debug!(?input, "input encoded to zero bytes; nothing to write");
+                    return;
+                }
                 if let Some(tx) = self.pty_tx.as_ref() {
+                    let len = bytes.len();
                     if tx.send(bytes).is_err() {
                         debug!("PTY writer channel closed; dropping input");
+                    } else {
+                        debug!(len, "input queued to PTY writer");
                     }
                 } else {
-                    trace!(?input, "no PTY; input discarded");
+                    debug!(?input, "no PTY; input discarded");
                 }
             }
             Ok(None) => {
-                trace!(?input, "input gated/dropped by encoder");
+                debug!(?input, "input gated/dropped by encoder");
             }
             Err(err) => {
                 warn!(error = %err, "input encode failed; dropping event");
@@ -1242,6 +1253,10 @@ impl TerminalActor {
         }
         match self.synthesize() {
             Ok(snap) => {
+                debug!(
+                    bytes = snap.bytes.len(),
+                    "resize resync: snapshot broadcast"
+                );
                 // A `Lagged`/no-receiver send error is benign here — the
                 // next PTY output or a re-attach snapshot re-syncs.
                 // phux-3ns5: ship the post-reflow grid as a `Resync` (→
@@ -1564,11 +1579,13 @@ impl TerminalActor {
                             } else {
                                 Bytes::from(coalesced)
                             };
-                            // Trace level: per-wakeup volume is the raw input
-                            // rate, useful for "what was the PTY doing right
-                            // before a stall" but far too chatty for the
-                            // default filter — off unless `phux=trace`.
-                            trace!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
+                            // Debug level deliberately (was trace): this is
+                            // the pump's only witness line, and the lost-echo
+                            // forensics (phux-dacb follow-up) need it inside
+                            // the test capture's debug filter. Per-wakeup, so
+                            // it costs one line per coalesced read, not per
+                            // byte.
+                            debug!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
                             self.terminal.borrow_mut().vt_write(&payload);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).

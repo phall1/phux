@@ -108,14 +108,25 @@ impl TracingCapture {
         use tracing_subscriber::{EnvFilter, Registry, fmt};
 
         let buf = SharedBuf::default();
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("phux_server=debug,phux_core=debug,phux=debug"));
-        let fmt_layer = fmt::layer()
-            .with_ansi(false)
-            .with_writer(buf.clone())
-            .with_target(true);
-        let subscriber = Registry::default().with(filter).with(fmt_layer);
-        let guard = tracing::subscriber::set_default(subscriber);
+        let make_subscriber = || {
+            let filter = EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("phux_server=debug,phux_core=debug,phux=debug"));
+            let fmt_layer = fmt::layer()
+                .with_ansi(false)
+                .with_writer(buf.clone())
+                .with_target(true);
+            Registry::default().with(filter).with(fmt_layer)
+        };
+        let guard = tracing::subscriber::set_default(make_subscriber());
+        // ALSO claim the process-global default (best-effort; first caller
+        // wins, later calls are a no-op `Err`). `set_default` above is
+        // thread-local, which misses the PTY reader/writer bridge threads
+        // (`phux-pty-reader` / `phux-pty-writer`) — exactly the threads
+        // whose death modes the route_input forensics need to see. Safe
+        // here because nextest runs one test per process; under plain
+        // `cargo test` a parallel sibling's threads could interleave into
+        // this buffer, which is acceptable noise for a debug artifact.
+        let _ = tracing::subscriber::set_global_default(make_subscriber());
 
         Self {
             buf,
