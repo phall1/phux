@@ -651,6 +651,20 @@ where
                     "INPUT_FOCUS",
                 );
             }
+            FrameKind::InputPaste { terminal_id, event } => {
+                // Same dispatch as the sibling INPUT_* frames; the terminal
+                // actor's per-pane paste encoder applies the trust policy and
+                // DEC 2004 bracketing (SPEC §9.4). Until this arm existed the
+                // frame fell into the unhandled-type debug arm and pastes
+                // from projection clients silently vanished.
+                handle_terminal_input(
+                    &state,
+                    client_id,
+                    &terminal_id,
+                    TerminalInput::Paste(event),
+                    "INPUT_PASTE",
+                );
+            }
             FrameKind::FrameAck { terminal_id, seq } => {
                 handle_frame_ack(&state, client_id, &terminal_id, seq);
             }
