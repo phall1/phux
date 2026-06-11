@@ -29,6 +29,7 @@ const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 pub(crate) fn run_server(
     session: &str,
     socket: Option<PathBuf>,
+    listen: Option<std::net::SocketAddr>,
     daemonize: bool,
     seed_command: Option<&str>,
 ) -> ExitCode {
@@ -113,12 +114,21 @@ pub(crate) fn run_server(
         }
     };
 
-    eprintln!(
-        "phux server listening on {} (session={session}; Ctrl-C to stop)",
-        socket_path.display()
-    );
+    match listen {
+        Some(addr) => eprintln!(
+            "phux server listening on {} + ws://{addr} (session={session}; Ctrl-C to stop)",
+            socket_path.display()
+        ),
+        None => eprintln!(
+            "phux server listening on {} (session={session}; Ctrl-C to stop)",
+            socket_path.display()
+        ),
+    }
 
-    let server = ServerRuntime::new(cfg);
+    let server = match listen {
+        Some(addr) => ServerRuntime::new(cfg).listen_ws(addr),
+        None => ServerRuntime::new(cfg),
+    };
     let result = rt.block_on(async move {
         server
             .run_async(async {

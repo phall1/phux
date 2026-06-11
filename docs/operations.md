@@ -108,8 +108,9 @@ an SSH tunnel, behind TLS plus a bearer pairing token
 ([ADR-0031](../ADR/0031-remote-consumer-auth-and-encryption.md)). This is the
 nearer-term, single-server path, distinct from the federation hub above.
 
-The bind address (`PHUX_WS_ADDR`) is the toggle, so there is no remote-mode
-setup friction:
+The bind address is the toggle, so there is no remote-mode setup friction. Set
+it either with `phux server --listen HOST:PORT` or the `PHUX_WS_ADDR`
+environment variable (the flag wins when both are present):
 
 - **Loopback address → plaintext, unauthenticated.** The historical
   browser-client dev path; zero config.

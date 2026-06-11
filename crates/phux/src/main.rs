@@ -69,7 +69,23 @@ mod selector;
           config     Inspect and scaffold the config file\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
-        grammar works across kill/snapshot/send-keys/run/wait."
+        grammar works across kill/snapshot/send-keys/run/wait.",
+    after_long_help = "ENVIRONMENT\n  \
+        PHUX_SOCKET        UDS path for the CLI verbs and the server. A `--socket`\n  \
+        \x20                 flag overrides it; default is\n  \
+        \x20                 $XDG_RUNTIME_DIR/phux/phux.sock (or /tmp/phux-$USER/...).\n  \
+        PHUX_WS_ADDR       Also accept WebSocket clients on HOST:PORT. Equivalent to\n  \
+        \x20                 `phux server --listen`, which overrides it.\n  \
+        PHUX_WS_SECURE     Force TLS + token auth on a loopback --listen address\n  \
+        \x20                 (exercise the remote path locally).\n  \
+        PHUX_WS_TLS_CERT   Operator-supplied server cert/key (PEM), instead of the\n  \
+        PHUX_WS_TLS_KEY    auto-provisioned self-signed pair used off-loopback.\n  \
+        PHUX_WS_TOKENS     Pairing-token store the server reads and `phux pair` writes.\n  \
+        PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
+        PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
+        RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\
+        Run `phux server --listen 127.0.0.1:8787` to expose a port; see\n  \
+        `phux help server` and docs/operations.md for the remote/TLS details."
 )]
 struct Cli {
     /// Subcommand. Defaults to attaching to the last session if omitted.
@@ -157,9 +173,16 @@ fn main() -> ExitCode {
         Some(Command::Server {
             session,
             socket,
+            listen,
             daemonize,
             seed_command,
-        }) => commands::server::run_server(&session, socket, daemonize, seed_command.as_deref()),
+        }) => commands::server::run_server(
+            &session,
+            socket,
+            listen,
+            daemonize,
+            seed_command.as_deref(),
+        ),
         Some(Command::Ls { json, socket }) => commands::ls::run_ls(json, socket),
         Some(Command::New {
             name,

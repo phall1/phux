@@ -145,11 +145,19 @@ impl ServerConfig {
     }
 }
 
-/// Resolve the default Unix-domain-socket path per the convention documented
-/// in this module: `$XDG_RUNTIME_DIR/phux/phux.sock` if `XDG_RUNTIME_DIR` is
-/// set, otherwise `/tmp/phux-$UID/phux.sock`.
+/// Resolve the default Unix-domain-socket path.
+///
+/// Precedence (matches the MCP adapter's `resolve`, so the daemon, the CLI
+/// verbs, and the MCP bridge all agree on one socket):
+/// 1. `$PHUX_SOCKET` if set — an explicit `--socket` flag still overrides it
+///    at the call sites that take one;
+/// 2. `$XDG_RUNTIME_DIR/phux/phux.sock` if `XDG_RUNTIME_DIR` is set;
+/// 3. `/tmp/phux-$UID/phux.sock` otherwise.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("PHUX_SOCKET") {
+        return PathBuf::from(path);
+    }
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         let mut p = PathBuf::from(dir);
         p.push("phux");
@@ -206,13 +214,30 @@ pub enum ServerError {
 #[derive(Debug)]
 pub struct ServerRuntime {
     cfg: ServerConfig,
+    /// Optional WebSocket listen address (in addition to the always-on UDS).
+    /// `None` falls back to the `PHUX_WS_ADDR` environment variable. The
+    /// `phux server --listen <ADDR>` flag populates this; binding off-loopback
+    /// auto-engages TLS + token auth (see [`build_ws_listener`]).
+    ws_addr: Option<SocketAddr>,
 }
 
 impl ServerRuntime {
     /// Create a runtime ready to be `run`. Does not perform I/O.
     #[must_use]
     pub const fn new(cfg: ServerConfig) -> Self {
-        Self { cfg }
+        Self { cfg, ws_addr: None }
+    }
+
+    /// Also accept WebSocket connections on `addr` (the UDS stays on).
+    ///
+    /// Overrides the `PHUX_WS_ADDR` environment variable. A loopback address
+    /// is plaintext + unauthenticated (the local browser-dev path); any
+    /// routable address auto-provisions TLS and requires a paired bearer
+    /// token (ADR-0031).
+    #[must_use]
+    pub const fn listen_ws(mut self, addr: SocketAddr) -> Self {
+        self.ws_addr = Some(addr);
+        self
     }
 
     /// Run the server until `shutdown` resolves.
@@ -298,6 +323,9 @@ impl ServerRuntime {
         // the configured multi-client policy (phux-nk07).
         let window_size = self.cfg.window_size;
         state.with_mut(|s| s.set_window_size(window_size));
+        // WebSocket listen address: the `--listen` flag (via `listen_ws`)
+        // wins; otherwise fall back to `PHUX_WS_ADDR` inside the accept setup.
+        let ws_addr_override = self.ws_addr;
         // Wire policy bundle from config into shared state.
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));
@@ -359,16 +387,19 @@ impl ServerRuntime {
                 }
                 // Optionally also accept WebSocket connections (phux-486.4) so
                 // browser consumers (`phux-web`) can speak the identical wire.
-                // Opt-in via `PHUX_WS_ADDR` (e.g. "127.0.0.1:8787"); UDS is
-                // always on.
-                let ws_addr = std::env::var("PHUX_WS_ADDR").ok().and_then(|raw| {
-                    match raw.parse::<SocketAddr>() {
-                        Ok(addr) => Some(addr),
-                        Err(err) => {
-                            warn!(addr = %raw, error = %err, "invalid PHUX_WS_ADDR; WebSocket transport disabled");
-                            None
+                // Opt-in via `phux server --listen <ADDR>` or the `PHUX_WS_ADDR`
+                // environment variable (e.g. "127.0.0.1:8787"); UDS is always
+                // on. The flag wins when both are set.
+                let ws_addr = ws_addr_override.or_else(|| {
+                    std::env::var("PHUX_WS_ADDR").ok().and_then(|raw| {
+                        match raw.parse::<SocketAddr>() {
+                            Ok(addr) => Some(addr),
+                            Err(err) => {
+                                warn!(addr = %raw, error = %err, "invalid PHUX_WS_ADDR; WebSocket transport disabled");
+                                None
+                            }
                         }
-                    }
+                    })
                 });
                 let ws_listener = match ws_addr {
                     Some(addr) => build_ws_listener(addr).await,
