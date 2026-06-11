@@ -17,6 +17,8 @@ use phux_protocol::input::key::{KeyEvent, ModSet, PhysicalKey};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use super::reconcile::ReconcileStats;
+
 /// Per-client knob for predictive echo.
 ///
 /// Wire to `phux_client::attach::run_with_predict`. Default is `enabled: false`
@@ -171,7 +173,49 @@ pub struct PredictionState {
     /// the real pane never overwrites it — a lingering ghost after a fast
     /// split / focus change (phux-7ry0 follow-up). Defaults to `false` (armed).
     suspended: bool,
+    /// Consecutive reconcile passes that contradicted a prediction, for
+    /// the adaptive auto-back-off heuristic (phux-pxaj). When this reaches
+    /// [`BACKOFF_THRESHOLD`] the state auto-suspends predicting: vi-mode
+    /// shells, modal apps, and fast layout transitions all manifest as a
+    /// run of contradictions where the server keeps painting cells we did
+    /// not predict. Reset to `0` by a clean productive reconcile pass, not
+    /// by [`Self::clear`] / [`Self::suspend`] (those run on every
+    /// contradiction and must not erase the running tally).
+    contradiction_streak: u32,
+    /// Consecutive clean productive reconcile passes (something confirmed,
+    /// nothing contradicted) observed *since* an auto-back-off suspend.
+    /// When this reaches [`REARM_THRESHOLD`] the back-off is lifted and
+    /// predicting resumes — typing has normalized. Reset to `0` by any
+    /// contradiction. Like [`Self::contradiction_streak`], it survives
+    /// [`Self::clear`] / [`Self::suspend`].
+    clean_confirm_streak: u32,
+    /// Distinguishes an auto-back-off suspend ([`Self::note_reconcile`])
+    /// from the re-anchor suspend ([`Self::suspend`]). The re-anchor
+    /// suspend is cleared by the very next authoritative cursor sync
+    /// ([`Self::set_cursor`]); a back-off must *survive* cursor/snapshot
+    /// syncs and only lift via the clean-confirm path, otherwise a single
+    /// reconcile would re-arm predicting straight back into the mispredict
+    /// storm it just backed off from (phux-pxaj).
+    auto_backed_off: bool,
 }
+
+/// Consecutive contradicting reconcile passes that trip auto-back-off.
+///
+/// Hardcoded for this slice; doc-earmarked as a future `PredictiveConfig`
+/// field (alongside the timeout / decoration / RTT knobs noted at
+/// [`PredictiveConfig`]). Three in a row is enough to separate a genuine
+/// mispredict mode (vi normal-mode, a modal app, a fast transition) from
+/// an isolated one-off contradiction that the per-cell suffix-drop already
+/// handles cheaply.
+const BACKOFF_THRESHOLD: u32 = 3;
+
+/// Consecutive clean productive reconcile passes that lift auto-back-off.
+///
+/// Hardcoded for this slice; future `PredictiveConfig` field. Two clean
+/// productive passes (a prediction confirmed with nothing contradicted)
+/// are required so a single fluke confirm during a mispredict storm does
+/// not prematurely re-arm.
+const REARM_THRESHOLD: u32 = 2;
 
 impl PredictionState {
     /// New state with predictive echo configured per `cfg` and an
@@ -187,6 +231,9 @@ impl PredictionState {
             rows,
             prompt_boundary: None,
             suspended: false,
+            contradiction_streak: 0,
+            clean_confirm_streak: 0,
+            auto_backed_off: false,
         }
     }
 
@@ -258,8 +305,88 @@ impl PredictionState {
         self.cursor_col = col.min(self.cols.saturating_sub(1));
         // An authoritative cursor (snapshot render or output reconcile) means
         // we now know where the focused pane's cursor is — re-arm prediction
-        // if a re-anchor had suspended it.
-        self.suspended = false;
+        // if a re-anchor had suspended it. An adaptive auto-back-off suspend
+        // (phux-pxaj) is the exception: it must survive cursor/snapshot syncs
+        // and lift only via the clean-confirm path in
+        // [`Self::note_reconcile`], otherwise a single reconcile would re-arm
+        // predicting straight back into the mispredict storm it backed off
+        // from.
+        if !self.auto_backed_off {
+            self.suspended = false;
+        }
+    }
+
+    /// Feed the outcome of one per-cell reconcile pass into the adaptive
+    /// auto-back-off heuristic (phux-pxaj).
+    ///
+    /// Predictive echo mispredicts hard in a few recurring modes: vi-mode
+    /// shells (normal-mode `h`/`j`/`k`/`l`/`x` are commands, not inserts),
+    /// modal full-screen apps, and fast layout/screen transitions. Each
+    /// manifests the same way — the server keeps *contradicting* what we
+    /// predicted. This heuristic watches the contradiction rate and:
+    ///
+    /// - after `BACKOFF_THRESHOLD` consecutive contradicting passes,
+    ///   auto-suspends predicting (drops the queue, stops echoing) so the
+    ///   user stops seeing ghosts the server immediately overwrites;
+    /// - after `REARM_THRESHOLD` consecutive *clean productive* passes
+    ///   (something confirmed, nothing contradicted) following a back-off,
+    ///   lifts the suspend and resumes — typing has normalized.
+    ///
+    /// A pass is classified from `stats`:
+    /// - `contradicted > 0` ⇒ a contradicting pass (regardless of any
+    ///   confirms in the same pass — a confirmed prefix followed by a
+    ///   contradicted suffix still means we guessed wrong);
+    /// - `contradicted == 0 && confirmed > 0` ⇒ a clean productive pass;
+    /// - `confirmed == 0 && contradicted == 0` (only pendings, or an empty
+    ///   queue) ⇒ **neutral** — leaves both streaks untouched so a quiet
+    ///   link neither trips nor lifts the back-off.
+    ///
+    /// Called from [`super::reconcile_terminal_output_per_cell`] just before
+    /// it returns, so every per-cell reconcile caller gets back-off for
+    /// free. The wholesale-drain [`super::reconcile_terminal_output`] does
+    /// not feed this — it is not a per-cell verdict.
+    pub fn note_reconcile(&mut self, stats: ReconcileStats) {
+        if stats.contradicted > 0 {
+            self.contradiction_streak = self.contradiction_streak.saturating_add(1);
+            self.clean_confirm_streak = 0;
+            if self.contradiction_streak >= BACKOFF_THRESHOLD {
+                self.auto_suspend();
+            }
+        } else if stats.confirmed > 0 {
+            // Clean productive pass.
+            self.contradiction_streak = 0;
+            self.clean_confirm_streak = self.clean_confirm_streak.saturating_add(1);
+            if self.auto_backed_off && self.clean_confirm_streak >= REARM_THRESHOLD {
+                // Typing normalized — lift the back-off and re-arm.
+                self.auto_backed_off = false;
+                self.suspended = false;
+                self.clean_confirm_streak = 0;
+            }
+        }
+        // Neutral pass (nothing confirmed, nothing contradicted): leave
+        // both streaks alone.
+    }
+
+    /// Suspend predicting because the server has been contradicting our
+    /// guesses (phux-pxaj). Unlike the re-anchor [`Self::suspend`], this
+    /// sets [`Self::auto_backed_off`] so the suspend survives authoritative
+    /// cursor syncs and only lifts via the clean-confirm path in
+    /// [`Self::note_reconcile`].
+    fn auto_suspend(&mut self) {
+        self.pending.clear();
+        self.prompt_boundary = None;
+        self.suspended = true;
+        self.auto_backed_off = true;
+        // Start counting clean passes afresh for the re-arm decision.
+        self.clean_confirm_streak = 0;
+    }
+
+    /// Whether predicting is currently suspended by adaptive auto-back-off
+    /// (phux-pxaj), as opposed to the re-anchor suspend. Exposed for
+    /// diagnostics and tests.
+    #[must_use]
+    pub const fn is_auto_backed_off(&self) -> bool {
+        self.auto_backed_off
     }
 
     /// Number of predictions waiting for confirmation.
@@ -1388,5 +1515,210 @@ mod tests {
         let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
         let ev = key_text("\x7f");
         assert_eq!(s.predict_key(&ev), PredictionOutcome::Skipped);
+    }
+
+    // ---- phux-pxaj: adaptive auto-back-off ----------------------------
+
+    fn contradicting_pass() -> ReconcileStats {
+        ReconcileStats {
+            confirmed: 0,
+            contradicted: 1,
+            pending: 0,
+        }
+    }
+
+    fn clean_productive_pass() -> ReconcileStats {
+        ReconcileStats {
+            confirmed: 1,
+            contradicted: 0,
+            pending: 0,
+        }
+    }
+
+    fn neutral_pass() -> ReconcileStats {
+        ReconcileStats {
+            confirmed: 0,
+            contradicted: 0,
+            pending: 2,
+        }
+    }
+
+    #[test]
+    fn three_contradictions_in_a_row_auto_back_off() {
+        // The mispredict-storm signal: three consecutive contradicting
+        // reconcile passes (vi normal-mode, a modal app, fast transitions)
+        // trip the back-off. Two are not enough.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.note_reconcile(contradicting_pass());
+        s.note_reconcile(contradicting_pass());
+        assert!(!s.is_suspended(), "two contradictions: not yet backed off");
+        assert!(!s.is_auto_backed_off());
+        s.note_reconcile(contradicting_pass());
+        assert!(s.is_suspended(), "third contradiction trips the back-off");
+        assert!(s.is_auto_backed_off());
+        // While backed off, predict_key is a no-op.
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn auto_back_off_drops_pending_queue() {
+        // The back-off must drop in-flight predictions, like the re-anchor
+        // suspend — they are exactly the ghosts the server is contradicting.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.predict_key(&key_text("h"));
+        s.predict_key(&key_text("i"));
+        assert_eq!(s.pending_len(), 2);
+        for _ in 0..BACKOFF_THRESHOLD {
+            s.note_reconcile(contradicting_pass());
+        }
+        assert!(s.is_auto_backed_off());
+        assert_eq!(s.pending_len(), 0, "back-off drops the queue");
+    }
+
+    #[test]
+    fn back_off_survives_set_cursor() {
+        // The re-anchor suspend is cleared by the next authoritative cursor
+        // sync; an auto-back-off must NOT be — otherwise a single reconcile
+        // would re-arm straight back into the mispredict storm.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for _ in 0..BACKOFF_THRESHOLD {
+            s.note_reconcile(contradicting_pass());
+        }
+        assert!(s.is_suspended());
+        assert!(s.is_auto_backed_off());
+        s.set_cursor(2, 4);
+        assert!(s.is_suspended(), "back-off survives a cursor sync");
+        assert!(s.is_auto_backed_off());
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Skipped);
+    }
+
+    #[test]
+    fn two_clean_confirms_re_arm_after_back_off() {
+        // Once typing normalizes — two consecutive clean productive passes —
+        // the back-off lifts and prediction resumes.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for _ in 0..BACKOFF_THRESHOLD {
+            s.note_reconcile(contradicting_pass());
+        }
+        assert!(s.is_auto_backed_off());
+        s.note_reconcile(clean_productive_pass());
+        assert!(
+            s.is_suspended(),
+            "one clean confirm is not enough to re-arm"
+        );
+        assert!(s.is_auto_backed_off());
+        s.note_reconcile(clean_productive_pass());
+        assert!(!s.is_suspended(), "two clean confirms re-arm");
+        assert!(!s.is_auto_backed_off());
+        // A cursor sync provides an anchor, then prediction works again.
+        s.set_cursor(0, 0);
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Predicted);
+    }
+
+    #[test]
+    fn a_contradiction_resets_the_clean_confirm_streak() {
+        // A fluke clean confirm mid-storm must not count toward re-arm: a
+        // following contradiction resets the clean streak, so it takes two
+        // *consecutive* clean passes to lift.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for _ in 0..BACKOFF_THRESHOLD {
+            s.note_reconcile(contradicting_pass());
+        }
+        s.note_reconcile(clean_productive_pass()); // clean streak = 1
+        s.note_reconcile(contradicting_pass()); // resets clean streak
+        s.note_reconcile(clean_productive_pass()); // clean streak = 1 again
+        assert!(s.is_suspended(), "still backed off: not two in a row");
+        s.note_reconcile(clean_productive_pass()); // clean streak = 2
+        assert!(!s.is_suspended(), "now two in a row → re-armed");
+    }
+
+    #[test]
+    fn empty_passes_do_not_move_streaks() {
+        // Neutral passes (only pendings, or an empty queue) must not trip
+        // the back-off nor lift it. Two contradictions then a run of neutral
+        // passes then a third contradiction still trips: the contradiction
+        // streak is preserved across the neutral passes.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.note_reconcile(contradicting_pass());
+        s.note_reconcile(contradicting_pass());
+        for _ in 0..5 {
+            s.note_reconcile(neutral_pass());
+        }
+        assert!(!s.is_suspended(), "neutral passes do not trip back-off");
+        s.note_reconcile(contradicting_pass());
+        assert!(
+            s.is_suspended(),
+            "contradiction streak survived neutral passes"
+        );
+    }
+
+    #[test]
+    fn neutral_passes_do_not_re_arm_during_back_off() {
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for _ in 0..BACKOFF_THRESHOLD {
+            s.note_reconcile(contradicting_pass());
+        }
+        s.note_reconcile(clean_productive_pass()); // clean streak = 1
+        for _ in 0..5 {
+            s.note_reconcile(neutral_pass());
+        }
+        // Neutral passes left the clean streak at 1; one more clean confirm
+        // reaches the threshold of 2 and re-arms.
+        assert!(s.is_suspended(), "neutral passes do not advance re-arm");
+        s.note_reconcile(clean_productive_pass());
+        assert!(!s.is_suspended());
+    }
+
+    #[test]
+    fn intermittent_contradictions_do_not_trip_back_off() {
+        // A single contradiction broken up by clean confirms is the normal
+        // wrong-guess-then-correct rhythm — it must not back off.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        for _ in 0..6 {
+            s.note_reconcile(contradicting_pass());
+            s.note_reconcile(clean_productive_pass());
+        }
+        assert!(
+            !s.is_suspended(),
+            "isolated contradictions never accumulate"
+        );
+        assert!(!s.is_auto_backed_off());
+    }
+
+    #[test]
+    fn reanchor_suspend_is_independent_of_auto_back_off() {
+        // The re-anchor suspend() leaves auto_backed_off untouched, so a
+        // single set_cursor re-arms it (the phux-cdvr behaviour), unlike a
+        // back-off.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        s.suspend();
+        assert!(s.is_suspended());
+        assert!(
+            !s.is_auto_backed_off(),
+            "re-anchor suspend is not a back-off"
+        );
+        s.set_cursor(1, 1);
+        assert!(!s.is_suspended(), "re-anchor suspend clears on cursor sync");
+    }
+
+    #[test]
+    fn confirmed_with_contradiction_in_same_pass_counts_as_contradiction() {
+        // A pass that confirmed a prefix but contradicted the suffix means
+        // we still guessed wrong — it counts toward back-off, not re-arm.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let mixed = ReconcileStats {
+            confirmed: 2,
+            contradicted: 1,
+            pending: 0,
+        };
+        s.note_reconcile(mixed);
+        s.note_reconcile(mixed);
+        assert!(!s.is_suspended());
+        s.note_reconcile(mixed);
+        assert!(
+            s.is_suspended(),
+            "contradicted>0 trips regardless of confirms"
+        );
     }
 }
