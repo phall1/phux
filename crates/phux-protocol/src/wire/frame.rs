@@ -441,6 +441,11 @@ pub(crate) const COMMAND_TAG_KILL_TERMINALS: u8 = 0x09;
 /// change detection. The reply rides `COMMAND_RESULT { Ok_With(Json(..)) }`.
 pub(crate) const COMMAND_TAG_GET_TERMINAL_STATE: u8 = 0x0c;
 pub(crate) const COMMAND_TAG_SUBSCRIBE_TERMINAL_EVENTS: u8 = 0x0d;
+/// Wire tag for [`Command::Upgrade`]. Appended after
+/// `SUBSCRIBE_TERMINAL_EVENTS`'s `0x0d`; `UPGRADE` is an additive control
+/// command (ADR-0032) that triggers a graceful in-place re-exec. It carries no
+/// payload — the handoff state blob is built and passed server-side.
+pub(crate) const COMMAND_TAG_UPGRADE: u8 = 0x0e;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -924,6 +929,14 @@ pub enum Command {
         /// Empty vector = all event types.
         event_types: Vec<TerminalEventType>,
     },
+    /// Ask the server to graceful-upgrade itself in place (ADR-0032): snapshot
+    /// every pane, re-exec the on-disk binary, and re-adopt the live PTYs so
+    /// sessions survive a binary update. A bare trigger — the handoff state
+    /// blob is built and passed entirely server-side (it never crosses the
+    /// wire). Clients see a brief disconnect and reconnect. Reply:
+    /// `COMMAND_RESULT { Ok }` (best-effort, before the re-exec). Backs
+    /// `phux upgrade`.
+    Upgrade,
 }
 
 /// A successful command's payload (SPEC §5, `CommandValue`).
@@ -2725,6 +2738,9 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
                 enc.write_u8(et.to_u8());
             }
         }
+        Command::Upgrade => {
+            enc.write_u8(COMMAND_TAG_UPGRADE);
+        }
     }
 }
 
@@ -2828,6 +2844,7 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
                 event_types,
             })
         }
+        COMMAND_TAG_UPGRADE => Ok(Command::Upgrade),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",
             value: u32::from(other),
