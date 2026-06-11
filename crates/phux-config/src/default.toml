@@ -98,6 +98,9 @@ prefix = "C-a"
 "o" = "next-pane"
 ";" = "previous-pane"
 
+# Zoom: toggle the focused pane to fill the whole window (tmux prefix-z).
+"z" = "toggle-zoom"
+
 # Copy-mode: enter text selection mode. Arrow keys adjust selection,
 # Enter copies to clipboard, Escape cancels. (phux-wave-a-copy-mode)
 "[" = "copy-mode"

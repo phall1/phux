@@ -768,10 +768,12 @@ mod tests {
             WindowInfo {
                 name: "bash".to_owned(),
                 active: true,
+                zoomed: false,
             },
             WindowInfo {
                 name: "vim".to_owned(),
                 active: false,
+                zoomed: false,
             },
         ];
         let ctx = StatusBarContext {
@@ -815,6 +817,7 @@ mod tests {
         p.set_windows(vec![WindowInfo {
             name: "a".to_owned(),
             active: true,
+            zoomed: false,
         }]);
         let mut buf = Vec::new();
         p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();

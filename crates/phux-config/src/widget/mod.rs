@@ -95,6 +95,10 @@ pub struct WindowInfo {
     pub name: String,
     /// `true` for the active window (rendered with the active style).
     pub active: bool,
+    /// phux-x2hm: `true` when a pane in this window is zoomed to fill it.
+    /// Only ever set on the active window; the `windows` widget appends a
+    /// `Z` marker to its tab (tmux's zoomed-pane indicator).
+    pub zoomed: bool,
 }
 
 /// Context passed to a [`StatusWidget`] at render time.

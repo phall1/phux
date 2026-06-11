@@ -155,6 +155,7 @@ mod tests {
         WindowInfo {
             name: name.to_owned(),
             active,
+            zoomed: false,
         }
     }
 

@@ -65,7 +65,11 @@ impl StatusWidget for WindowsWidget {
             if i > 0 && !self.separator.is_empty() {
                 cells.extend(WidgetCells::from_styled(&self.separator, None).cells);
             }
-            let text = self.segment_text(i, &w.name);
+            // phux-x2hm: a zoomed active window gets tmux's `Z` marker.
+            let mut text = self.segment_text(i, &w.name);
+            if w.zoomed {
+                text.push_str(" Z");
+            }
             let style = if w.active {
                 self.active.clone()
             } else {

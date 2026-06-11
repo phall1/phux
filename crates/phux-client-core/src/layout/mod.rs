@@ -27,6 +27,7 @@
 //!
 //! [ADR-0019]: ../../ADR/0019-tui-multi-pane-rendering.md
 
+use std::borrow::Cow;
 use std::io::Cursor;
 
 use phux_protocol::TerminalId;
@@ -309,6 +310,32 @@ impl Workspace {
     /// workspace is empty.
     pub fn active_window_mut(&mut self) -> Option<&mut LayoutState> {
         self.windows.get_mut(self.active).map(|w| &mut w.state)
+    }
+
+    /// The layout to **render and reflow** against, honoring a zoom (phux-x2hm).
+    ///
+    /// When `zoomed` is `Some(id)` and `id` is still a live leaf of the active
+    /// window, returns an owned single-leaf layout — the zoomed pane fills the
+    /// whole pane viewport, with no dividers and the other panes hidden (a
+    /// single-leaf tree already tiles to one full-viewport rect with zero
+    /// dividers). Otherwise — no zoom, or the zoom target has since closed or
+    /// belongs to a different window — returns the real active window.
+    ///
+    /// Folding the liveness check in here makes zoom **self-healing**: a
+    /// closed or window-switched zoom target silently falls back to the real
+    /// layout instead of stranding a dead single pane. `None` only when there
+    /// is no active window (pre-attach). Mutation and input-routing paths must
+    /// keep using [`Self::active_window`] (the real tree); only render/reflow
+    /// reads go through here.
+    #[must_use]
+    pub fn render_window(&self, zoomed: Option<&TerminalId>) -> Option<Cow<'_, LayoutState>> {
+        let active = self.active_window()?;
+        if let Some(id) = zoomed
+            && active.tree.as_ref().is_some_and(|t| leaves(t).contains(id))
+        {
+            return Some(Cow::Owned(LayoutState::single(id.clone())));
+        }
+        Some(Cow::Borrowed(active))
     }
 
     /// Append a new window named `name` holding a single `seed` pane and
@@ -914,6 +941,50 @@ mod tests {
 
     fn leaf(id: u32) -> LayoutNode {
         LayoutNode::Leaf(t(id))
+    }
+
+    fn ws_split(a: u32, b: u32, focus: u32) -> Workspace {
+        let tree = split_at(&leaf(a), &t(a), &t(b), SplitDir::Horizontal, 0.5).unwrap();
+        Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(t(focus)),
+                },
+            }],
+            active: 0,
+        }
+    }
+
+    #[test]
+    fn render_window_zooms_to_a_live_leaf() {
+        let ws = ws_split(1, 2, 1);
+        let rendered = ws.render_window(Some(&t(2))).expect("active window");
+        // A single-leaf synthetic layout of the zoomed pane.
+        assert_eq!(rendered.tree, Some(LayoutNode::Leaf(t(2))));
+        assert_eq!(rendered.focus, Some(t(2)));
+        // The real workspace is untouched (still a split).
+        assert!(matches!(
+            ws.active_window().unwrap().tree,
+            Some(LayoutNode::Split { .. })
+        ));
+    }
+
+    #[test]
+    fn render_window_self_heals_when_zoom_target_is_not_a_leaf() {
+        // A zoom id absent from the active window (closed pane, or another
+        // window's) falls back to the real layout — not a dead single pane.
+        let ws = ws_split(1, 2, 1);
+        let rendered = ws.render_window(Some(&t(99))).expect("active window");
+        assert!(matches!(rendered.tree, Some(LayoutNode::Split { .. })));
+    }
+
+    #[test]
+    fn render_window_without_zoom_is_the_active_window() {
+        let ws = ws_split(1, 2, 1);
+        let rendered = ws.render_window(None).expect("active window");
+        assert!(matches!(rendered.tree, Some(LayoutNode::Split { .. })));
     }
 
     // -------------------------------------------------------------------------
