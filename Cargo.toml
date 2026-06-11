@@ -45,6 +45,7 @@ phux-client = { path = "crates/phux-client", version = "0.0.1" }
 phux-client-core = { path = "crates/phux-client-core", version = "0.0.1" }
 phux-config = { path = "crates/phux-config", version = "0.0.1" }
 phux-mcp = { path = "crates/phux-mcp", version = "0.0.1" }
+portable-pty-adopt = { path = "crates/portable-pty-adopt", version = "0.0.1" }
 
 # External.
 thiserror = "2"

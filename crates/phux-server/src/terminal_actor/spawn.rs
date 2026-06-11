@@ -204,15 +204,41 @@ pub(crate) fn spawn_pty(
     // the child exits.
     drop(pair.slave);
 
-    let mut reader = pair
-        .master
+    start_pty_bridge(pair.master, child)
+}
+
+/// Adopt an inherited PTY master fd + child PID (survivors of a graceful-
+/// upgrade `execve`) into a [`PtyOwned`], starting fresh bridge threads on the
+/// adopted descriptor. The PTY itself is not re-opened and the child is not
+/// re-spawned — they kept running across the exec; this only rebuilds the
+/// server-side plumbing around them (ADR-0032).
+pub(crate) fn adopt_pty(
+    master_fd: std::os::fd::RawFd,
+    child_pid: i32,
+) -> Result<SpawnedPty, TerminalActorError> {
+    // SAFETY: `master_fd` is the inherited PTY master (FD_CLOEXEC cleared
+    // before the exec), owned solely by this process now.
+    let master: Box<dyn MasterPty + Send> =
+        Box::new(unsafe { portable_pty_adopt::AdoptedMaster::from_raw_fd(master_fd) });
+    let child: Box<dyn Child + Send + Sync> =
+        Box::new(portable_pty_adopt::AdoptedChild::new(child_pid));
+    start_pty_bridge(master, child)
+}
+
+/// Shared tail of [`spawn_pty`] / [`adopt_pty`]: take the master's reader +
+/// writer halves, start the reader / writer bridge threads, and assemble the
+/// [`PtyOwned`] bundle + actor-side channel endpoints.
+fn start_pty_bridge(
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
+) -> Result<SpawnedPty, TerminalActorError> {
+    let mut reader = master
         .try_clone_reader()
         .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
-    let mut writer = pair
-        .master
+    let mut writer = master
         .take_writer()
         .map_err(|e| TerminalActorError::PtyIo(e.to_string()))?;
-    let master = Arc::new(Mutex::new(pair.master));
+    let master = Arc::new(Mutex::new(master));
 
     let (pty_tx_to_actor, pty_rx_for_actor) = mpsc::unbounded_channel::<PtyEvent>();
     let (input_tx_to_writer, mut input_rx_for_writer) = mpsc::unbounded_channel::<Vec<u8>>();

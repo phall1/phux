@@ -381,6 +381,23 @@ impl std::fmt::Debug for TerminalActorBundle {
             .finish_non_exhaustive()
     }
 }
+
+/// Where a [`TerminalActor`]'s backing PTY comes from.
+enum PtySource {
+    /// No PTY (test / projection-only actors).
+    None,
+    /// Open a fresh PTY and spawn `cmd` on the slave.
+    Spawn(CommandBuilder),
+    /// Re-adopt a PTY master fd + child PID inherited across a graceful-upgrade
+    /// `execve` (ADR-0032).
+    Adopt {
+        /// Inherited master descriptor (`FD_CLOEXEC` cleared before the exec).
+        master_fd: std::os::fd::RawFd,
+        /// Surviving child PID on the slave side.
+        child_pid: i32,
+    },
+}
+
 impl TerminalActor {
     /// Build a fresh actor of the given dimensions **without** a backing
     /// PTY. Used by tests that exercise snapshot / shutdown semantics
@@ -396,7 +413,7 @@ impl TerminalActor {
         Self::build(
             cols,
             rows,
-            None,
+            PtySource::None,
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
         )
@@ -416,7 +433,7 @@ impl TerminalActor {
         Self::build(
             cols,
             rows,
-            Some(cmd),
+            PtySource::Spawn(cmd),
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
         )
@@ -446,7 +463,43 @@ impl TerminalActor {
         max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
-        Self::build(cols, rows, cmd, max_scrollback, token)
+        Self::build(
+            cols,
+            rows,
+            cmd.map_or(PtySource::None, PtySource::Spawn),
+            max_scrollback,
+            token,
+        )
+    }
+
+    /// Build an actor around a PTY master fd + child PID inherited across a
+    /// graceful-upgrade `execve` (ADR-0032), then replay `seed` (the pane's
+    /// snapshot from the [`StateBlob`](crate::upgrade::blob::StateBlob)) into
+    /// the fresh `Terminal` so the grid matches what the old image showed.
+    ///
+    /// The PTY is not re-opened and the child is not re-spawned — both kept
+    /// running across the exec; this rebuilds only the server-side plumbing.
+    pub fn new_with_adopted_pty(
+        master_fd: std::os::fd::RawFd,
+        child_pid: i32,
+        cols: u16,
+        rows: u16,
+        max_scrollback: u32,
+        token: CancellationToken,
+        seed: &[u8],
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
+        let bundle = Self::build(
+            cols,
+            rows,
+            PtySource::Adopt {
+                master_fd,
+                child_pid,
+            },
+            max_scrollback,
+            token,
+        )?;
+        bundle.actor.terminal.borrow_mut().vt_write(seed);
+        Ok(bundle)
     }
 
     #[allow(
@@ -456,7 +509,7 @@ impl TerminalActor {
     fn build(
         cols: u16,
         rows: u16,
-        cmd: Option<CommandBuilder>,
+        pty_source: PtySource,
         max_scrollback: u32,
         token: CancellationToken,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
@@ -497,11 +550,19 @@ impl TerminalActor {
         let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
         let bundle_token = token.clone();
 
-        let (pty_rx, pty_tx, pty) = if let Some(cmd) = cmd {
-            let (rx, tx, owned) = spawn_pty(cmd, cols, rows)?;
-            (Some(rx), Some(tx), Some(owned))
-        } else {
-            (None, None, None)
+        let (pty_rx, pty_tx, pty) = match pty_source {
+            PtySource::None => (None, None, None),
+            PtySource::Spawn(cmd) => {
+                let (rx, tx, owned) = spawn_pty(cmd, cols, rows)?;
+                (Some(rx), Some(tx), Some(owned))
+            }
+            PtySource::Adopt {
+                master_fd,
+                child_pid,
+            } => {
+                let (rx, tx, owned) = adopt_pty(master_fd, child_pid)?;
+                (Some(rx), Some(tx), Some(owned))
+            }
         };
         Self::install_effects(&mut terminal, &size_report, pty_tx.as_ref())?;
 
@@ -2334,6 +2395,114 @@ mod tests {
 
                 // Cancel so the actor reaps the `sleep` child instead of
                 // leaking it past the test.
+                token.cancel();
+            })
+            .await;
+    }
+
+    /// `new_with_adopted_pty` rebuilds a working actor around an inherited PTY:
+    /// it replays the seed snapshot into the fresh grid, exposes the adopted
+    /// child, and surfaces the live child's output — proving the resume path's
+    /// actor construction end to end.
+    #[tokio::test(flavor = "current_thread")]
+    async fn adopted_actor_replays_seed_and_serves_live_pty() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::io::Write;
+        use std::os::fd::{BorrowedFd, IntoRawFd};
+
+        #[allow(
+            clippy::future_not_send,
+            reason = "current-thread test helper; the actor's TerminalHandle is intentionally !Sync"
+        )]
+        async fn snapshot(handle: &TerminalHandle) -> String {
+            let (reply, rx) = oneshot::channel();
+            handle
+                .snapshot
+                .send(SnapshotRequest {
+                    scrollback: None,
+                    reply,
+                })
+                .await
+                .expect("send snapshot");
+            String::from_utf8_lossy(&rx.await.expect("snapshot reply").bytes).into_owned()
+        }
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // A real PTY with a `cat` child that echoes input.
+                let sys = native_pty_system();
+                let pair = sys
+                    .openpty(PtySize {
+                        rows: 5,
+                        cols: 20,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .expect("openpty");
+                let child = pair
+                    .slave
+                    .spawn_command(CommandBuilder::new("cat"))
+                    .expect("spawn cat");
+                drop(pair.slave);
+                let pid = i32::try_from(child.process_id().expect("pid")).expect("pid fits i32");
+                let master_fd = pair.master.as_raw_fd().expect("master fd");
+                // An owned duplicate of the master for the actor to adopt; the
+                // test keeps `pair.master` to write into the PTY. `std`-only
+                // (no `libc`, which is macOS-gated in this crate).
+                // SAFETY: `master_fd` is open and outlives this borrow.
+                let dup_fd = unsafe { BorrowedFd::borrow_raw(master_fd) }
+                    .try_clone_to_owned()
+                    .expect("dup master")
+                    .into_raw_fd();
+                let mut writer = pair.master.take_writer().expect("take writer");
+                drop(child); // the adopted actor becomes the sole reaper.
+
+                let bundle = TerminalActor::new_with_adopted_pty(
+                    dup_fd,
+                    pid,
+                    20,
+                    5,
+                    1000,
+                    CancellationToken::new(),
+                    b"resumed",
+                )
+                .expect("new_with_adopted_pty");
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                tokio::task::spawn_local(bundle.actor.run());
+
+                // Seed replayed synchronously into the rebuilt grid.
+                assert!(
+                    snapshot(&handle).await.contains("resumed"),
+                    "adopted actor should replay the seed snapshot"
+                );
+
+                // The adopted child is live and wired into the actor.
+                let (reply, rx) = oneshot::channel();
+                handle
+                    .upgrade
+                    .send(UpgradeHandleRequest { reply })
+                    .await
+                    .expect("send upgrade");
+                let h = rx.await.expect("upgrade reply");
+                assert_eq!(h.child_pid, Some(pid));
+                assert!(h.master_fd.is_some());
+
+                // Live byte flow: write into the PTY; `cat` echoes; the adopted
+                // actor's grid surfaces it.
+                writer.write_all(b"ping\n").expect("write to pty");
+                writer.flush().expect("flush");
+                let mut saw = false;
+                for _ in 0..40 {
+                    if snapshot(&handle).await.contains("ping") {
+                        saw = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                assert!(saw, "adopted actor should surface the child's echo");
+
                 token.cancel();
             })
             .await;

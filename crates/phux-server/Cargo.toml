@@ -91,6 +91,9 @@ console-subscriber = { version = "0.5", optional = true }
 # regular dependency because the actor owns the master fd; its blocking
 # read/write halves bridge to async via spawn_blocking + mpsc channels.
 portable-pty.workspace = true
+# Re-adopt inherited PTY masters + children across the graceful-upgrade
+# re-exec (ADR-0032): rebuilds portable-pty trait objects from (fd, pid).
+portable-pty-adopt.workspace = true
 
 # libghostty-vt is workspace-pinned (see workspace Cargo.toml). Build
 # requires zig 0.15.x on PATH; the nix dev shell provides it.
