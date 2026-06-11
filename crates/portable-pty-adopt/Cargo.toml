@@ -1,0 +1,37 @@
+# TODO(extract): this crate has no phux-specific dependencies — only
+# `portable-pty`, `libc`, and `anyhow` (the trait's own error type). It fills a
+# genuine upstream gap (portable-pty can construct a `MasterPty`/`Child` only
+# via `openpty()`/`spawn_command()`; there is no way to rebuild those trait
+# objects from an *inherited* master fd + child PID — e.g. across an `execve`
+# graceful restart). It is intended to be split into its own repository and
+# published to crates.io. Keep it dependency-clean so the move is a copy.
+[package]
+name = "portable-pty-adopt"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rebuild portable-pty MasterPty/Child trait objects from an inherited PTY master fd + child PID (e.g. to re-adopt PTYs across an execve graceful restart)."
+publish = false
+
+[dependencies]
+# Must match the workspace `portable-pty` exactly: the whole point is to
+# produce `Box<dyn MasterPty>` / `Box<dyn Child>` values that unify with the
+# consumer's trait objects, which only holds if both see the *same*
+# `portable-pty` version (same trait type).
+portable-pty.workspace = true
+# The PTY ioctls (TIOCSWINSZ/TIOCGWINSZ), tcgetpgrp, waitpid, and kill.
+libc = "0.2"
+# `MasterPty`'s methods return `Result<_, anyhow::Error>` — implementing the
+# trait means producing that error type. `portable-pty` already pulls anyhow.
+anyhow = "1"
+
+[dev-dependencies]
+# The integration tests name these directly (open a real PTY, dup/fcntl).
+portable-pty.workspace = true
+libc = "0.2"
+
+[lints]
+workspace = true
