@@ -30,6 +30,7 @@ pub(crate) fn run_server(
     session: &str,
     socket: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
+    quic: Option<std::net::SocketAddr>,
     daemonize: bool,
     seed_command: Option<&str>,
     resume: Option<std::os::fd::RawFd>,
@@ -117,20 +118,23 @@ pub(crate) fn run_server(
         }
     };
 
-    match listen {
-        Some(addr) => eprintln!(
-            "phux server listening on {} + ws://{addr} (session={session}; Ctrl-C to stop)",
-            socket_path.display()
-        ),
-        None => eprintln!(
-            "phux server listening on {} (session={session}; Ctrl-C to stop)",
-            socket_path.display()
-        ),
-    }
+    let extra = match (listen, quic) {
+        (Some(ws), Some(q)) => format!(" + ws://{ws} + quic://{q}"),
+        (Some(ws), None) => format!(" + ws://{ws}"),
+        (None, Some(q)) => format!(" + quic://{q}"),
+        (None, None) => String::new(),
+    };
+    eprintln!(
+        "phux server listening on {}{extra} (session={session}; Ctrl-C to stop)",
+        socket_path.display()
+    );
 
     let mut server = ServerRuntime::new(cfg);
     if let Some(addr) = listen {
         server = server.listen_ws(addr);
+    }
+    if let Some(addr) = quic {
+        server = server.listen_quic(addr);
     }
     if let Some(fd) = resume {
         server = server.resume(fd);

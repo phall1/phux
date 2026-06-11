@@ -44,6 +44,25 @@ Date: 2026-05-25
 > and `TERMINAL_SNAPSHOT`; the inline references to `PANE_OUTPUT` /
 > `PANE_SNAPSHOT` below should be read with that substitution.
 
+> **Update 2026-06-11 (phux-y8v6):** the QUIC transport is **built**.
+> Decision §2's "v0.2+ adds `QuicTransport`" is realized as a server-side
+> `QuicListener` (`phux-server::transport::quic`) implementing the actual
+> trait surface the code evolved to — frame-level `Incoming` / `FrameReader`
+> / `FrameWriter`, not the `AsyncRead + AsyncWrite` sketch below — so it
+> slots in beside the UDS and WebSocket listeners with no domain-module
+> change. It carries the identical length-prefixed frames over one
+> bidirectional QUIC stream (`docs/spec/proto.md` §4), reuses the `wss://`
+> path's persisted self-signed cert + token store, and authenticates
+> routable consumers with a bearer-token preamble (ADR-0031 parity). Opt-in
+> via `phux server --quic <HOST:PORT>`. **`quinn`, not `quiche`:** the choice
+> this ADR named is confirmed against cloudflare/quiche on implementation —
+> quiche is sans-I/O (we would hand-drive UDP sockets + the connection state
+> machine) and links BoringSSL via cmake, whereas quinn is tokio-native (its
+> streams are `AsyncRead`/`AsyncWrite`) and rides the rustls 0.23 + `ring`
+> provider already in the tree, adding no native toolchain. Still deferred:
+> a roaming-aware *client* dialer (connection migration / 0-RTT are inherent
+> to the stack but unused without it), SSH-stdio, and satellites.
+
 ## Context
 
 Two requests have arrived for what look like distinct features but

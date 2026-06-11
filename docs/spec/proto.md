@@ -138,17 +138,24 @@ redraw. The server is the only source of truth.
 ## 4. Transport
 
 The protocol runs over any reliable, ordered, bidirectional, octet-
-oriented byte stream. This version defines two concrete transports:
+oriented byte stream. This version defines these concrete transports:
 
 - **Unix domain socket** of type `SOCK_STREAM`, for local clients.
 - **Standard I/O of an SSH command**, for remote attaches. The client
   invokes `ssh host phux serve --stdio`; the protocol flows over the
   remote process's stdin/stdout.
+- **QUIC** (`quic://host:port`), for remote clients ([ADR-0007]). A
+  single bidirectional QUIC stream carries the identical framing — a
+  reliable, ordered octet stream, satisfying the property above. TLS 1.3
+  is intrinsic to QUIC, so confidentiality is never optional; a routable
+  listener additionally requires a per-attachment bearer token (§10).
 
 Future protocol versions MAY define additional transports (for example,
 a UDP-based resilient transport in the style of Mosh). Such transports
 MUST satisfy the reliable/ordered/bidirectional property; if they do
 not, they require a new major protocol version.
+
+[ADR-0007]: ../../ADR/0007-mosh-class-transport-and-satellites.md
 
 The transport is responsible for authentication and confidentiality.
 The protocol assumes both. Servers MUST NOT accept connections on
@@ -621,6 +628,11 @@ transport.
   permissions.
 - **SSH:** rely on the SSH session's authentication and channel
   confidentiality.
+- **QUIC:** TLS 1.3 provides confidentiality and server identity (the
+  client pins the self-signed certificate's fingerprint). A routable
+  listener authenticates each attachment with a bearer token the client
+  sends as the opening preamble of its stream — a transport
+  responsibility, per the paragraph below, not a protocol frame.
 
 The protocol does **not** define cookies, tokens, or in-band auth. If a
 future deployment requires per-attachment authorization, it is the

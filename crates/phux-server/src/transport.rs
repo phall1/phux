@@ -19,6 +19,7 @@
     reason = "single-threaded tokio runtime per ADR-0003; the token-auth accept path captures !Send Rc state and never crosses threads"
 )]
 
+pub mod quic;
 pub mod tls;
 
 use std::io;
