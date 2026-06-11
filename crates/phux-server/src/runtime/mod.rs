@@ -46,6 +46,7 @@ pub mod attach;
 pub mod client;
 pub mod commands;
 mod resume;
+mod upgrade;
 
 pub(crate) use attach::*;
 pub(crate) use client::*;
@@ -329,6 +330,11 @@ impl ServerRuntime {
             info!(path = %socket_path.display(), "phux-server listening on UDS");
             listener
         };
+
+        // Capture the upgrade context (ADR-0032): the listening socket's fd +
+        // path, so `handle_upgrade` can build the handoff blob and re-pass
+        // `--socket` to the re-exec'd image.
+        state.with_mut(|s| s.set_upgrade_context(listener.as_raw_fd(), socket_path.clone()));
 
         // The LocalSet hosts per-client tasks and per-pane actors —
         // both `!Send`. `LocalSet::run_until` drives the set to the

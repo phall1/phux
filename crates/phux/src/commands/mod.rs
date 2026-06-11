@@ -20,6 +20,7 @@ pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
 pub(crate) mod tag;
+pub(crate) mod upgrade;
 pub(crate) mod wait;
 pub(crate) mod watch;
 
@@ -169,6 +170,18 @@ pub(crate) enum Command {
         /// What to kill (selector).
         target: String,
 
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Graceful-upgrade the running server in place (ADR-0032).
+    ///
+    /// Asks the server to snapshot every pane, re-exec the on-disk binary, and
+    /// re-adopt the live PTYs, so the shells / editors / agents in every
+    /// session survive a binary update (e.g. after `cargo install` /
+    /// `brew upgrade`). Clients briefly disconnect and reconnect.
+    Upgrade {
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,

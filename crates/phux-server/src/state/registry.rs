@@ -69,6 +69,7 @@ impl ServerState {
             has_served_client: false,
             policy_bundle: crate::policy::PolicyBundle::default(),
             peer_identities: HashMap::new(),
+            upgrade_ctx: None,
         }
     }
 

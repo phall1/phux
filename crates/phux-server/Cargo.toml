@@ -94,6 +94,12 @@ portable-pty.workspace = true
 # Re-adopt inherited PTY masters + children across the graceful-upgrade
 # re-exec (ADR-0032): rebuilds portable-pty trait objects from (fd, pid).
 portable-pty-adopt.workspace = true
+# Graceful-upgrade orchestration (ADR-0032): clear FD_CLOEXEC on the
+# descriptors the re-exec'd image inherits (`rustix::io` fcntl), and carry the
+# handoff blob in an anonymous temp file (`tempfile`). `rustix` is libc-free
+# and cross-platform, unlike this crate's macOS-gated `libc`.
+rustix = { version = "0.38", default-features = false, features = ["std", "fs"] }
+tempfile.workspace = true
 
 # libghostty-vt is workspace-pinned (see workspace Cargo.toml). Build
 # requires zig 0.15.x on PATH; the nix dev shell provides it.

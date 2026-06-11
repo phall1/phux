@@ -1916,6 +1916,7 @@ dependencies = [
  "portable-pty",
  "portable-pty-adopt",
  "rcgen",
+ "rustix 0.38.44",
  "rustls",
  "serde",
  "serde_json",
