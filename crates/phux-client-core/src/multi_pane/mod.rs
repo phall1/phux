@@ -489,6 +489,48 @@ mod tests {
         }
     }
 
+    /// phux-jow6: while a pane is zoomed, mouse routing must target the
+    /// zoomed pane. The driver hit-tests against `Workspace::render_window`
+    /// (a single full-viewport leaf while zoomed, per phux-x2hm), so a click
+    /// that would geometrically land in the hidden right pane of the real
+    /// tiled tree instead lands on the zoomed pane.
+    #[test]
+    fn route_mouse_while_zoomed_targets_the_zoomed_pane() {
+        use crate::layout::{WindowState, Workspace};
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let workspace = Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(t(1)),
+                },
+            }],
+            active: 0,
+        };
+        // In the real tiled tree pane t(2) owns the right half; a click
+        // there would normally route to t(2).
+        let tiled = compute_layout(workspace.active_window().unwrap(), (80, 24));
+        let right_rect = tiled.rects.get(&t(2)).copied().unwrap();
+        let click_x = right_rect.x + 2;
+        let click_y = right_rect.y + 1;
+        // Zoom pane t(1): the render layout collapses to a single leaf, so
+        // the same click lands on t(1) instead.
+        let render = workspace.render_window(Some(&t(1))).unwrap();
+        let decision = route_mouse_event(&render, (80, 24), &mouse_at(click_x, click_y));
+        match decision {
+            RouteDecision::Pane {
+                target,
+                focus_changed,
+                ..
+            } => {
+                assert_eq!(target, t(1), "click while zoomed must hit the zoomed pane");
+                assert!(!focus_changed, "zoomed single-leaf is already focused");
+            }
+            other => panic!("expected Pane, got {other:?}"),
+        }
+    }
+
     /// Empty layout (no tree) returns `NoFocus`. Pre-attach race
     /// protection — the driver drops these.
     #[test]
