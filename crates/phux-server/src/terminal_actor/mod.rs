@@ -147,6 +147,7 @@ pub struct TerminalActor {
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
     screen_rx: mpsc::Receiver<ScreenRequest>,
+    upgrade_rx: mpsc::Receiver<UpgradeHandleRequest>,
     pwd_rx: mpsc::Receiver<PwdRequest>,
     resize_rx: mpsc::Receiver<ResizeRequest>,
     consumer_attach_rx: mpsc::Receiver<ConsumerAttachRequest>,
@@ -448,6 +449,10 @@ impl TerminalActor {
         Self::build(cols, rows, cmd, max_scrollback, token)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "straight-line wiring: one channel pair per request mailbox, then a single actor + handle struct literal. Splitting on an arbitrary boundary separates a channel's two halves from where the actor/handle consume them, which is harder to follow than the linear form."
+    )]
     fn build(
         cols: u16,
         rows: u16,
@@ -472,10 +477,10 @@ impl TerminalActor {
         let synth = SnapshotSynthesizer::new()?;
         let key_enc = PerTerminalKeyEncoder::new()?;
         let mouse_enc = PerTerminalMouseEncoder::new()?;
-
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (upgrade_tx, upgrade_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (pwd_tx, pwd_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (resize_tx, resize_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (consumer_attach_tx, consumer_attach_rx) =
@@ -513,6 +518,7 @@ impl TerminalActor {
             input_rx,
             snapshot_rx,
             screen_rx,
+            upgrade_rx,
             pwd_rx,
             resize_rx,
             consumer_attach_rx,
@@ -552,6 +558,7 @@ impl TerminalActor {
             input: input_tx,
             snapshot: snapshot_tx,
             screen: screen_tx,
+            upgrade: upgrade_tx,
             pwd: pwd_tx,
             output: output_tx,
             resize: resize_tx,
@@ -1734,6 +1741,48 @@ impl TerminalActor {
                     let _ = req.reply.send(screen);
                 }
 
+                Some(req) = self.upgrade_rx.recv() => {
+                    // ADR-0032: hand the upgrade producer this pane's PTY
+                    // descriptors + a full replay snapshot. Read-only; mirrors
+                    // the snapshot/pwd paths.
+                    let snap = self.synthesize_with_scrollback(Some(0)).unwrap_or_else(|err| {
+                        warn!(error = %err, "upgrade snapshot synthesis failed; replying empty");
+                        SnapshotBytes {
+                            cols: self.cols,
+                            rows: self.rows,
+                            bytes: Vec::new(),
+                            scrollback: Vec::new(),
+                        }
+                    });
+                    let pty = self.pty.as_ref();
+                    let master_fd = pty
+                        .and_then(|p| p.master.lock().ok().and_then(|m| m.as_raw_fd()));
+                    let child_pid = pty
+                        .and_then(|p| p.child.process_id())
+                        .and_then(|id| i32::try_from(id).ok());
+                    let cwd = pty
+                        .and_then(|p| p.child.process_id())
+                        .and_then(crate::cwd_query::process_cwd)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .or_else(|| {
+                            let last = self.last_known_cwd.borrow().clone();
+                            (!last.is_empty()).then_some(last)
+                        });
+                    let cell_px = (self.cell_px != (0, 0)).then_some(self.cell_px);
+                    let title = (!self.last_title.is_empty()).then(|| self.last_title.clone());
+                    let _ = req.reply.send(PaneUpgradeHandle {
+                        master_fd,
+                        child_pid,
+                        cols: self.cols,
+                        rows: self.rows,
+                        cell_px,
+                        title,
+                        cwd,
+                        vt_replay_bytes: snap.bytes,
+                        scrollback_bytes: snap.scrollback,
+                    });
+                }
+
                 Some(req) = self.pwd_rx.recv() => {
                     // Resolve the pane's live working directory by asking
                     // the kernel for the PTY child's CWD (the shell's
@@ -2224,6 +2273,68 @@ mod tests {
                     body.contains("hi there"),
                     "actor-synthesized bytes should contain seeded text"
                 );
+            })
+            .await;
+    }
+
+    /// A no-PTY actor answers `UpgradeHandleRequest` with the replay snapshot
+    /// and dims but no descriptors — there is no child to hand off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upgrade_handle_no_pty_has_snapshot_but_no_descriptors() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle = TerminalActor::new_with_seed(20, 5, b"seeded").expect("new_with_seed");
+                let handle = bundle.handle.clone();
+                let _token = bundle.token;
+                tokio::task::spawn_local(bundle.actor.run());
+
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .upgrade
+                    .send(UpgradeHandleRequest { reply: reply_tx })
+                    .await
+                    .expect("send upgrade request");
+                let h = reply_rx.await.expect("upgrade reply");
+                assert_eq!(h.master_fd, None);
+                assert_eq!(h.child_pid, None);
+                assert_eq!((h.cols, h.rows), (20, 5));
+                assert!(
+                    String::from_utf8_lossy(&h.vt_replay_bytes).contains("seeded"),
+                    "replay snapshot should carry the seeded text"
+                );
+            })
+            .await;
+    }
+
+    /// A PTY-backed actor answers `UpgradeHandleRequest` with the live master
+    /// fd and child PID — the descriptors the re-exec'd image re-adopts.
+    #[tokio::test(flavor = "current_thread")]
+    async fn upgrade_handle_with_pty_exposes_fd_and_pid() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut cmd = portable_pty::CommandBuilder::new("sleep");
+                cmd.arg("30");
+                let bundle =
+                    TerminalActor::new_with_command(cmd, 80, 24).expect("new_with_command");
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                tokio::task::spawn_local(bundle.actor.run());
+
+                let (reply_tx, reply_rx) = oneshot::channel();
+                handle
+                    .upgrade
+                    .send(UpgradeHandleRequest { reply: reply_tx })
+                    .await
+                    .expect("send upgrade request");
+                let h = reply_rx.await.expect("upgrade reply");
+                assert!(h.master_fd.is_some(), "PTY actor should expose a master fd");
+                assert!(h.child_pid.is_some(), "PTY actor should expose a child pid");
+
+                // Cancel so the actor reaps the `sleep` child instead of
+                // leaking it past the test.
+                token.cancel();
             })
             .await;
     }
