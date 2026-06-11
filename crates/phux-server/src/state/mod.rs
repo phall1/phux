@@ -344,6 +344,7 @@ mod tests {
         let (input_tx, _input_rx) = mpsc::channel(8);
         let (snapshot_tx, _snapshot_rx) = mpsc::channel(8);
         let (screen_tx, _screen_rx) = mpsc::channel(8);
+        let (upgrade_tx, _upgrade_rx) = mpsc::channel(8);
         let (pwd_tx, _pwd_rx) = mpsc::channel(8);
         let (output_tx, _output_rx_seed) =
             broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
@@ -357,6 +358,7 @@ mod tests {
             input: input_tx,
             snapshot: snapshot_tx,
             screen: screen_tx,
+            upgrade: upgrade_tx,
             pwd: pwd_tx,
             output: output_tx,
             resize: resize_tx,

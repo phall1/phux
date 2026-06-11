@@ -1,5 +1,7 @@
 //! Submodule for terminal actor internals.
 
+use std::os::fd::RawFd;
+
 use crate::grid::SnapshotBytes;
 use crate::state::{Outbound, TerminalInput};
 use bytes::Bytes;
@@ -216,6 +218,51 @@ pub struct ScreenRequest {
     pub reply: oneshot::Sender<phux_core::screen::ScreenState>,
 }
 
+/// Request for the pane's graceful-upgrade handoff (ADR-0032).
+///
+/// Sent by the upgrade producer while assembling the
+/// [`StateBlob`](crate::upgrade::blob::StateBlob): it asks every pane's actor
+/// for the descriptors and snapshot the re-exec'd image needs to re-adopt the
+/// PTY and rebuild the `Terminal`. Side-effect-free — like [`SnapshotRequest`]
+/// it only reads.
+#[derive(Debug)]
+pub struct UpgradeHandleRequest {
+    /// Channel the actor uses to ship the [`PaneUpgradeHandle`] back. Dropping
+    /// the receiver is benign — the actor discards the reply.
+    pub reply: oneshot::Sender<PaneUpgradeHandle>,
+}
+
+/// One pane's contribution to the upgrade [`StateBlob`](crate::upgrade::blob::StateBlob):
+/// the PTY descriptors to re-adopt plus the snapshot to replay.
+///
+/// `master_fd` / `child_pid` are `None` for a no-PTY actor (a pane carries no
+/// child); the producer skips such panes since there is nothing to hand off.
+#[derive(Debug, Clone)]
+pub struct PaneUpgradeHandle {
+    /// Raw PTY master descriptor (its `FD_CLOEXEC` is cleared by the
+    /// orchestrator before the re-exec so it survives).
+    pub master_fd: Option<RawFd>,
+    /// Child PID on the slave side, re-adopted via `waitpid` after the exec.
+    pub child_pid: Option<i32>,
+    /// Current grid width in cells.
+    pub cols: u16,
+    /// Current grid height in cells.
+    pub rows: u16,
+    /// Per-cell pixel size, if any client reported pixel metrics (`None` when
+    /// the actor's cell size is still the unset `0x0`).
+    pub cell_px: Option<(u16, u16)>,
+    /// Current pane title, if the child set one.
+    pub title: Option<String>,
+    /// Live working directory (kernel query against the child), falling back
+    /// to the actor's last-known CWD.
+    pub cwd: Option<String>,
+    /// Replayable viewport snapshot — the same bytes a freshly-attaching
+    /// client receives.
+    pub vt_replay_bytes: Vec<u8>,
+    /// Replayable scrollback that precedes the viewport, or empty.
+    pub scrollback_bytes: Vec<u8>,
+}
+
 /// Request for the pane's live current working directory (`phux-cs6`).
 ///
 /// Sent by the `SPAWN_TERMINAL` handler when `defaults.cwd-inheritance`
@@ -336,6 +383,10 @@ pub struct TerminalHandle {
     /// [`UnsubscribeFromEventsRequest`] when a client detaches; the actor
     /// removes the subscriber from its list (idempotent).
     pub unsubscribe_from_events: mpsc::Sender<UnsubscribeFromEventsRequest>,
+    /// Graceful-upgrade handoff channel (ADR-0032). The upgrade producer sends
+    /// an [`UpgradeHandleRequest`] per pane to collect its PTY descriptors +
+    /// replay snapshot into the [`StateBlob`](crate::upgrade::blob::StateBlob).
+    pub upgrade: mpsc::Sender<UpgradeHandleRequest>,
     /// Pane viewport width in cells at construction time.
     pub cols: u16,
     /// Pane viewport height in cells at construction time.
