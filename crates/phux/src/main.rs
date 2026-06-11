@@ -176,12 +176,14 @@ fn main() -> ExitCode {
             listen,
             daemonize,
             seed_command,
+            resume,
         }) => commands::server::run_server(
             &session,
             socket,
             listen,
             daemonize,
             seed_command.as_deref(),
+            resume,
         ),
         Some(Command::Ls { json, socket }) => commands::ls::run_ls(json, socket),
         Some(Command::New {

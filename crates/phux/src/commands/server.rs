@@ -32,13 +32,16 @@ pub(crate) fn run_server(
     listen: Option<std::net::SocketAddr>,
     daemonize: bool,
     seed_command: Option<&str>,
+    resume: Option<std::os::fd::RawFd>,
 ) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
 
     // Banner only for a hand-started foreground server (a human watching
     // a long-running process). The `--daemonize` child of the auto-spawn
-    // path nulls its stdio and logs to a file, so a banner there is noise.
-    if !daemonize {
+    // path nulls its stdio and logs to a file, so a banner there is noise;
+    // a `--resume` re-exec is likewise a detached continuation, not a
+    // hand-start.
+    if !daemonize && resume.is_none() {
         print_banner();
     }
 
@@ -125,10 +128,13 @@ pub(crate) fn run_server(
         ),
     }
 
-    let server = match listen {
-        Some(addr) => ServerRuntime::new(cfg).listen_ws(addr),
-        None => ServerRuntime::new(cfg),
-    };
+    let mut server = ServerRuntime::new(cfg);
+    if let Some(addr) = listen {
+        server = server.listen_ws(addr);
+    }
+    if let Some(fd) = resume {
+        server = server.resume(fd);
+    }
     let result = rt.block_on(async move {
         server
             .run_async(async {

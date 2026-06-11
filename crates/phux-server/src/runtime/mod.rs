@@ -29,6 +29,7 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -44,6 +45,7 @@ use crate::state::{Outbound, SharedState};
 pub mod attach;
 pub mod client;
 pub mod commands;
+mod resume;
 
 pub(crate) use attach::*;
 pub(crate) use client::*;
@@ -205,6 +207,10 @@ pub enum ServerError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
 
+    /// The handoff state blob could not be read or decoded on `--resume`.
+    #[error("resume: {0}")]
+    Resume(#[from] crate::upgrade::blob::BlobError),
+
     /// Failed to build the tokio runtime.
     #[error("failed to build tokio runtime: {0}")]
     Runtime(#[source] io::Error),
@@ -219,13 +225,31 @@ pub struct ServerRuntime {
     /// `phux server --listen <ADDR>` flag populates this; binding off-loopback
     /// auto-engages TLS + token auth (see [`build_ws_listener`]).
     ws_addr: Option<SocketAddr>,
+    /// Graceful-upgrade resume descriptor (ADR-0032). When `Some`, the runtime
+    /// reads the handoff state blob from this inherited fd, adopts the
+    /// inherited listener, and rebuilds the session tree instead of binding a
+    /// fresh socket and seeding an empty state. Set by `phux server --resume`.
+    resume_fd: Option<RawFd>,
 }
 
 impl ServerRuntime {
     /// Create a runtime ready to be `run`. Does not perform I/O.
     #[must_use]
     pub const fn new(cfg: ServerConfig) -> Self {
-        Self { cfg, ws_addr: None }
+        Self {
+            cfg,
+            ws_addr: None,
+            resume_fd: None,
+        }
+    }
+
+    /// Resume from a graceful upgrade (ADR-0032): read the handoff state blob
+    /// from inherited descriptor `fd`, adopt the inherited listener, and
+    /// rebuild the session tree rather than starting fresh.
+    #[must_use]
+    pub const fn resume(mut self, fd: RawFd) -> Self {
+        self.resume_fd = Some(fd);
+        self
     }
 
     /// Also accept WebSocket connections on `addr` (the UDS stays on).
@@ -266,23 +290,45 @@ impl ServerRuntime {
         clippy::future_not_send,
         reason = "ADR-0014: server runs on a LocalSet; per-pane actors are !Send"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear server bring-up: resolve config, set up the listener (fresh bind or resume-adopt), mirror config into shared state, then drive the LocalSet accept loop — one straight-line sequence."
+    )]
     pub async fn run_async<F>(self, shutdown: F) -> Result<(), ServerError>
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let socket_path = self.cfg.socket_path.clone();
-        prepare_socket_dir(&socket_path)?;
-        handle_existing_socket(&socket_path).await?;
 
         // Build shared state. The state is the merge point for multi-
         // client input and the routing table for fanout (see
         // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
         let state = SharedState::new();
 
-        let listener = crate::transport::UdsListener::new(
-            UnixListener::bind(&socket_path).map_err(ServerError::Bind)?,
-        );
-        info!(path = %socket_path.display(), "phux-server listening on UDS");
+        // Graceful upgrade (ADR-0032): when resuming, read the handoff blob and
+        // adopt the inherited listener instead of binding a fresh socket. The
+        // session tree is rebuilt from the blob inside the LocalSet below.
+        let resume_blob = match self.resume_fd {
+            Some(fd) => Some(resume::read_blob_from_fd(fd)?),
+            None => None,
+        };
+
+        let listener = if let Some(blob) = &resume_blob {
+            let listener = resume::adopt_uds_listener(blob.listener_fd)?;
+            info!(
+                path = %socket_path.display(),
+                "phux-server resumed; adopted the inherited UDS listener"
+            );
+            listener
+        } else {
+            prepare_socket_dir(&socket_path)?;
+            handle_existing_socket(&socket_path).await?;
+            let listener = crate::transport::UdsListener::new(
+                UnixListener::bind(&socket_path).map_err(ServerError::Bind)?,
+            );
+            info!(path = %socket_path.display(), "phux-server listening on UDS");
+            listener
+        };
 
         // The LocalSet hosts per-client tasks and per-pane actors —
         // both `!Send`. `LocalSet::run_until` drives the set to the
@@ -354,11 +400,21 @@ impl ServerRuntime {
                     });
                 }
 
-                // Pre-seed inside the LocalSet so we can `spawn_local`
-                // the pane actor. Without this, the pre-seed path
-                // would have to call `tokio::spawn`, which requires
-                // `Send` futures — exactly what `TerminalActor` is not.
-                if let Some(name) = pre_seeded.as_deref() {
+                // Graceful-upgrade resume (ADR-0032): rebuild the whole
+                // session tree from the handoff blob, re-adopting each pane's
+                // inherited PTY. Runs inside the LocalSet so the rebuilt pane
+                // actors `spawn_local` onto the same thread. A fresh start
+                // pre-seeds its single session instead (the `else` branch).
+                if let Some(blob) = resume_blob {
+                    match state.with_mut(|s| s.rebuild_from_blob(&blob)) {
+                        Ok(()) => info!(
+                            sessions = blob.sessions.len(),
+                            panes = blob.panes.len(),
+                            "resumed session tree from upgrade blob"
+                        ),
+                        Err(err) => error!(error = %err, "failed to rebuild state from upgrade blob"),
+                    }
+                } else if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
                         let mut cmd = seed_command
                             .unwrap_or_else(crate::terminal_actor::default_shell_command);
