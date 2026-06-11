@@ -96,7 +96,9 @@ These are the subcommands the binary ships today:
 ```
 phux                          # attach to default session, autostart server
 phux attach [SESSION]         # attach explicitly; session optional (alias: a)
-phux server  [--session N]    # run server in foreground (incl. for SSH; no --stdio yet)
+phux server [--session N] [--listen HOST:PORT]
+                              # run server in foreground (incl. for SSH; no --stdio yet)
+                              # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
 phux ls                       # list sessions (alias: list)

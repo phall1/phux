@@ -59,10 +59,19 @@ pub(crate) enum Command {
         #[arg(long, default_value = DEFAULT_SESSION_NAME)]
         session: String,
 
-        /// Override the UDS path. Defaults to `$XDG_RUNTIME_DIR/phux/phux.sock`
-        /// (or `/tmp/phux-$USER/phux.sock` if `XDG_RUNTIME_DIR` isn't set).
+        /// Override the UDS path. Defaults to `$PHUX_SOCKET`, else
+        /// `$XDG_RUNTIME_DIR/phux/phux.sock` (or `/tmp/phux-$USER/phux.sock`
+        /// if `XDG_RUNTIME_DIR` isn't set).
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
+
+        /// Also accept WebSocket clients on this `HOST:PORT` (the UDS stays
+        /// on). Loopback (e.g. `127.0.0.1:8787`) is plaintext for local
+        /// browser dev; any routable address (e.g. `0.0.0.0:8787`)
+        /// auto-provisions TLS and requires a `phux pair` token (ADR-0031).
+        /// Overrides `$PHUX_WS_ADDR`.
+        #[arg(long, value_name = "HOST:PORT")]
+        listen: Option<std::net::SocketAddr>,
 
         /// Detach from the controlling terminal via `setsid(2)` before
         /// binding. Set by the auto-spawn path so the server outlives
