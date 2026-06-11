@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use phux_client::attach::{self, AttachError};
 use phux_client::predict::PredictiveConfig;
@@ -79,10 +80,11 @@ pub(crate) fn run_naked() -> ExitCode {
         }
     };
 
-    match rt.block_on(attach_default_with_fallback(
+    match rt.block_on(attach_with_reconnect(
         &socket_path,
-        &default_name,
+        AttachTarget::Last,
         predict_cfg,
+        Some(&default_name),
     )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -182,6 +184,77 @@ pub(crate) async fn attach_default_with_fallback(
     }
 }
 
+/// How long a vanished server is given to come back before the client gives up
+/// and exits. A graceful upgrade (ADR-0032) re-execs in well under a second;
+/// the generous window only matters for a server that crashed and won't return.
+const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+/// Poll cadence while waiting for the re-exec'd server to start accepting.
+const RECONNECT_POLL: Duration = Duration::from_millis(100);
+
+/// Drive an attach, transparently reconnecting if the server *vanishes*
+/// mid-session — the graceful-upgrade blink (ADR-0032): the re-exec'd server
+/// keeps the socket bound, so the client re-attaches and the `ATTACH`
+/// handshake resyncs the screen via `TERMINAL_SNAPSHOT`.
+///
+/// A clean detach returns `Ok`. An [`AttachError::Disconnected`] (server closed
+/// without `DETACHED`) triggers a bounded reconnect: if the socket starts
+/// accepting again within [`RECONNECT_DEADLINE`] we re-attach; if the socket
+/// file is gone (a clean shutdown unlinks it) or never accepts again, the
+/// disconnect is surfaced. `default_name = Some` drives the naked-`phux`
+/// `Last` + `CreateIfMissing` cascade each attempt; `None` re-attaches `target`
+/// directly.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+async fn attach_with_reconnect(
+    socket_path: &Path,
+    target: AttachTarget,
+    predict_cfg: PredictiveConfig,
+    default_name: Option<&str>,
+) -> Result<(), AttachError> {
+    loop {
+        let result = match default_name {
+            Some(name) => attach_default_with_fallback(socket_path, name, predict_cfg).await,
+            None => run_attach_once(socket_path, target.clone(), predict_cfg).await,
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(AttachError::Disconnected) => {
+                if wait_until_connectable(socket_path, RECONNECT_DEADLINE).await {
+                    eprintln!("phux: server restarted; re-attaching…");
+                } else {
+                    return Err(AttachError::Disconnected);
+                }
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Wait until the server accepts on `socket_path` again, or give up.
+///
+/// Returns `false` immediately if the socket file is gone (a clean shutdown
+/// unlinks it — nothing to reconnect to), `false` if `deadline` elapses while
+/// connections keep failing (e.g. a crashed server), and `true` as soon as a
+/// connection succeeds (the re-exec'd server is up). A graceful upgrade never
+/// removes the socket file, so it falls into the retry-until-connectable path.
+async fn wait_until_connectable(socket_path: &Path, deadline: Duration) -> bool {
+    let end = Instant::now() + deadline;
+    loop {
+        if !socket_path.exists() {
+            return false;
+        }
+        if tokio::net::UnixStream::connect(socket_path).await.is_ok() {
+            return true;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        tokio::time::sleep(RECONNECT_POLL).await;
+    }
+}
+
 /// Block on the tokio current-thread runtime, drive the attach loop,
 /// translate the result into a process exit code.
 ///
@@ -256,12 +329,18 @@ pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> Ex
     // server (e.g. one whose auto-spawned seed pane exited before we
     // connected). An explicit name attaches to that session only.
     let result = match target {
-        AttachTarget::Last => rt.block_on(attach_default_with_fallback(
+        AttachTarget::Last => rt.block_on(attach_with_reconnect(
             &socket_path,
-            &default_name,
+            AttachTarget::Last,
             predict_cfg,
+            Some(&default_name),
         )),
-        other => rt.block_on(run_attach_once(&socket_path, other, predict_cfg)),
+        other => rt.block_on(attach_with_reconnect(
+            &socket_path,
+            other,
+            predict_cfg,
+            None,
+        )),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -272,5 +351,30 @@ pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> Ex
             print_attach_error(&err, &socket_path, &session_for_spawn);
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reconnect probe returns fast for a missing socket (clean shutdown),
+    /// and `true` once a listener is bound (the re-exec'd server is up).
+    #[tokio::test]
+    async fn reconnect_probe_distinguishes_missing_and_live_sockets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe.sock");
+
+        // No socket file: nothing to reconnect to — returns without waiting.
+        let start = Instant::now();
+        assert!(!wait_until_connectable(&path, Duration::from_secs(5)).await);
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a missing socket should fail fast, not burn the deadline"
+        );
+
+        // A bound listener: connectable.
+        let _listener = tokio::net::UnixListener::bind(&path).expect("bind");
+        assert!(wait_until_connectable(&path, Duration::from_secs(2)).await);
     }
 }
