@@ -210,6 +210,11 @@ fn paint_active_overlay<W: super::RenderSink>(
     workspace: &Workspace,
     panes: &mut HashMap<TerminalId, PaneSlot>,
     focused: Option<&TerminalId>,
+    // phux-x2hm: the driver's pane-zoom state. The base-frame repaints below
+    // render through `Workspace::render_window` so the zoomed pane fills the
+    // window; the copy-mode branch keeps using the REAL active window because
+    // copy mode operates on the focused pane regardless of zoom.
+    zoomed: Option<&TerminalId>,
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
     session_name: &str,
@@ -220,20 +225,26 @@ fn paint_active_overlay<W: super::RenderSink>(
             return;
         };
         // Set the selection on the focused renderer for this one paint, repaint
-        // the real frame (the renderer inverts the selected cells with their
-        // own styles), then clear it so ordinary renders are unaffected.
+        // the (zoom-honoring) base frame — the renderer inverts the selected
+        // cells with their own styles — then clear it so ordinary renders are
+        // unaffected. `ls` only gated the early-return on focus; the actual
+        // paint goes through the zoomed view so the base matches the screen.
+        let _ = ls;
+        let base = workspace.render_window(zoomed);
         if let Some(slot) = panes.get_mut(fid) {
             slot.renderer.set_selection(Some(sel));
         }
-        paint_full_frame(
-            out,
-            ls,
-            panes,
-            focused,
-            viewport_dims,
-            status_bar,
-            session_name,
-        );
+        if let Some(base) = base.as_deref() {
+            paint_full_frame(
+                out,
+                base,
+                panes,
+                focused,
+                viewport_dims,
+                status_bar,
+                session_name,
+            );
+        }
         if let Some(slot) = panes.get_mut(fid) {
             slot.renderer.set_selection(None);
         }
@@ -243,7 +254,7 @@ fn paint_active_overlay<W: super::RenderSink>(
         // the live panes visible by repainting the base frame, then emit
         // only the modal's bounded region on top. No `\x1b[2J` — the panes
         // surround the box instead of vanishing behind a full-screen clear.
-        if let Some(ls) = workspace.active_window() {
+        if let Some(ls) = workspace.render_window(zoomed).as_deref() {
             paint_full_frame(
                 out,
                 ls,
@@ -825,6 +836,11 @@ async fn main_loop<W: super::RenderSink>(
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
     let mut workspace = Workspace::default();
     let mut focused_pane: Option<TerminalId> = None;
+    // phux-x2hm: pane-zoom view state (driver-local, like focus). `Some(id)`
+    // ⇒ pane `id` is zoomed to fill the window; render/reflow then run against
+    // `workspace.render_window(zoomed)` (a synthetic single-leaf layout)
+    // instead of the real tiled tree, which is left untouched for mutation.
+    let mut zoomed: Option<TerminalId> = None;
     // phux-4li.5: keybind resolver + request-id allocator for L3 GET
     // correlation. The resolver consumes `InputEvent::Key` events
     // *before* they would be forwarded to the focused pane; a chord
@@ -927,6 +943,7 @@ async fn main_loop<W: super::RenderSink>(
         &mut panes,
         &mut workspace,
         &mut focused_pane,
+        &mut zoomed,
         &mut session_name,
         status_bar.as_mut(),
         viewport_dims,
@@ -974,7 +991,7 @@ async fn main_loop<W: super::RenderSink>(
     // phux-4li.17: seed the window/tab strip from the bootstrap layout so
     // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
     if let Some(sb) = status_bar.as_mut() {
-        sb.set_windows(window_infos(&workspace, &panes));
+        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
     }
 
     loop {
@@ -993,12 +1010,13 @@ async fn main_loop<W: super::RenderSink>(
                     &workspace,
                     &mut panes,
                     focused_pane.as_ref(),
+                    zoomed.as_ref(),
                     viewport_dims,
                     status_bar.as_mut(),
                     &session_name,
                     &theme,
                 );
-            } else if let Some(ls) = workspace.active_window() {
+            } else if let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref() {
                 paint_full_frame(
                     out,
                     ls,
@@ -1058,6 +1076,16 @@ async fn main_loop<W: super::RenderSink>(
                     continue;
                 }
                 let events = parser.feed(&stdin_buf[..n]);
+                // phux-x2hm: capture the PRE-dispatch zoom view's rects so a
+                // zoom toggle in this batch can diff against them and resize
+                // each changed pane's PTY (the reflow handshake below). Taken
+                // before `dispatch_input_events` mutates `zoomed`.
+                let prev_zoomed = zoomed.clone();
+                let prev_zoom_rects = zoom_rects(
+                    &workspace,
+                    prev_zoomed.as_ref(),
+                    pane_viewport(viewport_dims, status_bar.is_some()),
+                );
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -1072,6 +1100,7 @@ async fn main_loop<W: super::RenderSink>(
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
+                    zoomed: &mut zoomed,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1091,9 +1120,23 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(target) = switch_request.take() {
                     return Ok(LoopExit::SwitchTo(target));
                 }
+                // phux-x2hm: the zoom state flipped this batch — emit a
+                // TERMINAL_RESIZE per pane whose dims changed (the zoomed pane
+                // grows to fill the window; on un-zoom every pane shrinks back).
+                // Sent BEFORE the repaint, mirroring the close/SIGWINCH reflow.
+                if zoomed != prev_zoomed {
+                    emit_zoom_reflow(
+                        conn,
+                        &workspace,
+                        zoomed.as_ref(),
+                        &prev_zoom_rects,
+                        pane_viewport(viewport_dims, status_bar.is_some()),
+                    )
+                    .await?;
+                }
                 if layout_changed {
                     if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(window_infos(&workspace, &panes));
+                        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
                     }
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
@@ -1102,7 +1145,7 @@ async fn main_loop<W: super::RenderSink>(
                     // a push happened in the same batch) we skip the
                     // pane repaint and go straight to overlay paint.
                     if !overlays.is_active()
-                        && let Some(ls) = workspace.active_window()
+                        && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
                     {
                         paint_full_frame(
                             out,
@@ -1122,6 +1165,7 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         &mut panes,
                         focused_pane.as_ref(),
+                        zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
@@ -1171,21 +1215,29 @@ async fn main_loop<W: super::RenderSink>(
                         // against them and resize survivors whose dims
                         // changed. Only meaningful in multi-pane mode;
                         // skipped (no cost) on the single-pane hot path.
-                        let prev_rects = workspace.active_window().and_then(|ls| {
-                            ls.tree.as_ref().map(|_| {
-                                super::multi_pane::compute_layout(
-                                    ls,
-                                    pane_viewport(viewport_dims, status_bar.is_some()),
-                                )
-                                .rects
-                            })
-                        });
+                        // phux-x2hm: snapshot the zoom-honoring rects so a
+                        // close/spawn diffs against what is actually on screen;
+                        // a TerminalSpawned-ok un-zooms (sets `zoomed = None`)
+                        // inside `handle_server_frame`, so the post-frame view
+                        // below correctly reflows every pane back to its tile.
+                        let prev_rects = workspace
+                            .render_window(zoomed.as_ref())
+                            .and_then(|ls| {
+                                ls.tree.as_ref().map(|_| {
+                                    super::multi_pane::compute_layout(
+                                        ls.as_ref(),
+                                        pane_viewport(viewport_dims, status_bar.is_some()),
+                                    )
+                                    .rects
+                                })
+                            });
                         let outcome = handle_server_frame(
                             out,
                             f,
                             &mut panes,
                             &mut workspace,
                             &mut focused_pane,
+                            &mut zoomed,
                             &mut session_name,
                             status_bar.as_mut(),
                             viewport_dims,
@@ -1254,13 +1306,13 @@ async fn main_loop<W: super::RenderSink>(
                         // snapshot lands after the local mirror has grown.
                         if outcome.reflow_panes
                             && let Some(prev_rects) = &prev_rects
-                            && let Some(ls) = workspace.active_window()
+                            && let Some(ls) = workspace.render_window(zoomed.as_ref())
                             && ls.tree.is_some()
                         {
                             let new_pane_dims =
                                 pane_viewport(viewport_dims, status_bar.is_some());
                             let diff = super::reflow::compute_reflow(
-                                ls,
+                                ls.as_ref(),
                                 prev_rects,
                                 new_pane_dims,
                             );
@@ -1283,10 +1335,11 @@ async fn main_loop<W: super::RenderSink>(
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
                             if let Some(sb) = status_bar.as_mut() {
-                                sb.set_windows(window_infos(&workspace, &panes));
+                                sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
                             }
                             if !overlays.is_active()
-                                && let Some(ls) = workspace.active_window()
+                                && let Some(ls) =
+                                    workspace.render_window(zoomed.as_ref()).as_deref()
                             {
                                 paint_full_frame(
                                     out,
@@ -1321,6 +1374,15 @@ async fn main_loop<W: super::RenderSink>(
             // Escape key (see input::StdinParser::flush docs).
             () = flush_sleep => {
                 let events = parser.flush();
+                // phux-x2hm: a flushed bare-ESC chord can also resolve to
+                // `toggle-zoom`; capture the pre-toggle zoom rects for the
+                // reflow handshake, exactly as the stdin arm does.
+                let prev_zoomed = zoomed.clone();
+                let prev_zoom_rects = zoom_rects(
+                    &workspace,
+                    prev_zoomed.as_ref(),
+                    pane_viewport(viewport_dims, status_bar.is_some()),
+                );
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -1335,6 +1397,7 @@ async fn main_loop<W: super::RenderSink>(
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
+                    zoomed: &mut zoomed,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1354,12 +1417,22 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(target) = switch_request.take() {
                     return Ok(LoopExit::SwitchTo(target));
                 }
+                if zoomed != prev_zoomed {
+                    emit_zoom_reflow(
+                        conn,
+                        &workspace,
+                        zoomed.as_ref(),
+                        &prev_zoom_rects,
+                        pane_viewport(viewport_dims, status_bar.is_some()),
+                    )
+                    .await?;
+                }
                 if layout_changed && let Some(sb) = status_bar.as_mut() {
-                    sb.set_windows(window_infos(&workspace, &panes));
+                    sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
                 }
                 if layout_changed
                     && !overlays.is_active()
-                    && let Some(ls) = workspace.active_window()
+                    && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
                 {
                     paint_full_frame(
                         out,
@@ -1378,6 +1451,7 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         &mut panes,
                         focused_pane.as_ref(),
+                        zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
@@ -1418,16 +1492,16 @@ async fn main_loop<W: super::RenderSink>(
                 // (w, h) actually changed so the server ioctls TIOCSWINSZ
                 // on each PTY. Single-pane: skip the reflow math entirely
                 // (no per-leaf wire emissions to make).
-                if let Some(ls) = workspace.active_window()
+                if let Some(ls) = workspace.render_window(zoomed.as_ref())
                     && ls.tree.is_some()
                 {
                     let has_bar = status_bar.is_some();
                     let prev_pane_dims = pane_viewport(prev_dims, has_bar);
                     let new_pane_dims = pane_viewport(viewport_dims, has_bar);
                     let prev_rects =
-                        super::multi_pane::compute_layout(ls, prev_pane_dims).rects;
+                        super::multi_pane::compute_layout(ls.as_ref(), prev_pane_dims).rects;
                     let diff = super::reflow::compute_reflow(
-                        ls,
+                        ls.as_ref(),
                         &prev_rects,
                         new_pane_dims,
                     );
@@ -1459,12 +1533,13 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         &mut panes,
                         focused_pane.as_ref(),
+                        zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
                         &session_name,
                         &theme,
                     );
-                } else if let Some(ls) = workspace.active_window() {
+                } else if let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref() {
                     paint_full_frame(
                         out,
                         ls,
@@ -1502,8 +1577,8 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane
                             .as_ref()
                             .and_then(|fid| {
-                                workspace.active_window().and_then(|ls| {
-                                    super::multi_pane::compute_layout(ls, pane_dims)
+                                workspace.render_window(zoomed.as_ref()).and_then(|ls| {
+                                    super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
                                         .rects
                                         .get(fid)
                                         .copied()
@@ -1635,6 +1710,10 @@ fn build_resolver() -> Option<phux_config::keybind::Resolver> {
 fn window_infos(
     workspace: &Workspace,
     panes: &HashMap<TerminalId, PaneSlot>,
+    // phux-x2hm: the driver's pane-zoom state. The active window's tab gets a
+    // `Z` marker (`WindowInfo.zoomed`) when a pane is zoomed; non-active tabs
+    // never show it (zoom is per the active window).
+    zoomed: Option<&TerminalId>,
 ) -> Vec<phux_config::widget::WindowInfo> {
     workspace
         .windows
@@ -1650,12 +1729,63 @@ fn window_infos(
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .map(ToOwned::to_owned);
+            let active = i == workspace.active;
             phux_config::widget::WindowInfo {
                 name: title.unwrap_or_else(|| w.name.clone()),
-                active: i == workspace.active,
+                active,
+                zoomed: active && zoomed.is_some(),
             }
         })
         .collect()
+}
+
+/// phux-x2hm: the per-leaf rect map of the **zoom-honoring** view, used as the
+/// pre-toggle snapshot for the reflow handshake. Returns an empty map when
+/// there is no active window or its tree is unseeded (single-pane bootstrap).
+fn zoom_rects(
+    workspace: &Workspace,
+    zoomed: Option<&TerminalId>,
+    pane_dims: (u16, u16),
+) -> HashMap<TerminalId, crate::layout::Rect> {
+    workspace
+        .render_window(zoomed)
+        .and_then(|ls| {
+            ls.tree
+                .as_ref()
+                .map(|_| super::multi_pane::compute_layout(ls.as_ref(), pane_dims).rects)
+        })
+        .unwrap_or_default()
+}
+
+/// phux-x2hm: on a pane-zoom toggle, emit one `TERMINAL_RESIZE` per pane whose
+/// dimensions changed between the pre-toggle view (`prev_rects`) and the new
+/// `zoomed` view. Zooming grows the focused pane to the whole window; un-zooming
+/// shrinks every pane back to its tile. Reuses the close/SIGWINCH reflow path so
+/// each PTY's winsize (TIOCSWINSZ) tracks the on-screen geometry. Sent before
+/// the repaint, mirroring the other reflow sites.
+async fn emit_zoom_reflow(
+    conn: &mut Connection,
+    workspace: &Workspace,
+    zoomed: Option<&TerminalId>,
+    prev_rects: &HashMap<TerminalId, crate::layout::Rect>,
+    pane_dims: (u16, u16),
+) -> Result<(), AttachError> {
+    let Some(ls) = workspace.render_window(zoomed) else {
+        return Ok(());
+    };
+    if ls.tree.is_none() {
+        return Ok(());
+    }
+    let diff = super::reflow::compute_reflow(ls.as_ref(), prev_rects, pane_dims);
+    for (terminal_id, new_rect) in &diff.changed {
+        conn.send(&FrameKind::TerminalResize {
+            terminal_id: terminal_id.clone(),
+            cols: new_rect.w,
+            rows: new_rect.h,
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 /// phux-nz4.5 / phux-9vf: load the on-disk config and build a
@@ -2157,7 +2287,7 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes);
+        let infos = window_infos(&workspace, &panes, None);
         assert_eq!(infos.len(), 1);
         assert_eq!(
             infos[0].name, "~/src/phux",
@@ -2174,7 +2304,7 @@ mod tests {
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         panes.insert(id, PaneSlot::new_with_size(80, 24).expect("slot"));
 
-        let infos = window_infos(&workspace, &panes);
+        let infos = window_infos(&workspace, &panes, None);
         assert_eq!(infos[0].name, "1");
     }
 
@@ -2188,8 +2318,27 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;   \x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes);
+        let infos = window_infos(&workspace, &panes, None);
         assert_eq!(infos[0].name, "1");
+    }
+
+    #[test]
+    fn window_infos_flags_zoom_only_on_the_active_window() {
+        // phux-x2hm: the active window's `zoomed` reflects the zoom state;
+        // a non-active window is never marked zoomed.
+        let active = TerminalId::local(1);
+        let mut workspace = Workspace::single(active.clone());
+        workspace.add_window("2".to_owned(), TerminalId::local(2));
+        workspace.select(0); // active window is index 0
+        let panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+
+        let infos = window_infos(&workspace, &panes, Some(&active));
+        assert!(infos[0].zoomed, "active window reflects the zoom state");
+        assert!(!infos[1].zoomed, "a non-active window is never zoomed");
+
+        // No zoom ⇒ no window is marked.
+        let infos = window_infos(&workspace, &panes, None);
+        assert!(!infos[0].zoomed && !infos[1].zoomed);
     }
 
     #[test]

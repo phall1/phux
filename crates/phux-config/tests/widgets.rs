@@ -276,6 +276,15 @@ fn win(name: &str, active: bool) -> WindowInfo {
     WindowInfo {
         name: name.to_owned(),
         active,
+        zoomed: false,
+    }
+}
+
+fn win_zoomed(name: &str, active: bool) -> WindowInfo {
+    WindowInfo {
+        name: name.to_owned(),
+        active,
+        zoomed: true,
     }
 }
 
@@ -315,6 +324,14 @@ fn windows_widget_registered_in_builtins() {
 fn windows_widget_default_format_and_separator() {
     let cells = render_windows(&[], &[win("a", true), win("b", false)]);
     assert_eq!(text_of(&cells), "0:a 1:b");
+}
+
+#[test]
+fn windows_widget_appends_z_marker_when_zoomed() {
+    // phux-x2hm: a zoomed active window gets tmux's ` Z` suffix; the other
+    // (non-zoomed) tab is unmarked.
+    let cells = render_windows(&[], &[win_zoomed("a", true), win("b", false)]);
+    assert_eq!(text_of(&cells), "0:a Z 1:b");
 }
 
 #[test]

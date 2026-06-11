@@ -180,6 +180,11 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "toggle-zoom",
+        description: "Zoom the focused pane to fill the window (toggle)",
+        args: &[],
+    },
+    ActionSpec {
         name: "show-help",
         description: "Show the keybindings help overlay",
         args: &[],

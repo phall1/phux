@@ -118,6 +118,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     panes: &mut HashMap<TerminalId, PaneSlot>,
     workspace: &mut Workspace,
     focused_pane: &mut Option<TerminalId>,
+    // phux-x2hm: the driver's pane-zoom state. RENDER/REFLOW geometry reads go
+    // through `Workspace::render_window(zoomed)` so a zoomed pane paints to the
+    // full window and non-zoomed panes (absent from the synthetic single-leaf
+    // layout) correctly do not paint. A `TerminalSpawned`-ok split clears this
+    // (`*zoomed = None`) so a new pane un-zooms, matching tmux. Mutation/input
+    // reads (focus reconcile) keep using the REAL `active_window`.
+    zoomed: &mut Option<TerminalId>,
     session_name: &mut String,
     status_bar: Option<&mut StatusBarPainter>,
     viewport_dims: (u16, u16),
@@ -247,10 +254,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // (w, h) clips it. Multi-pane: ask the layout. Single-pane / no
             // layout: anchor at (0,0) spanning the full pane viewport.
             let rect = workspace
-                .active_window()
+                .render_window(zoomed.as_ref())
                 .filter(|ls| ls.tree.is_some())
                 .and_then(|ls| {
-                    super::multi_pane::compute_layout(ls, pane_dims)
+                    super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
                         .rects
                         .get(&terminal_id)
                         .copied()
@@ -360,8 +367,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // composition is off-screen and must NOT paint (off-screen
                 // invariant), so we render only when it has a rect.
                 let rects = workspace
-                    .active_window()
-                    .map(|ls| super::multi_pane::compute_layout(ls, pane_dims).rects)
+                    .render_window(zoomed.as_ref())
+                    .map(|ls| super::multi_pane::compute_layout(ls.as_ref(), pane_dims).rects)
                     .unwrap_or_default();
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
@@ -464,9 +471,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // only at the TERMINAL_SNAPSHOT resync (and a future resize-ack);
                 // here we just feed bytes in.
                 let initial_dims = workspace
-                    .active_window()
+                    .render_window(zoomed.as_ref())
                     .and_then(|ls| {
-                        super::multi_pane::compute_layout(ls, pane_dims)
+                        super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
                             .rects
                             .get(&terminal_id)
                             .map(|r| (r.w, r.h))
@@ -484,12 +491,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // non-active window (off-screen invariant). Rendering only
             // applies to the active window's composition; if there's no
             // active window there's nothing on-screen to repaint.
-            let Some(active_ls) = workspace.active_window() else {
+            // phux-x2hm: render against the zoom-honoring view so a zoomed
+            // pane paints to the whole window and the others (absent from the
+            // synthetic single-leaf layout) get no rect and so do not paint.
+            let Some(active_ls) = workspace.render_window(zoomed.as_ref()) else {
                 return Ok(FrameOutcome {
                     ack,
                     ..FrameOutcome::default()
                 });
             };
+            let active_ls = active_ls.as_ref();
             if is_focused
                 && !overlay_active
                 && !defer_paint
@@ -749,6 +760,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     match apply_spawned_ok(active_ls, new_id.clone(), &pending) {
                         Ok(new_state) => {
                             *active_ls = new_state;
+                            // phux-x2hm: a split un-zooms (tmux parity). The
+                            // new pane needs its tile, and the reflow_panes
+                            // diff below is taken against the now-cleared
+                            // (real, tiled) view.
+                            *zoomed = None;
                             // Seed a PaneSlot for the new Terminal so the
                             // first TERMINAL_SNAPSHOT lands on a warm
                             // mirror. Vacant-or-occupied — never overwrite
@@ -1249,6 +1265,7 @@ mod tests {
         viewport_dims: (u16, u16),
     ) -> FrameOutcome {
         let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
         let mut predict = PredictionState::new(
             PredictiveConfig::disabled(),
             viewport_dims.0,
@@ -1267,6 +1284,7 @@ mod tests {
             panes,
             layout,
             focused,
+            &mut zoomed,
             &mut session_name,
             None,
             viewport_dims,
@@ -1328,6 +1346,7 @@ mod tests {
         let mut panes = HashMap::new();
         let mut workspace = Workspace::default();
         let mut focused = None;
+        let mut zoomed: Option<TerminalId> = None;
         let mut session_name = String::new();
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 132, 43);
         let overlay = Overlay;
@@ -1344,6 +1363,7 @@ mod tests {
             &mut panes,
             &mut workspace,
             &mut focused,
+            &mut zoomed,
             &mut session_name,
             None,
             (132, 43),
@@ -1475,6 +1495,7 @@ mod tests {
         viewport_dims: (u16, u16),
     ) -> FrameOutcome {
         let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
         let mut predict = PredictionState::new(
             PredictiveConfig::disabled(),
             viewport_dims.0,
@@ -1495,6 +1516,7 @@ mod tests {
             panes,
             layout,
             focused,
+            &mut zoomed,
             &mut session_name,
             None,
             viewport_dims,
@@ -1780,6 +1802,7 @@ mod tests {
     fn bell_frame_writes_bel_to_sink() {
         let mut layout = Workspace::single(tid(1));
         let mut focused = Some(tid(1));
+        let mut zoomed: Option<TerminalId> = None;
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         let mut session_name = String::new();
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
@@ -1796,6 +1819,7 @@ mod tests {
             &mut panes,
             &mut layout,
             &mut focused,
+            &mut zoomed,
             &mut session_name,
             None,
             (80, 24),
@@ -1824,6 +1848,7 @@ mod tests {
     ) -> FrameOutcome {
         let mut out: Vec<u8> = Vec::new();
         let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
         let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
         let overlay = Overlay;
         let mut pending_splits = HashMap::new();
@@ -1837,6 +1862,7 @@ mod tests {
             panes,
             layout,
             focused,
+            &mut zoomed,
             &mut session_name,
             None,
             (80, 24),

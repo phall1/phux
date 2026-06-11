@@ -95,6 +95,11 @@ pub(super) struct DispatchCtx<'a> {
     /// dispatch batch and returns `LoopExit::SwitchTo(target)` so the
     /// outer loop re-attaches. Cleared by the driver each iteration.
     pub switch_request: &'a mut Option<ReattachTarget>,
+    /// phux-x2hm: the driver's pane-zoom state — `Some(id)` when pane `id`
+    /// is zoomed to fill the window. `apply_action_effects` flips this for a
+    /// `toggle-zoom` action; the driver reads it (via `Workspace::render_window`)
+    /// to render/reflow the zoomed pane.
+    pub zoomed: &'a mut Option<TerminalId>,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -377,6 +382,10 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     clippy::too_many_arguments,
     reason = "shares the dispatch loop's transport + render + predict context; phux-7ry0 added the focused-pane map for the predict re-anchor"
 )]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "flat per-effect dispatch — one guarded block per ActionEffects field (zoom, focus, metadata, bell, detach, spawn, kill); splitting would thread the same transport + render context through helpers"
+)]
 async fn apply_action_effects<W: super::RenderSink>(
     effects: ActionEffects,
     out: &mut W,
@@ -388,6 +397,15 @@ async fn apply_action_effects<W: super::RenderSink>(
     panes: &HashMap<TerminalId, PaneSlot>,
 ) -> Result<bool, AttachError> {
     let layout_changed = effects.layout_mutated;
+    if effects.toggle_zoom {
+        // phux-x2hm: flip pane-zoom. Un-zoom if zoomed; otherwise zoom the
+        // focused pane. `run_action` already gated single-pane windows.
+        *ctx.zoomed = if ctx.zoomed.is_some() {
+            None
+        } else {
+            focused_pane.clone()
+        };
+    }
     if let Some(target) = effects.set_focus {
         *focused_pane = Some(target);
         // Focus moved (keybinding pane navigation) — re-anchor predict to
@@ -557,6 +575,10 @@ fn consume_chord(
 struct ActionEffects {
     /// `true` ⇒ the active window was mutated in-place; driver repaints.
     layout_mutated: bool,
+    /// phux-x2hm: `true` ⇒ flip the driver's pane-zoom state (zoom the
+    /// focused pane to fill the window, or un-zoom). `apply_action_effects`
+    /// owns the actual toggle since the `zoomed` state lives in the driver.
+    toggle_zoom: bool,
     /// `Some(new_focus)` ⇒ swap the driver's `focused_pane` (input
     /// routing follows). The action helper already updated the active
     /// window's focus; this carries the new id so the driver
@@ -653,6 +675,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "detach",
     "next-pane",
     "previous-pane",
+    "toggle-zoom",
     "command-palette",
     "window-picker",
     "session-picker",
@@ -1015,6 +1038,23 @@ fn run_action(
                 effects.set_focus = new_focus;
             }
         }
+        "toggle-zoom" => {
+            // phux-x2hm: zoom needs more than one pane (a single-pane window
+            // bells, like tmux). When already zoomed the REAL tree still has
+            // >1 leaf, so this same check permits un-zooming. The driver owns
+            // the `zoomed` state; we just signal intent + request a repaint.
+            let multi = ctx
+                .workspace
+                .active_window()
+                .and_then(|ls| ls.tree.as_ref())
+                .is_some_and(|t| crate::layout::leaves(t).len() > 1);
+            if multi {
+                effects.toggle_zoom = true;
+                effects.layout_mutated = true;
+            } else {
+                effects.bell = true;
+            }
+        }
         other => {
             tracing::debug!(action = other, "unhandled resolved action");
         }
@@ -1363,6 +1403,7 @@ mod tests {
         let theme = Theme::default();
         let mut switch_request = None;
         let mut session_name = String::new();
+        let mut zoomed = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -1377,6 +1418,7 @@ mod tests {
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1483,6 +1525,47 @@ mod tests {
         assert!(!effects.layout_mutated);
     }
 
+    /// phux-x2hm: a multi-pane window can zoom — `toggle-zoom` requests the
+    /// driver-side flip (`toggle_zoom`) plus a repaint (`layout_mutated`),
+    /// without mutating the real tree or bell-ing.
+    #[test]
+    fn toggle_zoom_on_multi_pane_window_requests_toggle() {
+        use crate::layout::{LayoutState, WindowState, split_at};
+        let tree = split_at(
+            &crate::layout::LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            crate::layout::SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        let mut workspace = Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(1)),
+                },
+            }],
+            active: 0,
+        };
+        let effects = run(&bare_action("toggle-zoom"), &mut workspace);
+        assert!(effects.toggle_zoom, "multi-pane window may zoom");
+        assert!(effects.layout_mutated, "zoom toggles drive a repaint");
+        assert!(!effects.bell);
+    }
+
+    /// phux-x2hm: a single-pane window has nothing to zoom — `toggle-zoom`
+    /// bells (tmux parity) and does NOT request a toggle or repaint.
+    #[test]
+    fn toggle_zoom_on_single_pane_window_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("toggle-zoom"), &mut workspace);
+        assert!(effects.bell, "single-pane window cannot zoom");
+        assert!(!effects.toggle_zoom);
+        assert!(!effects.layout_mutated);
+    }
+
     #[test]
     fn rename_window_with_name_arg_renames_and_broadcasts() {
         let mut workspace = Workspace::single(tid(1)); // window "1"
@@ -1520,6 +1603,7 @@ mod tests {
         let theme = Theme::default();
         let mut switch_request = None;
         let mut session_name = String::new();
+        let mut zoomed = None;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1535,6 +1619,7 @@ mod tests {
                 focused_session,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
+                zoomed: &mut zoomed,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -1785,6 +1870,7 @@ mod tests {
         let theme = Theme::default();
         let mut switch_request = None;
         let mut session_name = String::new();
+        let mut zoomed = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1799,6 +1885,7 @@ mod tests {
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -1844,6 +1931,7 @@ mod tests {
         let theme = Theme::default();
         let mut switch_request = None;
         let mut session_name = "work".to_owned();
+        let mut zoomed = None;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1859,6 +1947,7 @@ mod tests {
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
+                zoomed: &mut zoomed,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -1984,6 +2073,7 @@ mod tests {
             unshifted_codepoint: Some(u32::from(b'x')),
         };
 
+        let mut zoomed = None;
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -1998,6 +2088,7 @@ mod tests {
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
         };
         dispatch_input_events(
             &mut out,
