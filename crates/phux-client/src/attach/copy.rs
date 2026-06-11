@@ -15,23 +15,31 @@ use std::io::{self, Write};
 use libghostty_vt::{
     Terminal as GhosttyTerminal,
     fmt::Format,
-    selection::{FormatOptions, Selection},
+    selection::{FormatOptions, SelectLineOptions, SelectWordOptions, Selection},
     terminal::{Point, PointCoordinate},
 };
 
-use crate::render::overlay::CopyRequest;
+use crate::render::overlay::{CopyRequest, SelectionGrab};
 
 /// Base64 alphabet (RFC 4648 §4, standard, with `+`/`/` and `=` padding).
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-/// Extract the plain text of `req`'s viewport selection from `terminal`.
+/// Extract the plain text of `req`'s selection from `terminal`.
 ///
-/// Maps the overlay's inclusive `(row, col)` viewport rectangle onto two
-/// [`Point::Viewport`] grid references, builds a [`Selection`] (rectangular
-/// when `req.rectangle`), and formats it to plain text. Returns `None` when
-/// the engine reports nothing selectable in the range (e.g. an all-blank
-/// span) or a libghostty call fails — copy is best-effort, so a failure is a
-/// silent no-op rather than an error the caller must thread.
+/// Branches on [`CopyRequest::grab`] (phux-7143):
+/// - [`SelectionGrab::Rect`] maps the overlay's inclusive `(row, col)` viewport
+///   rectangle onto two [`Point::Viewport`] grid references and builds a
+///   two-corner [`Selection`] (rectangular when `req.rectangle`).
+/// - The engine-derived grabs (`Word`/`Line`/`LineSemantic`/`All`/`Output`)
+///   call libghostty's own `select_*` helpers at the overlay cursor
+///   (`req.cursor_row`/`req.cursor_col`) and format the *returned* selection.
+///   `select_all` ignores the cursor. `Output` degrades to `None` (a no-op)
+///   when the pane has no OSC-133 command-output zones to resolve.
+///
+/// Returns `None` when the engine reports nothing selectable (e.g. an
+/// all-blank span, or `Output` with no zones) or a libghostty call fails —
+/// copy is best-effort, so a failure is a silent no-op rather than an error
+/// the caller must thread.
 ///
 /// `Point::Viewport` (not `Active`) is deliberate: the overlay coordinates
 /// index the *visible* viewport the client rendered, which is what the user
@@ -48,13 +56,42 @@ pub fn extract_selection_text(
         })
     };
 
-    // Endpoints are inclusive (see `Selection::new`); the overlay's CellRange
-    // is already normalized so start <= end and both ends name real cells.
-    let start = terminal
-        .grid_ref(point(req.start_col, req.start_row))
-        .ok()?;
-    let end = terminal.grid_ref(point(req.end_col, req.end_row)).ok()?;
-    let selection = Selection::new(start, end, req.rectangle);
+    let selection = match req.grab {
+        SelectionGrab::Rect => {
+            // Endpoints are inclusive (see `Selection::new`); the overlay's
+            // CellRange is already normalized so start <= end and both ends
+            // name real cells.
+            let start = terminal
+                .grid_ref(point(req.start_col, req.start_row))
+                .ok()?;
+            let end = terminal.grid_ref(point(req.end_col, req.end_row)).ok()?;
+            Selection::new(start, end, req.rectangle)
+        }
+        SelectionGrab::All => terminal.select_all().ok()??,
+        SelectionGrab::Word => {
+            let cursor = terminal
+                .grid_ref(point(req.cursor_col, req.cursor_row))
+                .ok()?;
+            terminal
+                .select_word(SelectWordOptions::new(cursor))
+                .ok()??
+        }
+        SelectionGrab::Line | SelectionGrab::LineSemantic => {
+            let cursor = terminal
+                .grid_ref(point(req.cursor_col, req.cursor_row))
+                .ok()?;
+            let opts = SelectLineOptions::new(cursor)
+                .with_semantic_prompt_boundary(req.grab == SelectionGrab::LineSemantic);
+            terminal.select_line(opts).ok()??
+        }
+        SelectionGrab::Output => {
+            let cursor = terminal
+                .grid_ref(point(req.cursor_col, req.cursor_row))
+                .ok()?;
+            // Best-effort: no OSC-133 zones -> `None` -> silent no-op copy.
+            terminal.select_output(cursor).ok()??
+        }
+    };
 
     let bytes = terminal
         .format_selection_alloc(
@@ -148,6 +185,37 @@ mod tests {
         .expect("Terminal::new")
     }
 
+    /// A two-corner [`SelectionGrab::Rect`] request over the inclusive
+    /// rectangle `(start_row,start_col)..=(end_row,end_col)`, linear.
+    fn rect_req(start_row: u16, start_col: u16, end_row: u16, end_col: u16) -> CopyRequest {
+        CopyRequest {
+            start_row,
+            start_col,
+            end_row,
+            end_col,
+            rectangle: false,
+            cursor_row: end_row,
+            cursor_col: end_col,
+            grab: SelectionGrab::Rect,
+        }
+    }
+
+    /// An engine-derived request resolving at cursor `(row, col)` with `grab`.
+    /// The two-corner rectangle is collapsed onto the cursor (unused by the
+    /// engine-derived path).
+    fn grab_req(grab: SelectionGrab, row: u16, col: u16) -> CopyRequest {
+        CopyRequest {
+            start_row: row,
+            start_col: col,
+            end_row: row,
+            end_col: col,
+            rectangle: false,
+            cursor_row: row,
+            cursor_col: col,
+            grab,
+        }
+    }
+
     /// RFC 4648 §10 test vectors.
     #[test]
     fn base64_rfc4648_vectors() {
@@ -184,13 +252,7 @@ mod tests {
         let mut t = fresh(20, 3);
         t.vt_write(b"hello world");
         // "hello" occupies viewport row 0, cols 0..=4 (inclusive).
-        let req = CopyRequest {
-            start_row: 0,
-            start_col: 0,
-            end_row: 0,
-            end_col: 4,
-            rectangle: false,
-        };
+        let req = rect_req(0, 0, 0, 4);
         assert_eq!(extract_selection_text(&t, req).as_deref(), Some("hello"));
     }
 
@@ -199,13 +261,7 @@ mod tests {
         let mut t = fresh(20, 3);
         // Row 0: "abc", row 1: "def" (explicit CR/LF placement).
         t.vt_write(b"abc\r\ndef");
-        let req = CopyRequest {
-            start_row: 0,
-            start_col: 0,
-            end_row: 1,
-            end_col: 2,
-            rectangle: false,
-        };
+        let req = rect_req(0, 0, 1, 2);
         let text = extract_selection_text(&t, req).expect("some text");
         assert!(text.contains("abc"), "got {text:?}");
         assert!(text.contains("def"), "got {text:?}");
@@ -216,13 +272,7 @@ mod tests {
         let mut t = fresh(20, 3);
         t.vt_write(b"hi");
         let mut out: Vec<u8> = Vec::new();
-        let req = CopyRequest {
-            start_row: 0,
-            start_col: 0,
-            end_row: 0,
-            end_col: 1,
-            rectangle: false,
-        };
+        let req = rect_req(0, 0, 0, 1);
         copy_to_host_clipboard(&mut out, &t, req).expect("write");
         // "hi" -> base64 "aGk=" wrapped in OSC 52.
         assert_eq!(out, b"\x1b]52;c;aGk=\x07");
@@ -232,17 +282,78 @@ mod tests {
     fn copy_to_host_clipboard_blank_span_writes_nothing() {
         let t = fresh(20, 3); // no output: viewport is all blanks
         let mut out: Vec<u8> = Vec::new();
-        let req = CopyRequest {
-            start_row: 1,
-            start_col: 0,
-            end_row: 1,
-            end_col: 5,
-            rectangle: false,
-        };
+        let req = rect_req(1, 0, 1, 5);
         copy_to_host_clipboard(&mut out, &t, req).expect("write");
         assert!(
             out.is_empty(),
             "blank selection should emit nothing, got {out:?}"
         );
+    }
+
+    #[test]
+    fn grab_word_extracts_word_under_cursor() {
+        let mut t = fresh(20, 3);
+        t.vt_write(b"hello world");
+        // Cursor inside "world" (col 8, row 0) -> select_word yields "world".
+        let req = grab_req(SelectionGrab::Word, 0, 8);
+        assert_eq!(extract_selection_text(&t, req).as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn grab_line_extracts_whole_line() {
+        let mut t = fresh(20, 3);
+        t.vt_write(b"alpha beta\r\ngamma");
+        // Cursor anywhere on row 0 -> the whole first line.
+        let req = grab_req(SelectionGrab::Line, 0, 2);
+        let text = extract_selection_text(&t, req).expect("line text");
+        assert!(text.contains("alpha"), "got {text:?}");
+        assert!(text.contains("beta"), "got {text:?}");
+        assert!(!text.contains("gamma"), "must not bleed row 1: {text:?}");
+    }
+
+    #[test]
+    fn grab_all_extracts_all_content() {
+        let mut t = fresh(20, 3);
+        t.vt_write(b"first\r\nsecond");
+        // select_all ignores the cursor; both rows are captured.
+        let req = grab_req(SelectionGrab::All, 0, 0);
+        let text = extract_selection_text(&t, req).expect("all text");
+        assert!(text.contains("first"), "got {text:?}");
+        assert!(text.contains("second"), "got {text:?}");
+    }
+
+    #[test]
+    fn grab_line_semantic_bounds_at_prompt() {
+        let mut t = fresh(40, 3);
+        // OSC-133 ; A -> prompt start, then prompt text + typed input on row 0.
+        t.vt_write(b"\x1b]133;A\x07$ ");
+        t.vt_write(b"\x1b]133;B\x07ls -la");
+        // Semantic-line select at the cursor: derives a selection bounded by
+        // the OSC-133 prompt-state changes rather than the raw display line.
+        let req = grab_req(SelectionGrab::LineSemantic, 0, 4);
+        let text = extract_selection_text(&t, req).expect("semantic line text");
+        assert!(text.contains("ls -la"), "got {text:?}");
+    }
+
+    #[test]
+    fn grab_output_extracts_command_output_zone() {
+        let mut t = fresh(40, 4);
+        // Prompt + input (row 0), then command output marked by OSC-133 ; C.
+        t.vt_write(b"\x1b]133;A\x07$ ");
+        t.vt_write(b"\x1b]133;B\x07cat f\r\n");
+        t.vt_write(b"\x1b]133;C\x07the-output-line\r\n");
+        // Cursor on the output row -> select_output captures the output span.
+        let req = grab_req(SelectionGrab::Output, 1, 3);
+        let text = extract_selection_text(&t, req).expect("output text");
+        assert!(text.contains("the-output-line"), "got {text:?}");
+    }
+
+    #[test]
+    fn grab_output_without_zones_is_noop() {
+        let mut t = fresh(20, 3);
+        // No OSC-133 marks: select_output has no zone to resolve -> None.
+        t.vt_write(b"plain text");
+        let req = grab_req(SelectionGrab::Output, 0, 2);
+        assert_eq!(extract_selection_text(&t, req), None);
     }
 }
