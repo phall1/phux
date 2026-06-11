@@ -134,6 +134,14 @@ impl IdBridge {
     pub fn is_empty(&self) -> bool {
         self.forward.is_empty()
     }
+
+    /// The next wire id this bridge would allocate. Carried into the
+    /// graceful-upgrade state blob so the resumed server keeps minting ids
+    /// above every restored one (ADR-0032).
+    #[must_use]
+    pub const fn next_wire(&self) -> u32 {
+        self.next
+    }
 }
 
 #[cfg(test)]
