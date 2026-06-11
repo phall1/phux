@@ -412,6 +412,48 @@ impl<'alloc> TerminalRenderer<'alloc> {
         Ok(cursor)
     }
 
+    /// Render `terminal` into the outer-viewport rect at `rect_origin =
+    /// (x, y)` spanning `rect_clip = (cols, rows)`, **letterboxed**: when the
+    /// server-authoritative mirror grid (`mirror = (cols, rows)`) is smaller
+    /// than the rect on an axis, centre the content within the rect and blank
+    /// the surrounding margin bars rather than painting at the rect origin
+    /// (which would pin an undersized mirror to the top-left and leave stale
+    /// cells along the bottom/right of the rect).
+    ///
+    /// When the mirror is >= the rect on an axis, this degrades to the
+    /// existing [`Self::render_at`] clamp on that axis (no pad, clip to the
+    /// rect) — a wider/taller mirror is confined to the rect exactly as
+    /// before (phux-wurs). The mirror-equals-rect case is byte-identical to
+    /// [`Self::render_at_full`]: zero pad ⇒ no margin bars ⇒ the same core
+    /// paint at the same origin.
+    ///
+    /// `force_full` forwards to the core paint (the full-frame path forces a
+    /// redraw after its `ED2`). The centring math (floor split, the extra pad
+    /// cell on the bottom/right of an odd gap) lives in the private
+    /// `letterbox_rect` helper.
+    ///
+    /// This is the single-view letterbox of ADR-0027 decision points 1-2:
+    /// one Terminal rendered into one slot under the nk07/xjgs geometry
+    /// policy. True multi-leaf mirroring (the same Terminal in N slots) is a
+    /// layout-model change and is out of scope here.
+    pub fn render_at_letterboxed(
+        &mut self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+        out: &mut impl Write,
+        rect_origin: (u16, u16),
+        rect_clip: (u16, u16),
+        mirror: (u16, u16),
+        force_full: bool,
+    ) -> Result<Dirty, RenderError> {
+        let lb = letterbox_rect(rect_origin, rect_clip, mirror);
+        // Blank the four margin bars first so an undersized mirror's
+        // surrounding cells are cleared before the centred content paints
+        // over the interior. Skipped entirely when there is no pad (the
+        // mirror-fills-the-rect / clamp case), keeping that path byte-identical.
+        emit_letterbox_margins(out, lb)?;
+        self.render_at_inner(terminal, out, lb.inner_origin, lb.inner_clip, force_full)
+    }
+
     fn render_at_inner(
         &mut self,
         terminal: &GhosttyTerminal<'alloc, '_>,
@@ -634,6 +676,141 @@ pub(super) fn write_cup(out: &mut impl Write, row: u16, col: u16) -> io::Result<
     let r = row.saturating_add(1);
     let c = col.saturating_add(1);
     write!(out, "\x1b[{r};{c}H")
+}
+
+/// The centred placement of a mirror within a render rect, plus the margin
+/// bars to blank around it (ADR-0027 single-view letterbox, phux-7ubw).
+///
+/// All coordinates are outer-viewport cells. `inner_origin`/`inner_clip` are
+/// what the core paint ([`TerminalRenderer::render_at_inner`]) consumes:
+/// the content's centred top-left and its clamped extent. The four `margin_*`
+/// fields are the surrounding gap the mirror does not cover and that
+/// [`emit_letterbox_margins`] blanks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Letterbox {
+    /// Centred top-left of the mirror content (rect origin + pad).
+    inner_origin: (u16, u16),
+    /// Painted extent `min(mirror, rect)` on each axis — the clamp the
+    /// existing `render_at` already applies, so a mirror >= the rect is
+    /// confined to the rect (phux-wurs) with no pad.
+    inner_clip: (u16, u16),
+    /// Left pad width in columns (`= inner_origin.0 - rect_origin.0`).
+    margin_left: u16,
+    /// Right pad width in columns (the floor split's extra cell lands here).
+    margin_right: u16,
+    /// Top pad height in rows (`= inner_origin.1 - rect_origin.1`).
+    margin_top: u16,
+    /// Bottom pad height in rows (the floor split's extra cell lands here).
+    margin_bottom: u16,
+    /// The rect's outer origin `(x, y)`, retained so the margin emitter can
+    /// position the bars without re-deriving it from the pads.
+    rect_origin: (u16, u16),
+    /// The rect's full extent `(cols, rows)`, retained for the same reason.
+    rect_clip: (u16, u16),
+}
+
+/// Centre a mirror of `mirror = (cols, rows)` within the render rect at
+/// `rect_origin = (x, y)` spanning `rect_clip = (cols, rows)`, returning the
+/// centred [`Letterbox`].
+///
+/// Per axis: when the mirror is smaller than the rect, the gap
+/// `rect - mirror` is split with `pad = gap / 2` on the leading edge
+/// (left/top) and the remainder `gap - pad` on the trailing edge
+/// (right/bottom) — a floor split that puts the extra cell of an odd gap on
+/// the bottom/right. When the mirror is `>=` the rect, the pad is `0` and the
+/// clip clamps to the rect (the existing `render_at` behaviour, phux-wurs).
+///
+/// Pure — no I/O, no `terminal` access — so it is unit-testable in isolation.
+fn letterbox_rect(rect_origin: (u16, u16), rect_clip: (u16, u16), mirror: (u16, u16)) -> Letterbox {
+    let (rx, ry) = rect_origin;
+    let (rect_cols, rect_rows) = rect_clip;
+    let (mirror_cols, mirror_rows) = mirror;
+
+    // Per-axis: clamp the painted extent to the rect, then centre the gap with
+    // the floor split (extra cell on the trailing edge).
+    let inner_cols = mirror_cols.min(rect_cols);
+    let inner_rows = mirror_rows.min(rect_rows);
+    let gap_x = rect_cols.saturating_sub(mirror_cols);
+    let gap_y = rect_rows.saturating_sub(mirror_rows);
+    let margin_left = gap_x / 2;
+    let margin_right = gap_x - margin_left;
+    let margin_top = gap_y / 2;
+    let margin_bottom = gap_y - margin_top;
+
+    Letterbox {
+        inner_origin: (
+            rx.saturating_add(margin_left),
+            ry.saturating_add(margin_top),
+        ),
+        inner_clip: (inner_cols, inner_rows),
+        margin_left,
+        margin_right,
+        margin_top,
+        margin_bottom,
+        rect_origin,
+        rect_clip,
+    }
+}
+
+/// Blank the four margin bars of a [`Letterbox`] so an undersized mirror's
+/// surrounding rect cells are cleared before the centred content paints.
+///
+/// Each bar is a sequence of `CUP` + an SGR-reset blank run: top and bottom
+/// bars span the full rect width; left and right bars span only the interior
+/// rows (between the top and bottom bars) so the corners are written once, by
+/// the top/bottom bars. A `Letterbox` with no pad (the mirror fills or
+/// exceeds the rect) emits nothing, keeping the clamp path byte-identical to
+/// [`TerminalRenderer::render_at`].
+fn emit_letterbox_margins(out: &mut impl Write, lb: Letterbox) -> io::Result<()> {
+    let (rx, ry) = lb.rect_origin;
+    let (rect_cols, rect_rows) = lb.rect_clip;
+    if lb.margin_left == 0 && lb.margin_right == 0 && lb.margin_top == 0 && lb.margin_bottom == 0 {
+        return Ok(());
+    }
+    // Reset SGR so the blanks paint in the default (background) style and no
+    // prior run's attributes leak into the bars.
+    out.write_all(b"\x1b[0m")?;
+
+    // Top bar: full-width rows above the centred content.
+    for row in ry..ry.saturating_add(lb.margin_top) {
+        write_cup(out, row, rx)?;
+        write_blank_run(out, rect_cols)?;
+    }
+    // Bottom bar: full-width rows below the centred content.
+    let content_bottom = ry
+        .saturating_add(lb.margin_top)
+        .saturating_add(lb.inner_clip.1);
+    for row in content_bottom..ry.saturating_add(rect_rows) {
+        write_cup(out, row, rx)?;
+        write_blank_run(out, rect_cols)?;
+    }
+    // Left/right bars: only the interior rows (the top/bottom bars already
+    // cleared the corners).
+    let interior_top = ry.saturating_add(lb.margin_top);
+    let interior_bottom = content_bottom;
+    let right_col = rx
+        .saturating_add(lb.margin_left)
+        .saturating_add(lb.inner_clip.0);
+    for row in interior_top..interior_bottom {
+        if lb.margin_left > 0 {
+            write_cup(out, row, rx)?;
+            write_blank_run(out, lb.margin_left)?;
+        }
+        if lb.margin_right > 0 {
+            write_cup(out, row, right_col)?;
+            write_blank_run(out, lb.margin_right)?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `n` blank (space) cells in one call — the margin-bar fill.
+fn write_blank_run(out: &mut impl Write, n: u16) -> io::Result<()> {
+    if n == 0 {
+        return Ok(());
+    }
+    let blanks = vec![b' '; n as usize];
+    out.write_all(&blanks)
 }
 
 /// The cell style currently active on the outer terminal, as a comparable
@@ -1262,6 +1439,239 @@ mod tests {
 
         let c = cursor.expect("cursor present");
         assert_eq!((c.x, c.y), (5, 1), "pane col 4 + origin (1,1)");
+    }
+
+    // ── phux-7ubw: single-view letterbox ─────────────────────────────────
+
+    /// The centring math: a mirror smaller than the rect on both axes is
+    /// centred with a floor split, the extra cell of an odd gap landing on
+    /// the bottom/right margin.
+    #[test]
+    fn letterbox_rect_centers_with_floor_split() {
+        // Rect 10x6 at origin (0,0), mirror 6x4: even gaps (4 cols, 2 rows).
+        let lb = letterbox_rect((0, 0), (10, 6), (6, 4));
+        assert_eq!(lb.inner_origin, (2, 1), "even gap centres symmetrically");
+        assert_eq!(lb.inner_clip, (6, 4), "clip is the mirror size");
+        assert_eq!((lb.margin_left, lb.margin_right), (2, 2));
+        assert_eq!((lb.margin_top, lb.margin_bottom), (1, 1));
+
+        // Odd gaps: rect 9x5, mirror 6x4 ⇒ gap 3 cols / 1 row. Floor split
+        // puts the extra pad on the right/bottom.
+        let lb = letterbox_rect((0, 0), (9, 5), (6, 4));
+        assert_eq!(
+            (lb.margin_left, lb.margin_right),
+            (1, 2),
+            "extra col on right"
+        );
+        assert_eq!(
+            (lb.margin_top, lb.margin_bottom),
+            (0, 1),
+            "extra row on bottom"
+        );
+        assert_eq!(lb.inner_origin, (1, 0));
+    }
+
+    /// The centred origin is offset by the rect origin too, so a pane that is
+    /// not the top-left leaf letterboxes within its own rect.
+    #[test]
+    fn letterbox_rect_offsets_by_rect_origin() {
+        let lb = letterbox_rect((4, 3), (10, 6), (6, 4));
+        // rect origin (4,3) + pad (2,1).
+        assert_eq!(lb.inner_origin, (6, 4));
+    }
+
+    /// A mirror that fills or exceeds the rect produces no pad and clamps the
+    /// clip to the rect — the existing `render_at` behaviour (phux-wurs).
+    #[test]
+    fn letterbox_rect_clamps_when_mirror_ge_rect() {
+        // Equal: no pad, clip == rect.
+        let lb = letterbox_rect((0, 0), (8, 4), (8, 4));
+        assert_eq!(lb.inner_origin, (0, 0));
+        assert_eq!(lb.inner_clip, (8, 4));
+        assert_eq!(
+            (
+                lb.margin_left,
+                lb.margin_right,
+                lb.margin_top,
+                lb.margin_bottom
+            ),
+            (0, 0, 0, 0)
+        );
+
+        // Larger: still no pad, clip clamps DOWN to the rect.
+        let lb = letterbox_rect((0, 0), (8, 4), (20, 10));
+        assert_eq!(lb.inner_origin, (0, 0));
+        assert_eq!(
+            lb.inner_clip,
+            (8, 4),
+            "clip clamps to the rect, not the mirror"
+        );
+        assert_eq!(
+            (
+                lb.margin_left,
+                lb.margin_right,
+                lb.margin_top,
+                lb.margin_bottom
+            ),
+            (0, 0, 0, 0)
+        );
+    }
+
+    /// An undersized mirror renders centred: its content's CUP is shifted by
+    /// the pad, and the margin rows/cols are blanked.
+    #[test]
+    fn render_at_letterboxed_centers_undersized_mirror() {
+        // Mirror is 4x2 of "ab"/"cd"; rect is 8x4 ⇒ pad (2 cols, 1 row) each.
+        let mut terminal = fresh(4, 2);
+        terminal.vt_write(b"ab\r\ncd");
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        let mut out: Vec<u8> = Vec::new();
+        let _ = renderer
+            .render_at_letterboxed(&terminal, &mut out, (0, 0), (8, 4), (4, 2), true)
+            .expect("render");
+        let s = String::from_utf8_lossy(&out);
+
+        // Content is centred: row 0 of the mirror lands at outer row 1
+        // (0-based) ⇒ 1-based CUP row 2, col = pad_left 2 ⇒ 1-based col 3.
+        assert!(
+            s.contains("\x1b[2;3H"),
+            "centred content CUP (row 2, col 3) missing; out = {s:?}"
+        );
+        // The top margin row (outer row 0 ⇒ CUP 1;1) is blanked full-width.
+        assert!(
+            s.contains("\x1b[1;1H"),
+            "top margin bar CUP missing; out = {s:?}"
+        );
+        // The bottom margin row: content occupies outer rows 1..3, so the
+        // bottom bar is outer row 3 ⇒ CUP 4;1.
+        assert!(
+            s.contains("\x1b[4;1H"),
+            "bottom margin bar CUP missing; out = {s:?}"
+        );
+        // The content glyphs are present.
+        assert!(s.contains('a') && s.contains('d'), "content missing; {s:?}");
+    }
+
+    /// An undersized mirror blanks exactly N margin rows + the left/right
+    /// margin columns: decode the emitted bytes into an 8x4 grid and confirm
+    /// the centred 4x2 content sits in the middle with blank borders.
+    #[test]
+    fn render_at_letterboxed_blanks_margins_around_content() {
+        let mut terminal = fresh(4, 2);
+        terminal.vt_write(b"WXYZ\r\nMNOP"); // 4 cols x 2 rows of content
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        let mut out: Vec<u8> = Vec::new();
+        let _ = renderer
+            .render_at_letterboxed(&terminal, &mut out, (0, 0), (8, 4), (4, 2), true)
+            .expect("render");
+
+        // Decode into an 8x4 grid: content centred at cols 2..6, rows 1..3.
+        let grid = decode_grid(&out, 8, 4);
+        let at = |r: usize, c: usize| grid[r * 8 + c].0;
+        // Top + bottom margin rows are entirely blank.
+        for c in 0..8 {
+            assert_eq!(at(0, c), None, "top margin row must be blank at col {c}");
+            assert_eq!(at(3, c), None, "bottom margin row must be blank at col {c}");
+        }
+        // Interior rows: left (cols 0,1) and right (cols 6,7) margins blank,
+        // content in cols 2..6.
+        for r in 1..3 {
+            assert_eq!(at(r, 0), None, "left margin blank, row {r}");
+            assert_eq!(at(r, 1), None, "left margin blank, row {r}");
+            assert_eq!(at(r, 6), None, "right margin blank, row {r}");
+            assert_eq!(at(r, 7), None, "right margin blank, row {r}");
+        }
+        assert_eq!(at(1, 2), Some('W'), "content top-left");
+        assert_eq!(at(1, 5), Some('Z'), "content top-right");
+        assert_eq!(at(2, 2), Some('M'), "content bottom-left");
+        assert_eq!(at(2, 5), Some('P'), "content bottom-right");
+    }
+
+    /// A mirror equal to the rect is byte-identical to today's
+    /// `render_at_full`: no pad ⇒ no margin bars ⇒ the same core paint.
+    #[test]
+    fn render_at_letterboxed_equal_size_is_byte_identical() {
+        let make = || {
+            let mut t = fresh(10, 3);
+            t.vt_write(b"\x1b[1mHELLO\x1b[0m world\r\nsecond row\r\nthird");
+            t
+        };
+
+        let t_a = make();
+        let mut r_a = TerminalRenderer::new().expect("renderer");
+        let mut today: Vec<u8> = Vec::new();
+        let _ = r_a
+            .render_at_full(&t_a, &mut today, (0, 0), (10, 3))
+            .expect("render_at_full");
+
+        let t_b = make();
+        let mut r_b = TerminalRenderer::new().expect("renderer");
+        let mut letterboxed: Vec<u8> = Vec::new();
+        let _ = r_b
+            .render_at_letterboxed(&t_b, &mut letterboxed, (0, 0), (10, 3), (10, 3), true)
+            .expect("render_at_letterboxed");
+
+        assert_eq!(
+            today, letterboxed,
+            "mirror==rect letterbox must be byte-identical to render_at_full"
+        );
+    }
+
+    /// A mirror larger than the rect clamps exactly as `render_at` does (the
+    /// phux-wurs clip): no margin bars, content confined to the rect.
+    #[test]
+    fn render_at_letterboxed_larger_mirror_clamps_like_render_at() {
+        let make = || {
+            let mut t = fresh(20, 4);
+            t.vt_write(b"ABCDEFGHIJKLMNOPQRST\r\nabcdefghijklmnopqrst");
+            t
+        };
+
+        // Today's clamp path.
+        let t_a = make();
+        let mut r_a = TerminalRenderer::new().expect("renderer");
+        let mut clamp: Vec<u8> = Vec::new();
+        let _ = r_a
+            .render_at_full(&t_a, &mut clamp, (0, 0), (12, 2))
+            .expect("render_at_full");
+
+        // Letterboxed path with mirror 20x4 > rect 12x2: must match.
+        let t_b = make();
+        let mut r_b = TerminalRenderer::new().expect("renderer");
+        let mut letterboxed: Vec<u8> = Vec::new();
+        let _ = r_b
+            .render_at_letterboxed(&t_b, &mut letterboxed, (0, 0), (12, 2), (20, 4), true)
+            .expect("render_at_letterboxed");
+
+        assert_eq!(
+            clamp, letterboxed,
+            "mirror>rect letterbox must clamp byte-identically to render_at_full"
+        );
+    }
+
+    /// The cursor cached in `last_cursor` (and the recorded `last_origin`)
+    /// include the letterbox pad offset, so the composite bar-restore agrees
+    /// with where the content was actually painted.
+    #[test]
+    fn render_at_letterboxed_cursor_includes_pad_offset() {
+        let mut terminal = fresh(4, 2);
+        terminal.vt_write(b"ab"); // cursor parks pane-local at (row 0, col 2)
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        let mut out: Vec<u8> = Vec::new();
+        // Rect 8x4, mirror 4x2 ⇒ pad (2 cols, 1 row).
+        let _ = renderer
+            .render_at_letterboxed(&terminal, &mut out, (0, 0), (8, 4), (4, 2), true)
+            .expect("render");
+        // Pane-local cursor is origin-free (the predict anchor).
+        assert_eq!(renderer.last_cursor_local(), Some((0, 2)));
+        // Outer cursor includes the pad: (row 0 + pad_top 1, col 2 + pad_left 2).
+        assert_eq!(
+            renderer.last_cursor(),
+            Some((1, 4)),
+            "last_cursor must include the letterbox pad offset"
+        );
+        // The recorded paint origin is the centred (padded) origin.
+        assert_eq!(renderer.last_origin(), (2, 1));
     }
 
     /// phux-l5xa: a double-width glyph occupies its base cell; the
