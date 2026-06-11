@@ -32,6 +32,9 @@ phux-config.workspace = true
 # `GET_SCREEN` serializes `phux_core::ScreenState` into the COMMAND_RESULT
 # JSON payload (ADR-0022 §2); the CLI deserializes the same contract.
 chrono.workspace = true
+# `derive` for the versioned graceful-upgrade state blob (ADR-0032); the
+# JSON codec is `serde_json`, already in the dep graph.
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
