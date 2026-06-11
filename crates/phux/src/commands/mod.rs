@@ -219,6 +219,23 @@ pub(crate) enum Command {
         #[arg(long)]
         cells: bool,
 
+        /// Emit the CLIENT's composited multi-pane view — the assembled
+        /// frame (layout tiling + dividers + status bar) as the human's glass
+        /// shows it — as dense structured cells (`phux-l5xa`). Unlike the
+        /// default side-effect-free read this ATTACHES (drives the headless
+        /// client render path). Mutually exclusive with `--cells` /
+        /// `--scrollback`; sizes the composite via `--cols` / `--rows`.
+        #[arg(long, conflicts_with_all = ["cells", "scrollback"])]
+        rendered: bool,
+
+        /// Composited viewport width for `--rendered` (no TTY to measure).
+        #[arg(long, value_name = "COLS", default_value_t = 80)]
+        cols: u16,
+
+        /// Composited viewport height for `--rendered`.
+        #[arg(long, value_name = "ROWS", default_value_t = 24)]
+        rows: u16,
+
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,

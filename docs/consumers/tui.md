@@ -105,6 +105,7 @@ phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
 phux rename SESSION NEW-NAME  # rename a session
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)
+phux snapshot --rendered      # dump the client's composited multi-pane view
 phux send-keys TARGET KEYS... # send keys to a pane (scripting)
 phux run TARGET CMD...        # run a command in a pane, capture $?
 phux wait [TARGET]            # poll a pane until a condition holds

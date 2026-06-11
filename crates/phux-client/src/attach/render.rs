@@ -26,8 +26,10 @@ use std::io::{self, Write};
 use libghostty_vt::{
     RenderState, Terminal as GhosttyTerminal,
     render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
-    style::{RgbColor, Style},
+    screen::CellWide,
+    style::{RgbColor, Style, StyleColor, Underline},
 };
+use phux_core::screen::{CellColor, CellStyle, CursorState, RenderedFrame};
 use phux_protocol::sgr::write_reset_and_sgr;
 
 /// Errors the renderer can surface.
@@ -322,6 +324,94 @@ impl<'alloc> TerminalRenderer<'alloc> {
         self.render_at_inner(terminal, out, origin, clip, true)
     }
 
+    /// Project this pane's grid into a region of a dense [`RenderedFrame`]
+    /// instead of emitting VT (`phux-l5xa`).
+    ///
+    /// Walks the **same** `RenderState` snapshot + `RowIterator` /
+    /// `CellIterator` as [`Self::render_at`], but writes each cell's
+    /// grapheme + resolved style into `frame` at `(row + origin.1, col +
+    /// origin.0)`, clipped to `clip = (cols, rows)` of the pane's render
+    /// rect exactly as the VT path clips. This is the structured-cells
+    /// counterpart to the byte renderer: no VT, no re-parse, so the
+    /// composited view can be introspected with no external emulator.
+    ///
+    /// Wide glyphs are mirrored faithfully: the base cell carries the
+    /// cluster, and its `SpacerTail` column is left as the empty grapheme
+    /// (`""`) so a consumer reconstructs exact widths (see [`RenderedCell`]).
+    /// Copy-mode selection inversion is intentionally *not* applied — this
+    /// is a side-effect-free introspection path, not the live overlay.
+    ///
+    /// Returns the pane's cursor in **frame-absolute** coordinates (pane
+    /// viewport cursor shifted by `origin`), or `None` when the cursor is
+    /// off-viewport or clipped away. The compositor elects which pane's
+    /// cursor becomes the frame cursor.
+    ///
+    /// [`RenderedCell`]: phux_core::screen::RenderedCell
+    pub fn render_at_cells(
+        &mut self,
+        terminal: &GhosttyTerminal<'alloc, '_>,
+        frame: &mut RenderedFrame,
+        origin: (u16, u16),
+        clip: (u16, u16),
+    ) -> Result<Option<CursorState>, RenderError> {
+        let (ox, oy) = origin;
+        let (clip_cols, clip_rows) = clip;
+        let snapshot = self.state.update(terminal)?;
+        // Clip to the render rect, mirroring `render_at_inner`: a
+        // server-authoritative mirror may transiently exceed the client's
+        // layout rect during a resize handshake; confine the walk so a wider
+        // mirror never spills past the rect and a smaller one stays in-grid.
+        let rows_total = snapshot.rows()?.min(clip_rows);
+        let cols_total = snapshot.cols()?.min(clip_cols);
+
+        let mut row_iter = self.rows.update(&snapshot)?;
+        let mut row_index: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if row_index >= rows_total {
+                break;
+            }
+            let mut col: u16 = 0;
+            let mut cell_iter = self.cells.update(row)?;
+            while let Some(cell) = cell_iter.next() {
+                if col >= cols_total {
+                    break;
+                }
+                let wide = cell.raw_cell()?.wide()?;
+                let graphemes = cell.graphemes()?;
+                let grapheme = if matches!(wide, CellWide::SpacerTail) {
+                    // Right half of a wide glyph: the base cell already
+                    // carries the cluster; emit no glyph so widths stay exact.
+                    String::new()
+                } else if graphemes.is_empty() {
+                    " ".to_owned()
+                } else {
+                    graphemes.iter().collect()
+                };
+                let style = to_cell_style(&cell.style()?, cell.fg_color()?, cell.bg_color()?);
+                if let Some(dst) =
+                    frame.cell_mut(row_index.saturating_add(oy), col.saturating_add(ox))
+                {
+                    dst.grapheme = grapheme;
+                    dst.style = style;
+                }
+                col = col.saturating_add(1);
+            }
+            row_index = row_index.saturating_add(1);
+        }
+
+        // Cursor, shifted into frame-absolute coords, dropped when it sits
+        // outside the painted (clipped) region.
+        let cursor = match snapshot.cursor_viewport()? {
+            Some(v) if v.y < rows_total && v.x < cols_total => Some(CursorState {
+                x: v.x.saturating_add(ox),
+                y: v.y.saturating_add(oy),
+                visible: snapshot.cursor_visible()?,
+            }),
+            _ => None,
+        };
+        Ok(cursor)
+    }
+
     fn render_at_inner(
         &mut self,
         terminal: &GhosttyTerminal<'alloc, '_>,
@@ -478,6 +568,50 @@ impl<'alloc> TerminalRenderer<'alloc> {
 
         out.flush()?;
         Ok(dirty)
+    }
+}
+
+/// Project a libghostty cell's `(Style, resolved fg, resolved bg)` into a
+/// plain-data [`CellStyle`] for the rendered-frame introspection path
+/// (`phux-l5xa`).
+///
+/// This mirrors the server synthesizer's `collect_cell` (`phux-8yl`) — the
+/// two can't share code because that projection lives in `phux-server` and
+/// this walk runs client-side, but they must agree cell-for-cell so a
+/// `--rendered` frame and a `--cells` snapshot describe the same glyph
+/// identically.
+fn to_cell_style(style: &Style, fg: Option<RgbColor>, bg: Option<RgbColor>) -> CellStyle {
+    CellStyle {
+        bold: style.bold,
+        faint: style.faint,
+        italic: style.italic,
+        underline: !matches!(style.underline, Underline::None),
+        blink: style.blink,
+        inverse: style.inverse,
+        invisible: style.invisible,
+        strikethrough: style.strikethrough,
+        overline: style.overline,
+        fg: cell_color(fg, style.fg_color),
+        bg: cell_color(bg, style.bg_color),
+    }
+}
+
+/// Project a cell color to [`CellColor`], preferring the explicit per-cell
+/// [`StyleColor`] so a palette index keeps its identity, and falling back to
+/// the iteration's resolved RGB. Mirrors the synthesizer's `cell_color`.
+fn cell_color(resolved: Option<RgbColor>, raw: StyleColor) -> CellColor {
+    match raw {
+        StyleColor::Palette(index) => CellColor::Palette { index: index.0 },
+        StyleColor::Rgb(rgb) => CellColor::Rgb {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        },
+        StyleColor::None => resolved.map_or(CellColor::Default, |rgb| CellColor::Rgb {
+            r: rgb.r,
+            g: rgb.g,
+            b: rgb.b,
+        }),
     }
 }
 
@@ -1095,6 +1229,62 @@ mod tests {
         assert!(
             !s.contains("\x1b[4;1H"),
             "row 3 past the rect must not paint; out = {s:?}"
+        );
+    }
+
+    /// phux-l5xa: `render_at_cells` projects graphemes + resolved style into
+    /// a dense frame, shifted by the origin, and returns the cursor in
+    /// frame-absolute coordinates.
+    #[test]
+    fn render_at_cells_projects_graphemes_style_and_cursor() {
+        let mut terminal = fresh(10, 3);
+        // Bold "Hi", reset, then " X": cols 0..1 bold, col 2 a default space,
+        // col 3 a default 'X'. Cursor parks pane-local at col 4.
+        terminal.vt_write(b"\x1b[1mHi\x1b[0m X");
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        let mut frame = RenderedFrame::blank(12, 4);
+        let cursor = renderer
+            .render_at_cells(&terminal, &mut frame, (1, 1), (10, 3))
+            .expect("render_at_cells");
+
+        assert_eq!(frame.cell(1, 1).expect("in range").grapheme, "H");
+        assert!(frame.cell(1, 1).expect("in range").style.bold, "H is bold");
+        assert_eq!(frame.cell(1, 2).expect("in range").grapheme, "i");
+        assert!(frame.cell(1, 2).expect("in range").style.bold);
+        assert_eq!(frame.cell(1, 3).expect("in range").grapheme, " ");
+        assert!(
+            !frame.cell(1, 3).expect("in range").style.bold,
+            "the space after the reset is default style"
+        );
+        assert_eq!(frame.cell(1, 4).expect("in range").grapheme, "X");
+        // Cells outside the painted rect stay blank.
+        assert_eq!(frame.cell(0, 0).expect("in range").grapheme, " ");
+
+        let c = cursor.expect("cursor present");
+        assert_eq!((c.x, c.y), (5, 1), "pane col 4 + origin (1,1)");
+    }
+
+    /// phux-l5xa: a double-width glyph occupies its base cell; the
+    /// `SpacerTail` column is the empty grapheme so widths stay exact.
+    #[test]
+    fn render_at_cells_marks_wide_glyph_tail_empty() {
+        let mut terminal = fresh(6, 2);
+        terminal.vt_write("世".as_bytes());
+        let mut renderer = TerminalRenderer::new().expect("renderer");
+        let mut frame = RenderedFrame::blank(6, 2);
+        let _ = renderer
+            .render_at_cells(&terminal, &mut frame, (0, 0), (6, 2))
+            .expect("render_at_cells");
+        assert_eq!(frame.cell(0, 0).expect("in range").grapheme, "世");
+        assert_eq!(
+            frame.cell(0, 1).expect("in range").grapheme,
+            "",
+            "the wide glyph's tail column is the empty grapheme"
+        );
+        assert_eq!(
+            frame.cell(0, 2).expect("in range").grapheme,
+            " ",
+            "the cell after the wide glyph is a normal blank"
         );
     }
 }
