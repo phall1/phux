@@ -261,6 +261,11 @@ pub struct ServerState {
     policy_bundle: crate::policy::PolicyBundle,
     /// Per-client peer identities, keyed by server-assigned client id.
     peer_identities: HashMap<ClientId, phux_protocol::policy::PeerIdentity>,
+    /// Graceful-upgrade context (ADR-0032): the listening socket's raw fd and
+    /// its path, captured at startup. `handle_upgrade` reads these to build the
+    /// handoff blob and to re-pass `--socket` to the re-exec'd image. `None`
+    /// until [`Self::set_upgrade_context`] runs (i.e. before serving).
+    upgrade_ctx: Option<(std::os::fd::RawFd, std::path::PathBuf)>,
 }
 
 impl Default for ServerState {

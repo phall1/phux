@@ -123,6 +123,10 @@ fn is_interactive_client(cli: &Cli) -> bool {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match arm per CLI subcommand; the dispatch is a flat verb table, clearer whole than split."
+)]
 fn main() -> ExitCode {
     // Heap profiler must outlive everything else in `main` — its Drop
     // is what flushes `dhat-heap.json`. Bind to `_dhat` (NOT `_`, which
@@ -195,6 +199,7 @@ fn main() -> ExitCode {
             command,
         }) => commands::new::run_new(name, session, cwd, socket, json, command),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
+        Some(Command::Upgrade { socket }) => commands::upgrade::run_upgrade(socket),
         Some(Command::Rename {
             session,
             new_name,

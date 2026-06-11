@@ -109,6 +109,14 @@ impl UdsListener {
     pub(crate) const fn new(listener: UnixListener) -> Self {
         Self(listener)
     }
+
+    /// The raw listening-socket descriptor, captured at startup for the
+    /// graceful-upgrade handoff (ADR-0032): cleared of `FD_CLOEXEC` and
+    /// inherited by the re-exec'd image so the socket stays bound.
+    pub(crate) fn as_raw_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd;
+        self.0.as_raw_fd()
+    }
 }
 
 impl Incoming for UdsListener {

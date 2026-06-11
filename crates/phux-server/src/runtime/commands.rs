@@ -7,7 +7,7 @@ use phux_protocol::wire::frame::{
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use super::{AttachPrepared, spawn_pane_event_drain, spawn_terminal_exit_watcher};
 use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
@@ -298,6 +298,14 @@ pub(crate) async fn handle_command(
     command: Command,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
+    // UPGRADE is handled out-of-band: `handle_upgrade` acks the client itself
+    // and then re-execs the process, so it never returns a `CommandResult` for
+    // the shared send below (ADR-0032).
+    if matches!(command, Command::Upgrade) {
+        handle_upgrade(state, request_id, out_tx).await;
+        return;
+    }
+
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
         Command::GetScreen {
@@ -361,6 +369,48 @@ pub(crate) async fn handle_command(
         ?client_id,
         request_id, "COMMAND dispatched; sending COMMAND_RESULT"
     );
+    let _ = out_tx
+        .send(Outbound::Frame(FrameKind::CommandResult {
+            request_id,
+            result,
+        }))
+        .await;
+}
+
+/// Handle `UPGRADE` (ADR-0032): prepare the graceful re-exec, ack the client,
+/// then replace the process. Acks itself (rather than returning a
+/// `CommandResult`) because on success it never returns.
+async fn handle_upgrade(
+    state: &SharedState,
+    request_id: u32,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) {
+    let result = match super::upgrade::prepare_upgrade(state).await {
+        Ok(plan) => {
+            // Ack `Ok` and let the writer flush it before we replace the
+            // process — best-effort; the client reconnects regardless.
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::CommandResult {
+                    request_id,
+                    result: CommandResult::Ok,
+                }))
+                .await;
+            tokio::task::yield_now().await;
+            info!("UPGRADE: re-exec'ing the new binary");
+            let err = plan.exec();
+            // Only reached if the exec itself failed: nothing was closed, so
+            // the old image keeps serving and no child is stranded.
+            error!(error = %err, "UPGRADE exec failed; continuing on the current image");
+            return;
+        }
+        Err(err) => {
+            warn!(error = %err, "UPGRADE preparation failed");
+            CommandResult::Error {
+                code: ErrorCode::InternalError,
+                message: format!("upgrade failed: {err}"),
+            }
+        }
+    };
     let _ = out_tx
         .send(Outbound::Frame(FrameKind::CommandResult {
             request_id,

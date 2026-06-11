@@ -19,7 +19,9 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::ServerState;
-use crate::terminal_actor::{PaneUpgradeHandle, TerminalActor, UpgradeHandleRequest};
+use crate::terminal_actor::{
+    PaneUpgradeHandle, TerminalActor, TerminalHandle, UpgradeHandleRequest,
+};
 use crate::upgrade::blob::{
     BLOB_VERSION, Counters, LayoutBlob, PaneBlob, SessionBlob, SplitDirBlob, StateBlob, WindowBlob,
 };
@@ -58,6 +60,48 @@ impl ServerState {
     /// its descriptor with no handoff — the resume path then has nothing to
     /// re-adopt for it.
     pub async fn build_upgrade_blob(&self, listener_fd: RawFd) -> StateBlob {
+        let mut handoffs = HashMap::new();
+        let tids: Vec<TerminalId> = self.terminals.keys().copied().collect();
+        for tid in tids {
+            if let Some(handoff) = self.request_pane_handoff(tid).await {
+                handoffs.insert(tid, handoff);
+            }
+        }
+        self.assemble_upgrade_blob(listener_fd, &handoffs)
+    }
+
+    /// Record the upgrade context — the listening socket's raw fd and path —
+    /// at startup, for `handle_upgrade` to read when building the handoff.
+    pub(crate) fn set_upgrade_context(&mut self, listener_fd: RawFd, socket_path: PathBuf) {
+        self.upgrade_ctx = Some((listener_fd, socket_path));
+    }
+
+    /// The upgrade context `(listener_fd, socket_path)`, if serving has begun.
+    pub(crate) fn upgrade_context(&self) -> Option<(RawFd, &std::path::Path)> {
+        self.upgrade_ctx
+            .as_ref()
+            .map(|(fd, path)| (*fd, path.as_path()))
+    }
+
+    /// Clone every pane's [`TerminalHandle`] so the runtime can query each
+    /// actor's upgrade handoff *outside* the `ServerState` lock (it can't hold
+    /// the `Arc<Mutex<_>>` across the await; see
+    /// [`Self::assemble_upgrade_blob`]).
+    pub(crate) fn upgrade_handles(&self) -> Vec<(TerminalId, TerminalHandle)> {
+        self.terminals
+            .iter()
+            .map(|(tid, handle)| (*tid, handle.clone()))
+            .collect()
+    }
+
+    /// Assemble the [`StateBlob`] from the live tree plus a pre-fetched map of
+    /// per-pane handoffs — synchronous, so the runtime can call it under the
+    /// state lock after gathering the handoffs out of lock.
+    pub(crate) fn assemble_upgrade_blob(
+        &self,
+        listener_fd: RawFd,
+        handoffs: &HashMap<TerminalId, PaneUpgradeHandle>,
+    ) -> StateBlob {
         let mut sessions = Vec::new();
         let mut windows = Vec::new();
         let mut panes = Vec::new();
@@ -109,7 +153,7 @@ impl ServerState {
                     else {
                         continue;
                     };
-                    let handoff = self.request_pane_handoff(tid).await;
+                    let handoff = handoffs.get(&tid).cloned();
                     panes.push(pane_blob(pane_wire, window_wire, desc, &self.term, handoff));
                 }
             }
