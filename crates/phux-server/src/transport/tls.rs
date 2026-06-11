@@ -97,25 +97,61 @@ pub fn ensure_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), TlsEr
     Ok(())
 }
 
-/// Build a [`TlsAcceptor`] from a PEM certificate chain and private key.
+/// ALPN protocol id advertised on the QUIC listener. QUIC mandates ALPN, so a
+/// dialer must offer this exact token or the TLS handshake fails — which also
+/// keeps a stray non-phux QUIC client (or a protocol-version mismatch) from
+/// ever reaching the frame layer.
+pub(crate) const QUIC_ALPN: &[u8] = b"phux-quic/1";
+
+/// Build a rustls [`ServerConfig`] from a PEM certificate chain and private
+/// key, using the `ring` provider. Shared by the WebSocket [`TlsAcceptor`] and
+/// the QUIC listener so both terminate TLS with the identical cert material.
 ///
 /// `cert_path` is a PEM file with the leaf certificate first, followed by any
 /// intermediates; `key_path` is a PEM file with one PKCS#8 / SEC1 / PKCS#1
 /// private key. No client authentication is required — the bearer token
 /// (see [`crate::auth`]) is the authentication layer; TLS provides encryption
 /// and server identity only. Mutual TLS is the ADR-0031 v0.2 hardening.
-pub fn acceptor_from_pem(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor, TlsError> {
+fn server_config_from_pem(cert_path: &Path, key_path: &Path) -> Result<ServerConfig, TlsError> {
     let certs = load_certs(cert_path)?;
     let key = load_key(key_path)?;
 
-    let config =
+    Ok(
         ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .with_safe_default_protocol_versions()
             .map_err(TlsError::Rustls)?
             .with_no_client_auth()
-            .with_single_cert(certs, key)?;
+            .with_single_cert(certs, key)?,
+    )
+}
 
-    Ok(TlsAcceptor::from(Arc::new(config)))
+/// Build a [`TlsAcceptor`] for the WebSocket listener from a PEM cert + key.
+pub fn acceptor_from_pem(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor, TlsError> {
+    Ok(TlsAcceptor::from(Arc::new(server_config_from_pem(
+        cert_path, key_path,
+    )?)))
+}
+
+/// Build the rustls [`ServerConfig`] for the QUIC listener from a PEM cert +
+/// key: TLS 1.3 only (QUIC forbids earlier versions) with the phux ALPN set.
+///
+/// Returned as a bare rustls config; the QUIC transport wraps it in quinn's
+/// `QuicServerConfig`. Reuses the same cert material as the WebSocket path.
+pub(crate) fn quic_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<ServerConfig, TlsError> {
+    let certs = load_certs(cert_path)?;
+    let key = load_key(key_path)?;
+
+    let mut config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(TlsError::Rustls)?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+    config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    Ok(config)
 }
 
 /// SHA-256 fingerprint of the leaf certificate, formatted as uppercase

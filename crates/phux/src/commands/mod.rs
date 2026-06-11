@@ -74,6 +74,14 @@ pub(crate) enum Command {
         #[arg(long, value_name = "HOST:PORT")]
         listen: Option<std::net::SocketAddr>,
 
+        /// Also accept QUIC clients on this `HOST:PORT` (the UDS stays on).
+        /// QUIC is always TLS 1.3-encrypted; a loopback address skips token
+        /// auth (local dev), while any routable address requires a `phux pair`
+        /// token sent as the stream's opening preamble (ADR-0007, ADR-0031).
+        /// Overrides `$PHUX_QUIC_ADDR`.
+        #[arg(long, value_name = "HOST:PORT")]
+        quic: Option<std::net::SocketAddr>,
+
         /// Detach from the controlling terminal via `setsid(2)` before
         /// binding. Set by the auto-spawn path so the server outlives
         /// the launching client's terminal; a foreground `phux server`

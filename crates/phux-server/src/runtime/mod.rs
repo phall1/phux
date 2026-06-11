@@ -56,6 +56,13 @@ pub use commands::*;
 /// existing socket file is encountered during bind.
 pub(crate) const STALE_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// A boxed, type-erased per-transport accept loop future. The accept loops over
+/// the (heterogeneous) UDS / WebSocket / QUIC listeners share one `Output` but
+/// have distinct concrete future types; boxing lets [`futures_util::future::select_all`]
+/// drive them as one homogeneous set. The lifetime ties each future to the
+/// listener it borrows for the duration of the `run_until` block.
+type AcceptLoopFuture<'a> = std::pin::Pin<Box<dyn Future<Output = Result<(), ServerError>> + 'a>>;
+
 /// Configuration for [`ServerRuntime`].
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -226,6 +233,12 @@ pub struct ServerRuntime {
     /// `phux server --listen <ADDR>` flag populates this; binding off-loopback
     /// auto-engages TLS + token auth (see [`build_ws_listener`]).
     ws_addr: Option<SocketAddr>,
+    /// Optional QUIC listen address (in addition to the always-on UDS).
+    /// `None` falls back to the `PHUX_QUIC_ADDR` environment variable. The
+    /// `phux server --quic <ADDR>` flag populates this; QUIC is always TLS-
+    /// encrypted, and binding off-loopback requires a paired bearer token
+    /// (see [`build_quic_listener`]).
+    quic_addr: Option<SocketAddr>,
     /// Graceful-upgrade resume descriptor (ADR-0032). When `Some`, the runtime
     /// reads the handoff state blob from this inherited fd, adopts the
     /// inherited listener, and rebuilds the session tree instead of binding a
@@ -240,6 +253,7 @@ impl ServerRuntime {
         Self {
             cfg,
             ws_addr: None,
+            quic_addr: None,
             resume_fd: None,
         }
     }
@@ -262,6 +276,19 @@ impl ServerRuntime {
     #[must_use]
     pub const fn listen_ws(mut self, addr: SocketAddr) -> Self {
         self.ws_addr = Some(addr);
+        self
+    }
+
+    /// Also accept QUIC connections on `addr` (the UDS stays on).
+    ///
+    /// Overrides the `PHUX_QUIC_ADDR` environment variable. QUIC is always
+    /// TLS 1.3-encrypted (the protocol mandates it); a loopback address skips
+    /// token auth (local dev), while any routable address requires a paired
+    /// bearer token sent as the stream's opening preamble (ADR-0031 parity
+    /// with `wss://`).
+    #[must_use]
+    pub const fn listen_quic(mut self, addr: SocketAddr) -> Self {
+        self.quic_addr = Some(addr);
         self
     }
 
@@ -378,6 +405,9 @@ impl ServerRuntime {
         // WebSocket listen address: the `--listen` flag (via `listen_ws`)
         // wins; otherwise fall back to `PHUX_WS_ADDR` inside the accept setup.
         let ws_addr_override = self.ws_addr;
+        // QUIC listen address: the `--quic` flag (via `listen_quic`) wins;
+        // otherwise fall back to `PHUX_QUIC_ADDR` inside the accept setup.
+        let quic_addr_override = self.quic_addr;
         // Wire policy bundle from config into shared state.
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));
@@ -418,7 +448,9 @@ impl ServerRuntime {
                             panes = blob.panes.len(),
                             "resumed session tree from upgrade blob"
                         ),
-                        Err(err) => error!(error = %err, "failed to rebuild state from upgrade blob"),
+                        Err(err) => {
+                            error!(error = %err, "failed to rebuild state from upgrade blob");
+                        }
                     }
                 } else if let Some(name) = pre_seeded.as_deref() {
                     let seeded = if seed_with_pty {
@@ -452,33 +484,40 @@ impl ServerRuntime {
                 // Opt-in via `phux server --listen <ADDR>` or the `PHUX_WS_ADDR`
                 // environment variable (e.g. "127.0.0.1:8787"); UDS is always
                 // on. The flag wins when both are set.
-                let ws_addr = ws_addr_override.or_else(|| {
-                    std::env::var("PHUX_WS_ADDR").ok().and_then(|raw| {
-                        match raw.parse::<SocketAddr>() {
-                            Ok(addr) => Some(addr),
-                            Err(err) => {
-                                warn!(addr = %raw, error = %err, "invalid PHUX_WS_ADDR; WebSocket transport disabled");
-                                None
-                            }
-                        }
-                    })
-                });
+                let ws_addr = ws_addr_override.or_else(|| env_socket_addr("PHUX_WS_ADDR"));
                 let ws_listener = match ws_addr {
                     Some(addr) => build_ws_listener(addr).await,
                     None => None,
                 };
-                match ws_listener {
-                    Some(ws) => {
-                        // Both loops run until the root token cancels;
-                        // whichever returns first ends the server (on
-                        // shutdown both observe the cancellation).
-                        tokio::select! {
-                            r = accept_loop(&listener, state.clone(), root_token.clone()) => r,
-                            r = accept_loop(&ws, state, root_token) => r,
-                        }
-                    }
-                    None => accept_loop(&listener, state, root_token).await,
+                // Optionally also accept QUIC connections (phux-y8v6, ADR-0007).
+                // Opt-in via `phux server --quic <ADDR>` or `PHUX_QUIC_ADDR`;
+                // QUIC carries the identical frames over a TLS 1.3 stream.
+                let quic_addr = quic_addr_override.or_else(|| env_socket_addr("PHUX_QUIC_ADDR"));
+                let quic_listener = quic_addr.and_then(build_quic_listener);
+
+                // UDS is always on; WS and QUIC are additive. Each transport's
+                // accept loop runs until the root token cancels; whichever
+                // returns first ends the server (on shutdown all observe the
+                // cancellation). `select_all` drives them concurrently without
+                // the combinatorial `select!` nesting the optional transports
+                // would otherwise need.
+                let mut accepts: Vec<AcceptLoopFuture<'_>> = vec![Box::pin(accept_loop(
+                    &listener,
+                    state.clone(),
+                    root_token.clone(),
+                ))];
+                if let Some(ws) = &ws_listener {
+                    accepts.push(Box::pin(accept_loop(ws, state.clone(), root_token.clone())));
                 }
+                if let Some(quic) = &quic_listener {
+                    accepts.push(Box::pin(accept_loop(
+                        quic,
+                        state.clone(),
+                        root_token.clone(),
+                    )));
+                }
+                let (result, _index, _remaining) = futures_util::future::select_all(accepts).await;
+                result
             })
             .await;
 
@@ -587,6 +626,90 @@ async fn build_ws_listener(addr: SocketAddr) -> Option<crate::transport::WsListe
         }
         Err(err) => {
             warn!(addr = %addr, error = %err, "failed to bind secure WebSocket; UDS only");
+            None
+        }
+    }
+}
+
+/// Parse a [`SocketAddr`] from environment variable `var`. Returns `None` (the
+/// transport stays disabled) when the variable is unset or malformed, logging a
+/// warning in the malformed case.
+fn env_socket_addr(var: &str) -> Option<SocketAddr> {
+    let raw = std::env::var(var).ok()?;
+    match raw.parse::<SocketAddr>() {
+        Ok(addr) => Some(addr),
+        Err(err) => {
+            warn!(var, addr = %raw, error = %err, "invalid socket address; transport disabled");
+            None
+        }
+    }
+}
+
+/// Build the optional QUIC listener for `addr` (phux-y8v6, ADR-0007). Returns
+/// `None` (QUIC disabled, other transports unaffected) on any setup failure
+/// rather than failing the whole server.
+///
+/// QUIC is **always** TLS 1.3-encrypted, so a certificate is provisioned in
+/// both modes — it shares the persisted self-signed cert and token store with
+/// the `wss://` path (so a single `phux pair` token authorizes either), keyed
+/// off the same `PHUX_WS_TLS_CERT` / `PHUX_WS_TLS_KEY` / `PHUX_WS_TOKENS`
+/// overrides:
+///
+/// * **Loopback address → TLS, no token.** Local dev; the dialer sends no
+///   preamble.
+/// * **Routable address (or `PHUX_WS_SECURE=1`) → TLS + bearer-token preamble.**
+///   Off-loopback is treated as exposing the server, so a paired token is
+///   required exactly as for a remote WebSocket consumer (ADR-0031).
+fn build_quic_listener(addr: SocketAddr) -> Option<crate::transport::quic::QuicListener> {
+    let force_secure = std::env::var_os("PHUX_WS_SECURE").is_some_and(|v| !v.is_empty());
+    let secure = !addr.ip().is_loopback() || force_secure;
+
+    let cert_env = std::env::var_os("PHUX_WS_TLS_CERT").map(PathBuf::from);
+    let key_env = std::env::var_os("PHUX_WS_TLS_KEY").map(PathBuf::from);
+    let operator_cert = cert_env.is_some() || key_env.is_some();
+    let cert_path = cert_env.unwrap_or_else(crate::transport::tls::default_cert_path);
+    let key_path = key_env.unwrap_or_else(crate::transport::tls::default_key_path);
+    if !operator_cert
+        && let Err(err) = crate::transport::tls::ensure_self_signed(&cert_path, &key_path)
+    {
+        error!(error = %err, "failed to provision self-signed certificate; QUIC disabled");
+        return None;
+    }
+
+    let tokens = if secure {
+        let tokens_path = std::env::var_os("PHUX_WS_TOKENS")
+            .map_or_else(crate::auth::default_token_store_path, PathBuf::from);
+        let store = match crate::auth::TokenStore::load(&tokens_path) {
+            Ok(store) => store,
+            Err(err) => {
+                error!(error = %err, path = %tokens_path.display(), "failed to load token store; QUIC disabled");
+                return None;
+            }
+        };
+        if store.is_empty() {
+            warn!(
+                path = %tokens_path.display(),
+                "no pairing tokens; every remote QUIC consumer is rejected until `phux pair`"
+            );
+        }
+        Some(std::sync::Arc::new(store))
+    } else {
+        None
+    };
+    let token_count = tokens.as_ref().map_or(0, |s| s.len());
+
+    match crate::transport::quic::QuicListener::from_pem(addr, &cert_path, &key_path, tokens) {
+        Ok(quic) => {
+            let bound = quic.local_addr().map(|a| a.to_string()).unwrap_or_default();
+            if secure {
+                info!(addr = %bound, tokens = token_count, "QUIC listening with TLS + token auth");
+            } else {
+                info!(addr = %bound, "QUIC listening (TLS, loopback, unauthenticated)");
+            }
+            Some(quic)
+        }
+        Err(err) => {
+            warn!(addr = %addr, error = %err, "failed to bind QUIC; UDS only");
             None
         }
     }
