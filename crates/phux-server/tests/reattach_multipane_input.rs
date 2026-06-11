@@ -266,6 +266,7 @@ fn reattach_to_multipane_session_can_type_into_non_active_pane() {
                 command: Some(vec!["cat".to_owned()]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;

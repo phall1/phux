@@ -751,6 +751,7 @@ fn run_action(
                 command: None,
                 cwd: None,
                 env: None,
+                term: None,
             };
             effects.spawn_terminal = Some((
                 request_id,
@@ -799,6 +800,7 @@ fn run_action(
                 command: None,
                 cwd: None,
                 env: None,
+                term: None,
             };
             effects.spawn_window = Some((request_id, PendingWindow { name }, frame));
         }

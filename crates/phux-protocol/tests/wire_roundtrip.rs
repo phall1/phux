@@ -1566,6 +1566,7 @@ proptest! {
         command in proptest::option::of(proptest::collection::vec(".{0,16}", 0..4)),
         cwd in proptest::option::of(".{0,32}"),
         env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
+        term in proptest::option::of(".{0,16}"),
     ) {
         let frame = FrameKind::SpawnTerminal {
             request_id,
@@ -1573,6 +1574,7 @@ proptest! {
             command,
             cwd,
             env,
+            term,
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -1939,6 +1941,7 @@ fn spawn_terminal_empty_command_vec_round_trips() {
         command: Some(Vec::new()),
         cwd: None,
         env: None,
+        term: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -1958,12 +1961,35 @@ fn spawn_terminal_empty_env_vec_round_trips() {
         command: None,
         cwd: None,
         env: Some(Vec::new()),
+        term: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
+}
+
+#[test]
+fn spawn_terminal_term_field_round_trips() {
+    // The first-class `term` field (phux-ign) is additive field id 6: a
+    // bare optional UTF-8 string distinct from a `TERM` env pair. `None`
+    // and `Some(..)` must both round-trip faithfully.
+    for term in [None, Some("ghostty".to_owned()), Some(String::new())] {
+        let frame = FrameKind::SpawnTerminal {
+            request_id: 3,
+            group: GroupId::new(1),
+            command: None,
+            cwd: None,
+            env: None,
+            term,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
 }
 
 #[test]

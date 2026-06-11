@@ -437,6 +437,7 @@ pub(crate) async fn handle_spawn_terminal(
     command: Option<Vec<String>>,
     cwd: Option<String>,
     env: Option<Vec<(String, String)>>,
+    term: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
 ) {
@@ -475,17 +476,18 @@ pub(crate) async fn handle_spawn_terminal(
         }
         _ => crate::terminal_actor::default_shell_command(),
     };
-    // TERM precedence (phux-ign): the server-wide `defaults.term` is the
-    // baseline for every spawn (overriding `default_shell_command`'s
-    // compiled-in default so explicit-command spawns don't silently
-    // degrade); a per-spawn `SPAWN_TERMINAL.env` entry for `TERM` then
-    // wins, because the wire `env` loop below runs last and
-    // `CommandBuilder::env` overwrites. So the order is:
+    // TERM precedence (phux-ign): each later tier overrides the prior via
+    // `CommandBuilder::env`, which overwrites. So the order is:
     //   1. compiled-in DEFAULT_TERM (from `default_shell_command`)
     //   2. server `defaults.term` (here)
-    //   3. wire `env` (below) — authoritative for the Terminal it creates.
-    let term = state.with(|s| s.term().to_owned());
-    crate::terminal_actor::apply_term(&mut builder, &term);
+    //   3. per-spawn first-class `SPAWN_TERMINAL.term` field (below)
+    //   4. per-spawn `SPAWN_TERMINAL.env` entry for `TERM` (wire `env`
+    //      loop, which runs last) — authoritative for the Terminal.
+    let default_term = state.with(|s| s.term().to_owned());
+    crate::terminal_actor::apply_term(&mut builder, &default_term);
+    if let Some(t) = term.as_deref() {
+        crate::terminal_actor::apply_term(&mut builder, t);
+    }
     // Working directory precedence (phux-cs6): an explicit wire `cwd`
     // always wins; otherwise fall back to `defaults.cwd-inheritance`. The
     // inherit-focused policy reads the spawning client's focused pane's

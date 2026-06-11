@@ -105,6 +105,7 @@ fn spawn_storm_then_kill_storm_does_not_panic() {
                     ]),
                     cwd: None,
                     env: None,
+                    term: None,
                 },
             )
             .await;

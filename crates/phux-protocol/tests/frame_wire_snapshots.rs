@@ -750,6 +750,7 @@ fn snap_spawn_terminal_minimal() {
         command: None,
         cwd: None,
         env: None,
+        term: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -767,6 +768,23 @@ fn snap_spawn_terminal_full() {
             ("TERM".to_owned(), "xterm-256color".to_owned()),
             ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
         ]),
+        term: None,
+    };
+    insta::assert_snapshot!(dump_frame(&frame));
+}
+
+#[test]
+fn snap_spawn_terminal_term_field() {
+    // The first-class `term` field (phux-ign): field id 6, a bare UTF-8
+    // string. Distinct from the `TERM` env pair above — this is the typed
+    // per-spawn override.
+    let frame = FrameKind::SpawnTerminal {
+        request_id: 0x0000_0003,
+        group: GroupId::new(1),
+        command: None,
+        cwd: None,
+        env: None,
+        term: Some("ghostty".to_owned()),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

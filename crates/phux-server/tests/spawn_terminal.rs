@@ -236,6 +236,7 @@ fn spawn_terminal_in_default_group_round_trips_input() {
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -332,6 +333,7 @@ fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -412,6 +414,7 @@ fn spawn_terminal_env_term_overrides_default() {
                 ]),
                 cwd: None,
                 env: Some(vec![("TERM".to_owned(), "phux-spawn-override".to_owned())]),
+                term: None,
             },
         )
         .await;
@@ -464,6 +467,7 @@ fn spawn_terminal_default_term_is_xterm_256color() {
                 ]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -480,6 +484,107 @@ fn spawn_terminal_default_term_is_xterm_256color() {
             acc.windows(needle.len()).any(|w| w == needle),
             "spawn with env=None must inherit defaults.term (xterm-256color); \
              got output: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-ign: the first-class `SPAWN_TERMINAL.term` field overrides the
+/// server's `defaults.term` baseline, reaching the spawned PTY's `TERM`.
+/// This is the typed per-spawn knob — distinct from hand-rolling a `TERM`
+/// env pair. The sentinel value can't match any real terminfo entry, so
+/// the assertion can't pass by accident.
+#[test]
+fn spawn_terminal_term_field_overrides_default() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 21,
+                group: DEFAULT_GROUP_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'TERMIS=%s\\n' \"$TERM\"; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+                term: Some("phux-term-field".to_owned()),
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 21).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = b"TERMIS=phux-term-field";
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "spawn `term` field must override defaults.term; got output: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-ign: a bare `env` entry for `TERM` still wins over the first-class
+/// `term` field — `env` is the lowest, most explicit tier (applied last on
+/// the server). This pins the documented precedence so the field doesn't
+/// silently shadow an explicit env override.
+#[test]
+fn spawn_terminal_env_term_beats_term_field() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 22,
+                group: DEFAULT_GROUP_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    "printf 'TERMIS=%s\\n' \"$TERM\"; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: Some(vec![("TERM".to_owned(), "phux-env-wins".to_owned())]),
+                term: Some("phux-term-field".to_owned()),
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 22).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+
+        let needle = b"TERMIS=phux-env-wins";
+        let acc = await_output_contains(&mut stream, &new_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "wire env TERM must beat the `term` field; got output: {body:?}",
         );
 
         drop(stream);
@@ -509,6 +614,7 @@ fn spawn_terminal_unknown_group_returns_group_not_found() {
                 command: None,
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -554,6 +660,7 @@ fn spawn_terminal_emits_terminal_closed_on_pty_exit() {
                 ]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -617,6 +724,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
                 command: Some(vec!["/bin/cat".to_owned()]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -804,6 +912,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
                 ]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -892,6 +1001,7 @@ fn spawn_terminal_session_root_inherits_seed_pane_dir() {
                 ]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
@@ -974,6 +1084,7 @@ fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
                 ]),
                 cwd: None,
                 env: None,
+                term: None,
             },
         )
         .await;
