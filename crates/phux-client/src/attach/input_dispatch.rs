@@ -251,11 +251,21 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // event with pane-local coordinates substituted.
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
-            let Some(active_ls) = ctx.workspace.active_window() else {
-                tracing::debug!("dropping mouse event: no active window");
-                continue;
+            // phux-jow6: hit-test against the RENDER layout, not the real
+            // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
+            // is a single full-viewport leaf, so any click lands on the
+            // visible zoomed pane instead of whichever hidden tiled pane sits
+            // under the cursor. Compute the decision in a scope that drops the
+            // borrowing `Cow` before the click-to-focus `active_window_mut()`
+            // below needs the workspace mutably.
+            let decision = {
+                let Some(render_ls) = ctx.workspace.render_window(ctx.zoomed.as_ref()) else {
+                    tracing::debug!("dropping mouse event: no active window");
+                    continue;
+                };
+                route_mouse_event(&render_ls, ctx.viewport, mouse)
             };
-            match route_mouse_event(active_ls, ctx.viewport, mouse) {
+            match decision {
                 RouteDecision::Pane {
                     target,
                     pane_x,
