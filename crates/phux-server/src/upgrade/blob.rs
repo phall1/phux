@@ -193,10 +193,14 @@ pub struct PaneBlob {
     /// The `TERM` the child was spawned with.
     pub term: String,
     /// PID of the child on the slave side — re-adopted via `waitpid` after the
-    /// re-exec (sound because `execve` preserves process parentage).
-    pub child_pid: i32,
+    /// re-exec (sound because `execve` preserves process parentage). `None`
+    /// for a no-PTY pane, which carries no child to hand off.
+    #[serde(default)]
+    pub child_pid: Option<i32>,
     /// PTY master descriptor (its `FD_CLOEXEC` is cleared before the re-exec).
-    pub master_fd: RawFd,
+    /// `None` for a no-PTY pane.
+    #[serde(default)]
+    pub master_fd: Option<RawFd>,
     /// Replayable viewport snapshot (`ED 2` + cells + cursor/mode epilogue),
     /// the same bytes the synthesizer hands a freshly-attaching client.
     pub vt_replay_bytes: Vec<u8>,
@@ -280,8 +284,8 @@ mod tests {
                     cwd: PathBuf::from("/home/u/proj"),
                     title: Some("vim".to_owned()),
                     term: "xterm-256color".to_owned(),
-                    child_pid: 4321,
-                    master_fd: 11,
+                    child_pid: Some(4321),
+                    master_fd: Some(11),
                     vt_replay_bytes: b"\x1b[2J\x1b[Hhello".to_vec(),
                     scrollback_bytes: b"old line\r\n".to_vec(),
                 },
@@ -294,8 +298,8 @@ mod tests {
                     cwd: PathBuf::from("/home/u/proj/src"),
                     title: None,
                     term: "xterm-256color".to_owned(),
-                    child_pid: 4322,
-                    master_fd: 12,
+                    child_pid: Some(4322),
+                    master_fd: Some(12),
                     vt_replay_bytes: vec![],
                     scrollback_bytes: vec![],
                 },

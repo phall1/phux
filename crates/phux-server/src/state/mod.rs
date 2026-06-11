@@ -52,6 +52,7 @@ mod events;
 mod input_log;
 mod metadata;
 mod registry;
+mod upgrade_blob;
 
 pub use client::{AttachError, AttachSnapshotPane, AttachedClient, ClientId};
 pub use events::{EventScope, EventSubscription};
