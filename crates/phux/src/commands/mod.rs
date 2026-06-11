@@ -87,6 +87,13 @@ pub(crate) enum Command {
         /// explicitly-created session still gets a shell.
         #[arg(long, hide = true)]
         seed_command: Option<String>,
+
+        /// Graceful-upgrade resume (ADR-0032): read the handoff state blob
+        /// from this inherited descriptor, adopt the inherited listener, and
+        /// rebuild the live session tree instead of starting fresh. Set by
+        /// the upgrade orchestrator's re-exec; never passed by hand.
+        #[arg(long, hide = true)]
+        resume: Option<std::os::fd::RawFd>,
     },
 
     /// List sessions on the running server.
