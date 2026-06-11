@@ -25,7 +25,7 @@
 //! | `split-pane`      | [`apply_split`]        | `SPAWN` + `SET_METADATA` (deferred) |
 //! | `kill-pane`       | [`apply_kill`]         | `SPAWN_KILL` + `SET_METADATA` (deferred) |
 //! | `focus-direction` | [`apply_focus`]        | none (focus is per-client) |
-//! | `resize-pane`     | [`apply_resize`]       | `SET_METADATA`              |
+//! | `resize-pane`     | `apply_resize`         | `SET_METADATA`              |
 //! | `next-pane`       | [`apply_next_pane`]    | none (focus is per-client) |
 //! | `previous-pane`   | [`apply_previous_pane`]| none (focus is per-client) |
 //!
@@ -43,8 +43,9 @@ use std::io::{self, Write};
 use phux_protocol::TerminalId;
 use thiserror::Error;
 
+use super::paint::{SidebarReservation, content_rect};
 use crate::layout::{self, Direction, LayoutError, LayoutNode, LayoutState, Rect, SplitDir};
-use crate::multi_pane::pane_rects;
+use crate::multi_pane::pane_rects_in;
 
 /// Errors returned by the pure action helpers.
 ///
@@ -201,11 +202,12 @@ const MIN_PANE_CELL: u16 = 2;
 /// * [`ActionError::NoResizableBoundary`] when no interior split along
 ///   the requested axis exists between the focused leaf and the root.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-pub fn apply_resize(
+pub(super) fn apply_resize(
     state: &LayoutState,
     dir: Direction,
     amount: i16,
     viewport: (u16, u16),
+    sidebar: Option<SidebarReservation>,
 ) -> Result<Option<LayoutState>, ActionError> {
     let tree = state.tree.as_ref().ok_or(ActionError::EmptyTree)?;
     let focused = state.focus.as_ref().ok_or(ActionError::NoFocus)?;
@@ -241,7 +243,7 @@ pub fn apply_resize(
     };
     // ADR-0019 decision 5: bell-and-no-op when any child would drop
     // below `MIN_PANE_CELL` on the active axis.
-    if violates_min_cell(&candidate, viewport) {
+    if violates_min_cell(&candidate, viewport, sidebar) {
         return Ok(None);
     }
     Ok(Some(candidate))
@@ -351,11 +353,22 @@ fn clamp_ratio(r: f32) -> f32 {
 /// Check whether any leaf in `state` falls below [`MIN_PANE_CELL`] cells
 /// in either axis under `viewport`. Used by [`apply_resize`] to gate
 /// the bell-no-op per ADR-0019 decision 5.
-fn violates_min_cell(state: &LayoutState, viewport: (u16, u16)) -> bool {
+///
+/// phux-4h5a: tiles into the inset content rect so the underflow check sees
+/// the same width panes paint into when a `sidebar` is docked. The status-bar
+/// row is intentionally NOT reserved here (`has_bar = false`): this gate has
+/// always measured against the full pane-row budget, and the
+/// `content_rect(.., false, None)` form reproduces the prior
+/// `pane_rects(tree, viewport)` byte-for-byte on the disabled path.
+fn violates_min_cell(
+    state: &LayoutState,
+    viewport: (u16, u16),
+    sidebar: Option<SidebarReservation>,
+) -> bool {
     let Some(tree) = state.tree.as_ref() else {
         return false;
     };
-    let rects = pane_rects(tree, viewport);
+    let rects = pane_rects_in(tree, content_rect(viewport, false, sidebar));
     rects
         .values()
         .any(|r: &Rect| r.w < MIN_PANE_CELL || r.h < MIN_PANE_CELL)
@@ -652,7 +665,7 @@ mod tests {
     fn resize_grow_focused_right() {
         let state = two_pane_h(); // (1|2), focus 1, ratio 0.5
         // viewport 80x24, amount=8 → delta = 8/80 = 0.1; new ratio 0.6.
-        let out = apply_resize(&state, Direction::Right, 8, (80, 24))
+        let out = apply_resize(&state, Direction::Right, 8, (80, 24), None)
             .unwrap()
             .unwrap();
         let LayoutNode::Split { ratio, .. } = out.tree.as_ref().unwrap() else {
@@ -664,7 +677,7 @@ mod tests {
     #[test]
     fn resize_shrink_focused_left() {
         let state = two_pane_h(); // (1|2), focus 1, ratio 0.5
-        let out = apply_resize(&state, Direction::Left, 8, (80, 24))
+        let out = apply_resize(&state, Direction::Left, 8, (80, 24), None)
             .unwrap()
             .unwrap();
         let LayoutNode::Split { ratio, .. } = out.tree.as_ref().unwrap() else {
@@ -679,14 +692,14 @@ mod tests {
         // divider 80 cells to the left would put the focused leaf
         // (left side) at 0 cells — well below the 2-cell floor.
         let state = two_pane_h();
-        let out = apply_resize(&state, Direction::Left, 80, (80, 24)).unwrap();
+        let out = apply_resize(&state, Direction::Left, 80, (80, 24), None).unwrap();
         assert!(out.is_none(), "expected bell-no-op, got {out:?}");
     }
 
     #[test]
     fn resize_zero_amount_is_no_change() {
         let state = two_pane_h();
-        let out = apply_resize(&state, Direction::Right, 0, (80, 24))
+        let out = apply_resize(&state, Direction::Right, 0, (80, 24), None)
             .unwrap()
             .unwrap();
         assert_eq!(out, state);
@@ -696,7 +709,7 @@ mod tests {
     fn resize_no_matching_axis_returns_error() {
         // Single pane: no interior split to adjust at all.
         let state = LayoutState::single(t(1));
-        let err = apply_resize(&state, Direction::Right, 5, (80, 24)).unwrap_err();
+        let err = apply_resize(&state, Direction::Right, 5, (80, 24), None).unwrap_err();
         assert!(matches!(err, ActionError::NoResizableBoundary));
     }
 
@@ -706,7 +719,7 @@ mod tests {
         // Direction::Up resize wants a Vertical split (horizontal
         // divider); none exists → NoResizableBoundary.
         let state = two_pane_h();
-        let err = apply_resize(&state, Direction::Up, 5, (80, 24)).unwrap_err();
+        let err = apply_resize(&state, Direction::Up, 5, (80, 24), None).unwrap_err();
         assert!(matches!(err, ActionError::NoResizableBoundary));
     }
 

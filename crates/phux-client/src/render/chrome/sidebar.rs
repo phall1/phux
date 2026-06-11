@@ -72,6 +72,15 @@ impl SidebarPainter {
         Ok(())
     }
 
+    /// Compose the strip into a `rect`-sized ratatui [`Buffer`] (origin
+    /// `(0, 0)`), for the structured `snapshot --rendered` compositor
+    /// (phux-l5xa / phux-4h5a). The VT [`Self::paint`] path uses the same
+    /// `compose` step internally, so the cells match a live paint.
+    #[must_use]
+    pub fn compose_buffer(&self, rect: Rect) -> Buffer {
+        self.compose(rect)
+    }
+
     /// Render the tab list + separator into a fresh `rect`-sized buffer.
     fn compose(&self, rect: Rect) -> Buffer {
         let area = RataRect::new(0, 0, rect.w, rect.h);

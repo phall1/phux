@@ -45,13 +45,17 @@ use super::input::StdinParser;
 use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
 };
-use super::paint::{paint_bar_after_pane, paint_full_frame, pane_viewport};
+use super::paint::{
+    SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
+};
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::handle_server_frame;
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
+use crate::render::chrome::sidebar::SidebarPainter;
 use crate::render::chrome::status_bar::{Position, StatusBarPainter};
 use crate::render::overlay::OverlayState;
+use phux_config::SidebarPosition;
 
 /// One pane's mirror: the libghostty Terminal that ingests
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
@@ -217,6 +221,13 @@ fn paint_active_overlay<W: super::RenderSink>(
     zoomed: Option<&TerminalId>,
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
+    // phux-4h5a: the sidebar reservation, so base-frame repaints under an
+    // overlay keep panes inset (no reflow flicker when a modal opens). The
+    // strip painter isn't threaded here — overlays are transient and the
+    // driver re-invalidates + repaints the strip on dismiss — so the base
+    // repaint passes `None` for the painter; the reservation alone keeps the
+    // tiling consistent. `None` reservation (default) is byte-identical.
+    sidebar: Option<SidebarReservation>,
     session_name: &str,
     theme: &crate::render::Theme,
 ) {
@@ -242,6 +253,8 @@ fn paint_active_overlay<W: super::RenderSink>(
                 focused,
                 viewport_dims,
                 status_bar,
+                sidebar,
+                None,
                 session_name,
             );
         }
@@ -262,6 +275,8 @@ fn paint_active_overlay<W: super::RenderSink>(
                 focused,
                 viewport_dims,
                 status_bar,
+                sidebar,
+                None,
                 session_name,
             );
         }
@@ -538,6 +553,26 @@ pub async fn run_headless_rendered(
     let mut zoomed: Option<TerminalId> = None;
     let mut session_name = String::new();
     let mut status_bar = build_status_bar_painter();
+    // phux-4h5a: read `[sidebar]` so `phux snapshot --rendered` shows the
+    // strip exactly as a live attach would. Disabled (the default) folds to
+    // `None`, keeping the rendered frame byte-identical to the pre-sidebar one.
+    let headless_cfg = phux_config::loader::load().ok();
+    let sidebar_cfg = headless_cfg.as_ref().map(|c| c.sidebar.clone());
+    let sidebar = sidebar_cfg
+        .as_ref()
+        .filter(|c| c.enabled)
+        .map(|c| SidebarReservation {
+            edge: match c.position {
+                SidebarPosition::Right => SidebarEdge::Right,
+                SidebarPosition::Left => SidebarEdge::Left,
+            },
+            width: c.width,
+        });
+    let sidebar_theme = headless_cfg
+        .as_ref()
+        .map_or_else(crate::render::Theme::default, |c| {
+            crate::render::Theme::from_cfg(&c.theme)
+        });
     let mut predict = PredictionState::new(
         PredictiveConfig::disabled(),
         viewport_dims.0,
@@ -558,6 +593,7 @@ pub async fn run_headless_rendered(
         &mut zoomed,
         &mut session_name,
         status_bar.as_mut(),
+        sidebar,
         viewport_dims,
         &mut predict,
         &overlay,
@@ -600,6 +636,7 @@ pub async fn run_headless_rendered(
                         &mut zoomed,
                         &mut session_name,
                         status_bar.as_mut(),
+                        sidebar,
                         viewport_dims,
                         &mut predict,
                         &overlay,
@@ -619,9 +656,14 @@ pub async fn run_headless_rendered(
 
     // Seed the window/tab strip exactly as the live loop does before its
     // first bar paint, so the composited bar shows the windows.
+    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
     if let Some(sb) = status_bar.as_mut() {
-        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+        sb.set_windows(windows.clone());
     }
+    // phux-4h5a: feed the same window list into the strip painter so the
+    // composited frame shows the sidebar tabs when `[sidebar]` is enabled.
+    let mut sidebar_painter = SidebarPainter::new(sidebar_theme);
+    sidebar_painter.set_windows(windows);
 
     // Compose the assembled frame against the render layout (honoring zoom).
     let layout_state = workspace.render_window(zoomed.as_ref()).map_or_else(
@@ -634,6 +676,8 @@ pub async fn run_headless_rendered(
         focused_pane.as_ref(),
         viewport_dims,
         status_bar.as_ref(),
+        sidebar,
+        Some(&sidebar_painter),
         &session_name,
         SystemTime::now(),
     );
@@ -1042,6 +1086,24 @@ async fn main_loop<W: super::RenderSink>(
         .map_or_else(crate::render::Theme::default, |c| {
             crate::render::Theme::from_cfg(&c.theme)
         });
+    // phux-4h5a: window-sidebar render state, driver-local like `zoomed`. The
+    // `[sidebar]` config seeds the initial enabled flag, width, and edge; the
+    // `toggle-sidebar` action flips `sidebar_enabled` at runtime. Each frame
+    // `sidebar_reservation()` folds these into an `Option<SidebarReservation>`
+    // that threads to every layout site, so panes, dividers, reflow, mouse, and
+    // the strip itself agree on the same inset. Default-off keeps the disabled
+    // path byte-identical.
+    let sidebar_cfg = loaded_cfg.as_ref().map(|c| c.sidebar.clone());
+    let mut sidebar_enabled = sidebar_cfg.as_ref().is_some_and(|c| c.enabled);
+    let sidebar_width = sidebar_cfg.as_ref().map_or(20, |c| c.width);
+    let sidebar_edge = match sidebar_cfg.as_ref().map(|c| c.position) {
+        Some(SidebarPosition::Right) => SidebarEdge::Right,
+        _ => SidebarEdge::Left,
+    };
+    // The strip painter, themed like the status bar. Fed `window_infos` from
+    // the same snapshot that drives the tab strip; caches so an unchanged
+    // repaint emits nothing.
+    let mut sidebar_painter = SidebarPainter::new(theme);
     // phux-5ke.4: overlay state — initially empty. Pushed onto by the
     // `show-help` action; drained by `OverlayState::handle_key` when
     // the active overlay returns `Dismiss`. While active, key events
@@ -1093,7 +1155,13 @@ async fn main_loop<W: super::RenderSink>(
     let mut switch_request: Option<ReattachTarget> = None;
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
-    // `handle_server_frame` runs exactly once, in one place.
+    // `handle_server_frame` runs exactly once, in one place. The sidebar
+    // reservation for this bootstrap frame (recomputed per-iteration in the
+    // loop below to track `toggle-sidebar`).
+    let sidebar = sidebar_enabled.then_some(SidebarReservation {
+        edge: sidebar_edge,
+        width: sidebar_width,
+    });
     let outcome = handle_server_frame(
         out,
         initial_attached,
@@ -1103,6 +1171,7 @@ async fn main_loop<W: super::RenderSink>(
         &mut zoomed,
         &mut session_name,
         status_bar.as_mut(),
+        sidebar,
         viewport_dims,
         &mut predict,
         &overlay,
@@ -1147,11 +1216,27 @@ async fn main_loop<W: super::RenderSink>(
     }
     // phux-4li.17: seed the window/tab strip from the bootstrap layout so
     // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
-    if let Some(sb) = status_bar.as_mut() {
-        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+    // phux-4h5a: the sidebar painter tracks the same window list so the strip's
+    // tab list stays current whenever the bar's does.
+    {
+        let windows = window_infos(&workspace, &panes, zoomed.as_ref());
+        if let Some(sb) = status_bar.as_mut() {
+            sb.set_windows(windows.clone());
+        }
+        sidebar_painter.set_windows(windows);
     }
 
     loop {
+        // phux-4h5a: fold the driver-local sidebar render state into the
+        // per-frame reservation threaded to every layout site this iteration.
+        // `toggle-sidebar` flips `sidebar_enabled`; the change takes effect on
+        // the next iteration. `None` (the default) keeps `content_rect` the
+        // full pane viewport, so the whole path is byte-identical when the
+        // sidebar is off.
+        let sidebar = sidebar_enabled.then_some(SidebarReservation {
+            edge: sidebar_edge,
+            width: sidebar_width,
+        });
         // phux-fysb: the off-loop stdout writer dropped a stale backlog under
         // a slow terminal. Repaint the latest state from scratch — a
         // self-contained full frame (or overlay) supersedes the dropped
@@ -1170,6 +1255,7 @@ async fn main_loop<W: super::RenderSink>(
                     zoomed.as_ref(),
                     viewport_dims,
                     status_bar.as_mut(),
+                    sidebar,
                     &session_name,
                     &theme,
                 );
@@ -1181,6 +1267,8 @@ async fn main_loop<W: super::RenderSink>(
                     focused_pane.as_ref(),
                     viewport_dims,
                     status_bar.as_mut(),
+                    sidebar,
+                    Some(&mut sidebar_painter),
                     &session_name,
                 );
             }
@@ -1241,7 +1329,8 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    pane_viewport(viewport_dims, status_bar.is_some()),
+                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
@@ -1258,6 +1347,8 @@ async fn main_loop<W: super::RenderSink>(
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
+                    sidebar,
+                    sidebar_enabled: &mut sidebar_enabled,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1271,6 +1362,14 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                // phux-4h5a: a `toggle-sidebar` in this batch flipped
+                // `sidebar_enabled`. Re-fold it into the reservation so the
+                // reflow + repaint below tile into the NEW content rect this
+                // iteration rather than waiting a frame.
+                let sidebar = sidebar_enabled.then_some(SidebarReservation {
+                    edge: sidebar_edge,
+                    width: sidebar_width,
+                });
                 // phux-eb0: a committed `switch-session` ends this loop so
                 // the outer driver re-attaches. Return BEFORE any repaint
                 // — the new session's ATTACHED + snapshot will repaint.
@@ -1287,14 +1386,16 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        pane_viewport(viewport_dims, status_bar.is_some()),
+                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
                     )
                     .await?;
                 }
                 if layout_changed {
+                    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
                     if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+                        sb.set_windows(windows.clone());
                     }
+                    sidebar_painter.set_windows(windows);
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
                     // below restores pane content under the now-gone
@@ -1311,6 +1412,8 @@ async fn main_loop<W: super::RenderSink>(
                             focused_pane.as_ref(),
                             viewport_dims,
                             status_bar.as_mut(),
+                            sidebar,
+                            Some(&mut sidebar_painter),
                             &session_name,
                         );
                     }
@@ -1325,6 +1428,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
+                        sidebar,
                         &session_name,
                         &theme,
                     );
@@ -1381,9 +1485,14 @@ async fn main_loop<W: super::RenderSink>(
                             .render_window(zoomed.as_ref())
                             .and_then(|ls| {
                                 ls.tree.as_ref().map(|_| {
-                                    super::multi_pane::compute_layout(
+                                    super::multi_pane::compute_layout_in(
                                         ls.as_ref(),
-                                        pane_viewport(viewport_dims, status_bar.is_some()),
+                                        content_rect(
+                                            viewport_dims,
+                                            status_bar.is_some(),
+                                            sidebar,
+                                        ),
+                                        viewport_dims,
                                     )
                                     .rects
                                 })
@@ -1397,6 +1506,7 @@ async fn main_loop<W: super::RenderSink>(
                             &mut zoomed,
                             &mut session_name,
                             status_bar.as_mut(),
+                            sidebar,
                             viewport_dims,
                             &mut predict,
                             &overlay,
@@ -1466,12 +1576,12 @@ async fn main_loop<W: super::RenderSink>(
                             && let Some(ls) = workspace.render_window(zoomed.as_ref())
                             && ls.tree.is_some()
                         {
-                            let new_pane_dims =
-                                pane_viewport(viewport_dims, status_bar.is_some());
+                            let new_content =
+                                content_rect(viewport_dims, status_bar.is_some(), sidebar);
                             let diff = super::reflow::compute_reflow(
                                 ls.as_ref(),
                                 prev_rects,
-                                new_pane_dims,
+                                new_content,
                             );
                             for (terminal_id, new_rect) in &diff.changed {
                                 conn.send(&FrameKind::TerminalResize {
@@ -1491,9 +1601,12 @@ async fn main_loop<W: super::RenderSink>(
                             // the repaint — the dismiss path always
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
+                            let windows =
+                                window_infos(&workspace, &panes, zoomed.as_ref());
                             if let Some(sb) = status_bar.as_mut() {
-                                sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+                                sb.set_windows(windows.clone());
                             }
+                            sidebar_painter.set_windows(windows);
                             if !overlays.is_active()
                                 && let Some(ls) =
                                     workspace.render_window(zoomed.as_ref()).as_deref()
@@ -1505,6 +1618,8 @@ async fn main_loop<W: super::RenderSink>(
                                     focused_pane.as_ref(),
                                     viewport_dims,
                                     status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
                                     &session_name,
                                 );
                             }
@@ -1538,7 +1653,8 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    pane_viewport(viewport_dims, status_bar.is_some()),
+                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
@@ -1555,6 +1671,8 @@ async fn main_loop<W: super::RenderSink>(
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
+                    sidebar,
+                    sidebar_enabled: &mut sidebar_enabled,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1568,6 +1686,13 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                // phux-4h5a: re-fold a `toggle-sidebar` flip into the
+                // reservation, same as the stdin arm, so the same-iteration
+                // repaint tiles into the new content rect.
+                let sidebar = sidebar_enabled.then_some(SidebarReservation {
+                    edge: sidebar_edge,
+                    width: sidebar_width,
+                });
                 // phux-eb0: same switch-on-commit check as the stdin arm.
                 // A bare-ESC flush can carry the final chord of a
                 // `<leader> a` selection committed via Enter.
@@ -1580,12 +1705,16 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        pane_viewport(viewport_dims, status_bar.is_some()),
+                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
                     )
                     .await?;
                 }
-                if layout_changed && let Some(sb) = status_bar.as_mut() {
-                    sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+                if layout_changed {
+                    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
+                    if let Some(sb) = status_bar.as_mut() {
+                        sb.set_windows(windows.clone());
+                    }
+                    sidebar_painter.set_windows(windows);
                 }
                 if layout_changed
                     && !overlays.is_active()
@@ -1598,6 +1727,8 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
+                        sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                     );
                 }
@@ -1611,6 +1742,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
+                        sidebar,
                         &session_name,
                         &theme,
                     );
@@ -1653,14 +1785,19 @@ async fn main_loop<W: super::RenderSink>(
                     && ls.tree.is_some()
                 {
                     let has_bar = status_bar.is_some();
-                    let prev_pane_dims = pane_viewport(prev_dims, has_bar);
-                    let new_pane_dims = pane_viewport(viewport_dims, has_bar);
+                    // phux-4h5a: size each PTY to the inset content rect (the
+                    // pane area after the status bar + sidebar reservation),
+                    // not the full viewport — otherwise an enabled sidebar
+                    // resizes panes to the full width while they paint inset.
+                    let prev_content = content_rect(prev_dims, has_bar, sidebar);
+                    let new_content = content_rect(viewport_dims, has_bar, sidebar);
                     let prev_rects =
-                        super::multi_pane::compute_layout(ls.as_ref(), prev_pane_dims).rects;
+                        super::multi_pane::compute_layout_in(ls.as_ref(), prev_content, prev_dims)
+                            .rects;
                     let diff = super::reflow::compute_reflow(
                         ls.as_ref(),
                         &prev_rects,
-                        new_pane_dims,
+                        new_content,
                     );
                     if diff.too_small {
                         tracing::warn!(
@@ -1693,6 +1830,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
+                        sidebar,
                         &session_name,
                         &theme,
                     );
@@ -1704,6 +1842,8 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         viewport_dims,
                         status_bar.as_mut(),
+                        sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                     );
                 }
@@ -1729,16 +1869,20 @@ async fn main_loop<W: super::RenderSink>(
                     // paint_bar_after_pane emitted no CUP → cursor
                     // stranded at the bar's last cell every tick.
                     let has_bar = status_bar.is_some();
-                    let pane_dims = pane_viewport(viewport_dims, has_bar);
+                    let content = content_rect(viewport_dims, has_bar, sidebar);
                     let fallback_origin = Some(
                         focused_pane
                             .as_ref()
                             .and_then(|fid| {
                                 workspace.render_window(zoomed.as_ref()).and_then(|ls| {
-                                    super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
-                                        .rects
-                                        .get(fid)
-                                        .copied()
+                                    super::multi_pane::compute_layout_in(
+                                        ls.as_ref(),
+                                        content,
+                                        viewport_dims,
+                                    )
+                                    .rects
+                                    .get(fid)
+                                    .copied()
                                 })
                             })
                             .map_or((0, 0), |r| (r.x, r.y)),
@@ -1902,14 +2046,15 @@ fn window_infos(
 fn zoom_rects(
     workspace: &Workspace,
     zoomed: Option<&TerminalId>,
-    pane_dims: (u16, u16),
+    content: crate::layout::Rect,
+    viewport_dims: (u16, u16),
 ) -> HashMap<TerminalId, crate::layout::Rect> {
     workspace
         .render_window(zoomed)
         .and_then(|ls| {
-            ls.tree
-                .as_ref()
-                .map(|_| super::multi_pane::compute_layout(ls.as_ref(), pane_dims).rects)
+            ls.tree.as_ref().map(|_| {
+                super::multi_pane::compute_layout_in(ls.as_ref(), content, viewport_dims).rects
+            })
         })
         .unwrap_or_default()
 }
@@ -1925,7 +2070,7 @@ async fn emit_zoom_reflow(
     workspace: &Workspace,
     zoomed: Option<&TerminalId>,
     prev_rects: &HashMap<TerminalId, crate::layout::Rect>,
-    pane_dims: (u16, u16),
+    content: crate::layout::Rect,
 ) -> Result<(), AttachError> {
     let Some(ls) = workspace.render_window(zoomed) else {
         return Ok(());
@@ -1933,7 +2078,7 @@ async fn emit_zoom_reflow(
     if ls.tree.is_none() {
         return Ok(());
     }
-    let diff = super::reflow::compute_reflow(ls.as_ref(), prev_rects, pane_dims);
+    let diff = super::reflow::compute_reflow(ls.as_ref(), prev_rects, content);
     for (terminal_id, new_rect) in &diff.changed {
         conn.send(&FrameKind::TerminalResize {
             terminal_id: terminal_id.clone(),

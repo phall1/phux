@@ -31,9 +31,10 @@ use ratatui::buffer::{Buffer, Cell as RatatuiCell, CellDiffOption};
 use ratatui::style::{Color, Modifier};
 
 use super::driver::PaneSlot;
-use super::paint::pane_viewport;
+use super::paint::{SidebarReservation, content_rect, sidebar_rect};
 use crate::layout::LayoutState;
 use crate::render::chrome::dividers::compose_buffer as compose_divider_buffer;
+use crate::render::chrome::sidebar::SidebarPainter;
 use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 
 /// Compose the assembled multi-pane frame into a dense [`RenderedFrame`].
@@ -43,19 +44,29 @@ use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 /// panes are tiled, exactly as the live paint does. `now` feeds time-based
 /// status widgets so the rendered bar matches a live paint at the same
 /// instant.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "phux-4h5a adds the sidebar reservation + painter to the compositor's paint context, mirroring paint_full_frame"
+)]
 pub(super) fn compose_full_frame_cells(
     layout_state: &LayoutState,
     panes: &mut HashMap<TerminalId, PaneSlot>,
     focused_pane: Option<&TerminalId>,
     viewport_dims: (u16, u16),
     status_bar: Option<&StatusBarPainter>,
+    // phux-4h5a: the window-sidebar reservation. `None` (disabled, the
+    // default) makes `content_rect` the full pane viewport, byte-identical to
+    // the pre-sidebar tiling. When `Some`, panes inset and `sidebar_painter`
+    // overlays the strip into its reserved columns.
+    sidebar: Option<SidebarReservation>,
+    sidebar_painter: Option<&SidebarPainter>,
     session_name: &str,
     now: SystemTime,
 ) -> RenderedFrame {
     let (cols, rows) = viewport_dims;
     let has_bar = status_bar.is_some();
-    let pane_dims = pane_viewport(viewport_dims, has_bar);
-    let multi = super::multi_pane::compute_layout(layout_state, pane_dims);
+    let content = content_rect(viewport_dims, has_bar, sidebar);
+    let multi = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims);
 
     let mut frame = RenderedFrame::blank(cols, rows);
 
@@ -86,7 +97,18 @@ pub(super) fn compose_full_frame_cells(
     // carries only the box-drawing glyphs, so overlaying its non-skip,
     // non-blank cells never clobbers pane content.
     let divider_buf = compose_divider_buffer(&multi);
-    overlay_buffer(&mut frame, &divider_buf, 0, true);
+    overlay_buffer(&mut frame, &divider_buf, (0, 0), true);
+
+    // Overlay the sidebar strip into its reserved columns (phux-4h5a). The
+    // strip buffer is composed at origin (0,0), so shift it to the reserved
+    // rect's x. Its styled blanks/separator are kept (skip_blanks = false) so
+    // the strip's full extent shows; it sits in columns `content_rect` carved
+    // out, never over pane content.
+    if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
+        let rect = sidebar_rect(viewport_dims, has_bar, res);
+        let strip = painter.compose_buffer(rect);
+        overlay_buffer(&mut frame, &strip, (rect.x, rect.y), false);
+    }
 
     // Overlay the status bar onto its reserved row. Styled blanks are kept
     // (an error strip's reverse-video field spans the full width); the bar
@@ -94,7 +116,7 @@ pub(super) fn compose_full_frame_cells(
     if let Some(painter) = status_bar {
         let ctx = make_context(session_name, now);
         if let Some((bar_buf, row_index)) = painter.compose_buffer(cols, rows, &ctx) {
-            overlay_buffer(&mut frame, &bar_buf, row_index, false);
+            overlay_buffer(&mut frame, &bar_buf, (0, row_index), false);
         }
     }
 
@@ -107,7 +129,8 @@ pub(super) fn compose_full_frame_cells(
 /// them). When `skip_blanks` is set, empty/space cells are also skipped so a
 /// divider buffer's gap cells don't paint over pane content; the status bar
 /// passes `false` so its styled background spaces survive.
-fn overlay_buffer(frame: &mut RenderedFrame, buf: &Buffer, row_offset: u16, skip_blanks: bool) {
+fn overlay_buffer(frame: &mut RenderedFrame, buf: &Buffer, origin: (u16, u16), skip_blanks: bool) {
+    let (col_offset, row_offset) = origin;
     let area = buf.area;
     for y in area.y..area.y.saturating_add(area.height) {
         for x in area.x..area.x.saturating_add(area.width) {
@@ -124,7 +147,9 @@ fn overlay_buffer(frame: &mut RenderedFrame, buf: &Buffer, row_offset: u16, skip
             if sym.is_empty() {
                 continue;
             }
-            if let Some(dst) = frame.cell_mut(y.saturating_add(row_offset), x) {
+            if let Some(dst) =
+                frame.cell_mut(y.saturating_add(row_offset), x.saturating_add(col_offset))
+            {
                 sym.clone_into(&mut dst.grapheme);
                 dst.style = ratatui_cell_to_style(cell);
             }
@@ -237,6 +262,8 @@ mod tests {
             Some(&left),
             (80, 24),
             None,
+            None,
+            None,
             "demo",
             UNIX_EPOCH,
         );
@@ -279,6 +306,139 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (left_rect.x + 1, left_rect.y));
     }
 
+    /// phux-4h5a enabled-path harness: with a Left sidebar reservation the
+    /// compositor (a) paints the window strip into its reserved columns
+    /// (labels + the `│` separator at the strip's last column), (b) insets the
+    /// panes so their content starts at the strip's right edge, and (c) leaves
+    /// the disabled (`None`) frame byte-identical to the pre-sidebar tiling.
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers the three enabled-path claims (strip / inset / disabled-unchanged) so they share one fixture"
+    )]
+    fn compose_insets_panes_and_paints_sidebar_strip_when_enabled() {
+        use crate::render::Theme;
+        use crate::render::chrome::sidebar::SidebarPainter;
+        use phux_config::widget::WindowInfo;
+        use phux_protocol::ids::TerminalId;
+
+        let left = TerminalId::local(1);
+        let right = TerminalId::local(2);
+        let workspace = two_pane(&left, &right);
+        let ls = workspace.active_window().expect("active window");
+
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(left.clone(), pane_with(b"L"));
+        panes.insert(right.clone(), pane_with(b"R"));
+
+        // The same window list `window_infos` would hand the strip painter.
+        let mut sidebar_painter = SidebarPainter::new(Theme::default());
+        sidebar_painter.set_windows(vec![
+            WindowInfo {
+                name: "editor".to_owned(),
+                active: true,
+                zoomed: false,
+            },
+            WindowInfo {
+                name: "shell".to_owned(),
+                active: false,
+                zoomed: false,
+            },
+        ]);
+
+        let res = SidebarReservation {
+            edge: super::super::paint::SidebarEdge::Left,
+            width: 20,
+        };
+        let enabled = compose_full_frame_cells(
+            ls,
+            &mut panes,
+            Some(&left),
+            (80, 24),
+            None,
+            Some(res),
+            Some(&sidebar_painter),
+            "demo",
+            UNIX_EPOCH,
+        );
+
+        // (a) The strip occupies columns 0..20. Its separator rule sits in the
+        // strip's last column (19); the active window's label glyphs land in
+        // the strip's text columns.
+        let sep: String = (0..24)
+            .filter_map(|r| enabled.cell(r, 19).map(|c| c.grapheme.clone()))
+            .collect();
+        assert!(
+            sep.contains('│'),
+            "sidebar separator must sit at the strip's last column (19); got {sep:?}"
+        );
+        let strip_text: String = (0..19)
+            .filter_map(|c| enabled.cell(0, c).map(|cell| cell.grapheme.clone()))
+            .collect();
+        assert!(
+            strip_text.contains('e') && strip_text.contains('r'),
+            "active window label 'editor' must paint into the strip's text columns; got {strip_text:?}"
+        );
+
+        // (b) Panes inset: with a 20-col Left strip, the content rect starts at
+        // x = 20, so the focused (left) pane's first cell lands at column 20.
+        let content = content_rect((80, 24), false, Some(res));
+        let multi = super::super::multi_pane::compute_layout_in(ls, content, (80, 24));
+        let left_rect = multi.rects.get(&left).copied().expect("left rect");
+        assert_eq!(left_rect.x, 20, "left pane must inset to the strip's edge");
+        assert_eq!(
+            enabled
+                .cell(left_rect.y, left_rect.x)
+                .expect("inset left cell")
+                .grapheme,
+            "L",
+            "focused pane content must start at the inset origin (col 20)"
+        );
+        // Nothing pane-authored bleeds into the strip's columns: col 0 of the
+        // pane row is strip text, never the 'L' the pane painted.
+        assert_ne!(
+            enabled.cell(left_rect.y, 0).expect("col 0").grapheme,
+            "L",
+            "pane content must not spill into the reserved sidebar columns"
+        );
+
+        // (c) The disabled (None) frame is unchanged: panes tile from col 0 and
+        // no separator rule is painted in the strip columns.
+        let mut panes_off: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes_off.insert(left.clone(), pane_with(b"L"));
+        panes_off.insert(right, pane_with(b"R"));
+        let disabled = compose_full_frame_cells(
+            ls,
+            &mut panes_off,
+            Some(&left),
+            (80, 24),
+            None,
+            None,
+            None,
+            "demo",
+            UNIX_EPOCH,
+        );
+        let off_multi = super::super::multi_pane::compute_layout(ls, (80, 24));
+        let off_left = off_multi.rects.get(&left).copied().expect("off left rect");
+        assert_eq!(off_left.x, 0, "disabled path tiles from the origin");
+        assert_eq!(
+            disabled
+                .cell(off_left.y, off_left.x)
+                .expect("disabled left cell")
+                .grapheme,
+            "L"
+        );
+        // No sidebar separator glyph anywhere on the disabled frame's would-be
+        // strip column.
+        let off_sep: String = (0..24)
+            .filter_map(|r| disabled.cell(r, 19).map(|c| c.grapheme.clone()))
+            .collect();
+        assert!(
+            !off_sep.contains('│'),
+            "disabled path must paint no sidebar separator; got {off_sep:?}"
+        );
+    }
+
     /// With a status bar the bottom row is reserved and carries the bar
     /// content (here the session name), composited over the panes (phux-l5xa).
     #[test]
@@ -302,6 +462,8 @@ mod tests {
             Some(&pane),
             (80, 24),
             Some(&painter),
+            None,
+            None,
             "alpha",
             UNIX_EPOCH,
         );
