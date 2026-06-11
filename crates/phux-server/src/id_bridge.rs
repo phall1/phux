@@ -102,6 +102,20 @@ impl IdBridge {
         self.forward.get(&core).copied()
     }
 
+    /// Bind a specific `core → wire` mapping recorded in a graceful-upgrade
+    /// state blob (ADR-0032), rather than allocating a fresh wire id. Pair
+    /// with [`Self::set_next`] so the restored allocator keeps minting ids
+    /// above every restored one.
+    pub fn bind(&mut self, core: CoreSessionId, wire: WireSessionId) {
+        self.forward.insert(core, wire);
+        self.reverse.insert(wire, core);
+    }
+
+    /// Restore the next-wire-id allocator after a graceful upgrade.
+    pub const fn set_next(&mut self, next: u32) {
+        self.next = next;
+    }
+
     /// Reverse lookup: which core slotmap key (if any) does `wire`
     /// resolve to? Returns `None` for unknown wire ids — i.e. the client
     /// sent an id the server never allocated, or one that referred to a

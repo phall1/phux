@@ -1,22 +1,48 @@
-//! Producer for the graceful-upgrade state blob (ADR-0032): walk the live
-//! [`ServerState`] tree and each pane's actor into a
-//! [`StateBlob`](crate::upgrade::blob::StateBlob) the re-exec'd image rebuilds
-//! from.
+//! The graceful-upgrade state blob's producer and consumer (ADR-0032):
+//! [`ServerState::build_upgrade_blob`] walks the live tree into a
+//! [`StateBlob`](crate::upgrade::blob::StateBlob), and
+//! [`ServerState::rebuild_from_blob`] reconstructs the tree from one in the
+//! re-exec'd image.
 
+use std::collections::HashMap;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use phux_core::ids::{SessionId, TerminalId, WindowId};
 use phux_core::terminal::TerminalDescriptor;
 use phux_core::window::{LayoutNode, SplitDir};
+use phux_protocol::ids::{
+    SessionId as WireSessionId, TerminalId as WireTerminalId, WindowId as WireWindowId,
+};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::ServerState;
-use crate::terminal_actor::{PaneUpgradeHandle, UpgradeHandleRequest};
+use crate::terminal_actor::{PaneUpgradeHandle, TerminalActor, UpgradeHandleRequest};
 use crate::upgrade::blob::{
     BLOB_VERSION, Counters, LayoutBlob, PaneBlob, SessionBlob, SplitDirBlob, StateBlob, WindowBlob,
 };
+
+/// Errors rebuilding a [`ServerState`] from a [`StateBlob`].
+#[derive(Debug, thiserror::Error)]
+pub enum RebuildError {
+    /// The registry rejected a session/window/pane insertion.
+    #[error("registry rebuild: {0}")]
+    Registry(#[from] phux_core::registry::RegistryError),
+    /// A pane's actor could not be rebuilt around its adopted PTY.
+    #[error("actor rebuild: {0}")]
+    Actor(#[from] crate::terminal_actor::TerminalActorError),
+    /// The blob references a wire id that no earlier entity defined (e.g. a
+    /// window naming a session not in the blob).
+    #[error("blob references unknown {kind} wire id {id}")]
+    DanglingRef {
+        /// Which kind of entity the dangling id was expected to name.
+        kind: &'static str,
+        /// The unresolved wire id.
+        id: u32,
+    },
+}
 
 impl ServerState {
     /// Assemble a [`StateBlob`] from the live session/window/pane tree for a
@@ -191,6 +217,196 @@ fn pane_blob(
     }
 }
 
+impl ServerState {
+    /// Rebuild the session/window/pane tree from a [`StateBlob`] in the
+    /// re-exec'd image (ADR-0032): recreate every entity under its recorded
+    /// wire id, restore the id allocators + cwd/last-touched metadata, and
+    /// spawn a pane actor that re-adopts the inherited PTY (or, for a pane with
+    /// no handoff, replays its snapshot into a fresh no-PTY actor).
+    ///
+    /// Must run inside the `LocalSet` that owns pane actors (it spawns them).
+    ///
+    /// # Errors
+    /// [`RebuildError`] on a registry insertion failure, an actor build
+    /// failure, or a dangling wire-id reference in the blob.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear reconstruction: create entities, bind wire ids, spawn actors, re-link the tree, restore counters — three short passes whose order is the meaning; splitting fragments it."
+    )]
+    pub fn rebuild_from_blob(&mut self, blob: &StateBlob) -> Result<(), RebuildError> {
+        let max_scrollback = self.history_limit;
+        let mut session_core: HashMap<u32, SessionId> = HashMap::new();
+        let mut window_core: HashMap<u32, WindowId> = HashMap::new();
+        let mut pane_core: HashMap<u32, TerminalId> = HashMap::new();
+
+        for s in &blob.sessions {
+            let core = self.registry.new_session(s.name.clone());
+            self.session_id_bridge
+                .bind(core, WireSessionId::new(s.wire_id));
+            if let Some(sess) = self.registry.session_mut(core)
+                && let Some(created) = unix_nanos_to_systemtime(s.created_at_unix_nanos)
+            {
+                sess.created_at = created;
+            }
+            if let Some(ts) = s.last_touched {
+                self.session_last_touched.insert(core, ts);
+            }
+            if let Some(root) = &s.root {
+                self.session_root.insert(core, root.clone());
+            }
+            session_core.insert(s.wire_id, core);
+        }
+
+        for w in &blob.windows {
+            let session =
+                *session_core
+                    .get(&w.session_wire_id)
+                    .ok_or(RebuildError::DanglingRef {
+                        kind: "session",
+                        id: w.session_wire_id,
+                    })?;
+            let core = self.registry.new_window(session)?;
+            self.window_wire_forward
+                .insert(core, WireWindowId::new(w.wire_id));
+            self.window_wire_reverse
+                .insert(WireWindowId::new(w.wire_id), core);
+            if let Some(cwd) = &w.last_cwd {
+                self.window_last_cwd.insert(core, cwd.clone());
+            }
+            window_core.insert(w.wire_id, core);
+        }
+
+        for p in &blob.panes {
+            let window = *window_core
+                .get(&p.window_wire_id)
+                .ok_or(RebuildError::DanglingRef {
+                    kind: "window",
+                    id: p.window_wire_id,
+                })?;
+            let core = self.registry.new_terminal(window)?;
+            if let Some(desc) = self.registry.terminal_mut(core) {
+                desc.dims = (p.cols, p.rows);
+                desc.cwd.clone_from(&p.cwd);
+                desc.title.clone_from(&p.title);
+            }
+
+            let seed = pane_seed(p);
+            let bundle = match (p.master_fd, p.child_pid) {
+                (Some(master_fd), Some(child_pid)) => TerminalActor::new_with_adopted_pty(
+                    master_fd,
+                    child_pid,
+                    p.cols,
+                    p.rows,
+                    max_scrollback,
+                    CancellationToken::new(),
+                    &seed,
+                )?,
+                _ => TerminalActor::new_with_seed(p.cols, p.rows, &seed)?,
+            };
+
+            // Pre-bind the wire id so `spawn_terminal_actor`'s intern is a
+            // no-op (it returns the existing mapping instead of allocating a
+            // fresh one that would diverge from the blob).
+            self.terminal_wire_forward
+                .insert(core, WireTerminalId::local(p.wire_id));
+            self.terminal_wire_reverse
+                .insert(WireTerminalId::local(p.wire_id), core);
+            self.spawn_terminal_actor(core, bundle.handle, bundle.token, bundle.actor.run());
+            pane_core.insert(p.wire_id, core);
+        }
+
+        // Re-apply window pane order / active / layout (the auto-split layout
+        // `new_terminal` produced is discarded for the blob's).
+        for w in &blob.windows {
+            let Some(&core) = window_core.get(&w.wire_id) else {
+                continue;
+            };
+            let panes = resolve_ids(&w.pane_wire_ids, &pane_core);
+            let active = w.active_pane.and_then(|id| pane_core.get(&id).copied());
+            let layout = w
+                .layout
+                .as_ref()
+                .and_then(|l| layout_from_blob(l, &pane_core));
+            if let Some(win) = self.registry.window_mut(core) {
+                win.panes = panes;
+                win.active = active;
+                win.layout = layout;
+            }
+        }
+
+        // Re-apply session window order / active.
+        for s in &blob.sessions {
+            let Some(&core) = session_core.get(&s.wire_id) else {
+                continue;
+            };
+            let windows = resolve_ids(&s.window_wire_ids, &window_core);
+            let active = s.active_window.and_then(|id| window_core.get(&id).copied());
+            if let Some(sess) = self.registry.session_mut(core) {
+                sess.windows = windows;
+                sess.active = active;
+            }
+        }
+
+        // Restore the allocators above every restored id.
+        self.session_id_bridge
+            .set_next(blob.counters.next_session_wire_id);
+        self.next_terminal_wire_id = blob.counters.next_terminal_wire_id;
+        self.next_window_wire_id = blob.counters.next_window_wire_id;
+        self.next_touch_timestamp = blob.counters.next_touch_timestamp;
+
+        Ok(())
+    }
+}
+
+/// Resolve a list of wire ids to their rebuilt core ids, dropping any that
+/// didn't resolve (a dangling reference is silently skipped at the list level;
+/// structural references error in `rebuild_from_blob`).
+fn resolve_ids<K: Copy>(wire_ids: &[u32], map: &HashMap<u32, K>) -> Vec<K> {
+    wire_ids
+        .iter()
+        .filter_map(|id| map.get(id).copied())
+        .collect()
+}
+
+/// `UNIX_EPOCH + nanos`, or `None` if the value overflows a `u64` of
+/// nanoseconds (≈ year 2554 — far past any real timestamp).
+fn unix_nanos_to_systemtime(nanos: u128) -> Option<std::time::SystemTime> {
+    u64::try_from(nanos)
+        .ok()
+        .map(|n| UNIX_EPOCH + Duration::from_nanos(n))
+}
+
+/// Concatenate a pane's scrollback then viewport replay — the order a client
+/// applies them, so seeding a fresh `Terminal` reproduces the same grid.
+fn pane_seed(p: &PaneBlob) -> Vec<u8> {
+    let mut seed = Vec::with_capacity(p.scrollback_bytes.len() + p.vt_replay_bytes.len());
+    seed.extend_from_slice(&p.scrollback_bytes);
+    seed.extend_from_slice(&p.vt_replay_bytes);
+    seed
+}
+
+/// Rebuild a [`LayoutNode`] from its [`LayoutBlob`] mirror, resolving pane wire
+/// ids to core ids. `None` if any referenced pane is missing.
+fn layout_from_blob(node: &LayoutBlob, panes: &HashMap<u32, TerminalId>) -> Option<LayoutNode> {
+    match node {
+        LayoutBlob::Leaf(wire) => panes.get(wire).copied().map(LayoutNode::Leaf),
+        LayoutBlob::Split {
+            dir,
+            ratio,
+            left,
+            right,
+        } => Some(LayoutNode::Split {
+            dir: match dir {
+                SplitDirBlob::Horizontal => SplitDir::Horizontal,
+                SplitDirBlob::Vertical => SplitDir::Vertical,
+            },
+            ratio: *ratio,
+            left: Box::new(layout_from_blob(left, panes)?),
+            right: Box::new(layout_from_blob(right, panes)?),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::state::ServerState;
@@ -255,6 +471,48 @@ mod tests {
                 assert!(blob.counters.next_session_wire_id > session_wire);
                 assert!(blob.counters.next_window_wire_id > window_wire);
                 assert!(blob.counters.next_terminal_wire_id > pane_wire);
+            })
+            .await;
+    }
+
+    /// Build a state → blob → rebuild into a fresh state → blob again. The
+    /// tree, wire ids, and counters round-trip exactly, and the rebuilt pane
+    /// replays its seed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn rebuild_from_blob_round_trips_the_tree() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut state = ServerState::new();
+                let sid = state.registry.new_session("main".to_owned());
+                let wid = state.registry.new_window(sid).expect("new_window");
+                let tid = state.registry.new_terminal(wid).expect("new_terminal");
+                state.session_id_bridge.intern(sid);
+                state.intern_window_wire(wid);
+                let bundle = TerminalActor::new_with_seed(20, 5, b"hello").expect("new_with_seed");
+                tokio::task::spawn_local(bundle.actor.run());
+                state.register_terminal_handle(tid, bundle.handle, bundle.token);
+
+                let blob = state.build_upgrade_blob(7).await;
+
+                // Rebuild into a brand-new state, then re-emit a blob from it.
+                let mut fresh = ServerState::new();
+                fresh.rebuild_from_blob(&blob).expect("rebuild");
+                let blob2 = fresh.build_upgrade_blob(7).await;
+
+                assert_eq!(blob.sessions, blob2.sessions, "sessions round-trip");
+                assert_eq!(blob.windows, blob2.windows, "windows + layout round-trip");
+                assert_eq!(blob.counters, blob2.counters, "id allocators round-trip");
+                assert_eq!(blob.panes.len(), blob2.panes.len());
+
+                let (p1, p2) = (&blob.panes[0], &blob2.panes[0]);
+                assert_eq!(p1.wire_id, p2.wire_id);
+                assert_eq!(p1.window_wire_id, p2.window_wire_id);
+                assert_eq!((p1.cols, p1.rows), (p2.cols, p2.rows));
+                assert!(
+                    String::from_utf8_lossy(&p2.vt_replay_bytes).contains("hello"),
+                    "rebuilt pane should replay its seed snapshot"
+                );
             })
             .await;
     }
