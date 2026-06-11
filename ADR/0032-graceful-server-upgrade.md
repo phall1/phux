@@ -18,7 +18,7 @@ libghostty `Terminal` by replaying its snapshot. Child processes never notice
 (fds survive `execve`); clients blink-reconnect. A separate fd-keeper daemon
 and live engine-state serialization are the rejected alternatives.
 
-Status: Proposed
+Status: Accepted
 Date: 2026-06-09
 
 ## Context
@@ -121,3 +121,23 @@ auto-upgrade per config — the install path then "just works" for non-dev users
 - New surface: a `--resume <fd>` server mode, the state-blob format (versioned,
   since old↔new server versions straddle it), and the fd manifest. The state
   format is an explicit compatibility boundary maintained across releases.
+
+## Implementation (shipped)
+
+v1 landed as `phux upgrade` (phux-fak5). Notes where the build refined the plan:
+
+- **fd re-adoption is small, not a fork.** portable_pty exposes `MasterPty` /
+  `Child` as *public traits*, so re-adopting an inherited `(master_fd, pid)`
+  needed only two trait impls, extracted as the standalone `portable-pty-adopt`
+  crate — not a portable_pty fork. A real-`execve` round-trip test proves the
+  child + fd survive.
+- **Blob carrier is an anonymous `tempfile`,** not a `memfd` (macOS has none) —
+  written, `FD_CLOEXEC`-cleared, and inherited; read back with a seek-to-start.
+- **JSON state blob,** versioned (`0.5.0-draft.4` allocates the `UPGRADE`
+  command at tag `0x0e`); keyed by wire ids so the resumed image re-pins them.
+- **Acceptance drill** (`crates/phux/tests/upgrade_e2e.rs`, run via `just e2e`):
+  the server PID is unchanged across the upgrade (in-place `execve`, not
+  kill+restart), the pane child stays alive, and scrollback survives.
+- Client reconnect is the v1 blink (re-attach + `TERMINAL_SNAPSHOT` resync).
+  The flicker-free client-socket hand-off and crash-surviving fd-keeper daemon
+  remain v2.
