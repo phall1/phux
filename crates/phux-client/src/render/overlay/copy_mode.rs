@@ -13,7 +13,7 @@ use phux_protocol::input::key::{KeyEvent, PhysicalKey};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::{CopyRequest, OverlayCommand, RenderOverlay};
+use super::{CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab};
 use crate::attach::render::SelectionRect;
 
 /// How copy-mode interprets the selection rectangle.
@@ -144,10 +144,19 @@ impl CopyModeOverlay {
         }
     }
 
-    /// Build the client-local copy request for the current selection: the
-    /// normalized inclusive viewport rectangle plus the block/linear flag.
-    /// The dispatcher resolves it against the focused pane's own engine.
+    /// Build the client-local copy request for the current two-corner
+    /// selection: the normalized inclusive viewport rectangle plus the
+    /// block/linear flag. The dispatcher resolves it against the focused
+    /// pane's own engine.
     fn copy_request(&self) -> CopyRequest {
+        self.copy_request_with(SelectionGrab::Rect)
+    }
+
+    /// Build a copy request tagged with `grab`. For the engine-derived grabs
+    /// (`Word`/`Line`/`LineSemantic`/`All`/`Output`) the `start`/`end`
+    /// rectangle is still carried (so the highlight stays coherent) but the
+    /// dispatcher resolves against `cursor_row`/`cursor_col` instead.
+    fn copy_request_with(&self, grab: SelectionGrab) -> CopyRequest {
         let range = self.selection_range();
         CopyRequest {
             start_row: range.start_row,
@@ -155,6 +164,9 @@ impl CopyModeOverlay {
             end_row: range.end_row,
             end_col: range.end_col,
             rectangle: self.mode == SelectionMode::Rect,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            grab,
         }
     }
 }
@@ -180,11 +192,13 @@ impl RenderOverlay for CopyModeOverlay {
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
-        use phux_protocol::input::key::KeyAction;
+        use phux_protocol::input::key::{KeyAction, ModSet};
 
         if key.action != KeyAction::Press {
             return OverlayCommand::Stay;
         }
+
+        let shift = key.mods.contains(ModSet::SHIFT);
 
         match key.key {
             // Arrow keys adjust the selection in-place; the driver repaints
@@ -206,9 +220,36 @@ impl RenderOverlay for CopyModeOverlay {
                 self.move_cursor(0, 1);
                 OverlayCommand::Stay
             }
-            // Enter copies the selection client-locally (the dispatcher
-            // resolves it against the focused pane's engine and emits OSC 52)
-            // and exits copy-mode, tmux-style.
+            // Engine-derived one-shot grabs (phux-7143). These copy-and-exit
+            // immediately (tmux-style): the dispatcher resolves the grab at the
+            // overlay cursor against the focused pane's own libghostty engine
+            // (`select_word`/`select_line`/`select_all`/`select_output`) and
+            // emits OSC 52. No wire traffic (ADR-0030).
+            //
+            // `w` = word under cursor.
+            PhysicalKey::W => OverlayCommand::Copy(self.copy_request_with(SelectionGrab::Word)),
+            // `v` = whole line; `V` (shift) = line bounded by semantic-prompt
+            // state changes (OSC-133 zones).
+            PhysicalKey::V => {
+                let grab = if shift {
+                    SelectionGrab::LineSemantic
+                } else {
+                    SelectionGrab::Line
+                };
+                OverlayCommand::Copy(self.copy_request_with(grab))
+            }
+            // `A` (shift) = select all selectable content.
+            PhysicalKey::A if shift => {
+                OverlayCommand::Copy(self.copy_request_with(SelectionGrab::All))
+            }
+            // `]` = command-output span under cursor (best-effort; no-op when
+            // the pane lacks OSC-133 zones).
+            PhysicalKey::BracketRight => {
+                OverlayCommand::Copy(self.copy_request_with(SelectionGrab::Output))
+            }
+            // Enter copies the current two-corner selection client-locally (the
+            // dispatcher resolves it against the focused pane's engine and emits
+            // OSC 52) and exits copy-mode, tmux-style.
             PhysicalKey::Enter => OverlayCommand::Copy(self.copy_request()),
             PhysicalKey::Escape => OverlayCommand::Dismiss,
             _ => OverlayCommand::Stay,
@@ -218,7 +259,85 @@ impl RenderOverlay for CopyModeOverlay {
 
 #[cfg(test)]
 mod tests {
+    use phux_protocol::input::key::{KeyAction, ModSet};
+
     use super::*;
+
+    /// A press `KeyEvent` for `key` with `mods`.
+    fn press(key: PhysicalKey, mods: ModSet) -> KeyEvent {
+        KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods,
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: None,
+            unshifted_codepoint: None,
+        }
+    }
+
+    /// Drive `key` through a fresh overlay and return the resulting command.
+    fn dispatch(key: PhysicalKey, mods: ModSet) -> OverlayCommand {
+        // Cursor at (2, 5) so engine-derived grabs carry a non-zero cursor.
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        overlay.handle_key(&press(key, mods))
+    }
+
+    fn grab_of(cmd: &OverlayCommand) -> SelectionGrab {
+        match cmd {
+            OverlayCommand::Copy(req) => req.grab,
+            other => panic!("expected Copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_w_grabs_word() {
+        let cmd = dispatch(PhysicalKey::W, ModSet::empty());
+        assert_eq!(grab_of(&cmd), SelectionGrab::Word);
+        if let OverlayCommand::Copy(req) = cmd {
+            assert_eq!((req.cursor_row, req.cursor_col), (2, 5));
+        }
+    }
+
+    #[test]
+    fn key_v_grabs_line() {
+        let cmd = dispatch(PhysicalKey::V, ModSet::empty());
+        assert_eq!(grab_of(&cmd), SelectionGrab::Line);
+    }
+
+    #[test]
+    fn shift_v_grabs_semantic_line() {
+        let cmd = dispatch(PhysicalKey::V, ModSet::SHIFT);
+        assert_eq!(grab_of(&cmd), SelectionGrab::LineSemantic);
+    }
+
+    #[test]
+    fn shift_a_grabs_all() {
+        let cmd = dispatch(PhysicalKey::A, ModSet::SHIFT);
+        assert_eq!(grab_of(&cmd), SelectionGrab::All);
+    }
+
+    #[test]
+    fn unshifted_a_is_inert() {
+        // `a` without shift is not a grab key — it must be consumed (Stay),
+        // not mistaken for select-all.
+        assert_eq!(
+            dispatch(PhysicalKey::A, ModSet::empty()),
+            OverlayCommand::Stay
+        );
+    }
+
+    #[test]
+    fn key_bracket_right_grabs_output() {
+        let cmd = dispatch(PhysicalKey::BracketRight, ModSet::empty());
+        assert_eq!(grab_of(&cmd), SelectionGrab::Output);
+    }
+
+    #[test]
+    fn enter_grabs_rect() {
+        let cmd = dispatch(PhysicalKey::Enter, ModSet::empty());
+        assert_eq!(grab_of(&cmd), SelectionGrab::Rect);
+    }
 
     #[test]
     fn cell_range_normalization() {

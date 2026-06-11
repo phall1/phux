@@ -136,12 +136,50 @@ pub enum OverlayCommand {
     Copy(CopyRequest),
 }
 
+/// How the dispatcher should derive the selection from a [`CopyRequest`]
+/// (phux-7143, [ADR-0030]).
+///
+/// `Rect` is the two-corner path: the overlay's `start`/`end` rectangle is
+/// turned into a linear-or-block `Selection::new` directly. The remaining
+/// variants are *engine-derived*: the dispatcher hands the overlay cursor
+/// (`cursor_row`/`cursor_col`) to libghostty's `select_*` helpers, which
+/// return a snapshot selection the dispatcher then formats. Keeping the
+/// derivation as a tag here (not a `libghostty_vt` call) preserves the
+/// render-layer boundary — `render/overlay/` never imports the engine; the
+/// dispatcher in `attach/copy.rs` does the resolution.
+///
+/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionGrab {
+    /// Two-corner rectangle: `start`/`end` corners, block when
+    /// [`CopyRequest::rectangle`] is set, else linear. The legacy default.
+    #[default]
+    Rect,
+    /// Word under the cursor (`select_word`).
+    Word,
+    /// Whole line under the cursor (`select_line`).
+    Line,
+    /// Whole line under the cursor, bounded by semantic-prompt state changes
+    /// (`select_line` with `with_semantic_prompt_boundary(true)`).
+    LineSemantic,
+    /// All selectable terminal content (`select_all`).
+    All,
+    /// The command-output span under the cursor (`select_output`). Degrades
+    /// to an empty no-op when the pane has no OSC-133 semantic zones.
+    Output,
+}
+
 /// A client-local copy request (phux-v6jw, [ADR-0030]).
 ///
 /// The overlay's normalized, inclusive viewport selection rectangle, handed to
 /// the dispatcher to resolve against the focused pane's own libghostty engine.
 /// Coordinates are pane-local viewport cells (`row`/`col`, zero-based,
 /// `start <= end`). `rectangle` selects block (vs linear) extraction.
+///
+/// `grab` tags how the dispatcher derives the selection. For
+/// [`SelectionGrab::Rect`] (the default) the `start`/`end` corners drive a
+/// two-corner `Selection`; the engine-derived grabs instead resolve at the
+/// overlay cursor (`cursor_row`/`cursor_col`).
 ///
 /// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,8 +192,16 @@ pub struct CopyRequest {
     pub end_row: u16,
     /// Right column of the selection (inclusive).
     pub end_col: u16,
-    /// Block (rectangular) selection when `true`; linear when `false`.
+    /// Block (rectangular) selection when `true`; linear when `false`. Only
+    /// consulted for [`SelectionGrab::Rect`].
     pub rectangle: bool,
+    /// The overlay cursor row (pane-local viewport cell). Engine-derived
+    /// grabs (`Word`/`Line`/`LineSemantic`/`Output`) resolve here.
+    pub cursor_row: u16,
+    /// The overlay cursor column (pane-local viewport cell).
+    pub cursor_col: u16,
+    /// How the dispatcher derives the selection from this request.
+    pub grab: SelectionGrab,
 }
 
 /// What [`OverlayState::handle_key`] hands back to the dispatcher.
