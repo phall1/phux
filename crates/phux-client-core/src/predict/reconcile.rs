@@ -158,6 +158,13 @@ where
         state.set_cursor(cursor_row, cursor_col);
     }
 
+    // Feed this pass into the adaptive auto-back-off heuristic (phux-pxaj):
+    // a run of contradicting passes (vi-mode, a modal app, fast transitions)
+    // auto-suspends predicting; clean productive passes afterward re-arm it.
+    // Done after the cursor resync so a back-off survives the `set_cursor`
+    // above (which would otherwise re-arm an ordinary suspend).
+    state.note_reconcile(summary);
+
     summary
 }
 
@@ -690,5 +697,84 @@ mod tests {
         let summary = reconcile_terminal_output_per_cell(&mut s, 0, 3, row_reader(&[]));
         assert_eq!(summary.pending, 1);
         assert_eq!(s.cursor(), (0, 4));
+    }
+
+    // -- adaptive auto-back-off integration (phux-pxaj) -----------------
+
+    /// Type one char and reconcile against a cell the server painted
+    /// differently — a single contradicting per-cell pass driven entirely
+    /// through the production `reconcile_terminal_output_per_cell` path
+    /// (so `note_reconcile` is exercised by the real call site).
+    fn contradict_one_insert(s: &mut PredictionState) {
+        // Re-arm and place the cursor, then predict an insert.
+        s.set_cursor(0, 0);
+        assert_eq!(s.predict_key(&key_text("h")), PredictionOutcome::Predicted);
+        // Server painted 'X' instead of 'h' → the insert is contradicted.
+        let summary = reconcile_terminal_output_per_cell(s, 0, 1, row_reader(&[((0, 0), "X")]));
+        assert_eq!(summary.contradicted, 1);
+    }
+
+    /// Type one char and reconcile against the cell the server confirmed —
+    /// a clean productive per-cell pass through the production path.
+    fn confirm_one_insert(s: &mut PredictionState) {
+        s.set_cursor(0, 0);
+        assert_eq!(s.predict_key(&key_text("h")), PredictionOutcome::Predicted);
+        let summary = reconcile_terminal_output_per_cell(s, 0, 1, row_reader(&[((0, 0), "h")]));
+        assert_eq!(summary.confirmed, 1);
+    }
+
+    #[test]
+    fn three_contradicting_reconciles_suspend_then_skip() {
+        // End-to-end: three contradicting per-cell reconciles via the real
+        // reconcile entry point auto-suspend the predictor. The next
+        // keystroke is then Skipped rather than echoed.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        contradict_one_insert(&mut s);
+        contradict_one_insert(&mut s);
+        assert!(!s.is_suspended(), "two contradictions: still armed");
+        // set_cursor in the helper re-armed an ordinary suspend, but the
+        // third contradiction is what trips the (sticky) back-off.
+        contradict_one_insert(&mut s);
+        assert!(s.is_suspended(), "three contradictions auto-suspend");
+        assert!(s.is_auto_backed_off());
+        // A keystroke now skips — no ghost echoed.
+        assert_eq!(s.predict_key(&key_text("a")), PredictionOutcome::Skipped);
+        assert_eq!(s.pending_len(), 0);
+    }
+
+    #[test]
+    fn back_off_then_clean_reconciles_re_arm() {
+        // After backing off, two clean productive reconciles lift the
+        // back-off and prediction resumes.
+        let mut s = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        contradict_one_insert(&mut s);
+        contradict_one_insert(&mut s);
+        contradict_one_insert(&mut s);
+        assert!(s.is_suspended());
+
+        // While backed off, predict_key is a no-op, so a confirming reconcile
+        // must be fed directly (no queued prediction to confirm via typing).
+        // Simulate the server confirming nothing-contradicted productive work
+        // through the per-cell path: queue is empty, so use note_reconcile via
+        // a confirming pass on a fresh prediction once re-armed is not possible
+        // yet — instead exercise the documented contract: clean productive
+        // passes re-arm. Drive them through the public reconcile by predicting
+        // is blocked, so assert through is_auto_backed_off using direct passes.
+        s.note_reconcile(ReconcileStats {
+            confirmed: 1,
+            contradicted: 0,
+            pending: 0,
+        });
+        assert!(s.is_suspended(), "one clean pass is not enough");
+        s.note_reconcile(ReconcileStats {
+            confirmed: 1,
+            contradicted: 0,
+            pending: 0,
+        });
+        assert!(!s.is_suspended(), "two clean passes re-arm");
+        assert!(!s.is_auto_backed_off());
+
+        // Prediction works again end-to-end.
+        confirm_one_insert(&mut s);
     }
 }
