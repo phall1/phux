@@ -43,7 +43,10 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # `macos-15-intel` is the last hosted x86_64 macOS image (GitHub
+          # retired `macos-13` on 2025-12-04 and drops Intel entirely in Fall
+          # 2027). Same best-effort CPU-baseline caveat as the header.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
