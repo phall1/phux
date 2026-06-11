@@ -12,7 +12,7 @@ use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
 use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
-use super::driver::{AttachError, DEFAULT_GROUP_ID, LAYOUT_KEY, PaneSlot};
+use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot};
 use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
 use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
@@ -988,11 +988,15 @@ fn focused_session_name(snapshot: &phux_protocol::wire::info::SessionSnapshot) -
         .unwrap_or_default()
 }
 
-/// Decide whether `(scope, key)` matches the layout-coordination key
-/// ADR-0019 reserves (`phux.tui.layout/v1`, scoped to the default
-/// Group).
+/// Decide whether `(scope, key)` matches a layout-coordination key ADR-0019
+/// reserves (`phux.tui.layout/v1[/<session>]`, scoped to the default Group).
+///
+/// Per-session keying (phux-jy4t) means the key carries a session suffix; a
+/// client only ever receives broadcasts for the key it subscribed to (its own
+/// session), so matching the family is sufficient.
 fn is_layout_key(scope: &Scope, key: &str) -> bool {
-    matches!(scope, Scope::Group(id) if *id == DEFAULT_GROUP_ID) && key == LAYOUT_KEY
+    matches!(scope, Scope::Group(id) if *id == DEFAULT_GROUP_ID)
+        && super::driver::is_layout_key_string(key)
 }
 
 /// Sanity-check a freshly decoded layout against the panes the driver

@@ -946,24 +946,28 @@ async fn main_loop<W: super::RenderSink>(
         sessions = list;
         focused_session = Some(focused);
     }
-    if outcome.subscribe_layout {
+    if outcome.subscribe_layout
+        && let Some(session) = focused_session
+    {
         // phux-4li.5: ask the server for any persisted layout, then
         // subscribe to future mutations. Both frames are best-effort —
         // if the server rejects them with an ERROR (we'd see one in a
         // later loop iteration) we just stay in the single-pane
-        // bootstrap.
+        // bootstrap. phux-jy4t: keyed per session so we restore THIS
+        // session's layout, not whatever sibling wrote the key last.
+        let key = layout_key(session);
         let req_id = next_request_id;
         layout_get_request_id = Some(req_id);
         next_request_id = next_request_id.wrapping_add(1);
         conn.send(&FrameKind::GetMetadata {
             request_id: req_id,
             scope: Scope::Group(DEFAULT_GROUP_ID),
-            key: LAYOUT_KEY.to_owned(),
+            key: key.clone(),
         })
         .await?;
         conn.send(&FrameKind::SubscribeMetadata {
             scope: Scope::Group(DEFAULT_GROUP_ID),
-            key: LAYOUT_KEY.to_owned(),
+            key,
         })
         .await?;
     }
@@ -1225,6 +1229,7 @@ async fn main_loop<W: super::RenderSink>(
                         // a local action — see `ActionEffects.set_metadata`
                         // for the local-action path.
                         if outcome.emit_set_metadata
+                            && let Some(session) = focused_session
                             && let Some(bytes) = encode_layout_or_log(&workspace)
                         {
                             let request_id = next_request_id;
@@ -1232,7 +1237,7 @@ async fn main_loop<W: super::RenderSink>(
                             conn.send(&FrameKind::SetMetadata {
                                 request_id,
                                 scope: Scope::Group(DEFAULT_GROUP_ID),
-                                key: LAYOUT_KEY.to_owned(),
+                                key: layout_key(session),
                                 value: bytes,
                             })
                             .await?;
@@ -1558,11 +1563,30 @@ async fn main_loop<W: super::RenderSink>(
     }
 }
 
-/// phux-4li.5: L3 metadata key under which the multi-pane layout
+/// phux-4li.5: L3 metadata key PREFIX under which the multi-pane layout
 /// envelope persists (ADR-0019 decision 1). The reference TUI is the
 /// sole consumer; other clients (a future GUI, an agent) never read
 /// or write it.
+///
+/// The persisted key is per-session: [`layout_key`] suffixes this with the
+/// session id so each session keeps its OWN layout, isolated in the shared
+/// group's metadata. Before phux-jy4t every session wrote this bare key, so a
+/// new session inherited (and clobbered) its sibling's tree.
 pub(super) const LAYOUT_KEY: &str = "phux.tui.layout/v1";
+
+/// The per-session layout metadata key: [`LAYOUT_KEY`] suffixed with the
+/// session id (phux-jy4t). Two clients on the same session share one key (and
+/// thus one layout + subscription); different sessions are isolated.
+pub(super) fn layout_key(session: phux_protocol::ids::SessionId) -> String {
+    format!("{LAYOUT_KEY}/{}", session.get())
+}
+
+/// Whether `key` is any session's layout key — the bare [`LAYOUT_KEY`] (legacy
+/// persisted value) or a `LAYOUT_KEY/<session>` form. Used to recognise layout
+/// `SET_METADATA` broadcasts (a client only ever receives its own session's).
+pub(super) fn is_layout_key_string(key: &str) -> bool {
+    key == LAYOUT_KEY || key.starts_with(&format!("{LAYOUT_KEY}/"))
+}
 
 /// phux-4li.5: the single Group v0.1 servers expose. The grouping tier
 /// is not a wire lifecycle; every L3 key the reference TUI cares about
@@ -2052,6 +2076,30 @@ mod tests {
         let err = AttachError::Io(io::Error::other("boom"));
         let msg = err.to_string();
         assert!(msg.contains("attach loop io error"));
+    }
+
+    /// phux-jy4t: the layout metadata key is per-session, so two sessions
+    /// never share (and clobber) one bucket.
+    #[test]
+    fn layout_key_is_per_session() {
+        use phux_protocol::ids::SessionId;
+        let a = layout_key(SessionId::new(1));
+        let b = layout_key(SessionId::new(2));
+        assert_eq!(a, "phux.tui.layout/v1/1");
+        assert_eq!(b, "phux.tui.layout/v1/2");
+        assert_ne!(a, b, "different sessions get different keys");
+        assert!(a.starts_with(LAYOUT_KEY), "still under the layout prefix");
+    }
+
+    #[test]
+    fn is_layout_key_string_matches_the_family_only() {
+        // Bare legacy key + any session-suffixed key are layout keys.
+        assert!(is_layout_key_string(LAYOUT_KEY));
+        assert!(is_layout_key_string("phux.tui.layout/v1/7"));
+        // A different key that merely shares the prefix-without-separator is
+        // NOT matched, and unrelated keys aren't either.
+        assert!(!is_layout_key_string("phux.tui.layout/v12"));
+        assert!(!is_layout_key_string("phux.tui.other/v1"));
     }
 
     #[test]
