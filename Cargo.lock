@@ -1984,6 +1984,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-pty-adopt"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "portable-pty",
+]
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
