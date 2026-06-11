@@ -429,6 +429,65 @@ impl StatusBarPainter {
         Ok(())
     }
 
+    /// Compose the status row into a fresh `cols × 1` ratatui [`Buffer`]
+    /// without emitting VT or touching the paint cache (`phux-l5xa`).
+    ///
+    /// Returns `(buffer, row_index)` where `row_index` is the bar's row in a
+    /// `rows`-high viewport, or `None` when nothing would paint (zero dims,
+    /// or an empty bar with no windows and no error). Mirrors the
+    /// composition in [`Self::paint`] / [`Self::paint_error_line`] so the
+    /// `phux snapshot --rendered` frame shows the same bar the live VT paint
+    /// would — read as dense cells, with no emulator re-parse.
+    pub(crate) fn compose_buffer(
+        &self,
+        cols: u16,
+        rows: u16,
+        ctx: &StatusBarContext<'_>,
+    ) -> Option<(Buffer, u16)> {
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        let row_index: u16 = match self.position {
+            Position::Bottom => rows.saturating_sub(1),
+            Position::Top => 0,
+        };
+        if let Some(message) = &self.error {
+            let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
+            let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            let mut tmp = [0u8; 4];
+            let mut x: u16 = 0;
+            for ch in message.chars() {
+                if x >= cols {
+                    break;
+                }
+                let cell = &mut buffer[(x, 0)];
+                cell.set_symbol(ch.encode_utf8(&mut tmp));
+                cell.set_style(style);
+                x = x.saturating_add(1);
+            }
+            // Extend the reverse-video strip across the rest of the row so it
+            // spans the full width, matching `paint_error_line`.
+            while x < cols {
+                let cell = &mut buffer[(x, 0)];
+                cell.set_symbol(" ");
+                cell.set_style(style);
+                x = x.saturating_add(1);
+            }
+            return Some((buffer, row_index));
+        }
+        if self.bar.is_empty() && self.windows.is_empty() {
+            return None;
+        }
+        let ctx = StatusBarContext {
+            windows: &self.windows,
+            ..*ctx
+        };
+        let row = self.bar.render(&ctx.as_widget(), cols);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
+        fill_buffer(&mut buffer, &row, cols);
+        Some((buffer, row_index))
+    }
+
     /// phux-9vf: paint the fixed error diagnostic onto the bar row.
     ///
     /// Bypasses the widget composer entirely: the message is laid into a

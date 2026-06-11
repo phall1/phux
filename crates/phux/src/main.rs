@@ -203,8 +203,22 @@ fn main() -> ExitCode {
             json,
             scrollback,
             cells,
+            rendered,
+            cols,
+            rows,
             socket,
-        }) => commands::snapshot::run_snapshot(session.as_deref(), json, scrollback, cells, socket),
+        }) => commands::snapshot::run_snapshot(
+            session.as_deref(),
+            json,
+            scrollback,
+            cells,
+            &commands::snapshot::RenderedOpts {
+                rendered,
+                cols,
+                rows,
+            },
+            socket,
+        ),
         Some(Command::SendKeys {
             target,
             keys,

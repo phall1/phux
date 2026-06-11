@@ -483,6 +483,163 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     attach_session(socket, target, out, predict, None, None).await
 }
 
+/// Headless one-shot: attach, ingest the session's snapshot + layout, and
+/// return the client's composited multi-pane view as dense structured cells
+/// (`phux snapshot --rendered`, phux-l5xa).
+///
+/// Unlike the side-effect-free `GET_SCREEN` read, this **attaches** (R2): it
+/// drives the same client render path the live attach loop uses, so the
+/// returned frame is what the human's glass would show — pane content tiled
+/// per the layout, dividers, and the status bar, composited. But it never
+/// installs raw mode or an alt screen and never paints VT: frames feed the
+/// pane mirrors with `defer_paint = true` (mirrors ingest, stdout is
+/// suppressed), then ONE `rendered::compose_full_frame_cells` pass
+/// assembles the frame. There is no TTY, so the viewport `(cols, rows)` is
+/// caller-supplied.
+///
+/// Settle policy (R3): after the ATTACHED replay and the layout `GET`,
+/// frames are drained until the stream goes idle for `SETTLE_IDLE` (the
+/// server's initial snapshot burst has landed) or an overall
+/// `SETTLE_DEADLINE` elapses — a quiescence wait on real frame arrival, not
+/// a fixed sleep.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "mirrors main_loop's session-scoped local setup before one ingest-and-compose; the ~12 &mut locals would otherwise be threaded through a context struct for a single caller"
+)]
+pub async fn run_headless_rendered(
+    socket: &Path,
+    target: AttachTarget,
+    cols: u16,
+    rows: u16,
+) -> Result<phux_core::screen::RenderedFrame, AttachError> {
+    use std::time::SystemTime;
+
+    /// Idle gap that marks the server's initial snapshot burst complete.
+    const SETTLE_IDLE: Duration = Duration::from_millis(120);
+    /// Hard cap on the whole drain, guarding a pathological never-idle stream.
+    const SETTLE_DEADLINE: Duration = Duration::from_secs(3);
+
+    let mut conn = Connection::connect(socket).await?;
+    let _mode = handshake(&mut conn).await?;
+    send_attach(&mut conn, target).await?;
+    let attached = wait_for_attached(&mut conn).await?;
+
+    let viewport_dims = (cols.max(1), rows.max(1));
+    // Throwaway sink: `defer_paint = true` emits no VT, but
+    // `handle_server_frame` still needs a `Write`.
+    let mut sink: Vec<u8> = Vec::new();
+    let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+    let mut workspace = Workspace::default();
+    let mut focused_pane: Option<TerminalId> = None;
+    let mut zoomed: Option<TerminalId> = None;
+    let mut session_name = String::new();
+    let mut status_bar = build_status_bar_painter();
+    let mut predict = PredictionState::new(
+        PredictiveConfig::disabled(),
+        viewport_dims.0,
+        viewport_dims.1,
+    );
+    let overlay = Overlay;
+    let mut pending_splits: HashMap<u32, PendingSplit> = HashMap::new();
+    let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
+    let mut layout_get_request_id: Option<u32> = None;
+
+    // Replay ATTACHED so the focused-pane + workspace bootstrap runs once.
+    let outcome = handle_server_frame(
+        &mut sink,
+        attached,
+        &mut panes,
+        &mut workspace,
+        &mut focused_pane,
+        &mut zoomed,
+        &mut session_name,
+        status_bar.as_mut(),
+        viewport_dims,
+        &mut predict,
+        &overlay,
+        layout_get_request_id,
+        &mut pending_splits,
+        &mut pending_windows,
+        false,
+        true,
+    )?;
+    let focused_session = outcome.sessions.map(|(_, focused)| focused);
+
+    // Pull any persisted multi-pane layout for this session so dividers +
+    // tiling match a live attach. One-shot, so we GET but do not SUBSCRIBE.
+    if outcome.subscribe_layout
+        && let Some(session) = focused_session
+    {
+        let req_id = 1;
+        layout_get_request_id = Some(req_id);
+        conn.send(&FrameKind::GetMetadata {
+            request_id: req_id,
+            scope: Scope::Group(DEFAULT_GROUP_ID),
+            key: layout_key(session),
+        })
+        .await?;
+    }
+
+    // Drain the initial burst until the stream goes idle (or the deadline).
+    let _ = tokio::time::timeout(SETTLE_DEADLINE, async {
+        loop {
+            tokio::select! {
+                biased;
+                frame = conn.recv() => {
+                    let frame = frame?;
+                    handle_server_frame(
+                        &mut sink,
+                        frame,
+                        &mut panes,
+                        &mut workspace,
+                        &mut focused_pane,
+                        &mut zoomed,
+                        &mut session_name,
+                        status_bar.as_mut(),
+                        viewport_dims,
+                        &mut predict,
+                        &overlay,
+                        layout_get_request_id,
+                        &mut pending_splits,
+                        &mut pending_windows,
+                        false,
+                        true,
+                    )?;
+                }
+                () = tokio::time::sleep(SETTLE_IDLE) => break,
+            }
+        }
+        Ok::<(), AttachError>(())
+    })
+    .await;
+
+    // Seed the window/tab strip exactly as the live loop does before its
+    // first bar paint, so the composited bar shows the windows.
+    if let Some(sb) = status_bar.as_mut() {
+        sb.set_windows(window_infos(&workspace, &panes, zoomed.as_ref()));
+    }
+
+    // Compose the assembled frame against the render layout (honoring zoom).
+    let layout_state = workspace.render_window(zoomed.as_ref()).map_or_else(
+        crate::layout::LayoutState::default,
+        std::borrow::Cow::into_owned,
+    );
+    let frame = super::rendered::compose_full_frame_cells(
+        &layout_state,
+        &mut panes,
+        focused_pane.as_ref(),
+        viewport_dims,
+        status_bar.as_ref(),
+        &session_name,
+        SystemTime::now(),
+    );
+    Ok(frame)
+}
+
 /// The attach session body shared by the production ([`run`]) and
 /// test-injectable ([`run_with_stdout_predict`]) entry points.
 ///

@@ -17,7 +17,9 @@ use std::path::Path;
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::{Command, CommandResult, CommandValue, FrameKind};
 
-pub use phux_core::screen::{CursorState, SCHEMA_VERSION, ScreenState};
+pub use phux_core::screen::{
+    CursorState, RENDERED_SCHEMA_VERSION, RenderedCell, RenderedFrame, SCHEMA_VERSION, ScreenState,
+};
 
 use crate::attach::AttachError;
 use crate::attach::connection::Connection;

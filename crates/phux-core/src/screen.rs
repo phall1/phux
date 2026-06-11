@@ -34,10 +34,11 @@ pub const SCHEMA_VERSION: u32 = 3;
 /// (`0..=255`, the 16 ANSI names plus the 256-color cube), or a direct
 /// 24-bit RGB triple. Kept as a tagged enum so the JSON distinguishes
 /// "default" from "explicitly black", which a flattened RGB cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CellColor {
     /// The terminal default (no explicit color set on the cell).
+    #[default]
     Default,
     /// A palette index: `0..=15` are the ANSI names, `16..=255` the
     /// 256-color cube/greyscale ramp.
@@ -89,7 +90,7 @@ pub enum SemanticContent {
 /// [`Self::underline`] bool for now — the agent surface cares that a cell
 /// is underlined, not which of six dash patterns; the richer enum can land
 /// additively later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "SGR attributes are an inherent bitset of independent flags, \
@@ -198,6 +199,109 @@ pub struct ScreenState {
     /// pre-`phux-8yl` shape (no `cells` key at all).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cells: Option<Vec<CellInfo>>,
+}
+
+/// Stable JSON contract version for [`RenderedFrame`] (`phux-l5xa`).
+///
+/// Independent of [`SCHEMA_VERSION`] (the per-pane [`ScreenState`] contract):
+/// the composited-frame projection is a different shape with its own
+/// evolution. Bump on any breaking change to [`RenderedFrame`].
+pub const RENDERED_SCHEMA_VERSION: u32 = 1;
+
+/// One cell of the client's composited frame (`phux-l5xa`).
+///
+/// Unlike [`CellInfo`] (sparse, per-pane, carries only non-default cells)
+/// this is a *dense* cell: every column of the assembled frame has exactly
+/// one, so a consumer can index `cells[row * cols + col]` and read the glyph
+/// and style the human's glass actually shows — pane content, dividers, and
+/// status bar alike, already composited.
+///
+/// `grapheme` is the cell's grapheme cluster:
+/// * a normal glyph (`"a"`, `"世"`, a ZWJ emoji sequence) for a drawn cell;
+/// * a single space (`" "`) for a blank cell;
+/// * the empty string (`""`) for the right half of a double-width glyph
+///   (libghostty's `SpacerTail`) — the preceding cell's wide glyph already
+///   occupies this column, so emitting no glyph here preserves exact widths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderedCell {
+    /// The cell's grapheme cluster; `" "` when blank, `""` for a wide-glyph
+    /// tail. See the type-level note.
+    pub grapheme: String,
+    /// Resolved text-style attributes for the cell.
+    pub style: CellStyle,
+}
+
+/// The client's composited multi-pane view, as structured dense cells
+/// (`phux snapshot --rendered`, `phux-l5xa`).
+///
+/// Where [`ScreenState`] projects a single server-side pane grid, this
+/// projects the **assembled frame** the client renders: layout tiling,
+/// dividers, and the status bar, composited exactly as painted to the
+/// terminal — but returned as cells (grapheme + style + cursor) rather than
+/// VT bytes, so an agent, a test, or an assistant debugging a render bug can
+/// ask "what does the screen look like right now" and get an answer with no
+/// external emulator in the loop (closing the symmetric-blindspot gap that
+/// forced pyte before).
+///
+/// Cells are dense and row-major: `cells.len() == cols as usize * rows as
+/// usize`, and the cell at `(row, col)` is `cells[row * cols + col]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderedFrame {
+    /// Contract version; see [`RENDERED_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// Composited frame width in cells.
+    pub cols: u16,
+    /// Composited frame height in cells.
+    pub rows: u16,
+    /// The composited cursor (whichever pane's cursor the end-of-frame
+    /// policy elects), or `None` when no pane contributes a visible
+    /// viewport cursor.
+    pub cursor: Option<CursorState>,
+    /// Dense, row-major cells of the assembled frame. Length is exactly
+    /// `cols * rows`; index `(row, col)` as `cells[row * cols + col]`.
+    pub cells: Vec<RenderedCell>,
+}
+
+impl RenderedFrame {
+    /// Build a blank frame of `cols * rows` space cells with the default
+    /// style and no cursor — the canvas the compositor fills.
+    #[must_use]
+    pub fn blank(cols: u16, rows: u16) -> Self {
+        let len = usize::from(cols) * usize::from(rows);
+        Self {
+            schema_version: RENDERED_SCHEMA_VERSION,
+            cols,
+            rows,
+            cursor: None,
+            cells: vec![
+                RenderedCell {
+                    grapheme: " ".to_owned(),
+                    style: CellStyle::default(),
+                };
+                len
+            ],
+        }
+    }
+
+    /// Mutable access to the cell at `(row, col)`, or `None` when the
+    /// coordinate is outside the frame.
+    pub fn cell_mut(&mut self, row: u16, col: u16) -> Option<&mut RenderedCell> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let idx = usize::from(row) * usize::from(self.cols) + usize::from(col);
+        self.cells.get_mut(idx)
+    }
+
+    /// The cell at `(row, col)`, or `None` when out of range.
+    #[must_use]
+    pub fn cell(&self, row: u16, col: u16) -> Option<&RenderedCell> {
+        if row >= self.rows || col >= self.cols {
+            return None;
+        }
+        let idx = usize::from(row) * usize::from(self.cols) + usize::from(col);
+        self.cells.get(idx)
+    }
 }
 
 #[cfg(test)]
@@ -324,5 +428,40 @@ mod tests {
         let json = serde_json::to_string(&original).expect("serialize");
         let decoded: ScreenState = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded, original);
+    }
+
+    /// `RenderedFrame::blank` allocates `cols * rows` dense space cells with
+    /// the default style; `cell`/`cell_mut` index row-major and bound-check
+    /// (`phux-l5xa`).
+    #[test]
+    fn rendered_frame_blank_is_dense_and_indexes_row_major() {
+        let mut f = RenderedFrame::blank(3, 2);
+        assert_eq!(f.schema_version, RENDERED_SCHEMA_VERSION);
+        assert_eq!(f.cells.len(), 6);
+        assert_eq!(f.cell(1, 2).expect("in range").grapheme, " ");
+        assert_eq!(f.cell(1, 2).expect("in range").style, CellStyle::default());
+        assert!(f.cell(2, 0).is_none(), "row past the frame is None");
+        assert!(f.cell(0, 3).is_none(), "col past the frame is None");
+        f.cell_mut(1, 2).expect("in range").grapheme = "X".to_owned();
+        assert_eq!(f.cell(1, 2).expect("in range").grapheme, "X");
+        // Row-major: (row 1, col 2) is index 1*3 + 2 = 5.
+        assert_eq!(f.cells[5].grapheme, "X");
+        assert!(f.cell_mut(2, 0).is_none(), "out-of-range mut is None");
+    }
+
+    /// A `RenderedFrame` survives a JSON round-trip, cursor and all
+    /// (`phux-l5xa`).
+    #[test]
+    fn rendered_frame_json_round_trips() {
+        let mut f = RenderedFrame::blank(2, 1);
+        f.cell_mut(0, 1).expect("in range").grapheme = "Z".to_owned();
+        f.cursor = Some(CursorState {
+            x: 1,
+            y: 0,
+            visible: true,
+        });
+        let json = serde_json::to_string(&f).expect("serialize");
+        let back: RenderedFrame = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(f, back);
     }
 }

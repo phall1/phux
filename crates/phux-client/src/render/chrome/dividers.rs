@@ -89,8 +89,10 @@ pub fn render_dividers<W: Write>(
 /// Build the ratatui `Buffer` for the divider layer.
 ///
 /// Public-in-crate so the skip-cell invariant test can introspect the
-/// buffer without re-emitting bytes.
-fn compose_buffer(layout: &PaneLayout) -> Buffer {
+/// buffer without re-emitting bytes, and so the rendered-frame compositor
+/// (`phux snapshot --rendered`, phux-l5xa) can overlay the divider cells
+/// into its dense cell grid without re-parsing emitted VT.
+pub(crate) fn compose_buffer(layout: &PaneLayout) -> Buffer {
     let (cols, rows) = layout.viewport;
     let area = RataRect::new(0, 0, cols, rows);
     let mut buf = Buffer::empty(area);
