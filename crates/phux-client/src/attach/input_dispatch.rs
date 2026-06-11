@@ -15,7 +15,7 @@ use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
-use super::driver::{AttachError, DEFAULT_GROUP_ID, LAYOUT_KEY, PaneSlot};
+use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -401,16 +401,20 @@ async fn apply_action_effects<W: super::RenderSink>(
     } else if effects.clear_predict {
         predict.clear();
     }
-    if effects.set_metadata {
+    if effects.set_metadata
+        && let Some(session) = ctx.focused_session
+    {
         // Encoding can fail only on an empty workspace (we just produced
         // it — shouldn't happen), but propagate cleanly if it ever does.
+        // phux-jy4t: keyed per session so a split here persists to THIS
+        // session's layout, not a key every session shares.
         if let Some(bytes) = encode_layout_or_log(ctx.workspace) {
             let request_id = *ctx.next_request_id;
             *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
             conn.send(&FrameKind::SetMetadata {
                 request_id,
                 scope: Scope::Group(DEFAULT_GROUP_ID),
-                key: LAYOUT_KEY.to_owned(),
+                key: layout_key(session),
                 value: bytes,
             })
             .await?;
