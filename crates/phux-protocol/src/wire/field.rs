@@ -247,6 +247,8 @@ pub mod spawn_terminal {
     pub const CWD: u32 = 4;
     /// Optional environment pairs (absent field = `None`).
     pub const ENV: u32 = 5;
+    /// Optional first-class `TERM` for the new Terminal (absent = `None`).
+    pub const TERM: u32 = 6;
 }
 
 /// `TERMINAL_SPAWNED` body fields (`docs/spec/L1.md` §10.1).

@@ -713,6 +713,7 @@ where
                 command,
                 cwd,
                 env,
+                term,
             } => {
                 handle_spawn_terminal(
                     &state,
@@ -722,6 +723,7 @@ where
                     command,
                     cwd,
                     env,
+                    term,
                     &out_tx,
                     &root_token,
                 )

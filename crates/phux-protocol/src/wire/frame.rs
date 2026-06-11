@@ -1533,6 +1533,12 @@ pub enum FrameKind {
         /// inherit the server's environment. `Some(vec![])` is distinct
         /// from `None`: it starts with an empty environment.
         env: Option<Vec<(String, String)>>,
+        /// First-class `TERM` override for the new Terminal, or `None` to
+        /// defer to the server's `defaults.term` (and ultimately the
+        /// compiled-in `DEFAULT_TERM`). A bare `env` entry for `TERM`
+        /// still wins over this field on the server, but this gives
+        /// consumers a typed knob without hand-rolling the env pair.
+        term: Option<String>,
     },
 
     /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
@@ -1973,6 +1979,7 @@ impl FrameKind {
                 command,
                 cwd,
                 env,
+                term,
             } => {
                 enc.write_field_with(field::spawn_terminal::REQUEST_ID, |e| {
                     e.write_u32_be(*request_id);
@@ -1993,6 +2000,9 @@ impl FrameKind {
                 }
                 if let Some(env) = env.as_deref() {
                     enc.write_field_with(field::spawn_terminal::ENV, |e| encode_env(env, e));
+                }
+                if let Some(t) = term.as_deref() {
+                    enc.write_field(field::spawn_terminal::TERM, t.as_bytes());
                 }
             }
             Self::TerminalSpawned { request_id, result } => {

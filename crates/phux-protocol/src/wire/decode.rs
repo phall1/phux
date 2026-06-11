@@ -852,6 +852,7 @@ impl<'a> Decoder<'a> {
                 let mut command: Option<Vec<String>> = None;
                 let mut cwd: Option<String> = None;
                 let mut env: Option<Vec<(String, String)>> = None;
+                let mut term: Option<String> = None;
                 while let Some((id, value)) = self.read_field()? {
                     match id {
                         field::spawn_terminal::REQUEST_ID => {
@@ -872,6 +873,13 @@ impl<'a> Decoder<'a> {
                             );
                         }
                         field::spawn_terminal::ENV => env = Some(sub!(value, decode_env)),
+                        field::spawn_terminal::TERM => {
+                            term = Some(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?
+                                    .to_owned(),
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -881,6 +889,7 @@ impl<'a> Decoder<'a> {
                     command,
                     cwd,
                     env,
+                    term,
                 }
             }
             TYPE_TERMINAL_SPAWNED => {
