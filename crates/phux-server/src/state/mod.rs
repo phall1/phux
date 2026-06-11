@@ -58,6 +58,7 @@ pub use client::{AttachError, AttachSnapshotPane, AttachedClient, ClientId};
 pub use events::{EventScope, EventSubscription};
 pub use input_log::{DEFAULT_CLIENT_MAILBOX, Outbound, TerminalInput};
 pub use metadata::{MetadataSetOutcome, MetadataStore, RenameOutcome};
+pub use upgrade_blob::RebuildError;
 
 /// Default Group identifier exposed by v0.1 servers.
 ///
