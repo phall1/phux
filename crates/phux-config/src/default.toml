@@ -101,6 +101,9 @@ prefix = "C-a"
 # Zoom: toggle the focused pane to fill the whole window (tmux prefix-z).
 "z" = "toggle-zoom"
 
+# Sidebar: show/hide the window-list strip (mnemonic: VS Code's Ctrl-B).
+"b" = "toggle-sidebar"
+
 # Copy-mode: enter text selection mode. Arrow keys adjust selection,
 # Enter copies to clipboard, Escape cancels. (phux-wave-a-copy-mode)
 "[" = "copy-mode"

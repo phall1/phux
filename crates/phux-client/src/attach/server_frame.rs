@@ -13,7 +13,7 @@ use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot};
-use super::paint::{paint_bar_after_pane, paint_focused_pane, pane_viewport};
+use super::paint::{SidebarReservation, content_rect, paint_bar_after_pane, paint_focused_pane};
 use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
 use crate::render::chrome::status_bar::StatusBarPainter;
@@ -127,6 +127,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     zoomed: &mut Option<TerminalId>,
     session_name: &mut String,
     status_bar: Option<&mut StatusBarPainter>,
+    // phux-4h5a: the window-sidebar reservation, threaded identically to
+    // `status_bar` so every layout site in this dispatcher tiles panes into
+    // the SAME inset content rect the driver paints + reflows against. `None`
+    // (sidebar disabled, the default) makes `content_rect` the full pane
+    // viewport, so the whole dispatcher stays byte-identical to the
+    // pre-sidebar path.
+    sidebar: Option<SidebarReservation>,
     viewport_dims: (u16, u16),
     predict: &mut PredictionState,
     overlay: &Overlay,
@@ -197,8 +204,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // viewport (the same dimensions used for rendering) rather
             // than the historical 80x24 placeholder.
             if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
-                let (cols, rows) = pane_viewport(viewport_dims, status_bar.is_some());
-                v.insert(PaneSlot::new_with_size(cols, rows)?);
+                let content = content_rect(viewport_dims, status_bar.is_some(), sidebar);
+                v.insert(PaneSlot::new_with_size(content.w, content.h)?);
             }
             // phux-17u: stash the session name for the status-bar
             // `WidgetContext`. The snapshot carries `sessions:
@@ -249,25 +256,20 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // `panes.entry(terminal_id)` move. Multi-pane: ask the
             // layout. Single-pane / no layout: anchor at (0,0).
             let has_bar = status_bar.is_some();
-            let pane_dims = pane_viewport(viewport_dims, has_bar);
+            let content = content_rect(viewport_dims, has_bar, sidebar);
             // The pane's outer-viewport Rect: origin positions the paint,
             // (w, h) clips it. Multi-pane: ask the layout. Single-pane / no
-            // layout: anchor at (0,0) spanning the full pane viewport.
+            // layout: anchor at the content rect spanning the full pane area.
             let rect = workspace
                 .render_window(zoomed.as_ref())
                 .filter(|ls| ls.tree.is_some())
                 .and_then(|ls| {
-                    super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
+                    super::multi_pane::compute_layout_in(ls.as_ref(), content, viewport_dims)
                         .rects
                         .get(&terminal_id)
                         .copied()
                 })
-                .unwrap_or(crate::layout::Rect {
-                    x: 0,
-                    y: 0,
-                    w: pane_dims.0,
-                    h: pane_dims.1,
-                });
+                .unwrap_or(content);
             let origin = (rect.x, rect.y);
             let slot = match panes.entry(terminal_id.clone()) {
                 std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
@@ -368,7 +370,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // invariant), so we render only when it has a rect.
                 let rects = workspace
                     .render_window(zoomed.as_ref())
-                    .map(|ls| super::multi_pane::compute_layout(ls.as_ref(), pane_dims).rects)
+                    .map(|ls| {
+                        super::multi_pane::compute_layout_in(ls.as_ref(), content, viewport_dims)
+                            .rects
+                    })
                     .unwrap_or_default();
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
@@ -460,7 +465,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
                 let has_bar = status_bar.is_some();
-                let pane_dims = pane_viewport(viewport_dims, has_bar);
+                let content = content_rect(viewport_dims, has_bar, sidebar);
                 // Best-known dims for sizing a freshly-allocated slot only. An
                 // existing slot's libghostty grid is server-authoritative and
                 // must NOT be resized here: the server authored these bytes for
@@ -473,12 +478,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 let initial_dims = workspace
                     .render_window(zoomed.as_ref())
                     .and_then(|ls| {
-                        super::multi_pane::compute_layout(ls.as_ref(), pane_dims)
+                        super::multi_pane::compute_layout_in(ls.as_ref(), content, viewport_dims)
                             .rects
                             .get(&terminal_id)
                             .map(|r| (r.w, r.h))
                     })
-                    .unwrap_or(pane_dims);
+                    .unwrap_or((content.w, content.h));
                 let slot = match panes.entry(terminal_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
                     std::collections::hash_map::Entry::Vacant(v) => {
@@ -516,8 +521,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 let _paint_trigger =
                     tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
                 let has_bar = status_bar.is_some();
-                let _ =
-                    paint_focused_pane(out, active_ls, panes, fid, viewport_dims, has_bar, false);
+                let _ = paint_focused_pane(
+                    out,
+                    active_ls,
+                    panes,
+                    fid,
+                    viewport_dims,
+                    has_bar,
+                    sidebar,
+                    false,
+                );
                 // The reconcile + overlay work entirely in PANE-LOCAL
                 // coordinates (predictions are pane-local; the cell reader
                 // indexes the pane's own grid). `focused_cursor` (outer) is
@@ -564,12 +577,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // `last_cursor` is None. Without this fallback the
                 // bar's final write leaves the host terminal cursor
                 // at bottom-right.
-                let pane_dims = pane_viewport(viewport_dims, has_bar);
-                let fallback_origin = super::multi_pane::compute_layout(active_ls, pane_dims)
-                    .rects
-                    .get(fid)
-                    .map(|r| (r.x, r.y))
-                    .or(Some((0, 0)));
+                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let fallback_origin =
+                    super::multi_pane::compute_layout_in(active_ls, content, viewport_dims)
+                        .rects
+                        .get(fid)
+                        .map(|r| (r.x, r.y))
+                        .or(Some((0, 0)));
                 paint_bar_after_pane(
                     status_bar,
                     out,
@@ -592,8 +606,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // pane's cursor so the host cursor stays where the user is
                 // typing.
                 let has_bar = status_bar.is_some();
-                let pane_dims = pane_viewport(viewport_dims, has_bar);
-                let rects = super::multi_pane::compute_layout(active_ls, pane_dims).rects;
+                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let rects =
+                    super::multi_pane::compute_layout_in(active_ls, content, viewport_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
                         let _ = slot.renderer.render_at(
@@ -1287,6 +1302,7 @@ mod tests {
             &mut zoomed,
             &mut session_name,
             None,
+            None,
             viewport_dims,
             &mut predict,
             &overlay,
@@ -1365,6 +1381,7 @@ mod tests {
             &mut focused,
             &mut zoomed,
             &mut session_name,
+            None,
             None,
             (132, 43),
             &mut predict,
@@ -1518,6 +1535,7 @@ mod tests {
             focused,
             &mut zoomed,
             &mut session_name,
+            None,
             None,
             viewport_dims,
             &mut predict,
@@ -1822,6 +1840,7 @@ mod tests {
             &mut zoomed,
             &mut session_name,
             None,
+            None,
             (80, 24),
             &mut predict,
             &overlay,
@@ -1864,6 +1883,7 @@ mod tests {
             focused,
             &mut zoomed,
             &mut session_name,
+            None,
             None,
             (80, 24),
             &mut predict,

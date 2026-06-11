@@ -185,6 +185,11 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "toggle-sidebar",
+        description: "Show or hide the window sidebar (toggle)",
+        args: &[],
+    },
+    ActionSpec {
         name: "show-help",
         description: "Show the keybindings help overlay",
         args: &[],

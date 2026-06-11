@@ -42,14 +42,17 @@
 //!
 //! # One tiling for paint and reflow
 //!
-//! The rectangle map comes from [`crate::multi_pane::pane_rects`] — the
-//! *same* local-divider tiling [`crate::multi_pane::compute_layout`] paints
+//! The rectangle map comes from [`crate::multi_pane::pane_rects_in`] — the
+//! *same* local-divider tiling [`crate::multi_pane::compute_layout_in`] paints
 //! with. Reflow-emit and paint therefore agree by construction: the size a
 //! pane's PTY is told to be (`TERMINAL_RESIZE`) is exactly the rect it is
 //! drawn into, so a nested split can never leave the gap/overlap dead space
 //! that arose when reflow subtracted dividers globally and paint subtracted
-//! them per-node (phux-islu). Divider accounting lives inside the walk; this
-//! module passes the full outer viewport, never a pre-deducted content rect.
+//! them per-node (phux-islu). Divider accounting lives inside the walk. The
+//! caller passes the residual **content** rect — the pane area after the
+//! status bar and (when enabled) the sidebar are folded off — so reflow sizes
+//! each PTY to the same inset rect it is painted into (phux-4h5a). With a
+//! full-viewport content rect this is the pre-sidebar behaviour.
 //! See [ADR-0019] decision 4 for the cell-budget rationale.
 //!
 //! [ADR-0019]: ../../../ADR/0019-tui-multi-pane-rendering.md
@@ -60,7 +63,7 @@ use std::hash::BuildHasher;
 use phux_protocol::TerminalId;
 
 use crate::layout::{LayoutState, Rect};
-use crate::multi_pane::pane_rects;
+use crate::multi_pane::pane_rects_in;
 
 /// Result of [`compute_reflow`]. Drives the caller's RESIZE-emission loop
 /// (per pane in [`changed`](Self::changed)) and its sub-viable-viewport
@@ -80,15 +83,18 @@ pub struct ReflowDiff {
     pub too_small: bool,
 }
 
-/// Compute the per-pane rectangle map for `new_outer_dims` and diff it
+/// Compute the per-pane rectangle map for the new `content` rect and diff it
 /// against `prev_rects`.
 ///
 /// Pure: no I/O, no allocator games beyond the returned maps/vecs. The
 /// algorithm:
 ///
-/// 1. Tile the tree into the new outer viewport via
-///    [`crate::multi_pane::pane_rects`] — the canonical local-divider walk
-///    paint uses, so divider accounting is handled inside the walk.
+/// 1. Tile the tree into the new `content` rect via
+///    [`crate::multi_pane::pane_rects_in`] — the canonical local-divider walk
+///    paint uses, so divider accounting is handled inside the walk. `content`
+///    is the residual pane area after the status bar and (when enabled) the
+///    sidebar are folded off; with a full-viewport rect this is the
+///    pre-sidebar behaviour.
 /// 2. Diff against `prev_rects`: a leaf enters `changed` iff it is new or
 ///    its (w, h) differs.
 /// 3. Set `too_small` if any leaf would have `w < 2 || h < 1`.
@@ -99,7 +105,7 @@ pub struct ReflowDiff {
 pub fn compute_reflow<S: BuildHasher>(
     layout: &LayoutState,
     prev_rects: &HashMap<TerminalId, Rect, S>,
-    new_outer_dims: (u16, u16),
+    content: Rect,
 ) -> ReflowDiff {
     let Some(tree) = layout.tree.as_ref() else {
         return ReflowDiff {
@@ -109,7 +115,7 @@ pub fn compute_reflow<S: BuildHasher>(
         };
     };
 
-    let new_rects = pane_rects(tree, new_outer_dims);
+    let new_rects = pane_rects_in(tree, content);
 
     let mut changed: Vec<(TerminalId, Rect)> = Vec::new();
     let mut too_small = false;
@@ -148,6 +154,19 @@ mod tests {
         TerminalId::local(id)
     }
 
+    /// A None-equivalent content rect: the full viewport anchored at the
+    /// origin. `compute_reflow` now takes a content `Rect` (the residual pane
+    /// area after chrome reservations); a full-viewport rect reproduces the
+    /// pre-sidebar behaviour these tests pin.
+    fn rect(cols: u16, rows: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: cols,
+            h: rows,
+        }
+    }
+
     fn leaf(id: u32) -> LayoutNode {
         LayoutNode::Leaf(t(id))
     }
@@ -167,7 +186,7 @@ mod tests {
     fn empty_state_returns_empty_diff() {
         let state = LayoutState::default();
         let prev = HashMap::new();
-        let diff = compute_reflow(&state, &prev, (80, 24));
+        let diff = compute_reflow(&state, &prev, rect(80, 24));
         assert!(diff.new_rects.is_empty());
         assert!(diff.changed.is_empty());
         assert!(!diff.too_small);
@@ -179,7 +198,7 @@ mod tests {
         // so the caller emits a RESIZE to seed the libghostty mirror.
         let state = LayoutState::single(t(1));
         let prev = HashMap::new();
-        let diff = compute_reflow(&state, &prev, (80, 24));
+        let diff = compute_reflow(&state, &prev, rect(80, 24));
 
         assert_eq!(diff.new_rects.len(), 1);
         assert_eq!(
@@ -209,7 +228,7 @@ mod tests {
                 h: 24,
             },
         );
-        let diff = compute_reflow(&state, &prev, (80, 24));
+        let diff = compute_reflow(&state, &prev, rect(80, 24));
 
         assert_eq!(diff.new_rects.len(), 1);
         assert!(diff.changed.is_empty());
@@ -230,8 +249,8 @@ mod tests {
         // Seed prev_rects with the 80x24 outer viewport: the canonical
         // tiling subtracts the one vertical divider row internally, so the
         // 23 content rows split 12/11.
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (80, 24));
-        let diff = compute_reflow(&state, &prev, (120, 30));
+        let prev = pane_rects_in(state.tree.as_ref().unwrap(), rect(80, 24));
+        let diff = compute_reflow(&state, &prev, rect(120, 30));
 
         // Both panes are in `changed`.
         assert_eq!(diff.changed.len(), 2);
@@ -257,8 +276,8 @@ mod tests {
         // splits 119 cols into 60/59.
         let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
         let state = state_with(tree, t(1));
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (80, 24));
-        let diff = compute_reflow(&state, &prev, (120, 30));
+        let prev = pane_rects_in(state.tree.as_ref().unwrap(), rect(80, 24));
+        let diff = compute_reflow(&state, &prev, rect(120, 30));
 
         assert_eq!(diff.changed.len(), 2);
         // Heights are unchanged-from-prev only if outer rows matched.
@@ -294,11 +313,11 @@ mod tests {
 
         // First reflow seeds the snapshot.
         let prev = HashMap::new();
-        let first = compute_reflow(&state, &prev, (80, 24));
+        let first = compute_reflow(&state, &prev, rect(80, 24));
         assert_eq!(first.changed.len(), 3);
 
         // Second reflow at the same dims: zero changes.
-        let second = compute_reflow(&state, &first.new_rects, (80, 24));
+        let second = compute_reflow(&state, &first.new_rects, rect(80, 24));
         assert!(second.changed.is_empty(), "got {:?}", second.changed);
         assert!(!second.too_small);
     }
@@ -311,8 +330,8 @@ mod tests {
         let tree = split_at(&tree, &t(2), &t(3), SplitDir::Vertical, 0.5).unwrap();
         let state = state_with(tree, t(1));
 
-        let prev = pane_rects(state.tree.as_ref().unwrap(), (120, 30));
-        let diff = compute_reflow(&state, &prev, (40, 12));
+        let prev = pane_rects_in(state.tree.as_ref().unwrap(), rect(120, 30));
+        let diff = compute_reflow(&state, &prev, rect(40, 12));
 
         // All three leaves present in new_rects.
         assert_eq!(diff.new_rects.len(), 3);
@@ -335,7 +354,7 @@ mod tests {
         let state = state_with(tree, t(1));
 
         let prev = HashMap::new();
-        let diff = compute_reflow(&state, &prev, (4, 2));
+        let diff = compute_reflow(&state, &prev, rect(4, 2));
         assert!(diff.too_small);
         // No panic. We still return a populated diff so the caller can
         // render garbage rather than freezing the UI.
@@ -347,7 +366,7 @@ mod tests {
         // 0x0 outer — every leaf is 0x0. too_small must be set, must not
         // panic.
         let state = LayoutState::single(t(1));
-        let diff = compute_reflow(&state, &HashMap::new(), (0, 0));
+        let diff = compute_reflow(&state, &HashMap::new(), rect(0, 0));
         assert!(diff.too_small);
         assert_eq!(diff.new_rects.len(), 1);
         assert_eq!(
@@ -451,9 +470,9 @@ mod tests {
             // via the canonical tiling — the same one compute_reflow uses,
             // so the diff reflects a real dimension change, not an
             // algorithm mismatch.
-            let prev = pane_rects(&tree, (prev_cols, prev_rows));
+            let prev = pane_rects_in(&tree, rect(prev_cols, prev_rows));
 
-            let diff = compute_reflow(&state, &prev, (cols, rows));
+            let diff = compute_reflow(&state, &prev, rect(cols, rows));
 
             // Subset.
             for (id, rect) in &diff.changed {
@@ -504,7 +523,7 @@ mod tests {
             let focus = alive.last().cloned().expect("alive non-empty");
             let state = state_with(tree.clone(), focus);
 
-            let diff = compute_reflow(&state, &HashMap::new(), (cols, rows));
+            let diff = compute_reflow(&state, &HashMap::new(), rect(cols, rows));
 
             // Every alive leaf has a rect — sub-viable splits shrink panes
             // to zero size but never drop them.
@@ -540,8 +559,8 @@ mod tests {
             let focus = alive.last().cloned().expect("alive non-empty");
             let state = state_with(tree, focus);
 
-            let seed = compute_reflow(&state, &HashMap::new(), (cols, rows));
-            let identity = compute_reflow(&state, &seed.new_rects, (cols, rows));
+            let seed = compute_reflow(&state, &HashMap::new(), rect(cols, rows));
+            let identity = compute_reflow(&state, &seed.new_rects, rect(cols, rows));
             prop_assert!(identity.changed.is_empty(), "unexpected changes: {:?}", identity.changed);
             prop_assert_eq!(&identity.new_rects, &seed.new_rects);
         }
@@ -559,7 +578,7 @@ mod tests {
             let focus = alive.last().cloned().expect("alive non-empty");
             let state = state_with(tree, focus);
 
-            let diff = compute_reflow(&state, &HashMap::new(), (cols, rows));
+            let diff = compute_reflow(&state, &HashMap::new(), rect(cols, rows));
             let any_small = diff.new_rects.values().any(|r| r.w < 2 || r.h < 1);
             prop_assert_eq!(diff.too_small, any_small);
         }

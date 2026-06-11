@@ -16,6 +16,7 @@ use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
+use super::paint::SidebarReservation;
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -100,6 +101,16 @@ pub(super) struct DispatchCtx<'a> {
     /// `toggle-zoom` action; the driver reads it (via `Workspace::render_window`)
     /// to render/reflow the zoomed pane.
     pub zoomed: &'a mut Option<TerminalId>,
+    /// phux-4h5a: the active sidebar reservation, or `None` when the sidebar is
+    /// disabled. The `resize-pane` min-cell gate tiles into the inset content
+    /// rect so the underflow check matches the width panes actually paint into
+    /// when a sidebar is docked.
+    pub sidebar: Option<SidebarReservation>,
+    /// phux-4h5a: the driver's sidebar on/off state. `toggle-sidebar` flips
+    /// this (via `ActionEffects::toggle_sidebar`); the driver re-folds it into
+    /// the per-frame `sidebar` reservation after dispatch so the toggle repaint
+    /// reflects the new state. Owned by the driver like `zoomed`.
+    pub sidebar_enabled: &'a mut bool,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -251,6 +262,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // event with pane-local coordinates substituted.
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
+            // phux-4h5a P4 follow-up: mouse click-to-focus on the sidebar
+            // strip. This hit-test routes against the pane layout over the full
+            // viewport; when the sidebar is enabled it does not yet recognize a
+            // click in the strip's reserved columns as "focus window N" (the
+            // companion to the deferred `focus-window`-by-index action below).
             // phux-jow6: hit-test against the RENDER layout, not the real
             // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
             // is a single full-viewport leaf, so any click lands on the
@@ -415,6 +431,12 @@ async fn apply_action_effects<W: super::RenderSink>(
         } else {
             focused_pane.clone()
         };
+    }
+    if effects.toggle_sidebar {
+        // phux-4h5a: flip the window-sidebar on/off state. The driver re-folds
+        // `sidebar_enabled` into the per-frame reservation after dispatch, so
+        // the `layout_mutated` repaint tiles into the new content rect.
+        *ctx.sidebar_enabled = !*ctx.sidebar_enabled;
     }
     if let Some(target) = effects.set_focus {
         *focused_pane = Some(target);
@@ -589,6 +611,11 @@ struct ActionEffects {
     /// focused pane to fill the window, or un-zoom). `apply_action_effects`
     /// owns the actual toggle since the `zoomed` state lives in the driver.
     toggle_zoom: bool,
+    /// phux-4h5a: `true` ⇒ flip the driver's window-sidebar on/off state.
+    /// `apply_action_effects` owns the toggle since `sidebar_enabled` lives in
+    /// the driver; it also sets `layout_mutated` so the panes reflow into (or
+    /// out of) the sidebar's reserved columns on the same-iteration repaint.
+    toggle_sidebar: bool,
     /// `Some(new_focus)` ⇒ swap the driver's `focused_pane` (input
     /// routing follows). The action helper already updated the active
     /// window's focus; this carries the new id so the driver
@@ -686,6 +713,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "next-pane",
     "previous-pane",
     "toggle-zoom",
+    "toggle-sidebar",
     "command-palette",
     "window-picker",
     "session-picker",
@@ -907,7 +935,7 @@ fn run_action(
                     effects.bell = true;
                     return effects;
                 };
-                match actions::apply_resize(ls, dir, amount, ctx.viewport) {
+                match actions::apply_resize(ls, dir, amount, ctx.viewport, ctx.sidebar) {
                     Ok(Some(new_state)) => {
                         *ls = new_state;
                         effects.layout_mutated = true;
@@ -1066,6 +1094,20 @@ fn run_action(
             } else {
                 effects.bell = true;
             }
+        }
+        "toggle-sidebar" => {
+            // phux-4h5a: show/hide the window sidebar. Unconditional (unlike
+            // zoom, which needs >1 pane) — the strip lists windows and is
+            // meaningful even single-pane. The driver owns `sidebar_enabled`;
+            // we signal intent + a repaint so the panes reflow into/out of the
+            // reserved columns.
+            // phux-4h5a P4 follow-up: a `focus-window`-by-index action (the
+            // keyboard companion to clicking a strip row) is deferred; the
+            // existing `select-window` jumps by tab position, but a strip-row
+            // index action that pairs with mouse click-to-focus is not yet
+            // wired.
+            effects.toggle_sidebar = true;
+            effects.layout_mutated = true;
         }
         other => {
             tracing::debug!(action = other, "unhandled resolved action");
@@ -1416,6 +1458,7 @@ mod tests {
         let mut switch_request = None;
         let mut session_name = String::new();
         let mut zoomed = None;
+        let mut sidebar_enabled = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -1431,6 +1474,8 @@ mod tests {
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1578,6 +1623,114 @@ mod tests {
         assert!(!effects.layout_mutated);
     }
 
+    /// phux-4h5a: `toggle-sidebar` requests the driver-side flip
+    /// (`toggle_sidebar`) plus a repaint (`layout_mutated`), unconditionally —
+    /// even single-pane, since the strip lists windows. It never bells and
+    /// mutates no tree.
+    #[test]
+    fn toggle_sidebar_requests_flip_and_repaint() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("toggle-sidebar"), &mut workspace);
+        assert!(effects.toggle_sidebar, "toggle-sidebar requests the flip");
+        assert!(
+            effects.layout_mutated,
+            "sidebar toggle drives a reflow repaint"
+        );
+        assert!(!effects.bell);
+        assert!(!effects.toggle_zoom);
+    }
+
+    /// phux-4h5a: `apply_action_effects` flips the driver-owned
+    /// `sidebar_enabled` when `toggle_sidebar` is set — off→on and back on a
+    /// second toggle.
+    #[tokio::test]
+    async fn apply_effects_flips_sidebar_enabled_state() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+        };
+        let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
+        let mut out: Vec<u8> = Vec::new();
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut focused_pane = None;
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        apply_action_effects(
+            effects,
+            &mut out,
+            &mut conn,
+            &mut ctx,
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &panes,
+        )
+        .await
+        .expect("apply effects");
+        assert!(sidebar_enabled, "first toggle enables the sidebar");
+
+        // A second toggle disables it again.
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+        };
+        let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
+        apply_action_effects(
+            effects,
+            &mut out,
+            &mut conn,
+            &mut ctx,
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &panes,
+        )
+        .await
+        .expect("apply effects");
+        assert!(!sidebar_enabled, "second toggle disables the sidebar");
+    }
+
     #[test]
     fn rename_window_with_name_arg_renames_and_broadcasts() {
         let mut workspace = Workspace::single(tid(1)); // window "1"
@@ -1616,6 +1769,7 @@ mod tests {
         let mut switch_request = None;
         let mut session_name = String::new();
         let mut zoomed = None;
+        let mut sidebar_enabled = false;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1632,6 +1786,8 @@ mod tests {
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
+                sidebar: None,
+                sidebar_enabled: &mut sidebar_enabled,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -1883,6 +2039,7 @@ mod tests {
         let mut switch_request = None;
         let mut session_name = String::new();
         let mut zoomed = None;
+        let mut sidebar_enabled = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1898,6 +2055,8 @@ mod tests {
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -1944,6 +2103,7 @@ mod tests {
         let mut switch_request = None;
         let mut session_name = "work".to_owned();
         let mut zoomed = None;
+        let mut sidebar_enabled = false;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1960,6 +2120,8 @@ mod tests {
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
+                sidebar: None,
+                sidebar_enabled: &mut sidebar_enabled,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -2086,6 +2248,7 @@ mod tests {
         };
 
         let mut zoomed = None;
+        let mut sidebar_enabled = false;
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -2101,6 +2264,8 @@ mod tests {
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
         };
         dispatch_input_events(
             &mut out,
