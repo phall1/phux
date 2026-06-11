@@ -1916,6 +1916,7 @@ dependencies = [
  "portable-pty",
  "rcgen",
  "rustls",
+ "serde",
  "serde_json",
  "sha2",
  "subtle",
