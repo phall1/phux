@@ -39,6 +39,21 @@ pub(super) fn safe_resize(
     terminal.resize(cols, rows, 0, 0)
 }
 
+/// The server-authoritative mirror grid `(cols, rows)` used to letterbox a
+/// pane within its render rect (phux-7ubw).
+///
+/// Reads the libghostty mirror's own grid size. On the (unexpected) error
+/// path it falls back to the rect dims, which makes [`render_at_letterboxed`]
+/// degrade to the prior rect-clamp paint (zero pad, no margins) rather than
+/// mis-centring on a bogus size.
+///
+/// [`render_at_letterboxed`]: super::render::TerminalRenderer::render_at_letterboxed
+fn mirror_dims(terminal: &GhosttyTerminal<'_, '_>, rect: crate::layout::Rect) -> (u16, u16) {
+    let cols = terminal.cols().unwrap_or(rect.w);
+    let rows = terminal.rows().unwrap_or(rect.h);
+    (cols, rows)
+}
+
 /// Render one pane into its outer-viewport sub-Rect.
 ///
 /// Looks up the pane's Rect in the layout, resizes its libghostty
@@ -77,13 +92,20 @@ pub(super) fn paint_focused_pane<W: Write>(
     // handshake strands previous-screen content in the dropped columns (the
     // ghost cells — alt screen does not reflow), which `render_at` would then
     // faithfully paint. Clipping confines the paint to the rect instead.
-    let _ = if force_full {
-        slot.renderer
-            .render_at_full(&slot.terminal, out, (rect.x, rect.y), (rect.w, rect.h))
-    } else {
-        slot.renderer
-            .render_at(&slot.terminal, out, (rect.x, rect.y), (rect.w, rect.h))
-    };
+    // Letterbox: when the server-authoritative mirror grid is smaller than the
+    // rect, centre it and blank the surrounding margins instead of pinning it
+    // to the rect's top-left (phux-7ubw, ADR-0027 single-view letterbox). When
+    // the mirror is >= the rect this degrades to the existing clamp, so a
+    // mirror that fills the rect is byte-identical to the prior `render_at`.
+    let mirror = mirror_dims(&slot.terminal, rect);
+    let _ = slot.renderer.render_at_letterboxed(
+        &slot.terminal,
+        out,
+        (rect.x, rect.y),
+        (rect.w, rect.h),
+        mirror,
+        force_full,
+    );
     slot.renderer.last_cursor()
 }
 
@@ -174,12 +196,17 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
             // an incremental "only dirty rows" paint would leave a pane
             // whose content is unchanged (the survivor of a split/resize)
             // blank. The rect clips the paint; it never resizes the
-            // server-authoritative mirror grid.
-            let _ = slot.renderer.render_at_full(
+            // server-authoritative mirror grid. Letterboxed: an undersized
+            // mirror is centred and its margins blanked (phux-7ubw); a mirror
+            // that fills/exceeds the rect degrades to the prior clamp.
+            let mirror = mirror_dims(&slot.terminal, *rect);
+            let _ = slot.renderer.render_at_letterboxed(
                 &slot.terminal,
                 out,
                 (rect.x, rect.y),
                 (rect.w, rect.h),
+                mirror,
+                true,
             );
         }
     }
