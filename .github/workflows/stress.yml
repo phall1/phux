@@ -13,7 +13,10 @@
 # Build+run stay on one runner (matching ci.yml): libghostty-vt's build.rs
 # lets zig auto-detect the host CPU, so an artifact built on one runner can
 # SIGILL on another. The CPU-fingerprinted cache key keeps native artifacts
-# pinned to matching hardware.
+# pinned to matching hardware. `magic-nix-cache` persists the devshell and
+# `save-if` confines rust-cache writes to `main` — same retention policy as
+# ci.yml (see its header for the 10 GB-eviction rationale); this lane only
+# fires on main/schedule/dispatch, so it always writes.
 
 name: stress
 
@@ -42,8 +45,10 @@ jobs:
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: stress suite
         run: nix develop -c just stress
