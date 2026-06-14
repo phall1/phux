@@ -66,42 +66,23 @@ pub(crate) struct QuicListener {
 }
 
 impl QuicListener {
-    /// Bind an unauthenticated (but always TLS-encrypted) listener — the
-    /// loopback/dev path. The dialer sends no token preamble.
-    pub(crate) fn bind(addr: SocketAddr, tls: rustls::ServerConfig) -> Result<Self, QuicBindError> {
-        Ok(Self {
-            endpoint: build_endpoint(addr, tls)?,
-            tokens: None,
-        })
-    }
-
-    /// Bind a token-authenticated listener for routable consumers. The dialer
-    /// MUST open the bidi stream with a valid token preamble or the connection
-    /// is closed before any frame is read (ADR-0031 parity with `wss://`).
-    pub(crate) fn bind_secure(
-        addr: SocketAddr,
-        tls: rustls::ServerConfig,
-        tokens: Arc<crate::auth::TokenStore>,
-    ) -> Result<Self, QuicBindError> {
-        Ok(Self {
-            endpoint: build_endpoint(addr, tls)?,
-            tokens: Some(tokens),
-        })
-    }
-
-    /// Build the QUIC rustls config from the persisted cert + key and bind a
-    /// listener, choosing the authenticated path when `tokens` is `Some`.
+    /// Bind a QUIC listener: build the (always-TLS) rustls config from the
+    /// persisted cert + key, then open the endpoint. `tokens` selects the auth
+    /// mode — `Some` requires a valid bearer-token preamble from each dialer
+    /// (routable consumers, ADR-0031 parity with `wss://`); `None` is the
+    /// loopback/dev path that expects no preamble. QUIC is TLS-encrypted in
+    /// both modes (the protocol mandates it).
     pub(crate) fn from_pem(
         addr: SocketAddr,
         cert_path: &std::path::Path,
         key_path: &std::path::Path,
         tokens: Option<Arc<crate::auth::TokenStore>>,
     ) -> Result<Self, QuicBindError> {
-        let tls = quic_server_config(cert_path, key_path).map_err(QuicBindError::Tls)?;
-        match tokens {
-            Some(store) => Self::bind_secure(addr, tls, store),
-            None => Self::bind(addr, tls),
-        }
+        let tls = quic_server_config(cert_path, key_path)?;
+        Ok(Self {
+            endpoint: build_endpoint(addr, tls)?,
+            tokens,
+        })
     }
 
     /// The local address the endpoint is bound to (for logging the OS-assigned
@@ -119,7 +100,7 @@ pub(crate) enum QuicBindError {
     Tls(#[from] super::tls::TlsError),
     /// The QUIC crypto config had no usable initial cipher suite.
     #[error("quic crypto: {0}")]
-    Crypto(String),
+    Crypto(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
     /// Binding the UDP endpoint failed.
     #[error("quic bind: {0}")]
     Io(#[from] io::Error),
@@ -130,8 +111,7 @@ fn build_endpoint(
     addr: SocketAddr,
     tls: rustls::ServerConfig,
 ) -> Result<quinn::Endpoint, QuicBindError> {
-    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)
-        .map_err(|err| QuicBindError::Crypto(err.to_string()))?;
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
 
     let mut transport = quinn::TransportConfig::default();
@@ -293,27 +273,17 @@ async fn authorize_preamble(
 }
 
 /// Fill `buf` from the QUIC stream. Returns `Ok(true)` when `buf` is filled,
-/// `Ok(false)` on a clean stream finish with zero bytes read (end of the
+/// `Ok(false)` on a clean stream finish before any byte was read (end of the
 /// connection at a frame boundary), and `Err` on a partial-then-finished read
 /// (a truncated frame) or a transport error.
 async fn read_exact_quic(recv: &mut quinn::RecvStream, buf: &mut [u8]) -> io::Result<bool> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match recv.read(&mut buf[filled..]).await {
-            Ok(Some(n)) => filled += n,
-            Ok(None) => {
-                if filled == 0 {
-                    return Ok(false);
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "quic stream finished mid-read",
-                ));
-            }
-            Err(err) => return Err(io::Error::other(err)),
-        }
+    match recv.read_exact(buf).await {
+        Ok(()) => Ok(true),
+        // Zero bytes before the stream finished is a clean EOF at a frame
+        // boundary; any other shortfall is a truncated frame.
+        Err(quinn::ReadExactError::FinishedEarly(0)) => Ok(false),
+        Err(err) => Err(io::Error::other(err)),
     }
-    Ok(true)
 }
 
 #[cfg(test)]
