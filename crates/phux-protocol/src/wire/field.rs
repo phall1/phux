@@ -307,6 +307,29 @@ pub mod event {
     pub const EVENT: u32 = 2;
 }
 
+/// `AgentEvent::Asked` body fields (`docs/spec/L1.md` §7.5).
+///
+/// Unlike the other `AgentEvent` bodies (positional), the `ASKED` body is
+/// field-tagged TLV: each field is `field_id || wire_type || length-delimited
+/// value`, read by `Decoder::read_field` which skips an unrecognised field by
+/// its length. This is what lets the optional `elapsed_seconds` and any future
+/// field be additive — a present field carries the value, an absent field is
+/// the default — while the whole event still skips cleanly to
+/// [`crate::wire::frame::AgentEvent::Unknown`] for an older decoder via the
+/// event's outer length prefix.
+pub mod event_asked {
+    /// Stable question id (`str`) the answer correlates against.
+    pub const ID: u32 = 1;
+    /// The question text (`str`) presented to the human.
+    pub const QUESTION: u32 = 2;
+    /// One suggested answer (`str`). Repeated once per suggestion, in order;
+    /// absent when there are no suggestions.
+    pub const SUGGESTION: u32 = 3;
+    /// Optional seconds the agent has been waiting (`u64`); an absent field is
+    /// `0` / unknown.
+    pub const ELAPSED_SECONDS: u32 = 4;
+}
+
 // -----------------------------------------------------------------------------
 // `SessionId` tagged union — ADR-0007 §3
 // -----------------------------------------------------------------------------
