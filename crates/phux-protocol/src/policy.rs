@@ -35,6 +35,14 @@ pub struct PeerIdentity {
     pub source_addr: Option<IpAddr>,
 }
 
+/// ALPN protocol id for the QUIC transport (`docs/spec/proto.md` §10).
+///
+/// QUIC mandates ALPN, so both the server listener and the client dialer must
+/// offer this exact token or the TLS handshake fails — which also keeps a stray
+/// non-phux QUIC client (or a protocol-version mismatch) from ever reaching the
+/// frame layer. Defined here, in the wire crate, so the two ends cannot drift.
+pub const QUIC_ALPN: &[u8] = b"phux-quic/1";
+
 /// Transport classification for peer identity.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Hash, Eq, PartialEq)]
 pub enum TransportType {

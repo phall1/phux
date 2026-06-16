@@ -47,6 +47,33 @@ pub(crate) enum Command {
         /// (or `/tmp/phux-$USER/phux.sock` if `XDG_RUNTIME_DIR` isn't set).
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
+
+        /// Attach over QUIC to a remote `phux server --quic` listener at this
+        /// `HOST:PORT` instead of the local Unix socket (`phux-y8v6`,
+        /// ADR-0007). QUIC is always TLS 1.3-encrypted. A loopback address
+        /// trusts the server's self-signed cert for local dev; any routable
+        /// address requires `--cert-fingerprint` (the value `phux pair`
+        /// prints on the server host).
+        #[arg(long, value_name = "HOST:PORT", conflicts_with = "socket")]
+        quic: Option<std::net::SocketAddr>,
+
+        /// Bearer pairing token (hex) for an authenticated QUIC listener, as
+        /// minted by `phux pair`. Sent as the stream's opening preamble.
+        /// Requires `--quic`.
+        #[arg(long, requires = "quic")]
+        token: Option<String>,
+
+        /// Pin the QUIC server's certificate by its SHA-256 fingerprint (the
+        /// value `phux pair` prints). Required to dial any non-loopback
+        /// `--quic` address. Requires `--quic`.
+        #[arg(long, value_name = "FP", requires = "quic")]
+        cert_fingerprint: Option<String>,
+
+        /// TLS server name (SNI) to offer the QUIC listener. Defaults to
+        /// `localhost`, matching the server's self-signed cert SANs. Requires
+        /// `--quic`.
+        #[arg(long, value_name = "NAME", requires = "quic")]
+        tls_server_name: Option<String>,
     },
 
     /// Run a phux server in the foreground.

@@ -1,8 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use phux_client::attach::{self, AttachError};
+use phux_client::attach::connection::Connection;
+use phux_client::attach::{self, AttachError, CertTrust, Dial, QuicDial};
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::AttachTarget;
@@ -81,7 +82,7 @@ pub(crate) fn run_naked() -> ExitCode {
     };
 
     match rt.block_on(attach_with_reconnect(
-        &socket_path,
+        &Dial::uds(&socket_path),
         AttachTarget::Last,
         predict_cfg,
         Some(&default_name),
@@ -134,15 +135,13 @@ pub(crate) fn configured_spawn_on_attach() -> Option<String> {
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 pub(crate) async fn run_attach_once(
-    socket_path: &Path,
+    dial: &Dial,
     target: AttachTarget,
     predict_cfg: PredictiveConfig,
 ) -> Result<(), AttachError> {
-    if predict_cfg.enabled {
-        attach::run_with_predict(socket_path, target, predict_cfg).await
-    } else {
-        attach::run(socket_path, target).await
-    }
+    // `run_with_predict_dial` with `predict.enabled = false` is identical to the
+    // non-predictive path, so one call covers both transports and both modes.
+    attach::run_with_predict_dial(dial, target, predict_cfg).await
 }
 
 /// Attach to the user's default session with the naked-`phux` fallback
@@ -159,18 +158,18 @@ pub(crate) async fn run_attach_once(
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 pub(crate) async fn attach_default_with_fallback(
-    socket_path: &Path,
+    dial: &Dial,
     default_name: &str,
     predict_cfg: PredictiveConfig,
 ) -> Result<(), AttachError> {
-    match run_attach_once(socket_path, AttachTarget::Last, predict_cfg).await {
+    match run_attach_once(dial, AttachTarget::Last, predict_cfg).await {
         Ok(()) => Ok(()),
         Err(AttachError::Refused(message)) => {
             eprintln!(
                 "phux: no prior-attach session (server said: {message}); creating `{default_name}`"
             );
             run_attach_once(
-                socket_path,
+                dial,
                 AttachTarget::CreateIfMissing {
                     name: default_name.to_owned(),
                     command: None,
@@ -208,20 +207,20 @@ const RECONNECT_POLL: Duration = Duration::from_millis(100);
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 async fn attach_with_reconnect(
-    socket_path: &Path,
+    dial: &Dial,
     target: AttachTarget,
     predict_cfg: PredictiveConfig,
     default_name: Option<&str>,
 ) -> Result<(), AttachError> {
     loop {
         let result = match default_name {
-            Some(name) => attach_default_with_fallback(socket_path, name, predict_cfg).await,
-            None => run_attach_once(socket_path, target.clone(), predict_cfg).await,
+            Some(name) => attach_default_with_fallback(dial, name, predict_cfg).await,
+            None => run_attach_once(dial, target.clone(), predict_cfg).await,
         };
         match result {
             Ok(()) => return Ok(()),
             Err(AttachError::Disconnected) => {
-                if wait_until_connectable(socket_path, RECONNECT_DEADLINE).await {
+                if wait_until_connectable(dial, RECONNECT_DEADLINE).await {
                     eprintln!("phux: server restarted; re-attaching…");
                 } else {
                     return Err(AttachError::Disconnected);
@@ -232,20 +231,38 @@ async fn attach_with_reconnect(
     }
 }
 
-/// Wait until the server accepts on `socket_path` again, or give up.
+/// Wait until the server accepts again on `dial`, or give up.
 ///
-/// Returns `false` immediately if the socket file is gone (a clean shutdown
-/// unlinks it — nothing to reconnect to), `false` if `deadline` elapses while
-/// connections keep failing (e.g. a crashed server), and `true` as soon as a
-/// connection succeeds (the re-exec'd server is up). A graceful upgrade never
-/// removes the socket file, so it falls into the retry-until-connectable path.
-async fn wait_until_connectable(socket_path: &Path, deadline: Duration) -> bool {
+/// Returns `true` as soon as a fresh connection succeeds (the re-exec'd server
+/// is up), and `false` once `deadline` elapses while connections keep failing
+/// (e.g. a crashed server). For UDS it short-circuits to `false` if the socket
+/// file is gone — a clean shutdown unlinks it, so there is nothing to reconnect
+/// to; a graceful upgrade never removes the socket, so it falls into the
+/// retry-until-connectable path. For QUIC it probes by completing a real dial
+/// (TLS + stream open + preamble) and dropping it, the transport analogue of the
+/// UDS connect-and-drop probe.
+async fn wait_until_connectable(dial: &Dial, deadline: Duration) -> bool {
     let end = Instant::now() + deadline;
     loop {
-        if !socket_path.exists() {
-            return false;
-        }
-        if tokio::net::UnixStream::connect(socket_path).await.is_ok() {
+        let connectable = match dial {
+            Dial::Uds(path) => {
+                if !path.exists() {
+                    return false;
+                }
+                tokio::net::UnixStream::connect(path).await.is_ok()
+            }
+            Dial::Quic(quic) => match Connection::connect_quic(quic).await {
+                // Close the probe cleanly so the server reaps it now; otherwise
+                // each 100ms probe during a restart would leave a phantom
+                // connection alive until the idle timeout.
+                Ok(conn) => {
+                    conn.shutdown().await;
+                    true
+                }
+                Err(_) => false,
+            },
+        };
+        if connectable {
             return true;
         }
         if Instant::now() >= end {
@@ -328,19 +345,15 @@ pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> Ex
     // create-and-attach the default session. This is robust to an empty
     // server (e.g. one whose auto-spawned seed pane exited before we
     // connected). An explicit name attaches to that session only.
+    let dial = Dial::uds(&socket_path);
     let result = match target {
         AttachTarget::Last => rt.block_on(attach_with_reconnect(
-            &socket_path,
+            &dial,
             AttachTarget::Last,
             predict_cfg,
             Some(&default_name),
         )),
-        other => rt.block_on(attach_with_reconnect(
-            &socket_path,
-            other,
-            predict_cfg,
-            None,
-        )),
+        other => rt.block_on(attach_with_reconnect(&dial, other, predict_cfg, None)),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -349,6 +362,100 @@ pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> Ex
             // guard (if any) has already dropped, so this lands on the
             // cooked terminal.
             print_attach_error(&err, &socket_path, &session_for_spawn);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Attach over QUIC (`phux-y8v6`, ADR-0007) to a `phux server --quic`
+/// listener at `addr`.
+///
+/// Unlike the UDS path there is no auto-spawn — the server lives on another
+/// host (or another address) and the user points at it explicitly. TLS trust is
+/// resolved up front:
+///
+/// * an explicit `--cert-fingerprint` pins the server's leaf certificate (the
+///   value `phux pair` prints), the trust anchor for any routable host;
+/// * a **loopback** `addr` with no fingerprint falls back to skip-verify (local
+///   dev — TLS still runs, but there is no untrusted network path to MITM);
+/// * a **routable** `addr` with no fingerprint is refused, rather than silently
+///   trusting whatever certificate answers.
+///
+/// With no session name this runs the same `Last` → `CreateIfMissing` cascade
+/// the naked path does; an explicit name attaches to that session only.
+pub(crate) fn run_attach_quic(
+    session: Option<String>,
+    addr: std::net::SocketAddr,
+    token: Option<String>,
+    cert_fingerprint: Option<String>,
+    server_name: Option<String>,
+) -> ExitCode {
+    print_banner();
+
+    let trust = match cert_fingerprint {
+        Some(fingerprint) => CertTrust::Pinned(fingerprint),
+        None if addr.ip().is_loopback() => CertTrust::SkipVerify,
+        None => {
+            eprintln!(
+                "phux: refusing to dial non-loopback QUIC server {addr} without --cert-fingerprint."
+            );
+            eprintln!(
+                "      Run `phux pair` on the server host to print its certificate fingerprint,"
+            );
+            eprintln!("      then pass it: phux attach --quic {addr} --cert-fingerprint <FP>");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let token = match token {
+        Some(token) => match attach::quic::parse_token_hex(&token) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                eprintln!("phux: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let dial = Dial::Quic(QuicDial {
+        addr,
+        server_name: server_name.unwrap_or_else(|| "localhost".to_owned()),
+        token,
+        trust,
+    });
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to build runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let predict_cfg = match config_loader::load() {
+        Ok(cfg) => PredictiveConfig {
+            enabled: cfg.experimental.predictive_echo,
+        },
+        Err(err) => {
+            eprintln!("phux: config load failed ({err}); using defaults");
+            PredictiveConfig::disabled()
+        }
+    };
+
+    let default_name = resolved_default_session_name();
+    let (target, default) = session.map_or_else(
+        || (AttachTarget::Last, Some(default_name.as_str())),
+        |name| (AttachTarget::ByName(name), None),
+    );
+
+    match rt.block_on(attach_with_reconnect(&dial, target, predict_cfg, default)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("phux: QUIC attach to {addr} failed: {err}");
             ExitCode::FAILURE
         }
     }
@@ -367,7 +474,7 @@ mod tests {
 
         // No socket file: nothing to reconnect to — returns without waiting.
         let start = Instant::now();
-        assert!(!wait_until_connectable(&path, Duration::from_secs(5)).await);
+        assert!(!wait_until_connectable(&Dial::uds(&path), Duration::from_secs(5)).await);
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "a missing socket should fail fast, not burn the deadline"
@@ -375,6 +482,6 @@ mod tests {
 
         // A bound listener: connectable.
         let _listener = tokio::net::UnixListener::bind(&path).expect("bind");
-        assert!(wait_until_connectable(&path, Duration::from_secs(2)).await);
+        assert!(wait_until_connectable(&Dial::uds(&path), Duration::from_secs(2)).await);
     }
 }

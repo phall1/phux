@@ -173,7 +173,25 @@ fn main() -> ExitCode {
     };
 
     match cli.command {
-        Some(Command::Attach { session, socket }) => commands::attach::run_attach(session, socket),
+        Some(Command::Attach {
+            session,
+            socket,
+            quic,
+            token,
+            cert_fingerprint,
+            tls_server_name,
+        }) => quic.map_or_else(
+            || commands::attach::run_attach(session.clone(), socket),
+            |addr| {
+                commands::attach::run_attach_quic(
+                    session.clone(),
+                    addr,
+                    token,
+                    cert_fingerprint,
+                    tls_server_name,
+                )
+            },
+        ),
         Some(Command::Server {
             session,
             socket,

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use phux_client::attach::Dial;
 use phux_client::attach::connection::Connection;
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
@@ -121,7 +122,11 @@ pub(crate) fn run_new(
             PredictiveConfig::disabled()
         }
     };
-    match rt.block_on(run_attach_once(&socket_path, target, predict_cfg)) {
+    match rt.block_on(run_attach_once(
+        &Dial::uds(&socket_path),
+        target,
+        predict_cfg,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             print_attach_error(&err, &socket_path, &name);

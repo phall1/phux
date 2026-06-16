@@ -72,7 +72,7 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = ["h
 # getrandom mints tokens from the OS CSPRNG. sha2 + hex compute the cert
 # fingerprint shown at pairing time. All are loopback-irrelevant: they only
 # engage when a TLS cert + token store are configured.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 subtle = "2"
 getrandom = "0.2"
@@ -101,7 +101,7 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # resolves to `tracing/log`, which feature-unification would turn on workspace-
 # wide, inflating every `tracing` macro's expansion (and tripping
 # `clippy::cognitive_complexity` in tracing-heavy functions far from here).
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+quinn.workspace = true
 # Optional: opt-in via the `tokio-console` feature. See the feature
 # comment above for the build incantation.
 console-subscriber = { version = "0.5", optional = true }
