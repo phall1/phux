@@ -1040,14 +1040,48 @@ fn is_layout_key(scope: &Scope, key: &str) -> bool {
 /// invariant we can't recover from: if the persisted focused leaf
 /// isn't a member of the tree the renderer would have no focused
 /// pane to draw input chrome on.
-/// Reconcile every window of a freshly decoded [`Workspace`] via
-/// [`reconcile_loaded_layout`], fixing any per-window focus that points
-/// at a leaf no longer in that window's tree.
+/// Reconcile a freshly decoded [`Workspace`], discarding it for a clean single
+/// pane only when it belongs to a *different* session, and otherwise fixing each
+/// window's focus to point at a leaf of its own tree.
+///
+/// The foreign-session discard (phux-jy4t) is evaluated at **workspace scope**,
+/// not per window. Layout metadata is group-scoped and shared across every
+/// session (one `DEFAULT_GROUP_ID`), so a freshly created session reads a
+/// sibling session's entire persisted workspace. The signal that the loaded
+/// workspace is foreign is that this session's real ATTACHED pane
+/// (`bootstrap_focus`) is a leaf of **none** of its windows — every window
+/// references terminals this session will never own. In that case discard the
+/// whole thing.
+///
+/// Doing the discard per window instead aliased every *non-active* window onto
+/// the focused pane: a non-active window legitimately never contains the focused
+/// pane, so the per-window guard rewrote it to `LayoutState::single(focus)` —
+/// leaving two windows referencing one `TerminalId`, so opening (say) vim in one
+/// window showed it in the other. Workspace scope is the fix.
 fn reconcile_loaded_workspace(
     mut workspace: Workspace,
     bootstrap_focus: Option<&TerminalId>,
     panes: &HashMap<TerminalId, PaneSlot>,
 ) -> Workspace {
+    if let Some(focus) = bootstrap_focus {
+        let mut any_leaves = false;
+        let mut owns_focus = false;
+        for w in &workspace.windows {
+            let leaves = w
+                .state
+                .tree
+                .as_ref()
+                .map(crate::layout::leaves)
+                .unwrap_or_default();
+            any_leaves |= !leaves.is_empty();
+            owns_focus |= leaves.contains(focus);
+        }
+        // Some window has real leaves, but none of them is our pane ⇒ the whole
+        // workspace is a foreign session's. Start from a clean single pane.
+        if any_leaves && !owns_focus {
+            return Workspace::single(focus.clone());
+        }
+    }
     for w in &mut workspace.windows {
         let reconciled = reconcile_loaded_layout(w.state.clone(), bootstrap_focus, panes);
         w.state = reconciled;
@@ -1055,6 +1089,13 @@ fn reconcile_loaded_workspace(
     workspace
 }
 
+/// Fix a single window's focus so it points at a leaf of *its own* tree.
+///
+/// No longer discards a tree that omits `bootstrap_focus` — that workspace-scope
+/// decision moved to [`reconcile_loaded_workspace`]. Here `bootstrap_focus` is
+/// only a *preference* for repairing an invalid focus; a non-active window whose
+/// tree doesn't contain it simply falls back to its first leaf, never to the
+/// global focus (which would alias it onto the active window's pane).
 fn reconcile_loaded_layout(
     mut state: LayoutState,
     bootstrap_focus: Option<&TerminalId>,
@@ -1065,20 +1106,6 @@ fn reconcile_loaded_layout(
         .as_ref()
         .map(crate::layout::leaves)
         .unwrap_or_default();
-    // Layout metadata is group-scoped and shared across every session (one
-    // `DEFAULT_GROUP_ID`), so a freshly created session reads its sibling's
-    // persisted tree. If this session's own ATTACHED focused pane is not a
-    // leaf of the loaded tree, that tree belongs to a DIFFERENT session — its
-    // leaves reference terminals this session will never own, which would
-    // render as dead/empty panes. Discard it and start from a clean
-    // single-pane layout of the real pane (phux-jy4t). Per-session layout
-    // isolation (the proper fix, session-keyed metadata) is a follow-up.
-    if let Some(focus) = bootstrap_focus
-        && !tree_leaves.is_empty()
-        && !tree_leaves.contains(focus)
-    {
-        return LayoutState::single(focus.clone());
-    }
     let focus_ok = state
         .focus
         .as_ref()
@@ -1148,39 +1175,52 @@ mod tests {
         }
     }
 
-    /// phux-jy4t: a freshly created session reads the group-shared layout
-    /// metadata, which holds a DIFFERENT session's tree. When this session's
-    /// real ATTACHED pane is not a leaf of that tree, the loaded layout is
-    /// foreign and must be discarded for a clean single pane — not rendered
-    /// as the old layout with dead/empty panes.
-    #[test]
-    fn reconcile_discards_a_foreign_session_layout() {
-        let foreign = split2(1, 2, 1); // leaves {1, 2}, from another session
-        let out = super::reconcile_loaded_layout(foreign, Some(&tid(9)), &HashMap::new());
-        let leaves = out
+    /// A single-window workspace wrapping `state`, for the reconcile tests.
+    fn ws1(state: LayoutState) -> Workspace {
+        Workspace {
+            windows: vec![crate::layout::WindowState {
+                name: "1".to_owned(),
+                state,
+            }],
+            active: 0,
+        }
+    }
+
+    /// Leaves of a workspace's window at `idx`.
+    fn window_leaves(ws: &Workspace, idx: usize) -> Vec<TerminalId> {
+        ws.windows[idx]
+            .state
             .tree
             .as_ref()
             .map(crate::layout::leaves)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    }
+
+    /// phux-jy4t: a freshly created session reads the group-shared layout
+    /// metadata, which holds a DIFFERENT session's tree. When this session's
+    /// real ATTACHED pane is not a leaf of ANY window, the whole loaded
+    /// workspace is foreign and must be discarded for a clean single pane — not
+    /// rendered as the old layout with dead/empty panes.
+    #[test]
+    fn reconcile_discards_a_foreign_session_layout() {
+        let foreign = ws1(split2(1, 2, 1)); // leaves {1, 2}, from another session
+        let out = super::reconcile_loaded_workspace(foreign, Some(&tid(9)), &HashMap::new());
+        assert_eq!(out.windows.len(), 1);
         assert_eq!(
-            leaves,
+            window_leaves(&out, 0),
             vec![tid(9)],
             "foreign layout discarded → clean single pane of the real terminal"
         );
-        assert_eq!(out.focus, Some(tid(9)));
+        assert_eq!(out.windows[0].state.focus, Some(tid(9)));
     }
 
     #[test]
     fn reconcile_keeps_a_layout_that_contains_the_session_pane() {
         // Legitimate re-attach: the session's focused pane IS a leaf, so the
         // multi-pane tree is preserved (not discarded).
-        let own = split2(1, 2, 1);
-        let out = super::reconcile_loaded_layout(own, Some(&tid(1)), &HashMap::new());
-        let leaves = out
-            .tree
-            .as_ref()
-            .map(crate::layout::leaves)
-            .unwrap_or_default();
+        let own = ws1(split2(1, 2, 1));
+        let out = super::reconcile_loaded_workspace(own, Some(&tid(1)), &HashMap::new());
+        let leaves = window_leaves(&out, 0);
         assert!(
             leaves.contains(&tid(1)) && leaves.contains(&tid(2)),
             "the session's own layout must be kept: {leaves:?}"
@@ -1190,14 +1230,45 @@ mod tests {
     #[test]
     fn reconcile_without_bootstrap_focus_keeps_the_tree() {
         // No ATTACHED focus to validate against ⇒ don't discard.
-        let tree = split2(1, 2, 1);
-        let out = super::reconcile_loaded_layout(tree, None, &HashMap::new());
-        let leaves = out
-            .tree
-            .as_ref()
-            .map(crate::layout::leaves)
-            .unwrap_or_default();
-        assert_eq!(leaves.len(), 2, "no focus to validate ⇒ tree preserved");
+        let tree = ws1(split2(1, 2, 1));
+        let out = super::reconcile_loaded_workspace(tree, None, &HashMap::new());
+        assert_eq!(
+            window_leaves(&out, 0).len(),
+            2,
+            "no focus to validate ⇒ tree preserved"
+        );
+    }
+
+    /// Regression: a multi-window workspace must NOT alias its non-active
+    /// windows onto the focused pane. The focused pane is a leaf of window 0
+    /// only; window 1 references a different terminal and must keep it (the
+    /// "open vim in one window, it shows in the other" bug, where the
+    /// per-window foreign-discard rewrote every non-active window to
+    /// `single(focus)`).
+    #[test]
+    fn reconcile_multi_window_does_not_alias_non_active_windows() {
+        let ws = Workspace {
+            windows: vec![
+                crate::layout::WindowState {
+                    name: "1".to_owned(),
+                    state: LayoutState::single(tid(1)),
+                },
+                crate::layout::WindowState {
+                    name: "2".to_owned(),
+                    state: LayoutState::single(tid(2)),
+                },
+            ],
+            active: 0,
+        };
+        // Focus is on window 0's pane (tid 1); window 1 (tid 2) is non-active.
+        let out = super::reconcile_loaded_workspace(ws, Some(&tid(1)), &HashMap::new());
+        assert_eq!(out.windows.len(), 2, "both windows survive");
+        assert_eq!(window_leaves(&out, 0), vec![tid(1)]);
+        assert_eq!(
+            window_leaves(&out, 1),
+            vec![tid(2)],
+            "non-active window keeps its own terminal, not aliased onto the focus"
+        );
     }
 
     /// Build a `panes` map with a warm [`PaneSlot`] per supplied id.
