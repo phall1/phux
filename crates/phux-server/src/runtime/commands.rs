@@ -201,6 +201,7 @@ pub(crate) fn handle_terminal_resize(
             rows,
             cell_px: None,
             resync_clients: true,
+            resync_only: false,
         }) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1103,6 +1104,7 @@ pub(crate) fn handle_viewport_resize(
                 rows,
                 cell_px,
                 resync_clients: true,
+                resync_only: false,
             }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {

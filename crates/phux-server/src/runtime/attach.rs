@@ -902,6 +902,10 @@ pub(crate) async fn handle_attach(
             let pump_out_tx = out_tx.clone();
             let pump_wire_terminal_id = wire_terminal_id.clone();
             let pump_client_caps = client_caps;
+            // phux-y8v6: lets a lagged pump ask the actor to broadcast an
+            // in-band resync (a full grid snapshot on the same ordered channel)
+            // so a consumer that dropped bytes reconverges.
+            let pump_resize = handle.resize.clone();
             // phux-7w1j: hold this pump's first forward until the pane's
             // snapshot has been sent (the drain loop fires `gate_tx`).
             let (gate_tx, gate_rx) = oneshot::channel::<()>();
@@ -949,11 +953,28 @@ pub(crate) async fn handle_attach(
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // The broadcast buffer overran: this consumer dropped
+                            // `n` chunks of VT, so its mirror is now diverged.
+                            // Ask the actor to emit an in-band `PaneOutput::Resync`
+                            // (a full grid snapshot on this same ordered channel):
+                            // it lands here after the post-lag tail and cleanly
+                            // supersedes the gap — no double-apply, no lost output.
+                            // Without this the divergence is permanent until an
+                            // unrelated resize/reattach happens to resync.
+                            // `try_send` failing (mailbox full ⇒ a resync is
+                            // already queued, or actor gone) is benign.
                             warn!(
                                 terminal_id = ?pump_wire_terminal_id,
                                 dropped = n,
-                                "TerminalOutput pump lagged; consider larger broadcast capacity",
+                                "TerminalOutput pump lagged; requesting in-band resync",
                             );
+                            let _ = pump_resize.try_send(ResizeRequest {
+                                cols: 0,
+                                rows: 0,
+                                cell_px: None,
+                                resync_clients: true,
+                                resync_only: true,
+                            });
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -1079,6 +1100,7 @@ pub(crate) fn apply_attach_viewport(
                 rows,
                 cell_px: s.resolve_terminal_cell_px(pane.terminal_id),
                 resync_clients: false,
+                resync_only: false,
             }) {
                 Ok(()) => {}
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
