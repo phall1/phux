@@ -1368,9 +1368,16 @@ impl TerminalActor {
         }
     }
 
-    /// phux-8v1: after a resize reflows the canonical `Terminal`,
-    /// broadcast a full synthesized snapshot of the post-reflow grid to
-    /// every attached client.
+    /// Broadcast a full synthesized snapshot of the canonical `Terminal`'s
+    /// current grid to every attached client, as an in-band
+    /// [`PaneOutput::Resync`].
+    ///
+    /// Two callers: a resize that reflowed the grid (phux-8v1, below), and a
+    /// `resync_only` request from an output pump that dropped bytes past the
+    /// broadcast buffer (`RecvError::Lagged`) and needs its consumer's mirror
+    /// rebuilt. Both want the same thing — the authoritative grid re-sent on the
+    /// ordered output channel so it cleanly supersedes whatever the client last
+    /// applied, with no double-apply or lost output.
     ///
     /// Why this is needed: a resize triggers an *independent* reflow on
     /// both the server's canonical `Terminal` and each client's mirror
@@ -1391,7 +1398,7 @@ impl TerminalActor {
     /// state-sync path (`consumer_states`) because the runtime drives the
     /// broadcast/pump path; the q0e per-consumer tick is not wired into
     /// the runtime today.
-    fn broadcast_resync_after_resize(&self) {
+    fn broadcast_resync(&self) {
         // No subscribers → nothing to resync. `receiver_count` is the
         // broadcast channel's live-subscriber count; the seed receiver
         // held by the actor was dropped at construction, so this is the
@@ -1861,14 +1868,19 @@ impl TerminalActor {
                 }
 
                 Some(req) = self.resize_rx.recv() => {
-                    self.handle_resize(req.cols, req.rows, req.cell_px);
+                    // A `resync_only` request (from a lagged output pump)
+                    // carries no geometry — skip the resize and only schedule
+                    // the resync broadcast below.
+                    if !req.resync_only {
+                        self.handle_resize(req.cols, req.rows, req.cell_px);
+                    }
                     // phux-8v1: re-broadcast a full snapshot for live
                     // resizes so client mirrors reconverge after their
                     // independent reflow. Suppressed for the ATTACH-time
                     // resize (the handshake snapshot covers it). Debounced
-                    // (RESIZE_RESYNC_DEBOUNCE) so a drag storm coalesces
-                    // into a single snapshot at the settled size rather
-                    // than flooding the client with stale-width snapshots.
+                    // (RESIZE_RESYNC_DEBOUNCE) so a drag storm — or a burst of
+                    // lag-resync requests — coalesces into a single snapshot
+                    // rather than flooding the client.
                     if req.resync_clients {
                         resync_pending = true;
                         resync_debounce
@@ -1884,7 +1896,7 @@ impl TerminalActor {
                 // fires spuriously.
                 () = &mut resync_debounce, if resync_pending => {
                     resync_pending = false;
-                    self.broadcast_resync_after_resize();
+                    self.broadcast_resync();
                 }
 
                 Some(req) = self.consumer_attach_rx.recv() => {
@@ -3536,6 +3548,7 @@ mod tests {
                         rows: 40,
                         cell_px: None,
                         resync_clients: false,
+                        resync_only: false,
                     })
                     .await
                     .expect("send resize");
@@ -3604,6 +3617,7 @@ mod tests {
                         rows: 40,
                         cell_px: Some((9, 18)),
                         resync_clients: false,
+                        resync_only: false,
                     })
                     .await
                     .expect("send resize");
@@ -3617,6 +3631,7 @@ mod tests {
                         rows: 30,
                         cell_px: None,
                         resync_clients: false,
+                        resync_only: false,
                     })
                     .await
                     .expect("send resize");
@@ -3661,6 +3676,7 @@ mod tests {
                         rows: 40,
                         cell_px: Some((9, 18)),
                         resync_clients: false,
+                        resync_only: false,
                     })
                     .await
                     .expect("send resize");
@@ -3745,6 +3761,7 @@ mod tests {
                         rows: 10,
                         cell_px: None,
                         resync_clients: true,
+                        resync_only: false,
                     })
                     .await
                     .expect("send resize");
@@ -3801,6 +3818,84 @@ mod tests {
             .await;
     }
 
+    /// phux-y8v6: a `resync_only` request (sent by a lagged output pump)
+    /// must re-broadcast a full grid snapshot WITHOUT resizing the grid —
+    /// the recovery path for a consumer that dropped bytes past the broadcast
+    /// buffer. We assert the broadcast carries the snapshot preamble + the
+    /// seeded content, and that the resync dims are the UNCHANGED grid size
+    /// (proving no resize happened).
+    #[tokio::test]
+    async fn resync_only_request_rebroadcasts_snapshot_without_resizing() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bundle =
+                    TerminalActor::new_with_seed(80, 24, b"resync-only-marker").expect("seed");
+                let handle = bundle.handle.clone();
+                let token = bundle.token;
+                let mut out = handle.output.subscribe();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                // resync_only: geometry fields are ignored, so the bogus 0x0
+                // must NOT become the grid size.
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 0,
+                        rows: 0,
+                        cell_px: None,
+                        resync_clients: true,
+                        resync_only: true,
+                    })
+                    .await
+                    .expect("send resync_only");
+
+                let mut acc: Vec<u8> = Vec::new();
+                let mut resync_dims: Option<(u16, u16)> = None;
+                for _ in 0..32 {
+                    match tokio::time::timeout(std::time::Duration::from_millis(100), out.recv())
+                        .await
+                    {
+                        Ok(Ok(PaneOutput::Resync { cols, rows, bytes })) => {
+                            resync_dims = Some((cols, rows));
+                            acc.extend_from_slice(&bytes);
+                            if contains_subslice(&acc, b"\x1b[!p")
+                                && contains_subslice(&acc, b"resync-only-marker")
+                            {
+                                break;
+                            }
+                        }
+                        Ok(Ok(PaneOutput::Live(bytes))) => acc.extend_from_slice(&bytes),
+                        Ok(Err(_)) => break,
+                        Err(_) => tokio::task::yield_now().await,
+                    }
+                }
+
+                assert_eq!(
+                    resync_dims,
+                    Some((80, 24)),
+                    "resync_only must keep the grid size, not adopt the ignored 0x0",
+                );
+                assert!(
+                    contains_subslice(&acc, b"\x1b[!p"),
+                    "resync_only broadcast missing DECSTR snapshot preamble; got {:?}",
+                    String::from_utf8_lossy(&acc),
+                );
+                assert!(
+                    contains_subslice(&acc, b"resync-only-marker"),
+                    "resync_only broadcast did not re-send grid content; got {:?}",
+                    String::from_utf8_lossy(&acc),
+                );
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
     /// phux-8v1 drag fix: a STORM of rapid live resizes (a window drag)
     /// must COALESCE into a single resync snapshot, not one per resize.
     /// Without the debounce the client gets flooded with snapshots
@@ -3826,7 +3921,13 @@ mod tests {
                 for w in [70u16, 60, 50, 60, 70, 80, 90, 100] {
                     handle
                         .resize
-                        .send(ResizeRequest { cols: w, rows: 24, cell_px: None, resync_clients: true })
+                        .send(ResizeRequest {
+                            cols: w,
+                            rows: 24,
+                            cell_px: None,
+                            resync_clients: true,
+                            resync_only: false,
+                        })
                         .await
                         .expect("send resize");
                 }
@@ -3907,6 +4008,7 @@ mod tests {
                             rows,
                             cell_px: None,
                             resync_clients: false,
+                            resync_only: false,
                         })
                         .await
                         .expect("send resize");
@@ -3925,6 +4027,7 @@ mod tests {
                         rows: 30,
                         cell_px: None,
                         resync_clients: false,
+                        resync_only: false,
                     })
                     .await
                     .expect("send final resize");

@@ -319,6 +319,13 @@ pub struct ResizeRequest {
     /// Re-broadcast a full snapshot after reflow (live resize) vs stay
     /// quiet (attach-time resize). See the type-level doc.
     pub resync_clients: bool,
+    /// Resync without resizing: skip the `handle_resize` entirely and only
+    /// schedule the `resync_clients` broadcast. Used by a lagged output pump to
+    /// ask the actor to emit an in-band [`PaneOutput::Resync`] (a full grid
+    /// snapshot on the same ordered broadcast) so a consumer that dropped bytes
+    /// past the broadcast buffer reconverges — without disturbing the grid
+    /// geometry. `cols`/`rows`/`cell_px` are ignored when this is set.
+    pub resync_only: bool,
 }
 
 /// Cross-task handle to a [`super::TerminalActor`].

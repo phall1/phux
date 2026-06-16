@@ -327,6 +327,7 @@ fn snapshot_plus_output_reconstructs_server_grid_across_resize() {
                 rows: 30,
                 cell_px: None,
                 resync_clients: true,
+                resync_only: false,
             })
             .await
             .expect("resize");
