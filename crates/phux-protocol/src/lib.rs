@@ -79,9 +79,18 @@ pub use ids::{ClientId, FrameId, GroupId, SatelliteHost, SessionId, TerminalId, 
 /// the client extracts the selected text from its own libghostty `Terminal` and
 /// copies it locally (OSC 52). Removing a wire frame is wire-breaking, so pre-1.0
 /// this bumps the minor.
+///
+/// Bumped from `0.5.0` to `0.6.0` by phux-2sl6: a new `AgentEvent` variant,
+/// `ASKED` (event tag `0x08`), carries an agent's pending human-answerable
+/// question (id, text, suggested answers, optional elapsed seconds) on the
+/// `EVENT` (`0xB3`) stream so a projection consumer can render the waiting
+/// prompt without re-deriving it from the grid. The addition is forward-compat
+/// — an older decoder skips the unknown event tag to `AgentEvent::Unknown` by
+/// its length prefix — but new wire bytes a peer may emit means the minor bumps
+/// pre-1.0.
 pub const PROTOCOL_VERSION: Version = Version {
     major: 0,
-    minor: 5,
+    minor: 6,
     patch: 0,
 };
 

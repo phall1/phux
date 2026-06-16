@@ -396,6 +396,14 @@ pub(crate) const EVENT_TAG_PANE_CLOSED: u8 = 0x05;
 pub(crate) const EVENT_TAG_DIRTY: u8 = 0x06;
 /// Wire tag for [`AgentEvent::Idle`].
 pub(crate) const EVENT_TAG_IDLE: u8 = 0x07;
+/// Wire tag for [`AgentEvent::Asked`]. Appended after `IDLE`'s `0x07`;
+/// `ASKED` is an additive agent-surface event (phux-2sl6) that carries an
+/// agent's pending human-answerable question so a projection consumer can
+/// render the waiting prompt without re-deriving it from the grid. Its body
+/// is field-tagged TLV (not positional) so the suggestion list and the
+/// optional elapsed counter are additive and an older decoder skips the whole
+/// event by its length prefix as [`AgentEvent::Unknown`].
+pub(crate) const EVENT_TAG_ASKED: u8 = 0x08;
 
 // Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
 // spec catalog order so the allocation is stable as later verbs land:
@@ -1048,6 +1056,26 @@ pub enum AgentEvent {
     /// window after a `Dirty`. The "output has settled" signal a `wait`
     /// consumer keys on.
     Idle,
+    /// An agent in the scoped Terminal is waiting on a human answer (phux-2sl6).
+    ///
+    /// The control-plane carrier for a pending question: an agent that has
+    /// blocked for input emits this so a projection consumer can render the
+    /// waiting prompt (id, text, suggested answers, how long it has waited)
+    /// without re-deriving it from the grid. It mirrors the consumer-side
+    /// question model one-for-one. The body is field-tagged TLV, so
+    /// `suggestions` and the optional `elapsed_seconds` are additive and an
+    /// older decoder skips the whole event as [`AgentEvent::Unknown`].
+    Asked {
+        /// Stable id the answer correlates against.
+        id: String,
+        /// The question text presented to the human.
+        question: String,
+        /// Suggested answers, in presentation order — the *actual options*,
+        /// not yes/no. Empty when the agent offered none.
+        suggestions: Vec<String>,
+        /// Seconds the agent has been waiting, or `None` when not reported.
+        elapsed_seconds: Option<u64>,
+    },
     /// An event whose `tag` this protocol version does not recognise.
     ///
     /// Produced **only by the decoder** when it reads an `EVENT` frame
@@ -3014,6 +3042,8 @@ pub(super) fn decode_optional_i32(dec: &mut Decoder<'_>) -> Result<Option<i32>, 
 //   PANE_CLOSED      (0x05) → optional<i32> exit_status
 //   DIRTY            (0x06) → empty
 //   IDLE             (0x07) → empty
+//   ASKED            (0x08) → field-tagged TLV: str id, str question,
+//                            repeated str suggestion, optional u64 elapsed_seconds
 // -----------------------------------------------------------------------------
 
 pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
@@ -3041,6 +3071,29 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
             }
             AgentEvent::Dirty => EVENT_TAG_DIRTY,
             AgentEvent::Idle => EVENT_TAG_IDLE,
+            AgentEvent::Asked {
+                id,
+                question,
+                suggestions,
+                elapsed_seconds,
+            } => {
+                // Field-tagged TLV body: id, question, then one repeated
+                // SUGGESTION field per suggestion (in order), then an optional
+                // ELAPSED_SECONDS. An absent suggestion list writes no field;
+                // an absent elapsed counter writes no field — both default
+                // cleanly on the decode side, and a future field is additive.
+                body_enc.write_field(field::event_asked::ID, id.as_bytes());
+                body_enc.write_field(field::event_asked::QUESTION, question.as_bytes());
+                for suggestion in suggestions {
+                    body_enc.write_field(field::event_asked::SUGGESTION, suggestion.as_bytes());
+                }
+                if let Some(secs) = elapsed_seconds {
+                    body_enc.write_field_with(field::event_asked::ELAPSED_SECONDS, |e| {
+                        e.write_u64_be(*secs)
+                    });
+                }
+                EVENT_TAG_ASKED
+            }
             // `Unknown` is decoder-only: an encoder that reaches here has
             // round-tripped an event this version did not understand.
             // Re-emit the captured body verbatim so a relay (a hub
@@ -3079,6 +3132,7 @@ pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, De
         },
         EVENT_TAG_DIRTY => AgentEvent::Dirty,
         EVENT_TAG_IDLE => AgentEvent::Idle,
+        EVENT_TAG_ASKED => decode_asked_event(&mut body_dec)?,
         // Unknown event tag: preserve the body verbatim and skip. This is
         // the forward-compat path — a v0.2.x server may add event kinds an
         // older client does not know.
@@ -3088,4 +3142,52 @@ pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, De
         },
     };
     Ok(event)
+}
+
+/// Decode an [`AgentEvent::Asked`] body (field-tagged TLV).
+///
+/// Loops over the body's TLV fields by id, accumulating suggestions as the
+/// repeated `SUGGESTION` field appears. An unrecognised field id is skipped by
+/// its length (forward-compat), `id` / `question` default to empty when their
+/// field is absent, and `elapsed_seconds` is `None` unless its field is
+/// present. The whole body is bounded by the event's outer length prefix, so a
+/// trailing future field cannot bleed into the next event.
+fn decode_asked_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, DecodeError> {
+    let mut id = String::new();
+    let mut question = String::new();
+    let mut suggestions = Vec::new();
+    let mut elapsed_seconds = None;
+    while let Some((field_id, value)) = dec.read_field()? {
+        match field_id {
+            field::event_asked::ID => {
+                core::str::from_utf8(value)
+                    .map_err(|_| DecodeError::InvalidUtf8)?
+                    .clone_into(&mut id);
+            }
+            field::event_asked::QUESTION => {
+                core::str::from_utf8(value)
+                    .map_err(|_| DecodeError::InvalidUtf8)?
+                    .clone_into(&mut question);
+            }
+            field::event_asked::SUGGESTION => {
+                suggestions.push(
+                    core::str::from_utf8(value)
+                        .map_err(|_| DecodeError::InvalidUtf8)?
+                        .to_owned(),
+                );
+            }
+            field::event_asked::ELAPSED_SECONDS => {
+                elapsed_seconds = Some(Decoder::new(value).read_u64_be()?);
+            }
+            // Unknown field id: skip by length (already consumed by
+            // `read_field`) — the forward-compat additive-field path.
+            _ => {}
+        }
+    }
+    Ok(AgentEvent::Asked {
+        id,
+        question,
+        suggestions,
+        elapsed_seconds,
+    })
 }

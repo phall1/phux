@@ -69,6 +69,86 @@ pub use tick::*;
 /// `defaults.history-limit` via [`TerminalActor::build_with_token`].
 const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 
+/// Sentinel prefix an in-pane agent writes into the terminal title (OSC 0 /
+/// OSC 2) to signal a pending human-answerable question (phux-2sl6).
+///
+/// The v1 ask-trigger is OSC-driven. libghostty-vt does not surface OSC 9 /
+/// OSC 777 desktop-notification escapes through its Rust API (title, pwd, and
+/// bell are the only user-notification signals it exposes), so the title is
+/// the honest closest signal an agent can drive and the server can observe
+/// without disturbing the per-consumer state-sync synthesizer. An agent that
+/// has blocked for input sets its title to:
+///
+/// ```text
+/// ESC ] 2 ; phux-ask:<question>                         ST
+/// ESC ] 2 ; phux-ask[<id>]:<question>                   ST
+/// ESC ] 2 ; phux-ask[<id>]:<question>?s=opt1|opt2|opt3  ST
+/// ```
+///
+/// i.e. the literal prefix [`ASK_TITLE_PREFIX`], an optional `[id]`, the
+/// question text, and an optional `?s=` suffix carrying `|`-separated
+/// suggested answers. Retitling away from a `phux-ask` title clears the ask.
+/// Full agent-state detection (manifests / hooks / OSC-9 surfacing) is the
+/// follow-up phux-2sl6.4.
+const ASK_TITLE_PREFIX: &str = "phux-ask";
+
+/// A parsed in-pane "ask" marker (phux-2sl6), sourced from the terminal title.
+///
+/// Construct with [`AskMarker::parse`], which returns `None` for any title that
+/// is not a `phux-ask` sentinel. Equality is by content so the actor can
+/// coalesce: a re-asserted identical marker does not re-fire `Asked`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AskMarker {
+    /// Stable id the answer correlates against. Defaults to the empty string
+    /// when the title omits the `[id]` segment.
+    id: String,
+    /// The question text presented to the human.
+    question: String,
+    /// Suggested answers, in presentation order; empty when none were given.
+    suggestions: Vec<String>,
+}
+
+impl AskMarker {
+    /// Parse an in-pane ask marker out of a terminal title, or `None` if the
+    /// title is not a `phux-ask` sentinel.
+    ///
+    /// Grammar (see [`ASK_TITLE_PREFIX`]): `phux-ask` then an optional
+    /// `[<id>]`, then `:`, then the question, then an optional `?s=a|b|c`
+    /// suggestion suffix. A bare `phux-ask` with no `:` is rejected (it is a
+    /// degenerate marker carrying no question).
+    fn parse(title: &str) -> Option<Self> {
+        let rest = title.strip_prefix(ASK_TITLE_PREFIX)?;
+        // Optional `[id]` segment immediately after the prefix.
+        let (id, rest) = if let Some(after_bracket) = rest.strip_prefix('[') {
+            let close = after_bracket.find(']')?;
+            (
+                after_bracket[..close].to_owned(),
+                &after_bracket[close + 1..],
+            )
+        } else {
+            (String::new(), rest)
+        };
+        // The question is introduced by ':'. Without it there is no ask.
+        let body = rest.strip_prefix(':')?;
+        // Optional `?s=opt1|opt2` suggestion suffix.
+        let (question, suggestions) = match body.split_once("?s=") {
+            Some((q, sugg)) => (
+                q.to_owned(),
+                sugg.split('|')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            None => (body.to_owned(), Vec::new()),
+        };
+        Some(Self {
+            id,
+            question,
+            suggestions,
+        })
+    }
+}
+
 /// Upper bound on consecutive ready PTY chunks coalesced into a single
 /// `vt_write` + broadcast frame per pump wakeup (phux-ahk burst path). A
 /// heavy neovim redraw or p10k repaint arrives as many ~4KB reads; coalescing
@@ -258,6 +338,24 @@ pub struct TerminalActor {
     /// Last terminal title observed (OSC 0 / OSC 2), for change detection.
     /// `title_changed` fires only when the polled title differs from this.
     last_title: String,
+    /// Last in-pane "ask" marker observed, for coalescing `AgentEvent::Asked`.
+    ///
+    /// The v1 ask-trigger is OSC-driven: an in-pane agent signals a pending
+    /// human-answerable question by setting the terminal title (OSC 0 / OSC 2)
+    /// to a `phux-ask` sentinel (see [`AskMarker`]). Like `dirty`/`idle`, the
+    /// ask is coalesced — we emit `Asked` once when the marker first appears
+    /// and again only when the marker *content* changes, so an agent that keeps
+    /// re-asserting the same title does not re-fire. `None` means no ask is
+    /// currently pending; clearing the marker (retitling to anything else)
+    /// resets it so the next distinct ask fires.
+    ///
+    /// NOTE (phux-2sl6): libghostty-vt does not surface OSC 9 / OSC 777
+    /// desktop-notification escapes through its API — title (OSC 0/2), pwd
+    /// (OSC 7), and bell are the only user-notification signals it exposes —
+    /// so the title sentinel is the honest closest signal for v1. Full
+    /// agent-state detection (manifests / hooks / OSC-9 surfacing) is the
+    /// follow-up phux-2sl6.4.
+    last_ask: Option<AskMarker>,
     /// Whether the pane is currently in an active output "burst": a
     /// `dirty` event has been emitted and no settling `idle` has followed.
     /// Drives the dirty/idle coalescing — at most one `dirty` per burst,
@@ -603,6 +701,7 @@ impl TerminalActor {
             token,
             event_sink: None,
             last_title: String::new(),
+            last_ask: None,
             in_output_burst: false,
             event_subscribers: RefCell::new(Vec::new()),
             last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
@@ -1037,8 +1136,28 @@ impl TerminalActor {
         if current_title != self.last_title {
             self.last_title.clone_from(&current_title);
             self.emit_event(AgentEvent::TitleChanged {
-                title: current_title,
+                title: current_title.clone(),
             });
+        }
+        // Asked: source a pending human-answerable question from a `phux-ask`
+        // title sentinel (phux-2sl6). Coalesced like dirty/idle — emit once
+        // when the marker first appears and again only when its content
+        // changes; retitling away from a `phux-ask` title clears the ask so
+        // the next distinct one fires. The v1 trigger is OSC-driven; full
+        // agent-state detection (manifests / hooks) is phux-2sl6.4.
+        let current_ask = AskMarker::parse(&current_title);
+        if current_ask != self.last_ask {
+            if let Some(ask) = current_ask.as_ref() {
+                self.emit_event(AgentEvent::Asked {
+                    id: ask.id.clone(),
+                    question: ask.question.clone(),
+                    suggestions: ask.suggestions.clone(),
+                    // Elapsed-since-ask is not tracked server-side in v1; the
+                    // consumer renders a live waiting counter from receipt.
+                    elapsed_seconds: None,
+                });
+            }
+            self.last_ask = current_ask;
         }
         // Dirty: a chunk arrived, so the grid mutated. Coalesce to one
         // `dirty` per burst; `idle` (from the tick arm) closes the burst.
@@ -2272,6 +2391,56 @@ mod tests {
         );
         assert_eq!(argv[1], "-c");
         assert_eq!(argv[2], "btop --utf-force");
+    }
+
+    /// phux-2sl6: a non-`phux-ask` title is not an ask marker.
+    #[test]
+    fn ask_marker_rejects_non_ask_titles() {
+        assert_eq!(AskMarker::parse(""), None);
+        assert_eq!(AskMarker::parse("vim README.md"), None);
+        // Bare prefix with no `:` carries no question — not a marker.
+        assert_eq!(AskMarker::parse("phux-ask"), None);
+        assert_eq!(AskMarker::parse("phux-ask[q1]"), None);
+    }
+
+    /// phux-2sl6: the minimal `phux-ask:<question>` form yields an empty id,
+    /// the question, and no suggestions.
+    #[test]
+    fn ask_marker_parses_bare_question() {
+        let marker = AskMarker::parse("phux-ask:Proceed?").expect("a phux-ask marker");
+        assert_eq!(marker.id, "");
+        assert_eq!(marker.question, "Proceed?");
+        assert!(marker.suggestions.is_empty());
+    }
+
+    /// phux-2sl6: the full `phux-ask[<id>]:<question>?s=a|b|c` form yields
+    /// the id, the question, and the `|`-delimited suggestions in order.
+    #[test]
+    fn ask_marker_parses_id_and_suggestions() {
+        let marker = AskMarker::parse("phux-ask[q1]:Deploy to prod??s=Yes|No|Hold")
+            .expect("a phux-ask marker");
+        assert_eq!(marker.id, "q1");
+        assert_eq!(marker.question, "Deploy to prod?");
+        assert_eq!(
+            marker.suggestions,
+            vec!["Yes".to_owned(), "No".to_owned(), "Hold".to_owned()],
+        );
+    }
+
+    /// phux-2sl6: an empty `?s=` suffix (or empty options) yields no
+    /// suggestions, never a vector with empty strings.
+    #[test]
+    fn ask_marker_drops_empty_suggestions() {
+        let marker = AskMarker::parse("phux-ask:Ready??s=").expect("a phux-ask marker");
+        assert_eq!(marker.question, "Ready?");
+        assert!(marker.suggestions.is_empty());
+
+        let marker = AskMarker::parse("phux-ask:Pick??s=a||b").expect("a phux-ask marker");
+        assert_eq!(
+            marker.suggestions,
+            vec!["a".to_owned(), "b".to_owned()],
+            "empty inter-pipe segments are dropped",
+        );
     }
 
     /// Direct synchronous test: snapshot-of-blank-Terminal yields the

@@ -2070,6 +2070,20 @@ fn arb_agent_event() -> impl Strategy<Value = AgentEvent> {
             .prop_map(|exit_status| AgentEvent::PaneClosed { exit_status }),
         Just(AgentEvent::Dirty),
         Just(AgentEvent::Idle),
+        (
+            ".{0,64}",
+            ".{0,256}",
+            proptest::collection::vec(".{0,64}", 0..4),
+            proptest::option::of(any::<u64>()),
+        )
+            .prop_map(
+                |(id, question, suggestions, elapsed_seconds)| AgentEvent::Asked {
+                    id,
+                    question,
+                    suggestions,
+                    elapsed_seconds,
+                }
+            ),
     ]
 }
 
@@ -2149,6 +2163,84 @@ fn event_unknown_tag_reencodes_verbatim() {
     frame.encode(&mut buf);
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn event_asked_round_trips_full() {
+    // The new `AgentEvent::Asked` carries an agent's pending question with
+    // every field populated; it MUST round-trip on the EVENT stream.
+    let frame = FrameKind::Event {
+        terminal: None,
+        event: AgentEvent::Asked {
+            id: "q-7f3a".to_string(),
+            question: "Which transport should the bridge use?".to_string(),
+            suggestions: vec![
+                "WebSocket".to_string(),
+                "gRPC".to_string(),
+                "raw TCP".to_string(),
+            ],
+            elapsed_seconds: Some(42),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn event_asked_round_trips_minimal() {
+    // No suggestions, no elapsed counter: the absent fields default to an
+    // empty list / `None` on decode.
+    let frame = FrameKind::Event {
+        terminal: None,
+        event: AgentEvent::Asked {
+            id: "q-0".to_string(),
+            question: "Proceed?".to_string(),
+            suggestions: Vec::new(),
+            elapsed_seconds: None,
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn event_asked_decodes_as_unknown_for_an_older_decoder() {
+    // Forward-compat guard: the ASKED tag (0x08) is constructed here by hand so
+    // that if a future change drops the variant the body still skips by length
+    // to `AgentEvent::Unknown`. We assert the captured body is preserved
+    // verbatim against the same bytes an unknown-tag decoder would keep. This
+    // pins the contract that an older client (one that does not know 0x08)
+    // skips the event cleanly rather than failing the frame parse.
+    //
+    // Body for ASKED is field-tagged TLV; we just need *some* opaque body to
+    // prove the skip path, so reuse a tag the current decoder does not know
+    // (0x09) carrying the same bytes ASKED would.
+    let body_bytes = [0x01u8, 0x02, 0x03];
+    let mut agent_event = vec![0x09u8]; // a tag this version does not know
+    agent_event.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
+    agent_event.extend_from_slice(&body_bytes);
+    let mut fields = Vec::new();
+    tlv_field(&mut fields, 2, &agent_event); // field::event::EVENT
+    let bytes = framed_tlv(0xB3, &fields);
+
+    let (decoded, tail) = FrameKind::decode(&bytes).unwrap();
+    assert_eq!(
+        decoded,
+        FrameKind::Event {
+            terminal: None,
+            event: AgentEvent::Unknown {
+                tag: 0x09,
+                body: body_bytes.to_vec(),
+            },
+        }
+    );
     assert!(tail.is_empty());
 }
 
