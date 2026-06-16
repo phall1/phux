@@ -197,6 +197,21 @@ fn coalesce_defer_flags(targets: &[Option<TerminalId>]) -> Vec<bool> {
         .collect()
 }
 
+/// Whether a frame actually skips its paint in a coalesced burst.
+///
+/// `deferred_by_coalesce` is the per-pane last-wins mask from
+/// [`coalesce_defer_flags`]. A frame defers iff that mask says so AND it is not
+/// a [`FrameKind::TerminalSnapshot`]: a snapshot is authoritative full-screen
+/// state and must always paint, never be superseded by a later same-pane
+/// incremental `TerminalOutput` (whose partial paint assumes a screen the
+/// snapshot never actually drew — the attach/reattach/split "mangled screen"
+/// bug). Ordinary output frames still coalesce. The headless ingest path passes
+/// `defer_paint = true` to `handle_server_frame` directly and never routes
+/// through here, so its no-VT-emit invariant is unaffected.
+const fn frame_defers_paint(deferred_by_coalesce: bool, frame: &FrameKind) -> bool {
+    deferred_by_coalesce && !matches!(frame, FrameKind::TerminalSnapshot { .. })
+}
+
 /// Paint the active overlay layer (called only when an overlay is active).
 ///
 /// Copy-mode is **not** a modal overlay: it repaints the focused pane with its
@@ -1469,7 +1484,7 @@ async fn main_loop<W: super::RenderSink>(
                             .collect();
                         let defer_flags = coalesce_defer_flags(&paint_targets);
                         for (frame_idx, f) in batch.into_iter().enumerate() {
-                        let defer_paint = defer_flags[frame_idx];
+                        let defer_paint = frame_defers_paint(defer_flags[frame_idx], &f);
                         // phux-tnh: snapshot the current per-leaf rects
                         // BEFORE the frame may fold (close) or split the
                         // layout, so a TerminalClosed/Spawned can diff
@@ -2563,6 +2578,31 @@ mod tests {
             coalesce_defer_flags(&[p(1), p(1), p(2)]),
             vec![true, false, false]
         );
+    }
+
+    #[test]
+    fn snapshot_never_defers_even_behind_a_later_same_pane_frame() {
+        // A snapshot is authoritative full state: even when the coalesce mask
+        // says "defer" (a later same-pane output exists in the burst), it must
+        // still paint, or the later incremental output paints onto a screen the
+        // snapshot never drew — the attach/reattach/split "mangled" bug.
+        let snap = FrameKind::TerminalSnapshot {
+            terminal_id: TerminalId::Local { id: 1 },
+            cols: 80,
+            rows: 24,
+            vt_replay_bytes: Vec::new(),
+            scrollback_bytes: None,
+        };
+        let output = FrameKind::TerminalOutput {
+            terminal_id: TerminalId::Local { id: 1 },
+            seq: 1,
+            bytes: Vec::new().into(),
+        };
+        // Mask says defer, but a snapshot overrides it and paints.
+        assert!(!frame_defers_paint(true, &snap));
+        // An ordinary output still honors the coalesce mask.
+        assert!(frame_defers_paint(true, &output));
+        assert!(!frame_defers_paint(false, &output));
     }
 
     #[test]

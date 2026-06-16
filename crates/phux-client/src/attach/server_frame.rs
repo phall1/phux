@@ -311,8 +311,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // the outbound emit, which would scribble over the
                 // modal. On dismiss the driver triggers a full
                 // repaint and the user sees the latest content.
-                // phux-jhv8: `defer_paint` suppresses the same way when this
-                // snapshot is an earlier member of a coalesced burst.
+                // The live coalescing path never defers a snapshot (the driver
+                // excludes `TerminalSnapshot` from the defer mask), so here
+                // `defer_paint` is set only by the headless ingest path, which
+                // suppresses all VT emission and composes once at the end.
                 if overlay_active || defer_paint {
                     let _ = overlay;
                 } else {
@@ -320,9 +322,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // separately from the `vt_apply` above.
                     let _paint_trigger =
                         tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
-                    let _ = slot
-                        .renderer
-                        .render_at(&slot.terminal, out, origin, (rect.w, rect.h));
+                    // A snapshot is authoritative full state, so force a full
+                    // redraw rather than trusting libghostty's per-row dirty
+                    // bits: a `safe_resize` + replay can leave rows the client
+                    // still needs marked clean (resize-grow, alt-screen
+                    // transitions), and a plain `render_at` would skip them,
+                    // leaving stale/garbage cells — the attach/reattach/resize
+                    // "mangled screen" bug.
+                    let _ =
+                        slot.renderer
+                            .render_at_full(&slot.terminal, out, origin, (rect.w, rect.h));
                     // Re-anchor the predict layer in PANE-LOCAL coordinates
                     // (predictions are pane-local; the overlay re-adds the
                     // origin). Feeding the outer-absolute `last_cursor` here
@@ -377,7 +386,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     .unwrap_or_default();
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ = slot.renderer.render_at(
+                        // Authoritative snapshot → force a full redraw of the
+                        // pane rect (see the focused branch above).
+                        let _ = slot.renderer.render_at_full(
                             &slot.terminal,
                             out,
                             (rect.x, rect.y),
