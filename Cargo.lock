@@ -1817,6 +1817,7 @@ name = "phux-client"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "hex",
  "insta",
  "libghostty-vt",
  "phux-client-core",
@@ -1825,10 +1826,14 @@ dependencies = [
  "phux-protocol",
  "phux-server",
  "proptest",
+ "quinn",
  "ratatui",
  "rustix 0.38.44",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml",

@@ -40,7 +40,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::Instrument as _;
 
 use super::actions::{PendingSplit, PendingWindow};
-use super::connection::Connection;
+use super::connection::{Connection, Dial};
 use super::input::StdinParser;
 use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
@@ -328,6 +328,14 @@ pub enum AttachError {
     #[error("attach loop io error: {0}")]
     Io(#[source] io::Error),
 
+    /// A remote transport could not be established: QUIC handshake, TLS
+    /// certificate verification (a fingerprint that did not match the pin), or
+    /// a refused/oversized auth preamble. Distinguished from local [`Self::Io`]
+    /// so the CLI can point at the address, the pin, and the token rather than a
+    /// missing socket file.
+    #[error("transport connect error: {0}")]
+    Connect(String),
+
     /// The server closed the connection without sending `DETACHED`.
     /// Distinguished from a clean detach so the CLI can surface "server
     /// went away" vs "you detached".
@@ -401,7 +409,7 @@ impl From<super::render::RenderError> for AttachError {
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError> {
-    run_buffered(socket, target, PredictiveConfig::disabled()).await
+    run_buffered(&Dial::uds(socket), target, PredictiveConfig::disabled()).await
 }
 
 /// Production attach: wrap stdout in the off-loop [`StdoutSink`](super::stdout_writer)
@@ -412,14 +420,14 @@ pub async fn run(socket: &Path, target: AttachTarget) -> Result<(), AttachError>
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 async fn run_buffered(
-    socket: &Path,
+    dial: &Dial,
     target: AttachTarget,
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
     let (mut sink, writer) = super::stdout_writer::spawn_stdout_writer();
     let resync = Arc::clone(&sink.needs_resync);
     attach_session(
-        socket,
+        dial,
         target,
         &mut sink,
         predict,
@@ -448,7 +456,24 @@ pub async fn run_with_predict(
     target: AttachTarget,
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
-    run_buffered(socket, target, predict).await
+    run_buffered(&Dial::uds(socket), target, predict).await
+}
+
+/// Dial-aware production attach (UDS *or* QUIC) with predictive echo config.
+///
+/// The transport-agnostic sibling of [`run_with_predict`]: the CLI builds a
+/// [`Dial`] from its flags (a UDS path or a remote `--quic` target) and the
+/// same off-loop-stdout production path runs regardless of byte plumbing.
+#[allow(
+    clippy::future_not_send,
+    reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+)]
+pub async fn run_with_predict_dial(
+    dial: &Dial,
+    target: AttachTarget,
+    predict: PredictiveConfig,
+) -> Result<(), AttachError> {
+    run_buffered(dial, target, predict).await
 }
 
 /// Same as [`run`], but writes the entire composited output stream to a
@@ -495,7 +520,7 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
     // Synchronous-sink test seam: no off-loop writer, no resync flag.
-    attach_session(socket, target, out, predict, None, None).await
+    attach_session(&Dial::uds(socket), target, out, predict, None, None).await
 }
 
 /// Headless one-shot: attach, ingest the session's snapshot + layout, and
@@ -698,7 +723,7 @@ pub async fn run_headless_rendered(
     reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
 )]
 async fn attach_session<W: super::RenderSink>(
-    socket: &Path,
+    dial: &Dial,
     target: AttachTarget,
     out: &mut W,
     predict: PredictiveConfig,
@@ -711,7 +736,7 @@ async fn attach_session<W: super::RenderSink>(
     // this block fails (no server, refused, signal during connect) the
     // user's terminal stays in its original state and `Err(_)` carries
     // the actionable cause up to the CLI.
-    let mut conn = Connection::connect(socket).await?;
+    let mut conn = Connection::connect_dial(dial).await?;
     // Attach-handshake timing (info): HELLO -> ATTACH -> ATTACHED. The
     // span's CLOSE duration is the end-to-end attach latency a trace reader
     // wants for "why was the first paint slow." Lifecycle-rate, so info.

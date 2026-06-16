@@ -97,11 +97,10 @@ pub fn ensure_self_signed(cert_path: &Path, key_path: &Path) -> Result<(), TlsEr
     Ok(())
 }
 
-/// ALPN protocol id advertised on the QUIC listener. QUIC mandates ALPN, so a
-/// dialer must offer this exact token or the TLS handshake fails — which also
-/// keeps a stray non-phux QUIC client (or a protocol-version mismatch) from
-/// ever reaching the frame layer.
-pub(crate) const QUIC_ALPN: &[u8] = b"phux-quic/1";
+/// ALPN protocol id advertised on the QUIC listener. Owned by `phux-protocol`
+/// (the wire crate) so the server listener and the client dialer cannot drift;
+/// re-exported here for the QUIC transport's call sites and tests.
+pub(crate) use phux_protocol::policy::QUIC_ALPN;
 
 /// Build a rustls [`ServerConfig`] from a PEM certificate chain and private
 /// key, using the `ring` provider. Shared by the WebSocket [`TlsAcceptor`] and

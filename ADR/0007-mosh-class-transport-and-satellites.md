@@ -60,8 +60,22 @@ Date: 2026-05-25
 > machine) and links BoringSSL via cmake, whereas quinn is tokio-native (its
 > streams are `AsyncRead`/`AsyncWrite`) and rides the rustls 0.23 + `ring`
 > provider already in the tree, adding no native toolchain. Still deferred:
-> a roaming-aware *client* dialer (connection migration / 0-RTT are inherent
-> to the stack but unused without it), SSH-stdio, and satellites.
+> SSH-stdio and satellites.
+
+> **Update 2026-06-15 (phux-y8v6):** the **client dialer** is built, so QUIC
+> is now end-to-end. `phux attach --quic <HOST:PORT>` mirrors the listener:
+> one bidirectional stream, the `phux-quic/1` ALPN (now owned by
+> `phux-protocol::policy::QUIC_ALPN` so both ends cannot drift), the same
+> length-prefixed frames, and the bearer-token preamble for routable hosts.
+> The client's `Connection` grew a transport enum (`UdsReader`/`QuicReader`,
+> `UdsWriter`/`QuicWriter`) so the driver and reconnect loop stay
+> transport-agnostic; the attach chain threads a `Dial { Uds | Quic }`. TLS
+> trust is fingerprint-pinning (`--cert-fingerprint`, the value `phux pair`
+> prints) for routable hosts, falling back to skip-verify only on loopback
+> dev; a non-loopback dial without a pin is refused, not silently trusted.
+> Connection migration / 0-RTT remain inherent-but-unexercised — the dialer
+> reconnects on a dropped link (the graceful-upgrade blink) but does not yet
+> actively roam across network changes.
 
 ## Context
 

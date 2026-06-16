@@ -96,9 +96,14 @@ These are the subcommands the binary ships today:
 ```
 phux                          # attach to default session, autostart server
 phux attach [SESSION]         # attach explicitly; session optional (alias: a)
-phux server [--session N] [--listen HOST:PORT]
+phux attach --quic HOST:PORT [--cert-fingerprint FP] [--token HEX]
+                              # attach to a remote server over QUIC (TLS 1.3).
+                              # loopback trusts the dev cert; routable hosts
+                              # require --cert-fingerprint (from `phux pair`)
+phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT]
                               # run server in foreground (incl. for SSH; no --stdio yet)
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
+                              # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
 phux ls                       # list sessions (alias: list)

@@ -109,6 +109,17 @@ toml = "1"
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
 libghostty-vt = { git = "https://github.com/phall1/libghostty-rs.git", rev = "6d49dfdeeb4915237615e0cd6e03046b6f96dfa3", version = "0.1", default-features = false }
+# QUIC transport (phux-y8v6, ADR-0007). Shared by phux-server (the
+# `QuicListener`) and phux-client (the dialer) so both ends speak the same
+# stack at the same version. `rustls-ring` keeps us off quinn's default
+# aws-lc-rs/cmake path; the `log` feature is deliberately omitted — it
+# resolves to `tracing/log`, which feature-unification would turn on
+# workspace-wide, inflating every `tracing` macro's expansion.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# rustls 0.23 + `ring` provider: TLS 1.3 termination on the server, and the
+# client-side cert verifier (fingerprint pin / loopback skip) on the dialer.
+# Same features both ends so feature-unification is a no-op.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 
 [profile.release]
 lto = "fat"

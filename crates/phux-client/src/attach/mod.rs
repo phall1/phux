@@ -37,15 +37,17 @@ pub mod driver;
 pub mod input;
 pub mod input_dispatch;
 pub mod paint;
+pub mod quic;
 pub mod reflow;
 pub mod render;
 pub mod rendered;
 pub mod server_frame;
 mod stdout_writer;
 
+pub use connection::{CertTrust, Dial, QuicDial};
 pub use driver::{
-    AttachError, run, run_headless_rendered, run_with_predict, run_with_stdout,
-    write_terminal_reset,
+    AttachError, run, run_headless_rendered, run_with_predict, run_with_predict_dial,
+    run_with_stdout, write_terminal_reset,
 };
 
 // Multi-pane composition moved to `phux-client-core` with phux-0fv

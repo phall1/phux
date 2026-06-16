@@ -10,7 +10,7 @@
 //! byte-level reassembly. Errors funnel into [`super::driver::AttachError`].
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use bytes::{Buf, BytesMut};
 use phux_protocol::wire::frame::{FrameKind, MAX_FRAME_LEN};
@@ -19,24 +19,67 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use super::driver::AttachError;
+use super::quic;
+pub use super::quic::{CertTrust, QuicDial};
 
 /// Number of bytes in the SPEC §5 length prefix.
 const LENGTH_PREFIX: usize = 4;
 
+/// How an attach should reach its server.
+///
+/// Either the always-local Unix domain socket, or a remote QUIC listener
+/// (`phux-y8v6`, ADR-0007). Threaded through the attach loop so the reconnect
+/// machinery dials the same way on each attempt.
+#[derive(Debug, Clone)]
+pub enum Dial {
+    /// Connect over the Unix domain socket at this path.
+    Uds(PathBuf),
+    /// Dial a remote QUIC listener.
+    Quic(QuicDial),
+}
+
+impl Dial {
+    /// A `Dial::Uds` borrowing-then-owning the given path. Lets the many
+    /// `&Path` call sites build a dial target without restating the variant.
+    #[must_use]
+    pub fn uds(path: &Path) -> Self {
+        Self::Uds(path.to_path_buf())
+    }
+}
+
 /// A connected, owned transport split into framed read and write halves.
 ///
-/// Construction performs the UDS connect; the two halves are independent
-/// after that and can be sent across tasks. The struct keeps them together
-/// so the simple "send + recv on the same task" case is one type.
+/// Construction performs the connect (UDS or QUIC); the two halves are
+/// independent after that. The struct keeps them together so the simple "send +
+/// recv on the same task" case is one type. Both transports carry the identical
+/// SPEC §5 framing — the variant only changes the byte plumbing underneath.
 #[derive(Debug)]
 pub struct Connection {
     reader: FrameReader,
     writer: FrameWriter,
 }
 
-/// Read half — pulls one [`FrameKind`] per call.
+/// Read half — pulls one [`FrameKind`] per call, over either transport.
 #[derive(Debug)]
-pub struct FrameReader {
+pub enum FrameReader {
+    /// Unix-domain-socket read half with a streaming reassembly buffer.
+    Uds(UdsReader),
+    /// QUIC bidi-stream read half.
+    Quic(QuicReader),
+}
+
+/// Write half — encodes one [`FrameKind`] per call, over either transport.
+#[derive(Debug)]
+pub enum FrameWriter {
+    /// Unix-domain-socket write half.
+    Uds(UdsWriter),
+    /// QUIC bidi-stream write half.
+    Quic(QuicWriter),
+}
+
+/// UDS read half — reads chunks into a buffer and decodes whole frames.
+#[derive(Debug)]
+pub struct UdsReader {
     inner: OwnedReadHalf,
     /// Streaming receive buffer. The socket is read in chunks (not one
     /// `read_exact` per frame) so a single syscall can surface several
@@ -47,12 +90,51 @@ pub struct FrameReader {
     buf: BytesMut,
 }
 
-/// Write half — encodes one [`FrameKind`] per call.
+/// UDS write half.
 #[derive(Debug)]
-pub struct FrameWriter {
+pub struct UdsWriter {
     inner: OwnedWriteHalf,
     /// Reusable encode buffer.
     out: BytesMut,
+}
+
+/// QUIC read half.
+///
+/// Reassembles length-prefixed frames off the bidi stream, byte-for-byte the
+/// same framing as the UDS path. quinn's `RecvStream` is a `tokio` `AsyncRead`,
+/// so this reads in chunks into a buffer exactly like [`UdsReader`] — a single
+/// read can surface several queued frames, which `try_recv` then drains so a
+/// back-to-back burst still coalesces into one paint (phux-jhv8). The
+/// cloned endpoint + connection are held so the I/O driver outlives the stream
+/// and the connection can be closed cleanly on teardown.
+#[derive(Debug)]
+pub struct QuicReader {
+    recv: quinn::RecvStream,
+    buf: BytesMut,
+    _endpoint: quinn::Endpoint,
+    _connection: quinn::Connection,
+}
+
+/// QUIC write half. Holds the endpoint + connection for the same reasons as
+/// [`QuicReader`]; its [`Drop`] issues a best-effort `CONNECTION_CLOSE`.
+#[derive(Debug)]
+pub struct QuicWriter {
+    send: quinn::SendStream,
+    /// Reusable encode buffer.
+    out: BytesMut,
+    endpoint: quinn::Endpoint,
+    connection: quinn::Connection,
+}
+
+impl Drop for QuicWriter {
+    fn drop(&mut self) {
+        // Best-effort clean teardown: a `CONNECTION_CLOSE` lets the server reap
+        // this consumer immediately instead of waiting out its 30s idle timeout.
+        // The endpoint clone is still alive in this struct, so its driver can
+        // transmit the frame. For a guaranteed flush (the reconnect probe) the
+        // caller uses [`Connection::shutdown`], which also awaits `wait_idle`.
+        self.connection.close(0u32.into(), b"phux: detach");
+    }
 }
 
 impl Connection {
@@ -67,15 +149,71 @@ impl Connection {
         let stream = UnixStream::connect(socket).await.map_err(AttachError::Io)?;
         let (read, write) = stream.into_split();
         Ok(Self {
-            reader: FrameReader {
+            reader: FrameReader::Uds(UdsReader {
                 inner: read,
                 buf: BytesMut::with_capacity(8192),
-            },
-            writer: FrameWriter {
+            }),
+            writer: FrameWriter::Uds(UdsWriter {
                 inner: write,
                 out: BytesMut::with_capacity(4096),
-            },
+            }),
         })
+    }
+
+    /// Dial a remote QUIC listener and return a framed connection.
+    ///
+    /// Establishes the TLS 1.3 handshake (phux ALPN), opens one bidirectional
+    /// stream, and writes the bearer-token preamble when [`QuicDial::token`] is
+    /// set, all before returning — so the first [`Self::send`]/[`Self::recv`]
+    /// sees a stream the server is already reading phux frames off.
+    ///
+    /// # Errors
+    ///
+    /// Surfaces [`AttachError::Connect`] on any handshake, certificate, or
+    /// preamble failure (the address, the pin, or the token).
+    pub async fn connect_quic(dial: &QuicDial) -> Result<Self, AttachError> {
+        let (endpoint, connection, send, recv) = quic::dial(dial).await?;
+        Ok(Self {
+            reader: FrameReader::Quic(QuicReader {
+                recv,
+                buf: BytesMut::with_capacity(8192),
+                _endpoint: endpoint.clone(),
+                _connection: connection.clone(),
+            }),
+            writer: FrameWriter::Quic(QuicWriter {
+                send,
+                out: BytesMut::with_capacity(4096),
+                endpoint,
+                connection,
+            }),
+        })
+    }
+
+    /// Close the connection cleanly, awaiting transmission of the close frame.
+    ///
+    /// For QUIC this issues a `CONNECTION_CLOSE` and awaits `wait_idle`, so the
+    /// server reaps the consumer at once rather than at its idle timeout — used
+    /// by the reconnect probe, which would otherwise leave a phantom connection
+    /// per attempt. For UDS this is a no-op (dropping the socket halves is a
+    /// clean close already). [`QuicWriter`]'s [`Drop`] is the best-effort
+    /// backstop on paths that cannot await.
+    pub async fn shutdown(self) {
+        if let FrameWriter::Quic(writer) = &self.writer {
+            writer.connection.close(0u32.into(), b"phux: detach");
+            writer.endpoint.wait_idle().await;
+        }
+    }
+
+    /// Connect over whichever transport `dial` names.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`Self::connect`] / [`Self::connect_quic`] errors.
+    pub async fn connect_dial(dial: &Dial) -> Result<Self, AttachError> {
+        match dial {
+            Dial::Uds(path) => Self::connect(path).await,
+            Dial::Quic(quic) => Self::connect_quic(quic).await,
+        }
     }
 
     /// Build a `Connection` from an already-connected [`UnixStream`].
@@ -88,14 +226,14 @@ impl Connection {
     pub(crate) fn from_stream(stream: UnixStream) -> Self {
         let (read, write) = stream.into_split();
         Self {
-            reader: FrameReader {
+            reader: FrameReader::Uds(UdsReader {
                 inner: read,
                 buf: BytesMut::with_capacity(8192),
-            },
-            writer: FrameWriter {
+            }),
+            writer: FrameWriter::Uds(UdsWriter {
                 inner: write,
                 out: BytesMut::with_capacity(4096),
-            },
+            }),
         }
     }
 
@@ -133,29 +271,62 @@ impl Connection {
 }
 
 impl FrameWriter {
-    /// Encode `frame` into the internal buffer and flush it to the socket.
+    /// Encode `frame` and write it to the server over whichever transport.
     pub async fn send(&mut self, frame: &FrameKind) -> Result<(), AttachError> {
+        match self {
+            Self::Uds(w) => w.send(frame).await,
+            Self::Quic(w) => w.send(frame).await,
+        }
+    }
+}
+
+impl FrameReader {
+    /// Read one complete frame off the wire over whichever transport.
+    pub async fn recv(&mut self) -> Result<FrameKind, AttachError> {
+        match self {
+            Self::Uds(r) => r.recv().await,
+            Self::Quic(r) => r.recv().await,
+        }
+    }
+
+    /// Non-blocking sibling of [`Self::recv`]: decode a frame only if one is
+    /// already buffered (or, for UDS, becomes readable without blocking).
+    ///
+    /// Returns `Ok(None)` when the next frame is not yet fully available. Both
+    /// transports drain a coalesced burst out of their receive buffer; the UDS
+    /// path additionally tops up from the socket without blocking (quinn exposes
+    /// no sync ready-check, so QUIC drains buffered bytes only).
+    pub fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
+        match self {
+            Self::Uds(r) => r.try_recv(),
+            Self::Quic(r) => r.try_recv(),
+        }
+    }
+}
+
+impl UdsWriter {
+    /// Encode `frame` into the internal buffer and flush it to the socket.
+    async fn send(&mut self, frame: &FrameKind) -> Result<(), AttachError> {
         self.out.clear();
         frame.encode(&mut self.out);
         self.inner
             .write_all(&self.out)
             .await
             .map_err(AttachError::Io)?;
-        // `flush` on a `UnixStream` half is a no-op today, but call it for
-        // forward-compat with buffered transport variants (QUIC, TLS).
+        // `flush` on a `UnixStream` half is a no-op, but harmless and explicit.
         self.inner.flush().await.map_err(AttachError::Io)?;
         Ok(())
     }
 }
 
-impl FrameReader {
+impl UdsReader {
     /// Read one complete frame off the wire.
     ///
     /// Returns [`AttachError::Disconnected`] on a clean EOF — the SPEC §5
     /// length prefix is the only legal cut point. Drains a complete frame
     /// from the receive buffer when one is already buffered; otherwise reads more
     /// bytes (awaiting the socket) until a full frame lands.
-    pub async fn recv(&mut self) -> Result<FrameKind, AttachError> {
+    async fn recv(&mut self) -> Result<FrameKind, AttachError> {
         loop {
             if let Some(frame) = decode_buffered(&mut self.buf)? {
                 return Ok(frame);
@@ -177,11 +348,7 @@ impl FrameReader {
 
     /// Non-blocking sibling of [`Self::recv`]: decode a frame only if one is
     /// already buffered or becomes readable without blocking.
-    ///
-    /// Returns `Ok(None)` when the next frame is not yet fully available.
-    /// Used to drain a burst after the first `recv` so the attach loop paints
-    /// the run once instead of per frame (phux-jhv8).
-    pub fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
+    fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
         // A frame may already be sitting in the buffer behind the one `recv`
         // just returned; hand it over before touching the socket.
         if let Some(frame) = decode_buffered(&mut self.buf)? {
@@ -195,6 +362,49 @@ impl FrameReader {
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(None),
             Err(err) => return Err(AttachError::Io(err)),
         }
+        decode_buffered(&mut self.buf)
+    }
+}
+
+impl QuicWriter {
+    /// Encode `frame` and write it to the QUIC stream. quinn's `write_all`
+    /// queues the bytes for ordered, reliable delivery — no separate flush.
+    async fn send(&mut self, frame: &FrameKind) -> Result<(), AttachError> {
+        self.out.clear();
+        frame.encode(&mut self.out);
+        self.send
+            .write_all(&self.out)
+            .await
+            .map_err(|err| AttachError::Io(io::Error::other(err)))?;
+        Ok(())
+    }
+}
+
+impl QuicReader {
+    /// Read one complete frame off the QUIC stream. quinn's `RecvStream` is a
+    /// `tokio` `AsyncRead`, so this is the same chunk-and-reassemble loop as the
+    /// UDS path: a clean stream finish at a frame boundary surfaces as a read of
+    /// zero ([`AttachError::Disconnected`]).
+    async fn recv(&mut self) -> Result<FrameKind, AttachError> {
+        loop {
+            if let Some(frame) = decode_buffered(&mut self.buf)? {
+                return Ok(frame);
+            }
+            let n = self
+                .recv
+                .read_buf(&mut self.buf)
+                .await
+                .map_err(AttachError::Io)?;
+            if n == 0 {
+                return Err(AttachError::Disconnected);
+            }
+        }
+    }
+
+    /// Drain a frame already sitting in the buffer behind the one [`Self::recv`]
+    /// just returned. quinn has no sync ready-check, so this never reads from
+    /// the stream — it only peels off bytes a prior `recv` over-read.
+    fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
         decode_buffered(&mut self.buf)
     }
 }
