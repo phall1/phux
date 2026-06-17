@@ -41,7 +41,8 @@ use super::encode::Encoder;
 use super::error::DecodeError;
 use super::field;
 use super::info::{
-    SessionSnapshot, decode_session_snapshot, encode_client_id, encode_session_snapshot,
+    SessionSnapshot, decode_client_id, decode_session_snapshot, encode_client_id,
+    encode_session_snapshot,
 };
 
 /// Maximum permitted value of the wire-frame `length` field, per `docs/spec/proto.md` §5
@@ -396,6 +397,12 @@ pub(crate) const EVENT_TAG_PANE_CLOSED: u8 = 0x05;
 pub(crate) const EVENT_TAG_DIRTY: u8 = 0x06;
 /// Wire tag for [`AgentEvent::Idle`].
 pub(crate) const EVENT_TAG_IDLE: u8 = 0x07;
+/// Wire tag for [`AgentEvent::TerminalControl`]. The supervisory broadcast
+/// (ADR-0033): emitted to every subscriber whenever a Terminal's input lease
+/// or process lifecycle changes — who holds the wheel, and `Running` /
+/// `Frozen` / `Exited`. The live-dashboard signal and the seed of the
+/// recorded audit trail.
+pub(crate) const EVENT_TAG_TERMINAL_CONTROL: u8 = 0x08;
 
 // Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
 // spec catalog order so the allocation is stable as later verbs land:
@@ -446,6 +453,19 @@ pub(crate) const COMMAND_TAG_SUBSCRIBE_TERMINAL_EVENTS: u8 = 0x0d;
 /// command (ADR-0032) that triggers a graceful in-place re-exec. It carries no
 /// payload — the handoff state blob is built and passed server-side.
 pub(crate) const COMMAND_TAG_UPGRADE: u8 = 0x0e;
+/// Wire tag for [`Command::AcquireInput`]. The first of the three
+/// supervisory verbs (ADR-0033, "take the wheel + kill"): asserts an
+/// exclusive input lease over a Terminal so a human/operator can seize the
+/// stdin write path from whatever is driving the pane.
+pub(crate) const COMMAND_TAG_ACQUIRE_INPUT: u8 = 0x0f;
+/// Wire tag for [`Command::ReleaseInput`]. Drops the input lease held over a
+/// Terminal, returning it to `Open` (any subscriber's input passes). ADR-0033.
+pub(crate) const COMMAND_TAG_RELEASE_INPUT: u8 = 0x10;
+/// Wire tag for [`Command::SignalTerminal`]. Delivers an explicit POSIX
+/// signal (interrupt / freeze / resume / terminate / kill) to the process
+/// group inside a Terminal — distinct from `KILL_TERMINAL`, which removes the
+/// pane. The reversible `Freeze`/`Resume` brake lives here. ADR-0033.
+pub(crate) const COMMAND_TAG_SIGNAL_TERMINAL: u8 = 0x11;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -539,6 +559,12 @@ pub enum ErrorCode {
     /// The server has run out of a resource needed to satisfy the request
     /// (file descriptors, memory, PTYs, ...).
     ResourceExhausted = 202,
+    /// ADR-0033: a cooperative `ACQUIRE_INPUT` was refused because another
+    /// client already holds the Terminal's input lease. The diagnostic names
+    /// the current holder. A `Seize`-mode acquire never surfaces this — it
+    /// preempts the holder instead. (`203` is reserved for `UNSAFE_PASTE` in
+    /// SPEC §14, so this takes `204`.)
+    InputLeaseHeld = 204,
 
     /// Catch-all for unexpected server-side failures. Carries
     /// `u16::MAX = 65535` on the wire.
@@ -571,6 +597,7 @@ impl ErrorCode {
             200 => Self::InvalidCommand,
             201 => Self::PermissionDenied,
             202 => Self::ResourceExhausted,
+            204 => Self::InputLeaseHeld,
             65535 => Self::InternalError,
             _ => return None,
         })
@@ -807,6 +834,168 @@ pub enum StateScope {
     Server,
 }
 
+/// Acquisition mode for [`Command::AcquireInput`] (ADR-0033).
+///
+/// `Cooperative` grants the input lease only if the Terminal is currently
+/// `Open` (unheld) — a polite request that fails with
+/// [`ErrorCode::InputLeaseHeld`] if someone else has the wheel.
+/// `Seize` preempts the current holder unconditionally — the supervisory
+/// "take the wheel now."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InputMode {
+    /// Grant only if the lease is free; otherwise refuse.
+    Cooperative = 0,
+    /// Preempt the current holder.
+    Seize = 1,
+}
+
+impl InputMode {
+    /// Wire byte for this mode.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from the wire byte; `None` for unknown values.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Cooperative),
+            1 => Some(Self::Seize),
+            _ => None,
+        }
+    }
+}
+
+/// A POSIX signal to deliver to a Terminal's process group via
+/// [`Command::SignalTerminal`] (ADR-0033).
+///
+/// Distinct from `KILL_TERMINAL` (which removes the pane): these signal the
+/// *process* and leave the pane addressable for the post-mortem.
+/// `Freeze`/`Resume` is the reversible brake — SIGSTOP halts the agent
+/// mid-step, SIGCONT lets it run again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalSignal {
+    /// SIGINT — the Ctrl-C equivalent; lets the process clean up.
+    Interrupt = 0,
+    /// SIGSTOP — pause the process group; fully reversible via `Resume`.
+    Freeze = 1,
+    /// SIGCONT — resume a frozen process group.
+    Resume = 2,
+    /// SIGTERM — request graceful termination.
+    Terminate = 3,
+    /// SIGKILL — force termination.
+    Kill = 4,
+}
+
+impl TerminalSignal {
+    /// Wire byte for this signal.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from the wire byte; `None` for unknown values.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Interrupt),
+            1 => Some(Self::Freeze),
+            2 => Some(Self::Resume),
+            3 => Some(Self::Terminate),
+            4 => Some(Self::Kill),
+            _ => None,
+        }
+    }
+}
+
+/// Process lifecycle state of a Terminal, carried by
+/// [`AgentEvent::TerminalControl`] (ADR-0033).
+///
+/// `Exited`'s process exit status rides alongside in the event body as an
+/// `Option<i32>` (the same shape `TERMINAL_CLOSED.exit_status` uses), so this
+/// enum stays a flat discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TerminalLifecycle {
+    /// The process group is running normally.
+    Running = 0,
+    /// The process group is stopped (SIGSTOP); resumable.
+    Frozen = 1,
+    /// The process exited; the accompanying `exit_status` carries the code.
+    Exited = 2,
+}
+
+impl TerminalLifecycle {
+    /// Wire byte for this lifecycle state.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from the wire byte; `None` for unknown values.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Running),
+            1 => Some(Self::Frozen),
+            2 => Some(Self::Exited),
+            _ => None,
+        }
+    }
+}
+
+/// The supervisory action that produced an [`AgentEvent::TerminalControl`]
+/// broadcast (ADR-0033).
+///
+/// Names *what just happened* so consumers can render a log line and the audit
+/// trail can record an intent, not just a state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ControlAction {
+    /// An input lease was granted to a previously-free Terminal.
+    Acquired = 0,
+    /// An input lease was taken from a prior holder (`Seize`).
+    Seized = 1,
+    /// An input lease was released back to `Open`.
+    Released = 2,
+    /// SIGINT was delivered.
+    Interrupted = 3,
+    /// SIGSTOP was delivered; the process group is now frozen.
+    Frozen = 4,
+    /// SIGCONT was delivered; the process group resumed.
+    Resumed = 5,
+    /// SIGTERM was delivered.
+    Terminated = 6,
+    /// SIGKILL was delivered.
+    Killed = 7,
+    /// The process exited (natural or post-signal); lifecycle is now `Exited`.
+    Exited = 8,
+}
+
+impl ControlAction {
+    /// Wire byte for this action.
+    #[must_use]
+    pub const fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode from the wire byte; `None` for unknown values.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Acquired),
+            1 => Some(Self::Seized),
+            2 => Some(Self::Released),
+            3 => Some(Self::Interrupted),
+            4 => Some(Self::Frozen),
+            5 => Some(Self::Resumed),
+            6 => Some(Self::Terminated),
+            7 => Some(Self::Killed),
+            8 => Some(Self::Exited),
+            _ => None,
+        }
+    }
+}
+
 /// A typed control-plane command carried by [`FrameKind::Command`] (SPEC §5.1).
 ///
 /// `#[non_exhaustive]`: the spec catalog has seven L1 commands; v0.1 wires
@@ -937,6 +1126,41 @@ pub enum Command {
     /// `COMMAND_RESULT { Ok }` (best-effort, before the re-exec). Backs
     /// `phux upgrade`.
     Upgrade,
+    /// Assert an exclusive input lease over `terminal_id` (ADR-0033, "take
+    /// the wheel"). While a lease is held, only the holder's `INPUT_*`
+    /// frames reach the PTY; others are dropped (still acked, preserving the
+    /// fire-and-forget input invariant). `mode` chooses cooperative-or-fail
+    /// vs. preempt; `ttl_ms` is an advisory lifetime (v1 servers hold the
+    /// lease until the holder detaches or its connection drops — see
+    /// ADR-0033). Reply: `COMMAND_RESULT { Ok }` on grant, or
+    /// `Error { InputLeaseHeld, .. }` when a cooperative acquire loses to an
+    /// existing holder.
+    AcquireInput {
+        /// The Terminal whose input authority to seize.
+        terminal_id: TerminalId,
+        /// Cooperative (grant only if free) or Seize (preempt).
+        mode: InputMode,
+        /// Advisory lease lifetime in milliseconds (0 = server default).
+        ttl_ms: u32,
+    },
+    /// Release the input lease over `terminal_id`, returning it to `Open`
+    /// (ADR-0033). A no-op if the caller does not hold the lease. Reply:
+    /// `COMMAND_RESULT { Ok }`.
+    ReleaseInput {
+        /// The Terminal whose lease to release.
+        terminal_id: TerminalId,
+    },
+    /// Deliver `signal` to the process group inside `terminal_id` (ADR-0033).
+    /// Orthogonal to `KILL_TERMINAL`: this signals the process and leaves the
+    /// pane addressable (read its final screen / exit status). `Freeze`
+    /// (SIGSTOP) / `Resume` (SIGCONT) is the reversible brake. Reply:
+    /// `COMMAND_RESULT { Ok }`, or `Error { TerminalNotFound, .. }`.
+    SignalTerminal {
+        /// The Terminal whose process group to signal.
+        terminal_id: TerminalId,
+        /// The signal to deliver.
+        signal: TerminalSignal,
+    },
 }
 
 /// A successful command's payload (SPEC §5, `CommandValue`).
@@ -1048,6 +1272,28 @@ pub enum AgentEvent {
     /// window after a `Dirty`. The "output has settled" signal a `wait`
     /// consumer keys on.
     Idle,
+    /// A supervisory state change on the scoped Terminal (ADR-0033): the
+    /// input lease changed hands, or the process lifecycle moved
+    /// (`Running` → `Frozen` → `Exited`). Broadcast to every subscriber so
+    /// consumers can render "who has the wheel" and "frozen" without polling,
+    /// and so the change is recorded with intent (`action`) and identity
+    /// (`actor`) — the seed of the audit trail.
+    TerminalControl {
+        /// Current process lifecycle of the Terminal.
+        lifecycle: TerminalLifecycle,
+        /// Process exit status when `lifecycle == Exited`; `None` otherwise
+        /// (or for signal-terminated / unknown exits).
+        exit_status: Option<i32>,
+        /// The client currently holding the input lease, or `None` if the
+        /// Terminal is `Open` (any subscriber's input passes).
+        input_holder: Option<ClientId>,
+        /// What just happened (acquired / seized / released / signalled / …).
+        action: ControlAction,
+        /// The client that performed `action`, or `None` for server-driven
+        /// transitions (e.g. a natural process exit, or a lease expiring on
+        /// the holder's disconnect).
+        actor: Option<ClientId>,
+    },
     /// An event whose `tag` this protocol version does not recognise.
     ///
     /// Produced **only by the decoder** when it reads an `EVENT` frame
@@ -2741,6 +2987,28 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
         Command::Upgrade => {
             enc.write_u8(COMMAND_TAG_UPGRADE);
         }
+        Command::AcquireInput {
+            terminal_id,
+            mode,
+            ttl_ms,
+        } => {
+            enc.write_u8(COMMAND_TAG_ACQUIRE_INPUT);
+            encode_terminal_id(terminal_id, enc);
+            enc.write_u8(mode.to_u8());
+            enc.write_u32_be(*ttl_ms);
+        }
+        Command::ReleaseInput { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_RELEASE_INPUT);
+            encode_terminal_id(terminal_id, enc);
+        }
+        Command::SignalTerminal {
+            terminal_id,
+            signal,
+        } => {
+            enc.write_u8(COMMAND_TAG_SIGNAL_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+            enc.write_u8(signal.to_u8());
+        }
     }
 }
 
@@ -2845,8 +3113,65 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
             })
         }
         COMMAND_TAG_UPGRADE => Ok(Command::Upgrade),
+        COMMAND_TAG_ACQUIRE_INPUT => {
+            let terminal_id = decode_terminal_id(dec)?;
+            let mode = InputMode::from_u8(dec.read_u8()?).ok_or(DecodeError::UnknownEnumValue {
+                field: "InputMode",
+                value: 0,
+            })?;
+            let ttl_ms = dec.read_u32_be()?;
+            Ok(Command::AcquireInput {
+                terminal_id,
+                mode,
+                ttl_ms,
+            })
+        }
+        COMMAND_TAG_RELEASE_INPUT => Ok(Command::ReleaseInput {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
+        COMMAND_TAG_SIGNAL_TERMINAL => {
+            let terminal_id = decode_terminal_id(dec)?;
+            let signal =
+                TerminalSignal::from_u8(dec.read_u8()?).ok_or(DecodeError::UnknownEnumValue {
+                    field: "TerminalSignal",
+                    value: 0,
+                })?;
+            Ok(Command::SignalTerminal {
+                terminal_id,
+                signal,
+            })
+        }
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",
+            value: u32::from(other),
+        }),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// `Option<ClientId>` codec — used by `AgentEvent::TerminalControl` (ADR-0033)
+// for `input_holder` and `actor`. Tag convention matches every other `Option`
+// on the wire (`0 = None`, `1 = Some`); the body is the inner `u32` via the
+// shared `ClientId` codec ([`encode_client_id`] / [`decode_client_id`]).
+// -----------------------------------------------------------------------------
+
+fn encode_optional_client_id(value: Option<ClientId>, enc: &mut Encoder<'_>) {
+    match value {
+        None => enc.write_u8(0),
+        Some(id) => {
+            enc.write_u8(1);
+            encode_client_id(id, enc);
+        }
+    }
+}
+
+fn decode_optional_client_id(dec: &mut Decoder<'_>) -> Result<Option<ClientId>, DecodeError> {
+    let tag = dec.read_u8()?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(decode_client_id(dec)?)),
+        other => Err(DecodeError::UnknownEnumValue {
+            field: "Option<ClientId> tag",
             value: u32::from(other),
         }),
     }
@@ -3041,6 +3366,20 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
             }
             AgentEvent::Dirty => EVENT_TAG_DIRTY,
             AgentEvent::Idle => EVENT_TAG_IDLE,
+            AgentEvent::TerminalControl {
+                lifecycle,
+                exit_status,
+                input_holder,
+                action,
+                actor,
+            } => {
+                body_enc.write_u8(lifecycle.to_u8());
+                encode_optional_i32(*exit_status, &mut body_enc);
+                encode_optional_client_id(*input_holder, &mut body_enc);
+                body_enc.write_u8(action.to_u8());
+                encode_optional_client_id(*actor, &mut body_enc);
+                EVENT_TAG_TERMINAL_CONTROL
+            }
             // `Unknown` is decoder-only: an encoder that reaches here has
             // round-tripped an event this version did not understand.
             // Re-emit the captured body verbatim so a relay (a hub
@@ -3079,6 +3418,30 @@ pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, De
         },
         EVENT_TAG_DIRTY => AgentEvent::Dirty,
         EVENT_TAG_IDLE => AgentEvent::Idle,
+        EVENT_TAG_TERMINAL_CONTROL => {
+            let lifecycle = TerminalLifecycle::from_u8(body_dec.read_u8()?).ok_or(
+                DecodeError::UnknownEnumValue {
+                    field: "TerminalLifecycle",
+                    value: 0,
+                },
+            )?;
+            let exit_status = decode_optional_i32(&mut body_dec)?;
+            let input_holder = decode_optional_client_id(&mut body_dec)?;
+            let action = ControlAction::from_u8(body_dec.read_u8()?).ok_or(
+                DecodeError::UnknownEnumValue {
+                    field: "ControlAction",
+                    value: 0,
+                },
+            )?;
+            let actor = decode_optional_client_id(&mut body_dec)?;
+            AgentEvent::TerminalControl {
+                lifecycle,
+                exit_status,
+                input_holder,
+                action,
+                actor,
+            }
+        }
         // Unknown event tag: preserve the body verbatim and skip. This is
         // the forward-compat path — a v0.2.x server may add event kinds an
         // older client does not know.

@@ -22,8 +22,9 @@ use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{
-    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ErrorCode, Scope, SpawnError,
-    SpawnResult, StateScope, ViewportInfo,
+    AgentEvent, AttachTarget, Command, CommandResult, CommandValue, ControlAction, ErrorCode,
+    InputMode, Scope, SpawnError, SpawnResult, StateScope, TerminalLifecycle, TerminalSignal,
+    ViewportInfo,
 };
 use phux_protocol::wire::info::{
     LayoutNode, SessionInfo, SessionSnapshot, SplitDir, TerminalInfo, WindowInfo,
@@ -1687,6 +1688,66 @@ fn command_upgrade_round_trips() {
 }
 
 #[test]
+fn command_acquire_input_round_trips() {
+    // ADR-0033: both acquisition modes round-trip, with the advisory ttl.
+    for mode in [InputMode::Cooperative, InputMode::Seize] {
+        let frame = FrameKind::Command {
+            request_id: 11,
+            command: Command::AcquireInput {
+                terminal_id: phux_protocol::ids::TerminalId::local(7),
+                mode,
+                ttl_ms: 30_000,
+            },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
+}
+
+#[test]
+fn command_release_input_round_trips() {
+    let frame = FrameKind::Command {
+        request_id: 12,
+        command: Command::ReleaseInput {
+            terminal_id: phux_protocol::ids::TerminalId::local(7),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
+fn command_signal_terminal_round_trips() {
+    // ADR-0033: every signal variant round-trips.
+    for signal in [
+        TerminalSignal::Interrupt,
+        TerminalSignal::Freeze,
+        TerminalSignal::Resume,
+        TerminalSignal::Terminate,
+        TerminalSignal::Kill,
+    ] {
+        let frame = FrameKind::Command {
+            request_id: 13,
+            command: Command::SignalTerminal {
+                terminal_id: phux_protocol::ids::TerminalId::local(3),
+                signal,
+            },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
+}
+
+#[test]
 fn command_get_screen_round_trips() {
     // GET_SCREEN (tag 0x07): TerminalId + a trailing optional<u32>
     // `request_scrollback` (phux-o1v) + a trailing bool `cells` (phux-8yl).
@@ -2070,6 +2131,24 @@ fn arb_agent_event() -> impl Strategy<Value = AgentEvent> {
             .prop_map(|exit_status| AgentEvent::PaneClosed { exit_status }),
         Just(AgentEvent::Dirty),
         Just(AgentEvent::Idle),
+        // ADR-0033 TerminalControl: exercise the full lifecycle × action
+        // space plus both `Option<ClientId>` slots.
+        (
+            0u8..3,
+            proptest::option::of(any::<i32>()),
+            proptest::option::of(any::<u32>()),
+            0u8..9,
+            proptest::option::of(any::<u32>()),
+        )
+            .prop_map(
+                |(lc, exit_status, holder, ac, actor)| AgentEvent::TerminalControl {
+                    lifecycle: TerminalLifecycle::from_u8(lc).unwrap(),
+                    exit_status,
+                    input_holder: holder.map(ClientId::new),
+                    action: ControlAction::from_u8(ac).unwrap(),
+                    actor: actor.map(ClientId::new),
+                }
+            ),
     ]
 }
 
