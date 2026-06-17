@@ -11,7 +11,9 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
-use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
+use phux_protocol::wire::frame::{
+    Command, FrameKind, InputMode, SESSION_NAME_KEY, Scope, TerminalSignal,
+};
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
@@ -500,6 +502,12 @@ async fn apply_action_effects<W: super::RenderSink>(
     for frame in effects.kill_frames {
         conn.send(&frame).await?;
     }
+    // ADR-0033: supervisory COMMAND frames (take/give the wheel, signal the
+    // pane). Fire-and-forward — the server's COMMAND_RESULT + TerminalControl
+    // broadcast drive the chrome; the input loop does not block on the reply.
+    for frame in effects.command_frames {
+        conn.send(&frame).await?;
+    }
     // phux-eb0 / new-session: an in-process re-attach request. Hand the
     // target up to the driver via `ctx.switch_request`; `main_loop` reads
     // it after this dispatch batch and returns a `SwitchTo` exit so the
@@ -657,6 +665,12 @@ struct ActionEffects {
     /// resulting `TERMINAL_CLOSED` from the server folds the pane out
     /// of the layout in [`crate::attach::server_frame::handle_server_frame`].
     kill_frames: Vec<FrameKind>,
+    /// ADR-0033: supervisory commands (`ACQUIRE_INPUT` / `RELEASE_INPUT` /
+    /// `SIGNAL_TERMINAL`) the `take-input` / `give-input` / `signal-terminal`
+    /// actions built for the focused pane. The async caller sends each as a
+    /// `COMMAND` frame in order; the server's `TerminalControl` broadcast (which
+    /// we subscribed to at attach) drives the chrome update on the way back.
+    command_frames: Vec<FrameKind>,
     /// phux-4li.20 / phux-eb0 / new-session: an in-process re-attach the
     /// driver should perform after this batch — either switch to an
     /// existing session or create a new one. [`apply_action_effects`]
@@ -727,6 +741,9 @@ pub const ACTION_NAMES: &[&str] = &[
     "session-picker",
     "switch-session",
     "new-session",
+    "take-input",
+    "give-input",
+    "signal-terminal",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -737,6 +754,7 @@ pub const ACTION_NAMES: &[&str] = &[
 /// failure doesn't leave layout state half-mutated.
 #[allow(
     clippy::too_many_lines,
+    clippy::cognitive_complexity,
     reason = "per-action arms accrete one-by-one; splitting into per-action helpers would obscure the central dispatch table"
 )]
 fn run_action(
@@ -818,6 +836,70 @@ fn run_action(
                 return effects;
             };
             effects.kill_frames = soft_kill_input_frames(&focused_id);
+        }
+        "take-input" => {
+            // ADR-0033: seize the focused pane's input lease so only this
+            // client's keystrokes reach the PTY. `Seize` preempts any holder;
+            // the server broadcasts `TerminalControl` so the badge updates.
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("take-input: no focused pane; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            effects.command_frames.push(FrameKind::Command {
+                request_id,
+                command: Command::AcquireInput {
+                    terminal_id: focused_id,
+                    mode: InputMode::Seize,
+                    ttl_ms: 0,
+                },
+            });
+        }
+        "give-input" => {
+            // ADR-0033: release the focused pane's input lease back to open
+            // input. A no-op server-side if we do not hold it.
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("give-input: no focused pane; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            effects.command_frames.push(FrameKind::Command {
+                request_id,
+                command: Command::ReleaseInput {
+                    terminal_id: focused_id,
+                },
+            });
+        }
+        "signal-terminal" => {
+            // ADR-0033: deliver a POSIX signal to the focused pane's process
+            // group. `freeze`/`resume` is the reversible brake; distinct from
+            // `kill-pane`, which removes the pane.
+            let Some(signal) = signal_arg(resolved) else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "signal-terminal missing/bad `signal` arg (interrupt|freeze|resume|terminate|kill)",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("signal-terminal: no focused pane; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            effects.command_frames.push(FrameKind::Command {
+                request_id,
+                command: Command::SignalTerminal {
+                    terminal_id: focused_id,
+                    signal,
+                },
+            });
         }
         "new-window" => {
             // phux-4li.15: open a new window. Spawn a fresh Terminal
@@ -1310,6 +1392,21 @@ fn split_dir_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<Spli
     match s {
         "horizontal" => Some(SplitDir::Vertical),
         "vertical" => Some(SplitDir::Horizontal),
+        _ => None,
+    }
+}
+
+/// ADR-0033: parse the `signal` arg of a `signal-terminal` action into a
+/// [`TerminalSignal`]. Recognises `interrupt` / `freeze` / `resume` /
+/// `terminate` / `kill`; returns `None` for a missing or unknown value (the
+/// arm bells and drops the action).
+fn signal_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<TerminalSignal> {
+    match resolved.args.get("signal")?.as_str()? {
+        "interrupt" => Some(TerminalSignal::Interrupt),
+        "freeze" => Some(TerminalSignal::Freeze),
+        "resume" => Some(TerminalSignal::Resume),
+        "terminate" => Some(TerminalSignal::Terminate),
+        "kill" => Some(TerminalSignal::Kill),
         _ => None,
     }
 }

@@ -199,6 +199,21 @@ pub const REGISTRY: &[ActionSpec] = &[
         description: "Detach this client from the session",
         args: &[],
     },
+    ActionSpec {
+        name: "take-input",
+        description: "Take the wheel: seize exclusive input over the focused pane (ADR-0033)",
+        args: &[],
+    },
+    ActionSpec {
+        name: "give-input",
+        description: "Give back the wheel: release the focused pane's input lease (ADR-0033)",
+        args: &[],
+    },
+    ActionSpec {
+        name: "signal-terminal",
+        description: "Signal the focused pane's process group (freeze/resume/kill, ADR-0033)",
+        args: &[("signal", ArgValue::Str("freeze"))],
+    },
 ];
 
 /// Build the palette's [`SelectItem`] rows from the [`REGISTRY`],
