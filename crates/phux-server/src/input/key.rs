@@ -138,6 +138,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn encodes_ctrl_j_to_line_feed() {
+        // Ctrl+J must reach the PTY as LF (0x0A), distinct from Enter's CR. The
+        // client parser produces this event from a 0x0A input byte.
+        let terminal = make_terminal();
+        let mut enc = PerTerminalKeyEncoder::new().expect("encoder");
+        let ev = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::J,
+            mods: ModSet::CTRL,
+            consumed_mods: ModSet::CTRL,
+            composing: false,
+            text: None,
+            unshifted_codepoint: Some(u32::from('j')),
+        };
+        let bytes = enc.encode(&ev, &terminal).expect("encode");
+        assert_eq!(bytes, b"\n", "Ctrl+J must encode to LF, got {bytes:?}");
+    }
+
     /// ADR-0024: the wire atoms are phux-owned but share libghostty's
     /// discriminants; the `server`-gated conversions are lossless for known
     /// values, keeping the two in lockstep.
