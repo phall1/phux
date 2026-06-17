@@ -20,11 +20,22 @@
 //!   no-op.
 //! - Esc dismisses ([`OverlayCommand::Dismiss`]).
 //!
-//! ## Filtering
+//! ## Filtering and ranking
 //!
-//! Filtering is a subsequence (fuzzy) match of the lowercased query
-//! against each item's `filter_text` (label + secondary). An empty query
-//! matches everything. See [`fuzzy_match`].
+//! Filtering is a *scored* subsequence (fuzzy) match of the lowercased
+//! query against each item's `filter_text` (label + secondary). An empty
+//! query matches everything (and preserves source order). A non-empty
+//! query keeps only matching rows and sorts them best-first: typing `sp`
+//! floats `split-pane` above `toggle-sidebar`. See [`fuzzy_score`].
+//!
+//! ## Headers and grouping
+//!
+//! A row may be a non-selectable [`SelectKind::Header`] — a dim section
+//! label (category in the palette, session in the grouped window picker).
+//! Headers never match a query, are skipped by navigation and Enter, and
+//! are hidden entirely once the user starts typing (a filtered list is a
+//! flat best-first ranking, not a grouped one). Selectable rows may be
+//! [`indented`](SelectItem::indented) to nest under the header above them.
 
 use phux_config::keybind::ResolvedAction;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -37,7 +48,19 @@ use super::widgets::{Modal, centered};
 use super::{OverlayCommand, RenderOverlay};
 use crate::render::Theme;
 
-/// One selectable row in a [`SelectList`].
+/// Whether a [`SelectItem`] is a selectable row or a non-selectable
+/// section header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectKind {
+    /// A normal selectable row that commits its [`SelectItem::action`].
+    Item,
+    /// A dim, non-selectable section label (a palette category, or a
+    /// session group in the window picker). Skipped by navigation/Enter
+    /// and hidden once the user types a query.
+    Header,
+}
+
+/// One row in a [`SelectList`] — either a selectable item or a header.
 #[derive(Debug, Clone)]
 pub struct SelectItem {
     /// Primary display label (left column), e.g. an action name or a
@@ -48,8 +71,13 @@ pub struct SelectItem {
     pub secondary: Option<String>,
     /// The action committed when this item is chosen. Flows straight
     /// into the dispatcher's `run_action()` — the same path a keybind
-    /// takes.
+    /// takes. Ignored for [`SelectKind::Header`] rows.
     pub action: ResolvedAction,
+    /// Whether this row is selectable or a section header.
+    pub kind: SelectKind,
+    /// Indent the label one level (two spaces) so selectable rows nest
+    /// visually under the [`SelectKind::Header`] above them.
+    pub indented: bool,
 }
 
 impl SelectItem {
@@ -61,6 +89,25 @@ impl SelectItem {
             label: label.into(),
             secondary: None,
             action,
+            kind: SelectKind::Item,
+            indented: false,
+        }
+    }
+
+    /// A non-selectable, dim section header labelled `label`. Carries no
+    /// runnable action (a no-op [`ResolvedAction`] placeholder); the list
+    /// never commits it.
+    #[must_use]
+    pub fn header(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            secondary: None,
+            action: ResolvedAction {
+                action: String::new(),
+                args: std::collections::BTreeMap::new(),
+            },
+            kind: SelectKind::Header,
+            indented: false,
         }
     }
 
@@ -69,6 +116,20 @@ impl SelectItem {
     pub fn secondary(mut self, secondary: impl Into<String>) -> Self {
         self.secondary = Some(secondary.into());
         self
+    }
+
+    /// Mark this selectable row as nested under the header above it
+    /// (renders with a two-space indent).
+    #[must_use]
+    pub const fn indented(mut self) -> Self {
+        self.indented = true;
+        self
+    }
+
+    /// `true` for a non-selectable [`SelectKind::Header`] row.
+    #[must_use]
+    pub const fn is_header(&self) -> bool {
+        matches!(self.kind, SelectKind::Header)
     }
 
     /// The text the query is fuzzy-matched against: label plus secondary
@@ -109,24 +170,81 @@ impl SelectList {
     /// items visible).
     #[must_use]
     pub fn new(title: impl Into<String>, items: Vec<SelectItem>, theme: &Theme) -> Self {
-        Self {
+        let mut list = Self {
             title: title.into(),
             items,
             query: String::new(),
             selected: 0,
             theme: *theme,
-        }
+        };
+        // The first row may be a header (grouped pickers always open on
+        // one); start the cursor on the first selectable row instead.
+        let indices = list.filtered_indices();
+        list.snap_to_selectable(&indices);
+        list
     }
 
-    /// Indices of items matching the current query, in original order.
+    /// Indices of items to display for the current query.
+    ///
+    /// With an empty query every row is shown in source order, headers
+    /// included, so the grouped layout reads as authored. With a non-empty
+    /// query, headers are dropped (a filtered view is a flat ranking, not a
+    /// grouped one) and the surviving selectable rows are sorted best-first
+    /// by [`fuzzy_score`]; ties keep source order (stable sort) so the
+    /// ordering is deterministic.
     fn filtered_indices(&self) -> Vec<usize> {
         let q = self.query.to_lowercase();
-        self.items
+        if q.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let mut scored: Vec<(i32, usize)> = self
+            .items
             .iter()
             .enumerate()
-            .filter(|(_, item)| fuzzy_match(&q, &item.filter_text().to_lowercase()))
-            .map(|(i, _)| i)
-            .collect()
+            .filter(|(_, item)| !item.is_header())
+            .filter_map(|(i, item)| {
+                fuzzy_score(&q, &item.filter_text().to_lowercase()).map(|score| (score, i))
+            })
+            .collect();
+        // Higher score first; ties broken by original index (stable).
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Whether the visible row at `row` (an index into `indices`) is a
+    /// selectable item (not a header).
+    fn row_selectable(&self, indices: &[usize], row: usize) -> bool {
+        indices
+            .get(row)
+            .is_some_and(|&idx| !self.items[idx].is_header())
+    }
+
+    /// Advance `selected` to the nearest selectable row at or after the
+    /// current position, then clamp. Keeps the cursor off header rows when
+    /// the list opens or a filter change lands it on one.
+    fn snap_to_selectable(&mut self, indices: &[usize]) {
+        let visible = indices.len();
+        self.clamp_selection(visible);
+        if visible == 0 {
+            return;
+        }
+        // Search forward for a selectable row, then backward, so a header
+        // at the very bottom still resolves to a real item.
+        if self.row_selectable(indices, self.selected) {
+            return;
+        }
+        for row in self.selected..visible {
+            if self.row_selectable(indices, row) {
+                self.selected = row;
+                return;
+            }
+        }
+        for row in (0..self.selected).rev() {
+            if self.row_selectable(indices, row) {
+                self.selected = row;
+                return;
+            }
+        }
     }
 
     /// Clamp `selected` so it always points at a visible row (or 0 when
@@ -139,17 +257,33 @@ impl SelectList {
         }
     }
 
-    /// Move the selection one row down within `visible` rows, saturating
-    /// at the bottom (no wrap — matches the prompt overlay's restraint).
-    const fn select_down(&mut self, visible: usize) {
-        if visible != 0 && self.selected + 1 < visible {
-            self.selected += 1;
+    /// Move the selection down to the next selectable row within `indices`,
+    /// saturating at the bottom (no wrap — matches the prompt overlay's
+    /// restraint). Header rows are skipped so the cursor only ever lands on
+    /// a runnable item.
+    fn select_down(&mut self, indices: &[usize]) {
+        let visible = indices.len();
+        let mut row = self.selected;
+        while row + 1 < visible {
+            row += 1;
+            if self.row_selectable(indices, row) {
+                self.selected = row;
+                return;
+            }
         }
     }
 
-    /// Move the selection one row up, saturating at the top.
-    const fn select_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+    /// Move the selection up to the previous selectable row, saturating at
+    /// the top and skipping header rows.
+    fn select_up(&mut self, indices: &[usize]) {
+        let mut row = self.selected;
+        while row > 0 {
+            row -= 1;
+            if self.row_selectable(indices, row) {
+                self.selected = row;
+                return;
+            }
+        }
     }
 
     /// The modal rect: 60% of the viewport, min 30x10, clamped to the
@@ -181,10 +315,26 @@ impl SelectList {
 
         for (row, &idx) in indices.iter().enumerate() {
             let item = &self.items[idx];
+            if item.is_header() {
+                lines.push(self.header_line(item));
+                continue;
+            }
             let selected = row == self.selected;
             lines.push(self.item_line(item, selected, inner_width));
         }
         lines
+    }
+
+    /// A dim, non-selectable section-header row, styled with the theme's
+    /// `section_header` slot (the same slot the help modal uses for its
+    /// headings).
+    fn header_line(&self, item: &SelectItem) -> Line<'static> {
+        Line::from(Span::styled(
+            item.label.clone(),
+            Style::default()
+                .fg(self.theme.section_header)
+                .add_modifier(Modifier::DIM),
+        ))
     }
 
     /// One list row: label on the left, optional dimmed secondary
@@ -192,7 +342,8 @@ impl SelectList {
     /// reverse-video across its visible width.
     fn item_line(&self, item: &SelectItem, selected: bool, inner_width: u16) -> Line<'static> {
         let width = inner_width as usize;
-        let label = item.label.clone();
+        let indent = if item.indented { "  " } else { "" };
+        let label = format!("{indent}{}", item.label);
         let secondary = item.secondary.clone().unwrap_or_default();
         // Lay out `label .... secondary` within `width`. The gap is at
         // least one space; secondary is truncated implicitly by the
@@ -241,18 +392,17 @@ impl RenderOverlay for SelectList {
             return OverlayCommand::Stay;
         }
         let indices = self.filtered_indices();
-        let visible = indices.len();
-        self.clamp_selection(visible);
+        self.snap_to_selectable(&indices);
 
         // Ctrl-modified navigation works regardless of query content.
         if key.mods.contains(ModSet::CTRL) {
             match key.key {
                 PhysicalKey::N => {
-                    self.select_down(visible);
+                    self.select_down(&indices);
                     return OverlayCommand::Stay;
                 }
                 PhysicalKey::P => {
-                    self.select_up();
+                    self.select_up(&indices);
                     return OverlayCommand::Stay;
                 }
                 _ => {}
@@ -261,34 +411,41 @@ impl RenderOverlay for SelectList {
 
         match key.key {
             PhysicalKey::Escape => OverlayCommand::Dismiss,
+            // Enter commits only a selectable row; a header (or empty list)
+            // is a no-op.
             PhysicalKey::Enter => indices
                 .get(self.selected)
                 .map_or(OverlayCommand::Stay, |&idx| {
-                    OverlayCommand::Commit(self.items[idx].action.clone())
+                    let item = &self.items[idx];
+                    if item.is_header() {
+                        OverlayCommand::Stay
+                    } else {
+                        OverlayCommand::Commit(item.action.clone())
+                    }
                 }),
             PhysicalKey::ArrowDown => {
-                self.select_down(visible);
+                self.select_down(&indices);
                 OverlayCommand::Stay
             }
             PhysicalKey::ArrowUp => {
-                self.select_up();
+                self.select_up(&indices);
                 OverlayCommand::Stay
             }
             PhysicalKey::Backspace => {
                 self.query.pop();
-                let visible = self.filtered_indices().len();
-                self.clamp_selection(visible);
+                let indices = self.filtered_indices();
+                self.snap_to_selectable(&indices);
                 OverlayCommand::Stay
             }
             // `j`/`k` navigate only while the query is empty (so a fresh
             // list is vi-navigable); once the user types, they're filter
             // text like any other letter.
             PhysicalKey::J if self.query.is_empty() => {
-                self.select_down(visible);
+                self.select_down(&indices);
                 OverlayCommand::Stay
             }
             PhysicalKey::K if self.query.is_empty() => {
-                self.select_up();
+                self.select_up(&indices);
                 OverlayCommand::Stay
             }
             _ => {
@@ -296,8 +453,8 @@ impl RenderOverlay for SelectList {
                     && !t.chars().any(char::is_control)
                 {
                     self.query.push_str(t);
-                    let visible = self.filtered_indices().len();
-                    self.clamp_selection(visible);
+                    let indices = self.filtered_indices();
+                    self.snap_to_selectable(&indices);
                 }
                 OverlayCommand::Stay
             }
@@ -305,23 +462,79 @@ impl RenderOverlay for SelectList {
     }
 }
 
-/// Subsequence (fuzzy) match.
+/// Scored subsequence (fuzzy) match.
 ///
-/// Every char of `needle` appears in `haystack` in order (not necessarily
-/// contiguously). An empty needle matches everything. Both arguments are
-/// expected lowercased by the caller.
+/// Returns `Some(score)` when every char of `needle` appears in `haystack`
+/// in order (not necessarily contiguously), or `None` when it does not.
+/// An empty needle scores `0` (matches everything). Both arguments are
+/// expected lowercased by the caller. Higher scores are better matches.
+///
+/// The score rewards the qualities that make one subsequence match read as
+/// "more relevant" than another:
+///
+/// - **Contiguous runs.** Consecutive matched chars compound (each step in
+///   a run is worth more than the last), so `sp` against `split-pane`
+///   (a two-char run at the front) outranks `sp` against `toggle-sidebar`
+///   (the `s` and `p` are far apart).
+/// - **Word-boundary / prefix hits.** A matched char at position 0, or
+///   immediately after a separator (`-`, `_`, space), earns a bonus — it
+///   reads as the start of a meaningful token.
+/// - **Earliness.** A small penalty grows with the gap skipped before each
+///   match, so matches that cluster near the front of the haystack win.
+///
+/// The exact constants are tuned for short action/window labels, not a
+/// general-purpose corpus; only the *ordering* they induce is contractual
+/// (see the unit tests).
+#[must_use]
+pub fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let hay: Vec<char> = haystack.chars().collect();
+    let mut score: i32 = 0;
+    let mut run: i32 = 0;
+    let mut hay_idx: usize = 0;
+    let mut last_match: Option<usize> = None;
+
+    for nc in needle.chars() {
+        // Advance through the haystack to the next occurrence of `nc`.
+        let found = hay[hay_idx..].iter().position(|&hc| hc == nc)?;
+        let pos = hay_idx + found;
+
+        // Gap penalty: chars skipped since the previous match (or the start
+        // of the haystack for the first char). Earlier, tighter matches win.
+        let gap = last_match.map_or(pos, |prev| pos - prev - 1);
+        score -= i32::try_from(gap).unwrap_or(i32::MAX).min(20);
+
+        // Word-boundary / prefix bonus.
+        let at_boundary = pos == 0
+            || hay
+                .get(pos - 1)
+                .is_some_and(|c| matches!(c, '-' | '_' | ' ' | ':' | '/'));
+        if at_boundary {
+            score += 10;
+        }
+
+        // Contiguous-run bonus: matching right after the previous match
+        // continues a run; each additional step in the run is worth more.
+        if last_match.is_some_and(|prev| prev + 1 == pos) {
+            run += 1;
+            score += 5 + run * 5;
+        } else {
+            run = 0;
+        }
+
+        last_match = Some(pos);
+        hay_idx = pos + 1;
+    }
+    Some(score)
+}
+
+/// Boolean subsequence test — `true` iff [`fuzzy_score`] would match.
+/// Retained as a convenience for callers that only need a yes/no answer.
 #[must_use]
 pub fn fuzzy_match(needle: &str, haystack: &str) -> bool {
-    let mut hay = haystack.chars();
-    'outer: for nc in needle.chars() {
-        for hc in hay.by_ref() {
-            if hc == nc {
-                continue 'outer;
-            }
-        }
-        return false;
-    }
-    true
+    fuzzy_score(needle, haystack).is_some()
 }
 
 #[cfg(test)]
@@ -374,6 +587,149 @@ mod tests {
         // Order matters: "wen" can't be a subsequence — there is no 'e'
         // after the first 'w' in "new-window".
         assert!(!fuzzy_match("wen", "new-window"));
+    }
+
+    #[test]
+    fn fuzzy_score_none_for_non_subsequence() {
+        assert_eq!(fuzzy_score("zzz", "new-window"), None);
+        assert_eq!(fuzzy_score("wen", "new-window"), None);
+    }
+
+    #[test]
+    fn fuzzy_score_empty_needle_scores_zero() {
+        assert_eq!(fuzzy_score("", "anything"), Some(0));
+    }
+
+    #[test]
+    fn fuzzy_score_prefers_split_pane_for_sp() {
+        // The worked example: "sp" should rank "split-pane" (a contiguous,
+        // front-anchored run) above another row that also matches "sp" only
+        // as a scattered subsequence. "previous-pane" has an `s` (end of
+        // "previous") followed later by the `p` of "pane", so it matches
+        // too — but with no contiguous run and a wide gap.
+        let split = fuzzy_score("sp", "split-pane").expect("split-pane matches sp");
+        let scattered = fuzzy_score("sp", "previous-pane").expect("previous-pane matches sp");
+        assert!(
+            split > scattered,
+            "split-pane ({split}) should outrank previous-pane ({scattered}) for `sp`",
+        );
+    }
+
+    #[test]
+    fn fuzzy_score_rewards_word_boundary() {
+        // "p" hitting the start of the "pane" token beats "p" buried
+        // mid-word.
+        let boundary = fuzzy_score("p", "split-pane").expect("matches");
+        let mid = fuzzy_score("p", "copy-mode").expect("matches");
+        assert!(
+            boundary > mid,
+            "boundary hit ({boundary}) should beat mid-word hit ({mid})",
+        );
+    }
+
+    #[test]
+    fn ranking_floats_best_match_to_top() {
+        let items = vec![
+            SelectItem::new("toggle-sidebar", action("toggle-sidebar")),
+            SelectItem::new("split-pane", action("split-pane")),
+            SelectItem::new("previous-pane", action("previous-pane")),
+        ];
+        let mut sl = SelectList::new("palette", items, &Theme::default());
+        for ch in ['s', 'p'] {
+            sl.handle_key(&press(PhysicalKey::A, Some(&ch.to_string())));
+        }
+        let idx = sl.filtered_indices();
+        assert_eq!(
+            sl.items[idx[0]].label,
+            "split-pane",
+            "`sp` must rank split-pane first, got {:?}",
+            idx.iter().map(|&i| &sl.items[i].label).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn ranking_is_stable_for_equal_scores() {
+        // Two labels for which the query matches at the identical position
+        // and context score identically; a stable sort then keeps source
+        // order, so the ranking is deterministic frame-to-frame. Both start
+        // "x-…", so "x" hits index 0 (a front-anchored, boundary match) in
+        // each.
+        let items = vec![
+            SelectItem::new("x-alpha", action("a")),
+            SelectItem::new("x-bravo", action("b")),
+        ];
+        let a = fuzzy_score("x", "x-alpha");
+        let b = fuzzy_score("x", "x-bravo");
+        assert_eq!(a, b, "the two labels must score equally for the test");
+        let mut sl = SelectList::new("palette", items, &Theme::default());
+        sl.handle_key(&press(PhysicalKey::A, Some("x")));
+        let idx = sl.filtered_indices();
+        assert_eq!(idx, vec![0, 1], "equal scores keep source order");
+    }
+
+    #[test]
+    fn empty_query_preserves_source_order_with_headers() {
+        let items = vec![
+            SelectItem::header("Pane"),
+            SelectItem::new("split-pane", action("split-pane")).indented(),
+            SelectItem::header("Window"),
+            SelectItem::new("new-window", action("new-window")).indented(),
+        ];
+        let sl = SelectList::new("palette", items, &Theme::default());
+        assert_eq!(sl.filtered_indices(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn headers_drop_out_when_filtering() {
+        let items = vec![
+            SelectItem::header("Pane"),
+            SelectItem::new("split-pane", action("split-pane")).indented(),
+            SelectItem::header("Window"),
+            SelectItem::new("new-window", action("new-window")).indented(),
+        ];
+        let mut sl = SelectList::new("palette", items, &Theme::default());
+        sl.handle_key(&press(PhysicalKey::A, Some("s")));
+        let idx = sl.filtered_indices();
+        assert!(
+            idx.iter().all(|&i| !sl.items[i].is_header()),
+            "no headers survive a non-empty query",
+        );
+    }
+
+    #[test]
+    fn navigation_skips_header_rows() {
+        let items = vec![
+            SelectItem::header("Pane"),
+            SelectItem::new("split-pane", action("split-pane")).indented(),
+            SelectItem::header("Window"),
+            SelectItem::new("new-window", action("new-window")).indented(),
+        ];
+        let mut sl = SelectList::new("palette", items, &Theme::default());
+        // Opens on the first selectable row (skips the leading header).
+        let cmd = sl.handle_key(&press(PhysicalKey::Enter, None));
+        let OverlayCommand::Commit(a) = cmd else {
+            panic!("expected Commit, got {cmd:?}");
+        };
+        assert_eq!(a.action, "split-pane");
+        // Down jumps over the "Window" header straight to new-window.
+        sl.handle_key(&press(PhysicalKey::ArrowDown, None));
+        let cmd = sl.handle_key(&press(PhysicalKey::Enter, None));
+        let OverlayCommand::Commit(a) = cmd else {
+            panic!("expected Commit");
+        };
+        assert_eq!(a.action, "new-window");
+    }
+
+    #[test]
+    fn enter_on_header_does_not_commit() {
+        // A list with only a header has no selectable row; Enter is a
+        // no-op rather than committing the header's placeholder action.
+        let items = vec![SelectItem::header("Pane")];
+        let mut sl = SelectList::new("palette", items, &Theme::default());
+        assert_eq!(
+            sl.handle_key(&press(PhysicalKey::Enter, None)),
+            OverlayCommand::Stay,
+        );
     }
 
     #[test]

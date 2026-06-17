@@ -32,12 +32,44 @@ use phux_config::{Action, KeybindingsCfg};
 
 use crate::render::overlay::select_list::SelectItem;
 
+/// The category a palette action groups under. Drives the dim section
+/// headers the palette renders between groups; rows keep their category's
+/// source order within a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    /// Pane-level actions: split, kill, focus, resize, zoom, cycle.
+    Pane,
+    /// Window ("tab") actions: new/kill/cycle/rename/pick.
+    Window,
+    /// Session actions: new/rename/pick.
+    Session,
+    /// View / chrome actions: sidebar, help, detach.
+    View,
+}
+
+impl Category {
+    /// All categories in the order the palette renders their sections.
+    const ORDER: &'static [Self] = &[Self::Pane, Self::Window, Self::Session, Self::View];
+
+    /// The section-header label shown above this category's rows.
+    const fn header(self) -> &'static str {
+        match self {
+            Self::Pane => "Pane",
+            Self::Window => "Window",
+            Self::Session => "Session",
+            Self::View => "View",
+        }
+    }
+}
+
 /// A registry row: an action the palette can offer.
 #[derive(Debug, Clone, Copy)]
 pub struct ActionSpec {
     /// Canonical action name (matches a `run_action` arm and an
     /// [`super::input_dispatch::ACTION_NAMES`] entry).
     pub name: &'static str,
+    /// The section the palette groups this action under.
+    pub category: Category,
     /// One-line human description shown in the palette.
     pub description: &'static str,
     /// Inline `(key, value)` args the palette-committed
@@ -103,66 +135,25 @@ impl ActionSpec {
 pub const REGISTRY: &[ActionSpec] = &[
     ActionSpec {
         name: "split-pane",
+        category: Category::Pane,
         description: "Split the focused pane side-by-side (vertical divider)",
         args: &[("direction", ArgValue::Str("vertical"))],
     },
     ActionSpec {
         name: "kill-pane",
+        category: Category::Pane,
         description: "Close the focused pane",
         args: &[],
     },
     ActionSpec {
-        name: "new-window",
-        description: "Open a new window",
-        args: &[],
-    },
-    ActionSpec {
-        name: "kill-window",
-        description: "Close the active window and all its panes",
-        args: &[],
-    },
-    ActionSpec {
-        name: "next-window",
-        description: "Switch to the next window",
-        args: &[],
-    },
-    ActionSpec {
-        name: "previous-window",
-        description: "Switch to the previous window",
-        args: &[],
-    },
-    ActionSpec {
-        name: "window-picker",
-        description: "Pick a window from a filterable list",
-        args: &[],
-    },
-    ActionSpec {
-        name: "session-picker",
-        description: "Pick a session from a filterable list",
-        args: &[],
-    },
-    ActionSpec {
-        name: "new-session",
-        description: "Create a new session and switch to it",
-        args: &[],
-    },
-    ActionSpec {
-        name: "rename-window",
-        description: "Rename the active window (interactive prompt)",
-        args: &[],
-    },
-    ActionSpec {
-        name: "rename-session",
-        description: "Rename the current session (interactive prompt)",
-        args: &[],
-    },
-    ActionSpec {
         name: "focus-direction",
+        category: Category::Pane,
         description: "Move focus to the pane on the left",
         args: &[("direction", ArgValue::Str("left"))],
     },
     ActionSpec {
         name: "resize-pane",
+        category: Category::Pane,
         description: "Grow the focused pane to the left",
         args: &[
             ("direction", ArgValue::Str("left")),
@@ -171,53 +162,124 @@ pub const REGISTRY: &[ActionSpec] = &[
     },
     ActionSpec {
         name: "next-pane",
+        category: Category::Pane,
         description: "Cycle focus to the next pane",
         args: &[],
     },
     ActionSpec {
         name: "previous-pane",
+        category: Category::Pane,
         description: "Cycle focus to the previous pane",
         args: &[],
     },
     ActionSpec {
         name: "toggle-zoom",
+        category: Category::Pane,
         description: "Zoom the focused pane to fill the window (toggle)",
         args: &[],
     },
     ActionSpec {
+        name: "new-window",
+        category: Category::Window,
+        description: "Open a new window",
+        args: &[],
+    },
+    ActionSpec {
+        name: "kill-window",
+        category: Category::Window,
+        description: "Close the active window and all its panes",
+        args: &[],
+    },
+    ActionSpec {
+        name: "next-window",
+        category: Category::Window,
+        description: "Switch to the next window",
+        args: &[],
+    },
+    ActionSpec {
+        name: "previous-window",
+        category: Category::Window,
+        description: "Switch to the previous window",
+        args: &[],
+    },
+    ActionSpec {
+        name: "window-picker",
+        category: Category::Window,
+        description: "Pick a window from all sessions (grouped)",
+        args: &[],
+    },
+    ActionSpec {
+        name: "rename-window",
+        category: Category::Window,
+        description: "Rename the active window (interactive prompt)",
+        args: &[],
+    },
+    ActionSpec {
+        name: "session-picker",
+        category: Category::Session,
+        description: "Pick a session from a filterable list",
+        args: &[],
+    },
+    ActionSpec {
+        name: "new-session",
+        category: Category::Session,
+        description: "Create a new session and switch to it",
+        args: &[],
+    },
+    ActionSpec {
+        name: "rename-session",
+        category: Category::Session,
+        description: "Rename the current session (interactive prompt)",
+        args: &[],
+    },
+    ActionSpec {
         name: "toggle-sidebar",
+        category: Category::View,
         description: "Show or hide the window sidebar (toggle)",
         args: &[],
     },
     ActionSpec {
         name: "show-help",
+        category: Category::View,
         description: "Show the keybindings help overlay",
         args: &[],
     },
     ActionSpec {
         name: "detach",
+        category: Category::View,
         description: "Detach this client from the session",
         args: &[],
     },
     ActionSpec {
         name: "take-input",
+        category: Category::Pane,
         description: "Take the wheel: seize exclusive input over the focused pane (ADR-0033)",
         args: &[],
     },
     ActionSpec {
         name: "give-input",
+        category: Category::Pane,
         description: "Give back the wheel: release the focused pane's input lease (ADR-0033)",
         args: &[],
     },
     ActionSpec {
         name: "signal-terminal",
+        category: Category::Pane,
         description: "Signal the focused pane's process group (freeze/resume/kill, ADR-0033)",
         args: &[("signal", ArgValue::Str("freeze"))],
     },
 ];
 
 /// Build the palette's [`SelectItem`] rows from the [`REGISTRY`],
-/// annotating each with its currently-bound chord (or `"unbound"`).
+/// annotating each with its currently-bound chord (or `"unbound"`) and
+/// grouping them under dim category headers ([`Category`]).
+///
+/// Rows are emitted category-by-category in [`Category`] order; each
+/// non-empty category is preceded by a [`SelectItem::header`] section
+/// label, and its action rows are [`indented`](SelectItem::indented) so the
+/// grouping reads visually. The headers are non-selectable and disappear
+/// once the user types a query (the filtered view is a flat best-first
+/// ranking).
 ///
 /// `keybindings` is the live config snapshot; `None` (config failed to
 /// load) yields every row as `"unbound"`. The committed action is the
@@ -225,17 +287,27 @@ pub const REGISTRY: &[ActionSpec] = &[
 /// runs exactly what a keybinding would.
 #[must_use]
 pub fn palette_items(keybindings: Option<&KeybindingsCfg>) -> Vec<SelectItem> {
-    REGISTRY
-        .iter()
-        .map(|spec| {
+    let mut items = Vec::new();
+    for &category in Category::ORDER {
+        let mut header_pushed = false;
+        for spec in REGISTRY.iter().filter(|s| s.category == category) {
+            if !header_pushed {
+                items.push(SelectItem::header(category.header()));
+                header_pushed = true;
+            }
             let resolved = spec.resolved_action();
             let chord = keybindings.map_or_else(
                 || "unbound".to_owned(),
                 |kb| bound_chord(kb, &resolved).unwrap_or_else(|| "unbound".to_owned()),
             );
-            SelectItem::new(spec.description, resolved).secondary(chord)
-        })
-        .collect()
+            items.push(
+                SelectItem::new(spec.description, resolved)
+                    .secondary(chord)
+                    .indented(),
+            );
+        }
+    }
+    items
 }
 
 /// Find the chord a user has bound to `target`, formatted as the literal
@@ -370,8 +442,46 @@ mod tests {
         assert!(
             items
                 .iter()
+                .filter(|i| !i.is_header())
                 .all(|i| i.secondary.as_deref() == Some("unbound")),
-            "no config ⇒ every row unbound",
+            "no config ⇒ every selectable row unbound",
         );
+    }
+
+    #[test]
+    fn palette_items_group_under_category_headers() {
+        let items = palette_items(None);
+        // Every category with members contributes exactly one header, in
+        // ORDER, each immediately followed by indented action rows.
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|i| i.is_header())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(headers, vec!["Pane", "Window", "Session", "View"]);
+
+        // Selectable rows are indented (nested under their header); headers
+        // are not.
+        for item in &items {
+            if item.is_header() {
+                assert!(!item.indented, "header `{}` must not indent", item.label);
+            } else {
+                assert!(item.indented, "row `{}` must indent", item.label);
+            }
+        }
+
+        // The first row is a header (Pane), not a bare action.
+        assert!(items[0].is_header(), "palette opens with a category header");
+    }
+
+    #[test]
+    fn every_registry_action_has_a_category_in_order() {
+        for spec in REGISTRY {
+            assert!(
+                Category::ORDER.contains(&spec.category),
+                "`{}` has a category outside ORDER",
+                spec.name,
+            );
+        }
     }
 }

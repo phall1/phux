@@ -179,6 +179,38 @@ fn shipped_default_keybindings_build_a_resolver() {
 }
 
 #[test]
+fn shipped_default_resolves_s_w_and_a_navigation() {
+    // The nav redefinition: under the C-a leader, `s` opens the session
+    // picker, `w` the grouped window picker, and `a` stays an alias for the
+    // session picker (muscle memory). Resolve each against the *shipped*
+    // default.toml so the bindings can't silently drift from the config.
+    let cfg = phux_config::parse_with_defaults("", std::path::Path::new("<embedded default.toml>"))
+        .expect("default config parses");
+    let prefix = chord(ModSet::CTRL, PhysicalKey::A);
+
+    let resolve = |key: PhysicalKey| {
+        let mut r = Resolver::new(&cfg.keybindings).expect("resolver builds");
+        assert_eq!(
+            r.feed(prefix),
+            Feed::Partial,
+            "leader chord opens the table"
+        );
+        match r.feed(chord(ModSet::empty(), key)) {
+            Feed::Resolved(a) => a.action,
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    };
+
+    assert_eq!(resolve(PhysicalKey::S), "session-picker", "C-a s");
+    assert_eq!(resolve(PhysicalKey::W), "window-picker", "C-a w");
+    assert_eq!(
+        resolve(PhysicalKey::A),
+        "session-picker",
+        "C-a a stays a session-picker alias",
+    );
+}
+
+#[test]
 fn resolver_rejects_ambiguous_prefix_binding() {
     // A global "C-b" binding plus a prefix table makes the prefix chord
     // ambiguous: feeding "C-b" would both resolve the global AND open the
