@@ -391,6 +391,17 @@ mod tests {
         }
     }
 
+    /// A content rect spanning the whole viewport — the no-chrome case where
+    /// the hit-test layout equals the full viewport.
+    fn full_content(cols: u16, rows: u16) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: cols,
+            h: rows,
+        }
+    }
+
     /// Clicking inside the focused pane forwards with focus unchanged
     /// and emits pane-local coordinates relative to the pane's `Rect`.
     #[test]
@@ -401,7 +412,7 @@ mod tests {
             focus: Some(t(1)),
         };
         // Click inside the left half (focused) at col 5, row 3.
-        let decision = route_mouse_event(&state, (80, 24), &mouse_at(5, 3));
+        let decision = route_mouse_event(&state, full_content(80, 24), (80, 24), &mouse_at(5, 3));
         match decision {
             RouteDecision::Pane {
                 target,
@@ -433,7 +444,12 @@ mod tests {
         // Click 2 cells into the right pane, on the second row.
         let click_x = right_rect.x + 2;
         let click_y = right_rect.y + 1;
-        let decision = route_mouse_event(&state, (80, 24), &mouse_at(click_x, click_y));
+        let decision = route_mouse_event(
+            &state,
+            full_content(80, 24),
+            (80, 24),
+            &mouse_at(click_x, click_y),
+        );
         match decision {
             RouteDecision::Pane {
                 target,
@@ -463,7 +479,12 @@ mod tests {
         // The divider sits at the column equal to the left pane's
         // width (its `Rect.w`). Any row on that column hits the gap.
         let left_w = layout.rects.get(&t(1)).copied().unwrap().w;
-        let decision = route_mouse_event(&state, (80, 24), &mouse_at(left_w, 10));
+        let decision = route_mouse_event(
+            &state,
+            full_content(80, 24),
+            (80, 24),
+            &mouse_at(left_w, 10),
+        );
         assert_eq!(decision, RouteDecision::DividerNoOp);
     }
 
@@ -472,7 +493,7 @@ mod tests {
     #[test]
     fn route_mouse_single_pane_always_hits() {
         let state = LayoutState::single(t(1));
-        let decision = route_mouse_event(&state, (80, 24), &mouse_at(40, 12));
+        let decision = route_mouse_event(&state, full_content(80, 24), (80, 24), &mouse_at(40, 12));
         match decision {
             RouteDecision::Pane {
                 target,
@@ -517,7 +538,12 @@ mod tests {
         // Zoom pane t(1): the render layout collapses to a single leaf, so
         // the same click lands on t(1) instead.
         let render = workspace.render_window(Some(&t(1))).unwrap();
-        let decision = route_mouse_event(&render, (80, 24), &mouse_at(click_x, click_y));
+        let decision = route_mouse_event(
+            &render,
+            full_content(80, 24),
+            (80, 24),
+            &mouse_at(click_x, click_y),
+        );
         match decision {
             RouteDecision::Pane {
                 target,
@@ -536,7 +562,7 @@ mod tests {
     #[test]
     fn route_mouse_empty_layout_returns_no_focus() {
         let state = LayoutState::default();
-        let decision = route_mouse_event(&state, (80, 24), &mouse_at(10, 5));
+        let decision = route_mouse_event(&state, full_content(80, 24), (80, 24), &mouse_at(10, 5));
         assert_eq!(decision, RouteDecision::NoFocus);
     }
 
@@ -553,6 +579,7 @@ mod tests {
         };
         let decision = route_mouse_event(
             &state,
+            full_content(80, 24),
             (80, 24),
             &MouseEvent {
                 action: MouseAction::Press,
@@ -570,6 +597,71 @@ mod tests {
             assert_eq!(target, t(2));
         } else {
             panic!("expected Pane decision, got {decision:?}");
+        }
+    }
+
+    /// Regression: the hit-test must tile into the same inset content rect the
+    /// renderer paints. With a bottom status bar reserving the last row, the
+    /// bottom-most viewport row is chrome, not pane. Hit-testing against the
+    /// full viewport (the bug) routes a click on that row to the bottom pane;
+    /// hit-testing against the inset content correctly drops it. A click that
+    /// is genuinely inside a painted pane still routes there.
+    #[test]
+    fn route_mouse_respects_status_bar_inset() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let viewport = (80, 24);
+        // Status bar reserves the last row: panes tile into rows 0..23.
+        let content = Rect {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 23,
+        };
+        let status_row = 23; // the bottom row, owned by the status bar
+
+        // The bug: hit-testing the status-bar row against the FULL viewport
+        // routes it to the bottom pane, which paints down to row 23 there.
+        let buggy = route_mouse_event(
+            &state,
+            full_content(80, 24),
+            viewport,
+            &mouse_at(10, status_row),
+        );
+        assert!(
+            matches!(&buggy, RouteDecision::Pane { target, .. } if *target == t(2)),
+            "test premise: full-viewport tiling mis-routes the status-bar row to t(2), got {buggy:?}"
+        );
+
+        // The fix: hit-testing against the inset content drops the chrome click.
+        let fixed = route_mouse_event(&state, content, viewport, &mouse_at(10, status_row));
+        assert_eq!(
+            fixed,
+            RouteDecision::DividerNoOp,
+            "a click on the reserved status-bar row must be dropped"
+        );
+
+        // A click genuinely inside the painted bottom pane still routes to t(2).
+        let bottom = compute_layout_in(&state, content, viewport)
+            .rects
+            .get(&t(2))
+            .copied()
+            .unwrap();
+        match route_mouse_event(&state, content, viewport, &mouse_at(10, bottom.y)) {
+            RouteDecision::Pane {
+                target,
+                pane_y,
+                focus_changed,
+                ..
+            } => {
+                assert_eq!(target, t(2), "click in painted bottom pane hits t(2)");
+                assert!(focus_changed);
+                assert!((pane_y - 0.0).abs() < f64::EPSILON);
+            }
+            other => panic!("expected Pane decision, got {other:?}"),
         }
     }
 

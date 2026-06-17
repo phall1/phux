@@ -4,7 +4,7 @@ use phux_protocol::input::mouse::MouseEvent;
 use crate::layout::LayoutState;
 use crate::layout::Rect;
 
-use super::layout::compute_layout;
+use super::layout::compute_layout_in;
 
 // -----------------------------------------------------------------------------
 // route_mouse_event — pure hit-test for INPUT_MOUSE routing (phux-4li.6)
@@ -58,7 +58,15 @@ pub enum RouteDecision {
 /// coordinates per the parser in `attach::input` — the inbound SGR /
 /// X10 / urxvt-1015 dispatchers all emit `f64` pixels with "1 cell ==
 /// 1 pixel" because the client does not know cell-size at parse time)
-/// against the pane `Rect`s yielded by [`compute_layout`].
+/// against the pane `Rect`s yielded by [`compute_layout_in`].
+///
+/// `content` is the inset rectangle the renderer tiles panes into after
+/// folding off the status bar row and any sidebar columns — it MUST be the
+/// same `content_rect(viewport, has_bar, sidebar)` the paint path uses, or
+/// the hit-test disagrees with what is on screen and clicks route to the
+/// wrong pane (off by the status-bar row and/or the sidebar width). Clicks
+/// that fall in the reserved chrome (status bar row, sidebar columns) miss
+/// every inset rect and resolve to [`RouteDecision::DividerNoOp`].
 ///
 /// Behavior matrix:
 ///
@@ -66,15 +74,16 @@ pub enum RouteDecision {
 /// * Click inside a pane's `Rect` ⇒ [`RouteDecision::Pane`] with
 ///   pane-local coords; `focus_changed = true` iff target ≠
 ///   `layout.focus`.
-/// * Click on a divider cell or outside any pane (degenerate viewport,
-///   undersized tree) ⇒ [`RouteDecision::DividerNoOp`].
+/// * Click on a divider cell or outside any pane (reserved chrome,
+///   degenerate viewport, undersized tree) ⇒ [`RouteDecision::DividerNoOp`].
 ///
 /// The function is pure (no allocation aside from the internal
-/// [`compute_layout`] call's `HashMap`) and synchronous; the driver's
+/// [`compute_layout_in`] call's `HashMap`) and synchronous; the driver's
 /// async input loop calls it once per `InputEvent::Mouse`.
 #[must_use]
 pub fn route_mouse_event(
     layout: &LayoutState,
+    content: Rect,
     viewport: (u16, u16),
     mouse: &MouseEvent,
 ) -> RouteDecision {
@@ -85,10 +94,11 @@ pub fn route_mouse_event(
         return RouteDecision::NoFocus;
     }
 
-    // Single-pane fast path: skip the HashMap roundtrip. With no
-    // dividers there is exactly one rect covering the whole viewport
-    // and every click lands in it.
-    let multi = compute_layout(layout, viewport);
+    // Tile into the same inset content rect the renderer paints, so the
+    // hit-test rects match the on-screen pane rects cell-for-cell. Single
+    // pane: exactly one rect covering `content`, and every in-content click
+    // lands in it.
+    let multi = compute_layout_in(layout, content, viewport);
     if multi.rects.is_empty() {
         return RouteDecision::NoFocus;
     }

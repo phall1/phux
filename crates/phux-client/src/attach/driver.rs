@@ -1389,6 +1389,7 @@ async fn main_loop<W: super::RenderSink>(
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    has_bar: status_bar.is_some(),
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1713,6 +1714,7 @@ async fn main_loop<W: super::RenderSink>(
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    has_bar: status_bar.is_some(),
                 };
                 let layout_changed = dispatch_input_events(
                     out,
