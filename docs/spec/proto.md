@@ -604,6 +604,8 @@ ErrorCode = enum {
     PERMISSION_DENIED    = 201,
     RESOURCE_EXHAUSTED   = 202,
     UNSAFE_PASTE         = 203,
+    INPUT_LEASE_HELD     = 204,  // ADR-0033: cooperative ACQUIRE_INPUT lost
+                                 //   to an existing input-lease holder
 
     INTERNAL_ERROR       = 65535,
 }
