@@ -348,6 +348,23 @@ mod tests {
     }
 
     #[test]
+    fn signal_terminal_palette_default_is_the_reversible_freeze() {
+        // ADR-0033: signals are NOT lease-gated server-side, so the palette's
+        // default arg is the safety boundary. It must stay the reversible
+        // `freeze` (SIGSTOP) so a palette-dispatched signal-terminal can never
+        // silently arm a destructive kill/terminate/interrupt.
+        let sig = REGISTRY
+            .iter()
+            .find(|s| s.name == "signal-terminal")
+            .expect("signal-terminal registered");
+        assert_eq!(
+            sig.resolved_action().args.get("signal"),
+            Some(&toml::Value::String("freeze".to_owned())),
+            "the palette default signal must remain the reversible freeze",
+        );
+    }
+
+    #[test]
     fn palette_items_show_unbound_when_no_config() {
         let items = palette_items(None);
         assert!(
