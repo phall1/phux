@@ -10,9 +10,11 @@ last-reviewed: 2026-06-07
 TLV**. Each top-level field is `field_id: varint || wire_type: u8 ||
 length-delimited value`. A decoder matches fields by stable id and skips any
 field id it does not recognise by that field's declared length; optional and
-trailing fields are simply absent. Leaf primitives are big-endian and
-length-prefixed inside a field's value, and nested tagged unions / sub-records
-stay positional within a field.
+trailing fields are simply absent. Leaf primitives are big-endian inside a
+field's value; a leaf `str` / `bytes` is length-prefixed with a **u32
+big-endian** count (distinct from the **varint** length the TLV envelope uses
+for a `BYTES`-typed field). Nested tagged unions / sub-records stay positional
+within a field.
 
 ---
 
@@ -99,3 +101,19 @@ append-only-trailing-field convention bounded by the field length (for
 example `Command::GetScreen`'s trailing `cells` flag): a value that ends
 before a trailing nested field decodes that field at its documented default.
 The field-tagged skip-by-length rule of §1 applies at the message-body level.
+
+### 2.1 Leaf `str` / `bytes` length prefix (u32, not varint)
+
+A `str` or `bytes` value appearing as a leaf inside a positional value is
+length-prefixed with a **`u32` big-endian** byte count, then the raw bytes —
+the encoding the reference codec writes (`Encoder::write_bytes` /
+`write_str`) and reads (`Decoder::read_bytes` / `read_str`). An empty value
+encodes as a four-byte zero header. A declared length that exceeds the
+remaining input or the protocol frame cap is rejected (`LengthOverflow`).
+
+This is deliberately **not** the varint length the TLV envelope uses. The
+varint applies only to the envelope machinery of §1 — the `field_id`, the
+`wire_type` byte, and the length of a `BYTES`-typed message-body field. Leaf
+primitives carried inside that field's positional value use the fixed-width
+`u32` prefix above. Keep the two distinct when hand-encoding: a leaf string's
+length is four big-endian bytes, never a LEB128 varint.

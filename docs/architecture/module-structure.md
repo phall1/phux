@@ -38,6 +38,14 @@ See `lib.rs` for the docs.rs / crates.io rationale. The pre-ADR-0013
 amount of stale doc-comment text inside `wire/field.rs` still mentions
 `DiffOp` and is scheduled for cleanup.
 
+> **Canonical names.** The spec and code call these frames
+> `TERMINAL_OUTPUT` (`0x90`) and `TERMINAL_SNAPSHOT` (`0x91`) per
+> [ADR-0016](../../ADR/0016-terminal-id-as-wire-primary.md); the
+> `PANE_*` spelling that survives in this doc is the pre-layering name
+> for the same bytes. Read `PANE_OUTPUT` / `PANE_SNAPSHOT` here as
+> aliases of the canonical `TERMINAL_*` frames, and "pane" as the TUI's
+> view of a Terminal.
+
 ## `phux-core`
 
 ```
