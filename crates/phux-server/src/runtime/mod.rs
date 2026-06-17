@@ -903,6 +903,7 @@ mod tests {
             consumer_ack: consumer_ack_tx,
             subscribe_to_events: subscribe_to_events_tx,
             unsubscribe_from_events: unsubscribe_from_events_tx,
+            control: mpsc::channel(8).0,
             cols: 80,
             rows: 24,
         };
@@ -1038,6 +1039,7 @@ mod tests {
                         consumer_ack: consumer_ack_tx,
                         subscribe_to_events: subscribe_to_events_tx,
                         unsubscribe_from_events: unsubscribe_from_events_tx,
+                        control: mpsc::channel(8).0,
                         cols: 80,
                         rows: 24,
                     };
@@ -1192,6 +1194,7 @@ mod tests {
                     consumer_ack: consumer_ack_tx,
                     subscribe_to_events: subscribe_to_events_tx,
                     unsubscribe_from_events: unsubscribe_from_events_tx,
+                    control: mpsc::channel(8).0,
                     cols: 80,
                     rows: 24,
                 };

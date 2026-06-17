@@ -271,6 +271,26 @@ pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: 
             }
         }
     }
+    // Release any input leases this client held (ADR-0033) and broadcast the
+    // `Released` transition so other clients stop showing it as the holder.
+    // Gathered under-lock; the `control` sends happen off-lock. `detach`
+    // (below) clears the lease state regardless, so this is purely the
+    // observable-event half — a saturated/closed mailbox is benign.
+    let released: Vec<crate::terminal_actor::TerminalHandle> = state.with(|s| {
+        s.leases_held_by(client_id)
+            .into_iter()
+            .filter_map(|pane| s.terminal_handle(pane).cloned())
+            .collect()
+    });
+    for handle in released {
+        let _ = handle
+            .control
+            .try_send(crate::terminal_actor::ControlRequest::LeaseChanged {
+                input_holder: None,
+                action: phux_protocol::wire::frame::ControlAction::Released,
+                actor: wire_client_id,
+            });
+    }
     state.with_mut(|s| s.detach(client_id));
 }
 

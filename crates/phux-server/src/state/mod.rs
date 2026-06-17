@@ -82,6 +82,13 @@ pub struct ServerState {
     /// For each pane, the clients currently observing it (and thus eligible
     /// to receive `TERMINAL_OUTPUT` frames for it).
     pub terminal_subscribers: HashMap<TerminalId, Vec<ClientId>>,
+    /// Per-pane input lease (ADR-0033, "take the wheel"). When a pane has an
+    /// entry, only that `ClientId`'s input reaches the PTY; everyone else's
+    /// `INPUT_*` / `ROUTE_INPUT` is dropped at the gate (still acked, per the
+    /// fire-and-forget input invariant). Absent = `Open`: any subscriber's
+    /// input passes (the back-compat default). Released automatically when the
+    /// holder detaches or its connection drops.
+    input_leases: HashMap<TerminalId, ClientId>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
@@ -374,6 +381,7 @@ mod tests {
             consumer_ack: consumer_ack_tx,
             subscribe_to_events: subscribe_to_events_tx,
             unsubscribe_from_events: unsubscribe_from_events_tx,
+            control: mpsc::channel(8).0,
             cols: 80,
             rows: 24,
         }
@@ -428,6 +436,85 @@ mod tests {
             s.subscribers_for_terminal(pid2).contains(&cid),
             "client not subscribed to second pane (the regression)"
         );
+    }
+
+    // ADR-0033 input-lease state machine (the gate's backing store).
+
+    #[test]
+    fn input_open_by_default_blocks_nobody() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        assert_eq!(s.input_lease_holder(pid), None);
+        assert!(!s.input_blocked(pid, a), "an Open pane blocks no one");
+    }
+
+    #[test]
+    fn acquired_lease_blocks_others_not_holder() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        let b = s.new_client_id();
+        assert_eq!(
+            s.set_input_lease(pid, a),
+            None,
+            "first acquire has no prior"
+        );
+        assert_eq!(s.input_lease_holder(pid), Some(a));
+        assert!(!s.input_blocked(pid, a), "the holder is never blocked");
+        assert!(s.input_blocked(pid, b), "a non-holder is blocked");
+    }
+
+    #[test]
+    fn seize_returns_prior_holder() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        let b = s.new_client_id();
+        s.set_input_lease(pid, a);
+        assert_eq!(
+            s.set_input_lease(pid, b),
+            Some(a),
+            "seizing returns the preempted holder"
+        );
+        assert_eq!(s.input_lease_holder(pid), Some(b));
+        assert!(
+            s.input_blocked(pid, a),
+            "the preempted client is now blocked"
+        );
+    }
+
+    #[test]
+    fn release_is_holder_scoped_and_idempotent() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        let b = s.new_client_id();
+        s.set_input_lease(pid, a);
+        assert!(!s.release_input_lease(pid, b), "non-holder cannot release");
+        assert_eq!(s.input_lease_holder(pid), Some(a));
+        assert!(
+            s.release_input_lease(pid, a),
+            "holder releases its own lease"
+        );
+        assert_eq!(s.input_lease_holder(pid), None);
+        assert!(!s.release_input_lease(pid, a), "double release is a no-op");
+    }
+
+    #[test]
+    fn detach_releases_the_wheel() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        let a = s.new_client_id();
+        s.set_input_lease(pid, a);
+        assert_eq!(s.leases_held_by(a), vec![pid]);
+        s.detach(a);
+        assert_eq!(
+            s.input_lease_holder(pid),
+            None,
+            "a disconnect must never strand the wheel"
+        );
+        assert!(s.leases_held_by(a).is_empty());
     }
 
     #[test]

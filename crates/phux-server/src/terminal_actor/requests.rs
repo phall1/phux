@@ -6,8 +6,46 @@ use crate::grid::SnapshotBytes;
 use crate::state::{Outbound, TerminalInput};
 use bytes::Bytes;
 use phux_protocol::ClientId;
-use phux_protocol::wire::frame::TerminalEventType;
+use phux_protocol::wire::frame::{ControlAction, TerminalEventType, TerminalSignal};
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// A supervisory control request delivered to a [`super::TerminalActor`] over
+/// its `control` mailbox (ADR-0033, "take the wheel + kill").
+///
+/// The input *lease* itself lives in [`crate::state::ServerState`] (the input
+/// gate runs there, under the state lock, where the originating `ClientId` is
+/// known). The actor is the emitter of the
+/// [`phux_protocol::wire::frame::AgentEvent::TerminalControl`] broadcast
+/// because it owns both the event-subscriber list and the process lifecycle —
+/// so the handler forwards the *fact* of a change and lets the actor stamp its
+/// current lifecycle and fan the event out.
+#[derive(Debug)]
+pub enum ControlRequest {
+    /// The input lease changed in `ServerState`; emit a `TerminalControl`
+    /// broadcast reflecting the new holder and the action that produced it.
+    LeaseChanged {
+        /// The client now holding the lease, or `None` if released to `Open`.
+        input_holder: Option<ClientId>,
+        /// What just happened (`Acquired` / `Seized` / `Released`).
+        action: ControlAction,
+        /// The client that performed the action.
+        actor: ClientId,
+    },
+    /// Deliver `signal` to the pane's process group, update the lifecycle
+    /// (`Freeze` → `Frozen`, `Resume` → `Running`), and broadcast a
+    /// `TerminalControl`. `reply` carries `Ok(())` on delivery or a
+    /// human-readable error (no PTY / no pid / `killpg` failed).
+    Signal {
+        /// The signal to deliver.
+        signal: TerminalSignal,
+        /// The lease holder at the time of the signal, for the broadcast.
+        input_holder: Option<ClientId>,
+        /// The client requesting the signal.
+        by: ClientId,
+        /// Delivery acknowledgement.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
 
 /// Request to register a new consumer with the actor.
 ///
@@ -394,6 +432,12 @@ pub struct TerminalHandle {
     /// an [`UpgradeHandleRequest`] per pane to collect its PTY descriptors +
     /// replay snapshot into the [`StateBlob`](crate::upgrade::blob::StateBlob).
     pub upgrade: mpsc::Sender<UpgradeHandleRequest>,
+    /// Supervisory control channel (ADR-0033). The runtime sends a
+    /// [`ControlRequest`] when a client takes the wheel, releases it, or
+    /// signals the pane's process group. The actor delivers signals (it owns
+    /// the PTY child pid) and broadcasts `TerminalControl` events (it owns the
+    /// event-subscriber list).
+    pub control: mpsc::Sender<ControlRequest>,
     /// Pane viewport width in cells at construction time.
     pub cols: u16,
     /// Pane viewport height in cells at construction time.
