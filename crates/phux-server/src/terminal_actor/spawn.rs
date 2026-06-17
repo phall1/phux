@@ -186,12 +186,17 @@ pub(crate) fn spawn_pty(
     rows: u16,
 ) -> Result<SpawnedPty, TerminalActorError> {
     let pty_system = native_pty_system();
+    // Derive the initial winsize pixel fields from the fallback cell size so a
+    // child that reads `TIOCGWINSZ` before any client resize (e.g. `kitten
+    // icat` preflighting at shell startup) sees nonzero pixel dimensions. The
+    // first client resize replaces these with the display's real cell size.
+    let (cell_w, cell_h) = super::DEFAULT_CELL_PX;
     let pair = pty_system
         .openpty(PtySize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: cols.saturating_mul(cell_w),
+            pixel_height: rows.saturating_mul(cell_h),
         })
         .map_err(|e| TerminalActorError::OpenPty(e.to_string()))?;
 

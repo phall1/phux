@@ -71,6 +71,18 @@ pub use tick::*;
 /// `defaults.history-limit` via [`TerminalActor::build_with_token`].
 const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 
+/// Fallback per-cell pixel size `(width, height)` used to derive the PTY
+/// `winsize` pixel fields and XTWINOPS size reports until a client announces
+/// a viewport with usable pixel metrics. A program inside the pane that calls
+/// `TIOCGWINSZ` or queries `CSI 14 t` must read nonzero pixel dimensions:
+/// pixel probes such as `kitten icat` refuse to run against a terminal that
+/// reports `0x0` ("Terminal does not support reporting screen sizes in
+/// pixels"). `8x16` is a conventional terminal cell at ~96 DPI; it is only a
+/// placeholder, replaced the moment a real client reports its display's cell
+/// size via [`ResizeRequest::cell_px`]. Cells (cols/rows) stay authoritative;
+/// pixels are always derived as `cells x cell size`.
+const DEFAULT_CELL_PX: (u16, u16) = (8, 16);
+
 /// Upper bound on consecutive ready PTY chunks coalesced into a single
 /// `vt_write` + broadcast frame per pump wakeup (phux-ahk burst path). A
 /// heavy neovim redraw or p10k repaint arrives as many ~4KB reads; coalescing
@@ -300,12 +312,13 @@ pub struct TerminalActor {
     wire_terminal_id: u32,
     cols: u16,
     rows: u16,
-    /// Last-known per-cell pixel size `(width, height)` from the most
-    /// recent [`ResizeRequest`] that carried one. Sticky: a pixel-less
-    /// resize (agent `TERMINAL_RESIZE`) keeps the established value.
-    /// `(0, 0)` until any client reports pixel metrics — the PTY winsize
-    /// and size reports then honestly carry zero, matching a terminal
-    /// that does not know its pixel geometry.
+    /// Per-cell pixel size `(width, height)` used to derive the PTY winsize
+    /// pixel fields and XTWINOPS size reports. Seeded to [`DEFAULT_CELL_PX`]
+    /// so the geometry is never zero, then overwritten by the most recent
+    /// [`ResizeRequest`] that carries usable pixel metrics. Sticky: a
+    /// pixel-less resize (agent `TERMINAL_RESIZE`) keeps the established
+    /// value. Nonzero on both axes at all times, so pixel probes inside the
+    /// pane (`kitten icat`, sixel sizers) always read a real cell size.
     cell_px: (u16, u16),
     /// Current grid + cell geometry shared with the libghostty `on_size`
     /// callback, which answers XTWINOPS size queries (CSI 14/16/18 t)
@@ -534,8 +547,8 @@ impl TerminalActor {
         let size_report = Rc::new(Cell::new(SizeReportSize {
             rows,
             columns: cols,
-            cell_width: 0,
-            cell_height: 0,
+            cell_width: u32::from(DEFAULT_CELL_PX.0),
+            cell_height: u32::from(DEFAULT_CELL_PX.1),
         }));
         let synth = SnapshotSynthesizer::new()?;
         let key_enc = PerTerminalKeyEncoder::new()?;
@@ -625,7 +638,7 @@ impl TerminalActor {
             wire_terminal_id: 0,
             cols,
             rows,
-            cell_px: (0, 0),
+            cell_px: DEFAULT_CELL_PX,
             size_report,
         };
         let handle = TerminalHandle {
@@ -1427,7 +1440,9 @@ impl TerminalActor {
         // `Terminal::resize` takes the per-cell pixel size and derives the
         // terminal's pixel dimensions (`cells x cell size`) for XTWINOPS
         // size reports, mode-2048 in-band notifications, and image
-        // protocols. `(0, 0)` while no client has reported pixel metrics.
+        // protocols. Seeded to `DEFAULT_CELL_PX` and replaced by a client's
+        // reported cell size, so it is always nonzero — pixel probes inside
+        // the pane never see a zero text area.
         //
         // A both-axes shrink in a single resize() call once overflowed
         // libghostty's `PageList.resizeCols` (phux-y06, the SIGABRT
@@ -3914,6 +3929,83 @@ mod tests {
                     .await
                     .expect("send resize");
                 wait_for((90, 30, 810, 540)).await;
+
+                token.cancel();
+                tokio::time::timeout(std::time::Duration::from_millis(500), join)
+                    .await
+                    .expect("actor did not exit within 500ms")
+                    .expect("actor task panicked");
+            })
+            .await;
+    }
+
+    /// With no client ever reporting pixel metrics, the PTY winsize must
+    /// still carry nonzero pixel dimensions derived from [`DEFAULT_CELL_PX`]:
+    /// at spawn (before any resize) and after a pixel-less resize. This is
+    /// the proximate `kitten icat` unblock — its preflight refuses a `0x0`
+    /// pixel report, and most clients announce cells but not pixels.
+    #[tokio::test(flavor = "current_thread")]
+    async fn winsize_pixels_default_when_no_client_reports_metrics() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let cmd = CommandBuilder::new("/bin/cat");
+                let bundle = TerminalActor::new_with_command(cmd, 80, 24).expect("spawn");
+                let master = std::sync::Arc::clone(&bundle.actor.pty.as_ref().expect("pty").master);
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                let join = tokio::task::spawn_local(bundle.actor.run());
+
+                let (cell_w, cell_h) = DEFAULT_CELL_PX;
+
+                // Spawn-time winsize: derived from the fallback cell size,
+                // never zero. 80x24 cells at 8x16 px -> 640x384 px.
+                let spawned = master
+                    .lock()
+                    .expect("master lock")
+                    .get_size()
+                    .expect("size");
+                assert_eq!(
+                    (spawned.pixel_width, spawned.pixel_height),
+                    (80 * cell_w, 24 * cell_h),
+                    "spawn-time winsize must carry nonzero default pixel dims",
+                );
+
+                let wait_for = async |want: (u16, u16, u16, u16)| {
+                    let read = || {
+                        let got = master
+                            .lock()
+                            .expect("master lock")
+                            .get_size()
+                            .expect("size");
+                        (got.cols, got.rows, got.pixel_width, got.pixel_height)
+                    };
+                    for _ in 0..200 {
+                        if read() == want {
+                            return;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    panic!(
+                        "winsize never reached {want:?}; kernel reports {:?}",
+                        read()
+                    );
+                };
+
+                // A pixel-less resize keeps deriving pixels from the default
+                // cell size: 100x40 cells at 8x16 px -> 800x640 px.
+                handle
+                    .resize
+                    .send(ResizeRequest {
+                        cols: 100,
+                        rows: 40,
+                        cell_px: None,
+                        resync_clients: false,
+                        resync_only: false,
+                    })
+                    .await
+                    .expect("send resize");
+                wait_for((100, 40, 100 * cell_w, 40 * cell_h)).await;
 
                 token.cancel();
                 tokio::time::timeout(std::time::Duration::from_millis(500), join)
