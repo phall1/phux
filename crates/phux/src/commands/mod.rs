@@ -1,12 +1,40 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
 use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
+    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope, TerminalSignal,
 };
+
+/// CLI signal names for `phux signal TARGET SIGNAL` (ADR-0033), mapped to the
+/// wire [`TerminalSignal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SignalArg {
+    /// SIGINT — the Ctrl-C equivalent.
+    Interrupt,
+    /// SIGSTOP — pause the process group (reversible via `resume`).
+    Freeze,
+    /// SIGCONT — resume a frozen process group.
+    Resume,
+    /// SIGTERM — request graceful termination.
+    Terminate,
+    /// SIGKILL — force termination.
+    Kill,
+}
+
+impl From<SignalArg> for TerminalSignal {
+    fn from(arg: SignalArg) -> Self {
+        match arg {
+            SignalArg::Interrupt => Self::Interrupt,
+            SignalArg::Freeze => Self::Freeze,
+            SignalArg::Resume => Self::Resume,
+            SignalArg::Terminate => Self::Terminate,
+            SignalArg::Kill => Self::Kill,
+        }
+    }
+}
 
 pub(crate) mod attach;
 pub(crate) mod config;
@@ -19,6 +47,7 @@ pub(crate) mod run;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod supervise;
 pub(crate) mod tag;
 pub(crate) mod upgrade;
 pub(crate) mod wait;
@@ -204,6 +233,57 @@ pub(crate) enum Command {
     Kill {
         /// What to kill (selector).
         target: String,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Take the input wheel of a pane (ADR-0033).
+    ///
+    /// Seizes exclusive input authority over the resolved pane: while held,
+    /// only this connection's input reaches the PTY — every other client's
+    /// keystrokes (and any agent's `send-keys`) are locked out. Use it to
+    /// grab control of a pane an agent is driving. Release with `phux give`.
+    /// TARGET is a selector (see the top-level help).
+    Take {
+        /// Target selector (resolves to one pane).
+        target: String,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Give back the input wheel of a pane (ADR-0033).
+    ///
+    /// Releases the input lease taken with `phux take`, returning the pane to
+    /// open input. A no-op if you do not hold the lease. TARGET is a selector.
+    Give {
+        /// Target selector (resolves to one pane).
+        target: String,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Signal a pane's process group (ADR-0033).
+    ///
+    /// Delivers a POSIX signal to the program running in the resolved pane and
+    /// every subprocess it spawned — distinct from `phux kill`, which destroys
+    /// the pane. `freeze` (SIGSTOP) pauses the process mid-step; `resume`
+    /// (SIGCONT) lets it run again — the reversible brake for an agent about to
+    /// do something rash. TARGET is a selector.
+    ///
+    ///   phux signal build freeze
+    ///   phux signal . kill
+    Signal {
+        /// Target selector (resolves to one pane).
+        target: String,
+
+        /// Which signal to deliver.
+        signal: SignalArg,
 
         /// Override the UDS path.
         #[arg(long)]
