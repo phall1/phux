@@ -7,31 +7,38 @@
 # multi-core box vs ~13 min on the 2-core runner — pure CPU starvation, not
 # a code defect). Gating PRs on that is a ~25-min wall for no added safety
 # signal a fast machine wouldn't already give. So the stress suite runs here
-# instead: post-merge on `main` (catch a regression the moment it lands) and
-# nightly (catch environment drift), never blocking a PR.
+# instead: nightly (catch environment drift) and on-demand —
+# `workflow_dispatch`, or by adding the `stress` label to a PR — never on
+# every push. (It used to also run post-merge on every `main` push; that was
+# the biggest Actions-minute sink for little signal, so it was dropped in
+# favor of the nightly + opt-in lanes.)
 #
 # Build+run stay on one runner (matching ci.yml): libghostty-vt's build.rs
 # lets zig auto-detect the host CPU, so an artifact built on one runner can
 # SIGILL on another. The CPU-fingerprinted cache key keeps native artifacts
 # pinned to matching hardware. `magic-nix-cache` persists the devshell and
 # `save-if` confines rust-cache writes to `main` — same retention policy as
-# ci.yml (see its header for the 10 GB-eviction rationale); this lane only
-# fires on main/schedule/dispatch, so it always writes.
+# ci.yml (see its header for the 10 GB-eviction rationale). The nightly and
+# `workflow_dispatch` runs are on `main` (they write the cache); a
+# label-triggered PR run is on the PR ref, so it reads the cache only.
 
 name: stress
 
 on:
-  push:
-    branches: [main]
   schedule:
     - cron: "0 7 * * *" # nightly 07:00 UTC
   workflow_dispatch:
+  # Opt-in per-PR: add the `stress` label to run this lane against a risky
+  # change. The job-level `if` below filters to that label so other labels
+  # spin up no runner.
+  pull_request:
+    types: [labeled]
 
-# Don't pile up: a newer main push supersedes an in-flight stress run on the
+# Don't pile up: re-labeling a PR supersedes its in-flight stress run on the
 # same ref. Never cancel a scheduled run (we want the nightly coverage).
 concurrency:
   group: stress-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -39,6 +46,9 @@ permissions:
 jobs:
   stress:
     name: stress
+    # schedule + workflow_dispatch always run; a pull_request fires this lane
+    # only when tagged with the `stress` label.
+    if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'stress' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
