@@ -254,6 +254,54 @@ fn write_buffer<W: Write>(
     out.flush()
 }
 
+/// ADR-0033: emit the supervisory badge right-aligned on `row_index`, as a
+/// reverse-video + bold chip atop the already-painted widget row. ASCII-only
+/// (no emojis, per repo convention), so the char count is the cell width.
+fn paint_supervisory_overlay<W: Write>(
+    out: &mut W,
+    badge: &str,
+    row_index: u16,
+    cols: u16,
+) -> io::Result<()> {
+    if cols == 0 || badge.is_empty() {
+        return Ok(());
+    }
+    let visible: String = badge.chars().take(cols as usize).collect();
+    let width = u16::try_from(visible.chars().count()).unwrap_or(cols);
+    let start_col = cols.saturating_sub(width);
+    let one_based_row = row_index.saturating_add(1);
+    let one_based_col = start_col.saturating_add(1);
+    // CUP to the chip's left edge, reverse+bold, text, hard reset.
+    write!(
+        out,
+        "\x1b[{one_based_row};{one_based_col}H\x1b[7;1m{visible}\x1b[0m"
+    )?;
+    out.flush()
+}
+
+/// ADR-0033: overlay the badge into a composed bar buffer (the
+/// `phux snapshot --rendered` path), right-aligned with reverse-video + bold so
+/// the dense-cell snapshot matches the live VT paint.
+fn overlay_badge_into_buffer(buffer: &mut Buffer, badge: &str, cols: u16) {
+    if cols == 0 || badge.is_empty() {
+        return;
+    }
+    let visible: Vec<char> = badge.chars().take(cols as usize).collect();
+    let width = u16::try_from(visible.len()).unwrap_or(cols);
+    let start = cols.saturating_sub(width);
+    let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let mut tmp = [0u8; 4];
+    for (i, ch) in visible.iter().enumerate() {
+        let x = start.saturating_add(u16::try_from(i).unwrap_or(0));
+        if x >= cols {
+            break;
+        }
+        let cell = &mut buffer[(x, 0)];
+        cell.set_symbol(ch.encode_utf8(&mut tmp));
+        cell.set_style(style);
+    }
+}
+
 /// VT painter for a composed [`StatusBar`].
 ///
 /// Thin stateful wrapper over [`render_status_bar`]: caches the last
@@ -280,6 +328,12 @@ pub struct StatusBarPainter {
     /// visible reason the bar and keybindings are degraded rather than a
     /// silently empty row.
     error: Option<String>,
+    /// ADR-0033: when `Some`, a supervisory badge (e.g. `[ FROZEN ]`,
+    /// `[ WHEEL:you ]`) is overlaid right-aligned on the bar row for the
+    /// focused pane. Set by the driver from inbound `TerminalControl` state; a
+    /// change invalidates the cache so the row repaints (and erases a cleared
+    /// badge). Painted over the composed widget row, not replacing it.
+    supervisory: Option<String>,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -294,6 +348,7 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("last_viewport", &self.last_viewport)
             .field("windows.len", &self.windows.len())
             .field("error", &self.error)
+            .field("supervisory", &self.supervisory)
             .finish()
     }
 }
@@ -309,6 +364,7 @@ impl StatusBarPainter {
             last_viewport: None,
             windows: Vec::new(),
             error: None,
+            supervisory: None,
         }
     }
 
@@ -331,6 +387,7 @@ impl StatusBarPainter {
             last_viewport: None,
             windows: Vec::new(),
             error: Some(message.into()),
+            supervisory: None,
         }
     }
 
@@ -340,6 +397,16 @@ impl StatusBarPainter {
     pub fn set_windows(&mut self, windows: Vec<WindowInfo>) {
         if self.windows != windows {
             self.windows = windows;
+            self.invalidate();
+        }
+    }
+
+    /// ADR-0033: set (or clear, with `None`) the supervisory badge overlaid on
+    /// the bar for the focused pane. A change invalidates the cache so the row
+    /// repaints — which also erases a badge that just cleared.
+    pub fn set_supervisory(&mut self, badge: Option<String>) {
+        if self.supervisory != badge {
+            self.supervisory = badge;
             self.invalidate();
         }
     }
@@ -396,7 +463,7 @@ impl StatusBarPainter {
         if self.error.is_some() {
             return self.paint_error_line(out, cols, rows);
         }
-        if self.bar.is_empty() && self.windows.is_empty() {
+        if self.bar.is_empty() && self.windows.is_empty() && self.supervisory.is_none() {
             return Ok(());
         }
         let new_row = self.bar.render(&ctx.as_widget(), cols);
@@ -424,6 +491,12 @@ impl StatusBarPainter {
         // (same inputs, deterministic) and keeps `render_status_bar`
         // usable standalone in tests.
         render_status_bar(out, &self.bar, &ctx, row_index, cols)?;
+        // ADR-0033: overlay the supervisory badge atop the freshly-painted
+        // widget row (right-aligned). Emitted after the row so it wins; the
+        // full-row repaint above erases any stale/cleared badge first.
+        if let Some(badge) = &self.supervisory {
+            paint_supervisory_overlay(out, badge, row_index, cols)?;
+        }
         self.last_row = Some((cols, new_row));
         self.last_viewport = Some((cols, rows));
         Ok(())
@@ -475,7 +548,7 @@ impl StatusBarPainter {
             }
             return Some((buffer, row_index));
         }
-        if self.bar.is_empty() && self.windows.is_empty() {
+        if self.bar.is_empty() && self.windows.is_empty() && self.supervisory.is_none() {
             return None;
         }
         let ctx = StatusBarContext {
@@ -485,6 +558,11 @@ impl StatusBarPainter {
         let row = self.bar.render(&ctx.as_widget(), cols);
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
         fill_buffer(&mut buffer, &row, cols);
+        // ADR-0033: overlay the supervisory badge into the snapshot buffer so
+        // `phux snapshot --rendered` shows the same chip the live paint draws.
+        if let Some(badge) = &self.supervisory {
+            overlay_badge_into_buffer(&mut buffer, badge, cols);
+        }
         Some((buffer, row_index))
     }
 

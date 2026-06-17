@@ -32,8 +32,8 @@ use std::time::Duration;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
-use phux_protocol::ids::{GroupId, TerminalId};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, ViewportInfo};
+use phux_protocol::ids::{ClientId, GroupId, TerminalId};
+use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, TerminalLifecycle, ViewportInfo};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
@@ -69,6 +69,14 @@ pub(super) struct PaneSlot {
     /// stay warm across frames (the renderer's `last_cursor` is also
     /// per-pane, so each pane's predictive-echo anchor is independent).
     pub renderer: TerminalRenderer<'static>,
+    /// ADR-0033 supervisory lifecycle for this pane, driven by inbound
+    /// `TerminalControl` events: `Running` until a `Freeze` (SIGSTOP) flips it
+    /// to `Frozen`. Read at paint time to render the "FROZEN" chrome badge.
+    pub lifecycle: TerminalLifecycle,
+    /// ADR-0033 input-lease holder for this pane (the wire `ClientId` that has
+    /// "the wheel"), or `None` when the pane is `Open`. Compared against the
+    /// driver's own `ClientId` to render "you" vs another client.
+    pub input_holder: Option<ClientId>,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -92,6 +100,11 @@ impl PaneSlot {
                 max_scrollback: 10_000,
             })?,
             renderer: TerminalRenderer::new()?,
+            // Panes start running and un-leased; a late-arriving
+            // TerminalControl (after the pane's first snapshot/output) updates
+            // these — a pane that exists before its control state is benign.
+            lifecycle: TerminalLifecycle::Running,
+            input_holder: None,
         })
     }
 
@@ -100,6 +113,44 @@ impl PaneSlot {
     /// viewport, or layout already tells us the pane's real dimensions.
     pub(super) fn new() -> Result<Self, AttachError> {
         Self::new_with_size(80, 24)
+    }
+}
+
+/// ADR-0033: compose the status-bar supervisory badge for the focused pane,
+/// or `None` when it is running and un-leased (so no badge paints). Reads the
+/// per-pane lifecycle + input-lease holder tracked from `TerminalControl`
+/// events; the holder renders as "you" when it matches this client's own id,
+/// else as the other client's numeric id. No emojis (plain ASCII chrome).
+fn supervisory_badge(
+    panes: &HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    own_client_id: Option<ClientId>,
+) -> Option<String> {
+    let slot = panes.get(focused_pane?)?;
+    let frozen = matches!(slot.lifecycle, TerminalLifecycle::Frozen);
+    format_supervisory_badge(frozen, slot.input_holder, own_client_id)
+}
+
+/// Pure badge formatter (split out from [`supervisory_badge`] so the
+/// state→string mapping is testable without a libghostty-backed `PaneSlot`).
+/// `None` ⇒ no badge (running and un-leased).
+fn format_supervisory_badge(
+    frozen: bool,
+    input_holder: Option<ClientId>,
+    own_client_id: Option<ClientId>,
+) -> Option<String> {
+    let wheel = input_holder.map(|holder| {
+        if Some(holder) == own_client_id {
+            "WHEEL:you".to_owned()
+        } else {
+            format!("WHEEL:c{}", holder.get())
+        }
+    });
+    match (frozen, wheel) {
+        (false, None) => None,
+        (true, None) => Some("[ FROZEN ]".to_owned()),
+        (false, Some(w)) => Some(format!("[ {w} ]")),
+        (true, Some(w)) => Some(format!("[ FROZEN {w} ]")),
     }
 }
 
@@ -1077,6 +1128,10 @@ async fn main_loop<W: super::RenderSink>(
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
     let mut workspace = Workspace::default();
     let mut focused_pane: Option<TerminalId> = None;
+    // ADR-0033: this client's own server-assigned ClientId, captured from
+    // ATTACHED. Used to render "you hold the wheel" vs another client in the
+    // supervisory badge. `None` until ATTACHED lands.
+    let mut own_client_id: Option<ClientId> = None;
     // phux-x2hm: pane-zoom view state (driver-local, like focus). `Some(id)`
     // ⇒ pane `id` is zoomed to fill the window; render/reflow then run against
     // `workspace.render_window(zoomed)` (a synthetic single-leaf layout)
@@ -1229,6 +1284,15 @@ async fn main_loop<W: super::RenderSink>(
         sessions = list;
         focused_session = Some(focused);
     }
+    // ADR-0033: cache our own ClientId (for the "you hold the wheel" badge) and
+    // opt into the agent-event stream so `TerminalControl` broadcasts (lease +
+    // lifecycle) reach this client. Server-scoped (`terminal: None`) so we see
+    // control events for every pane, not just one.
+    if outcome.own_client_id.is_some() {
+        own_client_id = outcome.own_client_id;
+    }
+    conn.send(&FrameKind::SubscribeEvents { terminal: None })
+        .await?;
     if outcome.subscribe_layout
         && let Some(session) = focused_session
     {
@@ -1262,6 +1326,11 @@ async fn main_loop<W: super::RenderSink>(
         let windows = window_infos(&workspace, &panes, zoomed.as_ref());
         if let Some(sb) = status_bar.as_mut() {
             sb.set_windows(windows.clone());
+            sb.set_supervisory(supervisory_badge(
+                &panes,
+                focused_pane.as_ref(),
+                own_client_id,
+            ));
         }
         sidebar_painter.set_windows(windows);
     }
@@ -1435,6 +1504,11 @@ async fn main_loop<W: super::RenderSink>(
                     let windows = window_infos(&workspace, &panes, zoomed.as_ref());
                     if let Some(sb) = status_bar.as_mut() {
                         sb.set_windows(windows.clone());
+                        sb.set_supervisory(supervisory_badge(
+                            &panes,
+                            focused_pane.as_ref(),
+                            own_client_id,
+                        ));
                     }
                     sidebar_painter.set_windows(windows);
                     // phux-5ke.4: on overlay dismiss the dispatcher
@@ -1567,6 +1641,42 @@ async fn main_loop<W: super::RenderSink>(
                             sessions = list;
                             focused_session = Some(focused);
                         }
+                        // ADR-0033: ATTACHED can re-land on reconnect — refresh
+                        // our own ClientId for the wheel-holder comparison.
+                        if outcome.own_client_id.is_some() {
+                            own_client_id = outcome.own_client_id;
+                        }
+                        // ADR-0033: a `TerminalControl` event changed a pane's
+                        // lease/lifecycle. The event frame paints nothing, so
+                        // refresh the badge and repaint the bar here — otherwise
+                        // "FROZEN" / "wheel" wouldn't show until the next content
+                        // frame. A full repaint is cheap relative to how rarely
+                        // supervisory state changes.
+                        if outcome.chrome_dirty {
+                            if let Some(sb) = status_bar.as_mut() {
+                                sb.set_supervisory(supervisory_badge(
+                                    &panes,
+                                    focused_pane.as_ref(),
+                                    own_client_id,
+                                ));
+                            }
+                            if !overlays.is_active()
+                                && let Some(ls) =
+                                    workspace.render_window(zoomed.as_ref()).as_deref()
+                            {
+                                paint_full_frame(
+                                    out,
+                                    ls,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
+                                    &session_name,
+                                );
+                            }
+                        }
                         // phux-3uv / ADR-0018: ack the applied TERMINAL_OUTPUT
                         // so the server's per-consumer SnapshotSynthesizer
                         // clears the dirty bits that produced this frame
@@ -1646,6 +1756,11 @@ async fn main_loop<W: super::RenderSink>(
                                 window_infos(&workspace, &panes, zoomed.as_ref());
                             if let Some(sb) = status_bar.as_mut() {
                                 sb.set_windows(windows.clone());
+                                sb.set_supervisory(supervisory_badge(
+                                    &panes,
+                                    focused_pane.as_ref(),
+                                    own_client_id,
+                                ));
                             }
                             sidebar_painter.set_windows(windows);
                             if !overlays.is_active()
@@ -1755,6 +1870,11 @@ async fn main_loop<W: super::RenderSink>(
                     let windows = window_infos(&workspace, &panes, zoomed.as_ref());
                     if let Some(sb) = status_bar.as_mut() {
                         sb.set_windows(windows.clone());
+                        sb.set_supervisory(supervisory_badge(
+                            &panes,
+                            focused_pane.as_ref(),
+                            own_client_id,
+                        ));
                     }
                     sidebar_painter.set_windows(windows);
                 }
@@ -2544,6 +2664,37 @@ mod tests {
     use super::*;
     use phux_protocol::caps::ServerCapabilities;
     use tokio::net::UnixStream;
+
+    #[test]
+    fn supervisory_badge_formats_every_state() {
+        // ADR-0033: the focused-pane supervisory badge. Running + un-leased
+        // shows nothing; frozen and lease-holder render distinct chips, and the
+        // holder is "you" only when it matches this client's own id.
+        let me = ClientId::new(7);
+        let other = ClientId::new(9);
+        assert_eq!(format_supervisory_badge(false, None, Some(me)), None);
+        assert_eq!(
+            format_supervisory_badge(true, None, Some(me)).as_deref(),
+            Some("[ FROZEN ]")
+        );
+        assert_eq!(
+            format_supervisory_badge(false, Some(me), Some(me)).as_deref(),
+            Some("[ WHEEL:you ]")
+        );
+        assert_eq!(
+            format_supervisory_badge(false, Some(other), Some(me)).as_deref(),
+            Some("[ WHEEL:c9 ]")
+        );
+        assert_eq!(
+            format_supervisory_badge(true, Some(other), Some(me)).as_deref(),
+            Some("[ FROZEN WHEEL:c9 ]")
+        );
+        // No own id yet (pre-ATTACHED): a holder still renders by id, never "you".
+        assert_eq!(
+            format_supervisory_badge(false, Some(me), None).as_deref(),
+            Some("[ WHEEL:c7 ]")
+        );
+    }
 
     #[test]
     fn attach_error_io_display_includes_source() {

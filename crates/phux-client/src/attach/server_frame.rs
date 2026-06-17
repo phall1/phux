@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 
-use phux_protocol::ids::{SessionId, TerminalId};
-use phux_protocol::wire::frame::{FrameKind, Scope, SpawnError, SpawnResult};
+use phux_protocol::ids::{ClientId, SessionId, TerminalId};
+use phux_protocol::wire::frame::{AgentEvent, FrameKind, Scope, SpawnError, SpawnResult};
 use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
@@ -73,6 +73,16 @@ pub(super) struct FrameOutcome {
     /// `ATTACHED` snapshot is already authoritative at attach time (SPEC
     /// §13). Set ONLY by the `Attached` arm.
     pub(super) sessions: Option<(Vec<SessionInfo>, SessionId)>,
+    /// ADR-0033: `Some(id)` ⇒ ATTACHED carried this client's own server-assigned
+    /// `ClientId`. The driver caches it to tell "you have the wheel" from
+    /// another client holding it when rendering the supervisory badge. Set ONLY
+    /// by the `Attached` arm.
+    pub(super) own_client_id: Option<ClientId>,
+    /// ADR-0033: `true` ⇒ a `TerminalControl` event updated a pane's lifecycle
+    /// or input-lease holder, so the driver must repaint the status-bar chrome
+    /// (the supervisory badge) even though no grid content changed. Set ONLY by
+    /// the `Event` arm.
+    pub(super) chrome_dirty: bool,
 }
 
 /// Payload-free label for the inbound `FrameKind` — the `kind` field on
@@ -174,7 +184,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     match frame {
         FrameKind::Attached {
             snapshot,
-            initial_client_id: _,
+            initial_client_id,
         } => {
             // Capture the initial focused pane so subsequent INPUT_* frames
             // know where to route.
@@ -233,6 +243,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             Ok(FrameOutcome {
                 subscribe_layout: true,
                 sessions: Some(session_cache),
+                // ADR-0033: cache our own ClientId so the supervisory badge can
+                // distinguish "you hold the wheel" from another client.
+                own_client_id: Some(initial_client_id),
                 ..FrameOutcome::default()
             })
         }
@@ -957,6 +970,34 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     );
                     Ok(FrameOutcome::default())
                 }
+            }
+        }
+        // ADR-0033: a pushed agent event. We subscribed to the stream at
+        // attach (SUBSCRIBE_EVENTS) for the supervisory `TerminalControl`
+        // broadcast; fold its lifecycle + lease-holder into the pane's slot so
+        // the next paint renders the "FROZEN" / "wheel" badge. Other event
+        // kinds (dirty/idle/bell/...) are not consumed by the interactive TUI.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event:
+                AgentEvent::TerminalControl {
+                    lifecycle,
+                    input_holder,
+                    ..
+                },
+        } => {
+            if let Some(slot) = panes.get_mut(&terminal) {
+                slot.lifecycle = lifecycle;
+                slot.input_holder = input_holder;
+                Ok(FrameOutcome {
+                    chrome_dirty: true,
+                    ..FrameOutcome::default()
+                })
+            } else {
+                // A control event for a pane we have no slot for yet (it can
+                // precede the first snapshot). Harmless to drop — the lease is
+                // server-authoritative and the next event re-states it.
+                Ok(FrameOutcome::default())
             }
         }
         other => {
