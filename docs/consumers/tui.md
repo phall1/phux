@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-06-17
 ---
 
 # The phux reference TUI
@@ -547,6 +547,9 @@ line of config.
 | `resize-pane`        | `direction`, `amount`                 |
 | `next-window`        |                                       |
 | `previous-window`    |                                       |
+| `take-input`         | seize the focused pane's input lease (ADR-0033) |
+| `give-input`         | release the focused pane's input lease (ADR-0033) |
+| `signal-terminal`    | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
 | `detach`             |                                       |
 | `run`                | `command`, `in?` (pane to run in)     |
 | `message`            | `text`                                |

@@ -168,6 +168,17 @@ prefix = "C-a"
 # Detach this client from the session.
 "d" = "detach"
 
+# Supervisory control (ADR-0033, "take the wheel + kill"). Take seizes
+# exclusive input over the focused pane so an agent driving it is locked
+# out until you Give it back; Freeze (SIGSTOP) pauses the pane's process
+# mid-step and Resume (SIGCONT) lets it run again. Destructive signals
+# (kill / terminate / interrupt) are left to `phux signal` so a stray
+# keystroke can't tear a process down; bind them yourself if you want them.
+"W" = "take-input"
+"g" = "give-input"
+"f" = { action = "signal-terminal", signal = "freeze" }
+"u" = { action = "signal-terminal", signal = "resume" }
+
 # Resize the focused pane. Capital letters are equivalent to `S-<lower>`.
 "H" = { action = "resize-pane", direction = "left",  amount = 5 }
 "J" = { action = "resize-pane", direction = "down",  amount = 5 }
