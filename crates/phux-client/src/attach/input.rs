@@ -578,14 +578,18 @@ fn c0_or_ascii_to_key(b: u8) -> Option<KeyEvent> {
             text: Some(char::from(b).to_string()),
             unshifted_codepoint: Some(u32::from(ascii_unshifted(b))),
         }),
-        // CR / LF → Enter.
-        0x0D | 0x0A => Some(make_named_key(PhysicalKey::Enter, ModSet::empty())),
+        // CR → Enter. LF (0x0A) is Ctrl+J: it falls through to the Ctrl-letter
+        // arm below so the server encoder reproduces 0x0A rather than CR. In raw
+        // mode the host TTY sends CR for Return and LF only for Ctrl+J, so this
+        // split is unambiguous.
+        0x0D => Some(make_named_key(PhysicalKey::Enter, ModSet::empty())),
         // BS / DEL → Backspace.
         0x08 | 0x7F => Some(make_named_key(PhysicalKey::Backspace, ModSet::empty())),
         // HT → Tab.
         0x09 => Some(make_named_key(PhysicalKey::Tab, ModSet::empty())),
-        // Ctrl-A..Ctrl-Z (skipping the dedicated mappings above and ESC).
-        0x01..=0x1A if b != 0x08 && b != 0x09 && b != 0x0A && b != 0x0D => {
+        // Ctrl-A..Ctrl-Z (skipping the dedicated mappings above and ESC). LF
+        // (0x0A) lands here as Ctrl+J → letter 'J'.
+        0x01..=0x1A if b != 0x08 && b != 0x09 && b != 0x0D => {
             let letter = b'A' + (b - 1);
             ascii_letter_to_key(letter).map(|key| KeyEvent {
                 action: KeyAction::Press,
@@ -1623,6 +1627,19 @@ mod tests {
         let keys = key_only(&evs);
         assert_eq!(keys[0].key, PhysicalKey::C);
         assert!(keys[0].mods.contains(ModSet::CTRL));
+    }
+
+    #[test]
+    fn lf_byte_becomes_ctrl_j_not_enter() {
+        // 0x0A (Ctrl+J) must not be laundered into Enter; the server encoder
+        // re-derives bytes from the KeyEvent, so an Enter event would emit CR
+        // and swallow the line feed.
+        let mut p = StdinParser::new();
+        let evs = p.feed(&[0x0A]);
+        let keys = key_only(&evs);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].key, PhysicalKey::J);
+        assert_eq!(keys[0].mods, ModSet::CTRL);
     }
 
     // ---- UTF-8 ----------------------------------------------------------
