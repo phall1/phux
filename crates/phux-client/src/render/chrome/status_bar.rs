@@ -402,13 +402,21 @@ impl StatusBarPainter {
     }
 
     /// ADR-0033: set (or clear, with `None`) the supervisory badge overlaid on
-    /// the bar for the focused pane. A change invalidates the cache so the row
-    /// repaints — which also erases a badge that just cleared.
-    pub fn set_supervisory(&mut self, badge: Option<String>) {
-        if self.supervisory != badge {
-            self.supervisory = badge;
-            self.invalidate();
+    /// the bar for the focused pane. Returns `true` if the badge actually
+    /// changed (so the caller can gate a repaint on it). A change invalidates
+    /// the cache so the row repaints — which also erases a badge that just
+    /// cleared.
+    ///
+    /// No-op while an error line is showing: the badge rides the normal bar and
+    /// is suppressed under the error strip, so storing it (and invalidating the
+    /// error-line cache) would only force a spurious error-strip re-emit.
+    pub fn set_supervisory(&mut self, badge: Option<String>) -> bool {
+        if self.error.is_some() || self.supervisory == badge {
+            return false;
         }
+        self.supervisory = badge;
+        self.invalidate();
+        true
     }
 
     /// True if the underlying bar has no widgets configured.
@@ -463,7 +471,11 @@ impl StatusBarPainter {
         if self.error.is_some() {
             return self.paint_error_line(out, cols, rows);
         }
-        if self.bar.is_empty() && self.windows.is_empty() && self.supervisory.is_none() {
+        // The supervisory badge rides the normal bar row, so it only paints
+        // when there is a bar to host it. An empty configured bar with no
+        // windows stays a no-op (the badge is suppressed rather than ghosting
+        // over un-erased pane content on a row the bar never blanks).
+        if self.bar.is_empty() && self.windows.is_empty() {
             return Ok(());
         }
         let new_row = self.bar.render(&ctx.as_widget(), cols);
@@ -548,7 +560,8 @@ impl StatusBarPainter {
             }
             return Some((buffer, row_index));
         }
-        if self.bar.is_empty() && self.windows.is_empty() && self.supervisory.is_none() {
+        // Match `paint`: the badge only composes onto a non-empty bar row.
+        if self.bar.is_empty() && self.windows.is_empty() {
             return None;
         }
         let ctx = StatusBarContext {

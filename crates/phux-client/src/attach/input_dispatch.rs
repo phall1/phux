@@ -762,7 +762,6 @@ fn run_action(
     ctx: &mut DispatchCtx<'_>,
     focused: Option<&TerminalId>,
 ) -> ActionEffects {
-    let _ = focused;
     // One event per resolved action the user triggered. Info level: a
     // keybinding firing is a user-lifecycle event a trace reader wants under
     // the default filter, and it is human-paced (not per-frame), so it costs

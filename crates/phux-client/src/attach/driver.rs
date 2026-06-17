@@ -154,6 +154,29 @@ fn format_supervisory_badge(
     }
 }
 
+/// Refresh the window strip AND the supervisory badge together (ADR-0033).
+///
+/// Both feed one status-bar paint, so they must stay in lockstep: a site that
+/// refreshed the window list on a focus/layout change but forgot the badge
+/// would silently desync them. This single chokepoint makes that impossible —
+/// every focus/layout-change site calls it instead of hand-rolling the pair.
+fn refresh_window_chrome(
+    status_bar: Option<&mut StatusBarPainter>,
+    sidebar_painter: &mut SidebarPainter,
+    workspace: &Workspace,
+    panes: &HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    zoomed: Option<&TerminalId>,
+    own_client_id: Option<ClientId>,
+) {
+    let windows = window_infos(workspace, panes, zoomed);
+    if let Some(sb) = status_bar {
+        sb.set_windows(windows.clone());
+        sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
+    }
+    sidebar_painter.set_windows(windows);
+}
+
 /// Re-anchor the predictive-echo layer to a (newly) focused pane (phux-7ry0).
 ///
 /// Predictions are pane-local, but the layer carries a single cursor anchor +
@@ -1323,16 +1346,15 @@ async fn main_loop<W: super::RenderSink>(
     // phux-4h5a: the sidebar painter tracks the same window list so the strip's
     // tab list stays current whenever the bar's does.
     {
-        let windows = window_infos(&workspace, &panes, zoomed.as_ref());
-        if let Some(sb) = status_bar.as_mut() {
-            sb.set_windows(windows.clone());
-            sb.set_supervisory(supervisory_badge(
-                &panes,
-                focused_pane.as_ref(),
-                own_client_id,
-            ));
-        }
-        sidebar_painter.set_windows(windows);
+        refresh_window_chrome(
+            status_bar.as_mut(),
+            &mut sidebar_painter,
+            &workspace,
+            &panes,
+            focused_pane.as_ref(),
+            zoomed.as_ref(),
+            own_client_id,
+        );
     }
 
     loop {
@@ -1501,16 +1523,15 @@ async fn main_loop<W: super::RenderSink>(
                     .await?;
                 }
                 if layout_changed {
-                    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
-                    if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(windows.clone());
-                        sb.set_supervisory(supervisory_badge(
-                            &panes,
-                            focused_pane.as_ref(),
-                            own_client_id,
-                        ));
-                    }
-                    sidebar_painter.set_windows(windows);
+                    refresh_window_chrome(
+                        status_bar.as_mut(),
+                        &mut sidebar_painter,
+                        &workspace,
+                        &panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                    );
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
                     // below restores pane content under the now-gone
@@ -1641,26 +1662,24 @@ async fn main_loop<W: super::RenderSink>(
                             sessions = list;
                             focused_session = Some(focused);
                         }
-                        // ADR-0033: ATTACHED can re-land on reconnect — refresh
-                        // our own ClientId for the wheel-holder comparison.
-                        if outcome.own_client_id.is_some() {
-                            own_client_id = outcome.own_client_id;
-                        }
                         // ADR-0033: a `TerminalControl` event changed a pane's
                         // lease/lifecycle. The event frame paints nothing, so
-                        // refresh the badge and repaint the bar here — otherwise
-                        // "FROZEN" / "wheel" wouldn't show until the next content
-                        // frame. A full repaint is cheap relative to how rarely
-                        // supervisory state changes.
+                        // refresh the badge and repaint the bar here — but only
+                        // when the FOCUSED pane's badge actually changed
+                        // (`set_supervisory` reports it), so an event on a
+                        // background pane doesn't force a full-window repaint for
+                        // state the user can't see. (`own_client_id` is fixed for
+                        // the life of this loop; it was captured at bootstrap.)
                         if outcome.chrome_dirty {
-                            if let Some(sb) = status_bar.as_mut() {
+                            let badge_changed = status_bar.as_mut().is_some_and(|sb| {
                                 sb.set_supervisory(supervisory_badge(
                                     &panes,
                                     focused_pane.as_ref(),
                                     own_client_id,
-                                ));
-                            }
-                            if !overlays.is_active()
+                                ))
+                            });
+                            if badge_changed
+                                && !overlays.is_active()
                                 && let Some(ls) =
                                     workspace.render_window(zoomed.as_ref()).as_deref()
                             {
@@ -1752,17 +1771,15 @@ async fn main_loop<W: super::RenderSink>(
                             // the repaint — the dismiss path always
                             // triggers paint_full_frame, and the
                             // libghostty mirror is already updated.
-                            let windows =
-                                window_infos(&workspace, &panes, zoomed.as_ref());
-                            if let Some(sb) = status_bar.as_mut() {
-                                sb.set_windows(windows.clone());
-                                sb.set_supervisory(supervisory_badge(
-                                    &panes,
-                                    focused_pane.as_ref(),
-                                    own_client_id,
-                                ));
-                            }
-                            sidebar_painter.set_windows(windows);
+                            refresh_window_chrome(
+                                status_bar.as_mut(),
+                                &mut sidebar_painter,
+                                &workspace,
+                                &panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                            );
                             if !overlays.is_active()
                                 && let Some(ls) =
                                     workspace.render_window(zoomed.as_ref()).as_deref()
@@ -1867,16 +1884,15 @@ async fn main_loop<W: super::RenderSink>(
                     .await?;
                 }
                 if layout_changed {
-                    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
-                    if let Some(sb) = status_bar.as_mut() {
-                        sb.set_windows(windows.clone());
-                        sb.set_supervisory(supervisory_badge(
-                            &panes,
-                            focused_pane.as_ref(),
-                            own_client_id,
-                        ));
-                    }
-                    sidebar_painter.set_windows(windows);
+                    refresh_window_chrome(
+                        status_bar.as_mut(),
+                        &mut sidebar_painter,
+                        &workspace,
+                        &panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                    );
                 }
                 if layout_changed
                     && !overlays.is_active()
