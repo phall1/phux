@@ -62,6 +62,10 @@ amends / extends) are hand-curated from each ADR's body.
 | [0028](./0028-runtime-log-control.md) | Runtime log control | Accepted (forward-compat, builds on [0024](./0024-wire-owns-input-atoms.md)) |
 | [0029](./0029-one-cursor-authority-and-repaint-scheduler.md) | One cursor authority and a repaint scheduler | Accepted (forward-compat, extends [0020](./0020-layered-render.md)) |
 | [0030](./0030-engine-delegated-wire-and-projection-consumers.md) | Engine-delegated wire and projection consumers | Accepted (supersedes the L2 tier of [0015](./0015-protocol-layering.md)) |
+| [0031](./0031-remote-consumer-auth-and-encryption.md) | Remote-consumer authentication and encryption (no SSH tunnel) | Proposed |
+| [0032](./0032-graceful-server-upgrade.md) | Graceful server upgrade (sessions survive a binary update) | Accepted |
+| [0033](./0033-input-authority-and-process-signals.md) | Input authority leases and process signals ("take the wheel + kill") | Accepted |
+| [0034](./0034-kitty-graphics-image-passthrough.md) | Kitty graphics / image passthrough through the cell renderer | Proposed |
 
 ## When to write an ADR
 

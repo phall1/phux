@@ -1,19 +1,51 @@
 <!--
 audience: humans, contributors, agents
 stability: stable
-last-reviewed: 2026-06-09
+last-reviewed: 2026-06-17
 -->
+
+<div align="center">
+
+<!-- LOGO: drop a wordmark/logo asset here once one exists, e.g.
+     <img src="docs/assets/logo.svg" alt="phux" width="320"> -->
 
 # phux
 
-phux is a terminal multiplexer. You attach, split panes, detach, and come
-back later to find your shells still running — the tmux job, done.
+**the tmux job, done — a terminal is an object on a wire**
 
-The difference is underneath. In phux a terminal is a first-class object on a
-wire, not a screen trapped behind one process. Panes are just a view of it. So
-the same live terminal can be held by more than one thing at once — your TUI, a
-GUI, an AI agent — each reading and writing the real terminal rather than a
-screenshot or a scrape of it.
+<!-- BADGES: only badges that resolve today live here. The rest are
+     placeholders until the asset/tag exists. -->
+[![CI](https://github.com/phall1/phux/actions/workflows/ci.yml/badge.svg)](https://github.com/phall1/phux/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+<!-- TODO badges (do not enable until they resolve):
+     - crates.io: needs the first `phux-protocol` publish
+     - version/release: needs a v0.0.x tag populating GitHub Releases
+     - Homebrew: needs the first bottle in the tap
+-->
+
+[Concepts](./docs/CONCEPTS.md) ·
+[Quickstart](./docs/QUICKSTART.md) ·
+[Install](./docs/INSTALL.md) ·
+[Agents](./docs/consumers/agents.md) ·
+[Spec](./docs/spec/) ·
+[Architecture](./docs/architecture/) ·
+[Contributing](./CONTRIBUTING.md)
+
+</div>
+
+<!-- DEMO: a ~10s asciinema cast / GIF goes here. Show kitty graphics +
+     truecolor surviving a detach/reattach, then a `phux run` / `phux watch`
+     line so the agent angle lands in the same breath. Recipe: docs/demo.md.
+     Replace this comment with the image once docs/assets/demo.gif exists. -->
+
+phux is a terminal multiplexer. You attach, split panes, detach, and come back
+later to find your shells still running — the tmux job, done. The difference is
+underneath: in phux a terminal is a first-class object on a wire, not a screen
+trapped behind one process. The same live terminal can be held by more than one
+thing at once — your TUI, a GUI, an AI agent — each reading and writing the real
+terminal rather than a screenshot of it.
+
+## Why it's different
 
 Two consequences fall out of that, and they're the reason to use phux.
 
@@ -21,19 +53,19 @@ Two consequences fall out of that, and they're the reason to use phux.
 hyperlinks, the modern keyboard protocol — they keep working after you detach
 and reattach, because phux never re-parses your bytes in the middle. Most
 multiplexers degrade or drop these the moment they sit between you and your
-terminal.
+terminal. The same terminal engine ([libghostty][lghv]) runs on both ends of the
+wire, so bytes pass straight through instead of being re-parsed and degraded.
 
 **An agent is a first-class user, not a guest.** An AI agent can drive the same
 terminal you're looking at, over the wire, with the same authority you have.
 There is no "agent mode" to enable — there are terminals, and some of the things
 attached to them are people.
 
-<!-- DEMO: a ~10s asciinema cast / GIF goes here. Show kitty graphics +
-     truecolor surviving a detach/reattach, then a `phux run` / `phux watch`
-     line so the agent angle lands in the same breath. Recipe: docs/demo.md.
-     Replace this comment with the image once docs/assets/demo.gif exists. -->
+## Install
 
-## Try it
+phux is v0.0.x. Pick the tier that's honest about your machine.
+
+**From source — works today.**
 
 ```sh
 git clone https://github.com/phall1/phux
@@ -43,11 +75,17 @@ cargo run --bin phux
 ```
 
 You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive —
-and run `phux` again to come back to exactly where you were. Full setup details
-(off-Nix pins, the agent binaries) are in [INSTALL.md](./docs/INSTALL.md).
+and run `phux` again to come back to exactly where you were. Off-Nix pins and the
+agent binaries are in [INSTALL.md](./docs/INSTALL.md).
 
-A Homebrew tap exists; the first bottles haven't shipped. Until they do, the
-source build above is the install path.
+**Prebuilt binary — coming.** A download-and-run binary needs a `v0.0.x` tag
+cut to populate GitHub Releases first; until that lands, build from source.
+
+**Homebrew — coming.** A tap exists; the first bottles haven't shipped. Until
+they do, the source build above is the install path.
+
+There is no `cargo install phux` yet — `phux-protocol`'s first crates.io publish
+is still pending.
 
 ## The wire, without a TTY
 
@@ -77,21 +115,14 @@ nothing gets mangled on the way through.
 
 So phux makes the **terminal** the unit — not the session, not the window. A
 human's TUI and an agent's API are two ways to hold the same object; neither is
-the privileged one.
-
-The same terminal engine ([libghostty][lghv]) runs on both ends of the wire, so
-bytes pass straight through instead of being re-parsed and degraded. That is the
-structural reason modern protocols survive a reattach — and why the next
-protocol will too, without phux learning about it.
-
-The longer version, with the diagrams: [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
+the privileged one. The longer version, with the diagrams:
+[`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
 
 [lghv]: https://github.com/Uzaaft/libghostty-rs
 
 ## Status
 
-phux is v0.0.x. The line between what's solid and what's still a promise is
-kept honest here:
+The line between what's solid and what's still a promise is kept honest here:
 
 **Stable — won't move under you**
 - The TUI: attach / detach / reattach, multi-pane splits, status bar,

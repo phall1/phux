@@ -25,7 +25,13 @@ Throughout the spec:
 - `varint` is unsigned [LEB128]: 7 data bits per byte, MSB set on
   continuation. Encoders MUST emit the minimum-length encoding. Decoders
   MUST reject non-canonical encodings (length-extended representations).
-- `bytes` is `varint length || raw bytes`.
+  Varints carry the field-tagged TLV envelope — `field_id`, `wire_type`
+  lengths — per [appendix-encoding.md](./appendix-encoding.md) §1.
+- `bytes` is `u32 length || raw bytes`, the length a big-endian count of
+  the raw bytes that follow. This is a **leaf primitive**: it length-
+  prefixes a `str` / `bytes` value sitting inside a field's positional
+  value, distinct from the varint length the TLV envelope uses for a
+  `BYTES` wire-type field (appendix-encoding.md §1).
 - `str` is `bytes` whose contents are valid UTF-8.
 - `bool` is `u8` with `0` for false, `1` for true, all other values
   reserved.
@@ -201,7 +207,7 @@ within the payload as defined per-message and per-field.
 ## 6. Version negotiation
 
 The protocol uses semantic versioning: `major.minor.patch`. This
-document specifies version `0.4.0`.
+document specifies version `0.5.0`.
 
 - **Major** version changes are wire-breaking.
 - **Minor** version changes add new messages or new fields. A peer
@@ -588,14 +594,18 @@ ErrorCode = enum {
     UNKNOWN_MESSAGE_TYPE = 2,
     MALFORMED_MESSAGE    = 3,
     FRAME_TOO_LARGE      = 4,
-    OUT_OF_TIER          = 5,   // a message arrived from a tier outside
-                                //   the negotiated `HELLO.layers` set
+    OUT_OF_TIER          = 5,   // RESERVED, not emitted: the L2 tier was
+                                //   dissolved (ADR-0030), so no message can
+                                //   arrive from an un-negotiated tier. The
+                                //   shipped enum does not define this variant;
+                                //   the value stays reserved for the §11.5 use.
 
     NOT_ATTACHED         = 100,
     ALREADY_ATTACHED     = 101,
-    COLLECTION_NOT_FOUND = 102,  // renamed from SESSION_NOT_FOUND; same byte
-    METADATA_KEY_NOT_FOUND = 103, // renamed from WINDOW_NOT_FOUND; same byte
-                                  //   (WindowId is no longer a wire concept)
+    SESSION_NOT_FOUND    = 102,  // shipped name; the requested session
+                                 //   (now an L3 grouping) does not exist
+    WINDOW_NOT_FOUND     = 103,  // shipped name; the requested window
+                                 //   (a TUI L3 convention) does not exist
     TERMINAL_NOT_FOUND   = 104,  // renamed from PANE_NOT_FOUND per ADR-0016
     CLIENT_NOT_FOUND     = 105,
     UNSUPPORTED_SATELLITE_ROUTE = 106,
@@ -603,7 +613,9 @@ ErrorCode = enum {
     INVALID_COMMAND      = 200,
     PERMISSION_DENIED    = 201,
     RESOURCE_EXHAUSTED   = 202,
-    UNSAFE_PASTE         = 203,
+    UNSAFE_PASTE         = 203,  // RESERVED, not yet emitted: no variant in the
+                                 //   shipped enum; the value is held for an
+                                 //   unsafe-paste guard and skipped by 204.
     INPUT_LEASE_HELD     = 204,  // ADR-0033: cooperative ACQUIRE_INPUT lost
                                  //   to an existing input-lease holder
 
@@ -611,9 +623,18 @@ ErrorCode = enum {
 }
 ```
 
-The numeric discriminants for codes 102, 103, 104 are preserved
-across the rename so the wire bytes are unchanged. Decoders MUST
-accept the byte values; the name change is editorial.
+This catalog tracks the shipped `#[non_exhaustive]` `ErrorCode` enum in
+`phux-protocol` (`wire::frame`), which is the source of truth for the
+wire bytes. Two values are **reserved but not emitted** by the reference
+implementation: `OUT_OF_TIER = 5` (the L2 tier it guarded was dissolved
+by [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md))
+and `UNSAFE_PASTE = 203` (held for a future unsafe-paste guard; `204`
+already skips it). Codes `102` and `103` ship under the names
+`SESSION_NOT_FOUND` / `WINDOW_NOT_FOUND`; the substrate no longer carries
+a session or window concept, so the names read as the TUI-convention
+lookups they back. Decoders MUST accept the byte values regardless of the
+name. Because the enum is `#[non_exhaustive]`, an unknown code value is
+surfaced rather than mapped to a placeholder.
 
 A fatal error MUST be followed by `DETACHED { reason: PROTOCOL_ERROR }`
 and transport close.
@@ -719,6 +740,14 @@ sessions, windows, and panes from L3 metadata, not from a wire tier.
 A peer receiving a message from a tier outside the negotiated
 intersection MUST send `ERROR { code: OUT_OF_TIER }` and SHOULD
 close the connection with `DETACHED { reason: PROTOCOL_ERROR }`.
+
+In practice no message can trigger this today: the only optional tier
+was L2, dissolved by
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md),
+so every conforming consumer speaks the same L1 (+ optional L3) surface.
+`OUT_OF_TIER = 5` is therefore reserved (§9) and not emitted by the
+reference implementation; the rule stands so a future optional tier
+reinstates it without a renumber.
 
 ### 11.6 Test suite
 

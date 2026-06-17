@@ -12,7 +12,7 @@ last-reviewed: 2026-06-07
 
 ## Maturity: pre-alpha, spec-first
 
-phux is pre-alpha. The protocol is at version 0.3.0 and the spec leads the code: several behaviors are designed and written down before they are built, and a few shipped behaviors still diverge from the target the spec describes. This document distinguishes what runs today from a stated direction. Where they disagree, the divergence is marked inline and pointed at the ADR that decides it.
+phux is pre-alpha. The protocol is at version 0.5.0 and the spec leads the code: several behaviors are designed and written down before they are built, and a few shipped behaviors still diverge from the target the spec describes. This document distinguishes what runs today from a stated direction. Where they disagree, the divergence is marked inline and pointed at the ADR that decides it.
 
 What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). What is designed but not built includes federation routing and the encoding migration noted below.
 
@@ -63,7 +63,7 @@ There is no L2 collection tier. Group lifecycle — "these terminals belong toge
 
 The wire surface itself is owned by the spec: L1 by [`spec/L1.md`](./spec/L1.md), the metadata model and grouping conventions by [`spec/L3.md`](./spec/L3.md), and the byte-level codec by [`spec/appendix-encoding.md`](./spec/appendix-encoding.md).
 
-Divergence to be honest about: the code on this branch still ships `CREATE_SESSION`, `RENAME_SESSION`, and `KILL_COLLECTION` as L1 commands, which puts session vocabulary and collection lifecycle in the substrate tier. The target decomposes them — create is `SPAWN_TERMINAL` plus a metadata key, rename is a metadata SET, kill-group is `KILL_TERMINALS` — and retires the `GroupId` plumbing that only served them. `GroupId` is retained for now as a documented opaque grouping key, not a lifecycle tier; its full removal is tracked work (bead phux-0bmc). The decomposition is decided in [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md); until the code lands, treat the spec as the target and the leaked verbs as the current reality.
+The dissolution of the collection lifecycle tier shipped in protocol 0.3.0: the `CREATE_SESSION`, `RENAME_SESSION`, and `KILL_COLLECTION` verbs are gone from the wire. Create is `SPAWN_TERMINAL` plus a metadata key, rename is a metadata SET, and atomic group teardown is the single `KILL_TERMINALS` operation. `GroupId` is retained as a documented opaque grouping key, not a lifecycle tier; its full removal is tracked work (bead phux-0bmc). The decomposition is decided in [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md).
 
 ---
 
