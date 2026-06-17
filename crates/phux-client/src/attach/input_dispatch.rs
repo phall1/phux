@@ -16,7 +16,7 @@ use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
-use super::paint::SidebarReservation;
+use super::paint::{SidebarReservation, content_rect};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -111,6 +111,11 @@ pub(super) struct DispatchCtx<'a> {
     /// the per-frame `sidebar` reservation after dispatch so the toggle repaint
     /// reflects the new state. Owned by the driver like `zoomed`.
     pub sidebar_enabled: &'a mut bool,
+    /// Whether the status bar reserves its row this frame (`status_bar.is_some()`
+    /// in the driver). Mouse routing folds this into the same
+    /// `content_rect(viewport, has_bar, sidebar)` the paint path uses so a
+    /// click hit-tests against the rects actually on screen.
+    pub has_bar: bool,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -262,14 +267,17 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // event with pane-local coordinates substituted.
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
-            // phux-4h5a P4 follow-up: mouse click-to-focus on the sidebar
-            // strip. This hit-test routes against the pane layout over the full
-            // viewport; when the sidebar is enabled it does not yet recognize a
-            // click in the strip's reserved columns as "focus window N" (the
-            // companion to the deferred `focus-window`-by-index action below).
+            // Hit-test against the SAME inset content rect the renderer tiles
+            // into — status-bar row and sidebar columns folded off the outer
+            // viewport. Routing against the full viewport instead disagrees with
+            // what is painted: a click near a divider lands one row off (the
+            // status bar) and, with a sidebar docked, one strip-width off in x,
+            // so it focuses/forwards to the wrong pane. Clicks in the reserved
+            // chrome miss every pane rect and become a DividerNoOp (dropped).
+            let content = content_rect(ctx.viewport, ctx.has_bar, ctx.sidebar);
             // phux-jow6: hit-test against the RENDER layout, not the real
             // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
-            // is a single full-viewport leaf, so any click lands on the
+            // is a single full-content leaf, so any click lands on the
             // visible zoomed pane instead of whichever hidden tiled pane sits
             // under the cursor. Compute the decision in a scope that drops the
             // borrowing `Cow` before the click-to-focus `active_window_mut()`
@@ -279,7 +287,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     tracing::debug!("dropping mouse event: no active window");
                     continue;
                 };
-                route_mouse_event(&render_ls, ctx.viewport, mouse)
+                route_mouse_event(&render_ls, content, ctx.viewport, mouse)
             };
             match decision {
                 RouteDecision::Pane {
@@ -1476,6 +1484,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1672,6 +1681,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         let mut out: Vec<u8> = Vec::new();
@@ -1714,6 +1724,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         apply_action_effects(
@@ -1788,6 +1799,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                has_bar: false,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -2057,6 +2069,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -2122,6 +2135,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                has_bar: false,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -2266,6 +2280,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
         };
         dispatch_input_events(
             &mut out,
