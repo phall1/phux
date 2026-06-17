@@ -342,43 +342,37 @@ window-size           = "smallest"   # geometry policy for shared Terminals (ADR
 # spawn-on-attach     = "/usr/bin/some-launcher"  # default: defaults.shell
 
 [keybindings]
-prefix = "ctrl+space"
+prefix = "C-a"
 
 # Bindings under the prefix.
 # An action is either a bare string (no parameters) or an inline
 # table whose `action` field names the action and remaining fields
 # pass parameters.
 [keybindings.prefix-table]
-"c"        = { action = "new-pane", direction = "horizontal" }
-"v"        = { action = "new-pane", direction = "vertical" }
+'"'        = { action = "split-pane", direction = "horizontal" }
+"%"        = { action = "split-pane", direction = "vertical" }
 "x"        = "kill-pane"
-"n"        = "new-window"
-"tab"      = "next-window"
-"h"        = { action = "focus-pane", direction = "left" }
-"j"        = { action = "focus-pane", direction = "down" }
-"k"        = { action = "focus-pane", direction = "up" }
-"l"        = { action = "focus-pane", direction = "right" }
+"c"        = "new-window"
+"n"        = "next-window"
+"h"        = { action = "focus-direction", direction = "left" }
+"j"        = { action = "focus-direction", direction = "down" }
+"k"        = { action = "focus-direction", direction = "up" }
+"l"        = { action = "focus-direction", direction = "right" }
+"w"        = "window-picker"
+"s"        = "session-picker"
 "d"        = "detach"
-"shift+r"  = "rename-window"
+","        = "rename-window"
 
 # Global table: bindings that fire without a prefix.
 # Empty by default; opt in to hyper/super combos if your outer
 # terminal forwards them.
 [keybindings.global]
-# "hyper+left" = { action = "focus-pane", direction = "left" }
+# "M-Enter" = "detach"
 
 [status]
-left   = ["session"]
-center = ["windows"]
-right  = [{ kind = "clock", format = "%H:%M" }]
-
-[[hooks.pane-exit]]
-when   = { exit-code = 0 }
-action = "noop"
-
-[[hooks.pane-exit]]
-when   = { exit-code = "*" }
-action = { kind = "notify", text = "pane {pane} exited with {exit-code}" }
+left   = [{ kind = "windows" }]
+center = []
+right  = ["session-name", { kind = "time", format = " %H:%M" }]
 
 [theme]
 accent = "#cdd6f4"
@@ -443,10 +437,15 @@ predictive-echo = false
 
 ### 4.3 Reloading
 
-Config reloads are explicit, not automatic. `phux config reload` re-reads
-the config file and applies it server-wide. We do not watch the file
-because watch-reload introduces a class of "saved-mid-edit, now my
-keybindings are gone" papercuts.
+> **Status:** Design intent. No live-reload verb ships today. The shipped
+> `phux config` subcommands are `init`, `path`, and `show` (§4.0); a
+> running client picks up config changes on its next start, not in place.
+
+Config reloads are designed to be explicit, not automatic: a future
+reload path re-reads the file and applies it without restarting, and the
+file is deliberately not watched, because watch-reload introduces a class
+of "saved-mid-edit, now my keybindings are gone" papercuts. Until that
+lands, restart the client (or detach and re-attach) to apply edits.
 
 ### 4.4 Theme color slots
 
@@ -494,14 +493,14 @@ We support two binding tables, both always present:
 
 ```toml
 [keybindings]
-prefix = "ctrl+space"
+prefix = "C-a"
 
 [keybindings.global]
-"hyper+left"  = { action = "focus-pane", direction = "left" }
-"hyper+right" = { action = "focus-pane", direction = "right" }
+"hyper+left"  = { action = "focus-direction", direction = "left" }
+"hyper+right" = { action = "focus-direction", direction = "right" }
 
 [keybindings.prefix-table]
-"c" = { action = "new-pane", direction = "horizontal" }
+'"' = { action = "split-pane", direction = "horizontal" }
 # ...
 ```
 
@@ -511,50 +510,99 @@ hyper/super at all. Users on Ghostty can opt in.
 
 ### 5.2 The dispatcher
 
-Bindings invoke **actions**. Actions are typed `Command`s from the wire
-spec (see [`../spec/L1.md`](../spec/L1.md) §5) plus a small set of client-side actions (detach, message-prompt,
-copy-selection-to-clipboard). They are *not* shell strings; they are
-named identifiers with typed parameters.
-
-To shell out, use the explicit `run` action:
-
-```toml
-[keybindings.prefix-table]
-"g"        = { action = "run", command = "lazygit" }          # in a new pane
-"shift+g"  = { action = "run", command = "git status", in = "." }  # in current pane
-```
+Bindings invoke **actions**: named identifiers with typed parameters, not
+shell strings. Every action in §5.4 routes through one `run_action`
+dispatch path — the command palette and the pickers commit the *same*
+`ResolvedAction` a keybinding produces, so there is a single source of
+truth for what each name does (see
+[`action_registry.rs`](../../crates/phux-client/src/attach/action_registry.rs)).
 
 ### 5.3 Defaults
 
-The defaults ship with `prefix = "ctrl+space"`. Users override it in one
-line of config.
+The defaults ship with `prefix = "C-a"` (tmux-shaped). Override it in one
+line of config. The shipped prefix-table bindings:
 
-### 5.4 Action catalog (initial)
+| Chord       | Action                                                   |
+|-------------|----------------------------------------------------------|
+| `C-a "`     | `split-pane` horizontal (stacked panes)                  |
+| `C-a %`     | `split-pane` vertical (side-by-side panes)               |
+| `C-a x`     | `kill-pane`                                              |
+| `C-a X`     | `kill-window`                                            |
+| `C-a h/j/k/l` | `focus-direction` left/down/up/right                   |
+| `C-a o`     | `next-pane`                                              |
+| `C-a ;`     | `previous-pane`                                          |
+| `C-a z`     | `toggle-zoom`                                            |
+| `C-a b`     | `toggle-sidebar`                                         |
+| `C-a [`     | `copy-mode`                                              |
+| `C-a c`     | `new-window`                                             |
+| `C-a n/p`   | `next-window` / `previous-window`                        |
+| `C-a 0`–`9` | `select-window` by index                                |
+| `C-a w`     | `window-picker` (grouped: sessions, windows nested)      |
+| `C-a s`     | `session-picker` (`C-a a` is a kept alias)               |
+| `C-a C`     | `new-session`                                            |
+| `C-a ,`     | `rename-window` (interactive prompt)                     |
+| `C-a $`     | `rename-session` (interactive prompt)                    |
+| `C-a H/J/K/L` | `resize-pane` left/down/up/right by 5                  |
+| `C-a :`     | `command-palette`                                        |
+| `C-a d`     | `detach`                                                 |
+| `C-a ?`     | `show-help`                                              |
 
-| Action               | Parameters                            |
-|----------------------|---------------------------------------|
-| `new-session`        | `name`, `cwd`, `command`              |
-| `new-window`         | `cwd`, `command`                      |
-| `new-pane`           | `direction`, `target`, `cwd`, `command` |
-| `kill-pane`          | `target?`                             |
-| `kill-window`        | `target?`                             |
-| `kill-session`       | `target?`                             |
-| `rename-window`      | `target?`, `prompt?`                  |
-| `rename-session`     | `target?`, `prompt?`                  |
-| `focus-pane`         | `direction` or `target`               |
-| `focus-window`       | `direction` or `index` or `target`    |
-| `move-pane`          | `target`, `position`                  |
-| `resize-pane`        | `direction`, `amount`                 |
-| `next-window`        |                                       |
-| `previous-window`    |                                       |
-| `take-input`         | seize the focused pane's input lease (ADR-0033) |
-| `give-input`         | release the focused pane's input lease (ADR-0033) |
-| `signal-terminal`    | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
-| `detach`             |                                       |
-| `run`                | `command`, `in?` (pane to run in)     |
-| `message`            | `text`                                |
-| `command-prompt`     | (interactive command entry)           |
-| `noop`               |                                       |
+### 5.4 Action catalog
+
+These are the actions the dispatcher actually handles today (the set is
+kept in lockstep with `ACTION_NAMES` and the palette registry by a unit
+test, so this table cannot silently drift):
+
+| Action            | Parameters                                  |
+|-------------------|---------------------------------------------|
+| `split-pane`      | `direction` (`horizontal` \| `vertical`)    |
+| `kill-pane`       |                                             |
+| `new-window`      |                                             |
+| `kill-window`     |                                             |
+| `next-window`     |                                             |
+| `previous-window` |                                             |
+| `select-window`   | `index`                                     |
+| `rename-window`   | `name?` (bare opens an interactive prompt)  |
+| `rename-session`  | `name?` (bare opens an interactive prompt)  |
+| `focus-direction` | `direction` (`left`/`right`/`up`/`down`)    |
+| `resize-pane`     | `direction`, `amount`                       |
+| `next-pane`       |                                             |
+| `previous-pane`   |                                             |
+| `toggle-zoom`     |                                             |
+| `toggle-sidebar`  |                                             |
+| `copy-mode`       |                                             |
+| `show-help`       |                                             |
+| `command-palette` | (opens the palette — §5.5)                  |
+| `window-picker`   | (opens the grouped window picker — §5.5)    |
+| `session-picker`  | (opens the session picker — §5.5)           |
+| `new-session`     | `name?` (bare opens an interactive prompt)  |
+| `switch-session`  | `name` (re-attaches this client)            |
+| `detach`          |                                             |
+| `take-input`      | seize the focused pane's input lease (ADR-0033) |
+| `give-input`      | release the focused pane's input lease (ADR-0033) |
+| `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
+
+### 5.5 Command palette and pickers
+
+`command-palette` (`C-a :`) opens a filterable overlay listing every
+action, each annotated with its currently-bound chord. Rows are grouped
+under dim category headers — **Pane**, **Window**, **Session**, **View** —
+when the query is empty; as you type, the headers fall away and the
+matches are ranked best-first by a scored fuzzy match (contiguous runs,
+word-boundary hits, and earliness all raise a row's rank), so typing `sp`
+floats `split-pane` to the top. Enter commits the selected row through the
+same `run_action` path a keybinding takes.
+
+The **session picker** (`session-picker`, `C-a s`, alias `C-a a`) lists the
+server's other sessions; choosing one re-attaches this client to it
+in-process (`switch-session`). A trailing "+ New session" row creates one.
+
+The **window picker** (`window-picker`, `C-a w`) is hierarchical: every
+session is a section header with its windows nested beneath it. Choosing a
+window in the **current** session switches to it directly; choosing
+another session switches to that session (its windows then list under its
+own picker). Directly selecting a window inside a different session in one
+step is not yet wired — see the picker's source for the gap.
 
 ---
 
@@ -662,19 +710,19 @@ a bare string is shorthand for a no-parameters widget:
 
 ```toml
 [status]
-left   = ["session"]                                    # → [{ kind = "session" }]
-center = ["windows"]
-right  = [{ kind = "clock", format = "%H:%M" }]
+left   = ["session-name"]                               # → [{ kind = "session-name" }]
+center = []
+right  = [{ kind = "time", format = " %H:%M" }]
 ```
 
 There are three categories of widgets:
 
 1. **Server facts.** The server already publishes session names, window
    lists, focused pane, cwd (via OSC 7), last command exit (via OSC
-   133). These are widget kinds (`session`, `windows`, `cwd`, `exit`,
-   etc.) backed by data the server pushes anyway.
+   133). These are widget kinds (`session-name`, `windows`, `cwd`,
+   `exit`, etc.) backed by data the server pushes anyway.
 2. **Client-local widgets.** Things derivable on the client without
-   server help: `clock`, `mode`, `key-indicator` (last key chord).
+   server help: `time`, `mode`, `key-indicator` (last key chord).
 3. **`exec` widgets.** The client runs the named program on the
    configured interval and renders its stdout (parsed for SGR if it
    contains ANSI). These run per-client; a clipboard daemon, a battery
@@ -684,7 +732,7 @@ There are three categories of widgets:
 right = [
     { kind = "exec", command = "~/.local/bin/battery", interval = "30s" },
     { kind = "text", value = " | " },
-    { kind = "clock", format = "%H:%M" },
+    { kind = "time", format = "%H:%M" },
 ]
 ```
 
@@ -705,13 +753,13 @@ architectural revision to grow a status bar plugin story.
 
 | Kind            | Parameters                                                   |
 |-----------------|--------------------------------------------------------------|
-| `session`       | `format?` (default: `"{name}"`)                              |
-| `window`        | `format?` (default: `"{name}"`)                              |
+| `session-name`  | `format?` (default: `"{name}"`) — **implemented**           |
+| `time`          | `format` (strftime) — **implemented**                       |
 | `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented** |
+| `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |
 | `cwd`           | `format?`, `truncate?` (chars)                               |
 | `exit`          | `format?` (last command exit code, OSC 133)                  |
-| `clock`         | `format` (strftime)                                          |
 | `host`          | `format?`                                                    |
 | `mode`          | `format?` (current input mode)                               |
 | `key-indicator` | shows the last key/chord pressed; reserved for v0.2          |
@@ -722,8 +770,8 @@ architectural revision to grow a status bar plugin story.
 Every widget kind accepts a `style` table with optional `fg`, `bg`
 (color strings: names, `#rrggbb`, or palette indices), and the boolean
 attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
-implemented built-ins today are `clock`, `session`, and `windows` (the
-others above are design intent); `windows` takes its `active` and
+implemented built-ins today are `session-name`, `time`, and `windows`
+(the others above are design intent); `windows` takes its `active` and
 `inactive` segments as such style tables.
 
 ### 8.4 Refresh and ordering
@@ -860,14 +908,14 @@ The shipped defaults, in one place:
 | Pane refresh rate cap         | 60 Hz                                    |
 | Backpressure threshold        | 32 unacked frames                        |
 | Journal size cap (per pane)   | 10 MiB ring                              |
-| Prefix key                    | `ctrl+space`                             |
+| Prefix key                    | `C-a`                                    |
 | Pane on PTY exit              | close                                    |
 | Mouse                         | on                                       |
 | New-pane CWD inheritance      | `inherit-focused` (tmux-shaped)          |
 | Spawn-on-attach               | `defaults.shell` (unset = inherit)       |
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
-| Status bar                    | `["session"]` / `["windows"]` / `[{ kind = "clock", format = "%H:%M" }]` |
+| Status bar                    | `[{ kind = "windows" }]` / `[]` / `["session-name", { kind = "time", format = " %H:%M" }]` |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
 | Cursor blink                  | follow inner program request             |
@@ -884,9 +932,9 @@ $ phux
 # running $SHELL in $PWD
 # attaches the client and renders
 # status bar shows "default | 0:shell | 21:14"
-# prefix is ctrl+space (advertised once in a startup message)
-$ ctrl+space c    # new pane horizontally
-$ ctrl+space d    # detach
+# prefix is C-a (advertised once in a startup message)
+$ C-a c           # new window
+$ C-a d           # detach
 $ phux            # re-attach to "default"; full state replayed
 ```
 
@@ -894,7 +942,7 @@ Discoverability: at startup the first time, the client prints one
 non-intrusive message to the status bar:
 
 ```
-phux 0.1 — prefix ctrl+space, ? for help, d to detach
+phux 0.1 — prefix C-a, ? for help, d to detach
 ```
 
 That message disappears after 5 seconds or any keystroke, whichever

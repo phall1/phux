@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-05-31
+last-reviewed: 2026-06-17
 ---
 
 # Configuration and keybindings
@@ -36,15 +36,11 @@ phux config show         # print the effective config (defaults merged
 phux config show --default  # print the shipped defaults with comments
 ```
 
-### Reloading
+### Applying changes
 
-Config reloads are **explicit**, not automatic. After editing your config file, run:
+There is no live-reload verb today (the shipped `phux config` subcommands are `init`, `path`, and `show`). To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
 
-```sh
-phux config reload       # re-read the config file and apply server-wide
-```
-
-We do not watch the file because auto-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). Explicit reload is safer.
+Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
 
 ---
 
@@ -66,7 +62,7 @@ The config TOML has five main sections:
 The keybindings section has three keys:
 
 - **`prefix`** — the key that unlocks prefix-table bindings (default: `C-a`)
-- **`[keybindings.prefix-table]`** — bindings that fire after pressing the prefix (tmux-style). This is where `c` (new window), `|` (vertical split), `x` (kill pane), etc. live.
+- **`[keybindings.prefix-table]`** — bindings that fire after pressing the prefix (tmux-style). This is where `c` (new window), `%` (vertical split), `"` (horizontal split), `x` (kill pane), etc. live.
 - **`[keybindings.global]`** — bindings that fire any time, no prefix needed. Reserved for modifiers unlikely to conflict with inner programs: `super`, `hyper`, `meta`. Empty by default.
 
 **Chord syntax:**
@@ -101,19 +97,21 @@ right  = ["session-name", { kind = "time", format = "%H:%M" }]
 
 A bare string like `"session-name"` is shorthand for `{ kind = "session-name" }`. Widgets that take parameters use inline table syntax.
 
-**Built-in widgets** (from `docs/consumers/tui.md` §8):
+**Shipped widgets** (the kinds implemented today; from `docs/consumers/tui.md` §8.3):
 
 - `"session-name"` — current session name
 - `"windows"` — tab bar, one tab per window
 - `{ kind = "time", format = "..." }` — wall-clock time (strftime format)
-- `"cwd"` — current working directory from OSC 7
-- `"exit"` — last command's exit code (from OSC 133)
+
+Further kinds (`cwd`, `exit`, `exec`, and more) are catalogued in `docs/consumers/tui.md` §8.3 as design intent, not yet implemented.
 
 All are **optional**. The default ships with windows on the left and session name + time on the right. Extend by using styled variants — see `phux config show --default` for examples with custom colors and separators.
 
 ### Hooks (events and actions)
 
-Hooks are event-driven actions. The shipped defaults show two `pane-exit` hooks — one for success (exit code 0), one for any other exit code:
+> **Status:** Schema only. The `[[hooks.<name>]]` tables parse, but the runtime that fires them is design intent (`docs/consumers/tui.md` §9); the shipped defaults define no hooks.
+
+Hooks are event-driven actions. You could, for example, declare two `pane-exit` hooks — one for success (exit code 0), one for any other exit code:
 
 ```toml
 [[hooks.pane-exit]]
@@ -140,7 +138,7 @@ The shipped default is `C-a` to avoid conflicts with readline and screen. To cha
 prefix = "C-b"
 ```
 
-Then run `phux config reload`. Every prefix-table binding (`c`, `|`, `x`, etc.) now fires after `Ctrl-B`.
+Then restart the client (detach and re-attach, or relaunch `phux`). Every prefix-table binding (`c`, `%`, `x`, etc.) now fires after `Ctrl-B`.
 
 Or use `Ctrl-Space`:
 
@@ -149,26 +147,19 @@ Or use `Ctrl-Space`:
 prefix = "C-Space"
 ```
 
-### Example 2: Add a clock widget to the right status bar
+### Example 2: Switch the clock to a 12-hour format
 
-Suppose you want to add the current working directory and use a 12-hour format. Edit your config:
+Suppose you want the right status bar to show the session name and a 12-hour clock. Edit your config:
 
 ```toml
 [status]
 right = [
   "session-name",
-  "cwd",
   { kind = "time", format = " %I:%M %p" }
 ]
 ```
 
-Reload:
-
-```sh
-phux config reload
-```
-
-The status bar now shows session, working directory, and time on the right. For styling (color, bold, underline), use the styled widget forms in `docs/consumers/tui.md` §8.2.
+Restart the client to apply it. The status bar now shows the session name and a 12-hour time on the right. For styling (color, bold, underline), use the styled widget forms in `docs/consumers/tui.md` §8.2.
 
 ### Example 3: Customize the prefix-table to use Vim-style bindings
 
@@ -188,13 +179,7 @@ prefix = "C-a"
 "-" = { action = "split-pane", direction = "horizontal" }
 ```
 
-Your file overrides the matching keys in the shipped defaults; all other bindings remain active. Reload:
-
-```sh
-phux config reload
-```
-
-Now `Ctrl-A H` resizes the pane left by 5 columns, and `Ctrl-A -` splits horizontally.
+Your file overrides the matching keys in the shipped defaults; all other bindings remain active. Restart the client to apply it. Now `Ctrl-A H` resizes the pane left by 5 columns, and `Ctrl-A -` splits horizontally.
 
 ---
 

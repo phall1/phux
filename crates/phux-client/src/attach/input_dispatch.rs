@@ -1085,13 +1085,16 @@ fn run_action(
             )));
         }
         "window-picker" => {
-            // phux-4li.19: push the `<leader> w` window picker. Each row is
-            // a window (`index:name`, pane count as the secondary label)
-            // that commits `select-window { index }` — the same action the
-            // numeric prefix bindings use, so switching flows through the
-            // single dispatch path. With no windows it bells.
-            let items = window_picker_items(ctx.workspace);
-            if items.is_empty() {
+            // phux-4li.19 / nav: push the `<leader> w` grouped window
+            // picker. Sessions are section headers; under the current
+            // session each window (`index:name`, pane count) commits
+            // `select-window { index }` (the same per-client switch the
+            // numeric prefix bindings use). Other sessions render a single
+            // "switch to session" row committing `switch-session { name }`
+            // — see the builder's doc-comment for the cross-session-window
+            // gap. With no rows at all it bells.
+            let items = window_picker_items(ctx.workspace, ctx.sessions, ctx.focused_session);
+            if items.iter().all(SelectItem::is_header) {
                 effects.bell = true;
                 return effects;
             }
@@ -1243,14 +1246,93 @@ fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
     resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
 }
 
-/// Build the `<leader> w` picker's rows from the client's [`Workspace`]
-/// windows (phux-4li.19).
+/// Build the `<leader> w` grouped window picker's rows (phux-4li.19 / nav).
 ///
-/// Each row's label is `index:name` (matching the status-bar window tab
-/// convention) with the pane count as the dimmed secondary; choosing it
-/// commits `select-window { index }`, which `run_action` routes through
-/// the same per-client window switch the numeric prefix bindings use.
-fn window_picker_items(workspace: &Workspace) -> Vec<SelectItem> {
+/// The picker is hierarchical: one [`SelectItem::header`] per session, with
+/// that session's windows nested (indented) beneath it. Sessions are
+/// ordered with the **current** session first (so the windows you can act
+/// on directly lead), then the rest by name for a stable layout.
+///
+/// - Under the **current** session, each window row is `index:name` with
+///   the pane count as the dimmed secondary; it commits
+///   `select-window { index }` — the same per-client window switch the
+///   numeric prefix bindings use, routed through the single dispatch path.
+/// - Under **other** sessions, the client cannot enumerate individual
+///   windows: the cached session graph (`ctx.sessions`,
+///   [`phux_protocol::wire::info::SessionInfo`]) carries only a
+///   `window_count`, not per-window names, and the live `WindowInfo` list
+///   from the ATTACHED snapshot is not retained client-side. Each such
+///   session therefore renders a single "switch to session" row committing
+///   `switch-session { name }`, which re-attaches this client to that
+///   session (its own window picker then lists its windows). Selecting a
+///   window directly inside a foreign session in one step would need both
+///   the cached foreign `WindowInfo` list and a combined
+///   switch-session-and-select-window flow; see the PR's risk notes.
+///
+/// Headers are non-selectable; a session with no rows beneath it (the
+/// current session with zero windows) still contributes its header, and
+/// the caller bells when *only* headers result.
+fn window_picker_items(
+    workspace: &Workspace,
+    sessions: &[phux_protocol::wire::info::SessionInfo],
+    focused: Option<phux_protocol::ids::SessionId>,
+) -> Vec<SelectItem> {
+    // Order sessions: current first, then the rest alphabetically by name
+    // for a deterministic layout.
+    let mut ordered: Vec<&phux_protocol::wire::info::SessionInfo> = sessions.iter().collect();
+    ordered.sort_by(|a, b| {
+        let a_cur = Some(a.id) == focused;
+        let b_cur = Some(b.id) == focused;
+        b_cur.cmp(&a_cur).then_with(|| a.name.cmp(&b.name))
+    });
+
+    let mut items = Vec::new();
+    for session in ordered {
+        let is_current = Some(session.id) == focused;
+        let header = if is_current {
+            format!("{} (current)", session.name)
+        } else {
+            session.name.clone()
+        };
+        items.push(SelectItem::header(header));
+
+        if is_current {
+            items.extend(current_session_window_rows(workspace));
+        } else {
+            // No per-window detail for a foreign session; offer a switch.
+            let windows = if session.window_count == 1 {
+                "1 window".to_owned()
+            } else {
+                format!("{} windows", session.window_count)
+            };
+            let mut args = std::collections::BTreeMap::new();
+            args.insert("name".to_owned(), toml::Value::String(session.name.clone()));
+            items.push(
+                SelectItem::new(
+                    "switch to this session",
+                    phux_config::keybind::ResolvedAction {
+                        action: "switch-session".to_owned(),
+                        args,
+                    },
+                )
+                .secondary(windows)
+                .indented(),
+            );
+        }
+    }
+
+    // No sessions cached yet (pre-snapshot): fall back to a flat list of
+    // the current workspace's windows so the picker is still useful.
+    if items.is_empty() {
+        items.extend(current_session_window_rows(workspace));
+    }
+    items
+}
+
+/// The indented, selectable window rows for the locally-attached session,
+/// drawn from the client's [`Workspace`]. Each commits
+/// `select-window { index }`.
+fn current_session_window_rows(workspace: &Workspace) -> Vec<SelectItem> {
     workspace
         .windows
         .iter()
@@ -1280,6 +1362,7 @@ fn window_picker_items(workspace: &Workspace) -> Vec<SelectItem> {
                 },
             )
             .secondary(secondary)
+            .indented()
         })
         .collect()
 }
@@ -1977,19 +2060,49 @@ mod tests {
     }
 
     #[test]
-    fn window_picker_items_label_index_name_and_pane_count() {
+    fn current_session_window_rows_label_index_name_and_pane_count() {
         let mut workspace = Workspace::single(tid(1)); // window "1", 1 pane
         workspace.add_window("editor".to_owned(), tid(2));
-        let items = window_picker_items(&workspace);
+        let items = current_session_window_rows(&workspace);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].label, "0:1");
         assert_eq!(items[0].secondary.as_deref(), Some("1 pane"));
+        assert!(items[0].indented, "window rows nest under their session");
         assert_eq!(items[1].label, "1:editor");
         // Each row commits select-window with its index.
         assert_eq!(items[1].action.action, "select-window");
         assert_eq!(
             items[1].action.args.get("index"),
             Some(&toml::Value::Integer(1))
+        );
+    }
+
+    #[test]
+    fn window_picker_groups_windows_under_their_session() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("editor".to_owned(), tid(2));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        let items = window_picker_items(
+            &workspace,
+            &sessions,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        // Current session ("work") leads, as a header marked "(current)".
+        assert!(items[0].is_header());
+        assert_eq!(items[0].label, "work (current)");
+        // Its windows nest directly beneath, selectable + indented.
+        assert!(!items[1].is_header() && items[1].indented);
+        assert_eq!(items[1].action.action, "select-window");
+        assert_eq!(items[2].action.action, "select-window");
+        // The foreign session is a header followed by a switch-session row.
+        let scratch = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        assert_eq!(items[scratch + 1].action.action, "switch-session");
+        assert_eq!(
+            items[scratch + 1].action.args.get("name"),
+            Some(&toml::Value::String("scratch".to_owned())),
         );
     }
 
@@ -2002,7 +2115,7 @@ mod tests {
         let mut workspace = Workspace::single(tid(1));
         workspace.add_window("2".to_owned(), tid(2));
         workspace.select(0); // active = 0
-        let items = window_picker_items(&workspace);
+        let items = current_session_window_rows(&workspace);
         // Commit the picker row for window index 1.
         let effects = run(&items[1].action, &mut workspace);
         assert_eq!(

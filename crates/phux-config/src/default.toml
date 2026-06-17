@@ -77,8 +77,8 @@ window-size = "smallest"
 prefix = "C-a"
 
 [keybindings.prefix-table]
-# Pane splits, tmux-style: | for a vertical divider (side-by-side panes),
-# - for a horizontal divider (stacked panes).
+# Pane splits, tmux-style: " stacks panes (horizontal divider), % places
+# them side-by-side (vertical divider).
 '"' = { action = "split-pane", direction = "horizontal" }
 "%" = { action = "split-pane", direction = "vertical" }
 
@@ -110,8 +110,8 @@ prefix = "C-a"
 
 # Windows ("tabs"), tmux-style (phux-4li.15/.16). c opens a new window;
 # n/p cycle windows; X kills the active window (see kill bindings above);
-# 0-9 jump to a window by the position shown in the status bar; w opens an
-# interactive window picker (below).
+# 0-9 jump to a window by the position shown in the status bar; w opens the
+# grouped window picker (below).
 "c" = "new-window"
 "n" = "next-window"
 "p" = "previous-window"
@@ -146,22 +146,34 @@ prefix = "C-a"
 # takes (phux-ahv.8).
 ":" = "command-palette"
 
-# Window picker: a filterable list of open windows; choosing one switches
-# to it (phux-4li.19).
+# Navigation, mnemonic s/w (sessions / windows):
+#
+#   w — grouped window picker (`window-picker`, phux-4li.19). A filterable,
+#       hierarchical list: every session is a header with its windows
+#       nested beneath. Picking a window in the CURRENT session switches to
+#       it via `select-window { index }`; picking another session switches
+#       to that session (its windows then list under its own picker). See
+#       the window-picker builder for why foreign windows aren't yet
+#       directly selectable in one step.
+#
+#   s — session picker (`session-picker`, phux-4li.20). A filterable list
+#       of the server's other sessions, built from the ATTACHED snapshot.
+#       Choosing a row commits `switch-session { name }` through the single
+#       dispatch path, which drives an in-process re-attach to the chosen
+#       session on the same connection (phux-eb0): the client detaches from
+#       the current session, re-runs the ATTACH handshake against the
+#       target, rebuilds all session-scoped state, and repaints — no
+#       reconnect, no flicker.
+#
+#   a — alias for the session picker, kept for muscle memory (the original
+#       binding before s/w landed). Same action as `s`.
 "w" = "window-picker"
-
-# Session picker (`session-picker`, phux-4li.20): a filterable list of the
-# server's other sessions, built from the ATTACHED snapshot. Choosing a
-# row commits `switch-session { name }` through the single dispatch path,
-# which drives an in-process re-attach to the chosen session on the same
-# connection (phux-eb0): the client detaches from the current session,
-# re-runs the ATTACH handshake against the target, rebuilds all
-# session-scoped state, and repaints — no reconnect, no flicker.
+"s" = "session-picker"
 "a" = "session-picker"
 
 # New session: C (Shift-c) creates a fresh session and switches this
 # client to it in-process. With no name it opens a prompt; the session
-# picker (a) also offers a "+ New session" row. (Lowercase c is
+# picker (s, alias a) also offers a "+ New session" row. (Lowercase c is
 # new-window; capital is the session-level peer.)
 "C" = "new-session"
 
@@ -185,8 +197,8 @@ prefix = "C-a"
 "K" = { action = "resize-pane", direction = "up",    amount = 5 }
 "L" = { action = "resize-pane", direction = "right", amount = 5 }
 
-# Show the help overlay (centered modal listing all keybindings). 
-# (hopefully this works with the prefix key. Esc or ? again dismisses.
+# Show the help overlay: a centered modal listing every keybinding. Esc
+# or ? again dismisses it.
 "?" = "show-help"
 
 [keybindings.global]
