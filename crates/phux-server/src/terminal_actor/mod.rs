@@ -39,7 +39,9 @@ use bytes::Bytes;
 use libghostty_vt::terminal::SizeReportSize;
 use libghostty_vt::{RenderState, Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::ClientId;
-use phux_protocol::wire::frame::{AgentEvent, FrameKind, TerminalEventType};
+use phux_protocol::wire::frame::{
+    AgentEvent, ControlAction, FrameKind, TerminalEventType, TerminalLifecycle, TerminalSignal,
+};
 use portable_pty::{CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -281,6 +283,14 @@ pub struct TerminalActor {
     dirty_event_emitted_this_burst: bool,
     /// Inbound subscription request channel. Drained by a select! arm
     /// that calls `subscribe_to_events`.
+    /// Supervisory control mailbox (ADR-0033): lease-change broadcasts and
+    /// process signals. Drained by a `select!` arm.
+    control_rx: mpsc::Receiver<ControlRequest>,
+    /// Process lifecycle as the supervisory surface sees it (ADR-0033):
+    /// `Running` until a `Freeze` (SIGSTOP) flips it to `Frozen`, back to
+    /// `Running` on `Resume` (SIGCONT). Natural/terminal exits are reported
+    /// by the existing `TERMINAL_CLOSED` / `PaneClosed` path, not here.
+    lifecycle: TerminalLifecycle,
     subscribe_to_events_rx: mpsc::Receiver<SubscribeToEventsRequest>,
     /// Inbound unsubscription request channel. Drained by a select! arm
     /// that calls `unsubscribe_from_events`.
@@ -546,6 +556,7 @@ impl TerminalActor {
             mpsc::channel::<SubscribeToEventsRequest>(DEFAULT_INPUT_MAILBOX);
         let (unsubscribe_from_events_tx, unsubscribe_from_events_rx) =
             mpsc::channel::<UnsubscribeFromEventsRequest>(DEFAULT_INPUT_MAILBOX);
+        let (control_tx, control_rx) = mpsc::channel::<ControlRequest>(DEFAULT_INPUT_MAILBOX);
         let (output_tx, _output_rx_seed) = broadcast::channel(DEFAULT_OUTPUT_BROADCAST);
         let (exit_tx, exit_rx) = oneshot::channel::<Option<i32>>();
         let bundle_token = token.clone();
@@ -609,6 +620,8 @@ impl TerminalActor {
             dirty_event_emitted_this_burst: false,
             subscribe_to_events_rx,
             unsubscribe_from_events_rx,
+            control_rx,
+            lifecycle: TerminalLifecycle::Running,
             wire_terminal_id: 0,
             cols,
             rows,
@@ -628,6 +641,7 @@ impl TerminalActor {
             consumer_ack: consumer_ack_tx,
             subscribe_to_events: subscribe_to_events_tx,
             unsubscribe_from_events: unsubscribe_from_events_tx,
+            control: control_tx,
             cols,
             rows,
         };
@@ -1099,10 +1113,15 @@ impl TerminalActor {
                 _ => None,
             };
 
-            if let Some(event_type) = event_type
-                && (subscriber.event_types.is_empty()
-                    || subscriber.event_types.contains(&event_type))
-            {
+            // Supervisory control events (ADR-0033) bypass the semantic-type
+            // filter: "who has the wheel" and "frozen" are not grid activity,
+            // and every subscriber needs them to render an honest state.
+            let interested = matches!(event, AgentEvent::TerminalControl { .. })
+                || event_type.is_some_and(|et| {
+                    subscriber.event_types.is_empty() || subscriber.event_types.contains(&et)
+                });
+
+            if interested {
                 let frame = FrameKind::Event {
                     terminal: if self.wire_terminal_id != 0 {
                         Some(phux_protocol::ids::TerminalId::local(self.wire_terminal_id))
@@ -1114,6 +1133,99 @@ impl TerminalActor {
                 let _ = subscriber.outbound.try_send(Outbound::Frame(frame));
             }
         }
+    }
+
+    /// Handle a supervisory [`ControlRequest`] (ADR-0033): a lease-change
+    /// broadcast or a process signal. The input lease lives in `ServerState`;
+    /// this actor is the emitter (it owns the event-subscriber list and the
+    /// lifecycle) and the signal deliverer (it owns the PTY child pid).
+    fn handle_control_request(&mut self, req: ControlRequest) {
+        match req {
+            ControlRequest::LeaseChanged {
+                input_holder,
+                action,
+                actor,
+            } => {
+                self.emit_terminal_control(action, input_holder, Some(actor), None);
+            }
+            ControlRequest::Signal {
+                signal,
+                input_holder,
+                by,
+                reply,
+            } => {
+                let result = self.deliver_signal(signal);
+                if result.is_ok() {
+                    // Reflect the reversible brake in the lifecycle the next
+                    // broadcast reports. Terminating signals leave it
+                    // `Running` until the EOF path fires `PaneClosed`.
+                    match signal {
+                        TerminalSignal::Freeze => self.lifecycle = TerminalLifecycle::Frozen,
+                        TerminalSignal::Resume => self.lifecycle = TerminalLifecycle::Running,
+                        TerminalSignal::Interrupt
+                        | TerminalSignal::Terminate
+                        | TerminalSignal::Kill => {}
+                    }
+                    let action = match signal {
+                        TerminalSignal::Interrupt => ControlAction::Interrupted,
+                        TerminalSignal::Freeze => ControlAction::Frozen,
+                        TerminalSignal::Resume => ControlAction::Resumed,
+                        TerminalSignal::Terminate => ControlAction::Terminated,
+                        TerminalSignal::Kill => ControlAction::Killed,
+                    };
+                    self.emit_terminal_control(action, input_holder, Some(by), None);
+                }
+                let _ = reply.send(result);
+            }
+        }
+    }
+
+    /// Deliver a POSIX signal to the pane's process group (ADR-0033).
+    ///
+    /// `portable_pty` spawns the child as a session/process-group leader (it
+    /// calls `setsid` + `TIOCSCTTY` to give the PTY a controlling terminal),
+    /// so the child's pid *is* its process-group id. Signaling the group
+    /// (`killpg`) reaches the child and every subprocess it spawned — the
+    /// agent and all its descendants — which is what "freeze/kill the agent"
+    /// must mean.
+    fn deliver_signal(&self, signal: TerminalSignal) -> Result<(), String> {
+        use nix::sys::signal::{Signal as NixSignal, killpg};
+        use nix::unistd::Pid;
+
+        let pid = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.child.process_id())
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or_else(|| "no PTY child to signal".to_owned())?;
+
+        let nix_signal = match signal {
+            TerminalSignal::Interrupt => NixSignal::SIGINT,
+            TerminalSignal::Freeze => NixSignal::SIGSTOP,
+            TerminalSignal::Resume => NixSignal::SIGCONT,
+            TerminalSignal::Terminate => NixSignal::SIGTERM,
+            TerminalSignal::Kill => NixSignal::SIGKILL,
+        };
+
+        killpg(Pid::from_raw(pid), nix_signal).map_err(|err| format!("killpg failed: {err}"))
+    }
+
+    /// Build and broadcast an [`AgentEvent::TerminalControl`] (ADR-0033)
+    /// stamped with this actor's current lifecycle.
+    fn emit_terminal_control(
+        &self,
+        action: ControlAction,
+        input_holder: Option<phux_protocol::ClientId>,
+        actor: Option<phux_protocol::ClientId>,
+        exit_status: Option<i32>,
+    ) {
+        self.broadcast_agent_event(&AgentEvent::TerminalControl {
+            lifecycle: self.lifecycle,
+            exit_status,
+            input_holder,
+            action,
+            actor,
+        });
     }
 
     /// Test-only: this actor's current shared adaptive tick interval
@@ -1964,6 +2076,14 @@ impl TerminalActor {
                     self.unsubscribe_from_events(&req);
                 }
 
+                // Supervisory control (ADR-0033): lease-change broadcasts and
+                // process signals. The lease itself lives in `ServerState`; the
+                // actor is the emitter (it owns the subscriber list + lifecycle)
+                // and the signal deliverer (it owns the PTY child pid).
+                Some(req) = self.control_rx.recv() => {
+                    self.handle_control_request(req);
+                }
+
                 // State-sync tick driver (phux-q0e.3, phux-ia4, ADR-0018).
                 // Iterates each attached consumer, diffs the live terminal
                 // against that consumer's own reference grid, and pushes a
@@ -2502,6 +2622,164 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 assert!(saw, "adopted actor should surface the child's echo");
+
+                token.cancel();
+            })
+            .await;
+    }
+
+    /// ADR-0033 end-to-end: a `Freeze` (SIGSTOP) flips the pane to `Frozen`
+    /// and broadcasts a `TerminalControl` event; `Resume` (SIGCONT) returns it
+    /// to `Running`; `Kill` (SIGKILL) actually terminates the child (its EOF
+    /// fires the exit notification). Exercises the actor's signal deliverer
+    /// (`killpg`) and the control-event broadcast over a real PTY child.
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "end-to-end PTY signal test: three signal round-trips plus subscriber setup"
+    )]
+    async fn signal_freezes_resumes_and_kills_the_child() {
+        use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+        use std::os::fd::{BorrowedFd, IntoRawFd};
+
+        #[allow(
+            clippy::future_not_send,
+            reason = "current-thread test helper; the actor's TerminalHandle is intentionally !Sync"
+        )]
+        async fn next_control(
+            rx: &mut mpsc::Receiver<Outbound>,
+        ) -> (ControlAction, TerminalLifecycle) {
+            // Scan past any incidental grid events (Dirty/Idle) for the next
+            // supervisory TerminalControl broadcast.
+            let scan = async {
+                loop {
+                    let Outbound::Frame(frame) = rx.recv().await.expect("event channel open");
+                    if let FrameKind::Event {
+                        event:
+                            AgentEvent::TerminalControl {
+                                action, lifecycle, ..
+                            },
+                        ..
+                    } = frame
+                    {
+                        return (action, lifecycle);
+                    }
+                }
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), scan)
+                .await
+                .expect("a TerminalControl event should arrive")
+        }
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let sys = native_pty_system();
+                let pair = sys
+                    .openpty(PtySize {
+                        rows: 5,
+                        cols: 20,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .expect("openpty");
+                let child = pair
+                    .slave
+                    .spawn_command(CommandBuilder::new("cat"))
+                    .expect("spawn cat");
+                drop(pair.slave);
+                let pid = i32::try_from(child.process_id().expect("pid")).expect("pid fits i32");
+                let master_fd = pair.master.as_raw_fd().expect("master fd");
+                // SAFETY: `master_fd` is open and outlives this borrow.
+                let dup_fd = unsafe { BorrowedFd::borrow_raw(master_fd) }
+                    .try_clone_to_owned()
+                    .expect("dup master")
+                    .into_raw_fd();
+                drop(child); // the adopted actor becomes the sole reaper.
+
+                let bundle = TerminalActor::new_with_adopted_pty(
+                    dup_fd,
+                    pid,
+                    20,
+                    5,
+                    1000,
+                    CancellationToken::new(),
+                    b"",
+                )
+                .expect("new_with_adopted_pty");
+                let handle = bundle.handle.clone();
+                let token = bundle.token.clone();
+                let mut exit_rx = bundle.exit_notify.expect("exit notify");
+                tokio::task::spawn_local(bundle.actor.run());
+
+                // Subscribe to the agent-event stream so we observe the
+                // TerminalControl broadcasts.
+                let (evt_tx, mut evt_rx) = mpsc::channel::<Outbound>(64);
+                handle
+                    .subscribe_to_events
+                    .send(SubscribeToEventsRequest {
+                        subscriber: TerminalEventSubscriber {
+                            outbound: evt_tx,
+                            event_types: Vec::new(),
+                        },
+                        wire_terminal_id: 1,
+                    })
+                    .await
+                    .expect("subscribe");
+
+                let by = phux_protocol::ids::ClientId::new(7);
+
+                // Freeze → Frozen.
+                let (reply, ack) = oneshot::channel();
+                handle
+                    .control
+                    .send(ControlRequest::Signal {
+                        signal: TerminalSignal::Freeze,
+                        input_holder: None,
+                        by,
+                        reply,
+                    })
+                    .await
+                    .expect("send freeze");
+                ack.await.expect("freeze ack").expect("freeze delivered");
+                let (action, lifecycle) = next_control(&mut evt_rx).await;
+                assert_eq!(action, ControlAction::Frozen);
+                assert_eq!(lifecycle, TerminalLifecycle::Frozen);
+
+                // Resume → Running.
+                let (reply, ack) = oneshot::channel();
+                handle
+                    .control
+                    .send(ControlRequest::Signal {
+                        signal: TerminalSignal::Resume,
+                        input_holder: None,
+                        by,
+                        reply,
+                    })
+                    .await
+                    .expect("send resume");
+                ack.await.expect("resume ack").expect("resume delivered");
+                let (action, lifecycle) = next_control(&mut evt_rx).await;
+                assert_eq!(action, ControlAction::Resumed);
+                assert_eq!(lifecycle, TerminalLifecycle::Running);
+
+                // Kill → the child actually dies; its EOF fires the exit notify.
+                let (reply, ack) = oneshot::channel();
+                handle
+                    .control
+                    .send(ControlRequest::Signal {
+                        signal: TerminalSignal::Kill,
+                        input_holder: None,
+                        by,
+                        reply,
+                    })
+                    .await
+                    .expect("send kill");
+                ack.await.expect("kill ack").expect("kill delivered");
+                tokio::time::timeout(std::time::Duration::from_secs(5), &mut exit_rx)
+                    .await
+                    .expect("killed child should exit and notify")
+                    .expect("exit notify channel");
 
                 token.cancel();
             })

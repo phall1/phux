@@ -42,6 +42,7 @@ impl ServerState {
             attached: HashMap::new(),
             viewport_clock: 0,
             terminal_subscribers: HashMap::new(),
+            input_leases: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
             terminal_tokens: HashMap::new(),
@@ -601,6 +602,11 @@ impl ServerState {
     /// idempotent for the EOF cleanup path in `handle_client`.
     pub fn detach(&mut self, client_id: ClientId) {
         self.attached.remove(&client_id);
+        // Release any input leases this client held (ADR-0033) so a
+        // disconnect never strands the wheel. The runtime broadcasts the
+        // `Released` events (via `leases_held_by`) before calling detach;
+        // this clears the state regardless of that path running.
+        self.input_leases.retain(|_, holder| *holder != client_id);
         for subs in self.terminal_subscribers.values_mut() {
             subs.retain(|c| *c != client_id);
         }
@@ -959,6 +965,52 @@ impl ServerState {
     #[must_use]
     pub fn terminal_handle(&self, terminal: TerminalId) -> Option<&TerminalHandle> {
         self.terminals.get(&terminal)
+    }
+
+    /// The client currently holding `pane`'s input lease (ADR-0033), or
+    /// `None` if the pane is `Open`.
+    #[must_use]
+    pub fn input_lease_holder(&self, terminal: TerminalId) -> Option<ClientId> {
+        self.input_leases.get(&terminal).copied()
+    }
+
+    /// Whether `client`'s input to `pane` is blocked by another client's
+    /// lease (ADR-0033). `false` when the pane is `Open` or `client` is the
+    /// holder. The gate calls this before forwarding input to the actor.
+    #[must_use]
+    pub fn input_blocked(&self, terminal: TerminalId, client: ClientId) -> bool {
+        self.input_leases
+            .get(&terminal)
+            .is_some_and(|holder| *holder != client)
+    }
+
+    /// Grant `pane`'s input lease to `client` (ADR-0033), returning the prior
+    /// holder if the lease was already held (a `Seize` preemption).
+    pub fn set_input_lease(&mut self, terminal: TerminalId, client: ClientId) -> Option<ClientId> {
+        self.input_leases.insert(terminal, client)
+    }
+
+    /// Release `pane`'s input lease if `client` holds it (ADR-0033). Returns
+    /// `true` if a lease was actually released. A no-op (returns `false`) if
+    /// the pane is `Open` or held by someone else.
+    pub fn release_input_lease(&mut self, terminal: TerminalId, client: ClientId) -> bool {
+        if self.input_leases.get(&terminal) == Some(&client) {
+            self.input_leases.remove(&terminal);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Every pane whose input lease `client` currently holds (ADR-0033). The
+    /// runtime reads this at disconnect time to broadcast `Released` events
+    /// before [`Self::detach`] clears the leases.
+    #[must_use]
+    pub fn leases_held_by(&self, client: ClientId) -> Vec<TerminalId> {
+        self.input_leases
+            .iter()
+            .filter_map(|(pane, holder)| (*holder == client).then_some(*pane))
+            .collect()
     }
 
     /// Wire pane id for `pane`, allocating one if needed.

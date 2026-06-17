@@ -3,7 +3,8 @@
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, ViewportInfo,
+    Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind, InputMode,
+    StateScope, TerminalSignal, ViewportInfo,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -12,7 +13,7 @@ use tracing::{debug, error, info, trace, warn};
 use super::{AttachPrepared, spawn_pane_event_drain, spawn_terminal_exit_watcher};
 use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
-    ConsumerAckRequest, ResizeRequest, ScreenRequest, TerminalActor, TerminalHandle,
+    ConsumerAckRequest, ControlRequest, ResizeRequest, ScreenRequest, TerminalActor, TerminalHandle,
 };
 
 pub(crate) fn seed_session_with_actor(
@@ -277,6 +278,9 @@ pub(crate) const fn command_kind(command: &Command) -> &'static str {
         Command::GetState { .. } => "get_state",
         Command::GetScreen { .. } => "get_screen",
         Command::RouteInput { .. } => "route_input",
+        Command::AcquireInput { .. } => "acquire_input",
+        Command::ReleaseInput { .. } => "release_input",
+        Command::SignalTerminal { .. } => "signal_terminal",
         _ => "other",
     }
 }
@@ -356,6 +360,18 @@ pub(crate) async fn handle_command(
             terminal_id,
             event_types,
         } => handle_subscribe_terminal_events(state, client_id, &terminal_id, event_types, out_tx),
+        Command::AcquireInput {
+            terminal_id,
+            mode,
+            ttl_ms,
+        } => handle_acquire_input(state, client_id, &terminal_id, mode, ttl_ms).await,
+        Command::ReleaseInput { terminal_id } => {
+            handle_release_input(state, client_id, &terminal_id).await
+        }
+        Command::SignalTerminal {
+            terminal_id,
+            signal,
+        } => handle_signal_terminal(state, client_id, &terminal_id, signal).await,
         // `Command` is `#[non_exhaustive]`: a forward-compat command this
         // server doesn't implement decodes only if a newer peer sent a
         // tag we allocated but haven't wired (the decoder rejects truly
@@ -891,17 +907,31 @@ pub(crate) fn handle_route_input(
     // Resolve the wire id to its (Send) Terminal handle in one lock; we
     // never await inside the lock. No subscription/role gate: ROUTE_INPUT is
     // the headless agent path (see the doc comment) and must work without an
-    // attach.
-    let handle = state.with(|s| {
+    // attach. But the input lease DOES gate it (ADR-0033): if a human has
+    // taken the wheel, the automated ROUTE_INPUT path is locked out too —
+    // that is the whole point of seizing input authority over an agent.
+    let resolved = state.with(|s| {
         let core = s.terminal_from_wire(terminal_id)?;
-        s.terminal_handle(core).cloned()
+        let blocked = s.input_blocked(core, client_id);
+        s.terminal_handle(core).cloned().map(|h| (h, blocked))
     });
-    let Some(handle) = handle else {
+    let Some((handle, blocked)) = resolved else {
         return CommandResult::Error {
             code: ErrorCode::TerminalNotFound,
             message: format!("no such terminal: {terminal_id:?}"),
         };
     };
+    if blocked {
+        debug!(
+            ?client_id,
+            ?terminal_id,
+            "ROUTE_INPUT blocked: another client holds the input lease (ADR-0033)"
+        );
+        return CommandResult::Error {
+            code: ErrorCode::InputLeaseHeld,
+            message: "input lease held by another client".to_owned(),
+        };
+    }
     debug!(?client_id, ?terminal_id, "ROUTE_INPUT delivering input");
     let input = match event {
         InputEvent::Key(event) => TerminalInput::Key(event),
@@ -929,6 +959,195 @@ pub(crate) fn handle_route_input(
         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => CommandResult::Error {
             code: ErrorCode::InternalError,
             message: "pane actor unavailable for ROUTE_INPUT".to_owned(),
+        },
+    }
+}
+
+/// Bridge `state::ClientId` (u64 newtype) → `phux_protocol::ClientId` (u32),
+/// the wire id that rides in `TerminalControl` events (ADR-0033). Matches the
+/// conversion the per-consumer state map and `FRAME_ACK` path already use; the
+/// wire `ClientId` space caps at `u32::MAX` (widening needs a protocol bump).
+fn wire_client_id(id: ClientId) -> phux_protocol::ids::ClientId {
+    phux_protocol::ids::ClientId::new(u32::try_from(id.0).unwrap_or(u32::MAX))
+}
+
+/// Outcome of resolving an `ACQUIRE_INPUT` against the lease map (ADR-0033).
+enum AcquireOutcome {
+    /// The wire id resolved to no pane.
+    NotFound,
+    /// A cooperative acquire lost to an existing holder (carried for the
+    /// diagnostic).
+    Denied(ClientId),
+    /// The lease was granted; broadcast the change via the pane's actor.
+    Granted {
+        /// The pane actor to notify.
+        handle: Box<TerminalHandle>,
+        /// `Acquired` (was free / self) or `Seized` (preempted another).
+        action: ControlAction,
+    },
+}
+
+/// Handle `ACQUIRE_INPUT` (ADR-0033, "take the wheel"): assert an exclusive
+/// input lease over a pane. `Cooperative` mode fails with `InputLeaseHeld`
+/// when another client holds it; `Seize` preempts. On grant, broadcasts a
+/// `TerminalControl` event so every subscriber re-renders who has the wheel.
+///
+/// `ttl_ms` is advisory in this server: the lease is held until the holder
+/// releases it or its connection drops (see [`crate::state::ServerState::detach`]).
+pub(crate) async fn handle_acquire_input(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    mode: InputMode,
+    _ttl_ms: u32,
+) -> CommandResult {
+    if !terminal_id.is_local() {
+        return CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("ACQUIRE_INPUT on satellite route unsupported: {terminal_id:?}"),
+        };
+    }
+    let outcome = state.with_mut(|s| {
+        let Some(core) = s.terminal_from_wire(terminal_id) else {
+            return AcquireOutcome::NotFound;
+        };
+        let Some(handle) = s.terminal_handle(core).cloned() else {
+            return AcquireOutcome::NotFound;
+        };
+        let prior = s.input_lease_holder(core);
+        if mode == InputMode::Cooperative
+            && let Some(holder) = prior
+            && holder != client_id
+        {
+            return AcquireOutcome::Denied(holder);
+        }
+        s.set_input_lease(core, client_id);
+        let action = match prior {
+            Some(holder) if holder != client_id => ControlAction::Seized,
+            _ => ControlAction::Acquired,
+        };
+        AcquireOutcome::Granted {
+            handle: Box::new(handle),
+            action,
+        }
+    });
+    match outcome {
+        AcquireOutcome::NotFound => CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        },
+        AcquireOutcome::Denied(holder) => CommandResult::Error {
+            code: ErrorCode::InputLeaseHeld,
+            message: format!("input lease held by client {}", holder.0),
+        },
+        AcquireOutcome::Granted { handle, action } => {
+            let _ = handle
+                .control
+                .send(ControlRequest::LeaseChanged {
+                    input_holder: Some(wire_client_id(client_id)),
+                    action,
+                    actor: wire_client_id(client_id),
+                })
+                .await;
+            CommandResult::Ok
+        }
+    }
+}
+
+/// Handle `RELEASE_INPUT` (ADR-0033): drop the input lease the caller holds
+/// over a pane, returning it to `Open`. Idempotent — a no-op (still `Ok`) if
+/// the caller does not hold the lease. Broadcasts `Released` when a lease was
+/// actually given up.
+pub(crate) async fn handle_release_input(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+) -> CommandResult {
+    if !terminal_id.is_local() {
+        return CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("RELEASE_INPUT on satellite route unsupported: {terminal_id:?}"),
+        };
+    }
+    let released = state.with_mut(|s| {
+        let core = s.terminal_from_wire(terminal_id)?;
+        let handle = s.terminal_handle(core).cloned()?;
+        Some((handle, s.release_input_lease(core, client_id)))
+    });
+    match released {
+        None => CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        },
+        Some((handle, did_release)) => {
+            if did_release {
+                let _ = handle
+                    .control
+                    .send(ControlRequest::LeaseChanged {
+                        input_holder: None,
+                        action: ControlAction::Released,
+                        actor: wire_client_id(client_id),
+                    })
+                    .await;
+            }
+            CommandResult::Ok
+        }
+    }
+}
+
+/// Handle `SIGNAL_TERMINAL` (ADR-0033): deliver a POSIX signal to the pane's
+/// process group. Distinct from `KILL_TERMINAL` (which removes the pane) —
+/// this signals the process and leaves the pane addressable. The actor owns
+/// the PTY child pid, so the work happens there; the broadcast follows.
+pub(crate) async fn handle_signal_terminal(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    signal: TerminalSignal,
+) -> CommandResult {
+    if !terminal_id.is_local() {
+        return CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("SIGNAL_TERMINAL on satellite route unsupported: {terminal_id:?}"),
+        };
+    }
+    let resolved = state.with(|s| {
+        let core = s.terminal_from_wire(terminal_id)?;
+        let holder = s.input_lease_holder(core).map(wire_client_id);
+        s.terminal_handle(core).cloned().map(|h| (h, holder))
+    });
+    let Some((handle, input_holder)) = resolved else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if handle
+        .control
+        .send(ControlRequest::Signal {
+            signal,
+            input_holder,
+            by: wire_client_id(client_id),
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for SIGNAL_TERMINAL".to_owned(),
+        };
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => CommandResult::Ok,
+        Ok(Err(msg)) => CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: msg,
+        },
+        Err(_) => CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor dropped SIGNAL_TERMINAL reply".to_owned(),
         },
     }
 }
@@ -1212,6 +1431,19 @@ pub(crate) fn handle_terminal_input(
                 ?session,
                 frame_label,
                 "client not subscribed to pane; dropping input",
+            );
+            return;
+        }
+        // Input-lease gate (ADR-0033, "take the wheel"): when another client
+        // holds the lease, drop this client's input. Dropped, not errored —
+        // the fire-and-forget input invariant (SPEC §12.2) holds, and the
+        // client renders the locked state from the `TerminalControl` event.
+        if s.input_blocked(pane, client_id) {
+            trace!(
+                ?client_id,
+                ?wire_terminal_id,
+                frame_label,
+                "input dropped: another client holds the input lease",
             );
             return;
         }
