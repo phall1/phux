@@ -4,7 +4,9 @@ use phux_protocol::TerminalId;
 
 use crate::layout::{LayoutNode, LayoutState, Rect};
 
-use super::rasterize::{DividerCell, DividerSegment, rasterize, walk_layout};
+use super::rasterize::{
+    DividerCell, DividerHit, DividerSegment, divider_hits, rasterize, split_dim, walk_layout,
+};
 
 /// Result of [`compute_layout`]: per-pane rectangles plus the cells
 /// occupied by dividers between them.
@@ -26,6 +28,15 @@ pub struct PaneLayout {
     /// painter writes it verbatim. Order is row-major within each
     /// interior split (left-to-right then top-to-bottom).
     pub dividers: Vec<DividerCell>,
+    /// Per-split grab targets for drag-to-resize.
+    ///
+    /// One [`DividerHit`] per interior split, mapping the cells that
+    /// split's divider line occupies to the split's node path + axis. A
+    /// mouse press that lands in any hit's `cells` resolves to the split
+    /// whose `ratio` the drag adjusts (ADR-0035). Built from the same
+    /// segments as [`Self::dividers`] and clamped to the same viewport,
+    /// so a hit cell is always a painted divider cell and vice versa.
+    pub divider_hits: Vec<DividerHit>,
 }
 
 // -----------------------------------------------------------------------------
@@ -75,6 +86,7 @@ pub fn compute_layout_in(
             viewport: viewport_dims,
             rects: HashMap::new(),
             dividers: Vec::new(),
+            divider_hits: Vec::new(),
         };
     };
     if content.w == 0 || content.h == 0 {
@@ -82,6 +94,7 @@ pub fn compute_layout_in(
             viewport: viewport_dims,
             rects: HashMap::new(),
             dividers: Vec::new(),
+            divider_hits: Vec::new(),
         };
     }
 
@@ -98,11 +111,15 @@ pub fn compute_layout_in(
     // the full viewport, not `content` — segments already carry inset
     // coordinates, and the clamp only guards the screen edge.
     let dividers = rasterize(&segments, layout.focus.as_ref(), &rects, viewport_dims);
+    // Same segments, same viewport clamp: the grab map's cells are
+    // exactly the cells `rasterize` paints a glyph into.
+    let divider_hits = divider_hits(&segments, viewport_dims);
 
     PaneLayout {
         viewport: viewport_dims,
         rects,
         dividers,
+        divider_hits,
     }
 }
 
@@ -133,6 +150,97 @@ pub fn pane_rects(tree: &LayoutNode, viewport_dims: (u16, u16)) -> HashMap<Termi
             h: viewport_dims.1,
         },
     )
+}
+
+/// The cell span available to the split at `path` for its `ratio`, in
+/// outer-viewport coordinates along the split's axis (ADR-0035).
+///
+/// Returns `(start, content_len)` where `start` is the first cell of the
+/// split's bounds on its axis and `content_len` is the budget the ratio
+/// divides (the split's axis length minus the one cell reserved for its
+/// own divider). A drag converts a pointer cell `p` to a ratio via
+/// `(p - start) / content_len`, which positions the divider under the
+/// pointer. `None` when `path` does not address a `Split` inside
+/// `content` or the budget is zero (a sub-viable split — the caller
+/// bells). Walks the same divider-reservation geometry as
+/// [`compute_layout_in`], so the span matches the painted divider.
+#[must_use]
+pub fn split_content_span_at(
+    tree: &LayoutNode,
+    content: Rect,
+    path: &crate::layout::NodePath,
+) -> Option<(u16, u16)> {
+    use crate::layout::{NodeStep, SplitDir};
+    let mut node = tree;
+    let mut bounds = content;
+    let mut steps = path.0.as_slice();
+    loop {
+        let LayoutNode::Split {
+            dir,
+            ratio,
+            left,
+            right,
+        } = node
+        else {
+            return None;
+        };
+        let (axis_start, axis_len) = match dir {
+            SplitDir::Horizontal => (bounds.x, bounds.w),
+            SplitDir::Vertical => (bounds.y, bounds.h),
+            _ => return None,
+        };
+        match steps.split_first() {
+            // The target split. Its content budget is the axis length
+            // minus the reserved divider cell.
+            None => {
+                let content_len = axis_len.saturating_sub(1);
+                if content_len == 0 {
+                    return None;
+                }
+                return Some((axis_start, content_len));
+            }
+            // Descend, reproducing walk_layout's child-bounds math.
+            Some((step, rest)) => {
+                steps = rest;
+                let has_divider = axis_len >= 1;
+                let content_len = axis_len.saturating_sub(1);
+                let low = split_dim(content_len, *ratio);
+                let high = content_len - low;
+                let divider = axis_start + low;
+                let (child, child_start, child_len) = match (dir, step) {
+                    (SplitDir::Horizontal, NodeStep::Left) => (left, bounds.x, low),
+                    (SplitDir::Horizontal, NodeStep::Right) => (
+                        right,
+                        if has_divider { divider + 1 } else { bounds.x },
+                        high,
+                    ),
+                    (SplitDir::Vertical, NodeStep::Left) => (left, bounds.y, low),
+                    (SplitDir::Vertical, NodeStep::Right) => (
+                        right,
+                        if has_divider { divider + 1 } else { bounds.y },
+                        high,
+                    ),
+                    _ => return None,
+                };
+                node = child;
+                bounds = match dir {
+                    SplitDir::Horizontal => Rect {
+                        x: child_start,
+                        y: bounds.y,
+                        w: child_len,
+                        h: bounds.h,
+                    },
+                    SplitDir::Vertical => Rect {
+                        x: bounds.x,
+                        y: child_start,
+                        w: bounds.w,
+                        h: child_len,
+                    },
+                    _ => return None,
+                };
+            }
+        }
+    }
 }
 
 /// Tile leaf rects into `content`, an arbitrary sub-rectangle.

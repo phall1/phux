@@ -44,8 +44,10 @@ use phux_protocol::TerminalId;
 use thiserror::Error;
 
 use super::paint::{SidebarReservation, content_rect};
-use crate::layout::{self, Direction, LayoutError, LayoutNode, LayoutState, Rect, SplitDir};
-use crate::multi_pane::pane_rects_in;
+use crate::layout::{
+    self, Direction, LayoutError, LayoutNode, LayoutState, NodePath, Rect, SplitDir,
+};
+use crate::multi_pane::{pane_rects_in, split_content_span_at};
 
 /// Errors returned by the pure action helpers.
 ///
@@ -375,6 +377,73 @@ fn violates_min_cell(
 }
 
 // -----------------------------------------------------------------------------
+// drag-to-resize (ADR-0035): node-targeted resize from an absolute pointer
+// -----------------------------------------------------------------------------
+
+/// Set the split addressed by `node_path` so its divider sits under the
+/// pointer at absolute outer-viewport cell `pointer` (ADR-0035 drag).
+///
+/// Unlike [`apply_resize`] — which walks up from the focused leaf and
+/// nudges a split by a relative `amount` — this targets a specific split
+/// (the one the grabbed divider controls) and sets its `ratio` from an
+/// *absolute* position, so the divider tracks the cursor. `axis` selects
+/// which pointer coordinate drives the ratio: a `Horizontal` split reads
+/// `pointer.0` (x), a `Vertical` split reads `pointer.1` (y).
+///
+/// Reuses the keyboard-resize floor: returns `Ok(None)` (driver bells /
+/// no-ops, no repaint) when the new ratio would push either child below
+/// [`MIN_PANE_CELL`] cells, so a drag stalls at the floor instead of
+/// collapsing a pane. The committed ratio is `clamp_ratio`-bounded just
+/// like the keybind path, so the two resize routes cannot diverge.
+///
+/// # Errors
+/// * [`ActionError::EmptyTree`] when `state.tree` is `None`.
+/// * [`ActionError::NoResizableBoundary`] when `node_path` no longer
+///   addresses a `Split` in the current tree (a stale grab after the
+///   layout changed mid-drag) or its content budget is zero.
+#[allow(clippy::cast_precision_loss)]
+pub(super) fn apply_divider_resize(
+    state: &LayoutState,
+    node_path: &NodePath,
+    axis: SplitDir,
+    pointer: (u16, u16),
+    viewport: (u16, u16),
+    has_bar: bool,
+    sidebar: Option<SidebarReservation>,
+) -> Result<Option<LayoutState>, ActionError> {
+    let tree = state.tree.as_ref().ok_or(ActionError::EmptyTree)?;
+    // The content rect mouse routing tiled into. This MUST match the
+    // hit-test's `content_rect(viewport, has_bar, sidebar)`: the pointer
+    // arrives in that same inset cell space, so the divider span and the
+    // pointer share an origin and the divider tracks the cursor exactly. A
+    // status bar shortens the content on its axis, so for a Vertical split
+    // (horizontal divider, y-driven) `has_bar` shifts the budget; an
+    // absolute drag that ignored it would mis-track when a bar is docked.
+    let content = content_rect(viewport, has_bar, sidebar);
+    let (start, content_len) =
+        split_content_span_at(tree, content, node_path).ok_or(ActionError::NoResizableBoundary)?;
+    // Position along the split's axis. The divider should land under the
+    // pointer: left/top size = pointer - span start, clamped into the span.
+    let p = match axis {
+        SplitDir::Horizontal => pointer.0,
+        SplitDir::Vertical => pointer.1,
+        _ => return Err(ActionError::NoResizableBoundary),
+    };
+    let low = p.saturating_sub(start).min(content_len);
+    let ratio = clamp_ratio(f32::from(low) / f32::from(content_len));
+    let new_tree =
+        layout::set_ratio_at(tree, node_path, ratio).ok_or(ActionError::NoResizableBoundary)?;
+    let candidate = LayoutState {
+        tree: Some(new_tree),
+        focus: state.focus.clone(),
+    };
+    if violates_min_cell(&candidate, viewport, sidebar) {
+        return Ok(None);
+    }
+    Ok(Some(candidate))
+}
+
+// -----------------------------------------------------------------------------
 // next-pane / previous-pane
 // -----------------------------------------------------------------------------
 
@@ -561,6 +630,22 @@ mod tests {
         }
     }
 
+    fn two_pane_v() -> LayoutState {
+        // (1 / 2), focus on 1 — a Vertical split (horizontal divider).
+        let tree = split_at(
+            &LayoutNode::Leaf(t(1)),
+            &t(1),
+            &t(2),
+            SplitDir::Vertical,
+            0.5,
+        )
+        .unwrap();
+        LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        }
+    }
+
     fn three_pane_mixed() -> LayoutState {
         // ((1 | 2) / 3), focus on 2.
         let t1 = split_at(
@@ -721,6 +806,160 @@ mod tests {
         let state = two_pane_h();
         let err = apply_resize(&state, Direction::Up, 5, (80, 24), None).unwrap_err();
         assert!(matches!(err, ActionError::NoResizableBoundary));
+    }
+
+    // ---------- apply_divider_resize (ADR-0035 drag) ----------
+
+    #[test]
+    fn divider_resize_sets_ratio_from_absolute_pointer() {
+        // (1 | 2) at 0.5 in an 80x24 viewport (no chrome). The root
+        // Horizontal split's content budget is 80 - 1 = 79 cells. Drop the
+        // pointer at column 32: left size = 32, ratio = 32/79 ≈ 0.405.
+        let state = two_pane_h();
+        let path = NodePath::root();
+        let out = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Horizontal,
+            (32, 10),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let LayoutNode::Split { ratio, .. } = out.tree.as_ref().unwrap() else {
+            panic!("expected split");
+        };
+        assert!((ratio - 32.0 / 79.0).abs() < 1e-3, "got ratio {ratio}");
+    }
+
+    #[test]
+    fn divider_resize_tracks_the_pointer_both_ways() {
+        // Dragging the divider right then left moves the ratio up then down.
+        let state = two_pane_h();
+        let path = NodePath::root();
+        let right = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Horizontal,
+            (60, 5),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let left = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Horizontal,
+            (20, 5),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let r = |s: &LayoutState| {
+            let LayoutNode::Split { ratio, .. } = s.tree.as_ref().unwrap() else {
+                panic!("split");
+            };
+            *ratio
+        };
+        assert!(r(&right) > 0.5, "drag right grows left pane: {}", r(&right));
+        assert!(r(&left) < 0.5, "drag left shrinks left pane: {}", r(&left));
+    }
+
+    #[test]
+    fn divider_resize_respects_min_cell_floor() {
+        // Pointer at column 0 would put the left pane at 0 cells — below
+        // the 2-cell floor — so the resize bell-no-ops (Ok(None)).
+        let state = two_pane_h();
+        let path = NodePath::root();
+        let out = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Horizontal,
+            (0, 5),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(out.is_none(), "expected min-cell no-op, got {out:?}");
+    }
+
+    #[test]
+    fn divider_resize_stale_path_errors() {
+        // A single-pane layout has no split; the root path addresses no
+        // Split, so the resize errors (stale grab after the layout changed).
+        let state = LayoutState::single(t(1));
+        let path = NodePath::root();
+        let err = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Horizontal,
+            (40, 5),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ActionError::NoResizableBoundary));
+    }
+
+    #[test]
+    fn divider_resize_vertical_split_honours_status_bar_budget() {
+        // A Vertical split (horizontal divider, y-driven) over a 80x24
+        // viewport with a status bar reserved: the content is 23 rows, so
+        // the split's budget is 23 - 1 = 22. The SAME pointer y maps to a
+        // different ratio with vs without the bar, proving the drag tracks
+        // the painted divider rather than the full-viewport budget.
+        let state = two_pane_v();
+        let path = NodePath::root();
+        let with_bar = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Vertical,
+            (5, 11),
+            (80, 24),
+            true,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let no_bar = apply_divider_resize(
+            &state,
+            &path,
+            SplitDir::Vertical,
+            (5, 11),
+            (80, 24),
+            false,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let r = |s: &LayoutState| {
+            let LayoutNode::Split { ratio, .. } = s.tree.as_ref().unwrap() else {
+                panic!("split");
+            };
+            *ratio
+        };
+        // y=11 over a 22-cell budget (bar) is a larger ratio than over a
+        // 23-cell budget (no bar): the shorter content makes the same row
+        // sit proportionally lower.
+        assert!(
+            (r(&with_bar) - 11.0 / 22.0).abs() < 1e-3,
+            "bar: {}",
+            r(&with_bar)
+        );
+        assert!(
+            (r(&no_bar) - 11.0 / 23.0).abs() < 1e-3,
+            "no bar: {}",
+            r(&no_bar)
+        );
+        assert!(r(&with_bar) > r(&no_bar), "bar shortens the budget");
     }
 
     // ---------- next-pane / previous-pane ----------

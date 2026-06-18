@@ -209,6 +209,7 @@ mod tests {
             viewport: (80, 24),
             rects: HashMap::new(),
             dividers: Vec::new(),
+            divider_hits: Vec::new(),
         };
         let mut buf: Vec<u8> = Vec::new();
         render_dividers(&mut buf, &layout, None).unwrap();
@@ -226,6 +227,7 @@ mod tests {
                 y: 0,
                 ch: '\u{2502}',
             }],
+            divider_hits: Vec::new(),
         };
         let mut buf: Vec<u8> = Vec::new();
         render_dividers(&mut buf, &layout, None).unwrap();
