@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
+use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::wire::frame::{
     Command, FrameKind, InputMode, SESSION_NAME_KEY, Scope, TerminalSignal,
 };
@@ -118,6 +119,27 @@ pub(super) struct DispatchCtx<'a> {
     /// `content_rect(viewport, has_bar, sidebar)` the paint path uses so a
     /// click hit-tests against the rects actually on screen.
     pub has_bar: bool,
+    /// ADR-0035: the in-flight divider drag, or `None` when no divider is
+    /// grabbed. A press on a divider cell records the grabbed split here;
+    /// subsequent button-motion events re-tune that split's ratio from the
+    /// pointer position; a release clears it. Owned by `main_loop` (it
+    /// must survive across dispatch batches) and threaded in by reference.
+    pub drag: &'a mut Option<DragGrab>,
+}
+
+/// An active divider drag (ADR-0035).
+///
+/// Press on a divider cell records the controlling split (`node_path`) and
+/// its `axis`; while held, each button-motion event sets that split's
+/// ratio so the divider tracks the pointer; release drops it. The grab is
+/// keyed by split identity, not by cursor cell, so a fast drag that
+/// outruns the divider still re-tunes the right split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DragGrab {
+    /// Path to the grabbed [`crate::layout::LayoutNode::Split`].
+    pub node_path: crate::layout::NodePath,
+    /// The grabbed split's axis (drives x vs y of the pointer).
+    pub axis: SplitDir,
 }
 
 /// Translate a batch of parser events into wire frames and ship them.
@@ -260,22 +282,62 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
             }
         }
-        // phux-4li.6: INPUT_MOUSE routing + click-to-focus. The parser
-        // emits mouse coordinates in outer-viewport cells (treated as
-        // 1-px-per-cell f64 per SPEC §9.2.1); we hit-test against the
-        // multi-pane composition's `Rect`s. A click on a divider cell
-        // is dropped (drag-to-resize is deferred per docs/consumers/tui.md §7); a
-        // click in a non-focused pane updates focus AND forwards the
-        // event with pane-local coordinates substituted.
+        // phux-4li.6 / ADR-0035: INPUT_MOUSE routing + click-to-focus +
+        // divider drag-to-resize. The parser emits mouse coordinates in
+        // outer-viewport cells (treated as 1-px-per-cell f64 per SPEC
+        // §9.2.1); we hit-test against the multi-pane composition's
+        // `Rect`s. A press on a divider cell *grabs* the split that
+        // divider controls; button-motion while grabbed re-tunes the
+        // split's ratio so the divider tracks the cursor; release drops
+        // the grab. A click in a pane forwards the event (with pane-local
+        // coords) to that pane — so an inner TUI that turned mouse
+        // tracking on still receives every pointer event over its own
+        // cells (the divider cells are the only ones whose meaning the
+        // client claims).
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
+            // ADR-0035: a release ALWAYS ends any in-flight drag first,
+            // regardless of where it lands — the cursor may have left the
+            // divider cell mid-drag. The commit broadcasts the final
+            // layout via SET_METADATA, the same persistence path the
+            // keyboard resize uses, so other attached clients converge. A
+            // release with no active drag falls through to normal routing
+            // (an inner app may want it).
+            if matches!(mouse.action, MouseAction::Release) && ctx.drag.is_some() {
+                *ctx.drag = None;
+                if let Some(session) = ctx.focused_session
+                    && let Some(bytes) = encode_layout_or_log(ctx.workspace)
+                {
+                    let request_id = *ctx.next_request_id;
+                    *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+                    conn.send(&FrameKind::SetMetadata {
+                        request_id,
+                        scope: Scope::Group(DEFAULT_GROUP_ID),
+                        key: layout_key(session),
+                        value: bytes,
+                    })
+                    .await?;
+                }
+                tracing::debug!("divider drag: released, broadcast layout");
+                continue;
+            }
+            // While a divider is grabbed, motion re-tunes that split and
+            // nothing reaches a pane. Press/other actions fall through.
+            if let Some(grab) = ctx.drag.clone()
+                && matches!(mouse.action, MouseAction::Motion)
+            {
+                if drag_resize(ctx, mouse, &grab) {
+                    layout_changed = true;
+                }
+                continue;
+            }
             // Hit-test against the SAME inset content rect the renderer tiles
             // into — status-bar row and sidebar columns folded off the outer
             // viewport. Routing against the full viewport instead disagrees with
             // what is painted: a click near a divider lands one row off (the
             // status bar) and, with a sidebar docked, one strip-width off in x,
             // so it focuses/forwards to the wrong pane. Clicks in the reserved
-            // chrome miss every pane rect and become a DividerNoOp (dropped).
+            // chrome miss every pane rect and become a Miss (dropped).
             let content = content_rect(ctx.viewport, ctx.has_bar, ctx.sidebar);
             // phux-jow6: hit-test against the RENDER layout, not the real
             // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
@@ -324,8 +386,31 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     .await?;
                     continue;
                 }
-                RouteDecision::DividerNoOp => {
-                    tracing::trace!(x = mouse.x, y = mouse.y, "dropping mouse on divider");
+                RouteDecision::Divider { node_path, axis } => {
+                    // ADR-0035: a LEFT-button press on a divider starts a drag
+                    // and immediately snaps the split to the press position (so
+                    // a click-without-motion still nudges, matching the
+                    // intuitive "grab here"). Scroll-wheel and right/middle
+                    // presses encode as Press too, but landing on a 1-cell
+                    // divider must not snap the split — those, and stray
+                    // grab-less motions, are dropped (the divider gap has no
+                    // pane to forward to).
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                    {
+                        let grab = DragGrab { node_path, axis };
+                        if drag_resize(ctx, mouse, &grab) {
+                            layout_changed = true;
+                        }
+                        *ctx.drag = Some(grab);
+                        tracing::debug!("divider drag: grabbed");
+                    } else {
+                        tracing::trace!(x = mouse.x, y = mouse.y, "dropping mouse on divider");
+                    }
+                    continue;
+                }
+                RouteDecision::Miss => {
+                    tracing::trace!(x = mouse.x, y = mouse.y, "dropping mouse: no target");
                     continue;
                 }
                 RouteDecision::NoFocus => {
@@ -400,6 +485,62 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     // the status-bar painter and session name needed for a proper full
     // frame. We never paint from here.
     Ok(layout_changed)
+}
+
+/// Apply one drag step: re-tune the grabbed split so its divider tracks
+/// `mouse`, returning `true` iff the layout changed (the caller repaints).
+///
+/// A pure mutation of the active window — no wire I/O (the `SET_METADATA`
+/// broadcast happens once on release). Reuses [`actions::apply_divider_resize`]
+/// so the drag, the keybind resize, and the persisted layout all run the
+/// same `MIN_PANE_CELL` floor + `clamp_ratio` math. The pointer is
+/// quantised to an outer-viewport cell exactly as the hit-test does.
+/// `Ok(None)` from the resize (min-cell floor hit, or a stale grab whose
+/// split the layout no longer has) leaves the layout untouched: the drag
+/// stalls at the floor rather than collapsing a pane.
+fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -> bool {
+    // Snapshot the geometry that feeds the resize before borrowing the
+    // workspace mutably for the active window.
+    let viewport = ctx.viewport;
+    let has_bar = ctx.has_bar;
+    let sidebar = ctx.sidebar;
+    let Some(ls) = ctx.workspace.active_window_mut() else {
+        return false;
+    };
+    let pointer = (quantize_cell(mouse.x), quantize_cell(mouse.y));
+    match actions::apply_divider_resize(
+        ls,
+        &grab.node_path,
+        grab.axis,
+        pointer,
+        viewport,
+        has_bar,
+        sidebar,
+    ) {
+        Ok(Some(new_state)) => {
+            *ls = new_state;
+            true
+        }
+        // Min-cell floor or stale grab — keep the divider where it is.
+        Ok(None) | Err(_) => false,
+    }
+}
+
+/// Quantise an f64 pointer position (1-px-per-cell per SPEC §9.2.1) to an
+/// outer-viewport cell, saturating into `u16` like the mouse hit-test.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "cell-quantised SGR/X10 input; saturate to keep malformed peers from breaking routing"
+)]
+fn quantize_cell(p: f64) -> u16 {
+    if p.is_nan() || p < 0.0 {
+        0
+    } else if p >= f64::from(u16::MAX) {
+        u16::MAX
+    } else {
+        p as u16
+    }
 }
 
 /// Apply the side-effects of a resolved action: layout-mutation repaint
@@ -1646,6 +1787,7 @@ mod tests {
         let mut session_name = String::new();
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -1664,6 +1806,7 @@ mod tests {
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
+            drag: &mut drag,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -1843,6 +1986,7 @@ mod tests {
         let mut session_name = String::new();
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -1861,6 +2005,7 @@ mod tests {
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
+            drag: &mut drag,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         let mut out: Vec<u8> = Vec::new();
@@ -1904,6 +2049,7 @@ mod tests {
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
+            drag: &mut drag,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         apply_action_effects(
@@ -1960,6 +2106,7 @@ mod tests {
         let mut session_name = String::new();
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -1979,6 +2126,7 @@ mod tests {
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
+                drag: &mut drag,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -2261,6 +2409,7 @@ mod tests {
         let mut session_name = String::new();
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2279,6 +2428,7 @@ mod tests {
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
+            drag: &mut drag,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -2326,6 +2476,7 @@ mod tests {
         let mut session_name = "work".to_owned();
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -2345,6 +2496,7 @@ mod tests {
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
+                drag: &mut drag,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -2472,6 +2624,7 @@ mod tests {
 
         let mut zoomed = None;
         let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -2490,6 +2643,7 @@ mod tests {
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
+            drag: &mut drag,
         };
         dispatch_input_events(
             &mut out,

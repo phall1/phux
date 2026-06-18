@@ -670,27 +670,47 @@ preserved.
 
 ## 7. Mouse
 
-> **Status:** Partial. Input types and the per-pane wire encoder ship
-> in `phux-protocol::input::mouse` and `phux-server/src/input/mouse.rs`
-> (per ADR-0006 / ADR-0008). The routing described below — click-to-
-> focus, drag-on-border to resize, scroll-wheel fallthrough, per-pane
-> `set-pane mouse off` — is **not yet implemented** as of 2026-05-25.
-> No tickets filed.
+> **Status:** Shipped (ADR-0035). Click-to-focus, drag-on-divider to
+> resize, and default outer-terminal mouse capture are implemented. The
+> client enables its own mouse tracking on attach so divider drags work
+> without an inner program turning mouse mode on. The per-pane
+> `set-pane mouse off` escape hatch is **follow-up** — the global
+> `mouse = false` config is the current opt-out.
 
-Mouse handling is enabled by default. The defaults:
+Mouse handling is enabled by default. On attach the client emits DECSET
+`?1002h` (button-event tracking) + `?1006h` (SGR coordinates) for the
+*outer* terminal and restores them on detach. That capture is what makes
+drag-to-resize work in a plain shell: without it the client is deaf to
+the pointer over a divider whenever the inner program has no mouse mode.
 
 | Event                    | Action                                |
 |--------------------------|---------------------------------------|
-| Click in pane            | Focus the pane                        |
-| Click on pane border     | (no-op; reserved for future)          |
-| Drag on pane border      | Resize the boundary                   |
-| Scroll wheel in pane     | If the inner program has mouse mode,  |
-|                          | forward; else scroll pane scrollback  |
-| Right-click              | Pass through to inner program         |
+| Click in pane            | Focus the pane, then forward to it    |
+| Press on a divider       | Grab the boundary for a resize drag   |
+| Drag a divider           | Resize the boundary (tracks pointer)  |
+| Release                  | Commit the new layout (broadcast L3)  |
+| Scroll wheel in pane     | Forwarded to the pane (inner program  |
+|                          | sees it if it enabled mouse mode)     |
+| Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar slot | Slot-defined; default no-op           |
 
-Mouse handling is configurable per-pane: `set-pane mouse off` for a pane
-that wants raw bytes (e.g. a TUI that does its own mouse handling).
+Only divider cells change meaning. Every event inside a pane's rectangle
+is forwarded to that pane with pane-local coordinates, so an inner TUI
+(vim, htop) that turns mouse tracking on still receives its mouse events
+— the server's per-pane encoder produces empty bytes for a pane whose
+inner app has no mouse mode, so forwarding is harmless either way.
+
+**Native selection.** Enabling outer capture suppresses the host
+terminal's click-drag text selection inside the phux viewport. Hold
+**Shift** to bypass application mouse reporting and use native selection
+(a near-universal terminal convention; phux relies on it but does not
+enforce it). A host that does not honour Shift-bypass needs
+`mouse = false` for easy selection.
+
+**Escape hatch.** `mouse = false` in `[defaults]` skips the DECSET
+entirely and reverts to pass-through-only (the client only sees mouse
+when an inner program enables it). The per-pane `set-pane mouse off`
+remains follow-up work (needs a `set-pane` verb + per-pane client state).
 
 We do not ship copy-mode mouse selection — see §11.
 

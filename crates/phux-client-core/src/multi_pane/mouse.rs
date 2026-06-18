@@ -2,7 +2,9 @@ use phux_protocol::TerminalId;
 use phux_protocol::input::mouse::MouseEvent;
 
 use crate::layout::LayoutState;
+use crate::layout::NodePath;
 use crate::layout::Rect;
+use crate::layout::SplitDir;
 
 use super::layout::compute_layout_in;
 
@@ -21,9 +23,11 @@ use super::layout::compute_layout_in;
 /// 3. Whether a divider repaint is required because focus changed
 ///    (heavy / light chrome moves with focus).
 ///
-/// A divider hit returns [`RouteDecision::DividerNoOp`]: the click
-/// landed on a between-pane cell, which v0.1 explicitly treats as a
-/// no-op (drag-to-resize is deferred per docs/consumers/tui.md §7 / ticket scope).
+/// A click on a divider cell returns [`RouteDecision::Divider`] carrying
+/// the controlling split's node path + axis, so the driver's drag machine
+/// can adjust that split's ratio (ADR-0035). A click that falls outside
+/// every pane rect *and* every divider cell (reserved chrome, degenerate
+/// viewport) returns [`RouteDecision::Miss`] and is dropped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouteDecision {
     /// The click hit a pane. The driver should:
@@ -43,9 +47,21 @@ pub enum RouteDecision {
         /// `true` iff this click moves focus.
         focus_changed: bool,
     },
-    /// The click hit a divider cell (or fell outside every pane Rect).
-    /// Per DESIGN §7 the v0.1 driver drops the event entirely.
-    DividerNoOp,
+    /// The click hit a divider cell. The driver starts (or continues) a
+    /// drag against the addressed split: `node_path` names the
+    /// [`crate::layout::LayoutNode::Split`] whose `ratio` the drag tunes,
+    /// and `axis` says whether the pointer's x (`Horizontal`) or y
+    /// (`Vertical`) drives the ratio (ADR-0035).
+    Divider {
+        /// Path from the layout root to the controlling split.
+        node_path: NodePath,
+        /// The split's axis.
+        axis: SplitDir,
+    },
+    /// The click fell outside every pane rect AND every divider cell
+    /// (reserved chrome, degenerate viewport, undersized tree). The
+    /// driver drops the event entirely.
+    Miss,
     /// No tree to hit-test against (fresh `LayoutState::default()`),
     /// or focus is unset. Caller falls back to "no input goes anywhere
     /// until ATTACHED seeds focus".
@@ -66,7 +82,7 @@ pub enum RouteDecision {
 /// the hit-test disagrees with what is on screen and clicks route to the
 /// wrong pane (off by the status-bar row and/or the sidebar width). Clicks
 /// that fall in the reserved chrome (status bar row, sidebar columns) miss
-/// every inset rect and resolve to [`RouteDecision::DividerNoOp`].
+/// every inset rect and resolve to [`RouteDecision::Miss`].
 ///
 /// Behavior matrix:
 ///
@@ -74,8 +90,10 @@ pub enum RouteDecision {
 /// * Click inside a pane's `Rect` ⇒ [`RouteDecision::Pane`] with
 ///   pane-local coords; `focus_changed = true` iff target ≠
 ///   `layout.focus`.
-/// * Click on a divider cell or outside any pane (reserved chrome,
-///   degenerate viewport, undersized tree) ⇒ [`RouteDecision::DividerNoOp`].
+/// * Click on a divider cell ⇒ [`RouteDecision::Divider`] carrying the
+///   split that cell controls (path + axis) for drag-to-resize.
+/// * Click outside any pane and any divider (reserved chrome, degenerate
+///   viewport, undersized tree) ⇒ [`RouteDecision::Miss`].
 ///
 /// The function is pure (no allocation aside from the internal
 /// [`compute_layout_in`] call's `HashMap`) and synchronous; the driver's
@@ -122,27 +140,40 @@ pub fn route_mouse_event(
         }
     }
 
-    match hit {
-        Some((target, rect)) => {
-            let focus_changed = layout.focus.as_ref() != Some(&target);
-            // Translate to pane-local. `rect.x <= cell_x` is
-            // guaranteed by `rect_contains`, so the subtraction never
-            // underflows.
-            #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
-            let pane_x = f64::from(cell_x - rect.x);
-            #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
-            let pane_y = f64::from(cell_y - rect.y);
-            RouteDecision::Pane {
-                target,
-                pane_x,
-                pane_y,
-                focus_changed,
-            }
-        }
-        // Cell lies in a divider gap or outside any rect (degenerate
-        // viewport). Drag-to-resize on divider is deferred.
-        None => RouteDecision::DividerNoOp,
+    if let Some((target, rect)) = hit {
+        let focus_changed = layout.focus.as_ref() != Some(&target);
+        // Translate to pane-local. `rect.x <= cell_x` is guaranteed by
+        // `rect_contains`, so the subtraction never underflows.
+        #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
+        let pane_x = f64::from(cell_x - rect.x);
+        #[allow(clippy::cast_lossless, reason = "u16 → f64 is exact for our range")]
+        let pane_y = f64::from(cell_y - rect.y);
+        return RouteDecision::Pane {
+            target,
+            pane_x,
+            pane_y,
+            focus_changed,
+        };
     }
+
+    // Not in a pane — is the cell a divider? The grab map's cells are
+    // exactly the painted divider cells (built from the same segments,
+    // same viewport clamp), so set-membership resolves the controlling
+    // split. Inner splits paint over outer ones at a crossing; the first
+    // hit whose cell set contains the click wins — for a true crossing
+    // cell that ambiguity is inherent and either split is a sane grab.
+    for h in &multi.divider_hits {
+        if h.cells.contains(&(cell_x, cell_y)) {
+            return RouteDecision::Divider {
+                node_path: h.node_path.clone(),
+                axis: h.axis,
+            };
+        }
+    }
+
+    // Reserved chrome, divider gap with no split (degenerate), or outside
+    // every rect entirely.
+    RouteDecision::Miss
 }
 
 /// Clamp an f64 cell position to `u16`. Pixel-precision input that

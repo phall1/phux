@@ -95,6 +95,48 @@ pub struct Rect {
 }
 
 // -----------------------------------------------------------------------------
+// NodePath — addressing an interior split node
+// -----------------------------------------------------------------------------
+
+/// One step down the binary split tree: into the `left` or `right` child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeStep {
+    /// Descend into the `left` child of a [`LayoutNode::Split`].
+    Left,
+    /// Descend into the `right` child.
+    Right,
+}
+
+/// A path from the layout root to a specific [`LayoutNode`].
+///
+/// Empty path ⇒ the root. The divider rasterizer
+/// ([`crate::multi_pane`]) tags each interior split's divider line with
+/// the path to that split, so a mouse press on a divider cell resolves to
+/// the [`LayoutNode::Split`] whose `ratio` a drag adjusts
+/// ([`set_ratio_at`]). Decoupled from the wire-side `LayoutNode` so it
+/// stays a pure TUI-local geometry concern.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodePath(pub Vec<NodeStep>);
+
+impl NodePath {
+    /// The root path (empty).
+    #[must_use]
+    pub const fn root() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Push a step onto the path (descend one level).
+    pub fn push(&mut self, step: NodeStep) {
+        self.0.push(step);
+    }
+
+    /// Pop the last step (ascend one level).
+    pub fn pop(&mut self) -> Option<NodeStep> {
+        self.0.pop()
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Errors
 // -----------------------------------------------------------------------------
 
@@ -564,6 +606,61 @@ pub fn split_at(
         return Err(LayoutError::PaneNotInLayout(target.clone()));
     }
     Ok(split_inner(tree, target, new_pane, dir, ratio))
+}
+
+/// Replace the `ratio` of the [`LayoutNode::Split`] addressed by `path`,
+/// returning the rewritten tree.
+///
+/// `ratio` is **not** validated or clamped here — callers (the drag
+/// machine, the divider-resize action) clamp into `(0, 1)` with the same
+/// `clamp_ratio` the keyboard resize uses before calling. Returns `None`
+/// if `path` does not address a `Split` (it ran off a leaf, or the path
+/// is the empty root over a single-leaf tree) — a stale path from a
+/// layout that changed between press and motion.
+#[must_use]
+pub fn set_ratio_at(tree: &LayoutNode, path: &NodePath, ratio: f32) -> Option<LayoutNode> {
+    set_ratio_inner(tree, &path.0, ratio)
+}
+
+fn set_ratio_inner(node: &LayoutNode, steps: &[NodeStep], ratio: f32) -> Option<LayoutNode> {
+    match node {
+        LayoutNode::Split {
+            dir,
+            ratio: r,
+            left,
+            right,
+        } => match steps.split_first() {
+            // Path ends here: this is the split to retune.
+            None => Some(LayoutNode::Split {
+                dir: *dir,
+                ratio,
+                left: left.clone(),
+                right: right.clone(),
+            }),
+            Some((NodeStep::Left, rest)) => {
+                let new_left = set_ratio_inner(left, rest, ratio)?;
+                Some(LayoutNode::Split {
+                    dir: *dir,
+                    ratio: *r,
+                    left: Box::new(new_left),
+                    right: right.clone(),
+                })
+            }
+            Some((NodeStep::Right, rest)) => {
+                let new_right = set_ratio_inner(right, rest, ratio)?;
+                Some(LayoutNode::Split {
+                    dir: *dir,
+                    ratio: *r,
+                    left: left.clone(),
+                    right: Box::new(new_right),
+                })
+            }
+        },
+        // Ran off a leaf (or hit a leaf at the path tip) — the path no
+        // longer names a split in this tree.
+        LayoutNode::Leaf(_) => None,
+        _ => unknown_layout_variant(),
+    }
 }
 
 /// Centralised handler for the `#[non_exhaustive]` wildcard arms on

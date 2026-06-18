@@ -850,7 +850,16 @@ async fn attach_session<W: super::RenderSink>(
     // the outer terminal into raw + alt screen. The guard's Drop runs
     // on unwinding; the signal-handler path inside `main_loop` runs
     // `write_terminal_reset` explicitly to cover SIGINT/SIGTERM/SIGHUP.
-    let _guard = RawModeGuard::install_with_stdout(out)?;
+    //
+    // ADR-0035: read the `mouse` config (default on) to decide whether the
+    // guard also enables the client's own outer-terminal mouse tracking, so
+    // divider drag-to-resize works by default. A load failure or an
+    // explicit `mouse = false` falls back to pass-through-only — no DECSET,
+    // host native selection untouched.
+    let mouse_capture = phux_config::loader::load()
+        .map(|c| c.defaults.mouse)
+        .unwrap_or(true);
+    let _guard = RawModeGuard::install_with_stdout(out, mouse_capture)?;
 
     // Install a panic hook so an unexpected panic inside `main_loop`
     // (renderer bug, libghostty FFI surprise, etc.) still restores the
@@ -1228,6 +1237,12 @@ async fn main_loop<W: super::RenderSink>(
     // route to the overlay (no pane forwarding) and pane stdout flushes
     // are suppressed (ADR-0020 §Decision invariant 5).
     let mut overlays = OverlayState::new();
+    // ADR-0035: the in-flight divider drag. `None` between drags; a press
+    // on a divider records the grabbed split, motion re-tunes it, release
+    // clears it. Lives across dispatch batches (press and release land in
+    // different `select!` wakeups), so it is owned here and lent to
+    // `DispatchCtx` by reference each batch.
+    let mut drag: Option<super::input_dispatch::DragGrab> = None;
     // Track the current outer-terminal viewport so the painter knows
     // which row is "bottom". Initialized to a sensible default and
     // updated by SIGWINCH; the server doesn't drive client-side
@@ -1481,6 +1496,7 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
+                    drag: &mut drag,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1847,6 +1863,7 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
+                    drag: &mut drag,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2373,16 +2390,24 @@ impl RawModeGuard {
     /// Install the guard, writing the alt-screen-enter + cursor-hide
     /// sequence to real stdout. Convenience wrapper around
     /// [`Self::install_with_stdout`] for the common path; tests use
-    /// the writer-injecting variant.
+    /// the writer-injecting variant. Enables mouse capture by default
+    /// (ADR-0035).
     pub fn install() -> Result<Self, AttachError> {
-        Self::install_with_stdout(&mut io::stdout())
+        Self::install_with_stdout(&mut io::stdout(), true)
     }
 
     /// Install the guard. Errors if stdin is not a TTY or the termios
     /// dance fails. The alt-screen + cursor-hide bytes are written to
     /// `out` so tests can capture them and assert on the regression
     /// guard for `phux-roz`.
-    pub fn install_with_stdout<W: Write>(out: &mut W) -> Result<Self, AttachError> {
+    ///
+    /// `mouse` gates the client's own outer-terminal mouse tracking
+    /// (ADR-0035): when `true` the entry sequence also emits DECSET
+    /// `?1002h?1006h` so divider drags work without an inner program
+    /// turning mouse mode on; when `false` the client emits no mouse DECSET
+    /// and only sees mouse when an inner program enables tracking (the host's
+    /// native selection is untouched).
+    pub fn install_with_stdout<W: Write>(out: &mut W, mouse: bool) -> Result<Self, AttachError> {
         let stdin = io::stdin();
         if !stdin.is_terminal() {
             return Err(AttachError::NotATty);
@@ -2423,8 +2448,10 @@ impl RawModeGuard {
             .map_err(|err| AttachError::Terminal(format!("tcsetattr: {err}")))?;
 
         // Enter the alt screen + hide the cursor up front so the first
-        // frame paint doesn't briefly show on the normal screen.
-        write_enter_alt_screen(out).map_err(AttachError::Io)?;
+        // frame paint doesn't briefly show on the normal screen. With
+        // `mouse` on, also enable our own outer-terminal mouse tracking so
+        // divider drags work by default (ADR-0035).
+        write_enter_alt_screen(out, mouse).map_err(AttachError::Io)?;
 
         // Remember that we entered the alt screen so signal handlers
         // know to emit the leave sequence. We deliberately set this
@@ -2484,6 +2511,20 @@ impl Drop for RawModeGuard {
 /// install. Two cheap flags is the right factoring.
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// Whether the client enabled its OWN outer-terminal mouse tracking
+/// (DECSET `?1002h` button-motion + `?1006h` SGR) on attach (ADR-0035).
+///
+/// Set by [`write_enter_alt_screen`] when the `mouse` config is on, so the
+/// client receives pointer reports over a divider even when the inner
+/// program has no mouse mode (the common shell case) — that is what makes
+/// drag-to-resize work by default. Cleared by [`write_terminal_reset`],
+/// which emits the matching `?1006l?1002l` BEFORE the `?1049l` alt-screen
+/// leave so the host terminal's native click-drag selection comes back on
+/// detach. Kept separate from [`ALT_SCREEN_ACTIVE`] for the same reason
+/// that flag is separate from the termios snapshot: independent concerns,
+/// each restored exactly once.
+static MOUSE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Snapshot of the outer terminal's pre-raw Termios, parked here so
 /// the signal-handler arms in `main_loop` and the panic hook installed
 /// by [`install_panic_hook_once`] can perform a true `tcsetattr`
@@ -2529,12 +2570,23 @@ fn take_termios_snapshot() -> Option<Termios> {
 /// chain hooks indefinitely.
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// Write the alt-screen-enter + cursor-hide sequence. Factored out so
-/// the install path and any future re-entry path share one byte
-/// definition.
-fn write_enter_alt_screen<W: Write>(out: &mut W) -> io::Result<()> {
+/// Write the alt-screen-enter + cursor-hide sequence, plus — when
+/// `mouse` is on — the client's own mouse-tracking DECSET (ADR-0035).
+/// Factored out so the install path and any future re-entry path share
+/// one byte definition.
+///
+/// `?1002h` is button-event tracking (motion only while a button is held,
+/// not `?1003h` any-motion which would flood the wire with hover traffic
+/// we discard); `?1006h` is SGR extended coordinates, mandatory to address
+/// columns past 223. Records [`MOUSE_CAPTURE_ACTIVE`] so the matching
+/// reset emits the leave sequence.
+fn write_enter_alt_screen<W: Write>(out: &mut W, mouse: bool) -> io::Result<()> {
     out.write_all(b"\x1b[?1049h")?;
     out.write_all(b"\x1b[?25l")?;
+    if mouse {
+        out.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+        MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+    }
     out.flush()
 }
 
@@ -2547,6 +2599,13 @@ fn write_enter_alt_screen<W: Write>(out: &mut W) -> io::Result<()> {
 /// `ALT_SCREEN_ACTIVE == false` and skips the leave sequence.
 pub fn write_terminal_reset<W: Write>(out: &mut W) -> io::Result<()> {
     write_reset(out)?;
+    // ADR-0035: drop our own mouse tracking BEFORE leaving the alt screen,
+    // so the host terminal's native click-drag selection is restored on
+    // detach. `?1006l` then `?1002l` undoes the entry pair in reverse.
+    if MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::SeqCst) {
+        out.write_all(b"\x1b[?1006l\x1b[?1002l")?;
+        out.flush()?;
+    }
     if ALT_SCREEN_ACTIVE.swap(false, Ordering::SeqCst) {
         out.write_all(b"\x1b[?1049l")?;
         out.flush()?;
@@ -3046,6 +3105,73 @@ mod tests {
     /// driving a real PTY; this `#[ignore]`-stub keeps the procedure
     /// next to the code and surfaces in `cargo test -- --ignored` if
     /// someone wires up an integration harness later.
+    /// ADR-0035: with mouse capture on, the alt-screen entry sequence also
+    /// enables the client's own outer-terminal mouse tracking
+    /// (`?1002h` button-motion + `?1006h` SGR), and the reset undoes it
+    /// (`?1006l?1002l`) BEFORE leaving the alt screen so the host's native
+    /// selection is restored. nextest runs each test in its own process,
+    /// so the module-global capture/alt flags are isolated.
+    #[test]
+    fn mouse_capture_enable_and_disable_bytes() {
+        let mut entry = Vec::new();
+        write_enter_alt_screen(&mut entry, true).unwrap();
+        assert!(
+            entry.windows(8).any(|w| w == b"\x1b[?1002h"),
+            "entry must enable button-motion tracking: {entry:?}"
+        );
+        assert!(
+            entry.windows(8).any(|w| w == b"\x1b[?1006h"),
+            "entry must enable SGR coordinates: {entry:?}"
+        );
+        // `write_enter_alt_screen` records MOUSE_CAPTURE_ACTIVE; the
+        // alt-screen flag is set separately by `install_with_stdout` on a
+        // real attach. Set it here so reset exercises the full leave path
+        // (mouse-disable AND alt-screen-leave) the way a live detach does.
+        ALT_SCREEN_ACTIVE.store(true, Ordering::SeqCst);
+        // Reset emits the leave pair before the ?1049l alt-screen leave.
+        let mut reset = Vec::new();
+        write_terminal_reset(&mut reset).unwrap();
+        let pos_1006l = reset
+            .windows(8)
+            .position(|w| w == b"\x1b[?1006l")
+            .expect("reset must disable SGR coordinates");
+        let pos_1002l = reset
+            .windows(8)
+            .position(|w| w == b"\x1b[?1002l")
+            .expect("reset must disable button-motion");
+        let pos_1049l = reset
+            .windows(8)
+            .position(|w| w == b"\x1b[?1049l")
+            .expect("reset must leave the alt screen");
+        assert!(
+            pos_1006l < pos_1049l && pos_1002l < pos_1049l,
+            "mouse-disable must precede the alt-screen leave: {reset:?}"
+        );
+    }
+
+    /// ADR-0035: `mouse = false` skips the DECSET entirely — the entry
+    /// sequence emits no mouse tracking, host native selection untouched.
+    #[test]
+    fn mouse_capture_disabled_emits_no_decset() {
+        let mut entry = Vec::new();
+        write_enter_alt_screen(&mut entry, false).unwrap();
+        assert!(
+            !entry.windows(8).any(|w| w == b"\x1b[?1002h"),
+            "mouse=false must not enable tracking: {entry:?}"
+        );
+        assert!(
+            entry.windows(8).any(|w| w == b"\x1b[?1049h"),
+            "alt-screen enter still emitted: {entry:?}"
+        );
+        // With capture never set, reset emits no mouse-disable bytes.
+        let mut reset = Vec::new();
+        write_terminal_reset(&mut reset).unwrap();
+        assert!(
+            !reset.windows(8).any(|w| w == b"\x1b[?1002l"),
+            "no capture ⇒ no mouse-disable on reset: {reset:?}"
+        );
+    }
+
     #[test]
     #[ignore = "manual: requires a live PTY and a SIGINT during attach"]
     fn signal_arm_true_restore_manual_repro() {

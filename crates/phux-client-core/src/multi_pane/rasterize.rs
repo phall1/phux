@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use phux_protocol::TerminalId;
 
-use crate::layout::{LayoutNode, Rect, SplitDir};
+use crate::layout::{LayoutNode, NodePath, NodeStep, Rect, SplitDir};
 
 /// One cell of the divider grid, with its resolved box-drawing glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +13,27 @@ pub struct DividerCell {
     pub y: u16,
     /// The pre-resolved box-drawing character.
     pub ch: char,
+}
+
+/// A grab target: the divider cells of one interior split, plus the
+/// identity of the [`LayoutNode::Split`] they control.
+///
+/// Surfaced out of the layout walk so a press on a divider cell resolves
+/// to the split whose `ratio` a drag should adjust. The `axis` is the
+/// split's `dir`: a `Horizontal` split paints a *vertical* line whose
+/// cells move left/right under a drag, a `Vertical` split a *horizontal*
+/// line whose cells move up/down. `cells` are the outer-viewport cell
+/// coordinates the line occupies (the same cells the rasterizer paints a
+/// glyph into), so the hit-test is an exact set-membership check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DividerHit {
+    /// Path from the layout root to the controlling [`LayoutNode::Split`].
+    pub node_path: NodePath,
+    /// The split's axis (`dir`). Drives whether a drag reads the
+    /// pointer's x (Horizontal) or y (Vertical).
+    pub axis: SplitDir,
+    /// Outer-viewport cells the divider line occupies, in long-axis order.
+    pub cells: Vec<(u16, u16)>,
 }
 
 // -----------------------------------------------------------------------------
@@ -40,6 +61,11 @@ pub(super) struct DividerSegment {
     low_leaves: Vec<TerminalId>,
     /// Leaves of the subtree on the "high" side.
     high_leaves: Vec<TerminalId>,
+    /// Path from the layout root to the [`LayoutNode::Split`] this
+    /// segment is the divider for. Carried so the divider→split identity
+    /// survives into [`DividerHit`] (a press on this line resolves to
+    /// this split).
+    node_path: NodePath,
 }
 
 /// Wildcard handler for `#[non_exhaustive]` matches over [`LayoutNode`] /
@@ -75,6 +101,23 @@ pub(super) fn walk_layout(
     segments: &mut Vec<DividerSegment>,
     rects: &mut HashMap<TerminalId, Rect>,
 ) {
+    walk_layout_at(node, bounds, &mut NodePath::root(), segments, rects);
+}
+
+/// [`walk_layout`] with an explicit `path` accumulator (the steps from
+/// the root to `node`). `path` is pushed before recursing into each child
+/// and popped after, so it always names the node currently under `bounds`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the Horizontal and Vertical arms are near-mirror child-bounds math; splitting them loses the side-by-side readability that makes the divider-reservation symmetry auditable."
+)]
+fn walk_layout_at(
+    node: &LayoutNode,
+    bounds: Rect,
+    path: &mut NodePath,
+    segments: &mut Vec<DividerSegment>,
+    rects: &mut HashMap<TerminalId, Rect>,
+) {
     match node {
         LayoutNode::Leaf(p) => {
             rects.insert(p.clone(), bounds);
@@ -102,9 +145,11 @@ pub(super) fn walk_layout(
                         cross: divider_x,
                         low_leaves: collect_leaves(left),
                         high_leaves: collect_leaves(right),
+                        node_path: path.clone(),
                     });
                 }
-                walk_layout(
+                path.push(NodeStep::Left);
+                walk_layout_at(
                     left,
                     Rect {
                         x: bounds.x,
@@ -112,10 +157,13 @@ pub(super) fn walk_layout(
                         w: left_w,
                         h: bounds.h,
                     },
+                    path,
                     segments,
                     rects,
                 );
-                walk_layout(
+                path.pop();
+                path.push(NodeStep::Right);
+                walk_layout_at(
                     right,
                     Rect {
                         x: if has_divider { divider_x + 1 } else { bounds.x },
@@ -123,9 +171,11 @@ pub(super) fn walk_layout(
                         w: right_w,
                         h: bounds.h,
                     },
+                    path,
                     segments,
                     rects,
                 );
+                path.pop();
             }
             SplitDir::Vertical => {
                 let has_divider = bounds.h >= 1;
@@ -141,9 +191,11 @@ pub(super) fn walk_layout(
                         cross: divider_y,
                         low_leaves: collect_leaves(left),
                         high_leaves: collect_leaves(right),
+                        node_path: path.clone(),
                     });
                 }
-                walk_layout(
+                path.push(NodeStep::Left);
+                walk_layout_at(
                     left,
                     Rect {
                         x: bounds.x,
@@ -151,10 +203,13 @@ pub(super) fn walk_layout(
                         w: bounds.w,
                         h: top_h,
                     },
+                    path,
                     segments,
                     rects,
                 );
-                walk_layout(
+                path.pop();
+                path.push(NodeStep::Right);
+                walk_layout_at(
                     right,
                     Rect {
                         x: bounds.x,
@@ -162,9 +217,11 @@ pub(super) fn walk_layout(
                         w: bounds.w,
                         h: bot_h,
                     },
+                    path,
                     segments,
                     rects,
                 );
+                path.pop();
             }
             _ => unknown_variant(),
         },
@@ -352,6 +409,52 @@ pub(super) fn rasterize(
         .collect()
 }
 
+/// Build the per-split grab map from the same segments [`rasterize`]
+/// paints. Each [`DividerSegment`] becomes one [`DividerHit`] carrying
+/// the controlling split's path + axis and the exact cells the divider
+/// line occupies, clamped to `viewport` identically to [`rasterize`] so
+/// the hit set and the painted glyph cells are the same cells.
+///
+/// Cells of an off-screen segment (its `cross` axis past the viewport,
+/// per the same guards [`rasterize`] uses) are dropped; a segment that
+/// clamps to zero on-screen cells still yields a `DividerHit` with an
+/// empty `cells` vec, which the hit-test simply never matches.
+pub(super) fn divider_hits(segments: &[DividerSegment], viewport: (u16, u16)) -> Vec<DividerHit> {
+    let (vcols, vrows) = viewport;
+    segments
+        .iter()
+        .map(|seg| {
+            let mut cells = Vec::new();
+            match seg.split {
+                SplitDir::Horizontal => {
+                    // Vertical line at column `cross` from row a0..=a1.
+                    let x = seg.cross;
+                    if x < vcols {
+                        for y in seg.a0..=seg.a1.min(vrows.saturating_sub(1)) {
+                            cells.push((x, y));
+                        }
+                    }
+                }
+                SplitDir::Vertical => {
+                    // Horizontal line at row `cross` from col a0..=a1.
+                    let y = seg.cross;
+                    if y < vrows {
+                        for x in seg.a0..=seg.a1.min(vcols.saturating_sub(1)) {
+                            cells.push((x, y));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            DividerHit {
+                node_path: seg.node_path.clone(),
+                axis: seg.split,
+                cells,
+            }
+        })
+        .collect()
+}
+
 /// Pick the box-drawing character for a cell given which of its four
 /// edges are present, and (per edge) whether that edge is heavy.
 ///
@@ -461,7 +564,7 @@ const fn edge_kind(e: Option<bool>) -> EdgeKind {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn split_dim(total: u16, ratio: f32) -> u16 {
+pub(super) fn split_dim(total: u16, ratio: f32) -> u16 {
     // Mirror crate::layout::split_dim (private there) for divider math.
     let raw = (f32::from(total) * ratio).round();
     if raw < 0.0 {

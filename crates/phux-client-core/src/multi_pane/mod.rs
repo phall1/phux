@@ -34,9 +34,11 @@ pub mod mouse;
 /// Rasterize the composition (pane interiors + divider segments) for paint.
 pub mod rasterize;
 
-pub use layout::{PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in};
+pub use layout::{
+    PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in, split_content_span_at,
+};
 pub use mouse::{RouteDecision, route_mouse_event};
-pub use rasterize::DividerCell;
+pub use rasterize::{DividerCell, DividerHit};
 
 #[cfg(test)]
 #[allow(
@@ -466,10 +468,11 @@ mod tests {
         }
     }
 
-    /// Clicking exactly on the divider column produces a no-op —
-    /// drag-to-resize is deferred (DESIGN §7).
+    /// Clicking exactly on the divider column resolves to the split that
+    /// divider controls (ADR-0035 drag-to-resize grab target).
     #[test]
-    fn route_mouse_divider_is_noop() {
+    fn route_mouse_divider_resolves_to_controlling_split() {
+        use crate::layout::{NodePath, SplitDir as Sd};
         let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
         let state = LayoutState {
             tree: Some(tree),
@@ -485,7 +488,15 @@ mod tests {
             (80, 24),
             &mouse_at(left_w, 10),
         );
-        assert_eq!(decision, RouteDecision::DividerNoOp);
+        match decision {
+            RouteDecision::Divider { node_path, axis } => {
+                // Root split (the only split) controls this divider; its
+                // axis is Horizontal (a vertical line moved left/right).
+                assert_eq!(node_path, NodePath::root());
+                assert_eq!(axis, Sd::Horizontal);
+            }
+            other => panic!("expected Divider decision, got {other:?}"),
+        }
     }
 
     /// Single-pane layout: every click stays in the lone pane with no
@@ -640,7 +651,7 @@ mod tests {
         let fixed = route_mouse_event(&state, content, viewport, &mouse_at(10, status_row));
         assert_eq!(
             fixed,
-            RouteDecision::DividerNoOp,
+            RouteDecision::Miss,
             "a click on the reserved status-bar row must be dropped"
         );
 
@@ -782,6 +793,37 @@ mod tests {
 
             // Exact cover: nothing left uncovered.
             prop_assert_eq!(covered.len(), usize::from(cols) * usize::from(rows));
+
+            // ADR-0035 hit-map consistency: the union of every
+            // `divider_hits` cell set is exactly the painted divider cell
+            // set (same cells, built from the same segments + viewport
+            // clamp), and each hit's `node_path` resolves to a `Split`.
+            let painted: HashSet<(u16, u16)> =
+                layout.dividers.iter().map(|c| (c.x, c.y)).collect();
+            let mut hit_cells: HashSet<(u16, u16)> = HashSet::new();
+            for h in &layout.divider_hits {
+                // The path must address a real split in the tree.
+                let retuned = crate::layout::set_ratio_at(
+                    state.tree.as_ref().unwrap(),
+                    &h.node_path,
+                    0.5,
+                );
+                prop_assert!(
+                    retuned.is_some(),
+                    "divider_hit node_path {:?} does not resolve to a Split", h.node_path
+                );
+                for cell in &h.cells {
+                    prop_assert!(
+                        painted.contains(cell),
+                        "divider_hit cell {cell:?} is not a painted divider cell"
+                    );
+                    hit_cells.insert(*cell);
+                }
+            }
+            prop_assert_eq!(
+                &hit_cells, &painted,
+                "divider_hits cells must equal painted divider cells"
+            );
         }
     }
 }
