@@ -1,4 +1,4 @@
-# Publish phux-protocol to crates.io.
+# Crate-only fallback for publishing phux-protocol to crates.io.
 #
 # Only phux-protocol is publishable: every other workspace crate is
 # publish=false (binary or internal-only). phux-protocol's default feature set
@@ -6,16 +6,21 @@
 # feature's optional libghostty-vt resolves to the crates.io release (>=0.2.0)
 # for external consumers.
 #
-# Manual-only: publishing is irreversible (versions cannot be reused, names
-# cannot be reclaimed), so this never fires on push. Requires the
-# CARGO_REGISTRY_TOKEN secret (a crates.io API token). Dispatch it after the
-# matching `v*` tag is pushed and `docs/spec` + the version are settled.
+# Normal full releases use release.yml with publish_protocol enabled. Keep this
+# manual fallback for a crate-only retry: publishing is irreversible (versions
+# cannot be reused, names cannot be reclaimed), so this never fires on push.
+# Requires the CARGO_REGISTRY_TOKEN secret (a crates.io API token). Dispatch it
+# with the matching `v*` tag after `docs/spec` + the version are settled.
 
 name: publish-crate
 
 on:
   workflow_dispatch:
     inputs:
+      tag:
+        description: "Tag to publish from (e.g. v0.1.0). Must already exist."
+        required: true
+        type: string
       dry_run:
         description: "Package + verify only; do not upload."
         type: boolean
@@ -30,8 +35,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Check release version
+        run: bash scripts/check-release-version.sh "${{ inputs.tag }}"
 
       - name: Package + verify (always)
         run: nix develop -c cargo publish --dry-run -p phux-protocol

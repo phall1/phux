@@ -1,8 +1,9 @@
-# phux release — build distributable binaries on a version tag, publish a
-# GitHub release, and refresh the Homebrew tap formula.
+# phux release — create or verify a version tag, build distributable binaries,
+# publish a GitHub release, refresh the Homebrew tap formula, and optionally
+# publish phux-protocol to crates.io from the same button.
 #
-# Trigger: push a tag matching `v*` (e.g. `v0.1.0`), or run manually via
-# workflow_dispatch with a `tag` input.
+# Trigger: run manually with a `tag` input. Manual dispatch creates the tag
+# from the default branch if it does not already exist.
 #
 # macOS builds run inside `nix develop -c` so they get the exact toolchain
 # from rust-toolchain.toml + flake.nix. Linux builds intentionally use rustup
@@ -18,22 +19,102 @@
 name: release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0). Must already exist."
+        description: "Tag to release (e.g. v0.1.0). Created from main if missing."
         required: true
+        type: string
+      publish_protocol:
+        description: "Also publish phux-protocol to crates.io. Irreversible."
+        required: true
+        type: boolean
+        default: false
+      crates_io_confirm:
+        description: "Required when publishing crates.io: type `publish phux-protocol`."
+        required: false
         type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
+  prepare:
+    name: prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="${RELEASE_REF}"
+          case "$ref" in
+            refs/tags/*) tag="${ref#refs/tags/}" ;;
+            *) tag="$ref" ;;
+          esac
+          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::invalid release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Require default branch for manual releases
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "::error::manual releases must be dispatched from ${DEFAULT_BRANCH}, got ${REF_NAME}"
+            exit 1
+          fi
+
+      - name: Check release version
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: bash scripts/check-release-version.sh "$TAG"
+
+      - name: Create or verify release tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            tag_sha="$(git rev-list -n 1 "refs/tags/${TAG}")"
+            if [ "$tag_sha" != "$head_sha" ]; then
+              echo "::error::${TAG} already points at ${tag_sha}, not ${head_sha}"
+              exit 1
+            fi
+            echo "${TAG} already points at this commit."
+          else
+            git tag "$TAG" "$head_sha"
+            git push origin "refs/tags/${TAG}"
+          fi
+
   build:
     name: build ${{ matrix.target }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -57,29 +138,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - name: Resolve version
-        id: version
-        shell: bash
-        env:
-          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          ref="${RELEASE_REF}"
-          case "$ref" in
-            refs/tags/*) tag="${ref#refs/tags/}" ;;
-            *) tag="$ref" ;;
-          esac
-          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
-            echo "::error::invalid release tag: ${tag}"
-            exit 1
-          fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
-
       - name: Check out release tag
         shell: bash
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
           git fetch --force --tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
@@ -88,7 +150,7 @@ jobs:
       - name: Check release version
         shell: bash
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: bash scripts/check-release-version.sh "$TAG"
 
       - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
@@ -121,7 +183,7 @@ jobs:
         id: package
         shell: bash
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
@@ -151,32 +213,12 @@ jobs:
 
   release:
     name: publish release
-    needs: build
+    needs: [prepare, build]
     # Publish whatever built: a single failed target shouldn't block the
     # release of the others. download-artifact below just collects what exists.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Resolve version
-        id: version
-        shell: bash
-        env:
-          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          ref="${RELEASE_REF}"
-          case "$ref" in
-            refs/tags/*) tag="${ref#refs/tags/}" ;;
-            *) tag="$ref" ;;
-          esac
-          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
-            echo "::error::invalid release tag: ${tag}"
-            exit 1
-          fi
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
@@ -185,8 +227,8 @@ jobs:
       - name: Create / update GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
-          tag_name: ${{ steps.version.outputs.tag }}
-          name: phux ${{ steps.version.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: phux ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           # A partial matrix still publishes whatever built — don't fail if a
           # target is missing (the glob still matches the ones that succeeded).
@@ -197,7 +239,7 @@ jobs:
 
   homebrew:
     name: update homebrew tap
-    needs: release
+    needs: [prepare, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     # Pushes Formula/phux.rb to phall1/homebrew-phux via an SSH deploy key
@@ -239,7 +281,7 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         shell: bash
         env:
-          TAG: ${{ needs.release.outputs.tag }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p tap/Formula
@@ -254,3 +296,40 @@ jobs:
             git commit -m "phux ${TAG}"
             git push
           fi
+
+  protocol-crate:
+    name: publish phux-protocol crate
+    needs: [prepare, release]
+    if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() && needs.release.result == 'success' && inputs.publish_protocol == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Confirm crates.io publish
+        shell: bash
+        env:
+          CONFIRM: ${{ inputs.crates_io_confirm }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "$CONFIRM" != "publish phux-protocol" ]; then
+            echo "::error::to publish crates.io, set crates_io_confirm to: publish phux-protocol"
+            exit 1
+          fi
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set"
+            exit 1
+          fi
+
+      - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
+      - uses: DeterminateSystems/magic-nix-cache-action@76aaf8814cdb385b86597c32b8c51b66b69b0839
+
+      - name: Package + verify phux-protocol
+        run: nix develop -c cargo publish --dry-run -p phux-protocol
+
+      - name: Publish phux-protocol to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: nix develop -c cargo publish -p phux-protocol
