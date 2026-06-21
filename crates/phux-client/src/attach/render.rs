@@ -25,7 +25,7 @@ use std::io::{self, Write};
 
 use libghostty_vt::{
     RenderState, Terminal as GhosttyTerminal,
-    render::{CellIterator, CursorVisualStyle, Dirty, RowIterator},
+    render::{CellIterator, CursorVisualStyle, Dirty, RowIterator, Snapshot},
     screen::CellWide,
     style::{RgbColor, Style, StyleColor, Underline},
 };
@@ -481,48 +481,27 @@ impl<'alloc> TerminalRenderer<'alloc> {
             snapshot.dirty()?
         };
 
-        let mut emitted_kitty = false;
-        if matches!(dirty, Dirty::Clean) {
-            emitted_kitty = kitty_replay::emit_kitty_graphics_replay(
+        let emitted_kitty = matches!(dirty, Dirty::Clean)
+            && kitty_replay::emit_kitty_graphics_replay(
                 terminal,
                 &mut self.kitty_placements,
                 out,
                 origin,
                 clip,
             )?;
-        }
 
-        match dirty {
-            Dirty::Clean => {
-                // No row content changed, but the cursor may have MOVED — a
-                // pure cursor advance (arrow-key navigation within a command
-                // line, accepting a zsh autosuggestion, vi-mode motions).
-                // libghostty marks no row dirty for that, so without this the
-                // on-screen cursor lags a frame: it wouldn't move until the
-                // next keystroke dirtied a cell. Reposition + refresh the
-                // cached cursor when it changed; emit nothing when it didn't,
-                // preserving the zero-byte idle repaint.
-                let new_local = snapshot.cursor_viewport()?.map(|v| (v.y, v.x));
-                let new_abs = new_local.map(|(y, x)| (y.saturating_add(oy), x.saturating_add(ox)));
-                if new_abs != self.last_cursor || emitted_kitty {
-                    if let Some((abs_y, abs_x)) = new_abs {
-                        write_cup(out, abs_y, abs_x)?;
-                        if snapshot.cursor_visible()? {
-                            out.write_all(b"\x1b[?25h")?;
-                        }
-                        out.flush()?;
-                    } else if emitted_kitty {
-                        out.flush()?;
-                    }
-                    self.last_cursor = new_abs;
-                    self.last_cursor_local = new_local;
-                }
-                return Ok(dirty);
-            }
-            Dirty::Partial | Dirty::Full => {
-                out.write_all(b"\x1b[?25l")?;
-            }
+        if matches!(dirty, Dirty::Clean) {
+            render_clean_frame_cursor(
+                &snapshot,
+                out,
+                origin,
+                emitted_kitty,
+                &mut self.last_cursor,
+                &mut self.last_cursor_local,
+            )?;
+            return Ok(dirty);
         }
+        out.write_all(b"\x1b[?25l")?;
 
         // Walk rows. Under `Dirty::Full` paint every row; under
         // `Dirty::Partial` skip rows whose per-row dirty bit is clear.
@@ -637,6 +616,37 @@ impl<'alloc> TerminalRenderer<'alloc> {
         out.flush()?;
         Ok(dirty)
     }
+}
+
+fn render_clean_frame_cursor(
+    snapshot: &Snapshot<'_, '_>,
+    out: &mut impl Write,
+    origin: (u16, u16),
+    emitted_kitty: bool,
+    last_cursor: &mut Option<(u16, u16)>,
+    last_cursor_local: &mut Option<(u16, u16)>,
+) -> Result<(), RenderError> {
+    // No row content changed, but the cursor may have MOVED — a pure cursor
+    // advance. Reposition + refresh the cached cursor when it changed.
+    let (ox, oy) = origin;
+    let new_local = snapshot.cursor_viewport()?.map(|v| (v.y, v.x));
+    let new_abs = new_local.map(|(y, x)| (y.saturating_add(oy), x.saturating_add(ox)));
+    if new_abs == *last_cursor && !emitted_kitty {
+        return Ok(());
+    }
+
+    if let Some((abs_y, abs_x)) = new_abs {
+        write_cup(out, abs_y, abs_x)?;
+        if snapshot.cursor_visible()? {
+            out.write_all(b"\x1b[?25h")?;
+        }
+        out.flush()?;
+    } else if emitted_kitty {
+        out.flush()?;
+    }
+    *last_cursor = new_abs;
+    *last_cursor_local = new_local;
+    Ok(())
 }
 
 /// Project a libghostty cell's `(Style, resolved fg, resolved bg)` into a

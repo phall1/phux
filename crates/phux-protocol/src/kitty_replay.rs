@@ -215,12 +215,11 @@ fn write_image_apc(
     Ok(())
 }
 
-fn kitty_format_code(format: ImageFormat) -> Option<u32> {
+const fn kitty_format_code(format: ImageFormat) -> Option<u32> {
     match format {
         ImageFormat::Rgb => Some(24),
         ImageFormat::Rgba => Some(32),
         ImageFormat::Png => Some(100),
-        ImageFormat::Gray | ImageFormat::GrayAlpha => None,
         _ => None,
     }
 }
