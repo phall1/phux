@@ -6,19 +6,18 @@ last-reviewed: 2026-05-30
 
 # Releasing
 
-**TL;DR.** Two independent distribution channels. The `phux` binary
-ships as prebuilt tarballs via a `v*` tag → GitHub release → Homebrew
-tap (`phall1/homebrew-phux`), with `v0.0.1` seeded as a Linux x86_64
-artifact. The `phux-protocol` library ships separately to crates.io by
-manual dispatch. `cargo install phux` is unsupported because the
-binary/internal crates are not publishable.
+**TL;DR.** Prefer the `release` workflow's manual button. It creates or
+verifies the `v*` tag, publishes GitHub release tarballs, refreshes the
+Homebrew tap (`phall1/homebrew-phux`), and can publish `phux-protocol` to
+crates.io when explicitly confirmed. `cargo install phux` is unsupported
+because the binary/internal crates are not publishable.
 
 ## What ships where
 
 | Artifact | Channel | Mechanism |
 |---|---|---|
-| `phux`, `phux-mcp` binaries | Homebrew + GitHub release | [`release.yml`](../.github/workflows/release.yml) on a `v*` tag |
-| `phux-protocol` crate | crates.io | [`publish-crate.yml`](../.github/workflows/publish-crate.yml), manual dispatch |
+| `phux`, `phux-mcp` binaries | Homebrew + GitHub release | [`release.yml`](../.github/workflows/release.yml), manual dispatch |
+| `phux-protocol` crate | crates.io | [`release.yml`](../.github/workflows/release.yml) with `publish_protocol`; [`publish-crate.yml`](../.github/workflows/publish-crate.yml) is a crate-only fallback |
 
 Every other crate (`phux`, `phux-core`, `phux-server`, `phux-client`,
 `phux-config`, `phux-mcp`) is `publish = false`: binary or internal-only.
@@ -42,12 +41,32 @@ To bump the binary release version:
    agree.
 4. Commit the bump.
 
-## Cutting a binary release
+## Cutting a full release
+
+Use GitHub Actions:
+
+1. Open **Actions → release → Run workflow**.
+2. Select the default branch.
+3. Enter `tag` as `vX.Y.Z`.
+4. Leave `publish_protocol` off for a binary/Homebrew-only release, or enable
+   it to publish `phux-protocol` to crates.io.
+5. If `publish_protocol` is enabled, type `publish phux-protocol` in
+   `crates_io_confirm`.
+6. Run the workflow.
+
+The workflow validates that `vX.Y.Z` matches Cargo's resolved workspace
+versions. If the tag is missing, it creates it from the default branch. If the
+tag already exists, it must point at the same commit or the workflow fails
+before building. After that it builds `phux` + `phux-mcp`, creates/updates the
+GitHub release, updates the Homebrew tap when `HOMEBREW_TAP_DEPLOY_KEY` is
+configured, and publishes `phux-protocol` only when the crates.io confirmation
+input is present.
+
+The manual workflow is the release entrypoint. Running these locally is now
+only a preflight, not the publish trigger:
 
 ```sh
 just release-check v0.1.0
-git tag v0.1.0
-git push origin v0.1.0
 ```
 
 `release.yml` then builds `phux` + `phux-mcp` for
@@ -110,7 +129,11 @@ an `x86_64` baseline through `libghostty-vt`'s build is future work.
 ## Publishing phux-protocol to crates.io
 
 Publishing is irreversible — versions cannot be reused and the name
-cannot be reclaimed — so this is never automatic.
+cannot be reclaimed — so this still requires an explicit confirmation input.
+For a normal release, use the `release` workflow's `publish_protocol` toggle
+and `crates_io_confirm` phrase.
+
+The crate-only fallback remains:
 
 1. Settle `docs/spec/` + the `phux-protocol` version (see
    [`CONTRIBUTING.md`](../CONTRIBUTING.md)).
@@ -119,7 +142,7 @@ cannot be reclaimed — so this is never automatic.
 3. Authenticate: `cargo login` once on the publishing machine, or set
    the `CARGO_REGISTRY_TOKEN` secret for the workflow.
 4. Publish: `just publish-protocol`, or dispatch `publish-crate.yml`
-   with `dry_run: false`.
+   with `tag: vX.Y.Z` and `dry_run: false`.
 
 The `server` feature's optional `libghostty-vt` resolves to the
 crates.io release (`>= 0.2.0`) for external consumers; verify that
