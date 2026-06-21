@@ -6,9 +6,61 @@ last-reviewed: 2026-06-09
 
 # Install
 
-**TL;DR.** Source is the install path today. The Nix dev shell pins the full toolchain — including the Zig compiler libghostty's build needs — so the build is reproducible on any supported platform. A Homebrew tap ([`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)) exists and the release pipeline targets it; the first bottles have not shipped yet. There is no `cargo install phux`, and nothing is on crates.io yet — `phux-protocol` is the one crate slated for it ([`RELEASING.md`](./RELEASING.md) tracks both first publishes).
+**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their `.sha256` sidecars. crates.io is for `phux-protocol`; `cargo install phux` is unsupported while the binary/internal crates are unpublished and `libghostty-vt` is git-pinned.
 
 ---
+
+## Homebrew
+
+Once `Formula/phux.rb` is published in
+[`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux), install with:
+
+```sh
+brew install phall1/phux/phux
+```
+
+Use this path first on supported Homebrew platforms after a post-`v0.0.1`
+Formula lands. If the Formula has not reached the tap for your target yet,
+use a source build.
+
+## Curl installer
+
+The installer is a convenience wrapper over the same GitHub release assets.
+Use it once a post-`v0.0.1` release is available:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
+```
+
+It verifies the release `.sha256` sidecar before unpacking and installs
+`phux` and `phux-mcp` into `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`. Set
+`PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
+uses the latest GitHub release; latest is currently `v0.0.1`, and the installer
+refuses that release because it is not a portable binary release.
+
+To install a specific future tag before it is latest:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
+```
+
+## Release tarball
+
+Release tags include target-specific tarballs and checksum sidecars:
+
+```sh
+tag=v0.1.0
+target=aarch64-apple-darwin
+base="https://github.com/phall1/phux/releases/download/${tag}"
+curl -LO "${base}/phux-${tag}-${target}.tar.gz"
+curl -LO "${base}/phux-${tag}-${target}.tar.gz.sha256"
+shasum -a 256 -c "phux-${tag}-${target}.tar.gz.sha256"
+tar -xzf "phux-${tag}-${target}.tar.gz"
+```
+
+Put the extracted `phux` and `phux-mcp` binaries somewhere on `PATH`. Avoid the
+seeded `v0.0.1` Linux tarball outside Nix environments; it was built with a
+Nix-store dynamic loader and is not portable.
 
 ## From source
 
@@ -28,18 +80,17 @@ cargo run --bin phux # auto-spawns a server and attaches
 `phux` with no arguments auto-spawns a server and attaches to it. Detach with
 `Ctrl-A d`; run `phux` again to re-attach.
 
-## Homebrew
+## crates.io
 
-Not live yet. The tap is [`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux)
-and the release workflow regenerates `Formula/phux.rb` on each `v*` tag; the
-first release with bottles is tracked in [`RELEASING.md`](./RELEASING.md). Once
-it ships, the install is:
+crates.io is for the wire library, not for installing the `phux` binary:
 
 ```sh
-brew install phall1/phux/phux
+cargo add phux-protocol
 ```
 
-Until then, build from source.
+`cargo install phux` is not supported yet. The binary crate and internal
+workspace crates are `publish = false`, and the binary depends on a git-pinned
+`libghostty-vt` that crates.io will not accept.
 
 ## Drive it from an agent
 
@@ -57,8 +108,8 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 
 | Platform | Status |
 |---|---|
-| macOS (Apple Silicon) | Source: yes. Bottle: not yet. |
-| macOS (x86_64) | Source: yes. Bottle: not yet. |
-| Linux x86_64 | Source: yes. Bottle: not yet. |
-| Linux aarch64 | Source: yes. Bottle: not yet. |
+| macOS (Apple Silicon) | Source: yes. Homebrew Formula/artifact pending. |
+| macOS (x86_64) | Source: yes. Homebrew Formula/artifact pending. |
+| Linux x86_64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
+| Linux aarch64 | Source: yes. Release artifact pending. |
 | Windows | No. Not on the near roadmap. |

@@ -4,12 +4,10 @@
 # Trigger: push a tag matching `v*` (e.g. `v0.1.0`), or run manually via
 # workflow_dispatch with a `tag` input.
 #
-# Like ci.yml, every cargo invocation runs inside `nix develop -c` so the
-# build uses the exact toolchain from rust-toolchain.toml + flake.nix —
-# crucially zig_0_15, which libghostty-vt's build.rs needs to compile its
-# static lib. That is also why `phux` ships as a prebuilt binary here rather
-# than via `cargo install` from crates.io: the binary crate is publish=false
-# and carries a git dependency that crates.io would reject.
+# macOS builds run inside `nix develop -c` so they get the exact toolchain
+# from rust-toolchain.toml + flake.nix. Linux builds intentionally use rustup
+# plus setup-zig instead: Nix-built Linux binaries record a `/nix/store`
+# dynamic loader and are not portable to ordinary hosts.
 #
 # CPU baseline caveat: libghostty-vt's build.rs lets zig auto-detect the host
 # CPU for native builds, so x86_64 release artifacts may carry instructions
@@ -43,43 +41,90 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
+            build_env: nix
           # `macos-15-intel` is the last hosted x86_64 macOS image (GitHub
           # retired `macos-13` on 2025-12-04 and drops Intel entirely in Fall
           # 2027). Same best-effort CPU-baseline caveat as the header.
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: ubuntu-latest
+            build_env: nix
+          # Build Linux on the oldest supported Ubuntu runner instead of
+          # `ubuntu-latest` to keep the glibc baseline as low as GitHub's
+          # hosted fleet currently allows.
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            build_env: system
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
         run: |
-          ref="${{ inputs.tag || github.ref_name }}"
-          echo "tag=${ref}" >> "$GITHUB_OUTPUT"
-          echo "version=${ref#v}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          ref="${RELEASE_REF}"
+          case "$ref" in
+            refs/tags/*) tag="${ref#refs/tags/}" ;;
+            *) tag="$ref" ;;
+          esac
+          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::invalid release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build release binaries
+      - name: Check out release tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git checkout --detach "refs/tags/${TAG}"
+
+      - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
+        if: matrix.build_env == 'nix'
+      - uses: DeterminateSystems/magic-nix-cache-action@76aaf8814cdb385b86597c32b8c51b66b69b0839
+        if: matrix.build_env == 'nix'
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        if: matrix.build_env == 'system'
+        with:
+          version: 0.15.2
+
+      - name: Install Rust toolchain
+        if: matrix.build_env == 'system'
+        run: rustup toolchain install 1.90.0 --profile default
+
+      - name: Install Linux build dependencies
+        if: matrix.build_env == 'system'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential mold
+
+      - name: Build release binaries (Nix)
+        if: matrix.build_env == 'nix'
         run: nix develop -c cargo build --release --bin phux --bin phux-mcp
+
+      - name: Build release binaries (system)
+        if: matrix.build_env == 'system'
+        run: cargo +1.90.0 build --release --bin phux --bin phux-mcp
 
       - name: Package tarball
         id: package
         shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          tag="${{ steps.version.outputs.tag }}"
-          target="${{ matrix.target }}"
+          tag="${TAG}"
+          target="${TARGET}"
           stage="phux-${tag}-${target}"
-          mkdir "${stage}"
-          cp target/release/phux target/release/phux-mcp "${stage}/"
-          cp README.md LICENSE-MIT LICENSE-APACHE "${stage}/"
+          mkdir -p "${stage}"
+          cp -f target/release/phux target/release/phux-mcp "${stage}/"
+          cp -f README.md LICENSE-MIT LICENSE-APACHE "${stage}/"
           tar -czf "${stage}.tar.gz" "${stage}"
           # Portable sha256 (shasum on macOS, sha256sum on Linux).
           if command -v sha256sum >/dev/null; then
@@ -90,7 +135,7 @@ jobs:
           echo "${sha}  ${stage}.tar.gz" > "${stage}.tar.gz.sha256"
           echo "artifact=${stage}.tar.gz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ matrix.target }}
           path: |
@@ -110,15 +155,29 @@ jobs:
     steps:
       - name: Resolve version
         id: version
-        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+        shell: bash
+        env:
+          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          ref="${RELEASE_REF}"
+          case "$ref" in
+            refs/tags/*) tag="${ref#refs/tags/}" ;;
+            *) tag="$ref" ;;
+          esac
+          if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::invalid release tag: ${tag}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           path: dist
           merge-multiple: true
 
       - name: Create / update GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: phux ${{ steps.version.outputs.tag }}
@@ -133,6 +192,7 @@ jobs:
   homebrew:
     name: update homebrew tap
     needs: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     # Pushes Formula/phux.rb to phall1/homebrew-phux via an SSH deploy key
     # (HOMEBREW_TAP_DEPLOY_KEY: a private key whose public half is a
@@ -141,8 +201,10 @@ jobs:
     steps:
       - name: Gate on deploy key
         id: gate
+        env:
+          HAS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
         run: |
-          if [ -n "${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}" ]; then
+          if [ "$HAS_DEPLOY_KEY" = "true" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
@@ -151,9 +213,9 @@ jobs:
 
       - name: Checkout phux (for the generator script)
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         if: steps.gate.outputs.enabled == 'true'
         with:
           path: dist
@@ -161,7 +223,7 @@ jobs:
 
       - name: Checkout tap
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           repository: phall1/homebrew-phux
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
@@ -170,11 +232,12 @@ jobs:
       - name: Regenerate + push formula
         if: steps.gate.outputs.enabled == 'true'
         shell: bash
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${{ needs.release.outputs.tag }}"
           mkdir -p tap/Formula
-          bash scripts/gen-formula.sh "$tag" dist tap/Formula/phux.rb
+          bash scripts/gen-formula.sh "$TAG" dist tap/Formula/phux.rb
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -182,6 +245,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Formula already up to date."
           else
-            git commit -m "phux ${tag}"
+            git commit -m "phux ${TAG}"
             git push
           fi

@@ -25,6 +25,7 @@
 use std::io::{self, Write};
 
 use phux_protocol::input::key::KeyEvent;
+use phux_protocol::input::mouse::MouseEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -84,6 +85,13 @@ pub trait RenderOverlay {
     /// the key.
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand;
 
+    /// React to a mouse event while this overlay is active. Most modal
+    /// overlays ignore pointer input; copy-mode consumes wheel events to
+    /// scroll the focused pane's client-local viewport.
+    fn handle_mouse(&mut self, _mouse: &MouseEvent) -> OverlayCommand {
+        OverlayCommand::Stay
+    }
+
     /// The painted region of this overlay inside `area`, or `None` if it
     /// paints the whole viewport.
     ///
@@ -134,6 +142,9 @@ pub enum OverlayCommand {
     ///
     /// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
     Copy(CopyRequest),
+    /// Keep the overlay active and scroll the focused pane's client-local
+    /// viewport by `delta` rows (negative means up into scrollback).
+    ScrollViewport(isize),
 }
 
 /// How the dispatcher should derive the selection from a [`CopyRequest`]
@@ -214,6 +225,9 @@ pub enum OverlayOutcome {
     RunAction(phux_config::keybind::ResolvedAction),
     /// Copy the resolved selection to the host clipboard (copy-mode).
     Copy(CopyRequest),
+    /// Scroll the focused pane's local terminal viewport while the overlay
+    /// remains active.
+    ScrollViewport(isize),
 }
 
 /// Stacked overlay state.
@@ -306,6 +320,32 @@ impl OverlayState {
                 self.dismiss();
                 OverlayOutcome::Copy(req)
             }
+            OverlayCommand::ScrollViewport(delta) => OverlayOutcome::ScrollViewport(delta),
+        }
+    }
+
+    /// Dispatch a mouse event to the top overlay. The overlay stays active;
+    /// scroll requests are handed back to the dispatcher for local terminal
+    /// viewport mutation.
+    pub fn handle_mouse(&mut self, mouse: &MouseEvent) -> OverlayOutcome {
+        let Some(top) = self.stack.last_mut() else {
+            return OverlayOutcome::None;
+        };
+        match top.handle_mouse(mouse) {
+            OverlayCommand::ScrollViewport(delta) => OverlayOutcome::ScrollViewport(delta),
+            OverlayCommand::Dismiss => {
+                self.dismiss();
+                OverlayOutcome::None
+            }
+            OverlayCommand::Commit(action) => {
+                self.dismiss();
+                OverlayOutcome::RunAction(action)
+            }
+            OverlayCommand::Copy(req) => {
+                self.dismiss();
+                OverlayOutcome::Copy(req)
+            }
+            OverlayCommand::Stay => OverlayOutcome::None,
         }
     }
 

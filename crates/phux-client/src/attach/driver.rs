@@ -394,7 +394,7 @@ fn paint_copy_mode_status<W: Write>(
     let cell_count =
         u32::from(sel.end_row - sel.start_row + 1) * u32::from(sel.end_col - sel.start_col + 1);
     let status =
-        format!(" copy-mode | {cell_count} cell(s) | arrows move | Enter copy | Esc cancel ");
+        format!(" copy-mode | {cell_count} cell(s) | arrows/PgUp/PgDn scroll | Enter copy | Esc ");
     write_cup(out, rows - 1, 0)?;
     // Selection strip from the theme (`selection_bg`/`selection_fg`). `\x1b[K`
     // fills the rest of the row with the strip bg; then reset + hide the cursor.

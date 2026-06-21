@@ -8,12 +8,11 @@ last-reviewed: 2026-05-30
 
 **TL;DR.** Two independent distribution channels. The `phux` binary
 ships as prebuilt tarballs via a `v*` tag → GitHub release → Homebrew
-tap (`phall1/homebrew-phux`). The `phux-protocol` library — the only
-`publish = true` crate — ships separately to crates.io via a
-manual-dispatch workflow. The binary is *not* on crates.io: it is
-`publish = false` and carries a git dependency on `libghostty-vt` that
-crates.io rejects, and it needs zig to build, so users get a prebuilt
-artifact instead.
+tap (`phall1/homebrew-phux`), with `v0.0.1` seeded as a Linux x86_64
+artifact. The `phux-protocol` library ships separately to crates.io by
+manual dispatch. `cargo install phux` is unsupported because the
+binary/internal crates are not publishable and `libghostty-vt` is
+git-pinned.
 
 ## What ships where
 
@@ -22,8 +21,11 @@ artifact instead.
 | `phux`, `phux-mcp` binaries | Homebrew + GitHub release | [`release.yml`](../.github/workflows/release.yml) on a `v*` tag |
 | `phux-protocol` crate | crates.io | [`publish-crate.yml`](../.github/workflows/publish-crate.yml), manual dispatch |
 
-Every other crate (`phux-core`, `phux-server`, `phux-client`,
-`phux-config`, `phux-mcp`) is `publish = false`: internal-only.
+Every other crate (`phux`, `phux-core`, `phux-server`, `phux-client`,
+`phux-config`, `phux-mcp`) is `publish = false`: binary or internal-only.
+The binary also carries the workspace's git-pinned `libghostty-vt`, which
+crates.io rejects, so the installable CLI ships through release artifacts
+and Homebrew instead of `cargo install phux`.
 
 ## Versioning
 
@@ -50,17 +52,21 @@ git push origin v0.1.0
 
 `release.yml` then builds `phux` + `phux-mcp` for
 `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu` (each inside `nix develop` for zig), packages
+`x86_64-unknown-linux-gnu`, packages
 `phux-<tag>-<target>.tar.gz` + `.sha256`, creates the GitHub release, and
-— if the `HOMEBREW_TAP_TOKEN` secret is set — regenerates and pushes
-`Formula/phux.rb` to the tap.
+— if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
+`Formula/phux.rb` to the tap. macOS builds run inside `nix develop`; Linux
+builds use rustup plus setup-zig on Ubuntu so the ELF does not record a
+`/nix/store` dynamic loader. `v0.0.1` was seeded with a Linux x86_64 tarball
+plus checksum, but that first artifact is Nix-linked and not portable; do not
+point installers or the tap at it.
 
-Seed the first release (or a host-only release) locally without CI:
+Seed a host-only release locally without CI:
 
 ```sh
 nix develop -c cargo build --release --bin phux --bin phux-mcp
-just dist v0.1.0                       # -> dist/phux-v0.1.0-<host>.tar.gz (+ .sha256)
-gh release create v0.1.0 dist/*        # attach the tarball + checksum
+just dist v0.0.2                       # -> dist/phux-v0.0.2-<host>.tar.gz (+ .sha256)
+gh release create v0.0.2 dist/*        # attach the tarball + checksum
 ```
 
 ### Required secret
@@ -72,6 +78,24 @@ is skipped (a warning annotation is emitted). The formula itself is
 produced by [`scripts/gen-formula.sh`](../scripts/gen-formula.sh), which
 emits a block only for the targets that actually built — so a
 partial-matrix release still yields an installable formula.
+
+### Curl installer contract
+
+The curl installer is a convenience layer over GitHub release artifacts. The
+unversioned command is user-facing only after a post-`v0.0.1` release is the
+latest GitHub release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
+```
+
+Keep it aligned with the release layout above. It should download the target
+tarball and `.sha256` sidecar from the selected release, verify the checksum
+before unpacking, and install `phux` + `phux-mcp` into
+`${PHUX_INSTALL_DIR:-$HOME/.local/bin}`. With no `--version`, it resolves the
+latest GitHub release. Keep the explicit `v0.0.1` Linux refusal until a newer
+portable Linux release is published, and keep install docs version-pinned or
+source-first until latest no longer resolves to `v0.0.1`.
 
 ### CPU baseline caveat
 
@@ -99,6 +123,12 @@ The `server` feature's optional `libghostty-vt` resolves to the
 crates.io release (`>= 0.1.1`) for external consumers; verify that
 release is API-compatible with the git rev pinned in `Cargo.toml`
 before relying on the `server` feature downstream.
+
+Do not publish the binary crate or internal workspace crates as part of
+this workflow. For users, the idiomatic crates.io command is
+`cargo add phux-protocol`; `cargo install phux` remains unsupported until
+the binary crate is intentionally made publishable and its git-pinned
+terminal dependency is removed or replaced.
 
 ## Installing from the tap
 

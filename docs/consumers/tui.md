@@ -690,7 +690,9 @@ the pointer over a divider whenever the inner program has no mouse mode.
 | Drag a divider           | Resize the boundary (tracks pointer)  |
 | Release                  | Commit the new layout (broadcast L3)  |
 | Scroll wheel in pane     | Forwarded to the pane (inner program  |
-|                          | sees it if it enabled mouse mode)     |
+|                          | sees it if it enabled mouse mode); in |
+|                          | copy-mode it scrolls the focused      |
+|                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar slot | Slot-defined; default no-op           |
 
@@ -712,7 +714,7 @@ entirely and reverts to pass-through-only (the client only sees mouse
 when an inner program enables it). The per-pane `set-pane mouse off`
 remains follow-up work (needs a `set-pane` verb + per-pane client state).
 
-We do not ship copy-mode mouse selection — see §11.
+We do not ship copy-mode mouse drag selection — see §11.
 
 ---
 
@@ -904,10 +906,12 @@ on these:
 - **No embedded scripting language.** No tmux-style `if-shell`, no
   format-template DSL with conditionals. Templates are interpolation
   only.
-- **No copy-mode reimplementation.** No vi/emacs cursor mode, no
-  search, no in-grid selection. We expose grid state and stay out of
-  the OS clipboard's way. Modern terminals (Ghostty, kitty, wezterm,
-  iTerm2) handle selection well; we delegate.
+- **No tmux-style copy-mode reimplementation.** No second parser for
+  selection boundaries, no mouse drag selection, and no custom clipboard
+  format path. The client may expose a focused-pane copy-mode projection
+  for cursor movement, viewport scrolling, highlighting, and literal
+  search over mirrored scrollback, then delegate extraction/formatting to
+  libghostty and native clipboard behavior.
 - **No multi-row status bar, no widgets, no themes-as-config.** The
   status bar is one row. Themes are color slots, not a styling engine.
 - **No plugin system on day one.** Hooks are typed events. Extensions

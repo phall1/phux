@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use libghostty_vt::terminal::ScrollViewport;
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -237,6 +238,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                             super::copy::copy_to_host_clipboard(out, &slot.terminal, req)?;
                         }
                     }
+                    OverlayOutcome::ScrollViewport(delta) => {
+                        if scroll_focused_pane_viewport(panes, focused_pane.as_ref(), delta) {
+                            layout_changed = true;
+                        }
+                    }
                     OverlayOutcome::None => {
                         // Overlay consumed the key but nothing else to do.
                     }
@@ -247,6 +253,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 if was_active && !ctx.overlays.is_active() {
                     layout_changed = true;
                 }
+            } else if let InputEvent::Mouse(ref mouse) = ev
+                && let OverlayOutcome::ScrollViewport(delta) = ctx.overlays.handle_mouse(mouse)
+                && scroll_focused_pane_viewport(panes, focused_pane.as_ref(), delta)
+            {
+                layout_changed = true;
             }
             continue;
         }
@@ -485,6 +496,61 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     // the status-bar painter and session name needed for a proper full
     // frame. We never paint from here.
     Ok(layout_changed)
+}
+
+fn scroll_focused_pane_viewport(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    delta: isize,
+) -> bool {
+    if delta == 0 {
+        return false;
+    }
+    let Some(fid) = focused_pane else {
+        return false;
+    };
+    let Some(slot) = panes.get_mut(fid) else {
+        return false;
+    };
+    slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+    true
+}
+
+fn focused_pane_rect(
+    ctx: &DispatchCtx<'_>,
+    focused_pane: Option<&TerminalId>,
+) -> crate::layout::Rect {
+    focused_pane_rect_for(
+        ctx.workspace,
+        ctx.zoomed.as_ref(),
+        focused_pane,
+        ctx.viewport,
+        ctx.has_bar,
+        ctx.sidebar,
+    )
+}
+
+fn focused_pane_rect_for(
+    workspace: &Workspace,
+    zoomed: Option<&TerminalId>,
+    focused_pane: Option<&TerminalId>,
+    viewport: (u16, u16),
+    has_bar: bool,
+    sidebar: Option<SidebarReservation>,
+) -> crate::layout::Rect {
+    let content = content_rect(viewport, has_bar, sidebar);
+    let Some(fid) = focused_pane else {
+        return content;
+    };
+    workspace
+        .render_window(zoomed)
+        .and_then(|layout| {
+            crate::multi_pane::compute_layout_in(&layout, content, viewport)
+                .rects
+                .get(fid)
+                .copied()
+        })
+        .unwrap_or(content)
 }
 
 /// Apply one drag step: re-tune the grabbed split so its divider tracks
@@ -1204,10 +1270,12 @@ fn run_action(
             // adjust selection, Enter copies to clipboard via SELECTION_FORMAT_REQUEST.
             // Cursor starts at current pane position (0,0 default for now).
             // TODO(phall1): wire current cursor position from focused pane.
-            let pane_cols = ctx.viewport.0;
-            let pane_rows = ctx.viewport.1.saturating_sub(1); // Leave room for status bar
+            let pane_rect = focused_pane_rect(ctx, focused);
             let overlay = Box::new(crate::render::overlay::CopyModeOverlay::new(
-                0, 0, pane_cols, pane_rows,
+                0,
+                0,
+                pane_rect.w,
+                pane_rect.h,
             ));
             ctx.overlays.push(overlay);
         }
@@ -1763,6 +1831,68 @@ mod tests {
             toml::Value::String("diagonal".into()),
         );
         assert_eq!(split_dir_arg(&bogus), None);
+    }
+
+    #[test]
+    fn focused_pane_rect_tracks_rendered_pane_bounds() {
+        use crate::layout::{LayoutNode, LayoutState, Rect, WindowState, split_at};
+
+        let tree = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        let workspace = Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(2)),
+                },
+            }],
+            active: 0,
+        };
+
+        let split_rect =
+            focused_pane_rect_for(&workspace, None, Some(&tid(2)), (80, 24), true, None);
+        assert_eq!(split_rect.y, 0);
+        assert_eq!(split_rect.h, 23, "status bar row is not copy-mode content");
+        assert_eq!(split_rect.x + split_rect.w, 80);
+        assert!(
+            split_rect.w < 80,
+            "split pane must not inherit the outer viewport width"
+        );
+        assert_ne!(
+            split_rect,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 23
+            }
+        );
+
+        let zoomed = tid(2);
+        let zoomed_rect = focused_pane_rect_for(
+            &workspace,
+            Some(&zoomed),
+            Some(&tid(2)),
+            (80, 24),
+            true,
+            None,
+        );
+        assert_eq!(
+            zoomed_rect,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 80,
+                h: 23
+            }
+        );
     }
 
     /// Build a [`ResolvedAction`] with no args.
@@ -2668,5 +2798,106 @@ mod tests {
         assert_eq!(received[0].key, PhysicalKey::A);
         assert!(received[0].mods.contains(ModSet::CTRL));
         assert_eq!(received[1].key, PhysicalKey::X);
+    }
+
+    #[tokio::test]
+    async fn copy_mode_page_scroll_mutates_focused_terminal_viewport() {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
+        fn visible_prefix(
+            panes: &mut HashMap<TerminalId, PaneSlot>,
+            id: &TerminalId,
+            row: u16,
+        ) -> String {
+            let slot = panes.get_mut(id).expect("pane");
+            (0..6)
+                .filter_map(|col| {
+                    slot.renderer
+                        .read_grapheme_string_at(&slot.terminal, row, col)
+                        .expect("read cell")
+                })
+                .collect()
+        }
+
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict = PredictionState::new(crate::predict::PredictiveConfig::disabled(), 8, 4);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(8, 4).expect("pane slot");
+        for n in 0..10 {
+            slot.terminal.vt_write(format!("line{n:02}\r\n").as_bytes());
+        }
+        panes.insert(tid(1), slot);
+
+        let before = visible_prefix(&mut panes, &tid(1), 0);
+
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(crate::render::overlay::CopyModeOverlay::new(
+            0, 0, 8, 4,
+        )));
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (8, 4),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
+            drag: &mut drag,
+        };
+        let page_up = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::PageUp,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: None,
+            unshifted_codepoint: None,
+        };
+
+        let changed = dispatch_input_events(
+            &mut out,
+            &mut conn,
+            vec![InputEvent::Key(page_up)],
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+
+        let after = visible_prefix(&mut panes, &tid(1), 0);
+        assert!(changed, "scrolling copy-mode should trigger a repaint");
+        assert_ne!(
+            before, after,
+            "dispatch should apply copy-mode scroll to the focused pane viewport"
+        );
     }
 }

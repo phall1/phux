@@ -150,6 +150,6 @@ the headlines:
 
 - No embedded scripting language.
 - No plugin host.
-- No copy-mode reinvention.
+- No tmux-style copy-mode clone.
 - No homegrown crypto.
 - No format-template DSL.
