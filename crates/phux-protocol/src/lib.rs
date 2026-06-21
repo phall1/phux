@@ -14,9 +14,8 @@
 //!   `libghostty-vt` input atoms (per [ADR-0008]). Every in-workspace
 //!   consumer enables this feature. Without `server` this crate is a
 //!   near-empty shell exposing only [`ids`], [`caps`], and [`Version`];
-//!   that subset exists so the crate can be published to crates.io
-//!   (where git-only deps like `libghostty-vt` are disallowed) and
-//!   rendered on docs.rs.
+//!   that subset is the minimal surface external consumers can depend on
+//!   without pulling in the full terminal-emulator type surface.
 //!
 //! [`docs/spec/`]: https://github.com/phall1/phux/tree/main/docs/spec
 //! [ADR-0008]: https://github.com/phall1/phux/blob/main/ADR/0008-use-libghostty-types-directly.md

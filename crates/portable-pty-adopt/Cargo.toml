@@ -7,7 +7,7 @@
 # published to crates.io. Keep it dependency-clean so the move is a copy.
 [package]
 name = "portable-pty-adopt"
-version = "0.0.2"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

@@ -38,14 +38,14 @@ missing_errors_doc = "allow"
 
 [workspace.dependencies]
 # Internal.
-phux-protocol = { path = "crates/phux-protocol", version = "0.0.2" }
-phux-core = { path = "crates/phux-core", version = "0.0.2" }
-phux-server = { path = "crates/phux-server", version = "0.0.2" }
-phux-client = { path = "crates/phux-client", version = "0.0.2" }
-phux-client-core = { path = "crates/phux-client-core", version = "0.0.2" }
-phux-config = { path = "crates/phux-config", version = "0.0.2" }
-phux-mcp = { path = "crates/phux-mcp", version = "0.0.2" }
-portable-pty-adopt = { path = "crates/portable-pty-adopt", version = "0.0.2" }
+phux-protocol = { path = "crates/phux-protocol" }
+phux-core = { path = "crates/phux-core" }
+phux-server = { path = "crates/phux-server" }
+phux-client = { path = "crates/phux-client" }
+phux-client-core = { path = "crates/phux-client-core" }
+phux-config = { path = "crates/phux-config" }
+phux-mcp = { path = "crates/phux-mcp" }
+portable-pty-adopt = { path = "crates/portable-pty-adopt" }
 
 # External.
 thiserror = "2"
@@ -108,7 +108,7 @@ toml = "1"
 # libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
-libghostty-vt = { git = "https://github.com/phall1/libghostty-rs.git", rev = "6d49dfdeeb4915237615e0cd6e03046b6f96dfa3", version = "0.1", default-features = false }
+libghostty-vt = { version = "0.2", default-features = false }
 # PNG decoder used by the Kitty graphics replay bridge (ADR-0034). This
 # matches libghostty-vt's optional PNG dependency and is enabled only for
 # in-workspace/server-feature consumers that need to ingest `f=100` APC images.

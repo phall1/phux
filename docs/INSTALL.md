@@ -6,7 +6,7 @@ last-reviewed: 2026-06-09
 
 # Install
 
-**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their `.sha256` sidecars. crates.io is for `phux-protocol`; `cargo install phux` is unsupported while the binary/internal crates are unpublished and `libghostty-vt` is git-pinned.
+**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their `.sha256` sidecars. crates.io is for `phux-protocol`; `cargo install phux` is unsupported while the binary/internal crates are unpublished.
 
 ---
 
@@ -89,8 +89,8 @@ cargo add phux-protocol
 ```
 
 `cargo install phux` is not supported yet. The binary crate and internal
-workspace crates are `publish = false`, and the binary depends on a git-pinned
-`libghostty-vt` that crates.io will not accept.
+workspace crates are `publish = false`; install the CLI through Homebrew,
+the curl installer, release tarballs, or a source build.
 
 ## Drive it from an agent
 
