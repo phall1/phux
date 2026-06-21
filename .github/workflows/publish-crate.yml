@@ -1,11 +1,10 @@
 # Publish phux-protocol to crates.io.
 #
 # Only phux-protocol is publishable: every other workspace crate is
-# publish=false (the binary carries a git dependency on libghostty-vt that
-# crates.io rejects, and the rest are internal). phux-protocol's default
-# feature set is a near-empty shell with no git deps, so it packages cleanly
-# (ADR-0011); its `server` feature's optional libghostty-vt resolves to the
-# crates.io release (>=0.1.1) for external consumers.
+# publish=false (binary or internal-only). phux-protocol's default feature set
+# is a near-empty shell, so it packages cleanly (ADR-0011); its `server`
+# feature's optional libghostty-vt resolves to the crates.io release (>=0.2.0)
+# for external consumers.
 #
 # Manual-only: publishing is irreversible (versions cannot be reused, names
 # cannot be reclaimed), so this never fires on push. Requires the

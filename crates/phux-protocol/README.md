@@ -33,12 +33,12 @@ an L3 metadata layer
 ## Features
 
 This crate publishes to crates.io as a near-empty shell by default and grows
-its full surface behind a feature flag, because the full surface depends on a
-git-pinned `libghostty-vt` that crates.io won't take:
+its full surface behind a feature flag. The full surface depends on
+`libghostty-vt`, resolved through the workspace dependency in this repository
+and through crates.io for published consumers:
 
 - **default** — stable IDs (`ids`), capability atoms (`caps`), and the
-  protocol-version constant. No git-only dependencies; this is what crates.io
-  and docs.rs see.
+  protocol-version constant.
 - **`server`** — the full type surface: the `input` and `wire` modules and
   the libghostty input-atom re-exports. Every in-workspace consumer enables
   it; an external consumer that vendors libghostty will too.

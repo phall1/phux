@@ -48,7 +48,7 @@ Three crate boundaries carry weight:
    gated by the `server` cargo feature). The protocol crate re-exports
    libghostty's input and style atoms instead of mirroring them. The
    default-features-off shell exists so `crates.io`/`docs.rs` see a
-   git-dep-free surface (libghostty-vt is a git-only dep today).
+   small surface without the full terminal-emulator dependency graph.
 3. **`phux-client` is split from `phux-client-core` so the ratatui
    boundary is compiler-enforced** (ADR-0020, phux-0fv). The split and
    the two-renderer rationale are owned by
@@ -96,8 +96,8 @@ and never builds the native binary.
 
 This is the one place `phux-protocol`'s default-features-off shell pays off: the
 web client compiles the codec to wasm without the `server` feature's
-libghostty-vt git dep. Full architecture + build steps: [the web client
-consumer doc](../consumers/web.md).
+libghostty-vt dependency graph. Full architecture + build steps: [the web
+client consumer doc](../consumers/web.md).
 
 ## Protocol layering and this implementation
 

@@ -11,8 +11,7 @@ ships as prebuilt tarballs via a `v*` tag → GitHub release → Homebrew
 tap (`phall1/homebrew-phux`), with `v0.0.1` seeded as a Linux x86_64
 artifact. The `phux-protocol` library ships separately to crates.io by
 manual dispatch. `cargo install phux` is unsupported because the
-binary/internal crates are not publishable and `libghostty-vt` is
-git-pinned.
+binary/internal crates are not publishable.
 
 ## What ships where
 
@@ -23,29 +22,30 @@ git-pinned.
 
 Every other crate (`phux`, `phux-core`, `phux-server`, `phux-client`,
 `phux-config`, `phux-mcp`) is `publish = false`: binary or internal-only.
-The binary also carries the workspace's git-pinned `libghostty-vt`, which
-crates.io rejects, so the installable CLI ships through release artifacts
-and Homebrew instead of `cargo install phux`.
+The installable CLI ships through release artifacts and Homebrew instead of
+`cargo install phux`.
 
 ## Versioning
 
 The workspace shares one `version` in the root `Cargo.toml`
-(`[workspace.package]`), and the internal `[workspace.dependencies]`
-pins must match it — bump both or the workspace fails to resolve.
-`phux-protocol` overrides with its own version line because it cuts
-crates.io releases on its own cadence.
+(`[workspace.package]`). All in-repo crates inherit it with
+`version.workspace = true`, and internal workspace dependencies use path-only
+requirements so release bumps do not require duplicate manifest edits.
+`phux-protocol` still ships to crates.io by manual dispatch, but its package
+version is the same root workspace version for the checkout being published.
 
 To bump the binary release version:
 
 1. Edit `[workspace.package].version` in the root `Cargo.toml`.
-2. Edit the five internal `phux-* = { ..., version = "X.Y.Z" }`
-   requirements in `[workspace.dependencies]` to match (leave
-   `phux-protocol` at its own version).
-3. `nix develop -c cargo build` to refresh `Cargo.lock`, commit.
+2. `cargo check --workspace` to refresh `Cargo.lock`.
+3. `just release-check vX.Y.Z` to verify the tag and resolved package versions
+   agree.
+4. Commit the bump.
 
 ## Cutting a binary release
 
 ```sh
+just release-check v0.1.0
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -57,9 +57,11 @@ git push origin v0.1.0
 — if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
 `Formula/phux.rb` to the tap. macOS builds run inside `nix develop`; Linux
 builds use rustup plus setup-zig on Ubuntu so the ELF does not record a
-`/nix/store` dynamic loader. `v0.0.1` was seeded with a Linux x86_64 tarball
-plus checksum, but that first artifact is Nix-linked and not portable; do not
-point installers or the tap at it.
+`/nix/store` dynamic loader. The workflow runs `just release-check <tag>` before
+building, so a pushed tag that does not match Cargo's resolved package versions
+fails before any artifact or tap update is published. `v0.0.1` was seeded with a
+Linux x86_64 tarball plus checksum, but that first artifact is Nix-linked and
+not portable; do not point installers or the tap at it.
 
 Seed a host-only release locally without CI:
 
@@ -120,15 +122,15 @@ cannot be reclaimed — so this is never automatic.
    with `dry_run: false`.
 
 The `server` feature's optional `libghostty-vt` resolves to the
-crates.io release (`>= 0.1.1`) for external consumers; verify that
-release is API-compatible with the git rev pinned in `Cargo.toml`
-before relying on the `server` feature downstream.
+crates.io release (`>= 0.2.0`) for external consumers; verify that
+release is API-compatible with the workspace dependency before relying on
+the `server` feature downstream.
 
 Do not publish the binary crate or internal workspace crates as part of
 this workflow. For users, the idiomatic crates.io command is
 `cargo add phux-protocol`; `cargo install phux` remains unsupported until
-the binary crate is intentionally made publishable and its git-pinned
-terminal dependency is removed or replaced.
+the binary crate and its internal dependencies are intentionally made
+publishable.
 
 ## Installing from the tap
 

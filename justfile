@@ -163,6 +163,11 @@ toolchain:
 dist TAG:
     bash scripts/dist.sh {{TAG}}
 
+# Check that a release tag matches the resolved Cargo package versions before
+# cutting/pushing the tag.
+release-check TAG:
+    bash scripts/check-release-version.sh {{TAG}}
+
 # Dry-run the crates.io publish of phux-protocol (package + verify, no
 # upload). The only publishable crate. Mirrors the publish-crate workflow.
 publish-protocol-dry:

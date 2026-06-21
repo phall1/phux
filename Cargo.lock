@@ -1354,8 +1354,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libghostty-vt"
-version = "0.1.1"
-source = "git+https://github.com/phall1/libghostty-rs.git?rev=6d49dfdeeb4915237615e0cd6e03046b6f96dfa3#6d49dfdeeb4915237615e0cd6e03046b6f96dfa3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04c77176dd05b2b5718046d807e786473f463ea6d478d56f8c0105e2fe6f71f5"
 dependencies = [
  "bitflags 2.13.0",
  "int-enum",
@@ -1365,8 +1366,9 @@ dependencies = [
 
 [[package]]
 name = "libghostty-vt-sys"
-version = "0.1.1"
-source = "git+https://github.com/phall1/libghostty-rs.git?rev=6d49dfdeeb4915237615e0cd6e03046b6f96dfa3#6d49dfdeeb4915237615e0cd6e03046b6f96dfa3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "404671567c0ac43389a69ae424eefc89390a25d3a5386a54249cdaf13e01b411"
 
 [[package]]
 name = "libm"
@@ -1802,7 +1804,7 @@ dependencies = [
 
 [[package]]
 name = "phux"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "clap",
  "dhat",
@@ -1824,7 +1826,7 @@ dependencies = [
 
 [[package]]
 name = "phux-client"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "hex",
@@ -1853,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "phux-client-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "ciborium",
  "insta",
@@ -1867,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "phux-config"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "chrono",
  "insta",
@@ -1883,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "phux-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "proptest",
  "serde",
@@ -1894,7 +1896,7 @@ dependencies = [
 
 [[package]]
 name = "phux-mcp"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "phux-client",
  "phux-core",
@@ -1906,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "phux-protocol"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bitflags 2.13.0",
  "bytes",
@@ -1923,7 +1925,7 @@ dependencies = [
 
 [[package]]
 name = "phux-server"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "bytes",
  "chrono",
@@ -2029,7 +2031,7 @@ dependencies = [
 
 [[package]]
 name = "portable-pty-adopt"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "libc",

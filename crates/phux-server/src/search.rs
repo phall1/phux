@@ -506,12 +506,10 @@ mod tests {
         // builds a selection pointer.
         let mut whole = Formatter::new(
             &t,
-            FormatterOptions {
-                format: Format::Plain,
-                trim: true,
-                unwrap: true,
-                selection: None,
-            },
+            FormatterOptions::new()
+                .with_format(Format::Plain)
+                .with_trim(true)
+                .with_unwrap(true),
         )
         .expect("whole-screen formatter constructs");
         let bytes = whole.format_alloc(None).expect("whole-screen format");
