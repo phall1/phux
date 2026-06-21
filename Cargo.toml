@@ -109,6 +109,10 @@ toml = "1"
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
 libghostty-vt = { git = "https://github.com/phall1/libghostty-rs.git", rev = "6d49dfdeeb4915237615e0cd6e03046b6f96dfa3", version = "0.1", default-features = false }
+# PNG decoder used by the Kitty graphics replay bridge (ADR-0034). This
+# matches libghostty-vt's optional PNG dependency and is enabled only for
+# in-workspace/server-feature consumers that need to ingest `f=100` APC images.
+png = "0.18"
 # QUIC transport (phux-y8v6, ADR-0007). Shared by phux-server (the
 # `QuicListener`) and phux-client (the dialer) so both ends speak the same
 # stack at the same version. `rustls-ring` keeps us off quinn's default

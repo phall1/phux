@@ -93,12 +93,14 @@ impl PaneSlot {
     /// width-sensitive during `vt_write`, so a later resize cannot reliably
     /// recover from a placeholder geometry.
     pub(super) fn new_with_size(cols: u16, rows: u16) -> Result<Self, AttachError> {
+        let mut terminal = GhosttyTerminal::new(TerminalOptions {
+            cols: cols.max(1),
+            rows: rows.max(1),
+            max_scrollback: 10_000,
+        })?;
+        phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)?;
         Ok(Self {
-            terminal: GhosttyTerminal::new(TerminalOptions {
-                cols: cols.max(1),
-                rows: rows.max(1),
-                max_scrollback: 10_000,
-            })?,
+            terminal,
             renderer: TerminalRenderer::new()?,
             // Panes start running and un-leased; a late-arriving
             // TerminalControl (after the pane's first snapshot/output) updates
@@ -469,6 +471,7 @@ impl From<super::render::RenderError> for AttachError {
         match value {
             super::render::RenderError::Io(e) => Self::Io(e),
             super::render::RenderError::Ghostty(e) => Self::Ghostty(e),
+            super::render::RenderError::KittyReplay(e) => Self::Protocol(e.to_string()),
         }
     }
 }

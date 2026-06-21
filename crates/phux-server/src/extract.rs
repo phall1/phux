@@ -183,7 +183,7 @@ pub fn extract_match_in_scope(
 /// Re-stamp a [`ExtractError::ColumnOutOfRange`] from active-space inputs back
 /// onto the viewport match the caller passed, so the error names that match's
 /// region/row rather than the raw active-area coordinates.
-const fn restamp_viewport(e: ExtractError, row: usize) -> ExtractError {
+fn restamp_viewport(e: ExtractError, row: usize) -> ExtractError {
     match e {
         ExtractError::ColumnOutOfRange { col, .. } => ExtractError::ColumnOutOfRange {
             region: Region::Viewport,

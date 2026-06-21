@@ -32,7 +32,10 @@ use std::io::Write as _;
 use phux_core::screen::{
     CellColor, CellInfo, CellStyle, CursorState, SCHEMA_VERSION, ScreenState, SemanticContent,
 };
-use phux_protocol::sgr::{write_reset_and_sgr, write_reset_and_sgr_unresolved};
+use phux_protocol::{
+    kitty_replay,
+    sgr::{write_reset_and_sgr, write_reset_and_sgr_unresolved},
+};
 
 use libghostty_vt::{
     RenderState, Terminal as GhosttyTerminal,
@@ -71,6 +74,9 @@ pub enum SynthesisError {
     /// variant to satisfy the error-propagation contract).
     #[error("snapshot buffer write failed")]
     Buffer,
+    /// Kitty graphics replay failed while projecting libghostty image state.
+    #[error("kitty replay: {0}")]
+    KittyReplay(#[from] kitty_replay::KittyReplayError),
 }
 
 /// Pooled per-pane snapshot scaffolding.
@@ -222,6 +228,14 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         }
 
         emit_epilogue(&mut out, &snapshot, terminal)?;
+        let mut kitty_placements = libghostty_vt::kitty::graphics::PlacementIterator::new()?;
+        let _ = kitty_replay::emit_kitty_graphics_replay(
+            terminal,
+            &mut kitty_placements,
+            &mut out,
+            (0, 0),
+            (cols, rows_n),
+        )?;
 
         Ok(SnapshotBytes {
             cols,
@@ -1342,6 +1356,22 @@ mod tests {
         assert!(snap.bytes.starts_with(b"\x1b[!p\x1b[2J\x1b[H"));
         // No scrollback requested ⇒ no scrollback-priming bytes.
         assert!(snap.scrollback.is_empty());
+    }
+
+    #[test]
+    fn snapshot_replays_kitty_graphics_placements() {
+        let mut terminal = fresh(10, 5);
+        phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)
+            .expect("kitty config");
+        terminal.resize(10, 5, 8, 16).expect("cell geometry");
+        terminal.vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,i=9,q=2;AAECAw==\x1b\\");
+
+        let snap = synthesize(&terminal).expect("synth");
+        let replay = String::from_utf8_lossy(&snap.bytes);
+        assert!(
+            replay.contains("\x1b_Ga=T,f=32,s=1,v=1,i=9,q=2,c=1,r=1,m=0;AAECAw==\x1b\\"),
+            "snapshot must replay stored Kitty image placement, got {replay:?}"
+        );
     }
 
     /// phux-5pyx: behavioural lock for the resize → pooled-tick path.

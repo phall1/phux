@@ -642,6 +642,7 @@ impl TerminalActor {
             // supported targets.
             max_scrollback: max_scrollback as usize,
         })?;
+        phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)?;
         let size_report = Rc::new(Cell::new(SizeReportSize {
             rows,
             columns: cols,

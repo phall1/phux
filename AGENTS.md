@@ -3,8 +3,6 @@ audience: agents, contributors
 stability: stable
 last-reviewed: 2026-05-28
 ---
-<!-- bd-doctor-divergence: ok -->
-
 # Agent Instructions
 
 **TL;DR.** Universal agent substrate for this repo: non-interactive
@@ -12,6 +10,8 @@ shell hygiene (always pass `-f` / `-y` flags), the beads-tracker
 integration block (auto-maintained), and the session-close protocol.
 For project-specific guidance see [`CLAUDE.md`](./CLAUDE.md); for the
 doc system see [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md).
+<!-- bd-doctor-divergence: ok -->
+
 
 Tracker integration and command reference live in the auto-injected
 `<!-- BEGIN BEADS INTEGRATION -->` block below — it is the canonical

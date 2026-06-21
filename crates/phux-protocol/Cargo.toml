@@ -22,7 +22,7 @@ default = []
 # `server` activates the full type surface, including libghostty-vt input-
 # atom re-exports (ADR-0008) and the wire codec. Every in-workspace
 # consumer enables this; external consumers will too.
-server = ["dep:libghostty-vt"]
+server = ["dep:libghostty-vt", "dep:png", "libghostty-vt/kitty-graphics", "libghostty-vt/png"]
 
 [dependencies]
 thiserror.workspace = true
@@ -35,6 +35,7 @@ serde_json = { workspace = true }
 # wasm-safe; the same crate libghostty-vt uses for its key discriminants.
 int-enum = "1.2"
 libghostty-vt = { workspace = true, optional = true }
+png = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

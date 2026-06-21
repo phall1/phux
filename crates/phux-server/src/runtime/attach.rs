@@ -1005,12 +1005,13 @@ pub(crate) async fn handle_attach(
             warn!(?terminal_id, "pane actor failed to reply with snapshot");
             continue;
         };
+        let replay = downsample_for_caps(&bytes::Bytes::from(snap.bytes), client_caps).into();
         if out_tx
             .send(Outbound::Frame(FrameKind::TerminalSnapshot {
                 terminal_id: wire_terminal_id,
                 cols: snap.cols,
                 rows: snap.rows,
-                vt_replay_bytes: snap.bytes,
+                vt_replay_bytes: replay,
                 // phux-9q5f: when the ATTACH requested scrollback and the pane
                 // retains history, the actor primed these history-priming VT
                 // bytes; the client `vt_write`s them before the viewport

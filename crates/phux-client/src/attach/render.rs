@@ -30,7 +30,7 @@ use libghostty_vt::{
     style::{RgbColor, Style, StyleColor, Underline},
 };
 use phux_core::screen::{CellColor, CellStyle, CursorState, RenderedFrame};
-use phux_protocol::sgr::write_reset_and_sgr;
+use phux_protocol::{kitty_replay, sgr::write_reset_and_sgr};
 
 /// Errors the renderer can surface.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +41,9 @@ pub enum RenderError {
     /// stdout (or the test buffer) returned an I/O error.
     #[error("io: {0}")]
     Io(#[from] io::Error),
+    /// Kitty graphics replay failed while projecting libghostty image state.
+    #[error("kitty replay: {0}")]
+    KittyReplay(#[from] kitty_replay::KittyReplayError),
 }
 
 /// A copy-mode selection in pane-local viewport cells (inclusive), for the
@@ -89,6 +92,7 @@ pub struct TerminalRenderer<'alloc> {
     state: RenderState<'alloc>,
     rows: RowIterator<'alloc>,
     cells: CellIterator<'alloc>,
+    kitty_placements: libghostty_vt::kitty::graphics::PlacementIterator<'alloc>,
     /// Last-seen authoritative cursor position (outer-viewport coords:
     /// pane-local cursor plus [`Self::last_origin`]). Updated at the end of
     /// [`Self::render`]. The host-cursor restore paths read this. `None`
@@ -125,6 +129,7 @@ impl<'alloc> TerminalRenderer<'alloc> {
             state: RenderState::new()?,
             rows: RowIterator::new()?,
             cells: CellIterator::new()?,
+            kitty_placements: libghostty_vt::kitty::graphics::PlacementIterator::new()?,
             last_cursor: None,
             last_cursor_local: None,
             last_origin: (0, 0),
@@ -476,6 +481,17 @@ impl<'alloc> TerminalRenderer<'alloc> {
             snapshot.dirty()?
         };
 
+        let mut emitted_kitty = false;
+        if matches!(dirty, Dirty::Clean) {
+            emitted_kitty = kitty_replay::emit_kitty_graphics_replay(
+                terminal,
+                &mut self.kitty_placements,
+                out,
+                origin,
+                clip,
+            )?;
+        }
+
         match dirty {
             Dirty::Clean => {
                 // No row content changed, but the cursor may have MOVED — a
@@ -488,12 +504,14 @@ impl<'alloc> TerminalRenderer<'alloc> {
                 // preserving the zero-byte idle repaint.
                 let new_local = snapshot.cursor_viewport()?.map(|v| (v.y, v.x));
                 let new_abs = new_local.map(|(y, x)| (y.saturating_add(oy), x.saturating_add(ox)));
-                if new_abs != self.last_cursor {
+                if new_abs != self.last_cursor || emitted_kitty {
                     if let Some((abs_y, abs_x)) = new_abs {
                         write_cup(out, abs_y, abs_x)?;
                         if snapshot.cursor_visible()? {
                             out.write_all(b"\x1b[?25h")?;
                         }
+                        out.flush()?;
+                    } else if emitted_kitty {
                         out.flush()?;
                     }
                     self.last_cursor = new_abs;
@@ -577,6 +595,14 @@ impl<'alloc> TerminalRenderer<'alloc> {
             }
             row_index += 1;
         }
+
+        let _ = kitty_replay::emit_kitty_graphics_replay(
+            terminal,
+            &mut self.kitty_placements,
+            out,
+            origin,
+            clip,
+        )?;
 
         // Reset SGR before the final cursor placement so the visual
         // cursor isn't tainted by the last cell's attributes.

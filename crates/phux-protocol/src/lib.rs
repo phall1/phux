@@ -41,6 +41,9 @@ pub mod policy;
 #[cfg(feature = "server")]
 pub mod sgr;
 
+#[cfg(feature = "server")]
+pub mod kitty_replay;
+
 pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
     KeyboardProtocolSet, Layer, LayerSet,
