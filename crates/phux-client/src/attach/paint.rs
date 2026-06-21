@@ -35,9 +35,8 @@ pub(super) const FALLBACK_CELL_PX: (u32, u32) = (8, 16);
 /// grid unchanged).
 ///
 /// The both-axes-shrink overflow in libghostty's `PageList.resizeCols`
-/// (phux-y06) is fixed in the vendored ghostty (phall1/ghostty 6d89054f3,
-/// "fix: resize overflow"), so a both-shrink is a single safe `resize()`
-/// call — no axis decomposition needed.
+/// (phux-y06) is fixed by the `libghostty-vt` 0.2.0 engine, so a both-shrink
+/// is a single safe `resize()` call — no axis decomposition needed.
 pub(super) fn safe_resize(
     terminal: &mut GhosttyTerminal<'_, '_>,
     cols: u16,

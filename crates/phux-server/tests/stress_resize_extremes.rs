@@ -51,8 +51,7 @@ fn resize_degenerate_viewports_do_not_panic() {
                 // server must absorb every one without panicking the pane
                 // actor. `0x0` exercises the zero-dimension clamp path; the
                 // mixed 1-cell / huge sizes exercise the resize-clamp and
-                // the both-axes-shrink path (overflow-fixed in the vendored
-                // ghostty) at the boundary.
+                // the both-axes-shrink path at the boundary.
                 let storm: &[(u16, u16)] = &[
                     (0, 0),
                     (1, 1),
@@ -98,8 +97,7 @@ fn resize_degenerate_viewports_do_not_panic() {
 /// cols and rows from the previous, repeatedly crossing the 1-cell
 /// clamp boundary, while a colored burst floods the grid. This is the
 /// worst case for the `PageList.resizeCols` both-shrink overflow: the
-/// vendored ghostty fix (phall1/ghostty 6d89054f3) must hold at every
-/// step including the clamp to 1.
+/// libghostty-vt 0.2.0 engine must hold at every step including the clamp to 1.
 #[ignore = "real-PTY e2e; starves the parallel pool. Run via `just e2e`."]
 #[test]
 fn both_axes_shrink_storm_under_output_does_not_panic() {
