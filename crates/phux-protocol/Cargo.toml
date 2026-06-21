@@ -1,7 +1,7 @@
 [package]
 name = "phux-protocol"
 description = "Wire protocol for phux: frame format, message catalog, codec, diff types."
-version = "0.0.1"
+version = "0.0.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

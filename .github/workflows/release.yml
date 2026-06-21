@@ -85,6 +85,12 @@ jobs:
           git fetch --force --tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
           git checkout --detach "refs/tags/${TAG}"
 
+      - name: Check release version
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: bash scripts/check-release-version.sh "$TAG"
+
       - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
         if: matrix.build_env == 'nix'
       - uses: DeterminateSystems/magic-nix-cache-action@76aaf8814cdb385b86597c32b8c51b66b69b0839

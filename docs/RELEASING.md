@@ -38,14 +38,22 @@ crates.io releases on its own cadence.
 To bump the binary release version:
 
 1. Edit `[workspace.package].version` in the root `Cargo.toml`.
-2. Edit the five internal `phux-* = { ..., version = "X.Y.Z" }`
-   requirements in `[workspace.dependencies]` to match (leave
-   `phux-protocol` at its own version).
-3. `nix develop -c cargo build` to refresh `Cargo.lock`, commit.
+2. Edit every internal `phux-* = { ..., version = "X.Y.Z" }`
+   requirement in `[workspace.dependencies]` to match. `phux-protocol`
+   still publishes to crates.io on its own manual action, but the in-repo
+   package version must match the workspace pin when the binary release
+   depends on it.
+3. If any crate has an explicit package version outside
+   `version.workspace = true`, bump it too.
+4. `cargo check --workspace` to refresh `Cargo.lock`.
+5. `just release-check vX.Y.Z` to verify the tag and resolved package versions
+   agree.
+6. Commit the bump.
 
 ## Cutting a binary release
 
 ```sh
+just release-check v0.1.0
 git tag v0.1.0
 git push origin v0.1.0
 ```
@@ -57,9 +65,11 @@ git push origin v0.1.0
 — if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
 `Formula/phux.rb` to the tap. macOS builds run inside `nix develop`; Linux
 builds use rustup plus setup-zig on Ubuntu so the ELF does not record a
-`/nix/store` dynamic loader. `v0.0.1` was seeded with a Linux x86_64 tarball
-plus checksum, but that first artifact is Nix-linked and not portable; do not
-point installers or the tap at it.
+`/nix/store` dynamic loader. The workflow runs `just release-check <tag>` before
+building, so a pushed tag that does not match Cargo's resolved package versions
+fails before any artifact or tap update is published. `v0.0.1` was seeded with a
+Linux x86_64 tarball plus checksum, but that first artifact is Nix-linked and
+not portable; do not point installers or the tap at it.
 
 Seed a host-only release locally without CI:
 
