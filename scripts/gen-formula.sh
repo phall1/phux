@@ -26,8 +26,9 @@ sha() {
 arm_mac="$(sha aarch64-apple-darwin)"
 x86_mac="$(sha x86_64-apple-darwin)"
 x86_linux="$(sha x86_64-unknown-linux-gnu)"
+arm_linux="$(sha aarch64-unknown-linux-gnu)"
 
-if [ -z "${arm_mac}${x86_mac}${x86_linux}" ]; then
+if [ -z "${arm_mac}${x86_mac}${x86_linux}${arm_linux}" ]; then
   echo "error: no artifacts found in ${dist} for ${tag}" >&2
   exit 1
 fi
@@ -62,12 +63,20 @@ EOF
     echo ""
   fi
 
-  if [ -n "${x86_linux}" ]; then
+  if [ -n "${x86_linux}${arm_linux}" ]; then
     echo "  on_linux do"
-    echo "    on_intel do"
-    echo "      url \"${base}/phux-${tag}-x86_64-unknown-linux-gnu.tar.gz\""
-    echo "      sha256 \"${x86_linux}\""
-    echo "    end"
+    if [ -n "${x86_linux}" ]; then
+      echo "    on_intel do"
+      echo "      url \"${base}/phux-${tag}-x86_64-unknown-linux-gnu.tar.gz\""
+      echo "      sha256 \"${x86_linux}\""
+      echo "    end"
+    fi
+    if [ -n "${arm_linux}" ]; then
+      echo "    on_arm do"
+      echo "      url \"${base}/phux-${tag}-aarch64-unknown-linux-gnu.tar.gz\""
+      echo "      sha256 \"${arm_linux}\""
+      echo "    end"
+    fi
     echo "  end"
     echo ""
   fi

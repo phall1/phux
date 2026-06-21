@@ -109,7 +109,7 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 | Platform | Status |
 |---|---|
 | macOS (Apple Silicon) | Source: yes. Homebrew Formula/artifact pending. |
-| macOS (x86_64) | Source: yes. Homebrew Formula/artifact pending. |
+| macOS (x86_64) | Source: yes. No official release artifact. |
 | Linux x86_64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
-| Linux aarch64 | Source: yes. Release artifact pending. |
+| Linux aarch64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
 | Windows | No. Not on the near roadmap. |

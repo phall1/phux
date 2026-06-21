@@ -123,10 +123,13 @@ case "${os}/${arch}" in
     target="aarch64-apple-darwin"
     ;;
   darwin/x86_64|darwin/amd64)
-    target="x86_64-apple-darwin"
+    die "macOS x86_64 has no official release artifact; use a source build"
     ;;
   linux/x86_64|linux/amd64)
     target="x86_64-unknown-linux-gnu"
+    ;;
+  linux/arm64|linux/aarch64)
+    target="aarch64-unknown-linux-gnu"
     ;;
   *)
     die "unsupported OS/architecture combination: ${os}/${arch}"
