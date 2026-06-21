@@ -99,6 +99,12 @@ impl PaneSlot {
             max_scrollback: 10_000,
         })?;
         phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)?;
+        terminal.resize(
+            cols.max(1),
+            rows.max(1),
+            super::paint::FALLBACK_CELL_PX.0,
+            super::paint::FALLBACK_CELL_PX.1,
+        )?;
         Ok(Self {
             terminal,
             renderer: TerminalRenderer::new()?,
@@ -2742,6 +2748,23 @@ mod tests {
     use super::*;
     use phux_protocol::caps::ServerCapabilities;
     use tokio::net::UnixStream;
+
+    #[test]
+    fn pane_slot_initializes_nonzero_cell_pixels_for_live_kitty_render() {
+        let mut slot = PaneSlot::new_with_size(10, 5).expect("slot");
+        slot.terminal
+            .vt_write(b"\x1b_Ga=T,f=32,s=1,v=1,i=77,q=2;/wAA/w==\x1b\\");
+
+        let mut out = Vec::new();
+        slot.renderer
+            .render(&slot.terminal, &mut out)
+            .expect("render");
+        let replay = String::from_utf8_lossy(&out);
+        assert!(
+            replay.contains("\x1b_Ga=T,f=32,s=1,v=1,i=77,q=2,c=1,r=1,m=0;/wAA/w==\x1b\\"),
+            "initial live render must replay classic Kitty placement; got {replay:?}"
+        );
+    }
 
     #[test]
     fn supervisory_badge_formats_every_state() {

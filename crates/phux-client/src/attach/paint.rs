@@ -20,6 +20,15 @@ use super::driver::PaneSlot;
 use crate::layout::LayoutState;
 use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
 
+/// Fallback per-cell pixel size for client-side libghostty mirrors.
+///
+/// The server-side actor uses the same conventional 8x16 default until a real
+/// viewport pixel report arrives. The client mirror also needs nonzero cell
+/// pixels: classic Kitty placements without explicit `c/r` dimensions infer
+/// their grid footprint from pixel geometry, and a zero value makes the first
+/// live render skip the placement until a later snapshot supplies `c/r`.
+pub(super) const FALLBACK_CELL_PX: (u32, u32) = (8, 16);
+
 /// Resize a libghostty [`GhosttyTerminal`] to `cols`x`rows`, clamping each axis to
 /// a 1-cell minimum (libghostty has no concept of a zero-dimension grid, so
 /// a `0`-col or `0`-row request fails with `InvalidValue` and leaves the
@@ -36,7 +45,7 @@ pub(super) fn safe_resize(
 ) -> libghostty_vt::error::Result<()> {
     let cols = cols.max(1);
     let rows = rows.max(1);
-    terminal.resize(cols, rows, 0, 0)
+    terminal.resize(cols, rows, FALLBACK_CELL_PX.0, FALLBACK_CELL_PX.1)
 }
 
 /// The server-authoritative mirror grid `(cols, rows)` used to letterbox a
