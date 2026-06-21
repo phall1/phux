@@ -9,7 +9,7 @@ last-reviewed: 2026-05-28
 **TL;DR.** Pass `just ci` before opening a PR; update `docs/spec/` +
 CHANGELOG for wire changes; write an ADR for any decision that closes
 off design space; no homegrown crypto, scripting language, plugin
-host, copy-mode reinvention, or template DSL. Doc conventions live in
+host, tmux-style copy-mode clone, or template DSL. Doc conventions live in
 [`docs/CONVENTIONS.md`](./docs/CONVENTIONS.md). The mental model is
 [`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
 
@@ -77,12 +77,15 @@ Asking saves us both time:
   selection (word/line/output boundaries, OSC-133-aware) and extraction
   (plain/VT/HTML) belong to the host terminal and to libghostty-vt's
   Selection + Formatter APIs (Ghostty PR \#12794), never reimplemented
-  here. phux owns exactly one copy-mode-adjacent primitive:
-  find-in-scrollback (`phux-server`'s `search` module), a literal search
-  over the scrollback rows we already mirror — libghostty exposes no
-  search or regex, so that locating step is ours. It produces match
-  coordinates and hands them to libghostty for extraction; it does not
-  reimplement boundaries, highlighting, or a copy cursor.
+  here. phux may provide a client-local copy-mode projection over the
+  focused pane: cursor movement, viewport scrolling, and highlight
+  rendering are UI navigation over libghostty state, not a second
+  selection model. phux also owns find-in-scrollback (`phux-server`'s
+  `search` module), a literal search over the scrollback rows we already
+  mirror — libghostty exposes no search or regex, so that locating step is
+  ours. Search produces match coordinates and hands them to libghostty for
+  extraction; it does not reimplement word/output boundaries or mouse drag
+  selection.
 - **Homegrown crypto.** SSH and Unix socket perms are the model.
 - **"Just supporting tmux's behavior here for compatibility."** We are
   not tmux. We will be better in places and different in others, and we

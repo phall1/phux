@@ -19,8 +19,8 @@ last-reviewed: 2026-06-17
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 <!-- TODO badges (do not enable until they resolve):
      - crates.io: needs the first `phux-protocol` publish
-     - version/release: needs a v0.0.x tag populating GitHub Releases
-     - Homebrew: needs the first bottle in the tap
+     - version/release: needs a stable badge source for GitHub Releases
+     - Homebrew: needs the Formula published in the tap
 -->
 
 [Concepts](./docs/CONCEPTS.md) ·
@@ -63,7 +63,39 @@ attached to them are people.
 
 ## Install
 
-phux is v0.0.x. Pick the tier that's honest about your machine.
+phux is v0.0.x. Source is the only install path guaranteed to work today. Once
+a post-`v0.0.1` release is cut, Homebrew becomes the primary binary install
+path:
+
+```sh
+brew install phall1/phux/phux
+```
+
+Until that release exists and the Formula is live on your platform, build from
+source.
+
+**Curl installer — after the next portable release.**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
+```
+
+The installer is a wrapper around GitHub release tarballs. It verifies the
+release `.sha256` sidecar before unpacking and installs into
+`${PHUX_INSTALL_DIR:-$HOME/.local/bin}`; set `PHUX_INSTALL_DIR` to choose a
+different bin directory. With no `--version`, it installs the latest GitHub
+release. Today latest is `v0.0.1`, which is intentionally refused because it is
+not a portable binary release.
+
+To install a specific future tag before it is latest:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
+```
+
+**Prebuilt release artifacts.** Version tags build tarballs for macOS arm64,
+macOS x86_64, and Linux x86_64. The seeded `v0.0.1` Linux tarball is
+Nix-linked and not portable; use the next CI-built tag, Homebrew, or source.
 
 **From source — works today.**
 
@@ -78,14 +110,9 @@ You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive �
 and run `phux` again to come back to exactly where you were. Off-Nix pins and the
 agent binaries are in [INSTALL.md](./docs/INSTALL.md).
 
-**Prebuilt binary — coming.** A download-and-run binary needs a `v0.0.x` tag
-cut to populate GitHub Releases first; until that lands, build from source.
-
-**Homebrew — coming.** A tap exists; the first bottles haven't shipped. Until
-they do, the source build above is the install path.
-
-There is no `cargo install phux` yet — `phux-protocol`'s first crates.io publish
-is still pending.
+There is no `cargo install phux` yet. crates.io is scoped to
+`phux-protocol`; the binary and internal crates are not publishable, and the
+binary still depends on a git-pinned `libghostty-vt`.
 
 ## The wire, without a TTY
 
@@ -184,8 +211,9 @@ Each of these is a "no" that keeps the model honest, not a gap:
   wants a runtime can shell out to one.
 - **No plugin host.** Hooks are typed events. A plugin contract, if it ever
   arrives, comes after we know what's actually pluggable.
-- **No copy-mode reinvention.** Selection belongs to your terminal. phux owns
-  one primitive nobody else provides: literal search over scrollback.
+- **No tmux-style copy-mode clone.** Selection formatting belongs to libghostty
+  and native selection belongs to your terminal. phux owns focused-pane
+  navigation and literal search over scrollback.
 - **No homegrown crypto.** SSH and Unix-socket permissions are the trust model.
 - **No format-template DSL.** The status bar takes typed widgets, not a printf
   dialect we'd have to maintain forever.

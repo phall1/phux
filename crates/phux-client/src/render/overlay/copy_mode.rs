@@ -10,11 +10,14 @@
 //! OSC 52. Nothing about the selection touches the wire.
 
 use phux_protocol::input::key::{KeyEvent, PhysicalKey};
+use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::{CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab};
 use crate::attach::render::SelectionRect;
+
+const WHEEL_SCROLL_LINES: isize = 3;
 
 /// How copy-mode interprets the selection rectangle.
 ///
@@ -144,6 +147,11 @@ impl CopyModeOverlay {
         }
     }
 
+    fn page_scroll_delta(&self) -> isize {
+        let rows = u32::from(self.pane_rows.saturating_sub(1).max(1));
+        isize::try_from(rows).unwrap_or(1)
+    }
+
     /// Build the client-local copy request for the current two-corner
     /// selection: the normalized inclusive viewport rectangle plus the
     /// block/linear flag. The dispatcher resolves it against the focused
@@ -205,12 +213,20 @@ impl RenderOverlay for CopyModeOverlay {
             // the overlay after every key while it is active, so `Stay` is
             // enough to reflect the moved cursor. No wire traffic (ADR-0030).
             PhysicalKey::ArrowUp => {
-                self.move_cursor(-1, 0);
-                OverlayCommand::Stay
+                if self.cursor_row == 0 {
+                    OverlayCommand::ScrollViewport(-1)
+                } else {
+                    self.move_cursor(-1, 0);
+                    OverlayCommand::Stay
+                }
             }
             PhysicalKey::ArrowDown => {
-                self.move_cursor(1, 0);
-                OverlayCommand::Stay
+                if self.cursor_row == self.pane_rows.saturating_sub(1) {
+                    OverlayCommand::ScrollViewport(1)
+                } else {
+                    self.move_cursor(1, 0);
+                    OverlayCommand::Stay
+                }
             }
             PhysicalKey::ArrowLeft => {
                 self.move_cursor(0, -1);
@@ -219,6 +235,12 @@ impl RenderOverlay for CopyModeOverlay {
             PhysicalKey::ArrowRight => {
                 self.move_cursor(0, 1);
                 OverlayCommand::Stay
+            }
+            PhysicalKey::PageUp | PhysicalKey::NumpadPageUp => {
+                OverlayCommand::ScrollViewport(-self.page_scroll_delta())
+            }
+            PhysicalKey::PageDown | PhysicalKey::NumpadPageDown => {
+                OverlayCommand::ScrollViewport(self.page_scroll_delta())
             }
             // Engine-derived one-shot grabs (phux-7143). These copy-and-exit
             // immediately (tmux-style): the dispatcher resolves the grab at the
@@ -255,6 +277,17 @@ impl RenderOverlay for CopyModeOverlay {
             _ => OverlayCommand::Stay,
         }
     }
+
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> OverlayCommand {
+        if mouse.action != MouseAction::Press {
+            return OverlayCommand::Stay;
+        }
+        match mouse.button {
+            MouseButton::Four => OverlayCommand::ScrollViewport(-WHEEL_SCROLL_LINES),
+            MouseButton::Five => OverlayCommand::ScrollViewport(WHEEL_SCROLL_LINES),
+            _ => OverlayCommand::Stay,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +306,16 @@ mod tests {
             composing: false,
             text: None,
             unshifted_codepoint: None,
+        }
+    }
+
+    fn mouse_wheel(button: MouseButton) -> MouseEvent {
+        MouseEvent {
+            action: MouseAction::Press,
+            button,
+            x: 0.0,
+            y: 0.0,
+            mods: ModSet::empty(),
         }
     }
 
@@ -337,6 +380,55 @@ mod tests {
     fn enter_grabs_rect() {
         let cmd = dispatch(PhysicalKey::Enter, ModSet::empty());
         assert_eq!(grab_of(&cmd), SelectionGrab::Rect);
+    }
+
+    #[test]
+    fn page_up_scrolls_one_visible_page() {
+        assert_eq!(
+            dispatch(PhysicalKey::PageUp, ModSet::empty()),
+            OverlayCommand::ScrollViewport(-23)
+        );
+    }
+
+    #[test]
+    fn page_down_scrolls_one_visible_page() {
+        assert_eq!(
+            dispatch(PhysicalKey::PageDown, ModSet::empty()),
+            OverlayCommand::ScrollViewport(23)
+        );
+    }
+
+    #[test]
+    fn arrow_up_at_top_scrolls_one_line() {
+        let mut overlay = CopyModeOverlay::new(0, 5, 80, 24);
+        assert_eq!(
+            overlay.handle_key(&press(PhysicalKey::ArrowUp, ModSet::empty())),
+            OverlayCommand::ScrollViewport(-1)
+        );
+        assert_eq!(overlay.cursor_row, 0);
+    }
+
+    #[test]
+    fn arrow_down_at_bottom_scrolls_one_line() {
+        let mut overlay = CopyModeOverlay::new(23, 5, 80, 24);
+        assert_eq!(
+            overlay.handle_key(&press(PhysicalKey::ArrowDown, ModSet::empty())),
+            OverlayCommand::ScrollViewport(1)
+        );
+        assert_eq!(overlay.cursor_row, 23);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_viewport() {
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        assert_eq!(
+            overlay.handle_mouse(&mouse_wheel(MouseButton::Four)),
+            OverlayCommand::ScrollViewport(-WHEEL_SCROLL_LINES)
+        );
+        assert_eq!(
+            overlay.handle_mouse(&mouse_wheel(MouseButton::Five)),
+            OverlayCommand::ScrollViewport(WHEEL_SCROLL_LINES)
+        );
     }
 
     #[test]
