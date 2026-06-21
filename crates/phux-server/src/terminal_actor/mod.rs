@@ -1566,9 +1566,8 @@ impl TerminalActor {
         //
         // A both-axes shrink in a single resize() call once overflowed
         // libghostty's `PageList.resizeCols` (phux-y06, the SIGABRT
-        // reproduced by the resize-extremes storm); the fix now lives in
-        // the vendored ghostty (phall1/ghostty 6d89054f3, "fix: resize
-        // overflow"), so a both-shrink is a single safe call.
+        // reproduced by the resize-extremes storm); libghostty-vt 0.2.0
+        // covers that path, so a both-shrink is a single safe call.
         let applied = {
             let mut term = self.terminal.borrow_mut();
             let result = term.resize(cols, rows, u32::from(cell_w), u32::from(cell_h));
@@ -4512,9 +4511,9 @@ mod tests {
     /// shrinks crossing the 1-cell clamp — must NOT panic the actor task.
     /// `handle_resize` clamps to a 1-cell minimum so a zero dimension never
     /// reaches libghostty; the both-axes-shrink overflow in the Zig
-    /// `PageList.resizeCols` is fixed in the vendored ghostty (phall1/ghostty
-    /// 6d89054f3). We assert the actor is still alive (the `join` unwrap
-    /// surfaces a panicked task) and a final sane resize still applies.
+    /// `PageList.resizeCols` is covered by libghostty-vt 0.2.0. We assert
+    /// the actor is still alive (the `join` unwrap surfaces a panicked task)
+    /// and a final sane resize still applies.
     #[tokio::test]
     async fn degenerate_resize_storm_does_not_panic_actor() {
         let local = tokio::task::LocalSet::new();
@@ -4590,15 +4589,13 @@ mod tests {
     /// `PageList.resizeCols` with an integer overflow.
     ///
     /// libghostty's `PageList.resizeCols` once overflowed (panic in Zig →
-    /// SIGABRT) when cols AND rows shrank in one `resize()` call. The fix
-    /// lives in the vendored ghostty (phall1/ghostty 6d89054f3, "fix:
-    /// resize overflow"); this test proves THAT fix — not any phux-side
-    /// axis decomposition — carries the load. It feeds reflowable content,
-    /// then drives the storm with a 1-cell clamp only (the same input
-    /// hygiene `handle_resize` keeps), issuing each step as one direct
-    /// `resize()`. It must survive every step and settle at the final
-    /// size. (Run as a plain `GhosttyTerminal` test so a regression aborts THIS
-    /// test, not a flaky e2e teardown.)
+    /// SIGABRT) when cols AND rows shrank in one `resize()` call. This test
+    /// proves the engine fix — not any phux-side axis decomposition — carries
+    /// the load. It feeds reflowable content, then drives the storm with a
+    /// 1-cell clamp only (the same input hygiene `handle_resize` keeps),
+    /// issuing each step as one direct `resize()`. It must survive every step
+    /// and settle at the final size. (Run as a plain `GhosttyTerminal` test so
+    /// a regression aborts THIS test, not a flaky e2e teardown.)
     #[test]
     fn resize_desync_then_both_shrink_does_not_overflow() {
         let mut term = GhosttyTerminal::new(TerminalOptions {
@@ -4636,8 +4633,8 @@ mod tests {
             }
             // Mirror `handle_resize`: 1-cell clamp (input hygiene) only,
             // then a BARE single resize() per step — no axis decomposition.
-            // The vendored ghostty fix is what keeps the both-shrink steps
-            // from overflowing.
+            // libghostty-vt 0.2.0 keeps the both-shrink steps from
+            // overflowing.
             let cols = req_cols.max(1);
             let rows = req_rows.max(1);
             let _ = term.resize(cols, rows, 0, 0);
