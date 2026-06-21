@@ -1,6 +1,8 @@
 # Dolt database (managed by Dolt, not git)
 dolt/
 embeddeddolt/
+proxieddb/
+proxied_server_client_info.json
 
 # Runtime files
 bd.sock
