@@ -2,8 +2,8 @@
 # publish a GitHub release, refresh the Homebrew tap formula, and optionally
 # publish phux-protocol to crates.io from the same button.
 #
-# Trigger: run manually with a `tag` input. Manual dispatch creates the tag
-# from the default branch if it does not already exist.
+# Trigger: run manually with a `tag` input. Manual dispatch uses an existing
+# tag, or creates it from the default branch if it does not already exist.
 #
 # macOS builds run inside `nix develop -c` so they get the exact toolchain
 # from rust-toolchain.toml + flake.nix. Linux builds intentionally use rustup
@@ -11,10 +11,10 @@
 # dynamic loader and are not portable to ordinary hosts.
 #
 # CPU baseline caveat: libghostty-vt's build.rs lets zig auto-detect the host
-# CPU for native builds, so x86_64 release artifacts may carry instructions
-# specific to the runner generation. aarch64-apple-darwin has a uniform
-# baseline and is unaffected; the x86_64 targets are best-effort until a
-# pinned baseline is wired through libghostty-vt's build.
+# CPU for native builds, so Linux artifacts may carry instructions specific to
+# the runner generation. aarch64-apple-darwin has a uniform baseline and is
+# unaffected; Linux targets are best-effort until a pinned baseline is wired
+# through libghostty-vt's build.
 
 name: release
 
@@ -86,31 +86,31 @@ jobs:
             exit 1
           fi
 
-      - name: Check release version
-        shell: bash
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
-        run: bash scripts/check-release-version.sh "$TAG"
-
       - name: Create or verify release tag
         shell: bash
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          head_sha="$(git rev-parse HEAD)"
           if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
             git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-            tag_sha="$(git rev-list -n 1 "refs/tags/${TAG}")"
-            if [ "$tag_sha" != "$head_sha" ]; then
-              echo "::error::${TAG} already points at ${tag_sha}, not ${head_sha}"
-              exit 1
-            fi
-            echo "${TAG} already points at this commit."
+            echo "${TAG} already exists; release will use the tagged commit."
           else
+            head_sha="$(git rev-parse HEAD)"
+            bash scripts/check-release-version.sh "$TAG"
             git tag "$TAG" "$head_sha"
             git push origin "refs/tags/${TAG}"
           fi
+
+      - name: Check release version at tag
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git checkout --detach "refs/tags/${TAG}"
+          bash scripts/check-release-version.sh "$TAG"
 
   build:
     name: build ${{ matrix.target }}
@@ -123,17 +123,14 @@ jobs:
           - os: macos-14
             target: aarch64-apple-darwin
             build_env: nix
-          # `macos-15-intel` is the last hosted x86_64 macOS image (GitHub
-          # retired `macos-13` on 2025-12-04 and drops Intel entirely in Fall
-          # 2027). Same best-effort CPU-baseline caveat as the header.
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            build_env: nix
           # Build Linux on the oldest supported Ubuntu runner instead of
           # `ubuntu-latest` to keep the glibc baseline as low as GitHub's
           # hosted fleet currently allows.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            build_env: system
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
             build_env: system
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -154,8 +151,6 @@ jobs:
         run: bash scripts/check-release-version.sh "$TAG"
 
       - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
-        if: matrix.build_env == 'nix'
-      - uses: DeterminateSystems/magic-nix-cache-action@76aaf8814cdb385b86597c32b8c51b66b69b0839
         if: matrix.build_env == 'nix'
 
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29

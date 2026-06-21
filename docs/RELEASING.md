@@ -56,11 +56,11 @@ Use GitHub Actions:
 
 The workflow validates that `vX.Y.Z` matches Cargo's resolved workspace
 versions. If the tag is missing, it creates it from the default branch. If the
-tag already exists, it must point at the same commit or the workflow fails
-before building. After that it builds `phux` + `phux-mcp`, creates/updates the
-GitHub release, updates the Homebrew tap when `HOMEBREW_TAP_DEPLOY_KEY` is
-configured, and publishes `phux-protocol` only when the crates.io confirmation
-input is present.
+tag already exists, the workflow reuses that tagged commit so failed releases
+can be retried after workflow fixes. After that it builds `phux` + `phux-mcp`,
+creates/updates the GitHub release, updates the Homebrew tap when
+`HOMEBREW_TAP_DEPLOY_KEY` is configured, and publishes `phux-protocol` only
+when the crates.io confirmation input is present.
 
 The manual workflow is the release entrypoint. Running these locally is now
 only a preflight, not the publish trigger:
@@ -70,8 +70,8 @@ just release-check v0.1.0
 ```
 
 `release.yml` then builds `phux` + `phux-mcp` for
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`, packages
+`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
+`aarch64-unknown-linux-gnu`, packages
 `phux-<tag>-<target>.tar.gz` + `.sha256`, creates the GitHub release, and
 — if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
 `Formula/phux.rb` to the tap. macOS builds run inside `nix develop`; Linux
@@ -121,10 +121,10 @@ source-first until latest no longer resolves to `v0.0.1`.
 ### CPU baseline caveat
 
 `libghostty-vt`'s `build.rs` lets zig auto-detect the host CPU for
-native builds, so `x86_64` artifacts may carry instructions specific to
-the runner generation and can `SIGILL` on older hardware.
-`aarch64-apple-darwin` has a uniform baseline and is unaffected. Pinning
-an `x86_64` baseline through `libghostty-vt`'s build is future work.
+native builds, so Linux artifacts may carry instructions specific to the
+runner generation and can `SIGILL` on older hardware. `aarch64-apple-darwin`
+has a uniform baseline and is unaffected. Pinning Linux CPU baselines through
+`libghostty-vt`'s build is future work.
 
 ## Publishing phux-protocol to crates.io
 
