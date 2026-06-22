@@ -1831,6 +1831,7 @@ name = "phux-client"
 version = "0.0.2"
 dependencies = [
  "bytes",
+ "futures-util",
  "hex",
  "insta",
  "libghostty-vt",
@@ -1850,8 +1851,11 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "toml",
  "tracing",
+ "tracing-core",
  "tracing-subscriber",
 ]
 

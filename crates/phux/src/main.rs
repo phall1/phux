@@ -83,6 +83,8 @@ mod selector;
         PHUX_WS_TLS_CERT   Operator-supplied server cert/key (PEM), instead of the\n  \
         PHUX_WS_TLS_KEY    auto-provisioned self-signed pair used off-loopback.\n  \
         PHUX_WS_TOKENS     Pairing-token store the server reads and `phux pair` writes.\n  \
+        PHUX_QUIC_ADDR     Also accept QUIC clients on HOST:PORT. Equivalent to\n  \
+        \x20                 `phux server --quic`, which overrides it.\n  \
         PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
         PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
         RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\
@@ -179,21 +181,31 @@ fn main() -> ExitCode {
             session,
             socket,
             quic,
+            ws,
             token,
             cert_fingerprint,
             tls_server_name,
-        }) => quic.map_or_else(
-            || commands::attach::run_attach(session.clone(), socket),
-            |addr| {
-                commands::attach::run_attach_quic(
-                    session.clone(),
-                    addr,
-                    token,
-                    cert_fingerprint,
-                    tls_server_name,
-                )
-            },
-        ),
+        }) => match (quic, ws) {
+            (Some(addr), None) => commands::attach::run_attach_quic(
+                session,
+                addr,
+                token,
+                cert_fingerprint,
+                tls_server_name,
+            ),
+            (None, Some(url)) => commands::attach::run_attach_ws(
+                session,
+                url,
+                token,
+                cert_fingerprint,
+                tls_server_name,
+            ),
+            (None, None) => commands::attach::run_attach(session, socket),
+            (Some(_), Some(_)) => {
+                eprintln!("phux: choose only one remote attach transport (--quic or --ws)");
+                ExitCode::FAILURE
+            }
+        },
         Some(Command::Server {
             session,
             socket,

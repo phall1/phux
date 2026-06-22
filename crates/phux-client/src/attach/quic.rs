@@ -20,15 +20,14 @@
 //!
 //! [ADR-0007]: ../../../ADR/0007-mosh-class-transport-and-satellites.md
 
-use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use phux_protocol::policy::QUIC_ALPN;
-use sha2::{Digest, Sha256};
 
 use super::driver::AttachError;
+pub use super::remote_tls::CertTrust;
 
 /// QUIC idle timeout, matched to the server's [`IDLE_TIMEOUT`] so a quiet but
 /// attached client is not reaped before the keep-alive fires.
@@ -37,26 +36,6 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keep-alive interval, comfortably under [`IDLE_TIMEOUT`] so a quiet client
 /// (no keystrokes, no output) holds its connection open across NATs.
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
-
-/// How the dialer decides to trust the server's TLS certificate.
-///
-/// QUIC always encrypts; the only choice is *whose* certificate to accept. The
-/// server auto-provisions a persisted self-signed cert (no operator setup,
-/// ADR-0031), so there is no CA chain to validate — trust is established
-/// out-of-band by pinning the fingerprint `phux pair` prints.
-#[derive(Debug, Clone)]
-pub enum CertTrust {
-    /// Accept the server's certificate without verification. **Loopback dev
-    /// only** — the listener still terminates TLS, so the handshake is real,
-    /// but a man-in-the-middle on the path could impersonate the server. The
-    /// CLI restricts this to loopback addresses.
-    SkipVerify,
-    /// Pin the server's leaf-certificate SHA-256 fingerprint, in the
-    /// colon-or-bare hex shape `phux pair` prints (`AB:CD:…`). Comparison is
-    /// case- and separator-insensitive. This is the trust anchor for routable
-    /// hosts: it defeats the trust-on-first-use MITM window ADR-0031 names.
-    Pinned(String),
-}
 
 /// Everything the dialer needs to reach a `phux server --quic` listener.
 #[derive(Debug, Clone)]
@@ -151,23 +130,7 @@ async fn write_preamble(send: &mut quinn::SendStream, token: &[u8]) -> Result<()
 /// certificate verifier, and a transport config matching the server's idle /
 /// keep-alive timings.
 fn client_config(trust: &CertTrust) -> Result<quinn::ClientConfig, AttachError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match trust {
-        CertTrust::SkipVerify => Arc::new(SkipServerVerification(provider.clone())),
-        CertTrust::Pinned(fingerprint) => Arc::new(PinnedFingerprint {
-            provider: provider.clone(),
-            expected: normalize_fingerprint(fingerprint),
-        }),
-    };
-
-    let mut crypto = rustls::ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|err| AttachError::Connect(format!("build TLS client config: {err}")))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    crypto.alpn_protocols = vec![QUIC_ALPN.to_vec()];
-
+    let crypto = super::remote_tls::client_config(trust, Some(QUIC_ALPN))?;
     let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|err| AttachError::Connect(format!("build QUIC crypto: {err}")))?;
     let mut config = quinn::ClientConfig::new(Arc::new(quic_crypto));
@@ -179,151 +142,6 @@ fn client_config(trust: &CertTrust) -> Result<quinn::ClientConfig, AttachError> 
     }
     config.transport_config(Arc::new(transport));
     Ok(config)
-}
-
-/// Uppercase hex digits only — drops the `:` separators (and any stray
-/// whitespace) so a pin pasted as `AB:CD:…`, `ab:cd:…`, or `ABCD…` all compare
-/// equal to the SHA-256 of the presented leaf certificate.
-fn normalize_fingerprint(fingerprint: &str) -> String {
-    fingerprint
-        .chars()
-        .filter(char::is_ascii_hexdigit)
-        .flat_map(char::to_uppercase)
-        .collect()
-}
-
-/// SHA-256 of a leaf certificate as bare uppercase hex (no separators), to
-/// compare against a [`normalize_fingerprint`]d pin.
-fn leaf_fingerprint(cert: &rustls::pki_types::CertificateDer<'_>) -> String {
-    let digest = Sha256::digest(cert.as_ref());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        // Writing to a `String` is infallible.
-        let _ = write!(hex, "{byte:02X}");
-    }
-    hex
-}
-
-/// Certificate verifier that pins the leaf certificate's SHA-256 fingerprint.
-///
-/// There is no CA chain to validate for the server's self-signed cert, so the
-/// pin *is* the trust: a presented leaf whose fingerprint matches the
-/// out-of-band value (`phux pair`) is accepted; anything else is rejected. TLS
-/// signatures are still verified by the crypto provider so a stolen cert cannot
-/// be replayed without its private key.
-#[derive(Debug)]
-struct PinnedFingerprint {
-    provider: Arc<rustls::crypto::CryptoProvider>,
-    expected: String,
-}
-
-impl rustls::client::danger::ServerCertVerifier for PinnedFingerprint {
-    fn verify_server_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let actual = leaf_fingerprint(end_entity);
-        if actual == self.expected {
-            Ok(rustls::client::danger::ServerCertVerified::assertion())
-        } else {
-            Err(rustls::Error::General(format!(
-                "server certificate fingerprint mismatch (pinned {}, got {})",
-                self.expected, actual
-            )))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.provider.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-/// Certificate verifier that accepts any server certificate (loopback dev).
-///
-/// TLS still runs — the handshake, ALPN, and signature checks are real — but the
-/// leaf is trusted blindly. Confidentiality holds against a passive observer;
-/// it does **not** defend against an active MITM, which is why the CLI permits
-/// it only for loopback addresses where there is no untrusted network path.
-#[derive(Debug)]
-struct SkipServerVerification(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &self.0.signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[cfg(test)]
@@ -342,18 +160,5 @@ mod tests {
             raw
         );
         assert!(parse_token_hex("nothex!!").is_err());
-    }
-
-    #[test]
-    fn normalize_fingerprint_is_separator_and_case_insensitive() {
-        let colons = "ab:CD:12:Ef";
-        let bare = "ABCD12EF";
-        assert_eq!(normalize_fingerprint(colons), bare);
-        assert_eq!(normalize_fingerprint(bare), bare);
-        assert_eq!(
-            normalize_fingerprint("  ab cd 12 ef  "),
-            bare,
-            "whitespace is dropped too"
-        );
     }
 }

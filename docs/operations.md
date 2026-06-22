@@ -93,13 +93,21 @@ The Unix socket lives in `$XDG_RUNTIME_DIR/phux/` (typically `/run/user/$UID/` o
 
 ### Federation trust model (v0.1+, forward-compatible)
 
-**v0.1 (current):** Remote attach uses SSH-tunneled `phux server --stdio`, delegating all authentication and encryption to SSH. Wire bytes flow plaintext through the tunnel; SSH provides the trust envelope.
+**v0.1 (current):** Remote attach is available for single-server consumers over
+WebSocket/TLS and QUIC/TLS. SSH-tunneled stdio remains the federation-shaped
+design fallback, delegating authentication and encryption to SSH when used.
 
 **v0.2+ (future, wire-compatible):** Satellites are phux servers on other machines. The hub authenticates consumers and routes terminal sessions to satellite servers via the `Transport` trait ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)).
 
-Future transports:
-- **SSH:** Reuses established SSH auth; inherits SSH's trust model.
-- **QUIC (future):** Certificate-based (mutual TLS, future); no encryption on the wire yet.
+Current remote transports:
+- **WebSocket/TCP:** `phux server --listen HOST:PORT`; loopback can be plaintext
+  for browser/dev use, while routable binds auto-provision TLS and require a
+  `phux pair` bearer token.
+- **QUIC/UDP:** `phux server --quic HOST:PORT`; always TLS 1.3 encrypted.
+  Routable binds use the same token store and `phux pair` certificate
+  fingerprint as the WebSocket path.
+- **SSH:** Reuses established SSH auth when operators tunnel or wrap the server;
+  inherits SSH's trust model.
 
 ### Remote consumer trust model (opt-in)
 
@@ -108,9 +116,9 @@ an SSH tunnel, behind TLS plus a bearer pairing token
 ([ADR-0031](../ADR/0031-remote-consumer-auth-and-encryption.md)). This is the
 nearer-term, single-server path, distinct from the federation hub above.
 
-The bind address is the toggle, so there is no remote-mode setup friction. Set
-it either with `phux server --listen HOST:PORT` or the `PHUX_WS_ADDR`
-environment variable (the flag wins when both are present):
+The bind address is the toggle, so there is no remote-mode setup friction. For
+TCP/WebSocket, set it either with `phux server --listen HOST:PORT` or the
+`PHUX_WS_ADDR` environment variable (the flag wins when both are present):
 
 - **Loopback address → plaintext, unauthenticated.** The historical
   browser-client dev path; zero config.
@@ -123,6 +131,22 @@ environment variable (the flag wins when both are present):
   Tokens are minted with `phux pair`, which prints the token once alongside the
   certificate's SHA-256 fingerprint to pin out-of-band. Revoke a device by
   deleting its line from the token file (effective on server restart).
+
+Native clients can use the same TCP fallback with:
+
+```sh
+phux attach --ws wss://HOST:PORT --token HEX --cert-fingerprint FP
+```
+
+For UDP/QUIC, set `phux server --quic HOST:PORT` or `PHUX_QUIC_ADDR` and attach
+with:
+
+```sh
+phux attach --quic HOST:PORT --token HEX --cert-fingerprint FP
+```
+
+Use WebSocket/TCP when UDP is blocked by a network or firewall; use QUIC when
+roaming/migration behavior matters and UDP is available.
 
 `PHUX_WS_SECURE=1` forces the secure path on a loopback address (to exercise the
 remote path locally); `PHUX_WS_TLS_CERT` + `PHUX_WS_TLS_KEY` substitute an

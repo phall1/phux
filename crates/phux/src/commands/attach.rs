@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use phux_client::attach::connection::Connection;
-use phux_client::attach::{self, AttachError, CertTrust, Dial, QuicDial};
+use phux_client::attach::{self, AttachError, CertTrust, Dial, QuicDial, WsDial};
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::AttachTarget;
@@ -238,9 +238,9 @@ async fn attach_with_reconnect(
 /// (e.g. a crashed server). For UDS it short-circuits to `false` if the socket
 /// file is gone — a clean shutdown unlinks it, so there is nothing to reconnect
 /// to; a graceful upgrade never removes the socket, so it falls into the
-/// retry-until-connectable path. For QUIC it probes by completing a real dial
-/// (TLS + stream open + preamble) and dropping it, the transport analogue of the
-/// UDS connect-and-drop probe.
+/// retry-until-connectable path. Remote transports probe by completing a real
+/// dial and dropping it, the transport analogue of the UDS connect-and-drop
+/// probe.
 async fn wait_until_connectable(dial: &Dial, deadline: Duration) -> bool {
     let end = Instant::now() + deadline;
     loop {
@@ -255,6 +255,13 @@ async fn wait_until_connectable(dial: &Dial, deadline: Duration) -> bool {
                 // Close the probe cleanly so the server reaps it now; otherwise
                 // each 100ms probe during a restart would leave a phantom
                 // connection alive until the idle timeout.
+                Ok(conn) => {
+                    conn.shutdown().await;
+                    true
+                }
+                Err(_) => false,
+            },
+            Dial::Ws(ws) => match Connection::connect_ws(ws).await {
                 Ok(conn) => {
                     conn.shutdown().await;
                     true
@@ -456,6 +463,97 @@ pub(crate) fn run_attach_quic(
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("phux: QUIC attach to {addr} failed: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Attach over WebSocket to `phux server --listen`.
+pub(crate) fn run_attach_ws(
+    session: Option<String>,
+    url: String,
+    token: Option<String>,
+    cert_fingerprint: Option<String>,
+    tls_server_name: Option<String>,
+) -> ExitCode {
+    print_banner();
+
+    let target = match attach::ws::WsTarget::parse(&url) {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if !target.secure && !target.is_loopback() {
+        eprintln!("phux: refusing plaintext WebSocket attach to non-loopback URL {url}.");
+        eprintln!("      Use wss:// plus `phux pair` credentials for remote devices.");
+        return ExitCode::FAILURE;
+    }
+    if target.secure && !target.is_loopback() && cert_fingerprint.is_none() {
+        eprintln!(
+            "phux: refusing to dial non-loopback WebSocket server {url} without --cert-fingerprint."
+        );
+        eprintln!("      Run `phux pair` on the server host, then pass the printed fingerprint.");
+        return ExitCode::FAILURE;
+    }
+    if target.secure && !target.is_loopback() && token.is_none() {
+        eprintln!("phux: refusing remote WebSocket attach to {url} without --token.");
+        eprintln!("      Run `phux pair` on the server host and pass the printed token once.");
+        return ExitCode::FAILURE;
+    }
+
+    let token = match token {
+        Some(token) => match attach::quic::parse_token_hex(&token) {
+            Ok(_) => Some(token.trim().to_owned()),
+            Err(err) => {
+                eprintln!("phux: {err}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let trust = cert_fingerprint.map_or(CertTrust::SkipVerify, CertTrust::Pinned);
+    let dial = Dial::Ws(WsDial {
+        url,
+        token,
+        trust,
+        tls_server_name,
+    });
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to build runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let predict_cfg = match config_loader::load() {
+        Ok(cfg) => PredictiveConfig {
+            enabled: cfg.experimental.predictive_echo,
+        },
+        Err(err) => {
+            eprintln!("phux: config load failed ({err}); using defaults");
+            PredictiveConfig::disabled()
+        }
+    };
+
+    let default_name = resolved_default_session_name();
+    let (target, default) = session.map_or_else(
+        || (AttachTarget::Last, Some(default_name.as_str())),
+        |name| (AttachTarget::ByName(name), None),
+    );
+
+    match rt.block_on(attach_with_reconnect(&dial, target, predict_cfg, default)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("phux: WebSocket attach failed: {err}");
             ExitCode::FAILURE
         }
     }

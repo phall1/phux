@@ -21,6 +21,8 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use super::driver::AttachError;
 use super::quic;
 pub use super::quic::{CertTrust, QuicDial};
+use super::ws;
+pub use super::ws::WsDial;
 
 /// Number of bytes in the SPEC §5 length prefix.
 const LENGTH_PREFIX: usize = 4;
@@ -36,6 +38,8 @@ pub enum Dial {
     Uds(PathBuf),
     /// Dial a remote QUIC listener.
     Quic(QuicDial),
+    /// Dial a remote WebSocket listener.
+    Ws(WsDial),
 }
 
 impl Dial {
@@ -66,6 +70,8 @@ pub enum FrameReader {
     Uds(UdsReader),
     /// QUIC bidi-stream read half.
     Quic(QuicReader),
+    /// WebSocket message read half.
+    Ws(WsReader),
 }
 
 /// Write half — encodes one [`FrameKind`] per call, over either transport.
@@ -75,6 +81,8 @@ pub enum FrameWriter {
     Uds(UdsWriter),
     /// QUIC bidi-stream write half.
     Quic(QuicWriter),
+    /// WebSocket message write half.
+    Ws(WsWriter),
 }
 
 /// UDS read half — reads chunks into a buffer and decodes whole frames.
@@ -124,6 +132,19 @@ pub struct QuicWriter {
     out: BytesMut,
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
+}
+
+/// WebSocket read half: one binary message is one encoded phux frame.
+#[derive(Debug)]
+pub struct WsReader {
+    inner: ws::WsReader,
+}
+
+/// WebSocket write half.
+#[derive(Debug)]
+pub struct WsWriter {
+    inner: ws::WsWriter,
+    out: BytesMut,
 }
 
 impl Drop for QuicWriter {
@@ -189,6 +210,24 @@ impl Connection {
         })
     }
 
+    /// Dial a remote WebSocket listener and return a framed connection.
+    ///
+    /// The server uses one binary WebSocket message per encoded phux frame.
+    /// This is the native TCP fallback for networks where UDP/QUIC is blocked.
+    pub async fn connect_ws(dial: &WsDial) -> Result<Self, AttachError> {
+        let ws = ws::dial(dial).await?;
+        let (tx, rx) = futures_util::StreamExt::split(ws);
+        Ok(Self {
+            reader: FrameReader::Ws(WsReader {
+                inner: ws::WsReader { rx },
+            }),
+            writer: FrameWriter::Ws(WsWriter {
+                inner: ws::WsWriter { tx },
+                out: BytesMut::with_capacity(4096),
+            }),
+        })
+    }
+
     /// Close the connection cleanly, awaiting transmission of the close frame.
     ///
     /// For QUIC this issues a `CONNECTION_CLOSE` and awaits `wait_idle`, so the
@@ -213,6 +252,7 @@ impl Connection {
         match dial {
             Dial::Uds(path) => Self::connect(path).await,
             Dial::Quic(quic) => Self::connect_quic(quic).await,
+            Dial::Ws(ws) => Self::connect_ws(ws).await,
         }
     }
 
@@ -276,6 +316,7 @@ impl FrameWriter {
         match self {
             Self::Uds(w) => w.send(frame).await,
             Self::Quic(w) => w.send(frame).await,
+            Self::Ws(w) => w.send(frame).await,
         }
     }
 }
@@ -286,6 +327,7 @@ impl FrameReader {
         match self {
             Self::Uds(r) => r.recv().await,
             Self::Quic(r) => r.recv().await,
+            Self::Ws(r) => r.recv().await,
         }
     }
 
@@ -300,6 +342,7 @@ impl FrameReader {
         match self {
             Self::Uds(r) => r.try_recv(),
             Self::Quic(r) => r.try_recv(),
+            Self::Ws(_) => Ok(None),
         }
     }
 }
@@ -406,6 +449,37 @@ impl QuicReader {
     /// the stream — it only peels off bytes a prior `recv` over-read.
     fn try_recv(&mut self) -> Result<Option<FrameKind>, AttachError> {
         decode_buffered(&mut self.buf)
+    }
+}
+
+impl WsWriter {
+    async fn send(&mut self, frame: &FrameKind) -> Result<(), AttachError> {
+        self.out.clear();
+        frame.encode(&mut self.out);
+        self.inner.send(&self.out).await
+    }
+}
+
+impl WsReader {
+    async fn recv(&mut self) -> Result<FrameKind, AttachError> {
+        let Some(frame) = self.inner.recv_message().await? else {
+            return Err(AttachError::Disconnected);
+        };
+        if frame.len() < LENGTH_PREFIX || frame.len() > LENGTH_PREFIX + MAX_FRAME_LEN as usize {
+            return Err(AttachError::Protocol(format!(
+                "server sent WebSocket frame with out-of-range length {}",
+                frame.len()
+            )));
+        }
+        let (decoded, rest) = FrameKind::decode(&frame).map_err(|err| {
+            AttachError::Protocol(format!("server sent undecodable frame: {err:?}"))
+        })?;
+        if !rest.is_empty() {
+            return Err(AttachError::Protocol(
+                "server sent trailing bytes after WebSocket frame".to_owned(),
+            ));
+        }
+        Ok(decoded)
     }
 }
 
