@@ -118,6 +118,7 @@ phux watch [TARGET]           # stream a pane's live events
 phux config <init|path|show>  # scaffold + inspect config
 phux config plugins [--json]  # compatibility alias: inspect plugin manifests
 phux config agents [--json]   # inspect configured plugin agent states
+phux config run PLUGIN ACTION # execute a configured plugin action
 phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
 phux --version                # print version
 phux help [COMMAND]
@@ -179,7 +180,8 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `config show`, `config plugins`, `config agents`, and `plugin`. Their
+`run`, `new`, `config show`, `config plugins`, `config agents`, `config run`,
+and `plugin`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -521,14 +523,23 @@ phux plugin unlink example.agent-tools
 unknown/idle/working/blocked state without knowing every plugin entrypoint.
 The config/plugin commands load the user config, resolve every configured
 manifest, and validate ids and non-empty command argv values. Invalid manifests
-are hard failures: they are never silently skipped, because a future runtime
-host should not execute a package the config surface could not validate.
+are hard failures: they are never silently skipped, because the runtime host
+should not execute a package the config surface could not validate.
+
+`phux config run PLUGIN ACTION [--json]` executes one enabled action declared
+by an inspected manifest. The runtime executes the manifest's argv directly
+from the plugin root, captures stdout/stderr/exit status/duration, and kills
+the child on `--timeout SECS` with wrapper exit code `125`. With `--json`, the
+result is a `schema_version = 1` document containing `plugin_id`, `action_id`,
+`command`, `cwd`, `outcome`, `exit_code`, `stdout`, `stderr`, and
+`duration_ms`. There is no implicit shell; a plugin opts into shell behavior by
+declaring `["sh", "-c", "..."]`.
 
 ### 4.3 Reloading
 
 > **Status:** Design intent. No live-reload verb ships today. The shipped
-> `phux config` subcommands are `init`, `path`, `show`, `plugins`, and
-> `agents` (§4.0); a running client picks up config changes on its next
+> `phux config` subcommands are `init`, `path`, `show`, `plugins`, `agents`,
+> and `run` (§4.0); a running client picks up config changes on its next
 > start, not in place.
 
 Config reloads are designed to be explicit, not automatic: a future

@@ -22,6 +22,7 @@ phux-core.workspace = true
 phux-server.workspace = true
 phux-client.workspace = true
 phux-config.workspace = true
+phux-plugin.workspace = true
 clap.workspace = true
 dhat = { workspace = true, optional = true }
 # `phux snapshot --json` emits the stable ScreenState contract (ADR-0022).

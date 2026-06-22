@@ -1,0 +1,125 @@
+#![allow(clippy::expect_used, reason = "tests")]
+
+use std::time::Duration;
+
+use phux_plugin::{
+    PluginActionError, PluginActionOutcome, PluginActionRequest, run_configured_action,
+};
+use tempfile::TempDir;
+
+fn write_configured_plugin(
+    tmp: &TempDir,
+    enabled: bool,
+    command: &str,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    let plugin_dir = tmp.path().join("plugin");
+    std::fs::create_dir_all(&plugin_dir)?;
+    std::fs::write(
+        plugin_dir.join("phux-plugin.toml"),
+        format!(
+            r#"
+id = "example.actions"
+name = "Actions"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "probe"
+title = "Probe"
+command = ["sh", "-c", {command:?}]
+"#
+        ),
+    )?;
+    let config_dir = tmp.path().join("xdg").join("phux");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[[plugins]]
+manifest = "{}"
+enabled = {enabled}
+"#,
+            plugin_dir.join("phux-plugin.toml").display()
+        ),
+    )?;
+    Ok(config_path)
+}
+
+fn request(timeout: Option<Duration>) -> PluginActionRequest {
+    PluginActionRequest {
+        plugin_id: "example.actions".to_owned(),
+        action_id: "probe".to_owned(),
+        timeout,
+        cwd: None,
+    }
+}
+
+#[tokio::test]
+async fn action_runtime_captures_stdout_stderr_and_exit_status()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let config = write_configured_plugin(&tmp, true, "printf out; printf err >&2; exit 7")?;
+
+    let output = run_configured_action(&config, &request(None)).await?;
+
+    assert_eq!(output.outcome, PluginActionOutcome::Completed);
+    assert_eq!(output.exit_code, Some(7));
+    assert_eq!(output.stdout, "out");
+    assert_eq!(output.stderr, "err");
+    Ok(())
+}
+
+#[tokio::test]
+async fn action_runtime_runs_from_plugin_root_and_sets_env()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let config = write_configured_plugin(
+        &tmp,
+        true,
+        "printf '%s|%s|%s|%s' \"$PWD\" \"$PHUX_PLUGIN_ID\" \"$PHUX_PLUGIN_ACTION_ID\" \"$PHUX_PLUGIN_ROOT\"",
+    )?;
+
+    let output = run_configured_action(&config, &request(None)).await?;
+    let plugin_root = tmp.path().join("plugin").canonicalize()?;
+
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(
+        output.stdout,
+        format!(
+            "{}|example.actions|probe|{}",
+            plugin_root.display(),
+            plugin_root.display()
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn action_runtime_times_out_and_reports_cancellation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let config = write_configured_plugin(&tmp, true, "sleep 5")?;
+
+    let output = run_configured_action(&config, &request(Some(Duration::from_millis(20)))).await?;
+
+    assert_eq!(output.outcome, PluginActionOutcome::TimedOut);
+    assert_eq!(output.exit_code, None);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn action_runtime_refuses_disabled_plugins() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let config = write_configured_plugin(&tmp, false, "true")?;
+
+    let err = run_configured_action(&config, &request(None))
+        .await
+        .expect_err("disabled plugin should not execute");
+
+    assert!(matches!(err, PluginActionError::PluginDisabled(_)));
+    Ok(())
+}

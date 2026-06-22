@@ -32,7 +32,7 @@ use crate::socket;
 pub(crate) struct ToolError(pub(crate) String);
 
 impl ToolError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -165,7 +165,8 @@ pub(crate) fn catalog() -> Value {
                     "socket": { "type": "string" }
                 }
             }
-        }
+        },
+        crate::plugin_action::schema()
     ])
 }
 
@@ -187,6 +188,7 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_new" => phux_new(args).await,
         "phux_kill" => phux_kill(args).await,
         "phux_watch" => phux_watch(args).await,
+        "phux_plugin_action" => crate::plugin_action::call(args).await,
         other => Err(ToolError::new(format!("unknown tool: {other}"))),
     }
 }
@@ -703,6 +705,7 @@ mod tests {
                 "phux_new",
                 "phux_kill",
                 "phux_watch",
+                "phux_plugin_action",
             ]
         );
         for tool in arr {

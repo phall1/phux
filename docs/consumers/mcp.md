@@ -6,9 +6,10 @@ last-reviewed: 2026-06-06
 
 # The phux MCP adapter
 
-**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the eight
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the nine
 JSON-RPC stdio tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`,
-`phux_run`, `phux_wait`, `phux_new`, `phux_kill`, `phux_watch`), the stdio
+`phux_run`, `phux_wait`, `phux_new`, `phux_kill`, `phux_watch`,
+`phux_plugin_action`), the stdio
 transport and lifecycle, how a tool resolves a target client-side, and the
 `tools/call` envelope.
 The structured shapes the tools return and the selector grammar are the
@@ -98,7 +99,7 @@ the literal `default`).
 
 ## 3. The tool catalog
 
-Six tools, returned verbatim by `tools/list`. Each `inputSchema` is a
+Nine tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all. The return shapes are the
 shared agent shapes owned by [`agents.md`](./agents.md) §3; each tool
@@ -251,6 +252,24 @@ same per-event JSON shape as `phux watch --json`. It is an accelerator of
 `phux_wait`'s poll floor, not a replacement: `phux_wait` is still the way to
 block on a specific screen condition.
 
+### 3.9 `phux_plugin_action`
+
+Executes one action declared by an enabled configured plugin manifest.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `plugin_id` | string | yes | Configured plugin id. |
+| `action_id` | string | yes | Plugin-local action id. |
+| `timeout_secs` | number | no | Give up after this many seconds. Omit to wait indefinitely. |
+| `cwd` | string | no | Override cwd. Relative paths resolve under the plugin root. |
+| `config` | string | no | Override `config.toml` path; defaults to the normal phux config path. |
+
+Result: the same `schema_version = 1` action result as
+`phux config run --json`: `plugin_id`, `action_id`, `command`, `cwd`,
+`outcome`, `exit_code`, `stdout`, `stderr`, and `duration_ms`. The runtime
+executes argv directly from the plugin root; there is no hidden shell
+expansion.
+
 ---
 
 ## 4. A worked `tools/call` example
@@ -293,13 +312,15 @@ sparse per-cell `cells` array populated.
 
 ## 5. Relationship to the CLI
 
-The MCP tools are name-for-name the CLI's agent subcommands: `phux_ls` ↔
-`phux ls`, and `phux_snapshot` / `phux_send_keys` / `phux_run` /
-`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait`
-/ `new` ([`agents.md`](./agents.md) §1). Same client-side resolution,
-same tiebreaks, because the adapter wraps the same `phux-client`
-functions the CLI does. The one shape difference is the `phux_run`
-timeout body (§3.4).
+The MCP tools are name-for-name adapters over the CLI's agent surfaces:
+`phux_ls` ↔ `phux ls`; `phux_snapshot` / `phux_send_keys` / `phux_run` /
+`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait` /
+`new`; and `phux_plugin_action` ↔ `phux config run`
+([`agents.md`](./agents.md) §1). Targeted pane tools use the same client-side
+resolution and tiebreaks because the adapter wraps the same `phux-client`
+functions the CLI does. Plugin actions instead share the `phux-plugin`
+runtime with the CLI. The one shape difference is the `phux_run` timeout body
+(§3.4).
 
 Per [ADR-0022](../../ADR/0022-tool-for-agents.md), the CLI and its JSON
 schema are the stable agent contract; the wire underneath stays additive
