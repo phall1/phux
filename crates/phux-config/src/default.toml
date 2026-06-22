@@ -206,9 +206,9 @@ prefix = "C-a"
 #   "M-Enter" = "detach"
 
 # Plugin packages are declarative manifests. phux can parse and inspect them
-# today with `phux config plugins --json`; execution, event hooks, and plugin
-# panes are a future runtime host. The manifest path may be absolute or
-# relative to this config file.
+# today with `phux plugin list --json` and `phux plugin validate`; execution,
+# event hooks, and plugin panes are a future runtime host. The manifest path may
+# be absolute or relative to this config file.
 #
 # [[plugins]]
 # manifest = "/path/to/plugin/phux-plugin.toml"

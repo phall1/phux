@@ -149,7 +149,8 @@ with rationale lives in [`../CONTRIBUTING.md`](../CONTRIBUTING.md);
 the headlines:
 
 - No embedded scripting language.
-- No plugin host.
+- No in-process plugin host. Plugins are external packages declared in
+  config, not code loaded into the server.
 - No tmux-style copy-mode clone.
 - No homegrown crypto.
 - No format-template DSL.

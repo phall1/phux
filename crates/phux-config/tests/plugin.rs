@@ -102,3 +102,46 @@ command = ["true"]
     );
     Ok(())
 }
+
+#[test]
+fn plugin_manifest_rejects_oversized_files() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = dir.path().join("phux-plugin.toml");
+    std::fs::write(&manifest, "x".repeat(1024 * 1024 + 1))?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("oversized manifest loaded successfully".into());
+    };
+    assert!(
+        err.to_string().contains("exceeds"),
+        "error should name size limit; got {err}"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn plugin_manifest_parse_errors_use_supplied_symlink_path() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = TempDir::new()?;
+    let target_dir = dir.path().join("private-target");
+    std::fs::create_dir_all(&target_dir)?;
+    let target = target_dir.join("phux-plugin.toml");
+    std::fs::write(&target, "not valid = [")?;
+    let link = dir.path().join("public-link.toml");
+    std::os::unix::fs::symlink(&target, &link)?;
+
+    let Err(err) = plugin::load_plugin_manifest(&link) else {
+        return Err("malformed symlinked manifest loaded successfully".into());
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("public-link.toml"),
+        "parse error should report caller-facing symlink path; got {message}"
+    );
+    assert!(
+        !message.contains("private-target"),
+        "parse error should not leak canonical target path; got {message}"
+    );
+    Ok(())
+}

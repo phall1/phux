@@ -42,6 +42,7 @@ pub(crate) mod kill;
 pub(crate) mod ls;
 pub(crate) mod new;
 pub(crate) mod pair;
+pub(crate) mod plugin;
 pub(crate) mod rename;
 pub(crate) mod run;
 pub(crate) mod send_keys;
@@ -528,6 +529,16 @@ pub(crate) enum Command {
         action: ConfigAction,
     },
 
+    /// Manage local plugin manifests in the phux config registry.
+    ///
+    /// This is a client-local config operation: it validates
+    /// `phux-plugin.toml` manifests and edits `[[plugins]]` entries in the
+    /// user's config without contacting a running server.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
     /// Read and write a Terminal's L3 tags (phux-f8wi, ADR-0027).
     ///
     /// Tags are freeform strings stored as L3 metadata (`phux.tags/v1`),
@@ -624,8 +635,74 @@ pub(crate) enum ConfigAction {
         default: bool,
     },
 
-    /// List plugin manifests declared by `[[plugins]]`.
+    /// Compatibility read path for plugin manifests declared by `[[plugins]]`.
     Plugins {
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `phux plugin <action>` — local plugin registry lifecycle.
+#[derive(Debug, Subcommand)]
+pub(crate) enum PluginAction {
+    /// List configured plugin manifests.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add or update a manifest entry in `config.toml`.
+    Link {
+        /// Path to a `phux-plugin.toml` file, or a directory containing one.
+        manifest: std::path::PathBuf,
+
+        /// Register the plugin but leave it disabled.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a configured plugin by id.
+    Unlink {
+        /// Plugin id from its manifest.
+        id: String,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Enable a configured plugin by id.
+    Enable {
+        /// Plugin id from its manifest.
+        id: String,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Disable a configured plugin by id.
+    Disable {
+        /// Plugin id from its manifest.
+        id: String,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Validate one manifest, or every configured manifest when omitted.
+    Validate {
+        /// Optional path to a `phux-plugin.toml` file or plugin directory.
+        manifest: Option<std::path::PathBuf>,
+
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
         json: bool,

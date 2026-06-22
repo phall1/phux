@@ -1,0 +1,198 @@
+mod json;
+mod registry;
+
+use std::path::Path;
+use std::process::ExitCode;
+
+use phux_config::loader as config_loader;
+use phux_config::plugin;
+
+use crate::commands::PluginAction;
+use json::{print_plugin_json, print_plugins_json, print_validation_json};
+use registry::{
+    RegistryEntry, find_entry, load_registry, load_registry_from_path, manifest_path_for_config,
+    push_entry, read_config_document, reject_symlinked_config, remove_entry, set_enabled,
+    update_entry, write_config_document,
+};
+
+pub(crate) fn run_plugin(action: &PluginAction) -> ExitCode {
+    match action {
+        PluginAction::List { json } => run_list(*json),
+        PluginAction::Link {
+            manifest,
+            disabled,
+            json,
+        } => run_link(manifest, !disabled, *json),
+        PluginAction::Unlink { id, json } => run_unlink(id, *json),
+        PluginAction::Enable { id, json } => run_set_enabled(id, true, *json),
+        PluginAction::Disable { id, json } => run_set_enabled(id, false, *json),
+        PluginAction::Validate { manifest, json } => run_validate(manifest.as_deref(), *json),
+    }
+}
+
+fn run_list(json: bool) -> ExitCode {
+    match load_registry() {
+        Ok(entries) if json => print_plugins_json(&entries),
+        Ok(entries) => {
+            for entry in entries {
+                let state = if entry.enabled { "enabled" } else { "disabled" };
+                println!("{} {} ({state})", entry.manifest.id, entry.manifest.version);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => fail(&err),
+    }
+}
+
+fn run_link(manifest_arg: &Path, enabled: bool, json: bool) -> ExitCode {
+    let config_path = config_loader::config_path();
+    let manifest = match plugin::load_plugin_manifest(manifest_arg) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            return fail(&format!("could not load {}: {err}", manifest_arg.display()));
+        }
+    };
+    let stored_manifest = manifest_path_for_config(&manifest.manifest_path, &config_path);
+    if let Err(err) = reject_symlinked_config(&config_path) {
+        return fail(&err);
+    }
+    let mut doc = match read_config_document(&config_path) {
+        Ok(doc) => doc,
+        Err(err) => return fail(&err),
+    };
+    let mut updated = false;
+    let existing_entries = match load_registry_from_path(&config_path) {
+        Ok(entries) => entries,
+        Err(err) => return fail(&err),
+    };
+    for entry in existing_entries {
+        if entry.manifest.id == manifest.id {
+            if let Err(err) = update_entry(&mut doc, entry.index, &stored_manifest, enabled) {
+                return fail(&err);
+            }
+            updated = true;
+            break;
+        }
+    }
+    if !updated && let Err(err) = push_entry(&mut doc, &stored_manifest, enabled) {
+        return fail(&err);
+    }
+    if let Err(err) = write_config_document(&config_path, &doc) {
+        return fail(&err);
+    }
+    let entry = RegistryEntry {
+        index: 0,
+        manifest_text: stored_manifest,
+        manifest_path: manifest.manifest_path.clone(),
+        enabled,
+        manifest,
+    };
+    if json {
+        print_plugin_json("plugin", &entry)
+    } else {
+        let state = if enabled { "enabled" } else { "disabled" };
+        println!("linked {} ({state})", entry.manifest.id);
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_unlink(id: &str, json: bool) -> ExitCode {
+    let config_path = config_loader::config_path();
+    if let Err(err) = reject_symlinked_config(&config_path) {
+        return fail(&err);
+    }
+    let entry = match find_entry(&config_path, id) {
+        Ok(entry) => entry,
+        Err(err) => return fail(&err),
+    };
+    let mut doc = match read_config_document(&config_path) {
+        Ok(doc) => doc,
+        Err(err) => return fail(&err),
+    };
+    if let Err(err) = remove_entry(&mut doc, entry.index) {
+        return fail(&err);
+    }
+    if let Err(err) = write_config_document(&config_path, &doc) {
+        return fail(&err);
+    }
+    if json {
+        print_plugin_json("removed", &entry)
+    } else {
+        println!("unlinked {}", entry.manifest.id);
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_set_enabled(id: &str, enabled: bool, json: bool) -> ExitCode {
+    let config_path = config_loader::config_path();
+    if let Err(err) = reject_symlinked_config(&config_path) {
+        return fail(&err);
+    }
+    let mut entry = match find_entry(&config_path, id) {
+        Ok(entry) => entry,
+        Err(err) => return fail(&err),
+    };
+    let mut doc = match read_config_document(&config_path) {
+        Ok(doc) => doc,
+        Err(err) => return fail(&err),
+    };
+    if let Err(err) = set_enabled(&mut doc, entry.index, enabled) {
+        return fail(&err);
+    }
+    if let Err(err) = write_config_document(&config_path, &doc) {
+        return fail(&err);
+    }
+    entry.enabled = enabled;
+    if json {
+        print_plugin_json("plugin", &entry)
+    } else {
+        let state = if enabled { "enabled" } else { "disabled" };
+        println!("{} {state}", entry.manifest.id);
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_validate(manifest_arg: Option<&Path>, json: bool) -> ExitCode {
+    manifest_arg.map_or_else(
+        || validate_registry(json),
+        |path| validate_manifest(path, json),
+    )
+}
+
+fn validate_manifest(path: &Path, json: bool) -> ExitCode {
+    match plugin::load_plugin_manifest(path) {
+        Ok(manifest) if json => {
+            let entry = RegistryEntry {
+                index: 0,
+                manifest_text: path.to_string_lossy().into_owned(),
+                manifest_path: manifest.manifest_path.clone(),
+                enabled: true,
+                manifest,
+            };
+            print_validation_json(&[entry])
+        }
+        Ok(manifest) => {
+            println!("valid {}", manifest.id);
+            ExitCode::SUCCESS
+        }
+        Err(err) => fail(&format!("could not load {}: {err}", path.display())),
+    }
+}
+
+fn validate_registry(json: bool) -> ExitCode {
+    match load_registry() {
+        Ok(entries) if json => print_validation_json(&entries),
+        Ok(entries) => {
+            for entry in entries {
+                println!("valid {}", entry.manifest.id);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => fail(&err),
+    }
+}
+
+pub(super) fn fail(message: &str) -> ExitCode {
+    eprintln!("phux: {message}");
+    ExitCode::FAILURE
+}

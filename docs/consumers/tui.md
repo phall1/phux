@@ -89,7 +89,7 @@ prior-attach memory. Auto-spawn (the client forks itself as `phux server`
 if the socket is missing, polls 25 ms / 2 s) covers both the naked and the
 explicit-attach paths.
 
-### 1.1 The twelve shipped verbs
+### 1.1 The shipped verbs
 
 These are the subcommands the binary ships today:
 
@@ -115,8 +115,9 @@ phux send-keys TARGET KEYS... # send keys to a pane (scripting)
 phux run TARGET CMD...        # run a command in a pane, capture $?
 phux wait [TARGET]            # poll a pane until a condition holds
 phux watch [TARGET]           # stream a pane's live events
-phux config <init|path|show>  # scaffold + inspect config (edit spec-only)
-phux config plugins [--json]  # inspect configured plugin manifests
+phux config <init|path|show>  # scaffold + inspect config
+phux config plugins [--json]  # compatibility alias: inspect plugin manifests
+phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
 phux --version                # print version
 phux help [COMMAND]
 ```
@@ -177,9 +178,9 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `config show`, and `config plugins`. Their per-verb JSON shapes and the
-stable exit-code semantics are owned by [`agents.md`](./agents.md)
-§3–§4 — this file does not restate them.
+`run`, `new`, `config show`, `config plugins`, and `plugin`. Their
+per-verb JSON shapes and the stable exit-code semantics are owned by
+[`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
 ---
 
@@ -279,6 +280,8 @@ phux config show            # print the effective config (defaults + your
 phux config show --default  # print the shipped defaults verbatim,
                             #   comments and all — the annotated source
 phux config plugins --json  # print configured plugin manifests as JSON
+phux plugin list --json     # inspect the plugin registry
+phux plugin validate        # validate every configured plugin manifest
 ```
 
 `phux config init` writes the shipped defaults *with every line commented
@@ -483,12 +486,25 @@ placement = "split"
 command = ["agent-board"]
 ```
 
-`phux config plugins --json` is the stable inspection surface for agents
-and scripts. It loads the user config, resolves every configured manifest,
-validates ids and non-empty command argv values, and emits a
-`schema_version = 1` JSON document. Invalid manifests are hard failures:
-they are never silently skipped, because a future runtime host should not
-execute a package the config surface could not validate.
+`phux plugin list --json` is the stable lifecycle inspection surface for
+agents and scripts; `phux config plugins --json` remains a compatibility
+read path for the same configured manifests. The plugin verbs load the
+user config, resolve every configured manifest, validate ids and
+non-empty command argv values, and emit `schema_version = 1` JSON
+documents. Invalid manifests are hard failures: they are never silently
+skipped, because a future runtime host should not execute a package the
+config surface could not validate.
+
+The lifecycle verbs edit `[[plugins]]` in `config.toml` without starting
+a server:
+
+```
+phux plugin link ./plugins/agent-tools/phux-plugin.toml
+phux plugin list --json
+phux plugin disable example.agent-tools
+phux plugin enable example.agent-tools
+phux plugin unlink example.agent-tools
+```
 
 ### 4.3 Reloading
 
