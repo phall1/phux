@@ -37,6 +37,25 @@ min_phux_version = "0.0.2"
 id = "open"
 title = "Open"
 command = ["true"]
+
+[[events]]
+id = "idle"
+title = "Pane idle"
+on = "pane.idle"
+command = ["true"]
+
+[[panes]]
+id = "board"
+title = "Agent Board"
+placement = "split"
+command = ["true"]
+
+[[links]]
+id = "ticket"
+title = "Open ticket"
+contexts = ["pane"]
+patterns = ["https://linear.app/*"]
+command = ["true"]
 "#
         ),
     )
@@ -72,6 +91,9 @@ fn link_list_disable_enable_unlink_json_is_machine_readable() {
     );
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("list stdout is JSON");
     assert_eq!(value["plugins"][0]["id"], "example.lifecycle");
+    assert_eq!(value["plugins"][0]["events"][0]["id"], "idle");
+    assert_eq!(value["plugins"][0]["panes"][0]["id"], "board");
+    assert_eq!(value["plugins"][0]["links"][0]["id"], "ticket");
 
     let (code, stdout, stderr) =
         run_with_xdg(&["plugin", "disable", "example.lifecycle", "--json"], &xdg);

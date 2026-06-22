@@ -45,6 +45,7 @@ fn plugin_json(entry: &RegistryEntry) -> serde_json::Value {
         "actions": entry.manifest.actions,
         "events": entry.manifest.events,
         "panes": entry.manifest.panes,
+        "links": entry.manifest.links,
     })
 }
 

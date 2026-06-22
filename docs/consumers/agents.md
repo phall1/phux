@@ -335,7 +335,8 @@ it does not load plugin code into phux and does not run plugin commands.
       "build": [],
       "actions": [],
       "events": [],
-      "panes": []
+      "panes": [],
+      "links": []
     }
   ]
 }
@@ -343,8 +344,10 @@ it does not load plugin code into phux and does not run plugin commands.
 
 `validate --json` also carries `"valid": true`. `link`, `enable`, and
 `disable` wrap the same plugin object under `"plugin"`; `unlink` wraps the
-removed object under `"removed"`. Invalid or missing manifests are hard
-failures: exit nonzero, stdout empty, stderr diagnostic.
+removed object under `"removed"`. The registry JSON enumerates declarative
+actions, event hooks, pane providers, and link handlers from each manifest but
+does not execute them. Invalid or missing manifests are hard failures: exit
+nonzero, stdout empty, stderr diagnostic.
 
 ### 4.6 `ConfiguredAgentsJson` — `phux config agents --json`
 

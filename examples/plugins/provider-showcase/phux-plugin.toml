@@ -1,0 +1,31 @@
+id = "com.phux.demo.provider-showcase"
+name = "phux Provider Showcase"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+description = "Declarative provider manifest for event, pane, and link-handler enumeration."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "summarize"
+title = "Summarize pane"
+contexts = ["pane"]
+command = ["true"]
+
+[[events]]
+id = "idle"
+title = "Pane idle"
+on = "pane.idle"
+command = ["true"]
+
+[[panes]]
+id = "board"
+title = "Agent Board"
+placement = "split"
+command = ["true"]
+
+[[links]]
+id = "ticket"
+title = "Open ticket"
+contexts = ["pane"]
+patterns = ["https://linear.app/*"]
+command = ["true"]

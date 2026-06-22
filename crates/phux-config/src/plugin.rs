@@ -49,6 +49,8 @@ pub struct PluginManifest {
     pub events: Vec<PluginManifestEvent>,
     /// Pane entrypoints declared by the plugin.
     pub panes: Vec<PluginManifestPane>,
+    /// Link/route handlers declared by the plugin.
+    pub links: Vec<PluginManifestLinkHandler>,
 }
 
 /// Platform names accepted in plugin manifests.
@@ -139,6 +141,12 @@ pub struct PluginManifestAction {
 /// Event hook entrypoint declared in a plugin manifest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginManifestEvent {
+    /// Plugin-local event hook id.
+    pub id: String,
+    /// Human-readable event hook title.
+    pub title: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
     /// Event name this hook observes.
     pub on: String,
     /// Optional platform override for this hook.
@@ -160,6 +168,27 @@ pub struct PluginManifestPane {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Where a future runtime host should place the pane.
     pub placement: PluginPanePlacement,
+    /// Command argv to execute.
+    pub command: Vec<String>,
+}
+
+/// Link or route handler declared in a plugin manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginManifestLinkHandler {
+    /// Plugin-local link handler id.
+    pub id: String,
+    /// Human-readable link handler title.
+    pub title: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// Context names where this handler is relevant.
+    pub contexts: Vec<String>,
+    /// URI schemes this handler accepts.
+    pub schemes: Vec<String>,
+    /// Route/link patterns this handler accepts.
+    pub patterns: Vec<String>,
+    /// Optional platform override for this handler.
+    pub platforms: Option<Vec<PluginPlatform>>,
     /// Command argv to execute.
     pub command: Vec<String>,
 }

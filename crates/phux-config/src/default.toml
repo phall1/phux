@@ -209,9 +209,9 @@ prefix = "C-a"
 # `phux plugin list --json`, validate/link/toggle/unlink them with
 # `phux plugin`, project their agent-state declarations with
 # `phux config agents --json`, and execute action entries with
-# `phux config run PLUGIN ACTION [--json]`. Event hooks and plugin panes are
-# declarative until their host surfaces ship. The manifest path may be absolute
-# or relative to this config file.
+# `phux config run PLUGIN ACTION [--json]`. Event hooks, plugin panes, and
+# link handlers are declarative until their host surfaces ship. The
+# manifest path may be absolute or relative to this config file.
 #
 # [[plugins]]
 # manifest = "/path/to/plugin/phux-plugin.toml"
@@ -237,6 +237,8 @@ prefix = "C-a"
 #   contexts = ["workspace", "pane"]
 #
 #   [[events]]
+#   id = "idle"
+#   title = "Pane idle"
 #   on = "pane.idle"
 #   command = ["sh", "-c", "printf idle"]
 #
@@ -245,6 +247,12 @@ prefix = "C-a"
 #   title = "Agent Board"
 #   placement = "split"
 #   command = ["agent-board"]
+#
+#   [[links]]
+#   id = "ticket"
+#   title = "Open ticket"
+#   patterns = ["https://linear.app/*"]
+#   command = ["agent-ticket", "{url}"]
 
 [status]
 # Left: the window/tab bar. The `windows` widget renders one tab per

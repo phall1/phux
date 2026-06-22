@@ -480,6 +480,8 @@ contexts = ["pane"]
 command = ["python3", "summarize.py"]
 
 [[events]]
+id = "idle"
+title = "Pane idle"
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
 
@@ -495,16 +497,24 @@ id = "board"
 title = "Agent Board"
 placement = "split"
 command = ["agent-board"]
+
+[[links]]
+id = "ticket"
+title = "Open ticket"
+contexts = ["pane"]
+patterns = ["https://linear.app/*"]
+command = ["agent-ticket", "{url}"]
 ```
 
 `phux plugin list --json` is the stable lifecycle inspection surface for
 agents and scripts; `phux config plugins --json` remains a compatibility
 read path for the same configured manifests. The plugin verbs load the
 user config, resolve every configured manifest, validate ids and
-non-empty command argv values, and emit `schema_version = 1` JSON
-documents. Invalid manifests are hard failures: they are never silently
-skipped, because a future runtime host should not execute a package the
-config surface could not validate.
+non-empty command argv values, reject duplicate provider ids, and emit
+`schema_version = 1` JSON documents that enumerate `actions`, `events`,
+`panes`, and `links`. Invalid manifests are hard failures: they are never
+silently skipped, because a future runtime host should not execute a package
+the config surface could not validate.
 
 The lifecycle verbs edit `[[plugins]]` in `config.toml` without starting
 a server:
