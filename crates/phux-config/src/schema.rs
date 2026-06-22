@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::plugin::PluginConfigEntry;
+use crate::{plugin::PluginConfigEntry, satellite::SatelliteConfigEntry};
 
 /// Top-level config. See `docs/consumers/tui.md` §4.2.
 ///
@@ -48,6 +48,10 @@ pub struct Config {
     /// Declarative plugin manifests composed into this config.
     #[serde(default)]
     pub plugins: Vec<PluginConfigEntry>,
+
+    /// Hub-and-spoke federation satellites declared for this host.
+    #[serde(default)]
+    pub satellites: Vec<SatelliteConfigEntry>,
 
     /// Color slots (theme). Free-form key/value of color strings.
     #[serde(default)]

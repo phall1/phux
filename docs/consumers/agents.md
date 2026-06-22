@@ -8,14 +8,14 @@ last-reviewed: 2026-06-06
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
 `phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
-session, `plugin` to manage configured plugin manifests, and `config run` to
-invoke configured plugin actions, and `workspace` to map git worktrees before
-spawning agent panes. This file is the agent contract. Per ADR-0030, the
-structured agent state — cells, command results, semantic events — is a local
-projection over the shared engine, and the CLI plus its versioned JSON schemas
-are what an agent depends on, not a structured wire tier. It documents each
-verb, its JSON shape, the read-act-wait loop, and the exit codes each verb
-mirrors.
+session, `plugin` to manage configured plugin manifests, `config run` to
+invoke configured plugin actions, `workspace` to map git worktrees before
+spawning agent panes, and `satellite` to manage hub-side federation entries.
+This file is the agent contract. Per ADR-0030, the structured agent state —
+cells, command results, semantic events — is a local projection over the shared
+engine, and the CLI plus its versioned JSON schemas are what an agent depends
+on, not a structured wire tier. It documents each verb, its JSON shape, the
+read-act-wait loop, and the exit codes each verb mirrors.
 
 ---
 
@@ -162,6 +162,11 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   worktrees. Agents use the JSON shape (§4.8) to choose a checkout before
   creating a session (`phux new -c <worktree>`) or mapping existing sessions and
   panes back to repo paths.
+- **`phux satellite <list|add|remove> [--json]`** — manage the hub-side
+  federation satellite registry. This never contacts a running server and never
+  opens a satellite transport; it only edits `[[satellites]]` in local config.
+  `--json` emits the satellite registry document (§4.9); failure paths leave
+  stdout empty and report diagnostics on stderr.
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
 (tracked as bead phux-99te). The shipped verbs are listed in
@@ -440,6 +445,31 @@ or non-git paths are hard failures: exit nonzero, stdout empty, stderr
 diagnostic. The command is intentionally read-only; creation and deletion stay
 in git/plugin/provider territory rather than the terminal substrate.
 
+### 4.9 Satellite registry — `phux satellite ... --json`
+
+The satellite lifecycle surface is config-local. It edits or reads
+`[[satellites]]` entries and does not dial remote hosts.
+
+`phux satellite list --json` emits:
+
+```json
+{
+  "schema_version": 1,
+  "satellites": [
+    {
+      "name": "devbox",
+      "endpoint": "ssh://devbox",
+      "enabled": true
+    }
+  ]
+}
+```
+
+`add --json` wraps the same satellite object under `"satellite"`; `remove
+--json` wraps the removed object under `"removed"`. Invalid names, invalid
+endpoint URIs, duplicate configured names, and refused registry writes are hard
+failures: exit nonzero, stdout empty, stderr diagnostic.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
@@ -481,6 +511,7 @@ Exit codes are not uniform across verbs:
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
 | `workspace` | `0` ok; `1` missing git repo, invalid git output, or JSON render failure. |
+| `satellite` | `0` ok; `1` invalid name/endpoint, duplicate configured name, invalid config, refused registry write, or unknown satellite name. |
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 
 **Why `run` uses 125, not 124.** `run` mirrors the child's own code into

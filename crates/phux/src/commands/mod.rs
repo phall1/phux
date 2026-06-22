@@ -46,6 +46,7 @@ pub(crate) mod pair;
 pub(crate) mod plugin;
 pub(crate) mod rename;
 pub(crate) mod run;
+pub(crate) mod satellite;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
@@ -560,6 +561,16 @@ pub(crate) enum Command {
         action: WorkspaceAction,
     },
 
+    /// Manage configured federation satellites.
+    ///
+    /// This is a local config operation: it edits `[[satellites]]` entries and
+    /// never contacts a running server. Hub routing consumes the registry in a
+    /// later federation slice.
+    Satellite {
+        #[command(subcommand)]
+        action: SatelliteAction,
+    },
+
     /// Read and write a Terminal's L3 tags (phux-f8wi, ADR-0027).
     ///
     /// Tags are freeform strings stored as L3 metadata (`phux.tags/v1`),
@@ -703,6 +714,47 @@ pub(crate) enum WorkspaceAction {
         /// Path inside the repository or worktree to inspect.
         #[arg(default_value = ".")]
         path: std::path::PathBuf,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `phux satellite <action>` — local satellite registry lifecycle.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SatelliteAction {
+    /// List configured satellites.
+    #[command(visible_alias = "ls")]
+    List {
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Add or update a satellite endpoint in `config.toml`.
+    Add {
+        /// Hub-local satellite name.
+        name: String,
+
+        /// Endpoint URI, e.g. `<ssh://devbox>`, `<quic://host:8788>`, or
+        /// `<wss://host:8787>`.
+        endpoint: String,
+
+        /// Register the satellite but leave it disabled.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Remove a configured satellite by name.
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// Hub-local satellite name.
+        name: String,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]

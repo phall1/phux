@@ -71,6 +71,8 @@ mod selector;
           plugin     Manage local plugin manifests in config\n\n\
         WORKSPACES\n  \
           workspace  Inspect git worktrees for agent orchestration\n\n\
+        FEDERATION\n  \
+          satellite  Manage configured federation satellites\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
         grammar works across kill/snapshot/send-keys/run/wait.",
@@ -297,6 +299,7 @@ fn main() -> ExitCode {
         Some(Command::Config { action }) => commands::config::run_config(&action),
         Some(Command::Plugin { action }) => commands::plugin::run_plugin(&action),
         Some(Command::Workspace { action }) => commands::workspace::run_workspace(&action),
+        Some(Command::Satellite { action }) => commands::satellite::run_satellite(&action),
         Some(Command::Tag { socket, action }) => commands::tag::run_tag(&action, socket),
         Some(Command::Pair { tokens, cert }) => commands::pair::run_pair(tokens, cert),
         None => commands::attach::run_naked(),
