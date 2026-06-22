@@ -54,6 +54,7 @@ pub(crate) mod tag;
 pub(crate) mod upgrade;
 pub(crate) mod wait;
 pub(crate) mod watch;
+pub(crate) mod workspace;
 
 /// Default name the `phux server` subcommand pre-seeds, and the name
 /// the `phux attach` auto-spawn path requests when the user doesn't
@@ -549,6 +550,16 @@ pub(crate) enum Command {
         action: PluginAction,
     },
 
+    /// Inspect a git workspace and its worktrees for agent orchestration.
+    ///
+    /// This is a local repo operation: it never contacts a running phux server
+    /// and never creates or deletes worktrees. Agents use it to map code
+    /// checkouts to phux sessions/panes before spawning or attaching work.
+    Workspace {
+        #[command(subcommand)]
+        action: WorkspaceAction,
+    },
+
     /// Read and write a Terminal's L3 tags (phux-f8wi, ADR-0027).
     ///
     /// Tags are freeform strings stored as L3 metadata (`phux.tags/v1`),
@@ -677,6 +688,21 @@ pub(crate) enum PluginAction {
     Validate {
         /// Optional path to a `phux-plugin.toml` file or plugin directory.
         manifest: Option<std::path::PathBuf>,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `phux workspace <action>` — local git workspace/worktree inspection.
+#[derive(Debug, Subcommand)]
+pub(crate) enum WorkspaceAction {
+    /// Inspect the git repository and its checked-out worktrees.
+    Inspect {
+        /// Path inside the repository or worktree to inspect.
+        #[arg(default_value = ".")]
+        path: std::path::PathBuf,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
