@@ -11,6 +11,21 @@ fn write_manifest(dir: &TempDir, body: &str) -> Result<std::path::PathBuf, std::
 }
 
 #[test]
+fn checked_in_provider_showcase_manifest_loads() -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("examples/plugins/provider-showcase/phux-plugin.toml");
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.id, "com.phux.demo.provider-showcase");
+    assert_eq!(loaded.events[0].id, "idle");
+    assert_eq!(loaded.panes[0].id, "board");
+    assert_eq!(loaded.links[0].id, "ticket");
+    Ok(())
+}
+
+#[test]
 fn config_accepts_plugin_manifest_entries() -> Result<(), Box<dyn std::error::Error>> {
     let input = r#"
 [[plugins]]
@@ -53,6 +68,8 @@ attention = "high"
 contexts = ["workspace"]
 
 [[events]]
+id = "idle"
+title = "Pane idle"
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
 
@@ -61,6 +78,14 @@ id = "board"
 title = "Agent Board"
 placement = "split"
 command = ["agent-board"]
+
+[[links]]
+id = "ticket"
+title = "Open ticket"
+contexts = ["pane"]
+schemes = ["https"]
+patterns = ["https://linear.app/*"]
+command = ["open", "{url}"]
 "#,
     )?;
 
@@ -75,11 +100,14 @@ command = ["agent-board"]
         loaded.agents[0].attention,
         plugin::PluginAgentAttention::High
     );
+    assert_eq!(loaded.events[0].id, "idle");
     assert_eq!(loaded.events[0].on, "pane.idle");
     assert_eq!(
         loaded.panes[0].placement,
         plugin::PluginPanePlacement::Split
     );
+    assert_eq!(loaded.links[0].id, "ticket");
+    assert_eq!(loaded.links[0].schemes, ["https"]);
     Ok(())
 }
 
@@ -170,6 +198,100 @@ command = ["true"]
     assert!(
         err.to_string().contains("duplicate plugin action id"),
         "error should name duplicate action id; got {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_duplicate_provider_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.dup-providers"
+name = "Duplicate Providers"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[events]]
+id = "idle"
+title = "Idle"
+on = "pane.idle"
+command = ["true"]
+
+[[events]]
+id = "idle"
+title = "Idle again"
+on = "pane.idle"
+command = ["true"]
+"#,
+    )?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("duplicate event provider manifest loaded successfully".into());
+    };
+    assert!(
+        err.to_string().contains("duplicate plugin event id"),
+        "error should name duplicate event provider id; got {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_malformed_link_provider_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.bad-link"
+name = "Bad Link"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[links]]
+id = "bad link"
+title = "Bad"
+schemes = ["https"]
+command = ["true"]
+"#,
+    )?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("malformed link provider manifest loaded successfully".into());
+    };
+    assert!(
+        err.to_string().contains("invalid plugin link handler id"),
+        "error should name malformed link provider id; got {err}"
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_link_provider_without_matchers() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.no-link-matchers"
+name = "No Link Matchers"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[links]]
+id = "ticket"
+title = "Ticket"
+command = ["true"]
+"#,
+    )?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("link provider without matchers loaded successfully".into());
+    };
+    assert!(
+        err.to_string()
+            .contains("requires at least one scheme or pattern"),
+        "error should name missing link provider matcher; got {err}"
     );
     Ok(())
 }

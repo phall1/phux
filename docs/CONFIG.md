@@ -148,7 +148,8 @@ Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are 
 > lifecycle, `phux plugin list --json` / `phux config plugins --json` list
 > manifests, `phux config agents --json` projects declared agent state for
 > consumers, and `phux config run PLUGIN ACTION` executes action entries. Event
-> hooks and panes remain declarative until their host surfaces ship.
+> hooks, panes, and link handlers remain declarative until their host surfaces
+> ship.
 
 Plugins are executable workflow packages declared by a `phux-plugin.toml`
 manifest. The config file composes local manifests:
@@ -211,9 +212,19 @@ The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`, and
 `[[agents]]` entries. Agent declarations are static status records for
 consumer projections: `state` normalizes to `unknown`, `idle`, `working`, or
 `blocked`, and `attention` normalizes to `none`, `low`, `normal`, or `high`.
-Commands are argv arrays, not shell strings. This keeps phux core small: the
-plugin owns its language and files, while phux owns manifest validation,
-config composition, and the runtime host surface.
+The manifest format also accepts provider declarations for `[[build]]`,
+`[[events]]`, `[[panes]]`, and `[[links]]` entries. Event hooks, panes, and
+link handlers are provider-shaped: each has a plugin-local `id`, a `title`,
+and an argv `command`, so frontends and server layers can enumerate them
+without loading plugin code. Link handlers additionally declare `schemes` or
+`patterns` that describe the routes they can accept. Commands are argv arrays,
+not shell strings. This keeps phux core small: the plugin owns its language and
+files, while phux owns manifest validation, config composition, and the future
+runtime host surface.
+
+[`examples/plugins/provider-showcase/phux-plugin.toml`](../examples/plugins/provider-showcase/phux-plugin.toml)
+is the checked-in provider fixture for event, pane, and link-handler
+enumeration.
 
 The checked-in demo package at
 [`examples/plugins/agent-tools`](../examples/plugins/agent-tools/README.md)

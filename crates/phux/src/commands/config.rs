@@ -246,6 +246,7 @@ fn print_plugins_json(plugins: &[LoadedPlugin]) -> ExitCode {
                 "actions": manifest.actions,
                 "events": manifest.events,
                 "panes": manifest.panes,
+                "links": manifest.links,
             })
         })
         .collect();
