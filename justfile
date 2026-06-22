@@ -113,13 +113,21 @@ trace-attach session="default" level="phux=debug":
 examples-smoke:
     bash scripts/examples-smoke.sh
 
+# Run the checked-in plugin package through the same discover/validate/run
+# sequence documented in examples/plugins/agent-tools/README.md.
+plugin-demo:
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config plugins
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config plugins --json
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect --json
+
 # Lint shell scripts with shellcheck (the harness, the boundary/docs
 # guards, and the examples). Provided by the dev shell. Gates at
 # `warning` severity: the examples carry deliberate `info`-level nits
 # (sourced libs shellcheck can't follow, single-quoted heredoc-ish
 # program strings) that are correct as written. On-demand, not in `ci`.
 shellcheck:
-    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh
+    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh examples/plugins/*/scripts/*.sh
 
 # Stable-cargo test for environments without nextest.
 test-cargo:
