@@ -8,11 +8,12 @@ last-reviewed: 2026-06-06
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
 `phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
-session. This file is the agent contract. Per ADR-0030, the structured agent
-state — cells, command results, semantic events — is a local projection over
-the shared engine, and the CLI plus its versioned JSON schemas are what an
-agent depends on, not a structured wire tier. It documents each verb, its JSON
-shape, the read-act-wait loop, and the exit codes each verb mirrors.
+session and `plugin` to manage configured plugin manifests. This file is the
+agent contract. Per ADR-0030, the structured agent state — cells, command
+results, semantic events — is a local projection over the shared engine, and
+the CLI plus its versioned JSON schemas are what an agent depends on, not a
+structured wire tier. It documents each verb, its JSON shape, the
+read-act-wait loop, and the exit codes each verb mirrors.
 
 ---
 
@@ -140,9 +141,14 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
   Shape in §4.4.
+- **`phux plugin <list|link|unlink|enable|disable|validate> [--json]`** —
+  manage declarative plugin manifest entries in the local config registry.
+  This never contacts a running server and never executes plugin commands.
+  `--json` emits the plugin registry document (§4.5); failure paths leave
+  stdout empty and report diagnostics on stderr.
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
-(tracked as bead phux-99te). The shipped verbs are the twelve in
+(tracked as bead phux-99te). The shipped verbs are listed in
 [`tui.md`](./tui.md) §1; the agent-relevant subset is the catalog above plus
 `kill` and `attach`.
 
@@ -294,6 +300,43 @@ if that name is already in use. Unlike the versioned `ScreenState` /
 `RunResult` / `SessionListJson` shapes, this is a flat ad-hoc object with no
 `schema_version`. The wire decomposition behind it is in §2.
 
+### 4.5 Plugin registry — `phux plugin ... --json`
+
+The plugin lifecycle surface is config-local. It edits or reads
+`[[plugins]]` entries and validates referenced `phux-plugin.toml` manifests;
+it does not load plugin code into phux and does not run plugin commands.
+
+`phux plugin list --json` and `phux plugin validate --json` emit:
+
+```json
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "example.agent-tools",
+      "name": "Agent Tools",
+      "version": "0.1.0",
+      "min_phux_version": "0.0.2",
+      "description": null,
+      "manifest": "./plugins/agent-tools/phux-plugin.toml",
+      "manifest_path": "/abs/path/phux-plugin.toml",
+      "plugin_root": "/abs/path",
+      "enabled": true,
+      "platforms": null,
+      "build": [],
+      "actions": [],
+      "events": [],
+      "panes": []
+    }
+  ]
+}
+```
+
+`validate --json` also carries `"valid": true`. `link`, `enable`, and
+`disable` wrap the same plugin object under `"plugin"`; `unlink` wraps the
+removed object under `"removed"`. Invalid or missing manifests are hard
+failures: exit nonzero, stdout empty, stderr diagnostic.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
@@ -333,6 +376,7 @@ Exit codes are not uniform across verbs:
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
+| `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 
 **Why `run` uses 125, not 124.** `run` mirrors the child's own code into

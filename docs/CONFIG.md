@@ -35,12 +35,24 @@ phux config show         # print the effective config (defaults merged
 
 phux config show --default  # print the shipped defaults with comments
 
-phux config plugins --json  # inspect configured plugin manifests
+phux plugin link ./my-plugin/phux-plugin.toml --json
+                         # add or update a plugin manifest entry
+
+phux plugin list --json  # inspect the plugin registry
+
+phux plugin disable example.agent-tools --json
+phux plugin enable example.agent-tools --json
+                         # toggle a registered plugin
+
+phux plugin unlink example.agent-tools --json
+                         # remove a registered plugin
+
+phux config plugins --json  # legacy read path for configured manifests
 ```
 
 ### Applying changes
 
-There is no live-reload verb today (the shipped `phux config` subcommands are `init`, `path`, `show`, and `plugins`). To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
+There is no live-reload verb today. To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
 
@@ -130,9 +142,9 @@ Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are 
 
 ### Plugins
 
-> **Status:** Declarative inspection only. `[[plugins]]` entries parse and
-> `phux config plugins --json` lists their manifests; phux does not execute
-> plugin actions, event hooks, or panes yet.
+> **Status:** Declarative registry only. `[[plugins]]` entries parse, `phux
+> plugin` manages their lifecycle, and `phux plugin list --json` lists their
+> manifests; phux does not execute plugin actions, event hooks, or panes yet.
 
 Plugins are executable workflow packages declared by a `phux-plugin.toml`
 manifest. The config file composes local manifests:
@@ -156,6 +168,17 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+```
+
+The `phux plugin` verbs edit the same `[[plugins]]` array while preserving
+relative manifest paths already in the file:
+
+```sh
+phux plugin link ./plugins/agent-tools/phux-plugin.toml
+phux plugin validate
+phux plugin disable example.agent-tools
+phux plugin enable example.agent-tools
+phux plugin unlink example.agent-tools
 ```
 
 The manifest format also accepts `[[build]]`, `[[events]]`, and `[[panes]]`

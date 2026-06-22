@@ -53,11 +53,12 @@ Interactive TUI:
 - A help overlay (`prefix ?`).
 - Terminal content as bytes on the wire with structured input: Kitty keyboard, OSC 8, OSC 133, true colour, and image protocols pass through to the engine on both ends.
 
-Headless verbs you can run without a TTY. The shipped set is exactly twelve:
+Headless verbs you can run without a TTY:
 
 ```
 attach   server   ls   new   kill   rename
 snapshot send-keys wait watch run    config
+plugin
 ```
 
 Read verbs take `--json` for a machine-readable shape, and every verb addresses panes by the same selector grammar the TUI uses. This is the surface a script or an agent drives; the per-verb catalog and JSON contracts live in [`consumers/agents.md`](./consumers/agents.md).

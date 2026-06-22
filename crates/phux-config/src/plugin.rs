@@ -1,6 +1,8 @@
 //! Declarative plugin manifest parsing for phux config consumers.
 
 mod loader;
+mod source;
+mod validate;
 
 use std::path::PathBuf;
 

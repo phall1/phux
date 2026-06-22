@@ -1,15 +1,15 @@
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde::Deserialize;
 
+use super::source::load_manifest_source;
+use super::validate::{
+    non_empty, normalize_command, normalize_id, reject_duplicate_ids, trim_optional,
+};
 use super::{
     PluginManifest, PluginManifestAction, PluginManifestBuild, PluginManifestError,
     PluginManifestEvent, PluginManifestPane, PluginPanePlacement, PluginPlatform,
 };
-
-const PLUGIN_ID_MAX_CHARS: usize = 120;
-const ENTRY_ID_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,20 +84,15 @@ struct RawPluginManifestPane {
 /// Returns an error if the file cannot be read, cannot be parsed as TOML,
 /// or violates the plugin manifest schema.
 pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifestError> {
-    let manifest_path = if path.is_dir() {
-        path.join("phux-plugin.toml")
-    } else {
-        path.to_path_buf()
-    }
-    .canonicalize()?;
+    let source = load_manifest_source(path)?;
+    let manifest_path = source.canonical_path;
     let plugin_root = manifest_path
         .parent()
         .ok_or_else(|| PluginManifestError::Invalid("manifest path has no parent".to_owned()))?
         .to_path_buf();
-    let input = std::fs::read_to_string(&manifest_path)?;
     let raw: RawPluginManifest =
-        toml::from_str(&input).map_err(|err| PluginManifestError::Parse {
-            path: manifest_path.clone(),
+        toml::from_str(&source.input).map_err(|err| PluginManifestError::Parse {
+            path: source.display_path,
             message: err.message().to_owned(),
         })?;
 
@@ -203,63 +198,4 @@ fn normalize_pane(raw: RawPluginManifestPane) -> Result<PluginManifestPane, Plug
         placement: raw.placement,
         command,
     })
-}
-
-fn normalize_command(command: &[String]) -> Result<Vec<String>, PluginManifestError> {
-    if command.is_empty() {
-        return Err(PluginManifestError::Invalid(
-            "plugin command must not be empty".to_owned(),
-        ));
-    }
-    command
-        .iter()
-        .map(|part| non_empty(part, "plugin command part"))
-        .collect()
-}
-
-fn normalize_id(value: &str, allow_dot: bool, label: &str) -> Result<String, PluginManifestError> {
-    let value = value.trim();
-    let valid = !value.is_empty()
-        && value.len() <= PLUGIN_ID_MAX_CHARS
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric()
-                || ch == '_'
-                || ch == '-'
-                || ch == ':'
-                || (allow_dot && ch == '.')
-        });
-    if valid {
-        Ok(value.to_owned())
-    } else {
-        Err(PluginManifestError::Invalid(format!("invalid {label}")))
-    }
-}
-
-fn non_empty(value: &str, label: &str) -> Result<String, PluginManifestError> {
-    let value = value.trim().to_owned();
-    if value.is_empty() {
-        Err(PluginManifestError::Invalid(format!("{label} is required")))
-    } else {
-        Ok(value)
-    }
-}
-
-fn trim_optional(value: &str) -> Option<String> {
-    let value = value.trim().to_owned();
-    (!value.is_empty()).then_some(value)
-}
-
-fn reject_duplicate_ids<'a>(
-    ids: impl IntoIterator<Item = &'a str>,
-    label: &str,
-) -> Result<(), PluginManifestError> {
-    let mut seen = BTreeSet::new();
-    for id in ids {
-        if id.len() > ENTRY_ID_MAX_CHARS || !seen.insert(id) {
-            return Err(PluginManifestError::Invalid(format!(
-                "duplicate {label} id '{id}'"
-            )));
-        }
-    }
-    Ok(())
 }
