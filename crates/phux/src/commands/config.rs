@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use phux_config::loader as config_loader;
-use phux_config::plugin::{self, PluginManifest};
+use phux_config::plugin::{self, PluginManifest, PluginManifestAgent};
 
-use crate::commands::ConfigAction;
+use super::config_action::ConfigAction;
 
 /// `phux config <action>` (phux-ijp). Entirely client-local: inspects
 /// and scaffolds the on-disk config without contacting a server.
@@ -71,17 +71,20 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
             }
         }
         ConfigAction::Plugins { json } => run_config_plugins(*json),
+        ConfigAction::Agents { json } => run_config_agents(*json),
     }
 }
 
-fn run_config_plugins(json: bool) -> ExitCode {
+struct LoadedPlugin {
+    enabled: bool,
+    manifest: PluginManifest,
+}
+
+fn load_configured_plugins() -> Result<Vec<LoadedPlugin>, String> {
     let path = config_loader::config_path();
     let cfg = match config_loader::load_from(&path) {
         Ok(cfg) => cfg,
-        Err(err) => {
-            eprintln!("phux: {err}");
-            return ExitCode::FAILURE;
-        }
+        Err(err) => return Err(err.to_string()),
     };
     let mut loaded = Vec::new();
     for entry in cfg.plugins {
@@ -89,18 +92,63 @@ fn run_config_plugins(json: bool) -> ExitCode {
         let manifest = match plugin::load_plugin_manifest(&manifest_path) {
             Ok(manifest) => manifest,
             Err(err) => {
-                eprintln!("phux: could not load {}: {err}", manifest_path.display());
-                return ExitCode::FAILURE;
+                return Err(format!("could not load {}: {err}", manifest_path.display()));
             }
         };
-        loaded.push((entry.enabled, manifest));
+        loaded.push(LoadedPlugin {
+            enabled: entry.enabled,
+            manifest,
+        });
     }
+    Ok(loaded)
+}
+
+fn run_config_plugins(json: bool) -> ExitCode {
+    let loaded = match load_configured_plugins() {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
     if json {
         return print_plugins_json(&loaded);
     }
-    for (enabled, manifest) in loaded {
-        let state = if enabled { "enabled" } else { "disabled" };
+    for plugin in loaded {
+        let state = if plugin.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let manifest = plugin.manifest;
         println!("{} {} ({state})", manifest.id, manifest.version);
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_config_agents(json: bool) -> ExitCode {
+    let loaded = match load_configured_plugins() {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if json {
+        return print_agents_json(&loaded);
+    }
+    for plugin in loaded {
+        let plugin_state = if plugin.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        for agent in plugin.manifest.agents {
+            println!(
+                "{}:{} {} {:?} {:?} ({plugin_state})",
+                plugin.manifest.id, agent.id, agent.label, agent.state, agent.attention
+            );
+        }
     }
     ExitCode::SUCCESS
 }
@@ -114,10 +162,11 @@ fn resolve_manifest_path(manifest: &Path, config_path: &Path) -> PathBuf {
         .map_or_else(|| manifest.to_path_buf(), |parent| parent.join(manifest))
 }
 
-fn print_plugins_json(plugins: &[(bool, PluginManifest)]) -> ExitCode {
+fn print_plugins_json(plugins: &[LoadedPlugin]) -> ExitCode {
     let plugins: Vec<_> = plugins
         .iter()
-        .map(|(enabled, manifest)| {
+        .map(|plugin| {
+            let manifest = &plugin.manifest;
             serde_json::json!({
                 "id": manifest.id,
                 "name": manifest.name,
@@ -126,9 +175,10 @@ fn print_plugins_json(plugins: &[(bool, PluginManifest)]) -> ExitCode {
                 "description": manifest.description,
                 "manifest_path": manifest.manifest_path,
                 "plugin_root": manifest.plugin_root,
-                "enabled": enabled,
+                "enabled": plugin.enabled,
                 "platforms": manifest.platforms,
                 "build": manifest.build,
+                "agents": manifest.agents,
                 "actions": manifest.actions,
                 "events": manifest.events,
                 "panes": manifest.panes,
@@ -149,4 +199,44 @@ fn print_plugins_json(plugins: &[(bool, PluginManifest)]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn print_agents_json(plugins: &[LoadedPlugin]) -> ExitCode {
+    let agents: Vec<_> = plugins
+        .iter()
+        .flat_map(|plugin| {
+            plugin
+                .manifest
+                .agents
+                .iter()
+                .map(|agent| agent_json(plugin, agent))
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "agents": agents,
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(rendered) => {
+            println!("{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: could not render agents JSON: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn agent_json(plugin: &LoadedPlugin, agent: &PluginManifestAgent) -> serde_json::Value {
+    serde_json::json!({
+        "plugin_id": plugin.manifest.id,
+        "plugin_enabled": plugin.enabled,
+        "id": agent.id,
+        "label": agent.label,
+        "description": agent.description,
+        "state": agent.state,
+        "attention": agent.attention,
+        "contexts": agent.contexts,
+    })
 }

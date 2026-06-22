@@ -169,6 +169,13 @@ min_phux_version = "0.0.2"
 id = "summarize"
 title = "Summarize"
 command = ["sh", "-c", "printf summarize"]
+
+[[agents]]
+id = "codex"
+label = "Codex"
+state = "blocked"
+attention = "high"
+contexts = ["workspace"]
 "#,
     )
     .expect("write manifest");
@@ -202,6 +209,8 @@ enabled = true
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
     assert_eq!(value["plugins"][0]["id"], "example.agent-tools");
     assert_eq!(value["plugins"][0]["actions"][0]["id"], "summarize");
+    assert_eq!(value["plugins"][0]["agents"][0]["id"], "codex");
+    assert_eq!(value["plugins"][0]["agents"][0]["state"], "blocked");
     assert_eq!(value["plugins"][0]["enabled"], true);
 }
 

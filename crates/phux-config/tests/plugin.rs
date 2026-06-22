@@ -45,6 +45,13 @@ title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
 
+[[agents]]
+id = "codex"
+label = "Codex"
+state = "blocked"
+attention = "high"
+contexts = ["workspace"]
+
 [[events]]
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
@@ -62,10 +69,74 @@ command = ["agent-board"]
     assert_eq!(loaded.id, "example.agent-tools");
     assert_eq!(loaded.plugin_root, dir.path().canonicalize()?);
     assert_eq!(loaded.actions[0].id, "summarize");
+    assert_eq!(loaded.agents[0].id, "codex");
+    assert_eq!(loaded.agents[0].state, plugin::PluginAgentState::Blocked);
+    assert_eq!(
+        loaded.agents[0].attention,
+        plugin::PluginAgentAttention::High
+    );
     assert_eq!(loaded.events[0].on, "pane.idle");
     assert_eq!(
         loaded.panes[0].placement,
         plugin::PluginPanePlacement::Split
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_defaults_agent_state_to_unknown() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.agent-state"
+name = "Agent State"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[agents]]
+id = "background-worker"
+label = "Background Worker"
+"#,
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.agents[0].state, plugin::PluginAgentState::Unknown);
+    assert_eq!(
+        loaded.agents[0].attention,
+        plugin::PluginAgentAttention::Normal
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_duplicate_agent_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.dup-agents"
+name = "Duplicate Agents"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[agents]]
+id = "codex"
+label = "Codex"
+
+[[agents]]
+id = "codex"
+label = "Codex again"
+"#,
+    )?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("duplicate agent manifest loaded successfully".into());
+    };
+    assert!(
+        err.to_string().contains("duplicate plugin agent id"),
+        "error should name duplicate agent id; got {err}"
     );
     Ok(())
 }
