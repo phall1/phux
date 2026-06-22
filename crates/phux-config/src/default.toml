@@ -205,6 +205,37 @@ prefix = "C-a"
 # No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"
 
+# Plugin packages are declarative manifests. phux can parse and inspect them
+# today with `phux config plugins --json`; execution, event hooks, and plugin
+# panes are a future runtime host. The manifest path may be absolute or
+# relative to this config file.
+#
+# [[plugins]]
+# manifest = "/path/to/plugin/phux-plugin.toml"
+# enabled = true
+#
+# A minimal phux-plugin.toml:
+#   id = "example.agent-tools"
+#   name = "Agent Tools"
+#   version = "0.1.0"
+#   min_phux_version = "0.0.2"
+#
+#   [[actions]]
+#   id = "summarize"
+#   title = "Summarize pane"
+#   contexts = ["pane"]
+#   command = ["python3", "summarize.py"]
+#
+#   [[events]]
+#   on = "pane.idle"
+#   command = ["sh", "-c", "printf idle"]
+#
+#   [[panes]]
+#   id = "board"
+#   title = "Agent Board"
+#   placement = "split"
+#   command = ["agent-board"]
+
 [status]
 # Left: the window/tab bar. The `windows` widget renders one tab per
 # window as `{index}:{name}`; by default the active tab is bold +

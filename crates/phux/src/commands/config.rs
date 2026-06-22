@@ -1,6 +1,8 @@
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use phux_config::loader as config_loader;
+use phux_config::plugin::{self, PluginManifest};
 
 use crate::commands::ConfigAction;
 
@@ -67,6 +69,84 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
                     ExitCode::FAILURE
                 }
             }
+        }
+        ConfigAction::Plugins { json } => run_config_plugins(*json),
+    }
+}
+
+fn run_config_plugins(json: bool) -> ExitCode {
+    let path = config_loader::config_path();
+    let cfg = match config_loader::load_from(&path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut loaded = Vec::new();
+    for entry in cfg.plugins {
+        let manifest_path = resolve_manifest_path(&entry.manifest, &path);
+        let manifest = match plugin::load_plugin_manifest(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(err) => {
+                eprintln!("phux: could not load {}: {err}", manifest_path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        loaded.push((entry.enabled, manifest));
+    }
+    if json {
+        return print_plugins_json(&loaded);
+    }
+    for (enabled, manifest) in loaded {
+        let state = if enabled { "enabled" } else { "disabled" };
+        println!("{} {} ({state})", manifest.id, manifest.version);
+    }
+    ExitCode::SUCCESS
+}
+
+fn resolve_manifest_path(manifest: &Path, config_path: &Path) -> PathBuf {
+    if manifest.is_absolute() {
+        return manifest.to_path_buf();
+    }
+    config_path
+        .parent()
+        .map_or_else(|| manifest.to_path_buf(), |parent| parent.join(manifest))
+}
+
+fn print_plugins_json(plugins: &[(bool, PluginManifest)]) -> ExitCode {
+    let plugins: Vec<_> = plugins
+        .iter()
+        .map(|(enabled, manifest)| {
+            serde_json::json!({
+                "id": manifest.id,
+                "name": manifest.name,
+                "version": manifest.version,
+                "min_phux_version": manifest.min_phux_version,
+                "description": manifest.description,
+                "manifest_path": manifest.manifest_path,
+                "plugin_root": manifest.plugin_root,
+                "enabled": enabled,
+                "platforms": manifest.platforms,
+                "build": manifest.build,
+                "actions": manifest.actions,
+                "events": manifest.events,
+                "panes": manifest.panes,
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "schema_version": 1,
+        "plugins": plugins,
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(rendered) => {
+            println!("{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: could not render plugins JSON: {err}");
+            ExitCode::FAILURE
         }
     }
 }

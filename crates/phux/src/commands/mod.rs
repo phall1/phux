@@ -623,6 +623,13 @@ pub(crate) enum ConfigAction {
         #[arg(long)]
         default: bool,
     },
+
+    /// List plugin manifests declared by `[[plugins]]`.
+    Plugins {
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Build a current-thread tokio runtime, or print why and return the

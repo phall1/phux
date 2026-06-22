@@ -19,6 +19,8 @@
 
 use std::process::Command;
 
+use tempfile::TempDir;
+
 /// Path to the freshly-built `phux` binary, injected by cargo.
 const PHUX: &str = env!("CARGO_BIN_EXE_phux");
 
@@ -31,6 +33,19 @@ fn dead_socket() -> String {
 /// Run `phux <args...>` and return `(exit_code, stdout, stderr)`.
 fn run(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(PHUX)
+        .args(args)
+        .output()
+        .expect("run phux binary");
+    (
+        out.status.code().expect("phux exited via code, not signal"),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn run_with_xdg(args: &[&str], xdg_config_home: &std::path::Path) -> (i32, String, String) {
+    let out = Command::new(PHUX)
+        .env("XDG_CONFIG_HOME", xdg_config_home)
         .args(args)
         .output()
         .expect("run phux binary");
@@ -134,4 +149,102 @@ fn config_path_is_clean_stdout_with_no_banner() {
         stdout.lines().count() == 1 && !stdout.trim().is_empty(),
         "`config path` stdout should be exactly the path on one line; got {stdout:?}"
     );
+}
+
+#[test]
+fn config_plugins_json_is_machine_readable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let plugin_dir = tmp.path().join("plugin");
+    std::fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+    let manifest = plugin_dir.join("phux-plugin.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+id = "example.agent-tools"
+name = "Agent Tools"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "summarize"
+title = "Summarize"
+command = ["sh", "-c", "printf summarize"]
+"#,
+    )
+    .expect("write manifest");
+
+    let config_dir = tmp.path().join("xdg").join("phux");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            r#"
+[[plugins]]
+manifest = "{}"
+enabled = true
+"#,
+            manifest.display()
+        ),
+    )
+    .expect("write config");
+
+    let (code, stdout, stderr) =
+        run_with_xdg(&["config", "plugins", "--json"], &tmp.path().join("xdg"));
+
+    assert_eq!(
+        code, 0,
+        "`config plugins --json` should exit 0; stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains(BANNER_FRAGMENT) && !stderr.contains(BANNER_FRAGMENT),
+        "`config plugins --json` must not print the banner; stdout={stdout:?} stderr={stderr:?}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(value["plugins"][0]["id"], "example.agent-tools");
+    assert_eq!(value["plugins"][0]["actions"][0]["id"], "summarize");
+    assert_eq!(value["plugins"][0]["enabled"], true);
+}
+
+#[test]
+fn config_plugins_json_resolves_relative_manifest_paths() {
+    let tmp = TempDir::new().expect("tempdir");
+    let config_dir = tmp.path().join("xdg").join("phux");
+    let plugin_dir = config_dir.join("plugins").join("agent-tools");
+    std::fs::create_dir_all(&plugin_dir).expect("create plugin dir");
+    std::fs::write(
+        plugin_dir.join("phux-plugin.toml"),
+        r#"
+id = "example.relative"
+name = "Relative"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "open"
+title = "Open"
+command = ["true"]
+"#,
+    )
+    .expect("write manifest");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+[[plugins]]
+manifest = "./plugins/agent-tools/phux-plugin.toml"
+enabled = false
+"#,
+    )
+    .expect("write config");
+
+    let (code, stdout, stderr) =
+        run_with_xdg(&["config", "plugins", "--json"], &tmp.path().join("xdg"));
+
+    assert_eq!(
+        code, 0,
+        "`config plugins --json` should resolve relative manifests; stderr={stderr}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(value["plugins"][0]["id"], "example.relative");
+    assert_eq!(value["plugins"][0]["actions"][0]["id"], "open");
+    assert_eq!(value["plugins"][0]["enabled"], false);
 }

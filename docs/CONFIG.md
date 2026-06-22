@@ -34,11 +34,13 @@ phux config show         # print the effective config (defaults merged
                          # with your overrides) as canonical TOML
 
 phux config show --default  # print the shipped defaults with comments
+
+phux config plugins --json  # inspect configured plugin manifests
 ```
 
 ### Applying changes
 
-There is no live-reload verb today (the shipped `phux config` subcommands are `init`, `path`, and `show`). To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
+There is no live-reload verb today (the shipped `phux config` subcommands are `init`, `path`, `show`, and `plugins`). To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
 
@@ -46,13 +48,14 @@ Reload is deliberately not automatic, even as design intent: the file is not wat
 
 ## Schema overview
 
-The config TOML has five main sections:
+The config TOML has these main sections:
 
 ```toml
 [defaults]             # Server-wide behavior: shell, history, spawning
 [keybindings]          # Prefix key + prefix-table + global chords
 [status]               # Status bar widget composition
 [hooks]                # Event-driven actions (array-of-tables)
+[[plugins]]            # Declarative plugin manifests
 [theme]                # Color slots for chrome and overlays
 [experimental]         # Opt-in flags subject to change
 ```
@@ -124,6 +127,41 @@ action = { kind = "notify", text = "pane {pane} exited with {exit-code}" }
 ```
 
 Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are allowed and evaluated in order. See `docs/consumers/tui.md` §9 for the full event and action catalog as it stabilizes.
+
+### Plugins
+
+> **Status:** Declarative inspection only. `[[plugins]]` entries parse and
+> `phux config plugins --json` lists their manifests; phux does not execute
+> plugin actions, event hooks, or panes yet.
+
+Plugins are executable workflow packages declared by a `phux-plugin.toml`
+manifest. The config file composes local manifests:
+
+```toml
+[[plugins]]
+manifest = "/path/to/plugin/phux-plugin.toml"
+enabled = true
+```
+
+`manifest` may be absolute or relative to `config.toml`. A minimal manifest:
+
+```toml
+id = "example.agent-tools"
+name = "Agent Tools"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "summarize"
+title = "Summarize pane"
+contexts = ["pane"]
+command = ["python3", "summarize.py"]
+```
+
+The manifest format also accepts `[[build]]`, `[[events]]`, and `[[panes]]`
+entries. Commands are argv arrays, not shell strings. This keeps phux core
+small: the plugin owns its language and files, while phux owns manifest
+validation, config composition, and the future runtime host surface.
 
 ---
 

@@ -12,6 +12,7 @@
 #![deny(missing_docs)]
 
 mod error;
+pub mod plugin;
 mod schema;
 
 // Wave 5 modules — each owned by its respective subtask:

@@ -13,6 +13,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::plugin::PluginConfigEntry;
+
 /// Top-level config. See `docs/consumers/tui.md` §4.2.
 ///
 /// Sections are all optional; an empty config file parses to
@@ -42,6 +44,10 @@ pub struct Config {
     /// entry is the array-of-tables under that name.
     #[serde(default)]
     pub hooks: BTreeMap<String, Vec<HookEntry>>,
+
+    /// Declarative plugin manifests composed into this config.
+    #[serde(default)]
+    pub plugins: Vec<PluginConfigEntry>,
 
     /// Color slots (theme). Free-form key/value of color strings.
     #[serde(default)]
