@@ -116,6 +116,7 @@ phux run TARGET CMD...        # run a command in a pane, capture $?
 phux wait [TARGET]            # poll a pane until a condition holds
 phux watch [TARGET]           # stream a pane's live events
 phux config <init|path|show>  # scaffold + inspect config (edit spec-only)
+phux config plugins [--json]  # inspect configured plugin manifests
 phux --version                # print version
 phux help [COMMAND]
 ```
@@ -176,7 +177,7 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, and `config show`. Their per-verb JSON shapes and the
+`run`, `new`, `config show`, and `config plugins`. Their per-verb JSON shapes and the
 stable exit-code semantics are owned by [`agents.md`](./agents.md)
 §3–§4 — this file does not restate them.
 
@@ -277,6 +278,7 @@ phux config show            # print the effective config (defaults + your
                             #   overrides) as canonical TOML
 phux config show --default  # print the shipped defaults verbatim,
                             #   comments and all — the annotated source
+phux config plugins --json  # print configured plugin manifests as JSON
 ```
 
 `phux config init` writes the shipped defaults *with every line commented
@@ -374,6 +376,10 @@ left   = [{ kind = "windows" }]
 center = []
 right  = ["session-name", { kind = "time", format = " %H:%M" }]
 
+[[plugins]]
+manifest = "/path/to/plugin/phux-plugin.toml"
+enabled = true
+
 [theme]
 accent = "#cdd6f4"
 section_header = "yellow"
@@ -435,10 +441,59 @@ under `[experimental]` may be renamed or removed without a SemVer bump.
 predictive-echo = false
 ```
 
+**Plugin manifests** live under `[[plugins]]`. This is the first
+plugin-surface contract, not a runtime plugin host: phux validates and
+inspects local `phux-plugin.toml` manifests today, and future runtime
+surfaces will consume the same manifest shape instead of inventing a
+second extension format. `manifest` is an absolute path, or a path
+relative to `config.toml`; `enabled` defaults to `true`.
+
+```toml
+[[plugins]]
+manifest = "./plugins/agent-tools/phux-plugin.toml"
+enabled = true
+```
+
+A manifest declares package metadata and argv entrypoints:
+
+```toml
+id = "example.agent-tools"
+name = "Agent Tools"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["cargo", "build", "--release"]
+
+[[actions]]
+id = "summarize"
+title = "Summarize pane"
+contexts = ["pane"]
+command = ["python3", "summarize.py"]
+
+[[events]]
+on = "pane.idle"
+command = ["sh", "-c", "printf idle"]
+
+[[panes]]
+id = "board"
+title = "Agent Board"
+placement = "split"
+command = ["agent-board"]
+```
+
+`phux config plugins --json` is the stable inspection surface for agents
+and scripts. It loads the user config, resolves every configured manifest,
+validates ids and non-empty command argv values, and emits a
+`schema_version = 1` JSON document. Invalid manifests are hard failures:
+they are never silently skipped, because a future runtime host should not
+execute a package the config surface could not validate.
+
 ### 4.3 Reloading
 
 > **Status:** Design intent. No live-reload verb ships today. The shipped
-> `phux config` subcommands are `init`, `path`, and `show` (§4.0); a
+> `phux config` subcommands are `init`, `path`, `show`, and `plugins` (§4.0); a
 > running client picks up config changes on its next start, not in place.
 
 Config reloads are designed to be explicit, not automatic: a future
@@ -914,8 +969,9 @@ on these:
   libghostty and native clipboard behavior.
 - **No multi-row status bar, no widgets, no themes-as-config.** The
   status bar is one row. Themes are color slots, not a styling engine.
-- **No plugin system on day one.** Hooks are typed events. Extensions
-  shell out.
+- **No embedded plugin runtime in core.** Plugin manifests are declarative
+  config today. Future runtime surfaces execute argv commands over the
+  same CLI/socket contract instead of embedding a scripting language.
 - **No homegrown crypto.** Transport is the right layer; SSH and Unix
   socket perms cover it.
 

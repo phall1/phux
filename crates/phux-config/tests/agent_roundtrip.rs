@@ -39,6 +39,10 @@ fn agent_can_generate_valid_config() {
             "right": [{ "kind": "time", "format": "%H:%M" }]
         },
         "hooks": {},
+        "plugins": [{
+            "manifest": "/tmp/phux-plugin.toml",
+            "enabled": false
+        }],
         "theme": { "fg": "#ddd", "bg": "#111" }
     });
 
@@ -61,4 +65,6 @@ fn agent_can_generate_valid_config() {
     assert_eq!(reparsed.keybindings.prefix, "C-b");
     assert_eq!(reparsed.defaults.history_limit, 5000);
     assert_eq!(reparsed.status.right.len(), 1);
+    assert_eq!(reparsed.plugins.len(), 1);
+    assert!(!reparsed.plugins[0].enabled);
 }
