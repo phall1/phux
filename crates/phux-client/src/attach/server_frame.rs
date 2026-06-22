@@ -1179,6 +1179,7 @@ fn reconcile_loaded_layout(
 mod tests {
     use super::{FrameOutcome, handle_server_frame};
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use phux_protocol::ids::{ClientId, SessionId, TerminalId, WindowId};
     use phux_protocol::wire::frame::FrameKind;
@@ -1187,6 +1188,8 @@ mod tests {
     use crate::attach::driver::PaneSlot;
     use crate::layout::{LayoutState, Workspace};
     use crate::predict::{Overlay, PredictionState, PredictiveConfig};
+
+    static TRACE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Strip CSI escape sequences (`ESC [ ... final`) from a captured
     /// render stream, leaving only the printable glyphs, so a content
@@ -1868,8 +1871,10 @@ mod tests {
     /// time) rather than the fused parent `handle_server_frame` close.
     #[test]
     fn output_emits_separate_apply_and_paint_spans() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
         use tracing_subscriber::fmt::MakeWriter;
+        use tracing_subscriber::layer::SubscriberExt as _;
+        use tracing_subscriber::{Registry, fmt};
 
         #[derive(Clone, Default)]
         struct Buf(Arc<Mutex<Vec<u8>>>);
@@ -1889,19 +1894,19 @@ mod tests {
             }
         }
 
-        use tracing_subscriber::layer::SubscriberExt as _;
-        use tracing_subscriber::{EnvFilter, Registry, fmt};
+        let _guard = TRACE_TEST_LOCK.lock().expect("trace test lock");
+
         let buf = Buf::default();
         let layer = fmt::layer()
             .with_ansi(false)
             .with_writer(buf.clone())
             .with_span_events(fmt::format::FmtSpan::CLOSE);
-        let subscriber = Registry::default()
-            .with(EnvFilter::new("phux_client=debug"))
-            .with(layer);
+        let subscriber = Registry::default().with(layer);
 
         {
-            let _guard = tracing::subscriber::set_default(subscriber);
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("install test tracing subscriber");
+            tracing_core::callsite::rebuild_interest_cache();
             let left = tid(1);
             let right = tid(2);
             let mut layout = two_pane_workspace(&left, &right, &left);

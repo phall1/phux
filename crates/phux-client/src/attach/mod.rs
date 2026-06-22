@@ -39,12 +39,14 @@ pub mod input_dispatch;
 pub mod paint;
 pub mod quic;
 pub mod reflow;
+mod remote_tls;
 pub mod render;
 pub mod rendered;
 pub mod server_frame;
 mod stdout_writer;
+pub mod ws;
 
-pub use connection::{CertTrust, Dial, QuicDial};
+pub use connection::{CertTrust, Dial, QuicDial, WsDial};
 pub use driver::{
     AttachError, run, run_headless_rendered, run_with_predict, run_with_predict_dial,
     run_with_stdout, write_terminal_reset,

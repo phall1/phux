@@ -2749,6 +2749,8 @@ mod tests {
     use phux_protocol::caps::ServerCapabilities;
     use tokio::net::UnixStream;
 
+    static TERMINAL_RESET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn pane_slot_initializes_nonzero_cell_pixels_for_live_kitty_render() {
         let mut slot = PaneSlot::new_with_size(10, 5).expect("slot");
@@ -3135,10 +3137,15 @@ mod tests {
     /// enables the client's own outer-terminal mouse tracking
     /// (`?1002h` button-motion + `?1006h` SGR), and the reset undoes it
     /// (`?1006l?1002l`) BEFORE leaving the alt screen so the host's native
-    /// selection is restored. nextest runs each test in its own process,
-    /// so the module-global capture/alt flags are isolated.
+    /// selection is restored.
     #[test]
     fn mouse_capture_enable_and_disable_bytes() {
+        let _guard = TERMINAL_RESET_TEST_LOCK
+            .lock()
+            .expect("terminal reset test lock");
+        MOUSE_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+        ALT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
+
         let mut entry = Vec::new();
         write_enter_alt_screen(&mut entry, true).unwrap();
         assert!(
@@ -3179,6 +3186,12 @@ mod tests {
     /// sequence emits no mouse tracking, host native selection untouched.
     #[test]
     fn mouse_capture_disabled_emits_no_decset() {
+        let _guard = TERMINAL_RESET_TEST_LOCK
+            .lock()
+            .expect("terminal reset test lock");
+        MOUSE_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+        ALT_SCREEN_ACTIVE.store(false, Ordering::SeqCst);
+
         let mut entry = Vec::new();
         write_enter_alt_screen(&mut entry, false).unwrap();
         assert!(
@@ -3195,6 +3208,10 @@ mod tests {
         assert!(
             !reset.windows(8).any(|w| w == b"\x1b[?1002l"),
             "no capture ⇒ no mouse-disable on reset: {reset:?}"
+        );
+        assert!(
+            !reset.windows(8).any(|w| w == b"\x1b[?1006l"),
+            "no capture ⇒ no SGR mouse-disable on reset: {reset:?}"
         );
     }
 

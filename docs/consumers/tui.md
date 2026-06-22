@@ -100,6 +100,10 @@ phux attach --quic HOST:PORT [--cert-fingerprint FP] [--token HEX]
                               # attach to a remote server over QUIC (TLS 1.3).
                               # loopback trusts the dev cert; routable hosts
                               # require --cert-fingerprint (from `phux pair`)
+phux attach --ws ws://127.0.0.1:8787
+                              # attach over the WebSocket/TCP fallback locally
+phux attach --ws wss://HOST:PORT --cert-fingerprint FP --token HEX
+                              # attach over TLS WebSocket when UDP/QUIC is blocked
 phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT]
                               # run server in foreground (incl. for SSH; no --stdio yet)
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)

@@ -29,7 +29,9 @@ additive rather than invasive.
   consumers. `phux-web` ([the web consumer](../consumers/web.md), per
   ADR-0025) speaks the exact framing over WebSocket and projects engine
   state locally; the bytes on the wire are identical to the UDS path, only
-  the byte stream underneath differs.
+  the byte stream underneath differs. Native attach can also use this path
+  with `phux attach --ws`, making it the TCP fallback when UDP/QUIC is
+  blocked.
 - **QUIC transport** (via `quinn`, ADR-0007) — for remote clients. Each
   connection opens one bidirectional QUIC stream and frames the identical
   codec over it. TLS 1.3 is intrinsic; a routable listener authenticates

@@ -65,6 +65,18 @@ Read verbs take `--json` for a machine-readable shape, and every verb addresses 
 
 There is also an MCP adapter, `phux-mcp`, exposing the core verbs as JSON-RPC tools — see [`consumers/mcp.md`](./consumers/mcp.md).
 
+Remote attach for a phone or another native client uses the same server:
+
+```sh
+phux pair
+phux server --listen 0.0.0.0:8787 --quic 0.0.0.0:8788
+phux attach --ws wss://HOST:8787 --token HEX --cert-fingerprint FP
+phux attach --quic HOST:8788 --token HEX --cert-fingerprint FP
+```
+
+WebSocket/TCP is the fallback for networks that block UDP; QUIC is the roaming
+path when UDP is available.
+
 Try the headless side once a session is up:
 
 ```sh

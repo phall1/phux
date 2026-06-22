@@ -51,6 +51,7 @@ portable-pty-adopt = { path = "crates/portable-pty-adopt" }
 # External.
 thiserror = "2"
 tracing = "0.1"
+tracing-core = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # Non-blocking, file-backed `tracing` sink. The telemetry foundation needs
 # to write logs to a file off the hot path — for the client (which must

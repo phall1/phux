@@ -67,6 +67,7 @@ pub(crate) enum Command {
     ///
     /// With no name, attaches to the most-recently-focused session,
     /// auto-spawning a server if none is running. Requires a TTY.
+    #[command(group = clap::ArgGroup::new("remote").args(["quic", "ws"]).multiple(false))]
     #[command(visible_alias = "a")]
     Attach {
         /// Session name (matches the name used at creation time).
@@ -88,22 +89,30 @@ pub(crate) enum Command {
         #[arg(long, value_name = "HOST:PORT", conflicts_with = "socket")]
         quic: Option<std::net::SocketAddr>,
 
+        /// Attach over WebSocket to a `phux server --listen` endpoint. Use
+        /// `ws://HOST:PORT` for loopback dev, or `wss://HOST:PORT` with
+        /// `--token` and `--cert-fingerprint` for routable remote attach. This
+        /// is the TCP fallback when UDP/QUIC is blocked.
+        #[arg(long, value_name = "URL", conflicts_with = "socket")]
+        ws: Option<String>,
+
         /// Bearer pairing token (hex) for an authenticated QUIC listener, as
-        /// minted by `phux pair`. Sent as the stream's opening preamble.
-        /// Requires `--quic`.
-        #[arg(long, requires = "quic")]
+        /// minted by `phux pair`. QUIC sends it as the stream's opening
+        /// preamble; WebSocket sends it as `Authorization: Bearer`.
+        /// Requires `--quic` or `--ws`.
+        #[arg(long, requires = "remote")]
         token: Option<String>,
 
         /// Pin the QUIC server's certificate by its SHA-256 fingerprint (the
         /// value `phux pair` prints). Required to dial any non-loopback
-        /// `--quic` address. Requires `--quic`.
-        #[arg(long, value_name = "FP", requires = "quic")]
+        /// `--quic`/`--ws wss://` address. Requires `--quic` or `--ws`.
+        #[arg(long, value_name = "FP", requires = "remote")]
         cert_fingerprint: Option<String>,
 
-        /// TLS server name (SNI) to offer the QUIC listener. Defaults to
-        /// `localhost`, matching the server's self-signed cert SANs. Requires
-        /// `--quic`.
-        #[arg(long, value_name = "NAME", requires = "quic")]
+        /// TLS server name (SNI) to offer the remote listener. QUIC defaults
+        /// to `localhost`; WebSocket defaults to the URL host. Requires
+        /// `--quic` or `--ws`.
+        #[arg(long, value_name = "NAME", requires = "remote")]
         tls_server_name: Option<String>,
     },
 
