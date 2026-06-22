@@ -1,0 +1,15 @@
+schema_version = 1
+id = "generic-shell-agent"
+display_name = "Generic Shell Agent"
+kind = "terminal-agent"
+description = "Template for any CLI assistant a team wants phux to launch and supervise."
+capabilities = ["terminal-control", "session-supervision"]
+
+[detect]
+mode = "opt-in"
+command = "sh"
+env = "PHUX_AGENT_TOOLS_DETECT"
+
+[launch]
+command = ["sh", "-lc", "echo configure this template with your agent command"]
+working_directory = "workspace"

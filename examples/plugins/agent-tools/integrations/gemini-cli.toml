@@ -1,0 +1,15 @@
+schema_version = 1
+id = "gemini-cli"
+display_name = "Gemini CLI"
+kind = "terminal-agent"
+description = "Gemini CLI running as a terminal-native coding assistant."
+capabilities = ["terminal-control", "code-editing", "human-question"]
+
+[detect]
+mode = "opt-in"
+command = "gemini"
+env = "PHUX_AGENT_TOOLS_DETECT"
+
+[launch]
+command = ["gemini"]
+working_directory = "workspace"

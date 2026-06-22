@@ -120,6 +120,9 @@ plugin-demo:
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config plugins --json
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect --json
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools list-integrations
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools validate-integrations
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
 
 # Lint shell scripts with shellcheck (the harness, the boundary/docs
 # guards, and the examples). Provided by the dev shell. Gates at

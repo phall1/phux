@@ -1,0 +1,15 @@
+schema_version = 1
+id = "codex"
+display_name = "Codex"
+kind = "terminal-agent"
+description = "OpenAI Codex CLI running inside a phux-managed terminal."
+capabilities = ["terminal-control", "code-editing", "human-question"]
+
+[detect]
+mode = "opt-in"
+command = "codex"
+env = "PHUX_AGENT_TOOLS_DETECT"
+
+[launch]
+command = ["codex"]
+working_directory = "workspace"
