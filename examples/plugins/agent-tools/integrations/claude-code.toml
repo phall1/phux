@@ -1,0 +1,15 @@
+schema_version = 1
+id = "claude-code"
+display_name = "Claude Code"
+kind = "terminal-agent"
+description = "Claude Code running as a terminal-native engineering agent."
+capabilities = ["terminal-control", "code-editing", "human-question"]
+
+[detect]
+mode = "opt-in"
+command = "claude"
+env = "PHUX_AGENT_TOOLS_DETECT"
+
+[launch]
+command = ["claude"]
+working_directory = "workspace"

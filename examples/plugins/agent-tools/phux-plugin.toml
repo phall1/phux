@@ -2,7 +2,7 @@ id = "com.phux.demo.agent-tools"
 name = "phux Agent Tools Demo"
 version = "0.1.0"
 min_phux_version = "0.0.2"
-description = "Local demo package for plugin discovery and action execution."
+description = "Local demo package for plugin discovery, action execution, and agent integration templates."
 platforms = ["linux", "macos"]
 
 [[actions]]
@@ -11,3 +11,24 @@ title = "Inspect agent workflow context"
 description = "Prints the runtime context phux gives an agentic plugin action."
 contexts = ["workspace", "pane"]
 command = ["sh", "scripts/inspect.sh"]
+
+[[actions]]
+id = "list-integrations"
+title = "List agent integration templates"
+description = "Prints the checked-in agent templates this plugin can compose into a phux workflow."
+contexts = ["workspace"]
+command = ["sh", "scripts/list-integrations.sh"]
+
+[[actions]]
+id = "validate-integrations"
+title = "Validate agent integration templates"
+description = "Checks the demo agent templates without requiring any local agent installation."
+contexts = ["workspace"]
+command = ["sh", "scripts/validate-integrations.sh"]
+
+[[actions]]
+id = "detect-agents"
+title = "Detect opted-in local agent CLIs"
+description = "Probes configured agent commands only when PHUX_AGENT_TOOLS_DETECT=1 is set."
+contexts = ["workspace"]
+command = ["sh", "scripts/detect-agents.sh"]

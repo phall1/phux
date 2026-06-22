@@ -12,6 +12,9 @@ cargo run -q -p phux -- config plugins
 cargo run -q -p phux -- config plugins --json
 cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect
 cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect --json
+cargo run -q -p phux -- config run com.phux.demo.agent-tools list-integrations
+cargo run -q -p phux -- config run com.phux.demo.agent-tools validate-integrations
+cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
 ```
 
 Expected human output:
@@ -33,3 +36,35 @@ root=/path/to/phux/examples/plugins/agent-tools
 
 `phux config run --json` wraps that stdout with the stable action result
 schema, including argv, cwd, exit code, stderr, and duration.
+
+## Integration templates
+
+The `integrations/*.toml` files are sample manifests for terminal-native
+agents that phux can launch, supervise, and report on through plugin actions.
+They are intentionally local, documented fixtures rather than hidden product
+magic:
+
+- `codex.toml`
+- `claude-code.toml`
+- `gemini-cli.toml`
+- `generic-shell-agent.toml`
+
+Each template declares a stable id, display name, capabilities, a launch
+command, and an opt-in detection command. Detection never probes the user's
+machine by default. To run it deliberately:
+
+```sh
+PHUX_AGENT_TOOLS_DETECT=1 \
+  cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
+```
+
+Tests can avoid local installations by overriding the detection search path:
+
+```sh
+PHUX_AGENT_TOOLS_DETECT=1 \
+PHUX_AGENT_TOOLS_PATH=/tmp/fake-agent-bin \
+  cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
+```
+
+`list-integrations` and `validate-integrations` are pure fixture checks and
+do not execute or inspect any local agent binaries.
