@@ -215,6 +215,16 @@ Commands are argv arrays, not shell strings. This keeps phux core small: the
 plugin owns its language and files, while phux owns manifest validation,
 config composition, and the runtime host surface.
 
+The checked-in demo package at
+[`examples/plugins/agent-tools`](../examples/plugins/agent-tools/README.md)
+shows the smallest useful loop: point `XDG_CONFIG_HOME` at the fixture config,
+list the configured plugin, validate it with `--json`, then run its `inspect`
+action. From a fresh checkout:
+
+```sh
+just plugin-demo
+```
+
 ---
 
 ## Three concrete examples

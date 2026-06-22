@@ -1,0 +1,13 @@
+id = "com.phux.demo.agent-tools"
+name = "phux Agent Tools Demo"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+description = "Local demo package for plugin discovery and action execution."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "inspect"
+title = "Inspect agent workflow context"
+description = "Prints the runtime context phux gives an agentic plugin action."
+contexts = ["workspace", "pane"]
+command = ["sh", "scripts/inspect.sh"]
