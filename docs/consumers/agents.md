@@ -9,12 +9,13 @@ last-reviewed: 2026-06-06
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
 `phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
 session, `plugin` to manage configured plugin manifests, and `config run` to
-invoke configured plugin actions. This file is the agent contract. Per
-ADR-0030, the structured agent state — cells, command results, semantic events
-— is a local projection over the shared engine, and the CLI plus its versioned
-JSON schemas are what an agent depends on, not a structured wire tier. It
-documents each verb, its JSON shape, the read-act-wait loop, and the exit codes
-each verb mirrors.
+invoke configured plugin actions, and `workspace` to map git worktrees before
+spawning agent panes. This file is the agent contract. Per ADR-0030, the
+structured agent state — cells, command results, semantic events — is a local
+projection over the shared engine, and the CLI plus its versioned JSON schemas
+are what an agent depends on, not a structured wire tier. It documents each
+verb, its JSON shape, the read-act-wait loop, and the exit codes each verb
+mirrors.
 
 ---
 
@@ -155,6 +156,12 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   command runs as argv from the plugin root; there is no implicit shell
   expansion. `--json` emits `PluginActionOutput` (§4.7). Exit code mirrors the
   action's process status; timeout exits `125`.
+- **`phux workspace inspect [PATH] [--json]`** — inspect the local git
+  repository containing `PATH` and every checked-out worktree reported by git.
+  This never contacts a running server and never creates, deletes, or checks out
+  worktrees. Agents use the JSON shape (§4.8) to choose a checkout before
+  creating a session (`phux new -c <worktree>`) or mapping existing sessions and
+  panes back to repo paths.
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
 (tracked as bead phux-99te). The shipped verbs are listed in
@@ -401,6 +408,38 @@ runtime executes the manifest's argv directly from the plugin root, captures
 stdout/stderr lossily as UTF-8, inherits the phux process environment, and adds
 `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and `PHUX_PLUGIN_ROOT`.
 
+### 4.8 Workspace inspection — `phux workspace inspect --json`
+
+The workspace surface is repo-local. It shells out to git's porcelain worktree
+listing and reports the current worktree plus siblings as a stable JSON
+projection:
+
+```json
+{
+  "schema_version": 1,
+  "repo": {
+    "path": "/abs/path/repo",
+    "head": "012345...",
+    "branch": "main",
+    "detached": false
+  },
+  "worktrees": [
+    {
+      "path": "/abs/path/repo-feature",
+      "head": "89abcd...",
+      "branch": "feature",
+      "detached": false,
+      "current": false
+    }
+  ]
+}
+```
+
+For detached worktrees, `branch` is `null` and `detached` is `true`. Missing
+or non-git paths are hard failures: exit nonzero, stdout empty, stderr
+diagnostic. The command is intentionally read-only; creation and deletion stay
+in git/plugin/provider territory rather than the terminal substrate.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
@@ -441,6 +480,7 @@ Exit codes are not uniform across verbs:
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
+| `workspace` | `0` ok; `1` missing git repo, invalid git output, or JSON render failure. |
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 
 **Why `run` uses 125, not 124.** `run` mirrors the child's own code into
