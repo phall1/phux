@@ -7,8 +7,9 @@ use super::validate::{
     non_empty, normalize_command, normalize_id, reject_duplicate_ids, trim_optional,
 };
 use super::{
-    PluginManifest, PluginManifestAction, PluginManifestBuild, PluginManifestError,
-    PluginManifestEvent, PluginManifestPane, PluginPanePlacement, PluginPlatform,
+    PluginAgentAttention, PluginAgentState, PluginManifest, PluginManifestAction,
+    PluginManifestAgent, PluginManifestBuild, PluginManifestError, PluginManifestEvent,
+    PluginManifestPane, PluginPanePlacement, PluginPlatform,
 };
 
 #[derive(Debug, Deserialize)]
@@ -25,6 +26,8 @@ struct RawPluginManifest {
     #[serde(default)]
     build: Vec<RawPluginManifestBuild>,
     #[serde(default)]
+    agents: Vec<RawPluginManifestAgent>,
+    #[serde(default)]
     actions: Vec<RawPluginManifestAction>,
     #[serde(default)]
     events: Vec<RawPluginManifestEvent>,
@@ -38,6 +41,21 @@ struct RawPluginManifestBuild {
     #[serde(default)]
     platforms: Option<Vec<PluginPlatform>>,
     command: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPluginManifestAgent {
+    id: String,
+    label: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    state: PluginAgentState,
+    #[serde(default)]
+    attention: PluginAgentAttention,
+    #[serde(default)]
+    contexts: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +125,12 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
         .into_iter()
         .map(normalize_build)
         .collect::<Result<Vec<_>, _>>()?;
+    let agents = raw
+        .agents
+        .into_iter()
+        .map(normalize_agent)
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_duplicate_ids(agents.iter().map(|agent| agent.id.as_str()), "plugin agent")?;
     let actions = raw
         .actions
         .into_iter()
@@ -138,6 +162,7 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
         plugin_root,
         platforms: raw.platforms,
         build,
+        agents,
         actions,
         events,
         panes,
@@ -152,6 +177,25 @@ fn normalize_build(
     Ok(PluginManifestBuild {
         platforms: raw.platforms,
         command,
+    })
+}
+
+fn normalize_agent(
+    raw: RawPluginManifestAgent,
+) -> Result<PluginManifestAgent, PluginManifestError> {
+    let contexts = raw
+        .contexts
+        .into_iter()
+        .map(|context| non_empty(&context, "plugin agent context"))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(PluginManifestAgent {
+        id: normalize_id(&raw.id, false, "plugin agent id")?,
+        label: non_empty(&raw.label, "plugin agent label")?,
+        description: raw.description.as_deref().and_then(trim_optional),
+        state: raw.state,
+        attention: raw.attention,
+        contexts,
     })
 }
 

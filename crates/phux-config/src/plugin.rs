@@ -41,6 +41,8 @@ pub struct PluginManifest {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Build commands declared by the plugin.
     pub build: Vec<PluginManifestBuild>,
+    /// Agent states declared by the plugin.
+    pub agents: Vec<PluginManifestAgent>,
     /// Action entrypoints declared by the plugin.
     pub actions: Vec<PluginManifestAction>,
     /// Event hook entrypoints declared by the plugin.
@@ -68,6 +70,53 @@ pub struct PluginManifestBuild {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Command argv to execute.
     pub command: Vec<String>,
+}
+
+/// Agent state declared in a plugin manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginManifestAgent {
+    /// Plugin-local agent id.
+    pub id: String,
+    /// Human-readable agent label.
+    pub label: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// Current state reported by this declarative surface.
+    pub state: PluginAgentState,
+    /// Attention level consumers may use for sorting or notification badges.
+    pub attention: PluginAgentAttention,
+    /// Context names where this agent is relevant.
+    pub contexts: Vec<String>,
+}
+
+/// Normalized state labels for agent-aware consumers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginAgentState {
+    /// State cannot be determined yet.
+    #[default]
+    Unknown,
+    /// Agent is available and not actively working.
+    Idle,
+    /// Agent is currently doing work.
+    Working,
+    /// Agent is waiting for human input or otherwise blocked.
+    Blocked,
+}
+
+/// Normalized attention priority for agent-aware consumers.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginAgentAttention {
+    /// Explicitly no attention requested.
+    None,
+    /// Low-priority background signal.
+    Low,
+    /// Normal attention priority.
+    #[default]
+    Normal,
+    /// High-priority signal that should be surfaced prominently.
+    High,
 }
 
 /// Action entrypoint declared in a plugin manifest.

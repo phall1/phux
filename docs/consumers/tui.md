@@ -117,6 +117,7 @@ phux wait [TARGET]            # poll a pane until a condition holds
 phux watch [TARGET]           # stream a pane's live events
 phux config <init|path|show>  # scaffold + inspect config
 phux config plugins [--json]  # compatibility alias: inspect plugin manifests
+phux config agents [--json]   # inspect configured plugin agent states
 phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
 phux --version                # print version
 phux help [COMMAND]
@@ -178,7 +179,7 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `config show`, `config plugins`, and `plugin`. Their
+`run`, `new`, `config show`, `config plugins`, `config agents`, and `plugin`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -280,6 +281,7 @@ phux config show            # print the effective config (defaults + your
 phux config show --default  # print the shipped defaults verbatim,
                             #   comments and all — the annotated source
 phux config plugins --json  # print configured plugin manifests as JSON
+phux config agents --json   # print configured plugin agent states as JSON
 phux plugin list --json     # inspect the plugin registry
 phux plugin validate        # validate every configured plugin manifest
 ```
@@ -479,6 +481,13 @@ command = ["python3", "summarize.py"]
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
 
+[[agents]]
+id = "codex"
+label = "Codex"
+state = "working"
+attention = "normal"
+contexts = ["workspace", "pane"]
+
 [[panes]]
 id = "board"
 title = "Agent Board"
@@ -506,11 +515,21 @@ phux plugin enable example.agent-tools
 phux plugin unlink example.agent-tools
 ```
 
+`phux config agents --json` projects `[[agents]]` entries into a flat
+`schema_version = 1` document with `plugin_id`, `id`, `label`, `state`,
+`attention`, and `contexts`, so consumers can render
+unknown/idle/working/blocked state without knowing every plugin entrypoint.
+The config/plugin commands load the user config, resolve every configured
+manifest, and validate ids and non-empty command argv values. Invalid manifests
+are hard failures: they are never silently skipped, because a future runtime
+host should not execute a package the config surface could not validate.
+
 ### 4.3 Reloading
 
 > **Status:** Design intent. No live-reload verb ships today. The shipped
-> `phux config` subcommands are `init`, `path`, `show`, and `plugins` (§4.0); a
-> running client picks up config changes on its next start, not in place.
+> `phux config` subcommands are `init`, `path`, `show`, `plugins`, and
+> `agents` (§4.0); a running client picks up config changes on its next
+> start, not in place.
 
 Config reloads are designed to be explicit, not automatic: a future
 reload path re-reads the file and applies it without restarting, and the

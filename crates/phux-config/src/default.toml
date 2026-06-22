@@ -205,10 +205,12 @@ prefix = "C-a"
 # No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"
 
-# Plugin packages are declarative manifests. phux can parse and inspect them
-# today with `phux plugin list --json` and `phux plugin validate`; execution,
-# event hooks, and plugin panes are a future runtime host. The manifest path may
-# be absolute or relative to this config file.
+# Plugin packages are declarative manifests. phux can inspect them with
+# `phux plugin list --json`, validate/link/toggle/unlink them with
+# `phux plugin`, and project their agent-state declarations with
+# `phux config agents --json`. Execution, event hooks, and plugin panes are a
+# future runtime host. The manifest path may be absolute or relative to this
+# config file.
 #
 # [[plugins]]
 # manifest = "/path/to/plugin/phux-plugin.toml"
@@ -225,6 +227,13 @@ prefix = "C-a"
 #   title = "Summarize pane"
 #   contexts = ["pane"]
 #   command = ["python3", "summarize.py"]
+#
+#   [[agents]]
+#   id = "codex"
+#   label = "Codex"
+#   state = "blocked"      # unknown | idle | working | blocked
+#   attention = "high"     # none | low | normal | high
+#   contexts = ["workspace", "pane"]
 #
 #   [[events]]
 #   on = "pane.idle"

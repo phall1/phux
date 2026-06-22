@@ -146,6 +146,9 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   This never contacts a running server and never executes plugin commands.
   `--json` emits the plugin registry document (§4.5); failure paths leave
   stdout empty and report diagnostics on stderr.
+- **`phux config agents [--json]`** — project configured plugin
+  `[[agents]]` declarations into a flat agent-state list. It never contacts a
+  server. `--json` emits `ConfiguredAgentsJson` (§4.6).
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
 (tracked as bead phux-99te). The shipped verbs are listed in
@@ -336,6 +339,33 @@ it does not load plugin code into phux and does not run plugin commands.
 `disable` wrap the same plugin object under `"plugin"`; `unlink` wraps the
 removed object under `"removed"`. Invalid or missing manifests are hard
 failures: exit nonzero, stdout empty, stderr diagnostic.
+
+### 4.6 `ConfiguredAgentsJson` — `phux config agents --json`
+
+`phux config agents --json` emits configured plugin agent declarations as a
+consumer-ready list. It is a config projection, not a live runtime detector:
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "plugin_id": "example.agent-tools",
+      "plugin_enabled": true,
+      "id": "codex",
+      "label": "Codex",
+      "description": "Coding agent",
+      "state": "working",
+      "attention": "normal",
+      "contexts": ["workspace", "pane"]
+    }
+  ]
+}
+```
+
+`state` is one of `unknown`, `idle`, `working`, or `blocked`. `attention` is
+one of `none`, `low`, `normal`, or `high`. Invalid manifests are hard failures
+and leave stdout empty on `--json`, preserving the script contract.
 
 ## 5. The read-act-wait loop and exit-code mirroring
 

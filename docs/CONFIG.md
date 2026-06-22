@@ -48,11 +48,12 @@ phux plugin unlink example.agent-tools --json
                          # remove a registered plugin
 
 phux config plugins --json  # legacy read path for configured manifests
+phux config agents --json   # project configured plugin agent states
 ```
 
 ### Applying changes
 
-There is no live-reload verb today. To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start.
+There is no live-reload verb today. To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start. Local config/plugin subcommands (`init`, `path`, `show`, `plugins`, `agents`, and `plugin ...`) read the file fresh on each invocation.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
 
@@ -143,8 +144,10 @@ Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are 
 ### Plugins
 
 > **Status:** Declarative registry only. `[[plugins]]` entries parse, `phux
-> plugin` manages their lifecycle, and `phux plugin list --json` lists their
-> manifests; phux does not execute plugin actions, event hooks, or panes yet.
+> plugin` manages their lifecycle, `phux plugin list --json` / `phux config
+> plugins --json` list manifests, and `phux config agents --json` projects
+> declared agent state for consumers. phux does not execute plugin actions,
+> event hooks, or panes yet.
 
 Plugins are executable workflow packages declared by a `phux-plugin.toml`
 manifest. The config file composes local manifests:
@@ -168,6 +171,14 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+
+[[agents]]
+id = "codex"
+label = "Codex"
+description = "Coding agent"
+state = "blocked"      # unknown | idle | working | blocked
+attention = "high"     # none | low | normal | high
+contexts = ["workspace", "pane"]
 ```
 
 The `phux plugin` verbs edit the same `[[plugins]]` array while preserving
@@ -181,10 +192,13 @@ phux plugin enable example.agent-tools
 phux plugin unlink example.agent-tools
 ```
 
-The manifest format also accepts `[[build]]`, `[[events]]`, and `[[panes]]`
-entries. Commands are argv arrays, not shell strings. This keeps phux core
-small: the plugin owns its language and files, while phux owns manifest
-validation, config composition, and the future runtime host surface.
+The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`, and
+`[[agents]]` entries. Agent declarations are static status records for
+consumer projections: `state` normalizes to `unknown`, `idle`, `working`, or
+`blocked`, and `attention` normalizes to `none`, `low`, `normal`, or `high`.
+Commands are argv arrays, not shell strings. This keeps phux core small: the
+plugin owns its language and files, while phux owns manifest validation,
+config composition, and the future runtime host surface.
 
 ---
 
