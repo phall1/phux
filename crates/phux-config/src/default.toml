@@ -254,6 +254,14 @@ prefix = "C-a"
 #   patterns = ["https://linear.app/*"]
 #   command = ["agent-ticket", "{url}"]
 
+# Federation satellites are remote phux servers a hub can route to. The registry
+# lands before routing so operators can declare stable names and endpoints.
+#
+# [[satellites]]
+# name = "devbox"
+# endpoint = "ssh://devbox"
+# enabled = true
+
 [status]
 # Left: the window/tab bar. The `windows` widget renders one tab per
 # window as `{index}:{name}`; by default the active tab is bold +

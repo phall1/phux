@@ -124,6 +124,7 @@ phux config plugins [--json]  # compatibility alias: inspect plugin manifests
 phux config agents [--json]   # inspect configured plugin agent states
 phux config run PLUGIN ACTION # execute a configured plugin action
 phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
+phux satellite <COMMAND>      # add/list/remove federation satellites
 phux --version                # print version
 phux help [COMMAND]
 ```
@@ -185,7 +186,7 @@ banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
 `run`, `new`, `config show`, `config plugins`, `config agents`, `config run`,
-and `plugin`. Their
+`plugin`, and `satellite`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -391,6 +392,11 @@ right  = ["session-name", { kind = "time", format = " %H:%M" }]
 manifest = "/path/to/plugin/phux-plugin.toml"
 enabled = true
 
+[[satellites]]
+name = "devbox"
+endpoint = "ssh://devbox"
+enabled = true
+
 [theme]
 accent = "#cdd6f4"
 section_header = "yellow"
@@ -548,6 +554,29 @@ result is a `schema_version = 1` document containing `plugin_id`, `action_id`,
 `command`, `cwd`, `outcome`, `exit_code`, `stdout`, `stderr`, and
 `duration_ms`. There is no implicit shell; a plugin opts into shell behavior by
 declaring `["sh", "-c", "..."]`.
+
+**Federation satellites** live under `[[satellites]]`. This is the
+hub-side registry for remote phux servers; routing is a later federation
+slice, but the registry name is already the host token that will appear in
+`TerminalId::Satellite.host`. `endpoint` is an opaque URI string so
+`ssh://devbox`, `quic://host:8788`, and `wss://host:8787` can share one
+control-plane shape; `enabled` defaults to `true`.
+
+```toml
+[[satellites]]
+name = "devbox"
+endpoint = "ssh://devbox"
+enabled = true
+```
+
+The lifecycle verbs edit `[[satellites]]` in `config.toml` without
+starting a server:
+
+```
+phux satellite add devbox ssh://devbox
+phux satellite list --json
+phux satellite remove devbox
+```
 
 ### 4.3 Reloading
 

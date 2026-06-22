@@ -13,6 +13,7 @@
 
 mod error;
 pub mod plugin;
+pub mod satellite;
 mod schema;
 
 // Wave 5 modules — each owned by its respective subtask:
@@ -22,6 +23,7 @@ pub mod scaffold; // phux-ijp (config init: commented projection of default.toml
 pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Widget is the trait)
 
 pub use error::{ConfigError, byte_offset_to_line_col};
+pub use satellite::SatelliteConfigEntry;
 pub use schema::{
     Action, Config, CwdInheritance, DefaultsCfg, ExperimentalCfg, HookEntry, KeybindingsCfg,
     ParamAction, SidebarCfg, SidebarPosition, StatusCfg, ThemeCfg, Widget, WidgetSpec, WindowSize,
