@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use phux_config::loader as config_loader;
 use phux_config::plugin::{self, PluginManifest, PluginManifestAgent};
@@ -72,6 +73,13 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
         }
         ConfigAction::Plugins { json } => run_config_plugins(*json),
         ConfigAction::Agents { json } => run_config_agents(*json),
+        ConfigAction::Run {
+            plugin,
+            action,
+            timeout,
+            cwd,
+            json,
+        } => run_config_action(plugin, action, *timeout, cwd.clone(), *json),
     }
 }
 
@@ -151,6 +159,62 @@ fn run_config_agents(json: bool) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn run_config_action(
+    plugin: &str,
+    action: &str,
+    timeout: Option<u64>,
+    cwd: Option<PathBuf>,
+    json: bool,
+) -> ExitCode {
+    let path = config_loader::config_path();
+    let timeout = timeout.map(Duration::from_secs);
+    let request = phux_plugin::PluginActionRequest {
+        plugin_id: plugin.to_owned(),
+        action_id: action.to_owned(),
+        timeout,
+        cwd,
+    };
+    let rt = match crate::commands::cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    match rt.block_on(phux_plugin::run_configured_action(&path, &request)) {
+        Ok(output) => print_action_output(&output, json),
+        Err(err) => {
+            eprintln!("phux: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_action_output(output: &phux_plugin::PluginActionOutput, json: bool) -> ExitCode {
+    if json {
+        return match serde_json::to_string_pretty(output) {
+            Ok(rendered) => {
+                println!("{rendered}");
+                action_exit_code(output)
+            }
+            Err(err) => {
+                eprintln!("phux: could not render plugin action JSON: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    print!("{}", output.stdout);
+    eprint!("{}", output.stderr);
+    action_exit_code(output)
+}
+
+fn action_exit_code(output: &phux_plugin::PluginActionOutput) -> ExitCode {
+    match output.outcome {
+        phux_plugin::PluginActionOutcome::Completed => output
+            .exit_code
+            .and_then(|code| u8::try_from(code).ok())
+            .map_or(ExitCode::FAILURE, ExitCode::from),
+        phux_plugin::PluginActionOutcome::TimedOut => ExitCode::from(125),
+    }
 }
 
 fn resolve_manifest_path(manifest: &Path, config_path: &Path) -> PathBuf {

@@ -8,12 +8,13 @@ last-reviewed: 2026-06-06
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
 `phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
-session and `plugin` to manage configured plugin manifests. This file is the
-agent contract. Per ADR-0030, the structured agent state — cells, command
-results, semantic events — is a local projection over the shared engine, and
-the CLI plus its versioned JSON schemas are what an agent depends on, not a
-structured wire tier. It documents each verb, its JSON shape, the
-read-act-wait loop, and the exit codes each verb mirrors.
+session, `plugin` to manage configured plugin manifests, and `config run` to
+invoke configured plugin actions. This file is the agent contract. Per
+ADR-0030, the structured agent state — cells, command results, semantic events
+— is a local projection over the shared engine, and the CLI plus its versioned
+JSON schemas are what an agent depends on, not a structured wire tier. It
+documents each verb, its JSON shape, the read-act-wait loop, and the exit codes
+each verb mirrors.
 
 ---
 
@@ -149,6 +150,11 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux config agents [--json]`** — project configured plugin
   `[[agents]]` declarations into a flat agent-state list. It never contacts a
   server. `--json` emits `ConfiguredAgentsJson` (§4.6).
+- **`phux config run PLUGIN ACTION [--timeout SECS] [--cwd PATH] [--json]`** —
+  execute one action declared by an enabled configured plugin manifest. The
+  command runs as argv from the plugin root; there is no implicit shell
+  expansion. `--json` emits `PluginActionOutput` (§4.7). Exit code mirrors the
+  action's process status; timeout exits `125`.
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
 (tracked as bead phux-99te). The shipped verbs are listed in
@@ -366,6 +372,31 @@ consumer-ready list. It is a config projection, not a live runtime detector:
 `state` is one of `unknown`, `idle`, `working`, or `blocked`. `attention` is
 one of `none`, `low`, `normal`, or `high`. Invalid manifests are hard failures
 and leave stdout empty on `--json`, preserving the script contract.
+
+### 4.7 `PluginActionOutput` — `phux config run --json`
+
+Defined in `crates/phux-plugin/src/lib.rs` (`schema_version = 1`). Shape:
+
+```json
+{
+  "schema_version": 1,
+  "plugin_id": "example.agent-tools",
+  "action_id": "summarize",
+  "command": ["python3", "summarize.py"],
+  "cwd": "/path/to/plugin",
+  "outcome": "completed",
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "",
+  "duration_ms": 42
+}
+```
+
+`outcome` is `"completed"` or `"timed_out"`. `exit_code` is `null` when the OS
+does not provide a process code or when phux kills the child on timeout. The
+runtime executes the manifest's argv directly from the plugin root, captures
+stdout/stderr lossily as UTF-8, inherits the phux process environment, and adds
+`PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and `PHUX_PLUGIN_ROOT`.
 
 ## 5. The read-act-wait loop and exit-code mirroring
 

@@ -40,4 +40,25 @@ pub(crate) enum ConfigAction {
         #[arg(long)]
         json: bool,
     },
+
+    /// Execute one action declared by a configured plugin manifest.
+    Run {
+        /// Configured plugin id.
+        plugin: String,
+
+        /// Plugin-local action id.
+        action: String,
+
+        /// Give up after this many seconds. Omit to wait indefinitely.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+
+        /// Override the action cwd. Relative paths resolve under plugin root.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Emit the structured action result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }

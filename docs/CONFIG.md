@@ -49,11 +49,12 @@ phux plugin unlink example.agent-tools --json
 
 phux config plugins --json  # legacy read path for configured manifests
 phux config agents --json   # project configured plugin agent states
+phux config run PLUGIN ACTION --json  # execute a configured plugin action
 ```
 
 ### Applying changes
 
-There is no live-reload verb today. To apply edits, restart the client — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start. Local config/plugin subcommands (`init`, `path`, `show`, `plugins`, `agents`, and `plugin ...`) read the file fresh on each invocation.
+There is no live-reload verb today. To apply edits to the interactive client, restart it — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start. Local config/plugin subcommands (`init`, `path`, `show`, `plugins`, `agents`, `plugin ...`, and plugin action `run`) read the file fresh on each invocation.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
 
@@ -143,11 +144,11 @@ Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are 
 
 ### Plugins
 
-> **Status:** Declarative registry only. `[[plugins]]` entries parse, `phux
-> plugin` manages their lifecycle, `phux plugin list --json` / `phux config
-> plugins --json` list manifests, and `phux config agents --json` projects
-> declared agent state for consumers. phux does not execute plugin actions,
-> event hooks, or panes yet.
+> **Status:** `[[plugins]]` entries parse, `phux plugin` manages their
+> lifecycle, `phux plugin list --json` / `phux config plugins --json` list
+> manifests, `phux config agents --json` projects declared agent state for
+> consumers, and `phux config run PLUGIN ACTION` executes action entries. Event
+> hooks and panes remain declarative until their host surfaces ship.
 
 Plugins are executable workflow packages declared by a `phux-plugin.toml`
 manifest. The config file composes local manifests:
@@ -192,13 +193,27 @@ phux plugin enable example.agent-tools
 phux plugin unlink example.agent-tools
 ```
 
+Run the action:
+
+```sh
+phux config run example.agent-tools summarize --json
+```
+
+Action commands execute as argv arrays from the plugin root. phux captures
+stdout/stderr, exit status, duration, and timeout outcome into a
+`schema_version = 1` JSON result when `--json` is set. There is no hidden shell
+expansion; a manifest only gets shell behavior when it explicitly declares an
+argv such as `["sh", "-c", "…"]`. The runtime inherits the phux process
+environment and adds `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and
+`PHUX_PLUGIN_ROOT`.
+
 The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`, and
 `[[agents]]` entries. Agent declarations are static status records for
 consumer projections: `state` normalizes to `unknown`, `idle`, `working`, or
 `blocked`, and `attention` normalizes to `none`, `low`, `normal`, or `high`.
 Commands are argv arrays, not shell strings. This keeps phux core small: the
 plugin owns its language and files, while phux owns manifest validation,
-config composition, and the future runtime host surface.
+config composition, and the runtime host surface.
 
 ---
 

@@ -207,10 +207,11 @@ prefix = "C-a"
 
 # Plugin packages are declarative manifests. phux can inspect them with
 # `phux plugin list --json`, validate/link/toggle/unlink them with
-# `phux plugin`, and project their agent-state declarations with
-# `phux config agents --json`. Execution, event hooks, and plugin panes are a
-# future runtime host. The manifest path may be absolute or relative to this
-# config file.
+# `phux plugin`, project their agent-state declarations with
+# `phux config agents --json`, and execute action entries with
+# `phux config run PLUGIN ACTION [--json]`. Event hooks and plugin panes are
+# declarative until their host surfaces ship. The manifest path may be absolute
+# or relative to this config file.
 #
 # [[plugins]]
 # manifest = "/path/to/plugin/phux-plugin.toml"

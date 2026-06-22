@@ -66,7 +66,7 @@ mod selector;
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n\n\
         CONFIG\n  \
-          config     Inspect and scaffold the config file\n\n\
+          config     Inspect config and run configured plugin actions\n\n\
         PLUGINS\n  \
           plugin     Manage local plugin manifests in config\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\

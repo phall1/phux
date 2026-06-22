@@ -23,9 +23,14 @@ path = "src/main.rs"
 # serde_json so the surface stays reimplementable in any language.
 phux-client.workspace = true
 phux-core.workspace = true
+phux-config.workspace = true
+phux-plugin.workspace = true
 phux-protocol = { workspace = true, features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true
 # Current-thread runtime: the client lib is async and its client-side
 # libghostty Terminal is !Send (ADR-0003). `io-std` for async stdin/stdout.
 tokio = { workspace = true, features = ["io-std"] }
+
+[dev-dependencies]
+tempfile.workspace = true
