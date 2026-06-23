@@ -155,7 +155,7 @@ pub(crate) fn catalog() -> Value {
         },
         {
             "name": "phux_watch",
-            "description": "Collect server-pushed events (command_started/finished, title_changed, bell, pane_spawned/closed, dirty, idle) for a pane or server-wide. Bounded one-shot: returns after max_events or timeout_secs.",
+            "description": "Collect server-pushed events (command_started/finished, title_changed, asked, bell, pane_spawned/closed, dirty, idle) for a pane or server-wide. Bounded one-shot: returns after max_events or timeout_secs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -419,6 +419,20 @@ fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
         }
         AgentEvent::Dirty => ("dirty", json!({})),
         AgentEvent::Idle => ("idle", json!({})),
+        AgentEvent::Asked {
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        } => (
+            "asked",
+            json!({
+                "id": id,
+                "question": question,
+                "suggestions": suggestions,
+                "elapsed_seconds": elapsed_seconds,
+            }),
+        ),
         AgentEvent::Unknown { tag, .. } => ("unknown", json!({ "tag": tag })),
         // `AgentEvent` is `#[non_exhaustive]`: a future minor may add a kind
         // this build predates. Surface it generically rather than failing.
@@ -834,6 +848,22 @@ mod tests {
         let tv = agent_event_json(&titled);
         assert_eq!(tv["event"], json!("title_changed"));
         assert_eq!(tv["title"], json!("vim"));
+
+        let asked = WatchEvent {
+            terminal: None,
+            event: AgentEvent::Asked {
+                id: "q1".to_owned(),
+                question: "Deploy to prod?".to_owned(),
+                suggestions: vec!["Yes".to_owned(), "No".to_owned()],
+                elapsed_seconds: None,
+            },
+        };
+        let av = agent_event_json(&asked);
+        assert_eq!(av["event"], json!("asked"));
+        assert_eq!(av["id"], json!("q1"));
+        assert_eq!(av["question"], json!("Deploy to prod?"));
+        assert_eq!(av["suggestions"], json!(["Yes", "No"]));
+        assert!(av["elapsed_seconds"].is_null());
     }
 
     /// `scrollback`/`cells` arg plumbing: the tri-state scrollback and the

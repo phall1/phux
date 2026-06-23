@@ -65,20 +65,7 @@ pub(crate) fn run_watch(session: Option<&str>, json: bool, socket: Option<PathBu
 pub(crate) fn print_watch_event(ev: &WatchEvent, json: bool) {
     // A stable, scriptable name for each event kind (matches the spec
     // taxonomy in §7.5.1).
-    let kind = match &ev.event {
-        AgentEvent::CommandStarted => "command_started",
-        AgentEvent::CommandFinished { .. } => "command_finished",
-        AgentEvent::TitleChanged { .. } => "title_changed",
-        AgentEvent::Bell => "bell",
-        AgentEvent::PaneSpawned => "pane_spawned",
-        AgentEvent::PaneClosed { .. } => "pane_closed",
-        AgentEvent::Dirty => "dirty",
-        AgentEvent::Idle => "idle",
-        // `AgentEvent::Unknown` (a tag this client predates, preserved by
-        // the decoder) and any future `#[non_exhaustive]` variant both
-        // render generically rather than failing the stream.
-        _ => "unknown",
-    };
+    let kind = watch_event_kind(&ev.event);
     let terminal = ev.terminal.as_ref().map(format_wire_terminal_id);
 
     if json {
@@ -96,10 +83,29 @@ pub(crate) fn print_watch_event(ev: &WatchEvent, json: bool) {
             AgentEvent::PaneClosed { exit_status } => {
                 exit_status.map_or_else(String::new, |c| format!(" exit={c}"))
             }
+            AgentEvent::Asked { question, .. } => format!(" {question:?}"),
             AgentEvent::Unknown { tag, .. } => format!(" tag={tag}"),
             _ => String::new(),
         };
         println!("{scope}\t{kind}{detail}");
+    }
+}
+
+const fn watch_event_kind(event: &AgentEvent) -> &'static str {
+    match event {
+        AgentEvent::CommandStarted => "command_started",
+        AgentEvent::CommandFinished { .. } => "command_finished",
+        AgentEvent::TitleChanged { .. } => "title_changed",
+        AgentEvent::Bell => "bell",
+        AgentEvent::PaneSpawned => "pane_spawned",
+        AgentEvent::PaneClosed { .. } => "pane_closed",
+        AgentEvent::Dirty => "dirty",
+        AgentEvent::Idle => "idle",
+        AgentEvent::Asked { .. } => "asked",
+        // `AgentEvent::Unknown` (a tag this client predates, preserved by
+        // the decoder) and any future `#[non_exhaustive]` variant both
+        // render generically rather than failing the stream.
+        _ => "unknown",
     }
 }
 
@@ -134,6 +140,32 @@ pub(crate) fn watch_event_json(
                 exit_status.map_or(serde_json::Value::Null, serde_json::Value::from),
             );
         }
+        AgentEvent::Asked {
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        } => {
+            obj.insert("id".to_owned(), serde_json::Value::from(id.clone()));
+            obj.insert(
+                "question".to_owned(),
+                serde_json::Value::from(question.clone()),
+            );
+            obj.insert(
+                "suggestions".to_owned(),
+                serde_json::Value::Array(
+                    suggestions
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::from)
+                        .collect(),
+                ),
+            );
+            obj.insert(
+                "elapsed_seconds".to_owned(),
+                elapsed_seconds.map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+        }
         AgentEvent::Unknown { tag, .. } => {
             obj.insert("tag".to_owned(), serde_json::Value::from(*tag));
         }
@@ -159,7 +191,7 @@ mod tests {
     use phux_client::watch::WatchEvent;
     use phux_protocol::wire::frame::AgentEvent;
 
-    use super::watch_event_json;
+    use super::{watch_event_json, watch_event_kind};
 
     /// Build the JSON line for an event and parse it back, asserting the
     /// shape the `phux watch --json` contract promises: one object with a
@@ -170,19 +202,7 @@ mod tests {
             terminal: None,
             event,
         };
-        // `kind` is computed the same way `print_watch_event` does; mirror
-        // the mapping here so the test exercises the real names.
-        let kind = match &ev.event {
-            AgentEvent::CommandStarted => "command_started",
-            AgentEvent::CommandFinished { .. } => "command_finished",
-            AgentEvent::TitleChanged { .. } => "title_changed",
-            AgentEvent::Bell => "bell",
-            AgentEvent::PaneSpawned => "pane_spawned",
-            AgentEvent::PaneClosed { .. } => "pane_closed",
-            AgentEvent::Dirty => "dirty",
-            AgentEvent::Idle => "idle",
-            _ => "unknown",
-        };
+        let kind = watch_event_kind(&ev.event);
         let line = watch_event_json(&ev, kind, terminal).unwrap();
         // One line, no embedded newline — `phux watch --json` is
         // one-object-per-line.
@@ -238,5 +258,24 @@ mod tests {
         let v = json_of(AgentEvent::CommandFinished { exit_code: None }, None);
         assert_eq!(v["event"], "command_finished");
         assert!(v["exit_code"].is_null());
+    }
+
+    #[test]
+    fn watch_json_asked_carries_question() {
+        let v = json_of(
+            AgentEvent::Asked {
+                id: "q1".to_owned(),
+                question: "Deploy to prod?".to_owned(),
+                suggestions: vec!["Yes".to_owned(), "No".to_owned(), "Hold".to_owned()],
+                elapsed_seconds: None,
+            },
+            Some("@9"),
+        );
+        assert_eq!(v["event"], "asked");
+        assert_eq!(v["terminal"], "@9");
+        assert_eq!(v["id"], "q1");
+        assert_eq!(v["question"], "Deploy to prod?");
+        assert_eq!(v["suggestions"], serde_json::json!(["Yes", "No", "Hold"]));
+        assert!(v["elapsed_seconds"].is_null());
     }
 }

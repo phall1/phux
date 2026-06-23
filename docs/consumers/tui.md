@@ -443,15 +443,18 @@ or session comes into being:
   consumers and config can target a stable name.
 
 **Experimental knobs** live under `[experimental]`. Today the only key
-is `predictive-echo` (boolean, default `true`), which engages Mosh-class
-predictive local echo in `phux attach` — a client-side guess for the
-next keystroke, rendered with an underline, that is reconciled when the
-server's authoritative output arrives. The prediction set is the
-conservative mosh-proven subset (single-grapheme inserts, end-of-line
-backspace, Ctrl-U at a known prompt boundary, Enter, left/right arrows
-over known cells); a wrong guess is stomped by the next authoritative
-frame. Set it to `false` to keep echo strictly authoritative; anything
-under `[experimental]` may be renamed or removed without a SemVer bump.
+is `predictive-echo` (boolean, default `false`), which opts `phux attach`
+into Mosh-class predictive local echo — a client-side guess for the next
+keystroke, rendered with an underline, that is reconciled when the
+server's authoritative output arrives. The TOML key is parsed by
+`phux-config` and wired into the attach driver as `PredictiveConfig`.
+The prediction set is the conservative mosh-proven subset
+(single-grapheme inserts, end-of-line backspace, Ctrl-U at a known prompt
+boundary, Enter, left/right arrows over known cells); a wrong guess is
+stomped by the next authoritative frame, and repeated contradictions
+trigger adaptive auto-backoff. Leave it unset or set it to `false` to keep
+echo strictly authoritative; set it to `true` to opt in. Anything under
+`[experimental]` may be renamed or removed without a SemVer bump.
 
 ```toml
 [experimental]
@@ -604,20 +607,25 @@ Recognized slots:
 
 | Slot             | Default     | Used for                                  |
 |------------------|-------------|-------------------------------------------|
-| `accent`         | cyan        | Modal titles (help / prompt border title) |
-| `chord`          | green       | Keybinding chords in the help table       |
+| `accent`         | `#bef264`   | Modal titles (help / prompt border title) |
+| `chord`          | `#86efac`   | Keybinding chords in the help table       |
 | `action`         | terminal fg | Action labels                             |
 | `dim`            | dark gray   | Footer hints, the "no bindings" notice    |
-| `border`         | terminal fg | Modal borders                             |
-| `title`          | cyan        | Titles that diverge from `accent`         |
+| `border`         | `#52525b`   | Modal borders                             |
+| `title`          | `#bef264`   | Titles that diverge from `accent`         |
 | `section_header` | yellow      | Section headings inside the help modal    |
 | `error`          | red         | Error / alarm text                        |
+| `surface`        | terminal bg | Modal interior background                 |
+| `shadow`         | `#1c1c26`   | Modal drop shadow                         |
+| `selection_fg`   | white       | Copy-mode status strip foreground         |
+| `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
 
 ```toml
 [theme]
-accent = "magenta"
-section_header = "#cdd6f4"
-chord = "12"
+accent = "#bef264"
+chord = "#86efac"
+border = "#52525b"
+shadow = "#1c1c26"
 ```
 
 ---
