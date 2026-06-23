@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 
-use libghostty_vt::terminal::ScrollViewport;
+use libghostty_vt::terminal::{Mode, ScrollViewport};
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
@@ -253,11 +253,40 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 if was_active && !ctx.overlays.is_active() {
                     layout_changed = true;
                 }
-            } else if let InputEvent::Mouse(ref mouse) = ev
-                && let OverlayOutcome::ScrollViewport(delta) = ctx.overlays.handle_mouse(mouse)
-                && scroll_focused_pane_viewport(panes, focused_pane.as_ref(), delta)
-            {
-                layout_changed = true;
+            } else if let InputEvent::Mouse(ref mouse) = ev {
+                match ctx.overlays.handle_mouse(mouse) {
+                    OverlayOutcome::Copy(req) => {
+                        if let Some(fid) = focused_pane.as_ref()
+                            && let Some(slot) = panes.get(fid)
+                        {
+                            super::copy::copy_to_host_clipboard(out, &slot.terminal, req)?;
+                        }
+                        layout_changed = true;
+                    }
+                    OverlayOutcome::ScrollViewport(delta) => {
+                        if scroll_focused_pane_viewport(panes, focused_pane.as_ref(), delta) {
+                            layout_changed = true;
+                        }
+                    }
+                    OverlayOutcome::RunAction(resolved) => {
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        if apply_action_effects(
+                            effects,
+                            out,
+                            conn,
+                            ctx,
+                            focused_pane,
+                            detach_pending,
+                            predict,
+                            panes,
+                        )
+                        .await?
+                        {
+                            layout_changed = true;
+                        }
+                    }
+                    OverlayOutcome::None => {}
+                }
             }
             continue;
         }
@@ -390,6 +419,14 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     let mut routed = *mouse;
                     routed.x = pane_x;
                     routed.y = pane_y;
+                    if let Some(delta) = wheel_scroll_delta(&routed)
+                        && let Some(slot) = panes.get_mut(&target)
+                        && !terminal_wants_mouse_tracking(slot)
+                    {
+                        slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+                        layout_changed = true;
+                        continue;
+                    }
                     conn.send(&FrameKind::InputMouse {
                         terminal_id: target,
                         event: routed,
@@ -496,6 +533,28 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     // the status-bar painter and session name needed for a proper full
     // frame. We never paint from here.
     Ok(layout_changed)
+}
+
+fn wheel_scroll_delta(mouse: &MouseEvent) -> Option<isize> {
+    if mouse.action != MouseAction::Press {
+        return None;
+    }
+    match mouse.button {
+        MouseButton::Four => Some(-3),
+        MouseButton::Five => Some(3),
+        _ => None,
+    }
+}
+
+fn terminal_wants_mouse_tracking(slot: &PaneSlot) -> bool {
+    [
+        Mode::X10_MOUSE,
+        Mode::NORMAL_MOUSE,
+        Mode::BUTTON_MOUSE,
+        Mode::ANY_MOUSE,
+    ]
+    .into_iter()
+    .any(|mode| slot.terminal.mode(mode).unwrap_or(false))
 }
 
 fn scroll_focused_pane_viewport(
@@ -1266,10 +1325,9 @@ fn run_action(
             ctx.overlays.push(Box::new(overlay));
         }
         "copy-mode" => {
-            // phux-wave-a-copy-mode: enter selection/copy mode. Arrow keys
-            // adjust selection, Enter copies to clipboard via SELECTION_FORMAT_REQUEST.
-            // Cursor starts at current pane position (0,0 default for now).
-            // TODO(phall1): wire current cursor position from focused pane.
+            // phux-wave-a-copy-mode: enter selection/copy mode. Arrow keys move
+            // the cursor without extending the selection unless Shift is held;
+            // mouse drag can select and copy in one gesture.
             let pane_rect = focused_pane_rect(ctx, focused);
             let overlay = Box::new(crate::render::overlay::CopyModeOverlay::new(
                 0,

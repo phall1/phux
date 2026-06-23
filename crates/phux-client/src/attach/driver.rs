@@ -2019,11 +2019,13 @@ async fn main_loop<W: super::RenderSink>(
                         .await?;
                     }
                 }
-                // phux-5ke.4: SIGWINCH while overlay is up: redraw the
-                // overlay at the new size instead of repainting panes
-                // (which would scribble over the modal). On dismiss the
-                // dispatch path triggers a full-frame repaint and the
-                // user sees the resized layout.
+                // phux-a7fz: do not repaint stale pre-resize mirrors into the
+                // new viewport. The server resize path sends an authoritative
+                // resync snapshot; painting the old grid first races with the
+                // shell's prompt redraw and leaves duplicated right prompts on
+                // resize-heavy shells. Clear immediately, then let the snapshot
+                // repopulate the viewport at the new dimensions.
+                let _ = out.write_all(b"\x1b[2J\x1b[H");
                 if overlays.is_active() {
                     paint_active_overlay(
                         out,
@@ -2038,18 +2040,8 @@ async fn main_loop<W: super::RenderSink>(
                         &session_name,
                         &theme,
                     );
-                } else if let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref() {
-                    paint_full_frame(
-                        out,
-                        ls,
-                        &mut panes,
-                        focused_pane.as_ref(),
-                        viewport_dims,
-                        status_bar.as_mut(),
-                        sidebar,
-                        Some(&mut sidebar_painter),
-                        &session_name,
-                    );
+                } else {
+                    let _ = out.flush();
                 }
             }
 
