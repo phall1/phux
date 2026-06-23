@@ -153,13 +153,16 @@ watch:
 docs-check:
     bash scripts/check-docs.sh
 
+formula-check:
+    bash scripts/check-formula.sh
+
 # Everything CI must pass.
 #
 # The ratatui-confinement boundary (ADR-0020) used to be a grep guard
 # (`check-ratatui-boundary`); phux-0fv replaced it with a crate split, so
 # `cargo build`/`lint` now enforce it structurally — `phux-client-core` has
 # no `ratatui` dependency.
-ci: fmt-check lint docs-check test deny doc
+ci: fmt-check lint docs-check formula-check test deny doc
     @echo "ok"
 
 # Print the toolchain we are pinned to.
