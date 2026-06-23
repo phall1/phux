@@ -17,6 +17,7 @@ use super::{
     AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
     MetadataStore, Outbound, RenameOutcome, ServerState,
 };
+use crate::agent_asked::{AskedPayload, AskedSource, AskedTransition};
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
 
@@ -59,6 +60,7 @@ impl ServerState {
             metadata: MetadataStore::default(),
             client_layers: HashMap::new(),
             event_subscriptions: HashMap::new(),
+            agent_asked: crate::agent_asked::AskedDetector::default(),
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
@@ -676,6 +678,20 @@ impl ServerState {
             .collect()
     }
 
+    pub(crate) fn report_agent_asked(
+        &mut self,
+        terminal: TerminalId,
+        source: AskedSource,
+        payload: AskedPayload,
+    ) -> AskedTransition {
+        self.agent_asked.report(terminal, source, payload)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_agent_asked(&self, terminal: TerminalId) -> Option<&AskedPayload> {
+        self.agent_asked.current(terminal)
+    }
+
     /// Whether any client has ever attached (arms the phux-60s self-exit).
     /// See the `has_served_client` field documentation for the rationale.
     #[must_use]
@@ -744,6 +760,7 @@ impl ServerState {
             token.cancel();
         }
         self.terminal_subscribers.remove(&pane);
+        self.agent_asked.clear_terminal(pane);
         if let Some(wire) = self.terminal_wire_forward.remove(&pane) {
             self.terminal_wire_reverse.remove(&wire);
             self.metadata.forget_terminal(&wire);

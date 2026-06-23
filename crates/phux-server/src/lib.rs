@@ -8,6 +8,7 @@
 
 #![deny(missing_docs)]
 
+pub(crate) mod agent_asked;
 pub mod auth;
 pub mod cwd_query;
 pub mod downsample;

@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::agent_asked::AskedDetector;
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
 use phux_core::ids::{SessionId, TerminalId, WindowId};
@@ -180,6 +181,7 @@ pub struct ServerState {
     /// event fanout must not depend on an `attached` entry that a pure
     /// watcher never creates.
     event_subscriptions: HashMap<ClientId, EventSubscription>,
+    agent_asked: AskedDetector,
     /// Whether `AttachTarget::CreateIfMissing` (phux-k61.3) should spawn
     /// a real PTY-backed actor for the newly created session's seed
     /// pane. Mirrors [`crate::runtime::ServerConfig::seed_with_pty`] so
@@ -735,6 +737,27 @@ mod tests {
             s.terminal_from_wire(&wire).is_none(),
             "wire id retired on reap",
         );
+    }
+
+    #[test]
+    fn reap_clears_agent_asked_state() {
+        let mut s = ServerState::new();
+        let (_sid, _wid, pid) = s.seed_session("default");
+        s.report_agent_asked(
+            pid,
+            crate::agent_asked::AskedSource::Hook,
+            crate::agent_asked::AskedPayload {
+                id: "hook".to_owned(),
+                question: "Approve?".to_owned(),
+                suggestions: Vec::new(),
+                elapsed_seconds: None,
+            },
+        );
+        assert!(s.current_agent_asked(pid).is_some());
+
+        s.reap_terminal(pid);
+
+        assert!(s.current_agent_asked(pid).is_none());
     }
 
     #[test]

@@ -3,14 +3,15 @@
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    AgentEvent, Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind,
-    InputMode, StateScope, TerminalSignal, ViewportInfo,
+    Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind, InputMode,
+    StateScope, TerminalSignal, ViewportInfo,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{AttachPrepared, spawn_pane_event_drain, spawn_terminal_exit_watcher};
+use crate::agent_asked::{AskedPayload, AskedSource};
 use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
     ConsumerAckRequest, ControlRequest, ResizeRequest, ScreenRequest, TerminalActor, TerminalHandle,
@@ -1250,28 +1251,28 @@ pub(crate) fn handle_report_asked(
             message: format!("REPORT_ASKED on satellite route unsupported: {terminal_id:?}"),
         };
     }
-    if state.with(|s| s.terminal_from_wire(terminal_id)).is_none() {
+    let Some(terminal) = state.with(|s| s.terminal_from_wire(terminal_id)) else {
         return CommandResult::Error {
             code: ErrorCode::TerminalNotFound,
             message: format!("no such terminal: {terminal_id:?}"),
         };
-    }
+    };
     if let Some(message) = validate_asked_payload(&id, &question, &suggestions) {
         return CommandResult::Error {
             code: ErrorCode::InvalidCommand,
             message,
         };
     }
-    super::client::broadcast_event(
-        state,
-        Some(terminal_id),
-        &AgentEvent::Asked {
-            id,
-            question,
-            suggestions,
-            elapsed_seconds,
-        },
-    );
+    let payload = AskedPayload {
+        id,
+        question,
+        suggestions,
+        elapsed_seconds,
+    };
+    let transition = state.with_mut(|s| s.report_agent_asked(terminal, AskedSource::Hook, payload));
+    if let Some(payload) = transition.emit_payload() {
+        super::client::broadcast_event(state, Some(terminal_id), &payload.into_event());
+    }
     CommandResult::Ok
 }
 
