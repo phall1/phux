@@ -6,22 +6,14 @@ last-reviewed: 2026-06-17
 
 <div align="center">
 
-<!-- LOGO: drop a wordmark/logo asset here once one exists, e.g.
-     <img src="docs/assets/logo.svg" alt="phux" width="320"> -->
+<img src="docs/assets/logo.svg" alt="phux" width="420">
 
 # phux
 
 **the tmux job, done — a terminal is an object on a wire**
 
-<!-- BADGES: only badges that resolve today live here. The rest are
-     placeholders until the asset/tag exists. -->
 [![CI](https://github.com/phall1/phux/actions/workflows/ci.yml/badge.svg)](https://github.com/phall1/phux/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-<!-- TODO badges (do not enable until they resolve):
-     - crates.io: needs the first `phux-protocol` publish
-     - version/release: needs a stable badge source for GitHub Releases
-     - Homebrew: needs the Formula published in the tap
--->
 
 [Concepts](./docs/CONCEPTS.md) ·
 [Quickstart](./docs/QUICKSTART.md) ·
@@ -33,10 +25,7 @@ last-reviewed: 2026-06-17
 
 </div>
 
-<!-- DEMO: a ~10s asciinema cast / GIF goes here. Show kitty graphics +
-     truecolor surviving a detach/reattach, then a `phux run` / `phux watch`
-     line so the agent angle lands in the same breath. Recipe: docs/demo.md.
-     Replace this comment with the image once docs/assets/demo.gif exists. -->
+![phux demo: a live terminal session reattached and then driven headlessly by agent-style commands](docs/assets/demo.gif)
 
 phux is a terminal multiplexer. You attach, split panes, detach, and come back
 later to find your shells still running — the tmux job, done. The difference is

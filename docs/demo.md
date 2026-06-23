@@ -6,11 +6,10 @@ last-reviewed: 2026-06-10
 
 # Recording the README demo
 
-**TL;DR.** The README has a demo-shaped hole at the top and it's the most
-important pixel on the page. This is the storyboard for filling it: two short
+**TL;DR.** The README demo is the first moving proof on the page: two short
 beats — *modern terminal content survives a detach/reattach*, then *the same
-thing driven headless* — recorded as a GIF and dropped at
-`docs/assets/demo.gif`. Use a real screen-recorder for the first beat
+thing driven headless* — recorded as a GIF at `docs/assets/demo.gif`. Use a
+real screen-recorder for future full-fidelity takes of the first beat
 (asciinema players don't render kitty graphics, which is the whole point);
 asciinema is fine for the second.
 
@@ -81,13 +80,6 @@ content is painted at the size you are recording at.
 
 ## Wiring it in
 
-Drop the finished file at `docs/assets/demo.gif`, then replace the
-`<!-- DEMO GOES HERE … -->` comment at the top of the root `README.md` with a
-standard markdown image: `!` then `[alt text]` then `(docs/assets/demo.gif)`,
-where the alt text is something like *phux: modern terminal content surviving a
-detach/reattach, then driven headless*.
-
-(The literal image syntax isn't shown inline here on purpose — the docs CI
-resolves every relative link, and the GIF doesn't exist until you record it.)
-
-That's the page going from half-built to built.
+The README already points at `docs/assets/demo.gif`. When replacing the asset
+with a higher-fidelity take, keep the same path and re-run `bash
+scripts/check-docs.sh` plus a real attach smoke.
