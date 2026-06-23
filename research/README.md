@@ -22,6 +22,10 @@ behavior, follow the cross-link to the ADR or to the relevant
   capability survey of `libghostty-vt`'s `RenderState` read API and
   dirty-tracking model; the renderer-side contract phux drives in both
   client and server.
+- [`2026-06-23-agent-asked-capture-harness.md`](./2026-06-23-agent-asked-capture-harness.md) —
+  clean-room harness notes for collecting empirical agent-asked evidence
+  from locally installed agent CLIs through phux-owned watch and snapshot
+  surfaces.
 
 ## archive/
 
