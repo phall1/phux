@@ -116,9 +116,11 @@
 //!
 //! Predictive echo is gated behind [`PredictiveConfig::enabled`], wired
 //! through `phux_client::attach::run_with_predict`. The default is `false`
-//! until the feature has miles on it. Wiring the TOML `[experimental]
-//! predictive-echo = true` knob into `phux-config` is deferred to a
-//! follow-up — the Rust-level toggle is what the test plan exercises.
+//! until the feature has miles on it. The TOML `[experimental]
+//! predictive-echo = true` knob is parsed by `phux-config` and converted
+//! into `PredictiveConfig { enabled: true, .. }` by the attach command.
+//! Repeated contradictions trigger adaptive auto-backoff before clean
+//! confirmations re-arm prediction.
 //!
 //! # Reconciliation policy
 //!

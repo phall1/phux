@@ -122,8 +122,9 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   is a JSON object `{ "event": <name>, "terminal"?: "@id", ... }` and stdout
   stays pure JSON (diagnostics on stderr); otherwise a compact tab-separated
   human line. Event names: `title_changed` (carries `title`), `bell`, `dirty`,
-  `idle`, `pane_spawned`, `pane_closed` (carries `exit_status`), plus the
-  deferred `command_started` / `command_finished` (carries a nullable
+  `idle`, `pane_spawned`, `pane_closed` (carries `exit_status`), `asked`
+  (carries `id`, `question`, `suggestions`, and nullable `elapsed_seconds`),
+  plus the deferred `command_started` / `command_finished` (carries a nullable
   `exit_code` — see the gap note below). `watch` cuts `wait`'s poll-floor
   latency: a `watch` consumer wakes the instant an event fires rather than on
   the next poll tick. It is additive — `wait` still works without it, and a

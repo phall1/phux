@@ -67,6 +67,7 @@ amends / extends) are hand-curated from each ADR's body.
 | [0033](./0033-input-authority-and-process-signals.md) | Input authority leases and process signals ("take the wheel + kill") | Accepted |
 | [0034](./0034-kitty-graphics-image-passthrough.md) | Kitty graphics / image passthrough through the cell renderer | Proposed |
 | [0035](./0035-agent-asked-event.md) | Agent-asked event: a pending human-answerable question on the wire | Accepted |
+| [0036](./0036-agent-asked-detection.md) | Agent-asked detection sources | Accepted |
 
 ## When to write an ADR
 

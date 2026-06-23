@@ -234,7 +234,7 @@ reaped) is reported as success.
 
 The push half of the agent surface — tagged lifecycle/activity events
 (`command_started`/`finished`, `title_changed`, `bell`,
-`pane_spawned`/`closed`, `dirty`, `idle`) — exposed as a **bounded
+`pane_spawned`/`closed`, `dirty`, `idle`, `asked`) — exposed as a **bounded
 one-shot** tool. MCP `tools/call` is request/response while the underlying
 stream is long-lived, so the tool collects events until a bound is reached,
 then returns the batch; an MCP host that wants a truly live stream still
@@ -248,9 +248,10 @@ shells out to `phux watch --json`.
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Result: `{ events: [ { event, terminal?, ...payload } ], count: N }`, the
-same per-event JSON shape as `phux watch --json`. It is an accelerator of
-`phux_wait`'s poll floor, not a replacement: `phux_wait` is still the way to
-block on a specific screen condition.
+same per-event JSON shape as `phux watch --json`, including `asked` payloads
+with `id`, `question`, `suggestions`, and nullable `elapsed_seconds`. It is an
+accelerator of `phux_wait`'s poll floor, not a replacement: `phux_wait` is
+still the way to block on a specific screen condition.
 
 ### 3.9 `phux_plugin_action`
 

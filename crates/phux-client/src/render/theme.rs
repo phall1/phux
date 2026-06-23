@@ -38,8 +38,7 @@
 //! `slot -> color-string` map ([`phux_config::ThemeCfg`]). Recognized
 //! slot keys override the default; an unknown key is ignored and an
 //! unparseable color string falls back to the slot's default (both
-//! logged at `warn`). The default theme deliberately reproduces the
-//! colors the overlays shipped with so existing snapshots don't churn.
+//! logged at `warn`).
 
 use std::str::FromStr;
 
@@ -90,19 +89,16 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// The built-in theme. Values reproduce the colors the chrome and
-    /// overlays shipped with before this module existed, so migrating a
-    /// call site to a slot is a visual no-op.
     fn default() -> Self {
         Self {
-            accent: Color::Cyan,
-            chord: Color::Green,
+            accent: Color::Rgb(190, 242, 100),
+            chord: Color::Rgb(134, 239, 172),
             // `Reset` = terminal default foreground; the action column
             // was unstyled (plain `Span::raw`) before this module.
             action: Color::Reset,
             dim: Color::DarkGray,
-            border: Color::Reset,
-            title: Color::Cyan,
+            border: Color::Rgb(82, 82, 91),
+            title: Color::Rgb(190, 242, 100),
             section_header: Color::Yellow,
             error: Color::Red,
             // Reset = no fill (inherit terminal bg); opt-in via config.
@@ -194,12 +190,12 @@ mod tests {
     #[test]
     fn default_slots_match_shipped_colors() {
         let t = Theme::default();
-        assert_eq!(t.accent, Color::Cyan);
-        assert_eq!(t.chord, Color::Green);
+        assert_eq!(t.accent, Color::Rgb(190, 242, 100));
+        assert_eq!(t.chord, Color::Rgb(134, 239, 172));
         assert_eq!(t.action, Color::Reset);
         assert_eq!(t.dim, Color::DarkGray);
-        assert_eq!(t.border, Color::Reset);
-        assert_eq!(t.title, Color::Cyan);
+        assert_eq!(t.border, Color::Rgb(82, 82, 91));
+        assert_eq!(t.title, Color::Rgb(190, 242, 100));
         assert_eq!(t.section_header, Color::Yellow);
         assert_eq!(t.error, Color::Red);
         // Design tokens added for floating-modal depth + selection chrome.
@@ -222,7 +218,7 @@ mod tests {
         assert_eq!(t.selection_bg, Color::Blue);
         assert_eq!(t.selection_fg, Color::Indexed(15));
         // Untouched slots keep their defaults.
-        assert_eq!(t.accent, Color::Cyan);
+        assert_eq!(t.accent, Color::Rgb(190, 242, 100));
     }
 
     #[test]
@@ -236,7 +232,7 @@ mod tests {
         let t = Theme::from_cfg(&cfg(&[("accent", "magenta")]));
         assert_eq!(t.accent, Color::Magenta);
         // Untouched slots keep their default.
-        assert_eq!(t.chord, Color::Green);
+        assert_eq!(t.chord, Color::Rgb(134, 239, 172));
     }
 
     #[test]
