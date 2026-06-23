@@ -1748,6 +1748,25 @@ fn command_signal_terminal_round_trips() {
 }
 
 #[test]
+fn command_report_asked_round_trips() {
+    let frame = FrameKind::Command {
+        request_id: 42,
+        command: Command::ReportAsked {
+            terminal_id: TerminalId::local(7),
+            id: "q1".to_owned(),
+            question: "Deploy to prod?".to_owned(),
+            suggestions: vec!["Yes".to_owned(), "No".to_owned(), "Hold".to_owned()],
+            elapsed_seconds: Some(9),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn command_get_screen_round_trips() {
     // GET_SCREEN (tag 0x07): TerminalId + a trailing optional<u32>
     // `request_scrollback` (phux-o1v) + a trailing bool `cells` (phux-8yl).

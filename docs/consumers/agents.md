@@ -7,9 +7,9 @@ last-reviewed: 2026-06-06
 # The phux agent CLI
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
-`phux ls / snapshot / send-keys / run / wait / watch`, plus `new` to create a
-session, `plugin` to manage configured plugin manifests, `config run` to
-invoke configured plugin actions, `workspace` to map git worktrees before
+`phux ls / snapshot / send-keys / run / wait / watch / ask`, plus `new` to
+create a session, `plugin` to manage configured plugin manifests, `config run`
+to invoke configured plugin actions, `workspace` to map git worktrees before
 spawning agent panes, and `satellite` to manage hub-side federation entries.
 This file is the agent contract. Per ADR-0030, the structured agent state —
 cells, command results, semantic events — is a local projection over the shared
@@ -135,6 +135,17 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   synthesizer); `command_finished.exit_code` is likewise always null until that
   shell-integration plumbing lands. The mechanism and the
   lifecycle/title/bell/dirty/idle events ship today.
+- **`phux ask TARGET [--id ID] [--suggest TEXT...] [--elapsed-seconds SECS]
+  [--json] [--socket P] QUESTION`** — report that an agent in a pane is blocked
+  on a human-answerable question. This is the opt-in hook ingress from
+  ADR-0036: configured plugin actions or first-party integrations call it
+  instead of writing a `phux-ask` title sentinel themselves. It resolves
+  `TARGET` client-side, does not attach or resize, and asks the server to emit
+  the normal `asked` event on the existing watch stream. `--json` echoes the
+  reported `{ event, terminal, id, question, suggestions, elapsed_seconds }`
+  object after the server accepts the payload. Empty questions, empty
+  suggestions, excessive suggestion counts, and unknown panes fail without
+  emitting an event.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a new session. Without `--json` it creates and attaches: an explicit
   `-s NAME` that already exists is an error (like tmux's duplicate-session
@@ -193,7 +204,7 @@ then the `PHUX_SOCKET` environment variable, then the daemon default:
 ## 3. Targeting: the selector grammar
 
 One grammar, every targeted command — `kill`, `snapshot`, `wait`, `send-keys`,
-and `run` all share `TARGET`. It is resolved client-side against a server
+`run`, and `ask` all share `TARGET`. It is resolved client-side against a server
 snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
 never parses a selector.
 
@@ -205,7 +216,7 @@ A selector that names several panes (a whole session or window) narrows to a
 single pane: the focused pane when it is among the matches, else the first in
 snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
 Optionality differs per verb: `snapshot` and `wait` default `TARGET` to the
-last-focused session; `send-keys` and `run` require it.
+last-focused session; `send-keys`, `run`, and `ask` require it.
 
 ## 4. JSON contracts (the per-verb machine shapes)
 
@@ -507,6 +518,7 @@ Exit codes are not uniform across verbs:
 | `ls` | `0` ok; `1` no server / unexpected result. |
 | `snapshot` | `0` ok; `1` failure (no server, serialize error, resolve miss). |
 | `send-keys` | `0` ok; `1` failure (no server / refused / miss). |
+| `ask` | `0` accepted; `1` no server, unknown pane, or invalid ask payload. |
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |

@@ -35,7 +35,9 @@ mod common;
 
 use std::time::Duration;
 
-use phux_protocol::wire::frame::{AgentEvent, FrameKind, TYPE_ATTACHED};
+use phux_protocol::wire::frame::{
+    AgentEvent, Command, CommandResult, ErrorCode, FrameKind, TYPE_ATTACHED,
+};
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -89,6 +91,50 @@ async fn collect_until_asked(stream: &mut UnixStream, deadline: Duration) -> Opt
             return Some(event);
         }
     }
+}
+
+async fn recv_command_result(stream: &mut UnixStream, request_id: u32) -> CommandResult {
+    loop {
+        let (_type_byte, frame) = recv_typed(stream).await;
+        if let FrameKind::CommandResult {
+            request_id: got,
+            result,
+        } = frame
+            && got == request_id
+        {
+            return result;
+        }
+    }
+}
+
+async fn collect_result_and_asked(
+    stream: &mut UnixStream,
+    request_id: u32,
+    deadline: Duration,
+) -> (Option<CommandResult>, Option<AgentEvent>) {
+    let end = tokio::time::Instant::now() + deadline;
+    let mut result = None;
+    let mut asked = None;
+    while result.is_none() || asked.is_none() {
+        let remaining = end.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok((_type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
+            break;
+        };
+        match frame {
+            FrameKind::CommandResult {
+                request_id: got,
+                result: got_result,
+            } if got == request_id => result = Some(got_result),
+            FrameKind::Event { event, .. } if matches!(event, AgentEvent::Asked { .. }) => {
+                asked = Some(event);
+            }
+            _ => {}
+        }
+    }
+    (result, asked)
 }
 
 /// A subscribed client receives an `Asked` agent event when the seed pane
@@ -145,6 +191,118 @@ fn subscribed_client_receives_asked_event_from_ask_title() {
             elapsed_seconds, None,
             "v1 does not track elapsed-since-ask server-side",
         );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+#[test]
+fn report_asked_command_emits_asked_event() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 2");
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut stream, &attach_by_name("demo")).await;
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED);
+        let FrameKind::Attached { snapshot, .. } = attached else {
+            panic!("expected ATTACHED");
+        };
+
+        send_frame(&mut stream, &FrameKind::SubscribeEvents { terminal: None }).await;
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 7,
+                command: Command::ReportAsked {
+                    terminal_id: snapshot.focused_pane,
+                    id: "hook-q1".to_owned(),
+                    question: "Approve release?".to_owned(),
+                    suggestions: vec!["Ship".to_owned(), "Hold".to_owned()],
+                    elapsed_seconds: Some(12),
+                },
+            },
+        )
+        .await;
+        let (result, asked) =
+            collect_result_and_asked(&mut stream, 7, Duration::from_secs(5)).await;
+        assert_eq!(result, Some(CommandResult::Ok));
+        let Some(AgentEvent::Asked {
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        }) = asked
+        else {
+            panic!("expected an Asked event from REPORT_ASKED; got {asked:?}");
+        };
+        assert_eq!(id, "hook-q1");
+        assert_eq!(question, "Approve release?");
+        assert_eq!(suggestions, vec!["Ship".to_owned(), "Hold".to_owned()]);
+        assert_eq!(elapsed_seconds, Some(12));
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+#[test]
+fn report_asked_rejects_empty_question() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg("sleep 2");
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut stream, &attach_by_name("demo")).await;
+        let (_type_byte, attached) = recv_typed(&mut stream).await;
+        let FrameKind::Attached { snapshot, .. } = attached else {
+            panic!("expected ATTACHED");
+        };
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 8,
+                command: Command::ReportAsked {
+                    terminal_id: snapshot.focused_pane,
+                    id: "bad".to_owned(),
+                    question: "   ".to_owned(),
+                    suggestions: Vec::new(),
+                    elapsed_seconds: None,
+                },
+            },
+        )
+        .await;
+        let CommandResult::Error { code, message } = recv_command_result(&mut stream, 8).await
+        else {
+            panic!("empty REPORT_ASKED question must be rejected");
+        };
+        assert_eq!(code, ErrorCode::InvalidCommand);
+        assert!(message.contains("question"));
 
         drop(stream);
         shutdown_tx.send(()).ok();

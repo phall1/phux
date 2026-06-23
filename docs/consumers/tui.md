@@ -119,6 +119,7 @@ phux send-keys TARGET KEYS... # send keys to a pane (scripting)
 phux run TARGET CMD...        # run a command in a pane, capture $?
 phux wait [TARGET]            # poll a pane until a condition holds
 phux watch [TARGET]           # stream a pane's live events
+phux ask TARGET QUESTION      # report an agent ask event for a pane
 phux config <init|path|show>  # scaffold + inspect config
 phux config plugins [--json]  # compatibility alias: inspect plugin manifests
 phux config agents [--json]   # inspect configured plugin agent states
@@ -130,7 +131,7 @@ phux help [COMMAND]
 ```
 
 The agent-facing verbs — `ls`, `snapshot`, `send-keys`, `run`, `wait`,
-`watch` (and `new`'s create-only `--json` mode) — have their JSON
+`watch`, `ask` (and `new`'s create-only `--json` mode) — have their JSON
 contracts and exit-code semantics documented in [`agents.md`](./agents.md);
 this file does not restate them.
 
@@ -167,7 +168,7 @@ detach` would have no attached viewport to act on.
 > and `config reload` are design intent (§4.3).
 
 **The target convention.** The verbs that address an existing pane —
-`kill`, `snapshot`, `send-keys`, `run`, `wait` — take the selector as a
+`kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
 **positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
 focused/last session). `attach` likewise takes its `[SESSION]` name
 positionally. `new` is the exception: because its trailing `[COMMAND...]`
@@ -175,7 +176,7 @@ is a positional var-arg, the *new* session's name is the `-s`/`--session`
 flag instead, keeping the command words unambiguous. So: positional target
 to act on something that exists; `-s` to name something you are creating.
 
-**Flags before the target.** `send-keys`, `run`, and `wait` take a
+**Flags before the target.** `send-keys`, `run`, `wait`, and `ask` take a
 trailing var-arg (the keys / command / nothing), so every flag —
 `--json`, `--timeout`, `--until`, `--idle`, `--socket` — MUST precede the
 positional `TARGET`; anything after it is swallowed into the trailing
@@ -238,8 +239,8 @@ phux kill #build                   # kill every Terminal tagged 'build'
 phux tag rm @7 ci                  # untag
 ```
 
-One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, and
-`run` all accept the same `TARGET` (phux-n95) and resolve it client-side
+One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, `run`, and
+`ask` all accept the same `TARGET` (phux-n95) and resolve it client-side
 against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
 selector. A selector that names several panes (a whole session or window)
 resolves to a single **selected pane**: the focused pane if it is among

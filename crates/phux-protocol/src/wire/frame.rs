@@ -474,6 +474,12 @@ pub(crate) const COMMAND_TAG_RELEASE_INPUT: u8 = 0x10;
 /// group inside a Terminal — distinct from `KILL_TERMINAL`, which removes the
 /// pane. The reversible `Freeze`/`Resume` brake lives here. ADR-0033.
 pub(crate) const COMMAND_TAG_SIGNAL_TERMINAL: u8 = 0x11;
+/// Wire tag for [`Command::ReportAsked`]. This is the opt-in agent hook
+/// ingress for ADR-0036: configured integrations can report the same payload
+/// as `AgentEvent::Asked` without writing terminal-title escape sequences.
+/// The server validates and emits the normal `EVENT` frame; no new event kind
+/// or consumer surface is introduced.
+pub(crate) const COMMAND_TAG_REPORT_ASKED: u8 = 0x12;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -1168,6 +1174,23 @@ pub enum Command {
         terminal_id: TerminalId,
         /// The signal to deliver.
         signal: TerminalSignal,
+    },
+    /// Report that an agent in `terminal_id` is blocked on a human-answerable
+    /// question. This is the explicit hook source selected by ADR-0036. The
+    /// server validates the payload, then emits [`AgentEvent::Asked`] to the
+    /// existing event stream. It does not write to the PTY, attach, resize, or
+    /// mutate terminal grid state.
+    ReportAsked {
+        /// The Terminal/pane that owns the blocked agent.
+        terminal_id: TerminalId,
+        /// Stable question id for answer correlation.
+        id: String,
+        /// Human-facing question text.
+        question: String,
+        /// Suggested answers, in display order.
+        suggestions: Vec<String>,
+        /// Optional seconds the agent has already been waiting.
+        elapsed_seconds: Option<u64>,
     },
 }
 
@@ -3037,6 +3060,17 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             encode_terminal_id(terminal_id, enc);
             enc.write_u8(signal.to_u8());
         }
+        Command::ReportAsked {
+            terminal_id,
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        } => {
+            enc.write_u8(COMMAND_TAG_REPORT_ASKED);
+            encode_terminal_id(terminal_id, enc);
+            encode_asked_fields(id, question, suggestions, *elapsed_seconds, enc);
+        }
     }
 }
 
@@ -3169,11 +3203,32 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
                 signal,
             })
         }
+        COMMAND_TAG_REPORT_ASKED => decode_report_asked_command(dec),
         other => Err(DecodeError::UnknownEnumValue {
             field: "Command",
             value: u32::from(other),
         }),
     }
+}
+
+fn decode_report_asked_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeError> {
+    let terminal_id = decode_terminal_id(dec)?;
+    let AgentEvent::Asked {
+        id,
+        question,
+        suggestions,
+        elapsed_seconds,
+    } = decode_asked_event(dec)?
+    else {
+        unreachable!("decode_asked_event always returns AgentEvent::Asked");
+    };
+    Ok(Command::ReportAsked {
+        terminal_id,
+        id,
+        question,
+        suggestions,
+        elapsed_seconds,
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -3416,21 +3471,7 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
                 suggestions,
                 elapsed_seconds,
             } => {
-                // Field-tagged TLV body: id, question, then one repeated
-                // SUGGESTION field per suggestion (in order), then an optional
-                // ELAPSED_SECONDS. An absent suggestion list writes no field;
-                // an absent elapsed counter writes no field — both default
-                // cleanly on the decode side, and a future field is additive.
-                body_enc.write_field(field::event_asked::ID, id.as_bytes());
-                body_enc.write_field(field::event_asked::QUESTION, question.as_bytes());
-                for suggestion in suggestions {
-                    body_enc.write_field(field::event_asked::SUGGESTION, suggestion.as_bytes());
-                }
-                if let Some(secs) = elapsed_seconds {
-                    body_enc.write_field_with(field::event_asked::ELAPSED_SECONDS, |e| {
-                        e.write_u64_be(*secs);
-                    });
-                }
+                encode_asked_fields(id, question, suggestions, *elapsed_seconds, &mut body_enc);
                 EVENT_TAG_ASKED
             }
             // `Unknown` is decoder-only: an encoder that reaches here has
@@ -3447,6 +3488,30 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
     }
     enc.write_u8(tag);
     enc.write_bytes(&body);
+}
+
+fn encode_asked_fields(
+    id: &str,
+    question: &str,
+    suggestions: &[String],
+    elapsed_seconds: Option<u64>,
+    enc: &mut Encoder<'_>,
+) {
+    // Field-tagged TLV body: id, question, then one repeated SUGGESTION field
+    // per suggestion (in order), then an optional ELAPSED_SECONDS. An absent
+    // suggestion list writes no field; an absent elapsed counter writes no
+    // field. The same body shape backs both Command::ReportAsked and
+    // AgentEvent::Asked so the hook and event payload cannot drift.
+    enc.write_field(field::event_asked::ID, id.as_bytes());
+    enc.write_field(field::event_asked::QUESTION, question.as_bytes());
+    for suggestion in suggestions {
+        enc.write_field(field::event_asked::SUGGESTION, suggestion.as_bytes());
+    }
+    if let Some(secs) = elapsed_seconds {
+        enc.write_field_with(field::event_asked::ELAPSED_SECONDS, |e| {
+            e.write_u64_be(secs);
+        });
+    }
 }
 
 pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, DecodeError> {
