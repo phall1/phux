@@ -30,6 +30,7 @@
 #![deny(missing_docs)]
 
 pub mod agent;
+pub mod ask;
 pub mod attach;
 pub mod l2;
 pub mod render;

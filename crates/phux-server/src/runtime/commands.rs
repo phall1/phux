@@ -3,8 +3,8 @@
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind, InputMode,
-    StateScope, TerminalSignal, ViewportInfo,
+    AgentEvent, Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind,
+    InputMode, StateScope, TerminalSignal, ViewportInfo,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -373,6 +373,20 @@ pub(crate) async fn handle_command(
             terminal_id,
             signal,
         } => handle_signal_terminal(state, client_id, &terminal_id, signal).await,
+        Command::ReportAsked {
+            terminal_id,
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        } => handle_report_asked(
+            state,
+            &terminal_id,
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        ),
         // `Command` is `#[non_exhaustive]`: a forward-compat command this
         // server doesn't implement decodes only if a newer peer sent a
         // tag we allocated but haven't wired (the decoder rejects truly
@@ -1220,6 +1234,78 @@ pub(crate) fn handle_subscribe_terminal_events(
         "SUBSCRIBE_TERMINAL_EVENTS: subscriber registered"
     );
     CommandResult::Ok
+}
+
+pub(crate) fn handle_report_asked(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    id: String,
+    question: String,
+    suggestions: Vec<String>,
+    elapsed_seconds: Option<u64>,
+) -> CommandResult {
+    if !terminal_id.is_local() {
+        return CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("REPORT_ASKED on satellite route unsupported: {terminal_id:?}"),
+        };
+    }
+    if state.with(|s| s.terminal_from_wire(terminal_id)).is_none() {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    }
+    if let Some(message) = validate_asked_payload(&id, &question, &suggestions) {
+        return CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message,
+        };
+    }
+    super::client::broadcast_event(
+        state,
+        Some(terminal_id),
+        &AgentEvent::Asked {
+            id,
+            question,
+            suggestions,
+            elapsed_seconds,
+        },
+    );
+    CommandResult::Ok
+}
+
+fn validate_asked_payload(id: &str, question: &str, suggestions: &[String]) -> Option<String> {
+    const MAX_ID_BYTES: usize = 128;
+    const MAX_QUESTION_BYTES: usize = 4096;
+    const MAX_SUGGESTIONS: usize = 16;
+    const MAX_SUGGESTION_BYTES: usize = 512;
+
+    if question.trim().is_empty() {
+        return Some("asked question must not be empty".to_owned());
+    }
+    if id.len() > MAX_ID_BYTES {
+        return Some(format!("asked id exceeds {MAX_ID_BYTES} bytes"));
+    }
+    if question.len() > MAX_QUESTION_BYTES {
+        return Some(format!("asked question exceeds {MAX_QUESTION_BYTES} bytes"));
+    }
+    if suggestions.len() > MAX_SUGGESTIONS {
+        return Some(format!(
+            "asked suggestions exceed {MAX_SUGGESTIONS} entries"
+        ));
+    }
+    for suggestion in suggestions {
+        if suggestion.trim().is_empty() {
+            return Some("asked suggestions must not be empty".to_owned());
+        }
+        if suggestion.len() > MAX_SUGGESTION_BYTES {
+            return Some(format!(
+                "asked suggestion exceeds {MAX_SUGGESTION_BYTES} bytes"
+            ));
+        }
+    }
+    None
 }
 
 /// A `SessionSnapshot` describing a server with no sessions: empty lists,

@@ -64,7 +64,8 @@ mod selector;
           rename     Rename a session\n  \
           send-keys  Send keys to a pane\n  \
           run        Run a command in a pane and capture its exit code\n  \
-          wait       Block until a pane meets a condition\n\n\
+          wait       Block until a pane meets a condition\n  \
+          ask        Report an agent ask event for a pane\n\n\
         CONFIG\n  \
           config     Inspect config and run configured plugin actions\n\n\
         PLUGINS\n  \
@@ -75,7 +76,7 @@ mod selector;
           satellite  Manage configured federation satellites\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
-        grammar works across kill/snapshot/send-keys/run/wait.",
+        grammar works across kill/snapshot/send-keys/run/wait/ask.",
     after_long_help = "ENVIRONMENT\n  \
         PHUX_SOCKET        UDS path for the CLI verbs and the server. A `--socket`\n  \
         \x20                 flag overrides it; default is\n  \
@@ -289,6 +290,23 @@ fn main() -> ExitCode {
             json,
             socket,
         }) => commands::watch::run_watch(session.as_deref(), json, socket),
+        Some(Command::Ask {
+            target,
+            id,
+            suggestions,
+            elapsed_seconds,
+            json,
+            question,
+            socket,
+        }) => commands::ask::run_ask(
+            &target,
+            id,
+            suggestions,
+            elapsed_seconds,
+            json,
+            question,
+            socket,
+        ),
         Some(Command::Run {
             target,
             command,

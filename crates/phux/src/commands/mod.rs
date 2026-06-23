@@ -36,6 +36,7 @@ impl From<SignalArg> for TerminalSignal {
     }
 }
 
+pub(crate) mod ask;
 pub(crate) mod attach;
 pub(crate) mod config;
 pub(crate) mod config_action;
@@ -490,6 +491,45 @@ pub(crate) enum Command {
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
+    },
+
+    /// Report that an agent in a pane is waiting on a human answer.
+    ///
+    /// This is the opt-in hook contract for configured integrations: it emits
+    /// the same `asked` event as the `phux-ask` title sentinel without writing
+    /// escape sequences into the target terminal. TARGET is resolved
+    /// client-side and the command neither attaches nor resizes the pane.
+    ///
+    ///   phux ask work:1.0 --id deploy --suggest Yes --suggest No "Deploy?"
+    ///   phux ask @3 --json "Need approval"
+    #[command(about = "Report an agent ask event for a pane")]
+    Ask {
+        /// Target selector: session, session:window, session:window.pane,
+        /// @id, `.` (focused), or `=` (last-focused).
+        target: String,
+
+        /// Stable question id for answer correlation.
+        #[arg(long, default_value = "")]
+        id: String,
+
+        /// Suggested answer. Repeat to preserve display order.
+        #[arg(long = "suggest", value_name = "TEXT")]
+        suggestions: Vec<String>,
+
+        /// Seconds the agent has already been waiting.
+        #[arg(long, value_name = "SECS")]
+        elapsed_seconds: Option<u64>,
+
+        /// Emit the reported event as JSON.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Human-facing question text.
+        question: String,
     },
 
     /// Run a command in a pane and capture its exit code.
