@@ -5,10 +5,9 @@
 # Trigger: run manually with a `tag` input. Manual dispatch uses an existing
 # tag, or creates it from the default branch if it does not already exist.
 #
-# macOS builds run inside `nix develop -c` so they get the exact toolchain
-# from rust-toolchain.toml + flake.nix. Linux builds intentionally use rustup
-# plus setup-zig instead: Nix-built Linux binaries record a `/nix/store`
-# dynamic loader and are not portable to ordinary hosts.
+# Release binaries are built with rustup plus setup-zig. Nix is useful for local
+# development, but Nix-built release binaries can record `/nix/store` dynamic
+# library paths and are not portable to ordinary hosts.
 #
 # CPU baseline caveat: libghostty-vt's build.rs lets zig auto-detect the host
 # CPU for native builds, so Linux artifacts may carry instructions specific to
@@ -122,16 +121,13 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            build_env: nix
           # Build Linux on the oldest supported Ubuntu runner instead of
           # `ubuntu-latest` to keep the glibc baseline as low as GitHub's
           # hosted fleet currently allows.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            build_env: system
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            build_env: system
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
 
@@ -150,29 +146,31 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: bash scripts/check-release-version.sh "$TAG"
 
-      - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
-        if: matrix.build_env == 'nix'
-
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        if: matrix.build_env == 'system'
         with:
           version: 0.15.2
 
       - name: Install Rust toolchain
-        if: matrix.build_env == 'system'
         run: rustup toolchain install 1.90.0 --profile default
 
       - name: Install Linux build dependencies
-        if: matrix.build_env == 'system'
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config build-essential mold
 
-      - name: Build release binaries (Nix)
-        if: matrix.build_env == 'nix'
-        run: nix develop -c cargo build --release --bin phux --bin phux-mcp
-
-      - name: Build release binaries (system)
-        if: matrix.build_env == 'system'
+      - name: Build release binaries
         run: cargo +1.90.0 build --release --bin phux --bin phux-mcp
+
+      - name: Check macOS binary portability
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in target/release/phux target/release/phux-mcp; do
+            if otool -L "$bin" | grep -F '/nix/store/'; then
+              echo "::error::${bin} links to a Nix store library; release binaries must be portable."
+              exit 1
+            fi
+          done
 
       - name: Package tarball
         id: package
