@@ -89,6 +89,7 @@ Nix-linked and not portable; use the next CI-built tag, Homebrew, or source.
 **From source — works today.**
 
 ```sh
+curl -fsSL https://install.determinate.systems/nix | sh -s -- install  # if you don't have Nix
 git clone https://github.com/phall1/phux
 cd phux
 nix develop          # pins the toolchain, including the zig libghostty needs
