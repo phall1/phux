@@ -166,6 +166,47 @@ overrides the token-store path.
   With a self-signed certificate, verifying the `phux pair` fingerprint on the
   device's first connect is what closes the trust-on-first-use MITM window.
 
+### Connecting from another network (overlay reachability)
+
+The remote-consumer path above authenticates and encrypts the link, but it
+still needs the client to **reach** the server's address. A self-hosted server
+behind NAT/CGNAT/a firewall has no inbound-reachable address, so a phone on
+cellular or another Wi-Fi cannot dial it directly — same-network or a VPN is
+required.
+
+The sanctioned answer for self-hosters is a **WireGuard-class overlay network**,
+which gives the client a routable address that works through NAT
+([ADR-0037](../ADR/0037-overlay-network-reachability.md)). phux needs no special
+configuration for this: an overlay is an L3 substrate, and phux dials the overlay
+address exactly as it dials a LAN address. Because an overlay IP is non-loopback,
+the secure path (TLS + token) engages automatically; cert pinning is on the
+fingerprint, not the hostname, so MagicDNS-style names work unchanged.
+
+phux is **overlay-agnostic** — pick what fits your trust model:
+
+- **[Tailscale](https://tailscale.com)** — the frictionless on-ramp. Install on
+  the server host and the client; attach to the server's `100.x` IP or its
+  MagicDNS `*.ts.net` name.
+- **[Headscale](https://github.com/juanfont/headscale)** — a self-hostable,
+  fully-OSS Tailscale control plane, for operators who will not depend on a
+  third-party coordinator.
+- **Raw [WireGuard](https://www.wireguard.com), [Nebula](https://github.com/slackhq/nebula),
+  or [Netbird](https://netbird.io)** — for hand-rolled overlays. All behave
+  identically to phux; it only ever sees an IP.
+
+```sh
+# Server, reachable on its overlay address:
+phux server --listen 0.0.0.0:8787   # binds all interfaces, including the overlay
+phux pair                            # mint a token + print the cert fingerprint
+
+# Client, from anywhere on the overlay:
+phux attach --ws wss://<overlay-host>:8787 --token HEX --cert-fingerprint FP
+```
+
+Hosted relays, rendezvous servers, and NAT hole-punching that would remove the
+both-ends-install requirement are deliberately out of scope for the self-host
+repo; see ADR-0037.
+
 ### Output mode for remote consumers
 
 A remote phone link is high-latency and may be lossy. A remote consumer SHOULD
