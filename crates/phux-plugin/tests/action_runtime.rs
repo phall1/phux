@@ -47,10 +47,40 @@ enabled = {enabled}
     Ok(config_path)
 }
 
+fn write_config_for_manifest(
+    tmp: &TempDir,
+    manifest: &std::path::Path,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    let config_dir = tmp.path().join("xdg").join("phux");
+    std::fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[[plugins]]
+manifest = "{}"
+enabled = true
+"#,
+            manifest.display()
+        ),
+    )?;
+    Ok(config_path)
+}
+
 fn request(timeout: Option<Duration>) -> PluginActionRequest {
     PluginActionRequest {
         plugin_id: "example.actions".to_owned(),
         action_id: "probe".to_owned(),
+        timeout,
+        cwd: None,
+    }
+}
+
+fn continuum_request(action_id: &str, timeout: Option<Duration>) -> PluginActionRequest {
+    PluginActionRequest {
+        plugin_id: "com.phux.demo.continuum".to_owned(),
+        action_id: action_id.to_owned(),
         timeout,
         cwd: None,
     }
@@ -121,5 +151,29 @@ async fn action_runtime_refuses_disabled_plugins() -> Result<(), Box<dyn std::er
         .expect_err("disabled plugin should not execute");
 
     assert!(matches!(err, PluginActionError::PluginDisabled(_)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_in_continuum_restore_missing_archive_is_structured()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("examples/plugins/continuum/phux-plugin.toml");
+    let config = write_config_for_manifest(&tmp, &manifest)?;
+
+    let output = run_configured_action(
+        &config,
+        &continuum_request("restore-latest", Some(Duration::from_secs(2))),
+    )
+    .await?;
+
+    assert_eq!(output.plugin_id, "com.phux.demo.continuum");
+    assert_eq!(output.action_id, "restore-latest");
+    assert_eq!(output.outcome, PluginActionOutcome::Completed);
+    assert_eq!(output.exit_code, Some(66));
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.contains("no saved workspace archive"));
     Ok(())
 }
