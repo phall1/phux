@@ -186,6 +186,10 @@ jobs:
           mkdir -p "${stage}"
           cp -f target/release/phux target/release/phux-mcp "${stage}/"
           cp -f README.md LICENSE-MIT LICENSE-APACHE "${stage}/"
+          test -x "${stage}/phux"
+          test -x "${stage}/phux-mcp"
+          "${stage}/phux" --version
+          "${stage}/phux-mcp" < /dev/null
           tar -czf "${stage}.tar.gz" "${stage}"
           # Portable sha256 (shasum on macOS, sha256sum on Linux).
           if command -v sha256sum >/dev/null; then

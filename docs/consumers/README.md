@@ -37,12 +37,12 @@ project locally, the way the web client does.
 |---|---|
 | [tui.md](./tui.md) | Reference TUI, the adoption wedge: CLI, keybinds, status bar, layout, hooks, recording. |
 | [web.md](./web.md) | Reference projection consumer: Rust-to-WASM browser client that carries its own engine over the WebSocket wire codec. |
-| [agents.md](./agents.md) | Agent surface: the CLI verb set and versioned JSON contracts (ScreenState, RunResult, WaitOutcome). (See [`../../AGENTS.md`](../../AGENTS.md) for universal agent substrate instructions.) |
-| [mcp.md](./mcp.md) | MCP adapter: a JSON-RPC stdio tool surface over the agent verbs. |
+| [agents.md](./agents.md) | Agent surface: the CLI verb set, public agent state, asks, workspace save/restore, and versioned JSON contracts. (See [`../../AGENTS.md`](../../AGENTS.md) for universal agent substrate instructions.) |
+| [mcp.md](./mcp.md) | MCP adapter: a JSON-RPC stdio tool surface over the agent verbs, `phux_ask`, and plugin workspace profile discovery. |
 | [sdk.md](./sdk.md) | The `phux-client` library crate over the `phux-protocol` wire codec, shared by the surfaces above. |
 
 Future consumers — a native GUI, a recorder, a tmux-CC adapter — get their
 own files here when they materialize. Each file's frontmatter declares its
 own `stability`; a shipped surface is `stable`, a forward-looking sketch is
-`evolving`. Today every surface in this directory is pre-alpha and marked
-`evolving`.
+`evolving`. Today the consumer surfaces are real but still pre-1.0, so most
+files remain marked `evolving`.

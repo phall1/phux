@@ -440,6 +440,10 @@ fn embedded_default_toml_populates_new_knobs() {
     assert_eq!(cfg.defaults.window_size, WindowSize::Smallest);
     // history-limit is the canonical scrollback knob (phux-4li.1 DEDUPE).
     assert_eq!(cfg.defaults.history_limit, 50_000);
+    assert!(matches!(
+        cfg.status.center.as_slice(),
+        [phux_config::Widget::Spec(spec)] if spec.kind == "help-hints"
+    ));
 }
 
 #[test]

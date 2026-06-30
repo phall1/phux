@@ -29,6 +29,7 @@ fn run_demo(args: &[&str]) -> (i32, String, String) {
 fn run_demo_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
     let out = Command::new(PHUX)
         .env("XDG_CONFIG_HOME", demo_xdg())
+        .env("PHUX_BIN", PHUX)
         .envs(envs.iter().copied())
         .args(args)
         .output()
@@ -42,6 +43,14 @@ fn run_demo_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, Stri
 
 fn stdout_from_json(output: &serde_json::Value) -> &str {
     output["stdout"].as_str().expect("stdout field")
+}
+
+fn without_dhat_footer(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| !line.starts_with("dhat: "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -94,8 +103,8 @@ fn integration_template_actions_are_local_and_validated() {
     assert_eq!(code, 0, "list integrations should succeed; stderr={stderr}");
     let output: serde_json::Value = serde_json::from_str(&stdout).expect("list stdout is JSON");
     let listed = stdout_from_json(&output);
-    assert!(listed.contains("codex\tCodex\tterminal-agent\topt-in\tcodex"));
-    assert!(listed.contains("claude-code\tClaude Code\tterminal-agent\topt-in\tclaude"));
+    assert!(listed.contains("codex\tCodex\tterminal-agent\t0.1.0\topt-in\tcodex"));
+    assert!(listed.contains("claude-code\tClaude Code\tterminal-agent\t0.1.0\topt-in\tclaude"));
     assert!(listed.contains("generic-shell-agent\tGeneric Shell Agent"));
 
     let (code, stdout, stderr) = run_demo(&["config", "run", PLUGIN_ID, VALIDATE_ACTION, "--json"]);
@@ -165,8 +174,9 @@ fn launch_bench_reports_no_server_as_action_failure() {
     );
 
     assert_ne!(code, 0, "stale socket should fail the action");
+    let wrapper_stderr = without_dhat_footer(&stderr);
     assert!(
-        stderr.is_empty(),
+        wrapper_stderr.is_empty(),
         "wrapper stderr should stay empty for JSON output: {stderr}"
     );
     let output: serde_json::Value = serde_json::from_str(&stdout).expect("action JSON");

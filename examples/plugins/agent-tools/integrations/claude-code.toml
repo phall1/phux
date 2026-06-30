@@ -3,12 +3,24 @@ id = "claude-code"
 display_name = "Claude Code"
 kind = "terminal-agent"
 description = "Claude Code running as a terminal-native engineering agent."
+package_version = "0.1.0"
+package_status = "public"
+first_party = true
 capabilities = ["terminal-control", "code-editing", "human-question"]
 
 [detect]
 mode = "opt-in"
 command = "claude"
 env = "PHUX_AGENT_TOOLS_DETECT"
+
+[link]
+mode = "state-file"
+default_session = "agent-bench-claude-code"
+
+[session_identity]
+mode = "native-or-phux"
+native_env = "PHUX_CLAUDE_SESSION_ID"
+restore = "external-cli"
 
 [launch]
 command = ["claude"]

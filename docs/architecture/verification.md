@@ -43,6 +43,32 @@ Tests are organized in three layers.
      loud rather than silent.
    - Rendered TUI frames, via a cell-grid to ASCII-art helper.
 
+## Parity evidence gate
+
+The herdr parity work uses a repeatable gate in
+[`../../scripts/parity-gate.sh`](../../scripts/parity-gate.sh), surfaced as
+`just parity-check-list` and `just parity-gate`. The list/check mode is cheap:
+it proves the named scenarios are present and still point at real scripts,
+just targets, tests, and example/plugin assets. The run mode is explicit
+because several scenarios spawn real PTYs, tmux, or the full CI gate.
+
+The gate names eight evidence surfaces:
+
+- `install-contract`: install docs/scripts/release artifact contract checks.
+- `examples-smoke`: examples/agents against a real `phux` binary.
+- `plugin-demo`: checked-in plugin discovery, validation, and actions.
+- `real-pty-run-wait`: the ignored e2e lane for real PTY `run`/`wait`.
+- `tui-probe`: black-box attach through an isolated tmux terminal.
+- `visual-qa-hooks`: captured TUI probe output with screen and cursor markers.
+- `docs-check`: the doc-system gate from this conventions layer.
+- `full-quality-gates`: `just ci`, including fmt, lint, docs, tests, deny, and
+  rustdoc.
+
+Each user-visible parity child task records four receipts in the work ledger:
+automated verification, a real-surface artifact, adversarial checks, and
+cleanup. Evidence files live under `.omo/evidence/`; they are execution
+artifacts, not product docs.
+
 Mutation testing with `cargo-mutants` is planned for once the codebase is
 substantial enough to warrant it; the intended bar is a mutation score above
 90% on the protocol and core crates. It is not running today.

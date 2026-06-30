@@ -136,3 +136,102 @@ fn workspace_archive_saves_and_restores_sessions() {
     assert!(sessions.iter().any(|session| session["name"] == "source"));
     assert!(sessions.iter().any(|session| session["name"] == "bench"));
 }
+
+#[test]
+#[ignore = "spawns real phux servers; run explicitly when validating workspace archives."]
+fn workspace_restore_starts_archived_command_process() {
+    let dest = ServerGuard::start("seed");
+    let archive_dir = tempfile::tempdir().expect("archive tempdir");
+    let archive_path = archive_dir.path().join("workspace-command.json");
+    let cwd = archive_dir.path().to_string_lossy().into_owned();
+    let marker = format!(
+        "PHUX_RESTORED_PROCESS_{}_{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    );
+    let command = vec![
+        "sh".to_owned(),
+        "-lc".to_owned(),
+        format!("printf '%s\\nPWD=%s\\n' {marker} \"$PWD\"; sleep 30"),
+    ];
+    let archive = serde_json::json!({
+        "schema_version": 1,
+        "sessions": [
+            {
+                "name": "restored-proc",
+                "active": true,
+                "cwd": cwd,
+                "command": command,
+                "windows": [
+                    {
+                        "name": "main",
+                        "active": true,
+                        "layout": { "kind": "pane", "pane": 0 },
+                        "panes": [
+                            {
+                                "active": true,
+                                "cwd": cwd,
+                                "command": command,
+                                "cols": 80,
+                                "rows": 24
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    });
+    std::fs::write(
+        &archive_path,
+        serde_json::to_string_pretty(&archive).expect("render archive"),
+    )
+    .expect("write archive");
+    let archive_arg = archive_path.to_string_lossy().into_owned();
+    let socket_arg = dest.socket_text();
+
+    let (code, stdout, stderr) = ServerGuard::run(&[
+        "workspace",
+        "restore",
+        &archive_arg,
+        "--socket",
+        &socket_arg,
+    ]);
+    assert_eq!(code, 0, "workspace restore failed: {stderr}");
+    let summary: serde_json::Value = serde_json::from_str(&stdout).expect("restore summary JSON");
+    assert!(
+        summary["restored"]
+            .as_array()
+            .expect("restored array")
+            .iter()
+            .any(|name| name == "restored-proc")
+    );
+
+    let (code, _stdout, stderr) = ServerGuard::run(&[
+        "wait",
+        "--until",
+        &marker,
+        "--timeout",
+        "5",
+        "--socket",
+        &socket_arg,
+        "restored-proc",
+    ]);
+    assert_eq!(code, 0, "restored command marker did not appear: {stderr}");
+
+    let (code, stdout, stderr) = ServerGuard::run(&[
+        "snapshot",
+        "--json",
+        "--socket",
+        &socket_arg,
+        "restored-proc",
+    ]);
+    assert_eq!(code, 0, "snapshot after restore failed: {stderr}");
+    assert!(
+        stdout.contains(&marker),
+        "snapshot should show restored command output"
+    );
+    assert!(
+        stdout.contains(&cwd),
+        "snapshot should show restored command cwd"
+    );
+}

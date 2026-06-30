@@ -146,6 +146,14 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   object after the server accepts the payload. Empty questions, empty
   suggestions, excessive suggestion counts, and unknown panes fail without
   emitting an event.
+- **`phux agent <list|show|explain> [TARGET] [--json] [--socket P]`** —
+  project public agent state from already-phux-shaped evidence: session/pane
+  metadata, OSC/title hints, side-effect-free `snapshot --cells`, and enabled
+  plugin `[[agents]]` declarations. `list` covers every pane; `show` returns
+  the selected pane; `explain` keeps the same state but expands the evidence
+  trail in the human view. `--json` emits `AgentStateJson` (§4.7). States are
+  `unknown`, `idle`, `working`, `blocked`, or `done`; each state carries
+  confidence and ordered provenance so consumers can show why phux believes it.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a new session. Without `--json` it creates and attaches: an explicit
   `-s NAME` that already exists is an error (like tmux's duplicate-session
@@ -166,12 +174,12 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux config run PLUGIN ACTION [--timeout SECS] [--cwd PATH] [--json]`** —
   execute one action declared by an enabled configured plugin manifest. The
   command runs as argv from the plugin root; there is no implicit shell
-  expansion. `--json` emits `PluginActionOutput` (§4.7). Exit code mirrors the
+  expansion. `--json` emits `PluginActionOutput` (§4.8). Exit code mirrors the
   action's process status; timeout exits `125`.
 - **`phux workspace inspect [PATH] [--json]`** — inspect the local git
   repository containing `PATH` and every checked-out worktree reported by git.
   This never contacts a running server and never creates, deletes, or checks out
-  worktrees. Agents use the JSON shape (§4.8) to choose a checkout before
+  worktrees. Agents use the JSON shape (§4.9) to choose a checkout before
   creating a session (`phux new -c <worktree>`) or mapping existing sessions and
   panes back to repo paths.
 - **`phux workspace save [--socket P] [--output PATH]`** — capture the running
@@ -183,7 +191,7 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux satellite <list|add|remove> [--json]`** — manage the hub-side
   federation satellite registry. This never contacts a running server and never
   opens a satellite transport; it only edits `[[satellites]]` in local config.
-  `--json` emits the satellite registry document (§4.9); failure paths leave
+  `--json` emits the satellite registry document (§4.10); failure paths leave
   stdout empty and report diagnostics on stderr.
 
 **Not implemented.** `split` and `detach` do not exist as subcommands today
@@ -406,7 +414,55 @@ consumer-ready list. It is a config projection, not a live runtime detector:
 one of `none`, `low`, `normal`, or `high`. Invalid manifests are hard failures
 and leave stdout empty on `--json`, preserving the script contract.
 
-### 4.7 `PluginActionOutput` — `phux config run --json`
+### 4.7 `AgentStateJson` — `phux agent ... --json`
+
+`phux agent list --json`, `phux agent show --json [TARGET]`, and
+`phux agent explain --json [TARGET]` emit the same versioned shape. `explain`
+differs only in the human output; JSON always includes the evidence trail:
+
+```json
+{
+  "schema_version": 1,
+  "agents": [
+    {
+      "terminal": "@3",
+      "session": "work",
+      "window": "window-0",
+      "agent": { "id": "codex", "label": "Codex", "kind": "codex" },
+      "state": "blocked",
+      "confidence": 0.95,
+      "attention": "high",
+      "title": "phux-ask[deploy]:Approve deploy??s=Yes|No",
+      "cwd": "/repo",
+      "sources": [
+        {
+          "kind": "title_ask",
+          "signal": "phux-ask title sentinel",
+          "confidence": 0.95,
+          "observed": "phux-ask[deploy]:Approve deploy??s=Yes|No"
+        }
+      ],
+      "explanation": "waiting on a reported human-answerable ask"
+    }
+  ]
+}
+```
+
+`agent.kind` is `codex`, `claude`, `plugin`, or `unknown`. `state` is
+`unknown`, `idle`, `working`, `blocked`, or `done`; `attention` is `none`,
+`low`, `normal`, or `high`. `sources` is sorted by descending confidence and is
+the provenance contract: current sources include `title_ask`, `screen`,
+`semantic_cells`, `identity`, and `plugin_report`. The detector is deliberately
+explainable rather than magical: a plugin report is lower precedence than a
+live `phux-ask` title sentinel or an explicit blocked/completed screen cue, and
+unknown/missing signals stay `unknown` or low-confidence `idle`.
+
+This is a public clean-room projection. It does not copy external agent
+manifests or private tradecraft rules; Codex and Claude recognition comes from
+public, user-visible pane text/title evidence plus optional local phux plugin
+declarations.
+
+### 4.8 `PluginActionOutput` — `phux config run --json`
 
 Defined in `crates/phux-plugin/src/lib.rs` (`schema_version = 1`). Shape:
 
@@ -431,7 +487,7 @@ runtime executes the manifest's argv directly from the plugin root, captures
 stdout/stderr lossily as UTF-8, inherits the phux process environment, and adds
 `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and `PHUX_PLUGIN_ROOT`.
 
-### 4.8 Workspace commands — `phux workspace ...`
+### 4.9 Workspace commands — `phux workspace ...`
 
 `phux workspace inspect --json` is repo-local. It shells out to git's porcelain worktree
 listing and reports the current worktree plus siblings as a stable JSON
@@ -499,7 +555,13 @@ starts the default shell in the saved cwd when available. Existing session names
 are skipped, and restore prints a summary JSON document with `restored` and
 `skipped_existing` arrays.
 
-### 4.9 Satellite registry — `phux satellite ... --json`
+Restored sessions are fresh PTYs. The archive preserves window/pane metadata and
+split-layout shape for inspection and future replay, but the current restore
+command only recreates missing sessions and their seed process. Use `phux
+upgrade` for live PTY handoff across a server re-exec; do not present workspace
+restore as resurrecting already-running processes.
+
+### 4.10 Satellite registry — `phux satellite ... --json`
 
 The satellite lifecycle surface is config-local. It edits or reads
 `[[satellites]]` entries and does not dial remote hosts.
@@ -561,6 +623,7 @@ Exit codes are not uniform across verbs:
 | `snapshot` | `0` ok; `1` failure (no server, serialize error, resolve miss). |
 | `send-keys` | `0` ok; `1` failure (no server / refused / miss). |
 | `ask` | `0` accepted; `1` no server, unknown pane, or invalid ask payload. |
+| `agent` | `0` ok; `1` no server, unknown pane, or JSON render failure. |
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |

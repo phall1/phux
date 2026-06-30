@@ -36,6 +36,7 @@ impl From<SignalArg> for TerminalSignal {
     }
 }
 
+pub(crate) mod agent;
 pub(crate) mod ask;
 pub(crate) mod attach;
 pub(crate) mod config;
@@ -530,6 +531,12 @@ pub(crate) enum Command {
 
         /// Human-facing question text.
         question: String,
+    },
+
+    /// List, show, or explain inferred public agent state.
+    Agent {
+        #[command(subcommand)]
+        action: agent::AgentAction,
     },
 
     /// Run a command in a pane and capture its exit code.

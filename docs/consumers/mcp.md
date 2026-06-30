@@ -6,10 +6,10 @@ last-reviewed: 2026-06-06
 
 # The phux MCP adapter
 
-**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the nine
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the eleven
 JSON-RPC stdio tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`,
 `phux_run`, `phux_wait`, `phux_new`, `phux_kill`, `phux_watch`,
-`phux_plugin_action`), the stdio
+`phux_ask`, `phux_plugin_action`, `phux_plugin_workspace`), the stdio
 transport and lifecycle, how a tool resolves a target client-side, and the
 `tools/call` envelope.
 The structured shapes the tools return and the selector grammar are the
@@ -68,8 +68,8 @@ the loop, which runs until stdin EOF.
 ## 2. How a tool resolves a target
 
 Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`) takes a `target` selector string in the **same grammar as
-the CLI's `TARGET`**, whose table and examples live in
+`phux_wait`, `phux_ask`) takes a `target` selector string in the **same
+grammar as the CLI's `TARGET`**, whose table and examples live in
 [`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
 (last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
 (pane), and `@N` (opaque id).
@@ -99,7 +99,7 @@ the literal `default`).
 
 ## 3. The tool catalog
 
-Nine tools, returned verbatim by `tools/list`. Each `inputSchema` is a
+Eleven tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all. The return shapes are the
 shared agent shapes owned by [`agents.md`](./agents.md) §3; each tool
@@ -271,6 +271,44 @@ Result: the same `schema_version = 1` action result as
 executes argv directly from the plugin root; there is no hidden shell
 expansion.
 
+### 3.10 `phux_ask`
+
+Reports that an agent in a pane is asking for human input. This is the
+MCP twin of `phux ask`: it emits the same `asked` event that
+`phux_watch` / `phux watch --json` observe, without writing a sentinel to
+the target PTY.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `target` | string | yes | Selector (see §2). |
+| `id` | string | yes | Stable question id for answer correlation. |
+| `question` | string | yes | Human-facing question text. |
+| `suggestions` | array of string | no | Suggested answers in display order. |
+| `elapsed_seconds` | number | no | Seconds the agent has already been waiting. |
+| `socket` | string | no | Override the UDS path (see §2). |
+
+Result: `{ event: "asked", terminal: "@N", id, question, suggestions,
+elapsed_seconds }`, matching the CLI's `phux ask --json` projection.
+
+### 3.11 `phux_plugin_workspace`
+
+Lists configured plugin workspace profiles. This is the workspace
+composition/read half of the plugin surface: it returns the manifest-level
+agents, actions, events, and pane roles that describe an agent bench. It
+does not create panes by itself; agents compose the returned profile with
+the existing `phux_new`, `phux_send_keys`, `phux_run`, `phux_wait`, and
+`phux_plugin_action` tools.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `plugin_id` | string | no | Optional configured plugin id filter. |
+| `workspace_id` | string | no | Optional plugin-local workspace id filter. |
+| `config` | string | no | Override `config.toml` path; defaults to the normal phux config path. |
+
+Result: `{ workspaces, count }`, where each item contains
+`plugin_id`, `plugin_name`, `enabled`, and the serialized plugin
+`workspace` profile. A filtered miss is an MCP tool error.
+
 ---
 
 ## 4. A worked `tools/call` example
@@ -316,12 +354,13 @@ sparse per-cell `cells` array populated.
 The MCP tools are name-for-name adapters over the CLI's agent surfaces:
 `phux_ls` ↔ `phux ls`; `phux_snapshot` / `phux_send_keys` / `phux_run` /
 `phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait` /
-`new`; and `phux_plugin_action` ↔ `phux config run`
+`new`; `phux_ask` ↔ `phux ask`; `phux_plugin_action` ↔ `phux config run`;
+and `phux_plugin_workspace` ↔ the plugin manifest workspace profile
 ([`agents.md`](./agents.md) §1). Targeted pane tools use the same client-side
 resolution and tiebreaks because the adapter wraps the same `phux-client`
 functions the CLI does. Plugin actions instead share the `phux-plugin`
-runtime with the CLI. The one shape difference is the `phux_run` timeout body
-(§3.4).
+runtime with the CLI. The one shape difference is the `phux_run` timeout
+body (§3.4).
 
 Per [ADR-0022](../../ADR/0022-tool-for-agents.md), the CLI and its JSON
 schema are the stable agent contract; the wire underneath stays additive

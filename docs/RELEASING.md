@@ -9,8 +9,9 @@ last-reviewed: 2026-05-30
 **TL;DR.** Prefer the `release` workflow's manual button. It creates or
 verifies the `v*` tag, publishes GitHub release tarballs, refreshes the
 Homebrew tap (`phall1/homebrew-phux`), and can publish `phux-protocol` to
-crates.io when explicitly confirmed. `cargo install phux` is unsupported
-because the binary/internal crates are not publishable.
+crates.io when explicitly confirmed. `cargo install phux is unsupported`
+because the binary/internal crates are not publishable. Windows is not
+supported by this release lane.
 
 ## What ships where
 
@@ -23,6 +24,22 @@ Every other crate (`phux`, `phux-core`, `phux-server`, `phux-client`,
 `phux-config`, `phux-mcp`) is `publish = false`: binary or internal-only.
 The installable CLI ships through release artifacts and Homebrew instead of
 `cargo install phux`.
+
+Each binary release must produce `phux and phux-mcp artifacts` for every target
+that publishes. The tarball layout is:
+
+```text
+phux-<tag>-<target>/
+  phux
+  phux-mcp
+  README.md
+  LICENSE-MIT
+  LICENSE-APACHE
+```
+
+The workflow smoke-checks both binaries in the staging directory before it
+creates `phux-<tag>-<target>.tar.gz` and the matching `.sha256` sidecar.
+Homebrew installs both binaries from the same tarball.
 
 ## Versioning
 
@@ -155,7 +172,7 @@ the `server` feature downstream.
 
 Do not publish the binary crate or internal workspace crates as part of
 this workflow. For users, the idiomatic crates.io command is
-`cargo add phux-protocol`; `cargo install phux` remains unsupported until
+`cargo add phux-protocol`; `cargo install phux is unsupported` until
 the binary crate and its internal dependencies are intentionally made
 publishable.
 
@@ -164,3 +181,6 @@ publishable.
 ```sh
 brew install phall1/phux/phux
 ```
+
+The tap does not add Windows support; Windows is not supported here. A Windows
+release would need a separate design and build lane rather than a formula tweak.

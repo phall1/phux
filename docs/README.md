@@ -20,9 +20,11 @@ To understand phux, top to bottom:
 
 1. [`CONCEPTS.md`](./CONCEPTS.md) — what phux is, the terminal as the unit,
    human and agent as peer consumers, and the current maturity status
-   (phux is pre-alpha / spec-first). Read this even if you read nothing else.
+   (phux is pre-1.0 and still spec-led). Read this even if you read nothing
+   else.
 2. [`QUICKSTART.md`](./QUICKSTART.md) — the nix dev-shell and `just ci`
-   setup, then get a session running and poke at it.
+   setup, then get a session running and poke at the TUI, agent, MCP, plugin,
+   and workspace surfaces that work today.
 3. [`spec/`](./spec/) — the normative wire surface, versioned with
    `phux-protocol`. Start at [`spec/README.md`](./spec/README.md).
 4. [`consumers/`](./consumers/) — how the CLI, agents, MCP, TUI, and web
@@ -45,6 +47,7 @@ To understand phux, top to bottom:
 | Setting up the dev shell / running it | [`QUICKSTART.md`](./QUICKSTART.md) |
 | Configuring keys / status bar | [`CONFIG.md`](./CONFIG.md) |
 | Driving it from an agent | [`consumers/agents.md`](./consumers/agents.md) (CLI) · [`consumers/mcp.md`](./consumers/mcp.md) (MCP) |
+| Composing an agent bench | [`CONFIG.md`](./CONFIG.md#plugins) · [`../examples/plugins/agent-tools/README.md`](../examples/plugins/agent-tools/README.md) |
 | Writing a different consumer | [`consumers/tui.md`](./consumers/tui.md) · [`consumers/web.md`](./consumers/web.md) |
 | Implementing against the wire | [`spec/README.md`](./spec/README.md) — normative, versioned with `phux-protocol` |
 | Reading how it is built | [`architecture/README.md`](./architecture/README.md) — process model, threading, transport, rendering, verification |

@@ -236,6 +236,24 @@ action. From a fresh checkout:
 just plugin-demo
 ```
 
+The same package carries first-party public Codex and Claude Code integration
+records. Link the plugin itself with `phux plugin link` or the fixture config,
+then use plugin actions for package lifecycle checks:
+
+```sh
+phux config run com.phux.demo.agent-tools validate-integrations
+phux config run com.phux.demo.agent-tools link-integration
+phux config run com.phux.demo.agent-tools status-integrations
+phux config run com.phux.demo.agent-tools unlink-integration
+```
+
+Those actions are still external and declarative. They write plugin-local
+state files, report package state as `missing`, `current`, or `outdated`, and
+record either a native session id supplied by the caller or the phux session
+target. They do not load an in-process plugin host, contact private services,
+or require agent credentials. `smoke-integrations` runs the lifecycle against
+fake public CLIs in a temporary state directory.
+
 Two larger checked-in profiles exercise the workspace layer:
 
 - [`examples/plugins/continuum`](../examples/plugins/continuum/phux-plugin.toml)

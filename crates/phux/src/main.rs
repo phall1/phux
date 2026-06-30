@@ -66,6 +66,7 @@ mod selector;
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n  \
           ask        Report an agent ask event for a pane\n\n\
+          agent      List, show, or explain inferred public agent state\n\n\
         CONFIG\n  \
           config     Inspect config and run configured plugin actions\n\n\
         PLUGINS\n  \
@@ -307,6 +308,7 @@ fn main() -> ExitCode {
             question,
             socket,
         ),
+        Some(Command::Agent { action }) => commands::agent::run_agent(&action),
         Some(Command::Run {
             target,
             command,
