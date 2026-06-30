@@ -115,7 +115,7 @@ toml_edit = "0.23"
 # libghostty is our canonical terminal backend (ADR-0008). Both phux-protocol
 # and phux-server depend on it — phux-protocol re-exports types, phux-server
 # drives the emulator.
-libghostty-vt = { version = "0.2", default-features = false }
+libghostty-vt = { version = "0.2", git = "https://github.com/uzaaft/libghostty-rs.git", rev = "81b776c64fa96d8be0b243e0ebc383887c51eb38", default-features = false }
 # PNG decoder used by the Kitty graphics replay bridge (ADR-0034). This
 # matches libghostty-vt's optional PNG dependency and is enabled only for
 # in-workspace/server-feature consumers that need to ingest `f=100` APC images.
