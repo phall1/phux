@@ -150,7 +150,8 @@ The line between what's solid and what's still a promise is kept honest here:
 
 **Real and tested — the API may still move before 1.0**
 - The headless verbs: `ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`,
-  `new`, `kill`, `rename`, `config`
+  `new`, `kill`, `rename`, `config`, `plugin`, and `workspace`
+  (`inspect`, `save`, `restore`)
 - `phux-mcp` — the same surface as MCP tools
 
 **Designed and addressed-for — not wired yet**
