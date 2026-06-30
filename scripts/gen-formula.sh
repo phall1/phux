@@ -6,10 +6,10 @@
 #   <dist-dir>  directory holding phux-<tag>-<target>.tar.gz.sha256 files
 #   [out-file]  defaults to stdout
 #
-# Only emits a download block for each target whose .sha256 file is present,
-# so a partial release (e.g. only the macOS arm64 artifact built) still yields
-# a valid, installable formula. Shared by release.yml and local seeding so the
-# two paths never drift.
+# Emits a top-level stable download plus per-platform overrides for every other
+# target whose .sha256 file is present. Homebrew requires a formula to have a
+# stable URL even when the effective download is selected through on_* blocks.
+# Shared by release.yml and local seeding so the two paths never drift.
 set -euo pipefail
 
 tag="${1:?usage: gen-formula.sh <tag> <dist-dir> [out-file]}"
@@ -63,15 +63,16 @@ class Phux < Formula
 
 EOF
 
-  if [ -n "${arm_mac}${x86_mac}" ]; then
+  if { [ -n "${arm_mac}" ] && [ "${primary_target}" != "aarch64-apple-darwin" ]; } ||
+    { [ -n "${x86_mac}" ] && [ "${primary_target}" != "x86_64-apple-darwin" ]; }; then
     echo "  on_macos do"
-    if [ -n "${arm_mac}" ]; then
+    if [ -n "${arm_mac}" ] && [ "${primary_target}" != "aarch64-apple-darwin" ]; then
       echo "    on_arm do"
       echo "      url \"${base}/phux-${tag}-aarch64-apple-darwin.tar.gz\""
       echo "      sha256 \"${arm_mac}\""
       echo "    end"
     fi
-    if [ -n "${x86_mac}" ]; then
+    if [ -n "${x86_mac}" ] && [ "${primary_target}" != "x86_64-apple-darwin" ]; then
       echo "    on_intel do"
       echo "      url \"${base}/phux-${tag}-x86_64-apple-darwin.tar.gz\""
       echo "      sha256 \"${x86_mac}\""
@@ -81,15 +82,16 @@ EOF
     echo ""
   fi
 
-  if [ -n "${x86_linux}${arm_linux}" ]; then
+  if { [ -n "${x86_linux}" ] && [ "${primary_target}" != "x86_64-unknown-linux-gnu" ]; } ||
+    { [ -n "${arm_linux}" ] && [ "${primary_target}" != "aarch64-unknown-linux-gnu" ]; }; then
     echo "  on_linux do"
-    if [ -n "${x86_linux}" ]; then
+    if [ -n "${x86_linux}" ] && [ "${primary_target}" != "x86_64-unknown-linux-gnu" ]; then
       echo "    on_intel do"
       echo "      url \"${base}/phux-${tag}-x86_64-unknown-linux-gnu.tar.gz\""
       echo "      sha256 \"${x86_linux}\""
       echo "    end"
     fi
-    if [ -n "${arm_linux}" ]; then
+    if [ -n "${arm_linux}" ] && [ "${primary_target}" != "aarch64-unknown-linux-gnu" ]; then
       echo "    on_arm do"
       echo "      url \"${base}/phux-${tag}-aarch64-unknown-linux-gnu.tar.gz\""
       echo "      sha256 \"${arm_linux}\""
