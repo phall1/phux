@@ -7,6 +7,10 @@ use phux_plugin::{
 };
 use tempfile::TempDir;
 
+fn sh_quote(value: &std::path::Path) -> String {
+    format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
+}
+
 fn write_configured_plugin(
     tmp: &TempDir,
     enabled: bool,
@@ -175,5 +179,80 @@ async fn checked_in_continuum_restore_missing_archive_is_structured()
     assert_eq!(output.exit_code, Some(66));
     assert!(output.stdout.is_empty());
     assert!(output.stderr.contains("no saved workspace archive"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn checked_in_continuum_autosave_honors_archive_override()
+-> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDir::new()?;
+    let bin_dir = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+    let fake_phux = bin_dir.join("phux");
+    std::fs::write(
+        &fake_phux,
+        r#"#!/bin/sh
+set -eu
+if [ "$1" != "workspace" ] || [ "$2" != "save" ]; then
+    printf 'unexpected command: %s\n' "$*" >&2
+    exit 9
+fi
+shift 2
+output=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --output)
+            output=$2
+            shift 2
+            ;;
+        --socket)
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+if [ -z "$output" ]; then
+    printf 'missing --output\n' >&2
+    exit 10
+fi
+printf '{"schema_version":1,"sessions":[]}\n' > "$output"
+"#,
+    )?;
+    let mut perms = std::fs::metadata(&fake_phux)?.permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&fake_phux, perms)?;
+
+    let archive = tmp.path().join("custom").join("continuum.json");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("examples/plugins/continuum/scripts/autosave.sh");
+    let command = format!(
+        "PHUX_BIN={} PHUX_CONTINUUM_ARCHIVE={} sh {}",
+        sh_quote(&fake_phux),
+        sh_quote(&archive),
+        sh_quote(&script)
+    );
+    let config = write_configured_plugin(&tmp, true, &command)?;
+
+    let output = run_configured_action(
+        &config,
+        &PluginActionRequest {
+            plugin_id: "example.actions".to_owned(),
+            action_id: "probe".to_owned(),
+            timeout: Some(Duration::from_secs(2)),
+            cwd: None,
+        },
+    )
+    .await?;
+
+    assert_eq!(output.outcome, PluginActionOutcome::Completed);
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(
+        std::fs::read_to_string(&archive)?,
+        "{\"schema_version\":1,\"sessions\":[]}\n"
+    );
+    assert!(output.stdout.contains(&archive.display().to_string()));
     Ok(())
 }
