@@ -117,16 +117,17 @@ pub(super) fn restore_plan(
             skipped_existing.push(session.name.clone());
             continue;
         }
+        let pane = preferred_pane(session);
         creates.push(CreateRequest {
             name: session.name.clone(),
             cwd: session
                 .cwd
                 .clone()
-                .or_else(|| first_pane(session).and_then(|pane| pane.cwd.clone())),
+                .or_else(|| pane.and_then(|pane| pane.cwd.clone())),
             command: session
                 .command
                 .clone()
-                .or_else(|| first_pane(session).and_then(|pane| pane.command.clone())),
+                .or_else(|| pane.and_then(|pane| pane.command.clone())),
         });
     }
     Ok(RestorePlan {
@@ -149,6 +150,27 @@ fn validate_archive(archive: &WorkspaceArchive) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn preferred_pane(session: &WorkspaceSession) -> Option<&WorkspacePane> {
+    session
+        .windows
+        .iter()
+        .find(|window| window.active)
+        .and_then(|window| {
+            window
+                .panes
+                .iter()
+                .find(|pane| pane.active)
+                .or_else(|| window.panes.first())
+        })
+        .or_else(|| {
+            session
+                .windows
+                .iter()
+                .find_map(|window| window.panes.iter().find(|pane| pane.active))
+        })
+        .or_else(|| first_pane(session))
 }
 
 fn first_pane(session: &WorkspaceSession) -> Option<&WorkspacePane> {
@@ -189,5 +211,32 @@ mod tests {
         assert_eq!(plan.creates[0].name, "bench");
         assert_eq!(plan.creates[0].cwd, None);
         assert_eq!(plan.creates[0].command, None);
+    }
+
+    #[test]
+    fn restore_plan_uses_active_pane_for_missing_command_and_cwd() {
+        let json = r#"{
+            "schema_version": 1,
+            "sessions": [
+                {
+                    "name": "bench",
+                    "windows": [
+                        {
+                            "name": "main",
+                            "panes": [
+                                { "cwd": "/wrong", "command": ["wrong"] },
+                                { "active": true, "cwd": "/right", "command": ["right"] }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+
+        let archive = parse_archive(json).expect("archive parses");
+        let plan = restore_plan(&archive, &[]).expect("restore plan");
+
+        assert_eq!(plan.creates[0].cwd.as_deref(), Some("/right"));
+        assert_eq!(plan.creates[0].command, Some(vec!["right".to_owned()]));
     }
 }

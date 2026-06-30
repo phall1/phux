@@ -19,7 +19,7 @@ pub(super) fn archive_from_snapshot(snapshot: &SessionSnapshot) -> WorkspaceArch
                 .get(&session.id)
                 .into_iter()
                 .flat_map(|windows| windows.iter())
-                .map(|window| archive_window(window, &panes_by_window))
+                .map(|window| archive_window(window, session.active_window, &panes_by_window))
                 .collect();
             WorkspaceSession {
                 name: session.name.clone(),
@@ -38,6 +38,7 @@ pub(super) fn archive_from_snapshot(snapshot: &SessionSnapshot) -> WorkspaceArch
 
 fn archive_window(
     window: &WindowInfo,
+    active_window: Option<WindowId>,
     panes_by_window: &BTreeMap<WindowId, Vec<&TerminalInfo>>,
 ) -> WorkspaceWindow {
     let panes = panes_by_window.get(&window.id).cloned().unwrap_or_default();
@@ -48,7 +49,7 @@ fn archive_window(
         .collect();
     WorkspaceWindow {
         name: window.name.clone(),
-        active: window.active_pane.is_some(),
+        active: Some(window.id) == active_window,
         layout: window
             .layout
             .as_ref()
@@ -156,5 +157,31 @@ mod tests {
             Some("/tmp/phux-ops")
         );
         assert_eq!(archive.sessions[0].windows[0].panes[0].command, None);
+    }
+
+    #[test]
+    fn marks_only_session_active_window_as_active() {
+        let session = SessionInfo::new(SessionId::new(1), "ops")
+            .with_active_window(Some(WindowId::new(3)))
+            .with_window_count(2);
+        let inactive_window = WindowInfo::new(WindowId::new(2), SessionId::new(1), "left")
+            .with_active_pane(Some(TerminalId::local(4)));
+        let active_window = WindowInfo::new(WindowId::new(3), SessionId::new(1), "right")
+            .with_index(1)
+            .with_active_pane(Some(TerminalId::local(5)));
+        let panes = vec![
+            TerminalInfo::new(TerminalId::local(4), WindowId::new(2), 80, 24),
+            TerminalInfo::new(TerminalId::local(5), WindowId::new(3), 80, 24),
+        ];
+        let snapshot =
+            SessionSnapshot::new(SessionId::new(1), WindowId::new(3), TerminalId::local(5))
+                .with_sessions(vec![session])
+                .with_windows(vec![inactive_window, active_window])
+                .with_panes(panes);
+
+        let archive = archive_from_snapshot(&snapshot);
+
+        assert!(!archive.sessions[0].windows[0].active);
+        assert!(archive.sessions[0].windows[1].active);
     }
 }
