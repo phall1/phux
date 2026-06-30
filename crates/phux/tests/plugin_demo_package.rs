@@ -161,7 +161,8 @@ fn launch_bench_reports_no_server_as_action_failure() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = tmp.path().join("bench.tsv");
     let socket = tmp.path().join("stale.sock");
-    std::fs::write(&socket, "").expect("stale socket placeholder");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("stale socket");
+    drop(listener);
     let state_text = state.to_str().expect("utf8 state path");
     let socket_text = socket.to_str().expect("utf8 socket path");
     let (code, stdout, stderr) = run_demo_with_env(
@@ -185,7 +186,7 @@ fn launch_bench_reports_no_server_as_action_failure() {
         output["stderr"]
             .as_str()
             .expect("action stderr")
-            .contains("phux: new failed"),
+            .contains("phux: no server running at"),
         "action stderr should explain failure: {output}"
     );
 }
