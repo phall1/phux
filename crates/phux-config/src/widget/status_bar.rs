@@ -211,6 +211,7 @@ mod tests {
         WidgetContext {
             now: UNIX_EPOCH + Duration::from_secs(0),
             session_name: session,
+            prefix: "C-a",
             windows: &[],
         }
     }

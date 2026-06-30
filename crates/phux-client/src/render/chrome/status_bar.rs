@@ -69,6 +69,8 @@ pub struct StatusBarContext<'a> {
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
+    /// Configured prefix chord.
+    pub prefix: &'a str,
     /// The TUI's windows in display order (active one flagged), consumed
     /// by the `windows` widget. Empty ⇒ no window bar. TUI-side data fed
     /// into the widget pipeline via [`Self::as_widget`].
@@ -83,6 +85,7 @@ impl<'a> StatusBarContext<'a> {
         WidgetContext {
             now: self.now,
             session_name: self.session_name,
+            prefix: self.prefix,
             windows: self.windows,
         }
     }
@@ -99,6 +102,7 @@ pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarConte
     StatusBarContext {
         now,
         session_name,
+        prefix: "C-a",
         windows: &[],
     }
 }
@@ -334,6 +338,7 @@ pub struct StatusBarPainter {
     /// change invalidates the cache so the row repaints (and erases a cleared
     /// badge). Painted over the composed widget row, not replacing it.
     supervisory: Option<String>,
+    prefix: String,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -349,6 +354,7 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("windows.len", &self.windows.len())
             .field("error", &self.error)
             .field("supervisory", &self.supervisory)
+            .field("prefix", &self.prefix)
             .finish()
     }
 }
@@ -356,7 +362,7 @@ impl std::fmt::Debug for StatusBarPainter {
 impl StatusBarPainter {
     /// Build a painter from an already-composed [`StatusBar`].
     #[must_use]
-    pub const fn new(bar: StatusBar, position: Position) -> Self {
+    pub fn new(bar: StatusBar, position: Position) -> Self {
         Self {
             bar,
             position,
@@ -365,6 +371,7 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: None,
             supervisory: None,
+            prefix: "C-a".to_owned(),
         }
     }
 
@@ -388,6 +395,16 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: Some(message.into()),
             supervisory: None,
+            prefix: "C-a".to_owned(),
+        }
+    }
+
+    /// Set the configured prefix chord exposed to prefix-aware widgets.
+    pub fn set_prefix(&mut self, prefix: impl Into<String>) {
+        let prefix = prefix.into();
+        if self.prefix != prefix {
+            self.prefix = prefix;
+            self.invalidate();
         }
     }
 
@@ -495,6 +512,7 @@ impl StatusBarPainter {
         // from the Workspace); inject it into the render context so
         // callers don't have to thread it through every paint path.
         let ctx = StatusBarContext {
+            prefix: &self.prefix,
             windows: &self.windows,
             ..*ctx
         };
@@ -565,6 +583,7 @@ impl StatusBarPainter {
             return None;
         }
         let ctx = StatusBarContext {
+            prefix: &self.prefix,
             windows: &self.windows,
             ..*ctx
         };
@@ -651,6 +670,7 @@ mod tests {
         StatusBarContext {
             now: UNIX_EPOCH,
             session_name: session,
+            prefix: "C-a",
             windows: &[],
         }
     }
@@ -929,6 +949,7 @@ mod tests {
         let ctx = StatusBarContext {
             now: UNIX_EPOCH,
             session_name: "",
+            prefix: "C-a",
             windows: &windows,
         };
         let mut buf = Vec::new();
@@ -952,6 +973,7 @@ mod tests {
         let ctx = StatusBarContext {
             now: UNIX_EPOCH,
             session_name: "",
+            prefix: "C-a",
             windows: &[],
         };
         let mut buf = Vec::new();
@@ -993,6 +1015,29 @@ mod tests {
         assert!(s.contains("\x1b[24;1H"), "no CUP-to-row-24: {s:?}");
         assert!(s.contains("hello"), "missing text: {s:?}");
         assert!(s.ends_with("\x1b[0m"), "missing SGR reset tail: {s:?}");
+    }
+
+    #[test]
+    fn painter_threads_configured_prefix_to_help_hints_widget() {
+        let cfg = StatusCfg {
+            center: vec![spec("help-hints", &[])],
+            ..Default::default()
+        };
+        let mut painter = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        painter.set_prefix("C-b");
+
+        let mut buf = Vec::new();
+        painter.paint(&mut buf, 80, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8(buf).unwrap());
+
+        assert!(
+            visible.contains("C-b ? help"),
+            "configured prefix should reach hints widget: {visible:?}"
+        );
+        assert!(
+            !visible.contains("C-a ? help"),
+            "default prefix must not leak after rebind: {visible:?}"
+        );
     }
 
     #[test]

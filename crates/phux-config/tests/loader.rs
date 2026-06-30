@@ -85,7 +85,9 @@ fn missing_file_returns_default() {
         Some(&phux_config::Action::Bare("detach".to_owned()))
     );
     assert!(
-        !cfg.status.left.is_empty() || !cfg.status.right.is_empty(),
+        !cfg.status.left.is_empty()
+            || !cfg.status.center.is_empty()
+            || !cfg.status.right.is_empty(),
         "embedded defaults must populate the status bar"
     );
 }

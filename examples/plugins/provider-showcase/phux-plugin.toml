@@ -29,3 +29,16 @@ title = "Open ticket"
 contexts = ["pane"]
 patterns = ["https://linear.app/*"]
 command = ["true"]
+
+[[workspaces]]
+id = "ops-bench"
+title = "Ops Bench"
+description = "Composes the showcase providers into one workspace profile."
+contexts = ["workspace"]
+actions = ["summarize"]
+events = ["idle"]
+
+[[workspaces.panes]]
+id = "board"
+pane = "board"
+role = "board"

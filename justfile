@@ -122,7 +122,18 @@ plugin-demo:
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect --json
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools list-integrations
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools validate-integrations
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools status-integrations
+    XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools smoke-integrations
     XDG_CONFIG_HOME="{{justfile_directory()}}/examples/plugins/agent-tools/config" cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
+
+# List and verify the herdr parity QA gate without running heavy surfaces.
+parity-check-list:
+    bash scripts/parity-gate.sh --check-list
+
+# Run the herdr parity QA gate. With no args, runs every parity scenario;
+# pass scenario names to run a subset, e.g. `just parity-gate plugin-demo`.
+parity-gate *SCENARIOS:
+    bash scripts/parity-gate.sh --run {{SCENARIOS}}
 
 # Lint shell scripts with shellcheck (the harness, the boundary/docs
 # guards, and the examples). Provided by the dev shell. Gates at

@@ -34,8 +34,10 @@
     reason = "bin-internal modules expose items via `pub`; `pub(crate)` would trip unreachable_pub in a binary with no external API (matches crates/phux/src/main.rs)"
 )]
 
+mod ask_tool;
 mod jsonrpc;
 mod plugin_action;
+mod plugin_workspace;
 mod socket;
 mod tools;
 
@@ -257,11 +259,17 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#).unwrap();
         let resp = handle_request(req).await.expect("tools/list replies");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 11);
         assert!(tools.iter().any(|t| t["name"] == json!("phux_ls")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_new")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_kill")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_watch")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_ask")));
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["name"] == json!("phux_plugin_workspace"))
+        );
     }
 
     #[tokio::test]

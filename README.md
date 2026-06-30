@@ -19,6 +19,7 @@ last-reviewed: 2026-06-23
 [Keys](#keys-you-need-first) |
 [Config](#settings-and-config) |
 [Headless](#headless-and-agent-control) |
+[Agent Workbench](#agent-workbench) |
 [Status](#status) |
 [Docs](#where-to-go-from-here)
 
@@ -112,34 +113,91 @@ for the schema, examples, status widgets, hooks, and plugin manifests.
 
 ## Install paths
 
-phux is v0.0.x. Source is the only install path guaranteed to work today. Once
-a post-`v0.0.1` release is cut, Homebrew becomes the primary binary install
-path:
+phux is v0.0.x. Source is the only install path guaranteed to work today while
+the latest GitHub release is the seeded `v0.0.1`.
+
+### Supported install channels
+
+| Channel | Status | Command |
+|---|---|---|
+| From source | Works today on macOS and Linux | `nix develop`, then `cargo run --bin phux` |
+| Homebrew | Primary binary path after a post-`v0.0.1` Formula lands | `brew install phall1/phux/phux` |
+| Curl installer | Release-tarball wrapper after a post-`v0.0.1` portable release lands | `curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh \| bash` |
+| Release tarball | CI-built macOS arm64, Linux x86_64, and Linux arm64 artifacts after `v0.0.1` | download `phux-<tag>-<target>.tar.gz` plus `.sha256` |
+
+Homebrew becomes the primary binary install path once the Formula is live for
+your platform:
 
 ```sh
 brew install phall1/phux/phux
 ```
 
-The curl installer is a wrapper around GitHub release tarballs. It verifies the
-release `.sha256` sidecar before unpacking and installs into
-`${PHUX_INSTALL_DIR:-$HOME/.local/bin}`:
+Until that release exists and the Formula is live on your platform, use the
+source path.
+
+**Curl installer — after the next portable release.**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
 ```
 
-Today latest is `v0.0.1`, which is intentionally refused because it is not a
-portable binary release. To install a specific future tag before it becomes
-latest:
+The installer is a wrapper around GitHub release tarballs. It verifies the
+release `.sha256` sidecar before unpacking and installs both `phux` and
+`phux-mcp` into `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`; set
+`PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
+installs the latest GitHub release. Today latest is `v0.0.1`, which is
+intentionally refused because it is not a portable binary release.
+
+To install a specific future tag before it is latest:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
 ```
 
-There is no `cargo install phux` yet. crates.io is scoped to
-`phux-protocol`; the binary and internal crates are not publishable, and the
-binary still depends on a git-pinned `libghostty-vt`. Off-Nix build details are
-in [Install](./docs/INSTALL.md).
+**Prebuilt release artifacts.** Version tags build tarballs for macOS arm64,
+Linux x86_64, and Linux arm64. The seeded `v0.0.1` Linux tarball is Nix-linked
+and not portable; use the next CI-built tag, Homebrew, or source.
+
+**From source — works today.**
+
+```sh
+git clone https://github.com/phall1/phux
+cd phux
+nix develop          # pins the toolchain, including the zig libghostty needs
+cargo run --bin phux
+```
+
+You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive —
+and run `phux` again to come back to exactly where you were. Off-Nix pins and the
+agent binaries are in [INSTALL.md](./docs/INSTALL.md).
+
+`cargo install phux is unsupported`: crates.io is scoped to `phux-protocol`;
+the binary and internal crates are not publishable, and the binary still
+depends on a git-pinned `libghostty-vt`. Windows is not supported. mise/asdf
+shims are not a supported install channel yet.
+
+### First run: persistent session + agent loop
+
+Once `phux` is on `PATH`, start and attach:
+
+```sh
+phux
+```
+
+That auto-spawns a server and a shell-backed session. Detach with `Ctrl-A d`;
+the shell keeps running. In another terminal, exercise the agent loop against
+that same persistent pane:
+
+```sh
+phux ls --json
+phux run . --json "printf 'phux-agent-loop\n'"
+phux wait . --until "phux-agent-loop" --timeout 10
+phux snapshot . --json --scrollback 50
+```
+
+For MCP clients, point the client at the bundled `phux-mcp` binary. It exposes
+the same `ls`, `snapshot`, `send-keys`, `run`, `wait`, `ask`, `new`, `kill`,
+`watch`, plugin-action, and plugin-workspace surfaces over JSON-RPC stdio.
 
 ## Headless and agent control
 
@@ -180,8 +238,39 @@ Selectors are shared across the CLI:
 | `=` | last-focused target |
 
 Point an MCP agent at `phux-mcp` and it gets the same core verbs over JSON-RPC
-stdio. Start with [Agents](./docs/consumers/agents.md) and
-[MCP](./docs/consumers/mcp.md).
+stdio, plus `phux_ask` and plugin workspace profile discovery. Start with
+[Agents](./docs/consumers/agents.md) and [MCP](./docs/consumers/mcp.md).
+
+## Agent workbench
+
+phux now has the public pieces that make an agent bench feel first-class
+without copying another app's plugin host:
+
+```sh
+phux agent list --json
+phux agent show . --json
+phux agent explain .
+phux ask . --id blocked-on-human --question "Which deploy target?"
+```
+
+`phux agent` is an explainable projection over phux-owned evidence: terminal
+identity, screen/title hints, plugin reports, and explicit `ask` events. It
+returns state, confidence, attention, and source provenance instead of hiding a
+rule engine.
+
+The checked-in plugin package at
+[`examples/plugins/agent-tools`](./examples/plugins/agent-tools/) provides
+public Codex and Claude Code integration records, lifecycle actions, and an
+agent-bench workspace profile:
+
+```sh
+XDG_CONFIG_HOME="$PWD/examples/plugins/agent-tools/config" \
+  phux config run com.phux.demo.agent-tools smoke-integrations
+```
+
+Those integrations are external and declarative. They can report
+`missing`/`current`/`outdated`, link local session identity where available,
+and run smoke checks without private credentials.
 
 ## Why it is different
 
@@ -210,7 +299,7 @@ The line between shipped and promised is kept explicit:
 **Stable enough to try**
 
 - TUI attach, detach, reattach, multi-pane splits, status bar, keybindings,
-  help overlay, and multiple clients on one session
+  prefix-aware help hints, help overlay, and multiple clients on one session
 - Modern-protocol passthrough: Kitty keyboard, truecolor, OSC 8, OSC 133,
   images
 - Version-negotiated wire types in `phux-protocol`
@@ -218,9 +307,15 @@ The line between shipped and promised is kept explicit:
 **Real and tested, still pre-1.0**
 
 - Headless verbs: `ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`,
-  `new`, `kill`, `rename`, `config`, `plugin`
-- `phux-mcp`, exposing the same surface as MCP tools
+  `ask`, `new`, `kill`, `rename`, `config`, `agent`, `plugin`, and
+  `workspace` (`inspect`, `save`, `restore`)
+- `phux-mcp`, exposing the same surface as MCP tools, including `phux_ask` and
+  plugin workspace profile discovery
+- Public Codex and Claude Code integration package fixtures with
+  link/status/unlink/smoke actions
 - Config scaffolding and effective-config inspection
+- Workspace restore that recreates sessions and seed processes from a typed
+  archive; live PTY handoff belongs to `phux upgrade`, not restore
 
 **Designed and addressed-for, not wired yet**
 
@@ -266,13 +361,13 @@ Each of these is a "no" that keeps the model honest:
 
 - **No embedded scripting language.** Commands are typed messages. Logic that
   wants a runtime can shell out to one.
-- **No plugin host inside the server.** Plugins are manifests and argv commands;
-  phux owns validation and routing, not your plugin runtime.
-- **No tmux-style copy-mode clone as the core model.** Selection formatting
-  belongs to libghostty and native selection belongs to your terminal. phux owns
-  focused-pane navigation and literal search over scrollback.
-- **No homegrown crypto.** SSH, Unix-socket permissions, and future transport
-  authentication are the trust model.
+- **No in-process plugin host.** Plugins are external packages declared in
+  config and executed as argv; phux owns typed manifests, workspace state, and
+  terminal control, not loaded plugin code.
+- **No tmux-style copy-mode clone.** Selection formatting belongs to libghostty
+  and native selection belongs to your terminal. phux owns focused-pane
+  navigation and literal search over scrollback.
+- **No homegrown crypto.** SSH and Unix-socket permissions are the trust model.
 - **No format-template DSL.** The status bar takes typed widgets, not a printf
   dialect.
 

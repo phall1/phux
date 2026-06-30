@@ -273,5 +273,5 @@ prefix = "C-a"
 # Right: session name + clock (the leading space in the time format keeps
 # them apart).
 left   = [{ kind = "windows" }]
-center = []
+center = [{ kind = "help-hints" }]
 right  = ["session-name", { kind = "time", format = " %H:%M" }]

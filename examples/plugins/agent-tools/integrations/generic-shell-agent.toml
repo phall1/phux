@@ -3,12 +3,24 @@ id = "generic-shell-agent"
 display_name = "Generic Shell Agent"
 kind = "terminal-agent"
 description = "Template for any CLI assistant a team wants phux to launch and supervise."
+package_version = "0.1.0"
+package_status = "public-template"
+first_party = true
 capabilities = ["terminal-control", "session-supervision"]
 
 [detect]
 mode = "opt-in"
 command = "sh"
 env = "PHUX_AGENT_TOOLS_DETECT"
+
+[link]
+mode = "state-file"
+default_session = "agent-bench-generic-shell-agent"
+
+[session_identity]
+mode = "phux"
+native_env = "PHUX_GENERIC_AGENT_SESSION_ID"
+restore = "phux-session"
 
 [launch]
 command = ["sh", "-lc", "echo configure this template with your agent command"]

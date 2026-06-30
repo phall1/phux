@@ -3,6 +3,7 @@
 //! Each submodule defines a `Widget`-implementing struct plus a
 //! `pub(crate) fn factory` that the [`super::WidgetRegistry`] calls.
 
+pub(super) mod help_hints;
 pub(super) mod session_name;
 pub(super) mod time;
 pub(super) mod windows;

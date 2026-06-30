@@ -76,6 +76,43 @@ Two spans carry most of the signal. On the server, `synthesize_against_reference
 
 Runtime introspection ships as `phux server status --json`: number of sessions / windows / terminals / clients, per-terminal refresh rate, per-client queue depth, total bytes since start. This is the substrate for any future Prometheus/OpenTelemetry exporter — phux does not ship one. Runtime per-target log-level control and a `phux logs` discovery/tail verb are designed but not built ([ADR-0028](../ADR/0028-runtime-log-control.md) Slice 2); today the dials are the `RUST_LOG` / `PHUX_LOG` / `PHUX_LOG_FORMAT` environment knobs above, set at process start.
 
+## Workspace continuity and update survival
+
+phux has two different continuity mechanisms. They are intentionally separate:
+
+- **Restart restore:** `phux workspace save` writes a typed JSON archive of the
+  running workspace. `phux workspace restore ARCHIVE` reads that archive and
+  creates any missing session names on a running server. Each restored session
+  starts a fresh PTY process: the archived `command` is used when present;
+  otherwise phux starts the default shell in the archived cwd when available.
+  This is a restart/recreate path, not a live handoff path.
+- **Live update handoff:** `phux upgrade` is the mechanism intended to keep
+  existing PTYs alive across a server binary re-exec. Its e2e drill is
+  `cargo test -p phux --test upgrade_e2e -- --ignored`, which checks that a
+  pane child PID and scrollback marker survive the upgrade.
+
+The workspace archive stores sessions, windows, pane metadata, cwd, dimensions,
+and split-layout shape where the server reports it. Restore currently recreates
+missing **sessions and seed processes** only; it does not replay the archived
+split tree into multiple live panes. Do not describe `workspace restore` as PTY
+resurrection or full layout replay until a restore-side layout command exists
+and has e2e coverage.
+
+Operational smoke checks:
+
+```sh
+# Process/cwd restart restore smoke. Starts real phux servers.
+cargo test -p phux --test workspace_archive_e2e \
+  workspace_restore_starts_archived_command_process -- --ignored
+
+# Save/restore session inventory smoke. Starts real phux servers.
+cargo test -p phux --test workspace_archive_e2e \
+  workspace_archive_saves_and_restores_sessions -- --ignored
+
+# Live PTY handoff across server update/re-exec.
+cargo test -p phux --test upgrade_e2e -- --ignored
+```
+
 ## Security model and trust boundaries
 
 **Design assumption:** This is not a security-hardened system for hostile environments. It is suitable for trusted networks and multi-user boxes where Unix permissions are enforced by the kernel.
@@ -147,6 +184,21 @@ phux attach --quic HOST:PORT --token HEX --cert-fingerprint FP
 
 Use WebSocket/TCP when UDP is blocked by a network or firewall; use QUIC when
 roaming/migration behavior matters and UDP is available.
+
+Remote attach has protocol coverage and manual smoke coverage, but it is not a
+workspace-restore mechanism. A remote WebSocket or QUIC client attaches to the
+server state that exists on that server. It does not move PTYs between hosts,
+and it does not replay a saved archive on the remote side by itself. Validate a
+remote deployment with a loopback-secure smoke before advertising it:
+
+```sh
+PHUX_WS_SECURE=1 phux server --listen 127.0.0.1:8787
+phux pair
+phux attach --ws wss://127.0.0.1:8787 --token HEX --cert-fingerprint FP
+```
+
+For QUIC, use the same token/fingerprint pair with `phux server --quic
+127.0.0.1:8788` and `phux attach --quic 127.0.0.1:8788 ...`.
 
 `PHUX_WS_SECURE=1` forces the secure path on a loopback address (to exercise the
 remote path locally); `PHUX_WS_TLS_CERT` + `PHUX_WS_TLS_KEY` substitute an

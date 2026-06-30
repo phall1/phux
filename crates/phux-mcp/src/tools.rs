@@ -166,7 +166,9 @@ pub(crate) fn catalog() -> Value {
                 }
             }
         },
-        crate::plugin_action::schema()
+        crate::ask_tool::schema(),
+        crate::plugin_action::schema(),
+        crate::plugin_workspace::schema(),
     ])
 }
 
@@ -188,7 +190,9 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_new" => phux_new(args).await,
         "phux_kill" => phux_kill(args).await,
         "phux_watch" => phux_watch(args).await,
+        "phux_ask" => crate::ask_tool::call(args).await,
         "phux_plugin_action" => crate::plugin_action::call(args).await,
+        "phux_plugin_workspace" => crate::plugin_workspace::call(args),
         other => Err(ToolError::new(format!("unknown tool: {other}"))),
     }
 }
@@ -719,7 +723,9 @@ mod tests {
                 "phux_new",
                 "phux_kill",
                 "phux_watch",
+                "phux_ask",
                 "phux_plugin_action",
+                "phux_plugin_workspace",
             ]
         );
         for tool in arr {

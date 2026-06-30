@@ -2308,7 +2308,11 @@ fn build_status_bar_painter() -> Option<StatusBarPainter> {
     let registry = phux_config::WidgetRegistry::with_builtins();
     match phux_config::widget::StatusBar::build(&cfg.status, &registry) {
         Ok(bar) if bar.is_empty() => None,
-        Ok(bar) => Some(StatusBarPainter::new(bar, Position::default())),
+        Ok(bar) => {
+            let mut painter = StatusBarPainter::new(bar, Position::default());
+            painter.set_prefix(cfg.keybindings.prefix);
+            Some(painter)
+        }
         Err(err) => {
             tracing::warn!(error = %err, "status-bar build failed; surfacing on status bar");
             Some(StatusBarPainter::error_line(config_error_line(&err)))

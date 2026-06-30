@@ -148,8 +148,9 @@ Each `[[hooks.<name>]]` entry is an array-of-tables entry; multiple entries are 
 > lifecycle, `phux plugin list --json` / `phux config plugins --json` list
 > manifests, `phux config agents --json` projects declared agent state for
 > consumers, and `phux config run PLUGIN ACTION` executes action entries. Event
-> hooks, panes, and link handlers remain declarative until their host surfaces
-> ship.
+> hooks, panes, links, and workspace profiles are declarative provider records;
+> plugin actions compose the shipped CLI surfaces such as `workspace save` and
+> `workspace restore`.
 
 Plugins are executable workflow packages declared by a `phux-plugin.toml`
 manifest. The config file composes local manifests:
@@ -208,19 +209,18 @@ argv such as `["sh", "-c", "…"]`. The runtime inherits the phux process
 environment and adds `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and
 `PHUX_PLUGIN_ROOT`.
 
-The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`, and
-`[[agents]]` entries. Agent declarations are static status records for
-consumer projections: `state` normalizes to `unknown`, `idle`, `working`, or
-`blocked`, and `attention` normalizes to `none`, `low`, `normal`, or `high`.
-The manifest format also accepts provider declarations for `[[build]]`,
-`[[events]]`, `[[panes]]`, and `[[links]]` entries. Event hooks, panes, and
-link handlers are provider-shaped: each has a plugin-local `id`, a `title`,
-and an argv `command`, so frontends and server layers can enumerate them
+The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`,
+`[[links]]`, and `[[workspaces]]` entries. Agent declarations are static status
+records for consumer projections: `state` normalizes to `unknown`, `idle`,
+`working`, or `blocked`, and `attention` normalizes to `none`, `low`, `normal`,
+or `high`. Event hooks, panes, link handlers, and workspace profiles are
+provider-shaped: each entry has a plugin-local `id`, a `title`, and, where it
+executes, an argv `command`, so frontends and server layers can enumerate them
 without loading plugin code. Link handlers additionally declare `schemes` or
-`patterns` that describe the routes they can accept. Commands are argv arrays,
-not shell strings. This keeps phux core small: the plugin owns its language and
-files, while phux owns manifest validation, config composition, and the future
-runtime host surface.
+`patterns`; workspace profiles list the action, event, agent, and pane role ids
+they compose. Commands are argv arrays, not shell strings. This keeps phux core
+small: the plugin owns its language and files, while phux owns manifest
+validation, config composition, workspace archives, and terminal control.
 
 [`examples/plugins/provider-showcase/phux-plugin.toml`](../examples/plugins/provider-showcase/phux-plugin.toml)
 is the checked-in provider fixture for event, pane, and link-handler
@@ -235,6 +235,34 @@ action. From a fresh checkout:
 ```sh
 just plugin-demo
 ```
+
+The same package carries first-party public Codex and Claude Code integration
+records. Link the plugin itself with `phux plugin link` or the fixture config,
+then use plugin actions for package lifecycle checks:
+
+```sh
+phux config run com.phux.demo.agent-tools validate-integrations
+phux config run com.phux.demo.agent-tools link-integration
+phux config run com.phux.demo.agent-tools status-integrations
+phux config run com.phux.demo.agent-tools unlink-integration
+```
+
+Those actions are still external and declarative. They write plugin-local
+state files, report package state as `missing`, `current`, or `outdated`, and
+record either a native session id supplied by the caller or the phux session
+target. They do not load an in-process plugin host, contact private services,
+or require agent credentials. `smoke-integrations` runs the lifecycle against
+fake public CLIs in a temporary state directory.
+
+Two larger checked-in profiles exercise the workspace layer:
+
+- [`examples/plugins/continuum`](../examples/plugins/continuum/phux-plugin.toml)
+  declares `autosave` and `restore-latest` actions plus idle/session-change
+  events that call `phux workspace save` and `phux workspace restore`.
+- [`examples/plugins/agent-tools`](../examples/plugins/agent-tools/README.md)
+  declares an `agent-bench` workspace whose `launch-bench`, `list-bench`, and
+  `drive-bench` actions create role sessions, report status, and route keys to
+  the selected role through `phux send-keys`.
 
 ---
 

@@ -6,7 +6,10 @@ last-reviewed: 2026-06-06
 
 # Quickstart
 
-**TL;DR.** This doc owns the setup path: drop into the Nix-pinned dev shell, run `just ci` to verify the toolchain, then `cargo run --bin phux` to spawn a server and attach. It also catalogs the verbs that run today versus the ones that are designed but not built. phux is pre-alpha, so expect rough edges and read the caveats before you rely on anything.
+**TL;DR.** This doc owns the setup path: drop into the Nix-pinned dev shell,
+run `just ci` to verify the toolchain, then `cargo run --bin phux` to spawn a
+server and attach. It also catalogs the TUI, agent, MCP, plugin, and workspace
+surfaces that run today versus the ones that are designed but not built.
 
 ---
 
@@ -58,6 +61,8 @@ Interactive TUI:
 - Attach and detach to a single auto-spawned session, with multiple clients on the same session.
 - Split panes (horizontal and vertical) and kill panes.
 - A status bar with widgets; the typed widget contract is in [`consumers/tui.md`](./consumers/tui.md).
+- Prefix-aware help hints in the default status bar (`Ctrl-A ?`, `Ctrl-A :`,
+  `Ctrl-A [`), so first-run discovery is visible without opening docs.
 - Keybindings via a TOML config that layers over the shipped `default.toml`, with prefix-table and global chord resolution.
 - A help overlay (`prefix ?`).
 - Terminal content as bytes on the wire with structured input: Kitty keyboard, OSC 8, OSC 133, true colour, and image protocols pass through to the engine on both ends.
@@ -67,12 +72,14 @@ Headless verbs you can run without a TTY:
 ```
 attach   server   ls   new   kill   rename
 snapshot send-keys wait watch run    config
-plugin
+ask      agent     plugin workspace
 ```
 
 Read verbs take `--json` for a machine-readable shape, and every verb addresses panes by the same selector grammar the TUI uses. This is the surface a script or an agent drives; the per-verb catalog and JSON contracts live in [`consumers/agents.md`](./consumers/agents.md).
 
-There is also an MCP adapter, `phux-mcp`, exposing the core verbs as JSON-RPC tools — see [`consumers/mcp.md`](./consumers/mcp.md).
+There is also an MCP adapter, `phux-mcp`, exposing the core verbs as JSON-RPC
+tools plus `phux_ask` and plugin workspace profile discovery — see
+[`consumers/mcp.md`](./consumers/mcp.md).
 
 Remote attach for a phone or another native client uses the same server:
 
@@ -94,11 +101,28 @@ phux run . "echo hello && exit 3"    # run in the focused pane, get exit code 3 
 phux watch --json .                  # stream live events; Ctrl-C to stop
 ```
 
+Try the agent workbench pieces:
+
+```sh
+phux agent list --json
+phux agent explain .
+XDG_CONFIG_HOME="$PWD/examples/plugins/agent-tools/config" \
+  phux config run com.phux.demo.agent-tools smoke-integrations
+```
+
+`phux agent` reports explainable public state (`working`, `blocked`, `idle`,
+`done`, or `unknown`) with confidence and evidence sources. The checked-in
+agent-tools package demonstrates external Codex and Claude Code integration
+records without requiring private credentials.
+
 ## What does not work yet
 
 - **`split` and `detach` as CLI subcommands.** Splitting and detaching exist inside the interactive TUI, but they are not headless verbs. Tracked as bead phux-99te.
 - **Federation routing.** The wire accepts `SATELLITE { host, id }`, but nothing routes it to a remote host. See the maturity note in [`CONCEPTS.md`](./CONCEPTS.md).
 - **Predictive local echo.** Designed, gated on a transport whose round-trip actually needs it.
+- **Live PTY resurrection through workspace restore.** `workspace restore`
+  recreates sessions and seed processes from a typed archive. Live handoff
+  across a server re-exec is the `upgrade` path.
 
 The wire encoding is positional (big-endian, length-prefixed) today; a move to field-tagged TLV is deferred future work (beads phux-ktte, relates phux-i58). The normative codec statement is in [`spec/appendix-encoding.md`](./spec/appendix-encoding.md).
 

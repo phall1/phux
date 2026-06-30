@@ -386,7 +386,7 @@ prefix = "C-a"
 
 [status]
 left   = [{ kind = "windows" }]
-center = []
+center = [{ kind = "help-hints" }]
 right  = ["session-name", { kind = "time", format = " %H:%M" }]
 
 [[plugins]]
@@ -462,12 +462,12 @@ echo strictly authoritative; set it to `true` to opt in. Anything under
 predictive-echo = false
 ```
 
-**Plugin manifests** live under `[[plugins]]`. This is the first
-plugin-surface contract, not a runtime plugin host: phux validates and
-inspects local `phux-plugin.toml` manifests today, and future runtime
-surfaces will consume the same manifest shape instead of inventing a
-second extension format. `manifest` is an absolute path, or a path
-relative to `config.toml`; `enabled` defaults to `true`.
+**Plugin manifests** live under `[[plugins]]`. This is an external package
+contract, not an in-process plugin host: phux validates and inspects local
+`phux-plugin.toml` manifests, executes declared actions as child processes, and
+keeps terminal/session state in first-party CLI surfaces. `manifest` is an
+absolute path, or a path relative to `config.toml`; `enabled` defaults to
+`true`.
 
 ```toml
 [[plugins]]
@@ -518,6 +518,19 @@ title = "Open ticket"
 contexts = ["pane"]
 patterns = ["https://linear.app/*"]
 command = ["agent-ticket", "{url}"]
+
+[[workspaces]]
+id = "agent-bench"
+title = "Agent Bench"
+contexts = ["workspace"]
+agents = ["codex"]
+actions = ["summarize"]
+events = ["idle"]
+
+[[workspaces.panes]]
+id = "board"
+pane = "board"
+role = "monitor"
 ```
 
 `phux plugin list --json` is the stable lifecycle inspection surface for
@@ -558,6 +571,16 @@ result is a `schema_version = 1` document containing `plugin_id`, `action_id`,
 `command`, `cwd`, `outcome`, `exit_code`, `stdout`, `stderr`, and
 `duration_ms`. There is no implicit shell; a plugin opts into shell behavior by
 declaring `["sh", "-c", "..."]`.
+
+`phux workspace save [--socket PATH] [--output PATH]` captures the running phux
+workspace as a JSON archive. The archive records sessions, windows, pane
+titles/cwds, focus, nullable commands, and layout orientation. It does not
+pretend dead processes survive. `phux workspace restore ARCHIVE [--socket PATH]`
+recreates missing sessions from that archive, using saved/authored cwd and
+command fields where available. External packages compose this surface today:
+the checked-in continuum demo autosaves/restores profile archives, and the
+agent-tools demo launches and drives an `agent-bench` profile through
+`phux config run`.
 
 **Federation satellites** live under `[[satellites]]`. This is the
 hub-side registry for remote phux servers; routing is a later federation
@@ -931,6 +954,7 @@ architectural revision to grow a status bar plugin story.
 | `session-name`  | `format?` (default: `"{name}"`) — **implemented**           |
 | `time`          | `format` (strftime) — **implemented**                       |
 | `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented** |
+| `help-hints`    | prefix-aware help / palette / copy affordances — **implemented** |
 | `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |
 | `cwd`           | `format?`, `truncate?` (chars)                               |
@@ -945,9 +969,9 @@ architectural revision to grow a status bar plugin story.
 Every widget kind accepts a `style` table with optional `fg`, `bg`
 (color strings: names, `#rrggbb`, or palette indices), and the boolean
 attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
-implemented built-ins today are `session-name`, `time`, and `windows`
-(the others above are design intent); `windows` takes its `active` and
-`inactive` segments as such style tables.
+implemented built-ins today are `session-name`, `time`, `windows`, and
+`help-hints` (the others above are design intent); `windows` takes its
+`active` and `inactive` segments as such style tables.
 
 ### 8.4 Refresh and ordering
 
@@ -1093,7 +1117,7 @@ The shipped defaults, in one place:
 | Spawn-on-attach               | `defaults.shell` (unset = inherit)       |
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
-| Status bar                    | `[{ kind = "windows" }]` / `[]` / `["session-name", { kind = "time", format = " %H:%M" }]` |
+| Status bar                    | `[{ kind = "windows" }]` / `[{ kind = "help-hints" }]` / `["session-name", { kind = "time", format = " %H:%M" }]` |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
 | Cursor blink                  | follow inner program request             |
@@ -1109,22 +1133,15 @@ $ phux
 # spawns server, creates session "default" with one window/one pane
 # running $SHELL in $PWD
 # attaches the client and renders
-# status bar shows "default | 0:shell | 21:14"
-# prefix is C-a (advertised once in a startup message)
+# status bar shows "0:shell | C-a ? help | C-a : palette | C-a [ copy | default 21:14"
 $ C-a c           # new window
 $ C-a d           # detach
 $ phux            # re-attach to "default"; full state replayed
 ```
 
-Discoverability: at startup the first time, the client prints one
-non-intrusive message to the status bar:
-
-```
-phux 0.1 — prefix C-a, ? for help, d to detach
-```
-
-That message disappears after 5 seconds or any keystroke, whichever
-first.
+Discoverability: the default status bar keeps the highest-value prefix
+affordances visible without consuming pane space. If the prefix is
+rebound, the `help-hints` widget renders the configured prefix.
 
 Beyond that, `?` after the prefix opens a popup listing every binding.
 The popup is rendered server-side (a temporary overlay pane) so

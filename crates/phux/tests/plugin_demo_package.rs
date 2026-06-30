@@ -9,6 +9,7 @@ const INSPECT_ACTION: &str = "inspect";
 const LIST_ACTION: &str = "list-integrations";
 const VALIDATE_ACTION: &str = "validate-integrations";
 const DETECT_ACTION: &str = "detect-agents";
+const LAUNCH_BENCH_ACTION: &str = "launch-bench";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -28,6 +29,7 @@ fn run_demo(args: &[&str]) -> (i32, String, String) {
 fn run_demo_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
     let out = Command::new(PHUX)
         .env("XDG_CONFIG_HOME", demo_xdg())
+        .env("PHUX_BIN", PHUX)
         .envs(envs.iter().copied())
         .args(args)
         .output()
@@ -41,6 +43,14 @@ fn run_demo_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, Stri
 
 fn stdout_from_json(output: &serde_json::Value) -> &str {
     output["stdout"].as_str().expect("stdout field")
+}
+
+fn without_dhat_footer(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| !line.starts_with("dhat: "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -93,8 +103,8 @@ fn integration_template_actions_are_local_and_validated() {
     assert_eq!(code, 0, "list integrations should succeed; stderr={stderr}");
     let output: serde_json::Value = serde_json::from_str(&stdout).expect("list stdout is JSON");
     let listed = stdout_from_json(&output);
-    assert!(listed.contains("codex\tCodex\tterminal-agent\topt-in\tcodex"));
-    assert!(listed.contains("claude-code\tClaude Code\tterminal-agent\topt-in\tclaude"));
+    assert!(listed.contains("codex\tCodex\tterminal-agent\t0.1.0\topt-in\tcodex"));
+    assert!(listed.contains("claude-code\tClaude Code\tterminal-agent\t0.1.0\topt-in\tclaude"));
     assert!(listed.contains("generic-shell-agent\tGeneric Shell Agent"));
 
     let (code, stdout, stderr) = run_demo(&["config", "run", PLUGIN_ID, VALIDATE_ACTION, "--json"]);
@@ -144,4 +154,39 @@ fn agent_detection_is_opt_in_and_path_overridable() {
     let detected = stdout_from_json(&output);
     assert!(detected.contains("codex\tCodex\tcodex\tavailable"));
     assert!(detected.contains("claude-code\tClaude Code\tclaude\tmissing"));
+}
+
+#[test]
+fn launch_bench_reports_no_server_as_action_failure() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = tmp.path().join("bench.tsv");
+    let socket = tmp.path().join("stale.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("stale socket");
+    drop(listener);
+    let state_text = state.to_str().expect("utf8 state path");
+    let socket_text = socket.to_str().expect("utf8 socket path");
+    let (code, stdout, stderr) = run_demo_with_env(
+        &["config", "run", PLUGIN_ID, LAUNCH_BENCH_ACTION, "--json"],
+        &[
+            ("PHUX_SOCKET", socket_text),
+            ("PHUX_AGENT_BENCH_STATE", state_text),
+            ("PHUX_AGENT_BENCH_ROLES", "codex"),
+        ],
+    );
+
+    assert_ne!(code, 0, "stale socket should fail the action");
+    let wrapper_stderr = without_dhat_footer(&stderr);
+    assert!(
+        wrapper_stderr.is_empty(),
+        "wrapper stderr should stay empty for JSON output: {stderr}"
+    );
+    let output: serde_json::Value = serde_json::from_str(&stdout).expect("action JSON");
+    assert_ne!(output["exit_code"], 0);
+    assert!(
+        output["stderr"]
+            .as_str()
+            .expect("action stderr")
+            .contains("phux: no server running at"),
+        "action stderr should explain failure: {output}"
+    );
 }

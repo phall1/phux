@@ -6,9 +6,22 @@ last-reviewed: 2026-06-09
 
 # Install
 
-**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their `.sha256` sidecars. crates.io is for `phux-protocol`; `cargo install phux` is unsupported while the binary/internal crates are unpublished.
+**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their .sha256 sidecars. crates.io is for `phux-protocol`; `cargo install phux is unsupported` while the binary/internal crates are unpublished. Windows is not supported.
 
 ---
+
+## Supported install channels
+
+| Channel | Best for | Status |
+|---|---|---|
+| Homebrew | Day-to-day binary install on supported Homebrew platforms | Primary binary path after a post-`v0.0.1` Formula lands |
+| Curl installer | Scripted install from GitHub release tarballs | Use after a post-`v0.0.1` portable release is latest, or pass `--version` for a known portable tag |
+| Release tarball | Manual install and verification | CI-built tarballs include `phux`, `phux-mcp`, licenses, README, and `.sha256` sidecars |
+| From source | Contributors and early users today | Works now on macOS and Linux through the Nix-pinned toolchain |
+
+Not supported yet: `cargo install phux`, Windows, mise/asdf shims, and the
+seeded `v0.0.1` Linux tarball as a portable binary. The crates.io package today
+is `phux-protocol`, not the CLI.
 
 ## Homebrew
 
@@ -37,6 +50,9 @@ It verifies the release `.sha256` sidecar before unpacking and installs
 `PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
 uses the latest GitHub release; latest is currently `v0.0.1`, and the installer
 refuses that release because it is not a portable binary release.
+In plain terms: it verifies the release .sha256 sidecar before unpacking, then
+installs both binaries. `phux-mcp is bundled` with every portable tarball and
+installer path; do not install a separate MCP package.
 
 To install a specific future tag before it is latest:
 
@@ -88,17 +104,45 @@ crates.io is for the wire library, not for installing the `phux` binary:
 cargo add phux-protocol
 ```
 
-`cargo install phux` is not supported yet. The binary crate and internal
+`cargo install phux is unsupported`. The binary crate and internal
 workspace crates are `publish = false`; install the CLI through Homebrew,
 the curl installer, release tarballs, or a source build.
 
-## Drive it from an agent
+## First run: persistent session + agent loop
 
-The agent surface ships with the same binary — nothing extra to install. The
-MCP adapter is its own binary in the workspace:
+After install, run:
 
 ```sh
-cargo run --bin phux-mcp     # JSON-RPC over stdio; wire it into your MCP client
+phux
+```
+
+`phux` with no arguments auto-spawns a server and attaches to a shell-backed
+session. Detach with `Ctrl-A d`; the server keeps the shell alive. Run `phux`
+again to re-attach.
+
+From a second terminal, drive the same persistent pane through the agent loop:
+
+```sh
+phux ls --json
+phux run . --json "printf 'phux-agent-loop\n'"
+phux wait . --until "phux-agent-loop" --timeout 10
+phux snapshot . --json --scrollback 50 > phux-screen.json
+```
+
+That is the read -> act -> wait -> read pattern from
+[`consumers/agents.md`](./consumers/agents.md): read state, send or run work in
+the pane, wait for observable output, then snapshot again. It uses the same
+server and PTY as the interactive TUI. phux does not promise live PTY
+resurrection; workspace restore starts new processes instead of reviving an old
+PTY.
+
+## Drive it from an agent
+
+The agent surface ships with the same release artifact — nothing extra to
+install. The MCP adapter is its own bundled binary:
+
+```sh
+phux-mcp     # JSON-RPC over stdio; wire it into your MCP client
 ```
 
 Tool catalog and JSON contracts: [`consumers/mcp.md`](./consumers/mcp.md). The
@@ -112,4 +156,4 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 | macOS (x86_64) | Source: yes. No official release artifact. |
 | Linux x86_64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
 | Linux aarch64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
-| Windows | No. Not on the near roadmap. |
+| Windows | No. Windows is not supported and is not on the near roadmap. |

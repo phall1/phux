@@ -1,0 +1,242 @@
+mod config;
+mod detect;
+mod model;
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
+use phux_protocol::wire::info::{SessionSnapshot, TerminalInfo, WindowInfo};
+use phux_server::runtime::default_socket_path;
+
+use crate::commands::{
+    cli_runtime, parse_selector, report_no_server, request_command, resolve_targets,
+};
+
+use self::config::configured_agents;
+use self::detect::infer_agent_state;
+use self::model::{AgentStateReport, PaneEvidence, format_terminal};
+
+#[derive(Debug, clap::Subcommand)]
+pub(crate) enum AgentAction {
+    #[command(about = "List inferred agent state for every pane")]
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    #[command(about = "Show inferred state for one pane")]
+    Show {
+        target: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    #[command(about = "Explain the evidence behind one pane's state")]
+    Explain {
+        target: Option<String>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+}
+
+pub(crate) fn run_agent(action: &AgentAction) -> ExitCode {
+    match action {
+        AgentAction::List { json, socket } => run_agent_list(*json, socket.clone()),
+        AgentAction::Show {
+            target: _,
+            json: _,
+            socket: _,
+        }
+        | AgentAction::Explain {
+            target: _,
+            json: _,
+            socket: _,
+        } => run_agent_one(action),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentView {
+    Show,
+    Explain,
+}
+
+fn run_agent_list(json: bool, socket: Option<PathBuf>) -> ExitCode {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    rt.block_on(async move {
+        let snapshot = match fetch_snapshot(&socket_path, "agent list").await {
+            Ok(snapshot) => snapshot,
+            Err(code) => return code,
+        };
+        let plugins = configured_agents();
+        let states = classify_snapshot(&socket_path, &snapshot, &plugins).await;
+        print_agent_states(&states, json, AgentView::Show)
+    })
+}
+
+fn run_agent_one(action: &AgentAction) -> ExitCode {
+    let (target, json, socket, view) = match action {
+        AgentAction::Show {
+            target,
+            json,
+            socket,
+        } => (target.as_deref(), *json, socket.clone(), AgentView::Show),
+        AgentAction::Explain {
+            target,
+            json,
+            socket,
+        } => (target.as_deref(), *json, socket.clone(), AgentView::Explain),
+        AgentAction::List { .. } => return ExitCode::FAILURE,
+    };
+    let selector = match parse_selector(target) {
+        Ok(selector) => selector,
+        Err(code) => return code,
+    };
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = match cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    rt.block_on(async move {
+        let snapshot = match fetch_snapshot(&socket_path, "agent").await {
+            Ok(snapshot) => snapshot,
+            Err(code) => return code,
+        };
+        let candidates = resolve_targets(&socket_path, &selector, &snapshot).await;
+        let Some(target_id) =
+            crate::selector::pick_target_pane(&candidates, &snapshot.focused_pane)
+        else {
+            eprintln!("phux: no such target");
+            return ExitCode::FAILURE;
+        };
+        let plugins = configured_agents();
+        let states = classify_snapshot(&socket_path, &snapshot, &plugins).await;
+        let Some(state) = states
+            .into_iter()
+            .find(|state| state.terminal == format_terminal(&target_id))
+        else {
+            eprintln!("phux: no such target");
+            return ExitCode::FAILURE;
+        };
+        print_agent_states(&[state], json, view)
+    })
+}
+
+async fn fetch_snapshot(socket_path: &Path, verb: &str) -> Result<SessionSnapshot, ExitCode> {
+    match request_command(
+        socket_path,
+        WireCommand::GetState {
+            scope: StateScope::Server,
+        },
+    )
+    .await
+    {
+        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => Ok(snapshot),
+        Ok(other) => {
+            eprintln!("phux: unexpected GET_STATE result: {other:?}");
+            Err(ExitCode::FAILURE)
+        }
+        Err(err) => Err(report_no_server(&err, socket_path, verb)),
+    }
+}
+
+async fn classify_snapshot(
+    socket_path: &Path,
+    snapshot: &SessionSnapshot,
+    plugins: &[model::PluginAgent],
+) -> Vec<AgentStateReport> {
+    let mut states = Vec::with_capacity(snapshot.panes.len());
+    for pane in &snapshot.panes {
+        let evidence = pane_evidence(socket_path, snapshot, pane).await;
+        states.push(infer_agent_state(&evidence, plugins));
+    }
+    states.sort_by(|a, b| a.terminal.cmp(&b.terminal));
+    states
+}
+
+async fn pane_evidence(
+    socket_path: &Path,
+    snapshot: &SessionSnapshot,
+    pane: &TerminalInfo,
+) -> PaneEvidence {
+    let screen =
+        phux_client::snapshot::get_screen_scrollback(socket_path, pane.id.clone(), None, true)
+            .await
+            .ok();
+    let window = snapshot.windows.iter().find(|w| w.id == pane.window_id);
+    let session = window.and_then(|w| session_for_window(snapshot, w));
+    PaneEvidence {
+        terminal: format_terminal(&pane.id),
+        session: session.map_or_else(|| "unknown".to_owned(), |s| s.name.clone()),
+        window: window_label(window),
+        title: pane.title.clone(),
+        cwd: pane.cwd.clone(),
+        lines: screen.as_ref().map_or_else(Vec::new, |s| s.lines.clone()),
+        semantic_input: screen
+            .as_ref()
+            .and_then(|s| s.cells.as_ref())
+            .is_some_and(|cells| {
+                cells
+                    .iter()
+                    .any(|cell| cell.semantic == Some(phux_core::screen::SemanticContent::Input))
+            }),
+    }
+}
+
+fn session_for_window<'a>(
+    snapshot: &'a SessionSnapshot,
+    window: &WindowInfo,
+) -> Option<&'a phux_protocol::wire::info::SessionInfo> {
+    snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == window.session_id)
+}
+
+fn window_label(window: Option<&WindowInfo>) -> String {
+    window.map_or_else(|| "unknown".to_owned(), |w| format!("window-{}", w.index))
+}
+
+fn print_agent_states(states: &[AgentStateReport], json: bool, view: AgentView) -> ExitCode {
+    if json {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "agents": states,
+        });
+        return match serde_json::to_string_pretty(&value) {
+            Ok(rendered) => {
+                println!("{rendered}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("phux: could not render agent JSON: {err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    for state in states {
+        println!(
+            "{}\t{}\t{}\t{:.2}\t{}",
+            state.terminal, state.agent.id, state.state, state.confidence, state.explanation
+        );
+        if view == AgentView::Explain {
+            for source in &state.sources {
+                println!(
+                    "  - {} {:.2}: {} ({})",
+                    source.kind, source.confidence, source.signal, source.observed
+                );
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}

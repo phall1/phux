@@ -27,6 +27,7 @@ mod status_bar;
 mod widgets;
 
 pub use status_bar::{StatusBar, row_to_string};
+pub use widgets::help_hints::HelpHintsWidget;
 pub use widgets::session_name::SessionNameWidget;
 pub use widgets::time::TimeWidget;
 pub use widgets::windows::WindowsWidget;
@@ -113,6 +114,8 @@ pub struct WidgetContext<'a> {
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
+    /// Configured TUI prefix chord, used by discoverability widgets.
+    pub prefix: &'a str,
     /// The TUI's windows in display order, with the active one flagged.
     /// Consumed by the `windows` (tab-bar) widget; empty for consumers
     /// that don't present windows.
@@ -222,6 +225,7 @@ impl WidgetRegistry {
     #[must_use]
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
+        r.register("help-hints", widgets::help_hints::factory);
         r.register("time", widgets::time::factory);
         r.register("session-name", widgets::session_name::factory);
         r.register("windows", widgets::windows::factory);

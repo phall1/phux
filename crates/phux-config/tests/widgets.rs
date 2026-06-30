@@ -67,6 +67,7 @@ fn register_then_build_invokes_factory() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "main",
+        prefix: "C-a",
         windows: &[],
     });
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
@@ -91,6 +92,7 @@ fn session_name_renders_prefix_and_truncated_name() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "very-long-session-name",
+        prefix: "C-a",
         windows: &[],
     });
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
@@ -108,6 +110,7 @@ fn session_name_max_len_accepts_snake_case_alias() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "abcdef",
+        prefix: "C-a",
         windows: &[],
     });
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
@@ -120,6 +123,7 @@ fn session_name_no_options_renders_full_name() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "main",
+        prefix: "C-a",
         windows: &[],
     });
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
@@ -167,6 +171,7 @@ fn time_widget_default_format_renders_h_m() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "",
+        prefix: "C-a",
         windows: &[],
     });
     // Default %H:%M renders to 5 chars (HH:MM) in any locale.
@@ -194,6 +199,7 @@ fn time_widget_explicit_format_uses_format_string() {
     let cells = w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "",
+        prefix: "C-a",
         windows: &[],
     });
     // %Y is a 4-digit year.
@@ -299,6 +305,7 @@ fn render_windows(opts: &[(&str, toml::Value)], windows: &[WindowInfo]) -> Widge
     w.render(&WidgetContext {
         now: fixed_time(),
         session_name: "",
+        prefix: "C-a",
         windows,
     })
 }
@@ -318,6 +325,34 @@ fn style_table(entries: &[(&str, toml::Value)]) -> toml::Value {
 #[test]
 fn windows_widget_registered_in_builtins() {
     assert!(WidgetRegistry::with_builtins().kinds().contains(&"windows"));
+}
+
+#[test]
+fn help_hints_widget_registered_in_builtins() {
+    assert!(
+        WidgetRegistry::with_builtins()
+            .kinds()
+            .contains(&"help-hints")
+    );
+}
+
+#[test]
+fn help_hints_widget_uses_configured_prefix() {
+    let spec = WidgetSpec {
+        kind: "help-hints".to_owned(),
+        opts: BTreeMap::new(),
+    };
+    let widget = WidgetRegistry::with_builtins()
+        .build(&spec)
+        .expect("help-hints builds");
+    let cells = widget.render(&WidgetContext {
+        now: fixed_time(),
+        session_name: "",
+        prefix: "C-b",
+        windows: &[],
+    });
+
+    assert_eq!(text_of(&cells), "C-b ? help | C-b : palette | C-b [ copy");
 }
 
 #[test]

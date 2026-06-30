@@ -6,33 +6,35 @@ last-reviewed: 2026-06-07
 
 # When to use phux (and when not to)
 
-**TL;DR.** phux is a terminal multiplexer whose differentiator is the wire,
-not the splits: a terminal is an object other programs can attach to, and the
-headline case is a human and their agents driving the *same* live terminal.
-If you want that, phux is for you today. If you want a battle-hardened local
-multiplexer with a decade of muscle memory, you mostly don't need it yet.
-Find your row below.
+**TL;DR.** phux is a terminal multiplexer whose differentiator is the wire, not
+the splits: a terminal is an object other programs can attach to, inspect, and
+drive. The headline case is a human and their agents sharing the *same* live
+terminal with CLI/MCP control, public agent state, and external integration
+packages. If you want that, phux is for you today. If you want a
+battle-hardened local multiplexer with a decade of muscle memory, you mostly
+do not need it yet. Find your row below.
 
 ## Find yourself
 
 | You are | phux? | Why |
 |---|---|---|
 | A human who wants their agent to *see and drive the same terminal they do* | **Yes — this is the point** | One server, many consumers; the agent attaches to your live pane, reads its grid, and types into it. |
-| An agent author who wants structured, scriptable terminal control | **Yes** | `ls`/`snapshot`/`send-keys`/`run`/`wait`/`watch` with `--json`, plus `phux-mcp`. The CLI + JSON schema is the contract. |
-| A tmux user who wants a modern, protocol-honest multiplexer | **Yes, with eyes open** | Attach/detach, splits, status bar, keybindings work. It's v0.1; expect rough edges and missing conveniences. |
+| An agent author who wants structured, scriptable terminal control | **Yes** | `ls`/`snapshot`/`send-keys`/`run`/`wait`/`watch`/`ask`/`agent` with `--json`, plus `phux-mcp`. The CLI + JSON schema is the contract. |
+| A team composing terminal-native coding agents | **Yes** | Public Codex/Claude integration fixtures, plugin workspace profiles, and MCP tools give you a phux-shaped agent bench without an in-process plugin host. |
+| A tmux user who wants a modern, protocol-honest multiplexer | **Yes, with eyes open** | Attach/detach, splits, status bar, keybindings, visible help hints, and copy/navigation affordances work. Expect pre-1.0 edges. |
 | Someone on one SSH session who just wants splits and persistence | **Probably not yet** | tmux already does this well and phux adds no wire advantage for a single local user. Revisit when you want remoting or agents. |
 | A fleet operator who wants to drive terminals across machines | **Not yet — addressed for, not wired** | The wire already speaks `SATELLITE{host, id}`; nothing routes it. That's the v0.2 arc. |
 
 ## The honest gaps
 
-phux is v0.1. The wire, the reference TUI's attach/detach/multi-pane, and the
-full modern-protocol passthrough are solid and won't move under you. The
-headless verbs and `phux-mcp` are real and tested but the API may still wiggle
-before 1.0. Cross-machine routing, a native GUI consumer, a typed Rust SDK
-crate, and predictive local echo are designed and addressed-for but **not
-wired yet** — if a capability isn't in the "works today" lists in the
-[README](../README.md#what-actually-works-today), treat it as a promise, not a
-feature.
+phux is pre-1.0. The wire, the reference TUI's attach/detach/multi-pane, and
+the full modern-protocol passthrough are solid and won't move under you. The
+headless verbs, `phux agent`, `phux-mcp`, plugin actions, and workspace
+save/restore are real and tested, but JSON/API details may still wiggle before
+1.0. Cross-machine routing, a native GUI consumer, a typed Rust SDK crate, and
+predictive local echo are designed and addressed-for but **not wired yet**. If
+a capability is not in the [README status list](../README.md#status), treat it
+as a promise, not a feature.
 
 ## Go deeper
 

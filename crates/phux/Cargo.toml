@@ -26,6 +26,7 @@ phux-plugin.workspace = true
 clap.workspace = true
 dhat = { workspace = true, optional = true }
 # `phux snapshot --json` emits the stable ScreenState contract (ADR-0022).
+serde.workspace = true
 serde_json.workspace = true
 # `phux config show` renders the effective merged config table as TOML.
 toml.workspace = true

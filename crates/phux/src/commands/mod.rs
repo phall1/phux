@@ -36,6 +36,7 @@ impl From<SignalArg> for TerminalSignal {
     }
 }
 
+pub(crate) mod agent;
 pub(crate) mod ask;
 pub(crate) mod attach;
 pub(crate) mod config;
@@ -532,6 +533,12 @@ pub(crate) enum Command {
         question: String,
     },
 
+    /// List, show, or explain inferred public agent state.
+    Agent {
+        #[command(subcommand)]
+        action: agent::AgentAction,
+    },
+
     /// Run a command in a pane and capture its exit code.
     ///
     /// Reports the command's exit code, output, and duration (ADR-0022
@@ -746,7 +753,7 @@ pub(crate) enum PluginAction {
     },
 }
 
-/// `phux workspace <action>` — local git workspace/worktree inspection.
+/// `phux workspace <action>` — workspace inspection and session archives.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkspaceAction {
     /// Inspect the git repository and its checked-out worktrees.
@@ -758,6 +765,27 @@ pub(crate) enum WorkspaceAction {
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Save the running phux workspace as a JSON archive.
+    Save {
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Write the archive to a path instead of stdout.
+        #[arg(long, short = 'o', value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
+    },
+
+    /// Restore missing sessions from a workspace archive.
+    Restore {
+        /// JSON archive path, or '-' to read from stdin.
+        archive: std::path::PathBuf,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
     },
 }
 
