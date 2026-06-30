@@ -3,6 +3,8 @@ use std::process::{Command, ExitCode};
 
 use crate::commands::WorkspaceAction;
 
+mod archive;
+
 const SCHEMA_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,12 @@ struct WorktreeBuilder {
 pub(crate) fn run_workspace(action: &WorkspaceAction) -> ExitCode {
     match action {
         WorkspaceAction::Inspect { path, json } => run_inspect(path, *json),
+        WorkspaceAction::Save { socket, output } => {
+            archive::run_save(socket.clone(), output.as_ref())
+        }
+        WorkspaceAction::Restore { archive, socket } => {
+            archive::run_restore(archive, socket.clone())
+        }
     }
 }
 

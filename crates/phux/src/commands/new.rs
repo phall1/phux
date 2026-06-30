@@ -208,7 +208,7 @@ pub(crate) fn run_new_json(
 /// `SESSION_CREATE_RESULT_KEY`. Returns the seed pane's local id on success,
 /// or the failure `ExitCode` (already reported to stderr) otherwise. Shared
 /// by `phux new --json`; mirrors the MCP `phux_new` path.
-async fn create_session_via_metadata(
+pub(crate) async fn create_session_via_metadata(
     socket_path: &Path,
     name: &str,
     command: Option<Vec<String>>,

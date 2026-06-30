@@ -746,7 +746,7 @@ pub(crate) enum PluginAction {
     },
 }
 
-/// `phux workspace <action>` — local git workspace/worktree inspection.
+/// `phux workspace <action>` — workspace inspection and session archives.
 #[derive(Debug, Subcommand)]
 pub(crate) enum WorkspaceAction {
     /// Inspect the git repository and its checked-out worktrees.
@@ -758,6 +758,27 @@ pub(crate) enum WorkspaceAction {
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
         json: bool,
+    },
+
+    /// Save the running phux workspace as a JSON archive.
+    Save {
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Write the archive to a path instead of stdout.
+        #[arg(long, short = 'o', value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
+    },
+
+    /// Restore missing sessions from a workspace archive.
+    Restore {
+        /// JSON archive path, or '-' to read from stdin.
+        archive: std::path::PathBuf,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
     },
 }
 

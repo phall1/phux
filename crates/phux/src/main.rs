@@ -71,7 +71,7 @@ mod selector;
         PLUGINS\n  \
           plugin     Manage local plugin manifests in config\n\n\
         WORKSPACES\n  \
-          workspace  Inspect git worktrees for agent orchestration\n\n\
+          workspace  Inspect worktrees and save/restore session archives\n\n\
         FEDERATION\n  \
           satellite  Manage configured federation satellites\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
