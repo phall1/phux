@@ -74,9 +74,10 @@ just release-check v0.1.0
 `aarch64-unknown-linux-gnu`, packages
 `phux-<tag>-<target>.tar.gz` + `.sha256`, creates the GitHub release, and
 — if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
-`Formula/phux.rb` to the tap. macOS builds run inside `nix develop`; Linux
-builds use rustup plus setup-zig on Ubuntu so the ELF does not record a
-`/nix/store` dynamic loader. The workflow runs `just release-check <tag>` before
+`Formula/phux.rb` to the tap. Release builds use rustup plus setup-zig instead
+of the Nix dev shell, because portable release binaries must not record
+`/nix/store` dynamic library paths. The workflow checks macOS binaries with
+`otool -L` before packaging. It also runs `just release-check <tag>` before
 building, so a pushed tag that does not match Cargo's resolved package versions
 fails before any artifact or tap update is published. `v0.0.1` was seeded with a
 Linux x86_64 tarball plus checksum, but that first artifact is Nix-linked and
@@ -85,10 +86,13 @@ not portable; do not point installers or the tap at it.
 Seed a host-only release locally without CI:
 
 ```sh
-nix develop -c cargo build --release --bin phux --bin phux-mcp
+cargo build --release --bin phux --bin phux-mcp
 just dist v0.0.2                       # -> dist/phux-v0.0.2-<host>.tar.gz (+ .sha256)
 gh release create v0.0.2 dist/*        # attach the tarball + checksum
 ```
+
+Do not run the local seed build inside `nix develop`; use a host toolchain plus
+Zig on `PATH` so the packaged binaries do not link to Nix-store libraries.
 
 ### Required secret
 
@@ -97,8 +101,8 @@ public half is a write-enabled deploy key on `phall1/homebrew-phux`.
 Without it the release still publishes; only the automatic formula bump
 is skipped (a warning annotation is emitted). The formula itself is
 produced by [`scripts/gen-formula.sh`](../scripts/gen-formula.sh), which
-emits a block only for the targets that actually built — so a
-partial-matrix release still yields an installable formula.
+emits a stable top-level URL plus overrides only for the targets that actually
+built — so a partial-matrix release still yields an installable formula.
 
 ### Curl installer contract
 

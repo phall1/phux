@@ -19,6 +19,15 @@ use crate::attach::render::SelectionRect;
 
 const WHEEL_SCROLL_LINES: isize = 3;
 
+fn quantize_mouse_cell(value: f64, max: u16) -> u16 {
+    if !value.is_finite() || max == 0 {
+        return 0;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let cell = value.floor().max(0.0) as u16;
+    cell.min(max.saturating_sub(1))
+}
+
 /// How copy-mode interprets the selection rectangle.
 ///
 /// Client-local UI state (phux-q1ni, [ADR-0030]): selection is a consumer-side
@@ -86,6 +95,8 @@ pub struct CopyModeOverlay {
     pub pane_cols: u16,
     /// Number of rows in the pane.
     pub pane_rows: u16,
+    /// Whether a left-button drag is actively extending the selection.
+    selecting_with_mouse: bool,
 }
 
 impl CopyModeOverlay {
@@ -105,7 +116,13 @@ impl CopyModeOverlay {
             mode: SelectionMode::Char,
             pane_cols,
             pane_rows,
+            selecting_with_mouse: false,
         }
+    }
+
+    fn set_cursor_from_mouse(&mut self, mouse: &MouseEvent) {
+        self.cursor_row = quantize_mouse_cell(mouse.y, self.pane_rows);
+        self.cursor_col = quantize_mouse_cell(mouse.x, self.pane_cols);
     }
 
     /// Get the current normalized selection range.
@@ -144,6 +161,14 @@ impl CopyModeOverlay {
                     .saturating_sub(delta_col.unsigned_abs())
                     .min(max_col)
             };
+        }
+    }
+
+    fn move_cursor_key(&mut self, delta_row: i16, delta_col: i16, extend_selection: bool) {
+        self.move_cursor(delta_row, delta_col);
+        if !extend_selection {
+            self.anchor_row = self.cursor_row;
+            self.anchor_col = self.cursor_col;
         }
     }
 
@@ -216,7 +241,7 @@ impl RenderOverlay for CopyModeOverlay {
                 if self.cursor_row == 0 {
                     OverlayCommand::ScrollViewport(-1)
                 } else {
-                    self.move_cursor(-1, 0);
+                    self.move_cursor_key(-1, 0, shift);
                     OverlayCommand::Stay
                 }
             }
@@ -224,16 +249,16 @@ impl RenderOverlay for CopyModeOverlay {
                 if self.cursor_row == self.pane_rows.saturating_sub(1) {
                     OverlayCommand::ScrollViewport(1)
                 } else {
-                    self.move_cursor(1, 0);
+                    self.move_cursor_key(1, 0, shift);
                     OverlayCommand::Stay
                 }
             }
             PhysicalKey::ArrowLeft => {
-                self.move_cursor(0, -1);
+                self.move_cursor_key(0, -1, shift);
                 OverlayCommand::Stay
             }
             PhysicalKey::ArrowRight => {
-                self.move_cursor(0, 1);
+                self.move_cursor_key(0, 1, shift);
                 OverlayCommand::Stay
             }
             PhysicalKey::PageUp | PhysicalKey::NumpadPageUp => {
@@ -279,12 +304,33 @@ impl RenderOverlay for CopyModeOverlay {
     }
 
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> OverlayCommand {
-        if mouse.action != MouseAction::Press {
-            return OverlayCommand::Stay;
-        }
-        match mouse.button {
-            MouseButton::Four => OverlayCommand::ScrollViewport(-WHEEL_SCROLL_LINES),
-            MouseButton::Five => OverlayCommand::ScrollViewport(WHEEL_SCROLL_LINES),
+        match (mouse.action, mouse.button) {
+            (MouseAction::Press, MouseButton::Four) => {
+                OverlayCommand::ScrollViewport(-WHEEL_SCROLL_LINES)
+            }
+            (MouseAction::Press, MouseButton::Five) => {
+                OverlayCommand::ScrollViewport(WHEEL_SCROLL_LINES)
+            }
+            (MouseAction::Press, MouseButton::Left) => {
+                self.set_cursor_from_mouse(mouse);
+                self.anchor_row = self.cursor_row;
+                self.anchor_col = self.cursor_col;
+                self.selecting_with_mouse = true;
+                OverlayCommand::Stay
+            }
+            (MouseAction::Motion, MouseButton::Left) if self.selecting_with_mouse => {
+                self.set_cursor_from_mouse(mouse);
+                OverlayCommand::Stay
+            }
+            (MouseAction::Release, MouseButton::Left) if self.selecting_with_mouse => {
+                self.set_cursor_from_mouse(mouse);
+                self.selecting_with_mouse = false;
+                if self.anchor_row == self.cursor_row && self.anchor_col == self.cursor_col {
+                    OverlayCommand::Stay
+                } else {
+                    OverlayCommand::Copy(self.copy_request())
+                }
+            }
             _ => OverlayCommand::Stay,
         }
     }
@@ -309,14 +355,18 @@ mod tests {
         }
     }
 
-    fn mouse_wheel(button: MouseButton) -> MouseEvent {
+    fn mouse_event(action: MouseAction, button: MouseButton, x: f64, y: f64) -> MouseEvent {
         MouseEvent {
-            action: MouseAction::Press,
+            action,
             button,
-            x: 0.0,
-            y: 0.0,
+            x,
+            y,
             mods: ModSet::empty(),
         }
+    }
+
+    fn mouse_wheel(button: MouseButton) -> MouseEvent {
+        mouse_event(MouseAction::Press, button, 0.0, 0.0)
     }
 
     /// Drive `key` through a fresh overlay and return the resulting command.
@@ -458,5 +508,68 @@ mod tests {
             (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
             (2, 3, 3, 5)
         );
+    }
+
+    #[test]
+    fn arrow_keys_move_cursor_without_extending_unless_shift_is_held() {
+        let mut overlay = CopyModeOverlay::new(2, 3, 80, 24);
+        assert_eq!(
+            overlay.handle_key(&press(PhysicalKey::ArrowRight, ModSet::empty())),
+            OverlayCommand::Stay
+        );
+        let sel = overlay.copy_selection().expect("selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (2, 4, 2, 4),
+            "plain arrows move the cursor instead of selecting from the original anchor"
+        );
+
+        assert_eq!(
+            overlay.handle_key(&press(PhysicalKey::ArrowRight, ModSet::SHIFT)),
+            OverlayCommand::Stay
+        );
+        let sel = overlay.copy_selection().expect("selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (2, 4, 2, 5),
+            "shift-arrows extend the selection"
+        );
+    }
+
+    #[test]
+    fn mouse_drag_updates_selection_and_copies_on_release() {
+        let mut overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        assert_eq!(
+            overlay.handle_mouse(&mouse_event(
+                MouseAction::Press,
+                MouseButton::Left,
+                4.0,
+                2.0
+            )),
+            OverlayCommand::Stay
+        );
+        assert_eq!(
+            overlay.handle_mouse(&mouse_event(
+                MouseAction::Motion,
+                MouseButton::Left,
+                8.0,
+                3.0
+            )),
+            OverlayCommand::Stay
+        );
+        let sel = overlay
+            .copy_selection()
+            .expect("copy-mode always has a selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (2, 4, 3, 8)
+        );
+        let cmd = overlay.handle_mouse(&mouse_event(
+            MouseAction::Release,
+            MouseButton::Left,
+            8.0,
+            3.0,
+        ));
+        assert_eq!(grab_of(&cmd), SelectionGrab::Rect);
     }
 }

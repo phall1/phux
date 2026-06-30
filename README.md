@@ -1,7 +1,7 @@
 <!--
 audience: humans, contributors, agents
 stability: stable
-last-reviewed: 2026-06-17
+last-reviewed: 2026-06-23
 -->
 
 <div align="center">
@@ -10,47 +10,107 @@ last-reviewed: 2026-06-17
 
 # phux
 
-**the tmux job, done — a terminal is an object on a wire**
+**the tmux job, done - a terminal is an object on a wire**
 
 [![CI](https://github.com/phall1/phux/actions/workflows/ci.yml/badge.svg)](https://github.com/phall1/phux/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-[Concepts](./docs/CONCEPTS.md) ·
-[Quickstart](./docs/QUICKSTART.md) ·
-[Install](./docs/INSTALL.md) ·
-[Agents](./docs/consumers/agents.md) ·
-[Spec](./docs/spec/) ·
-[Architecture](./docs/architecture/) ·
-[Contributing](./CONTRIBUTING.md)
+[Start](#start-now) |
+[Keys](#keys-you-need-first) |
+[Config](#settings-and-config) |
+[Headless](#headless-and-agent-control) |
+[Status](#status) |
+[Docs](#where-to-go-from-here)
 
 </div>
 
 ![phux demo: a live terminal session reattached and then driven headlessly by agent-style commands](docs/assets/demo.gif)
 
-phux is a terminal multiplexer. You attach, split panes, detach, and come back
-later to find your shells still running — the tmux job, done. The difference is
-underneath: in phux a terminal is a first-class object on a wire, not a screen
-trapped behind one process. The same live terminal can be held by more than one
-thing at once — your TUI, a GUI, an AI agent — each reading and writing the real
-terminal rather than a screenshot of it.
+phux is a terminal multiplexer: attach, split panes, detach, and come back
+later to the same shells. The difference is underneath. In phux, a terminal is
+a first-class object on a wire, so your TUI, a GUI, and an AI agent can all
+hold the same live terminal instead of reading screenshots or copied text.
 
-## Why it's different
+If you are new here, start with the commands below. You should be able to open
+this page, run phux, find help, change config, split panes, detach, reattach,
+and drive a pane from a script without hunting through the docs.
 
-Two consequences fall out of that, and they're the reason to use phux.
+## Start now
 
-**Modern terminals stay modern across a reattach.** Kitty graphics, truecolor,
-hyperlinks, the modern keyboard protocol — they keep working after you detach
-and reattach, because phux never re-parses your bytes in the middle. Most
-multiplexers degrade or drop these the moment they sit between you and your
-terminal. The same terminal engine ([libghostty][lghv]) runs on both ends of the
-wire, so bytes pass straight through instead of being re-parsed and degraded.
+Source is the install path guaranteed to work today:
 
-**An agent is a first-class user, not a guest.** An AI agent can drive the same
-terminal you're looking at, over the wire, with the same authority you have.
-There is no "agent mode" to enable — there are terminals, and some of the things
-attached to them are people.
+```sh
+git clone https://github.com/phall1/phux
+cd phux
+nix develop
+cargo run --bin phux
+```
 
-## Install
+That starts the server if needed and attaches a TUI client to the default
+session. You are now inside a real shell running under phux.
+
+## Keys you need first
+
+Inside phux, the default prefix is `Ctrl-A`:
+
+| You want to | Press |
+|---|---|
+| Open the help overlay | `Ctrl-A ?` |
+| Open the command palette | `Ctrl-A :` |
+| Split side by side | `Ctrl-A %` |
+| Split stacked | `Ctrl-A "` |
+| Move between panes | `Ctrl-A h/j/k/l` |
+| New tab/window | `Ctrl-A c` |
+| Switch tab/window | `Ctrl-A n` / `Ctrl-A p` or `Ctrl-A 0`-`9` |
+| Window/session picker | `Ctrl-A w` / `Ctrl-A s` |
+| Rename window/session | `Ctrl-A ,` / `Ctrl-A $` |
+| Copy mode | `Ctrl-A [` |
+| Detach | `Ctrl-A d` |
+
+After detaching, the server and pane processes keep running. Reattach with:
+
+```sh
+cargo run --bin phux
+```
+
+Once you have an installed binary on your PATH, the same flow is just:
+
+```sh
+phux
+```
+
+## Settings and config
+
+There is no settings modal. phux is config-file first: one TOML file overlays
+the shipped defaults, and omitted keys keep following new defaults from the
+binary.
+
+If you are running from a source checkout before installing the binary, prefix
+these commands with `cargo run --bin phux --`, for example
+`cargo run --bin phux -- config path`.
+
+| You want to | Run |
+|---|---|
+| See where config lives | `phux config path` |
+| Create a commented starter config | `phux config init` |
+| Print the effective merged config | `phux config show` |
+| Print the shipped defaults with comments | `phux config show --default` |
+| Validate configured plugins | `phux plugin validate` |
+| Inspect plugins as JSON | `phux plugin list --json` |
+
+Default config path:
+
+```text
+$XDG_CONFIG_HOME/phux/config.toml
+# or, if XDG_CONFIG_HOME is unset:
+~/.config/phux/config.toml
+```
+
+Edit the file, then restart the client to apply changes: detach and reattach,
+or quit and run `phux` again. See [Configuration and keybindings](./docs/CONFIG.md)
+for the schema, examples, status widgets, hooks, and plugin manifests.
+
+## Install paths
 
 phux is v0.0.x. Source is the only install path guaranteed to work today. Once
 a post-`v0.0.1` release is cut, Homebrew becomes the primary binary install
@@ -60,142 +120,143 @@ path:
 brew install phall1/phux/phux
 ```
 
-Until that release exists and the Formula is live on your platform, build from
-source.
-
-**Curl installer — after the next portable release.**
+The curl installer is a wrapper around GitHub release tarballs. It verifies the
+release `.sha256` sidecar before unpacking and installs into
+`${PHUX_INSTALL_DIR:-$HOME/.local/bin}`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
 ```
 
-The installer is a wrapper around GitHub release tarballs. It verifies the
-release `.sha256` sidecar before unpacking and installs into
-`${PHUX_INSTALL_DIR:-$HOME/.local/bin}`; set `PHUX_INSTALL_DIR` to choose a
-different bin directory. With no `--version`, it installs the latest GitHub
-release. Today latest is `v0.0.1`, which is intentionally refused because it is
-not a portable binary release.
-
-To install a specific future tag before it is latest:
+Today latest is `v0.0.1`, which is intentionally refused because it is not a
+portable binary release. To install a specific future tag before it becomes
+latest:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
 ```
 
-**Prebuilt release artifacts.** Version tags build tarballs for macOS arm64,
-macOS x86_64, and Linux x86_64. The seeded `v0.0.1` Linux tarball is
-Nix-linked and not portable; use the next CI-built tag, Homebrew, or source.
-
-**From source — works today.**
-
-```sh
-git clone https://github.com/phall1/phux
-cd phux
-nix develop          # pins the toolchain, including the zig libghostty needs
-cargo run --bin phux
-```
-
-You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive —
-and run `phux` again to come back to exactly where you were. Off-Nix pins and the
-agent binaries are in [INSTALL.md](./docs/INSTALL.md).
-
 There is no `cargo install phux` yet. crates.io is scoped to
 `phux-protocol`; the binary and internal crates are not publishable, and the
-binary still depends on a git-pinned `libghostty-vt`.
+binary still depends on a git-pinned `libghostty-vt`. Off-Nix build details are
+in [Install](./docs/INSTALL.md).
 
-## The wire, without a TTY
+## Headless and agent control
 
-Everything above also works headless. The same terminals, addressed by name or
-id, driven from a script — or an agent — with JSON coming back:
+Everything above also works without a TTY. The same terminals can be addressed
+by name or id from scripts, CI, or an agent:
+
+If you are still running from source, prefix these with
+`cargo run --bin phux --` too.
 
 ```sh
-phux ls --json                          # what's running
-phux send-keys build:0.1 'cargo test' Enter
-phux run build "cargo test"             # runs in a real pane, returns the exit code
-phux wait build --until "0 failed"      # blocks until the output appears, then exits 0
-phux watch --json work:1.0 | jq .       # live events: bells, titles, idle, lifecycle
+phux ls --json                         # list sessions and panes
+phux snapshot .                        # read the focused pane
+phux send-keys . 'cargo test' Enter    # type into the focused pane
+phux run . "cargo test"                # run in a real pane, return its exit code
+phux wait . --until "0 failed"         # block until output appears
+phux watch --json .                    # stream pane events
 ```
 
-Point an MCP agent at it and it gets the same surface as a set of tools:
-`phux-mcp` exposes the core verbs over JSON-RPC stdio. The agent holds the
-terminal the same way you do — same object, same keys.
+Selectors are shared across the CLI:
 
-## How it works
+| Selector | Meaning |
+|---|---|
+| `.` | current focused pane/window/session |
+| `work` | session named `work` |
+| `work:1.0` | session `work`, window 1, pane 0 |
+| `@42` | opaque server-local terminal id |
+| `=` | last-focused target |
 
-A terminal multiplexer is the right shape for one person at one keyboard. Now
-some of the users are programs, and a program does not want a screen to read
-pixels off of — it wants to start something, learn when it finished, and read
-the exit code. Build the terminal so a program can use it cleanly and the human
-gets the better terminal too: nothing reinterprets the bytes in the middle, so
-nothing gets mangled on the way through.
+Point an MCP agent at `phux-mcp` and it gets the same core verbs over JSON-RPC
+stdio. Start with [Agents](./docs/consumers/agents.md) and
+[MCP](./docs/consumers/mcp.md).
 
-So phux makes the **terminal** the unit — not the session, not the window. A
-human's TUI and an agent's API are two ways to hold the same object; neither is
-the privileged one. The longer version, with the diagrams:
-[`docs/CONCEPTS.md`](./docs/CONCEPTS.md).
+## Why it is different
 
-[lghv]: https://github.com/Uzaaft/libghostty-rs
+**Modern terminals stay modern across a reattach.** Kitty graphics, truecolor,
+hyperlinks, OSC 133, and the modern keyboard protocol survive detach/reattach
+because phux does not re-parse your bytes in the middle. The same terminal
+engine ([libghostty][lghv]) runs on both ends of the wire.
+
+**Agents are first-class users.** An AI agent can drive the same terminal you
+are looking at, over the wire, with the same authority you have. There is no
+separate "agent mode" to enter. There are terminals, and some attached users
+are people while others are programs.
+
+**The terminal is the unit.** Sessions, windows, panes, and splits are TUI
+arrangements around terminals. A script or agent can spawn a terminal, route
+input to it, read its output, and wait for state changes without learning the
+whole human UI model.
+
+For the longer mental model, read [Concepts](./docs/CONCEPTS.md). For fit and
+tradeoffs, read [When to use phux](./docs/when-to-use.md).
 
 ## Status
 
-The line between what's solid and what's still a promise is kept honest here:
+The line between shipped and promised is kept explicit:
 
-**Stable — won't move under you**
-- The TUI: attach / detach / reattach, multi-pane splits, status bar,
-  keybindings, multiple clients on one session
-- Full modern-protocol passthrough (Kitty keyboard, truecolor, OSC 8, OSC 133,
-  images) — the parser is identical on both ends
-- The wire, version-negotiated. `phux-protocol` is the crate boundary; its
-  first crates.io publish is pending.
+**Stable enough to try**
+
+- TUI attach, detach, reattach, multi-pane splits, status bar, keybindings,
+  help overlay, and multiple clients on one session
+- Modern-protocol passthrough: Kitty keyboard, truecolor, OSC 8, OSC 133,
+  images
+- Version-negotiated wire types in `phux-protocol`
+
+**Real and tested, still pre-1.0**
+
+- Headless verbs: `ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`,
+  `new`, `kill`, `rename`, `config`, `plugin`
+- `phux-mcp`, exposing the same surface as MCP tools
+- Config scaffolding and effective-config inspection
 
 **Real and tested — the API may still move before 1.0**
 - The headless verbs: `ls`, `snapshot`, `send-keys`, `run`, `wait`, `watch`,
   `new`, `kill`, `rename`, `config`, `plugin`, and `workspace`
   (`inspect`, `save`, `restore`)
 - `phux-mcp` — the same surface as MCP tools
+**Designed and addressed-for, not wired yet**
 
-**Designed and addressed-for — not wired yet**
-- Driving terminals across machines. The wire already carries
-  `SATELLITE{host, id}`; nothing routes it yet. v0.2.
+- Federation across machines. The wire already carries `SATELLITE { host, id }`;
+  nothing routes it yet. That is the v0.2 arc.
 - A native GUI consumer, a typed Rust SDK crate, predictive local echo.
 
 Anything not in the first two lists is a direction, not a feature.
-
-Not sure phux fits? [When to use phux (and when not to)](./docs/when-to-use.md)
-sorts the common cases and says which are shipped and which are still a promise.
 
 ## Where to go from here
 
 | You want to | Read |
 |---|---|
-| Decide if it's for you | [`docs/when-to-use.md`](./docs/when-to-use.md) |
-| Get it on your machine | [`docs/INSTALL.md`](./docs/INSTALL.md) |
-| First session, start to finish | [`docs/QUICKSTART.md`](./docs/QUICKSTART.md) |
-| Understand the model | [`docs/CONCEPTS.md`](./docs/CONCEPTS.md) |
-| Drive it from an agent | [`docs/consumers/agents.md`](./docs/consumers/agents.md) · [`docs/consumers/mcp.md`](./docs/consumers/mcp.md) |
-| Customize keys and config | [`docs/CONFIG.md`](./docs/CONFIG.md) |
-| Read the wire spec | [`docs/spec/`](./docs/spec/) |
-| See how it's built | [`docs/architecture/`](./docs/architecture/) |
-| Read where it's going | [`docs/vision.md`](./docs/vision.md) |
-| See the decisions | [`ADR/README.md`](./ADR/README.md) |
-| Build it with us | [`CONTRIBUTING.md`](./CONTRIBUTING.md) |
+| Run your first session | [Quickstart](./docs/QUICKSTART.md) |
+| Install without Nix | [Install](./docs/INSTALL.md) |
+| Customize keys and config | [Configuration](./docs/CONFIG.md) |
+| Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
+| Understand the model | [Concepts](./docs/CONCEPTS.md) |
+| Drive it from an agent | [Agents](./docs/consumers/agents.md) |
+| Use the MCP adapter | [MCP](./docs/consumers/mcp.md) |
+| Read the wire spec | [Spec](./docs/spec/) |
+| See how it is built | [Architecture](./docs/architecture/) |
+| Read where it is going | [Vision](./docs/vision.md) |
+| See the decisions | [ADRs](./ADR/README.md) |
+| Build it with us | [Contributing](./CONTRIBUTING.md) |
 
 ## Crates
 
 | Crate | Does |
 |---|---|
 | `phux` | The binary: `attach` / `server` plus the headless verbs |
-| `phux-protocol` | Wire types, codec, version negotiation. The one crate meant for publishing |
-| `phux-core` | Domain types: in-process terminal / collection registries |
+| `phux-protocol` | Wire types, codec, version negotiation; the crate meant for publishing |
+| `phux-core` | Domain types: in-process terminal and collection registries |
 | `phux-server` | The daemon: per-terminal actor, PTY supervision, output fanout |
-| `phux-client-core` | Renderer + protocol client, ratatui-free (the boundary is compiler-enforced) |
-| `phux-client` | The TUI chrome (ratatui) over `phux-client-core` |
-| `phux-config` | TOML config schema + status widget contract |
-| `phux-mcp` | The agent surface as MCP tools, over JSON-RPC stdio |
+| `phux-client-core` | Renderer and protocol client, ratatui-free |
+| `phux-client` | The TUI chrome over `phux-client-core` |
+| `phux-config` | TOML config schema and status widget contract |
+| `phux-mcp` | The agent surface as MCP tools over JSON-RPC stdio |
 
-## What phux deliberately won't do
+## What phux deliberately will not do
 
-Each of these is a "no" that keeps the model honest, not a gap:
+Each of these is a "no" that keeps the model honest:
 
 - **No embedded scripting language.** Commands are typed messages. Logic that
   wants a runtime can shell out to one.
@@ -207,10 +268,12 @@ Each of these is a "no" that keeps the model honest, not a gap:
   navigation and literal search over scrollback.
 - **No homegrown crypto.** SSH and Unix-socket permissions are the trust model.
 - **No format-template DSL.** The status bar takes typed widgets, not a printf
-  dialect we'd have to maintain forever.
+  dialect.
 
-Full reasoning: [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+Full reasoning: [Contributing](./CONTRIBUTING.md).
 
 ## License
 
 Dual-licensed under [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE).
+
+[lghv]: https://github.com/Uzaaft/libghostty-rs
