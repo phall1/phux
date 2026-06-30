@@ -22,6 +22,8 @@ fn checked_in_provider_showcase_manifest_loads() -> Result<(), Box<dyn std::erro
     assert_eq!(loaded.events[0].id, "idle");
     assert_eq!(loaded.panes[0].id, "board");
     assert_eq!(loaded.links[0].id, "ticket");
+    assert_eq!(loaded.workspaces[0].id, "ops-bench");
+    assert_eq!(loaded.workspaces[0].panes[0].pane, "board");
     Ok(())
 }
 
@@ -86,6 +88,20 @@ contexts = ["pane"]
 schemes = ["https"]
 patterns = ["https://linear.app/*"]
 command = ["open", "{url}"]
+
+[[workspaces]]
+id = "agent-bench"
+title = "Agent Bench"
+description = "Restore and supervise the agent bench"
+contexts = ["workspace"]
+agents = ["codex"]
+actions = ["summarize"]
+events = ["idle"]
+
+[[workspaces.panes]]
+id = "board-role"
+pane = "board"
+role = "board"
 "#,
     )?;
 
@@ -108,6 +124,47 @@ command = ["open", "{url}"]
     );
     assert_eq!(loaded.links[0].id, "ticket");
     assert_eq!(loaded.links[0].schemes, ["https"]);
+    assert_eq!(loaded.workspaces[0].id, "agent-bench");
+    assert_eq!(loaded.workspaces[0].title, "Agent Bench");
+    assert_eq!(loaded.workspaces[0].agents, ["codex"]);
+    assert_eq!(loaded.workspaces[0].actions, ["summarize"]);
+    assert_eq!(loaded.workspaces[0].events, ["idle"]);
+    assert_eq!(loaded.workspaces[0].panes[0].id, "board-role");
+    assert_eq!(loaded.workspaces[0].panes[0].pane, "board");
+    assert_eq!(loaded.workspaces[0].panes[0].role, "board");
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_workspace_unknown_pane_ref() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.bad-workspace"
+name = "Bad Workspace"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[workspaces]]
+id = "bench"
+title = "Bench"
+
+[[workspaces.panes]]
+id = "missing"
+pane = "not-declared"
+role = "lead"
+"#,
+    )?;
+
+    let Err(err) = plugin::load_plugin_manifest(&manifest) else {
+        return Err("workspace with unknown pane ref loaded successfully".into());
+    };
+    assert!(
+        err.to_string()
+            .contains("workspace bench references unknown pane 'not-declared'"),
+        "error should name missing workspace pane reference; got {err}"
+    );
     Ok(())
 }
 

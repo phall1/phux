@@ -1,8 +1,10 @@
 //! Declarative plugin manifest parsing for phux config consumers.
 
+mod link;
 mod loader;
 mod source;
 mod validate;
+mod workspace;
 
 use std::path::PathBuf;
 
@@ -51,6 +53,8 @@ pub struct PluginManifest {
     pub panes: Vec<PluginManifestPane>,
     /// Link/route handlers declared by the plugin.
     pub links: Vec<PluginManifestLinkHandler>,
+    /// Workspace profiles declared by the plugin.
+    pub workspaces: Vec<PluginManifestWorkspace>,
 }
 
 /// Platform names accepted in plugin manifests.
@@ -191,6 +195,40 @@ pub struct PluginManifestLinkHandler {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Command argv to execute.
     pub command: Vec<String>,
+}
+
+/// Workspace composition profile declared in a plugin manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginManifestWorkspace {
+    /// Plugin-local workspace id.
+    pub id: String,
+    /// Human-readable workspace title.
+    pub title: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
+    /// Context names where this workspace is relevant.
+    pub contexts: Vec<String>,
+    /// Agent ids this workspace composes.
+    pub agents: Vec<String>,
+    /// Action ids this workspace surfaces.
+    pub actions: Vec<String>,
+    /// Event ids this workspace subscribes to.
+    pub events: Vec<String>,
+    /// Pane roles this workspace wants phux to create or restore.
+    pub panes: Vec<PluginWorkspacePane>,
+}
+
+/// Pane role inside a plugin workspace profile.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginWorkspacePane {
+    /// Plugin-local workspace pane role id.
+    pub id: String,
+    /// Referenced [`PluginManifestPane::id`].
+    pub pane: String,
+    /// Role label used by composition tools.
+    pub role: String,
+    /// Optional human-readable description.
+    pub description: Option<String>,
 }
 
 /// Placement requested by a plugin pane entrypoint.

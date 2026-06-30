@@ -176,6 +176,23 @@ label = "Codex"
 state = "blocked"
 attention = "high"
 contexts = ["workspace"]
+
+[[panes]]
+id = "board"
+title = "Board"
+command = ["true"]
+
+[[workspaces]]
+id = "agent-bench"
+title = "Agent Bench"
+contexts = ["workspace"]
+agents = ["codex"]
+actions = ["summarize"]
+
+[[workspaces.panes]]
+id = "board"
+pane = "board"
+role = "monitor"
 "#,
     )
     .expect("write manifest");
@@ -211,6 +228,11 @@ enabled = true
     assert_eq!(value["plugins"][0]["actions"][0]["id"], "summarize");
     assert_eq!(value["plugins"][0]["agents"][0]["id"], "codex");
     assert_eq!(value["plugins"][0]["agents"][0]["state"], "blocked");
+    assert_eq!(value["plugins"][0]["workspaces"][0]["id"], "agent-bench");
+    assert_eq!(
+        value["plugins"][0]["workspaces"][0]["panes"][0]["role"],
+        "monitor"
+    );
     assert_eq!(value["plugins"][0]["enabled"], true);
 }
 

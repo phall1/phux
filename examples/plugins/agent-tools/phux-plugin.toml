@@ -32,3 +32,22 @@ title = "Detect opted-in local agent CLIs"
 description = "Probes configured agent commands only when PHUX_AGENT_TOOLS_DETECT=1 is set."
 contexts = ["workspace"]
 command = ["sh", "scripts/detect-agents.sh"]
+
+[[panes]]
+id = "agent-board"
+title = "Agent Board"
+description = "Lists the agent integrations available to a composed workspace."
+placement = "split"
+command = ["sh", "scripts/list-integrations.sh"]
+
+[[workspaces]]
+id = "agent-bench"
+title = "Agent Bench"
+description = "Composes local agent integration helpers into a herdr-like workspace profile."
+contexts = ["workspace"]
+actions = ["inspect", "list-integrations", "validate-integrations", "detect-agents"]
+
+[[workspaces.panes]]
+id = "board"
+pane = "agent-board"
+role = "board"

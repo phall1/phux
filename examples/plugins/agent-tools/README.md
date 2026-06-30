@@ -37,6 +37,11 @@ root=/path/to/phux/examples/plugins/agent-tools
 `phux config run --json` wraps that stdout with the stable action result
 schema, including argv, cwd, exit code, stderr, and duration.
 
+The manifest also declares an `agent-bench` workspace profile. It composes
+the local inspection/list/validation actions with an `agent-board` pane entry,
+which gives future `phux save` / `phux restore` / herd-style runners a typed
+profile to consume without loading plugin code into the server.
+
 ## Integration templates
 
 The `integrations/*.toml` files are sample manifests for terminal-native
