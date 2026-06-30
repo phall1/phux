@@ -15,6 +15,15 @@ last-reviewed: 2026-06-06
 - macOS or Linux
 - [Nix with flakes](https://nixos.org/download.html), or, off-Nix: Rust 1.90, `zig` 0.15, `cargo-nextest`, and `cargo-deny` on your PATH
 
+## Install Nix
+
+If you don't have Nix yet, the Determinate Systems installer sets it up with
+flakes enabled:
+
+```sh
+curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+```
+
 ## Drop into the dev shell
 
 ```sh

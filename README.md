@@ -150,6 +150,17 @@ If you are still running from source, prefix these with
 `cargo run --bin phux --` too.
 
 ```sh
+
+curl -fsSL https://install.determinate.systems/nix | sh -s -- install  # if you don't have Nix
+
+
+git clone https://github.com/phall1/phux
+
+cd phux
+nix develop          # pins the toolchain, including the zig libghostty needs
+
+
+cargo run --bin phux
 phux ls --json                         # list sessions and panes
 phux snapshot .                        # read the focused pane
 phux send-keys . 'cargo test' Enter    # type into the focused pane
