@@ -174,6 +174,12 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   worktrees. Agents use the JSON shape (§4.8) to choose a checkout before
   creating a session (`phux new -c <worktree>`) or mapping existing sessions and
   panes back to repo paths.
+- **`phux workspace save [--socket P] [--output PATH]`** — capture the running
+  phux workspace as a typed JSON archive. With no `--output`, the archive is
+  printed to stdout. This contacts the server but does not attach or resize.
+- **`phux workspace restore ARCHIVE [--socket P]`** — recreate sessions missing
+  from a saved archive. Restore starts new processes; it does not claim to
+  resurrect the original PTYs.
 - **`phux satellite <list|add|remove> [--json]`** — manage the hub-side
   federation satellite registry. This never contacts a running server and never
   opens a satellite transport; it only edits `[[satellites]]` in local config.
@@ -425,9 +431,9 @@ runtime executes the manifest's argv directly from the plugin root, captures
 stdout/stderr lossily as UTF-8, inherits the phux process environment, and adds
 `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and `PHUX_PLUGIN_ROOT`.
 
-### 4.8 Workspace inspection — `phux workspace inspect --json`
+### 4.8 Workspace commands — `phux workspace ...`
 
-The workspace surface is repo-local. It shells out to git's porcelain worktree
+`phux workspace inspect --json` is repo-local. It shells out to git's porcelain worktree
 listing and reports the current worktree plus siblings as a stable JSON
 projection:
 
@@ -456,6 +462,42 @@ For detached worktrees, `branch` is `null` and `detached` is `true`. Missing
 or non-git paths are hard failures: exit nonzero, stdout empty, stderr
 diagnostic. The command is intentionally read-only; creation and deletion stay
 in git/plugin/provider territory rather than the terminal substrate.
+
+`phux workspace save` emits a separate archive shape:
+
+```json
+{
+  "schema_version": 1,
+  "sessions": [
+    {
+      "name": "agent-bench-codex",
+      "active": true,
+      "windows": [
+        {
+          "name": "0",
+          "active": true,
+          "panes": [
+            {
+              "active": true,
+              "title": "codex",
+              "cwd": "/repo",
+              "command": null,
+              "cols": 120,
+              "rows": 40
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`command` is nullable because process argv is not always known. Plugin-authored
+archives may fill it, and `workspace restore` uses it when present; otherwise it
+starts the default shell in the saved cwd when available. Existing session names
+are skipped, and restore prints a summary JSON document with `restored` and
+`skipped_existing` arrays.
 
 ### 4.9 Satellite registry — `phux satellite ... --json`
 
@@ -523,7 +565,7 @@ Exit codes are not uniform across verbs:
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
-| `workspace` | `0` ok; `1` missing git repo, invalid git output, or JSON render failure. |
+| `workspace` | `0` ok; `1` missing git repo, invalid git output, no server for save/restore, invalid archive, or JSON render failure. |
 | `satellite` | `0` ok; `1` invalid name/endpoint, duplicate configured name, invalid config, refused registry write, or unknown satellite name. |
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 

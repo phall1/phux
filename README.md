@@ -198,8 +198,9 @@ Each of these is a "no" that keeps the model honest, not a gap:
 
 - **No embedded scripting language.** Commands are typed messages. Logic that
   wants a runtime can shell out to one.
-- **No plugin host.** Hooks are typed events. A plugin contract, if it ever
-  arrives, comes after we know what's actually pluggable.
+- **No in-process plugin host.** Plugins are external packages declared in
+  config and executed as argv; phux owns typed manifests, workspace state, and
+  terminal control, not loaded plugin code.
 - **No tmux-style copy-mode clone.** Selection formatting belongs to libghostty
   and native selection belongs to your terminal. phux owns focused-pane
   navigation and literal search over scrollback.

@@ -15,6 +15,9 @@ cargo run -q -p phux -- config run com.phux.demo.agent-tools inspect --json
 cargo run -q -p phux -- config run com.phux.demo.agent-tools list-integrations
 cargo run -q -p phux -- config run com.phux.demo.agent-tools validate-integrations
 cargo run -q -p phux -- config run com.phux.demo.agent-tools detect-agents
+cargo run -q -p phux -- config run com.phux.demo.agent-tools launch-bench
+cargo run -q -p phux -- config run com.phux.demo.agent-tools list-bench
+cargo run -q -p phux -- config run com.phux.demo.agent-tools drive-bench
 ```
 
 Expected human output:
@@ -38,9 +41,18 @@ root=/path/to/phux/examples/plugins/agent-tools
 schema, including argv, cwd, exit code, stderr, and duration.
 
 The manifest also declares an `agent-bench` workspace profile. It composes
-the local inspection/list/validation actions with an `agent-board` pane entry,
-which gives future `phux save` / `phux restore` / herd-style runners a typed
-profile to consume without loading plugin code into the server.
+inspection/list/validation actions, static agent status records, pane roles,
+and three runnable bench actions:
+
+- `launch-bench` creates one phux session per role and writes a role/session
+  state table.
+- `list-bench` prints that state table.
+- `drive-bench` sends keys to the selected role with `phux send-keys`.
+
+The defaults are safe: roles launch as normal phux shell sessions, not real
+agent binaries. Set `PHUX_AGENT_BENCH_ROLES`, `PHUX_AGENT_BENCH_PROFILE`,
+`PHUX_AGENT_BENCH_STATE`, `PHUX_AGENT_BENCH_ROLE`, or `PHUX_AGENT_BENCH_KEYS`
+to customize the fixture.
 
 ## Integration templates
 
