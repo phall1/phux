@@ -33,6 +33,48 @@ description = "Probes configured agent commands only when PHUX_AGENT_TOOLS_DETEC
 contexts = ["workspace"]
 command = ["sh", "scripts/detect-agents.sh"]
 
+[[actions]]
+id = "launch-bench"
+title = "Launch agent bench"
+description = "Creates one phux session per configured agent role and records their targets."
+contexts = ["workspace"]
+command = ["sh", "scripts/launch-bench.sh"]
+
+[[actions]]
+id = "list-bench"
+title = "List agent bench"
+description = "Prints the current role/session/status table for the launched bench."
+contexts = ["workspace"]
+command = ["sh", "scripts/list-bench.sh"]
+
+[[actions]]
+id = "drive-bench"
+title = "Drive agent bench role"
+description = "Routes keys to the configured role target through phux send-keys."
+contexts = ["workspace", "pane"]
+command = ["sh", "scripts/drive-bench.sh"]
+
+[[agents]]
+id = "codex"
+label = "Codex"
+state = "unknown"
+attention = "normal"
+contexts = ["workspace"]
+
+[[agents]]
+id = "claude-code"
+label = "Claude Code"
+state = "unknown"
+attention = "normal"
+contexts = ["workspace"]
+
+[[agents]]
+id = "gemini-cli"
+label = "Gemini CLI"
+state = "unknown"
+attention = "normal"
+contexts = ["workspace"]
+
 [[panes]]
 id = "agent-board"
 title = "Agent Board"
@@ -40,14 +82,37 @@ description = "Lists the agent integrations available to a composed workspace."
 placement = "split"
 command = ["sh", "scripts/list-integrations.sh"]
 
+[[panes]]
+id = "agent-role"
+title = "Agent Role"
+description = "A terminal-native agent role session managed by the bench launcher."
+placement = "split"
+command = ["sh"]
+
 [[workspaces]]
 id = "agent-bench"
 title = "Agent Bench"
 description = "Composes local agent integration helpers into a herdr-like workspace profile."
 contexts = ["workspace"]
-actions = ["inspect", "list-integrations", "validate-integrations", "detect-agents"]
+agents = ["codex", "claude-code", "gemini-cli"]
+actions = ["inspect", "list-integrations", "validate-integrations", "detect-agents", "launch-bench", "list-bench", "drive-bench"]
 
 [[workspaces.panes]]
 id = "board"
 pane = "agent-board"
 role = "board"
+
+[[workspaces.panes]]
+id = "codex"
+pane = "agent-role"
+role = "codex"
+
+[[workspaces.panes]]
+id = "claude-code"
+pane = "agent-role"
+role = "claude-code"
+
+[[workspaces.panes]]
+id = "gemini-cli"
+pane = "agent-role"
+role = "gemini-cli"
