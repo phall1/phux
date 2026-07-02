@@ -254,7 +254,21 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     layout_changed = true;
                 }
             } else if let InputEvent::Mouse(ref mouse) = ev {
-                match ctx.overlays.handle_mouse(mouse) {
+                // Copy-mode tracks pane-local cells but the parser emits
+                // outer-viewport coordinates; translate into the focused
+                // pane's frame so a drag over a non-origin pane highlights
+                // the cells actually under the pointer. Modal overlays (the
+                // only other mouse consumers) keep viewport coords.
+                let routed = if ctx.overlays.copy_selection().is_some() {
+                    let rect = focused_pane_rect(ctx, focused_pane.as_ref());
+                    let mut m = *mouse;
+                    m.x = (m.x - f64::from(rect.x)).max(0.0);
+                    m.y = (m.y - f64::from(rect.y)).max(0.0);
+                    m
+                } else {
+                    *mouse
+                };
+                match ctx.overlays.handle_mouse(&routed) {
                     OverlayOutcome::Copy(req) => {
                         if let Some(fid) = focused_pane.as_ref()
                             && let Some(slot) = panes.get(fid)
@@ -425,6 +439,29 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     {
                         slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
                         layout_changed = true;
+                        continue;
+                    }
+                    // Drag-to-copy (tmux convention): a left press on a pane
+                    // whose app has NOT enabled mouse tracking starts a
+                    // copy-mode selection anchored at the click. Motion and
+                    // release then route through the overlay branch above —
+                    // release copies to the host clipboard (OSC 52) and
+                    // dismisses; a click without drag just dismisses. Apps
+                    // that DO track the mouse (vim, htop) keep receiving
+                    // their events untouched.
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                        && panes
+                            .get(&target)
+                            .is_some_and(|slot| !terminal_wants_mouse_tracking(slot))
+                    {
+                        let rect = focused_pane_rect(ctx, focused_pane.as_ref());
+                        ctx.overlays
+                            .push(Box::new(crate::render::overlay::CopyModeOverlay::new(
+                                0, 0, rect.w, rect.h,
+                            )));
+                        // Seed anchor + cursor from the (pane-local) press.
+                        let _ = ctx.overlays.handle_mouse(&routed);
                         continue;
                     }
                     conn.send(&FrameKind::InputMouse {
