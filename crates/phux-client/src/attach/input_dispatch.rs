@@ -254,7 +254,21 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     layout_changed = true;
                 }
             } else if let InputEvent::Mouse(ref mouse) = ev {
-                match ctx.overlays.handle_mouse(mouse) {
+                // Copy-mode tracks pane-local cells but the parser emits
+                // outer-viewport coordinates; translate into the focused
+                // pane's frame so a drag over a non-origin pane highlights
+                // the cells actually under the pointer. Modal overlays (the
+                // only other mouse consumers) keep viewport coords.
+                let routed = if ctx.overlays.copy_selection().is_some() {
+                    let rect = focused_pane_rect(ctx, focused_pane.as_ref());
+                    let mut m = *mouse;
+                    m.x = (m.x - f64::from(rect.x)).max(0.0);
+                    m.y = (m.y - f64::from(rect.y)).max(0.0);
+                    m
+                } else {
+                    *mouse
+                };
+                match ctx.overlays.handle_mouse(&routed) {
                     OverlayOutcome::Copy(req) => {
                         if let Some(fid) = focused_pane.as_ref()
                             && let Some(slot) = panes.get(fid)
@@ -424,7 +438,35 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         && !terminal_wants_mouse_tracking(slot)
                     {
                         slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+                        if delta < 0 {
+                            // Scrolled up into scrollback: remember so the
+                            // next key press snaps back to the live screen.
+                            slot.viewport_scrolled = true;
+                        }
                         layout_changed = true;
+                        continue;
+                    }
+                    // Drag-to-copy (tmux convention): a left press on a pane
+                    // whose app has NOT enabled mouse tracking starts a
+                    // copy-mode selection anchored at the click. Motion and
+                    // release then route through the overlay branch above —
+                    // release copies to the host clipboard (OSC 52) and
+                    // dismisses; a click without drag just dismisses. Apps
+                    // that DO track the mouse (vim, htop) keep receiving
+                    // their events untouched.
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                        && panes
+                            .get(&target)
+                            .is_some_and(|slot| !terminal_wants_mouse_tracking(slot))
+                    {
+                        let rect = focused_pane_rect(ctx, focused_pane.as_ref());
+                        ctx.overlays
+                            .push(Box::new(crate::render::overlay::CopyModeOverlay::new(
+                                0, 0, rect.w, rect.h,
+                            )));
+                        // Seed anchor + cursor from the (pane-local) press.
+                        let _ = ctx.overlays.handle_mouse(&routed);
                         continue;
                     }
                     conn.send(&FrameKind::InputMouse {
@@ -468,6 +510,24 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             }
         }
 
+        // A key press headed for the pane snaps a scrolled viewport back to
+        // the live screen (tmux behavior). Without this, a wheel scroll into
+        // scrollback pins the viewport there forever and the pane looks
+        // frozen — new output (e.g. the shell prompt after a TUI app exits)
+        // lands below the visible rows and never paints. Runs BEFORE the
+        // predict peek so grid reads see the active area.
+        if let InputEvent::Key(ref key_event) = ev
+            && matches!(
+                key_event.action,
+                phux_protocol::input::key::KeyAction::Press
+            )
+            && snap_scrolled_viewport(
+                panes,
+                ctx.workspace.active_window().and_then(|w| w.focus.as_ref()),
+            )
+        {
+            layout_changed = true;
+        }
         // Predictive echo only fires for key events; mouse / paste / focus
         // intentionally bypass the prediction layer (they target the
         // server's input model, not the visual grid). The branch is
@@ -572,6 +632,27 @@ fn scroll_focused_pane_viewport(
         return false;
     };
     slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
+    if delta < 0 {
+        slot.viewport_scrolled = true;
+    }
+    true
+}
+
+/// Snap `focused_pane`'s viewport back to the live screen if a wheel /
+/// copy-mode scroll left it pinned in scrollback. Returns `true` iff the
+/// viewport moved (the caller repaints).
+fn snap_scrolled_viewport(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+) -> bool {
+    let Some(slot) = focused_pane.and_then(|fid| panes.get_mut(fid)) else {
+        return false;
+    };
+    if !slot.viewport_scrolled {
+        return false;
+    }
+    slot.terminal.scroll_viewport(ScrollViewport::Bottom);
+    slot.viewport_scrolled = false;
     true
 }
 
@@ -1852,6 +1933,41 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// A pinned-in-scrollback viewport must snap back to the live screen on
+    /// the next key press (the "pane looks frozen after a TUI app exits"
+    /// bug): scroll up, flag the slot, snap — the flag clears, the caller is
+    /// told to repaint, and the render shows the live bottom line again.
+    #[test]
+    fn snap_scrolled_viewport_returns_to_live_screen() {
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let id = tid(1);
+        let mut slot = PaneSlot::new_with_size(20, 3).expect("slot");
+        // Ten numbered lines -> scrollback exists; "line-10" is the live tail.
+        for i in 1..=10 {
+            slot.terminal.vt_write(format!("line-{i}\r\n").as_bytes());
+        }
+        slot.terminal.scroll_viewport(ScrollViewport::Delta(-5));
+        slot.viewport_scrolled = true;
+        panes.insert(id.clone(), slot);
+
+        assert!(snap_scrolled_viewport(&mut panes, Some(&id)));
+        let slot = panes.get_mut(&id).expect("slot");
+        assert!(!slot.viewport_scrolled, "flag must clear after the snap");
+        let mut out = Vec::new();
+        let _ = slot
+            .renderer
+            .render_at_full(&slot.terminal, &mut out, (0, 0), (20, 3))
+            .expect("render");
+        assert!(
+            String::from_utf8_lossy(&out).contains("line-10"),
+            "viewport must be back at the live screen"
+        );
+
+        // Un-scrolled slot: a no-op, no repaint requested.
+        assert!(!snap_scrolled_viewport(&mut panes, Some(&id)));
+        assert!(!snap_scrolled_viewport(&mut panes, None));
     }
 
     #[test]

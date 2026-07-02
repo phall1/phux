@@ -1054,6 +1054,42 @@ mod tests {
         );
     }
 
+    /// Alt-screen exit must repaint the restored primary screen. A TUI app
+    /// (claude, vim, htop) enters 1049h, paints, then exits with 1049l; the
+    /// restored primary rows + the shell's fresh prompt must be emitted, not
+    /// skipped as Clean with only a cursor reposition.
+    #[test]
+    fn alt_screen_exit_repaints_restored_primary_screen() {
+        let mut terminal = fresh(20, 5);
+        terminal.vt_write(b"$ old-prompt");
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut buf = Vec::new();
+        let _ = renderer.render(&terminal, &mut buf).expect("render 1");
+
+        // Enter alt screen, paint a TUI frame, render it.
+        terminal.vt_write(b"\x1b[?1049h\x1b[2J\x1b[HTUI-FRAME");
+        buf.clear();
+        let _ = renderer.render(&terminal, &mut buf).expect("render 2");
+        assert!(
+            String::from_utf8_lossy(&buf).contains("TUI-FRAME"),
+            "alt-screen content must paint"
+        );
+
+        // Exit alt screen; the shell prints a fresh prompt.
+        terminal.vt_write(b"\x1b[?1049l\r\n$ new-prompt");
+        buf.clear();
+        let dirty = renderer.render(&terminal, &mut buf).expect("render 3");
+        let s = String::from_utf8_lossy(&buf);
+        assert!(
+            !matches!(dirty, Dirty::Clean),
+            "alt-screen exit must not classify as Clean"
+        );
+        assert!(
+            s.contains("old-prompt") && s.contains("new-prompt"),
+            "restored primary rows + new prompt must repaint, got {s:?}"
+        );
+    }
+
     /// Incremental-paint baseline: a second `render` of a terminal with no
     /// new input is `Dirty::Clean` and emits ZERO bytes. This is what the
     /// status-bar cache change leans on — the focused pane render is

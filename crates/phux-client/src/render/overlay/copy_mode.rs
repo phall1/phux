@@ -326,7 +326,10 @@ impl RenderOverlay for CopyModeOverlay {
                 self.set_cursor_from_mouse(mouse);
                 self.selecting_with_mouse = false;
                 if self.anchor_row == self.cursor_row && self.anchor_col == self.cursor_col {
-                    OverlayCommand::Stay
+                    // A click without a drag selects nothing — exit copy-mode
+                    // (tmux-style) so a mouse-initiated entry can't trap the
+                    // user with the keyboard captured.
+                    OverlayCommand::Dismiss
                 } else {
                     OverlayCommand::Copy(self.copy_request())
                 }
@@ -478,6 +481,27 @@ mod tests {
         assert_eq!(
             overlay.handle_mouse(&mouse_wheel(MouseButton::Five)),
             OverlayCommand::ScrollViewport(WHEEL_SCROLL_LINES)
+        );
+    }
+
+    #[test]
+    fn click_without_drag_dismisses() {
+        let mut overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        overlay.handle_mouse(&mouse_event(
+            MouseAction::Press,
+            MouseButton::Left,
+            4.0,
+            2.0,
+        ));
+        assert_eq!(
+            overlay.handle_mouse(&mouse_event(
+                MouseAction::Release,
+                MouseButton::Left,
+                4.0,
+                2.0
+            )),
+            OverlayCommand::Dismiss,
+            "an empty selection must exit copy-mode, not trap the user"
         );
     }
 
