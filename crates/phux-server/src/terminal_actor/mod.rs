@@ -197,6 +197,16 @@ const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
 /// is `MAX_PTY_COALESCE_BYTES`.
 const MAX_INPUT_COALESCE: usize = 16;
 
+/// Grace window a still-running PTY child gets to flush and exit after a
+/// `SIGHUP` on pane teardown before we escalate to `SIGKILL` (phux-sw1).
+/// Sized so a foreground agent (`claude`) can persist its transcript; kept
+/// short so pane close / server shutdown stays snappy (idle shells exit on
+/// the hangup well inside it).
+// ponytail: fixed 500ms grace + 20ms poll; promote to a config knob only if a
+// slow-flushing agent actually needs longer.
+const PANE_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+const PANE_KILL_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Per-pane actor. Owns the `Terminal`, the PTY master, the per-pane
 /// input encoders, and serves the channels exposed via [`TerminalHandle`].
 ///
@@ -1755,24 +1765,28 @@ impl TerminalActor {
         }
     }
 
-    /// Tear down the PTY: kill the child if still alive, drop the
-    /// master (which sends EOF to the slave and unblocks the reader
+    /// Tear down the PTY: gracefully stop the child if still alive, drop
+    /// the master (which sends EOF to the slave and unblocks the reader
     /// thread), and join the bridge threads. Best-effort: errors are
     /// logged, not propagated, because we're on the shutdown path.
-    fn shutdown_pty(&mut self) {
+    #[allow(
+        clippy::future_not_send,
+        reason = "ADR-0014: TerminalActor owns !Send Terminal; lives on LocalSet"
+    )]
+    async fn shutdown_pty(&mut self) {
         let Some(mut pty) = self.pty.take() else {
             return;
         };
-        // Best-effort kill — if the child has already exited this is a
-        // no-op. `kill` is fire-and-forget; `wait` reaps the zombie.
+        // If the child is still alive, tear it down *gracefully* so a
+        // foreground process (e.g. `claude`) gets a chance to flush before
+        // we pull the rug — see `terminate_child_group`. If it already
+        // exited this is a no-op; `wait` below reaps the zombie.
         match pty.child.try_wait() {
             Ok(Some(_status)) => {
                 trace!("pty child already exited");
             }
             Ok(None) => {
-                if let Err(err) = pty.child.kill() {
-                    debug!(?err, "pty child kill failed (already exited?)");
-                }
+                Self::terminate_child_group(&mut pty).await;
             }
             Err(err) => {
                 debug!(?err, "pty child try_wait failed");
@@ -1809,6 +1823,68 @@ impl TerminalActor {
             let _ = handle.join();
         }
         drop(pty);
+    }
+
+    /// Gracefully stop a still-running PTY child on pane teardown (phux-sw1).
+    ///
+    /// A pane close is a hangup: send `SIGHUP` to the child's process group
+    /// so the foreground process (e.g. `claude`) and its descendants get a
+    /// chance to flush and exit cleanly, poll for exit within
+    /// [`PANE_KILL_GRACE`], then `SIGKILL` the group as a backstop. The PTY
+    /// master stays open for the duration, so the child can still write during
+    /// the grace window.
+    ///
+    /// This replaces an immediate `std::process::Child::kill` (a `SIGKILL` of
+    /// the shell pid alone, with no grace), which killed a foreground agent
+    /// before it could persist its transcript. `killpg` matches
+    /// [`Self::deliver_signal`]'s rationale: `portable_pty` makes the child a
+    /// session/group leader (`setsid`), so its pid is its pgid and signaling
+    /// the group reaches the whole subtree. Falls back to the library kill if
+    /// the pid is already gone.
+    #[allow(
+        clippy::future_not_send,
+        reason = "ADR-0014: TerminalActor owns !Send Terminal; lives on LocalSet"
+    )]
+    async fn terminate_child_group(pty: &mut PtyOwned) {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let Some(group) = pty
+            .child
+            .process_id()
+            .and_then(|id| i32::try_from(id).ok())
+            .map(Pid::from_raw)
+        else {
+            let _ = pty.child.kill();
+            return;
+        };
+
+        // Hang up the group so the foreground process can flush.
+        if let Err(err) = killpg(group, Signal::SIGHUP) {
+            debug!(
+                ?err,
+                "SIGHUP to pane group failed; falling back to child kill"
+            );
+            let _ = pty.child.kill();
+            return;
+        }
+
+        // Poll for a clean exit within the grace budget.
+        let deadline = tokio::time::Instant::now() + PANE_KILL_GRACE;
+        while tokio::time::Instant::now() < deadline {
+            match pty.child.try_wait() {
+                Ok(Some(_status)) => return, // exited within grace
+                Ok(None) => tokio::time::sleep(PANE_KILL_POLL).await,
+                Err(err) => {
+                    debug!(?err, "try_wait during pane-kill grace failed");
+                    break;
+                }
+            }
+        }
+
+        // Backstop: the group ignored the hangup (or is mid-flush past the
+        // budget). Hard-kill the whole group.
+        let _ = killpg(group, Signal::SIGKILL);
     }
 
     /// Run the actor's event loop until shutdown.
@@ -1882,7 +1958,7 @@ impl TerminalActor {
 
                 () = self.token.cancelled() => {
                     debug!("TerminalActor cancellation token fired");
-                    self.shutdown_pty();
+                    self.shutdown_pty().await;
                     return;
                 }
 
@@ -2978,6 +3054,56 @@ mod tests {
                     .expect("exit notify channel");
 
                 token.cancel();
+            })
+            .await;
+    }
+
+    /// phux-sw1: killing a pane (cancel the actor token → `shutdown_pty`)
+    /// must give a still-running foreground process a chance to flush before
+    /// it dies. The child traps `SIGHUP`, writes a marker file, and exits;
+    /// after the token is cancelled the marker must exist — proving the
+    /// graceful SIGHUP + grace-window path ran, not an immediate SIGKILL
+    /// (which would skip the trap and leave no marker). This is the wire-free
+    /// analogue of "quit the pane while `claude` is foreground; its transcript
+    /// still flushes".
+    #[tokio::test(flavor = "current_thread")]
+    async fn pane_kill_lets_foreground_process_flush_before_death() {
+        use portable_pty::CommandBuilder;
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let marker = dir.path().join("flushed");
+
+                // A shell that flushes-on-hangup: trap SIGHUP, write the
+                // marker, exit. `sleep 30 & wait` keeps it alive and keeps the
+                // shell interruptible so the trap fires promptly on SIGHUP.
+                let mut cmd = CommandBuilder::new("/bin/sh");
+                cmd.arg("-c");
+                cmd.arg(format!(
+                    "trap 'echo flushed > {}; exit 0' HUP; sleep 30 & wait",
+                    marker.display()
+                ));
+
+                let token = CancellationToken::new();
+                let bundle = TerminalActor::build_with_token(20, 5, Some(cmd), 1000, token.clone())
+                    .expect("build actor");
+                let run = tokio::task::spawn_local(bundle.actor.run());
+
+                // Let the child install its trap and reach `wait`.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                // Kill the pane. The actor's shutdown runs SIGHUP + grace.
+                token.cancel();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+
+                let body = std::fs::read_to_string(&marker).unwrap_or_default();
+                assert!(
+                    body.contains("flushed"),
+                    "foreground process must run its SIGHUP flush handler before \
+                     the pane is killed; marker={body:?}",
+                );
             })
             .await;
     }
