@@ -732,6 +732,33 @@ impl ServerState {
         self.event_subscriptions.remove(&client_id);
     }
 
+    /// Collect the `(client, outbound mailbox)` pairs to force-detach for the
+    /// `phux detach` verb (`DETACH_CLIENTS`).
+    ///
+    /// `session = Some(name)` selects only clients attached to that session
+    /// (empty when the name is unknown); `None` selects every attached client.
+    /// Each mailbox is cloned so the caller can push a `DETACHED` frame before
+    /// running the normal per-client detach teardown, which re-locks state and
+    /// so must run off this borrow.
+    #[must_use]
+    pub fn attached_clients_to_detach(
+        &self,
+        session: Option<&str>,
+    ) -> Vec<(ClientId, mpsc::Sender<Outbound>)> {
+        let target_session = match session {
+            Some(name) => match self.find_session_by_name(name) {
+                Some(id) => Some(id),
+                None => return Vec::new(),
+            },
+            None => None,
+        };
+        self.attached
+            .values()
+            .filter(|c| target_session.is_none_or(|sid| c.session == sid))
+            .map(|c| (c.id, c.tx.clone()))
+            .collect()
+    }
+
     /// Record an agent-event subscription for `client_id` at `scope`
     /// (SPEC §7.5, phux-y2t). Idempotent: re-subscribing the same scope
     /// is a no-op (the per-client scope set absorbs the duplicate). A

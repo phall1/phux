@@ -41,8 +41,8 @@ use std::time::Duration;
 
 use phux_protocol::ids::{GroupId, TerminalId};
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_COMMAND_RESULT,
-    TYPE_TERMINAL_CLOSED,
+    Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope, TYPE_ATTACHED,
+    TYPE_COMMAND_RESULT, TYPE_DETACHED, TYPE_TERMINAL_CLOSED, TYPE_TERMINAL_SNAPSHOT,
 };
 use tempfile::TempDir;
 use tokio::net::UnixStream;
@@ -1024,6 +1024,98 @@ fn get_terminal_state_unknown_terminal_returns_not_found_error() {
                 );
             }
             other => panic!("expected Error(TerminalNotFound, ..), got {other:?}"),
+        }
+    });
+}
+
+/// DETACH_CLIENTS (tag 0x13, `phux detach`) force-detaches an attached client
+/// from *outside* the attach UI: a second connection issues the command
+/// targeting the victim's session, the victim's connection receives a DETACHED
+/// frame, and the command replies `OkWith(Json(count))` with the number of
+/// clients detached. This is the wire proof behind the `phux detach` verb.
+#[test]
+fn detach_clients_force_detaches_attached_client() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+
+        // Victim: attach to "work", drain ATTACHED + SNAPSHOT.
+        let mut victim = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut victim, &attach_by_name("work")).await;
+        let (t, _) = recv_typed(&mut victim).await;
+        assert_eq!(t, TYPE_ATTACHED, "victim expected ATTACHED");
+        let (t, _) = recv_typed(&mut victim).await;
+        assert_eq!(t, TYPE_TERMINAL_SNAPSHOT, "victim expected SNAPSHOT");
+
+        // Controller: a separate connection issues DETACH_CLIENTS { "work" }.
+        let mut controller = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(
+            &mut controller,
+            &FrameKind::Command {
+                request_id: 5,
+                command: Command::DetachClients {
+                    session: Some("work".to_owned()),
+                },
+            },
+        )
+        .await;
+
+        // The command reports exactly one client detached.
+        match await_command_result(&mut controller, 5).await {
+            CommandResult::OkWith(CommandValue::Json(count)) => {
+                assert_eq!(count, "1", "expected exactly one client detached");
+            }
+            other => panic!("expected OkWith(Json(count)), got {other:?}"),
+        }
+
+        // The victim's connection receives DETACHED.
+        let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+        let mut saw_detached = false;
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let Ok((t, _)) = timeout(remaining, recv_typed(&mut victim)).await else {
+                break;
+            };
+            if t == TYPE_DETACHED {
+                saw_detached = true;
+                break;
+            }
+        }
+        assert!(
+            saw_detached,
+            "victim must receive DETACHED after DETACH_CLIENTS",
+        );
+    });
+}
+
+/// DETACH_CLIENTS with an unknown session name is a no-op that reports zero
+/// clients detached — not an error (mirrors KILL_TERMINALS's skip-silently
+/// shape for unknown ids).
+#[test]
+fn detach_clients_unknown_session_reports_zero() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (_shutdown_tx, _server) = spawn_server(socket_path.clone(), Some("work"));
+
+        let mut controller = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(
+            &mut controller,
+            &FrameKind::Command {
+                request_id: 9,
+                command: Command::DetachClients {
+                    session: Some("nope".to_owned()),
+                },
+            },
+        )
+        .await;
+
+        match await_command_result(&mut controller, 9).await {
+            CommandResult::OkWith(CommandValue::Json(count)) => {
+                assert_eq!(count, "0", "unknown session detaches nobody");
+            }
+            other => panic!("expected OkWith(Json(\"0\")), got {other:?}"),
         }
     });
 }

@@ -461,6 +461,7 @@ pub(crate) const fn command_kind(command: &Command) -> &'static str {
         Command::DetachTerminal { .. } => "detach_terminal",
         Command::KillTerminal { .. } => "kill_terminal",
         Command::KillTerminals { .. } => "kill_terminals",
+        Command::DetachClients { .. } => "detach_clients",
         Command::GetState { .. } => "get_state",
         Command::GetScreen { .. } => "get_screen",
         Command::RouteInput { .. } => "route_input",
@@ -531,6 +532,9 @@ pub(crate) async fn handle_command(
             None => handle_route_input(state, client_id, &terminal_id, event),
         },
         Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
+        Command::DetachClients { session } => {
+            handle_detach_clients(state, session.as_deref()).await
+        }
         Command::KillTerminal { terminal_id } => handle_kill_terminal(state, &terminal_id),
         Command::GetTerminalState {
             terminal_id,
@@ -1281,6 +1285,36 @@ pub(crate) fn handle_kill_terminals(
         killed, "KILL_TERMINALS: torn down group atomically"
     );
     CommandResult::Ok
+}
+
+/// Force-detach clients from *outside* the attach UI (`phux detach`).
+///
+/// Gathers the target clients — those attached to `session`, or every attached
+/// client when `session` is `None` — and their outbound mailboxes under one
+/// read borrow, then (off-lock, since the teardown re-locks) pushes a
+/// `DETACHED` frame to each so its TUI exits cleanly and runs the normal
+/// per-client detach teardown. Returns the count as a JSON number so the CLI
+/// can report how many clients it detached. An unknown session name detaches
+/// nobody and reports `0` — not an error, matching `KILL_TERMINALS`'s
+/// skip-silently shape.
+pub(crate) async fn handle_detach_clients(
+    state: &SharedState,
+    session: Option<&str>,
+) -> CommandResult {
+    let targets = state.with(|s| s.attached_clients_to_detach(session));
+    let count = targets.len();
+    for (client_id, tx) in targets {
+        // Best-effort DETACHED push; the teardown below removes the client
+        // regardless of whether this frame lands (a wedged writer is exactly
+        // the "stuck client" case `phux detach` exists to clear).
+        let _ = tx.send(Outbound::Frame(FrameKind::Detached)).await;
+        super::client::detach_and_release_consumer_state(state, client_id);
+    }
+    debug!(
+        ?session,
+        count, "DETACH_CLIENTS: force-detached clients from outside the attach UI"
+    );
+    CommandResult::OkWith(CommandValue::Json(count.to_string()))
 }
 
 /// Create a named session and seed its pane, *without* attaching — the
