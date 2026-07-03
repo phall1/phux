@@ -173,7 +173,13 @@ pub(crate) async fn attach_default_with_fallback(
                 AttachTarget::CreateIfMissing {
                     name: default_name.to_owned(),
                     command: None,
-                    cwd: None,
+                    // phux-0db: seed the pane in the client's cwd (like the
+                    // `${cwd-basename}` session name already reads), so
+                    // `claude --resume` finds its transcript. `None` here made
+                    // the pane inherit the daemon's cwd.
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .map(|p| p.to_string_lossy().into_owned()),
                 },
                 predict_cfg,
             )

@@ -137,11 +137,12 @@ pub(crate) async fn resolve_attach_target(
 /// [`crate::state::ServerState::attach_create_seed_command`] preempts
 /// them: an explicit per-server seed command always wins (it's how the
 /// `phux server` binary pins `default_shell_command()` for the user).
-/// The PTY path also currently ignores `cwd` — pre-seeded PTY launches
-/// land in the server's CWD today, and lifting that into a
-/// per-`CreateIfMissing` override is filed as a follow-up rather than
-/// snuck in here. The no-PTY path ignores both, matching the existing
-/// `seed_session_with_actor` shape.
+/// The PTY path honors `cwd` (phux-0db): the seed pane is spawned in the
+/// client's working directory, so a `claude` session's transcript is
+/// keyed under the right path hash and `claude --resume` works. `cwd` is
+/// orthogonal to the command, so it applies even under a server-seed or
+/// wire command override. The no-PTY path ignores both, matching the
+/// existing `seed_session_with_actor` shape.
 ///
 /// On terminal-actor spawn failure (e.g. PTY allocation fails on a
 /// host with no remaining ptys), emits a `SessionNotFound` error
@@ -156,7 +157,7 @@ pub(crate) async fn resolve_create_if_missing(
     state: &SharedState,
     name: String,
     command: Option<Vec<String>>,
-    _cwd: Option<String>,
+    seed_cwd: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
 ) -> Option<String> {
@@ -207,6 +208,14 @@ pub(crate) async fn resolve_create_if_missing(
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
         crate::terminal_actor::apply_term(&mut cmd, &term);
+        // phux-0db: honor the client's wire `cwd` so the seed pane lands in
+        // the user's project dir, not the daemon's CWD. Without this, a
+        // `claude` session's transcript is keyed under the wrong path hash and
+        // `claude --resume` can't find it. Orthogonal to the command above, so
+        // it applies even when an override command is in force.
+        if let Some(dir) = seed_cwd {
+            cmd.cwd(dir);
+        }
         seed_session_with_pty(state, &name, cmd, history_limit, root_token)
     } else {
         // No-PTY path: the wire `command` is meaningless without a
