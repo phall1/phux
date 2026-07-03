@@ -23,6 +23,12 @@ build:
 build-release:
     cargo build --workspace --release
 
+# Rebuild the phux binary and hot-swap the running server in place,
+# preserving live sessions (ADR-0032).
+rebuild:
+    cargo build -p phux
+    phux upgrade
+
 # Format every Rust file in place.
 fmt:
     cargo fmt --all
