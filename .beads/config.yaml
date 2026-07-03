@@ -1,7 +1,7 @@
 issue_prefix: phux
 issue-prefix: phux
 dolt.auto-start: false
-export.auto: false
+export.auto: true
 types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
