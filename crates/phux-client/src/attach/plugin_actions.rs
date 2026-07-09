@@ -319,6 +319,7 @@ mod tests {
             prefix: "C-a".to_owned(),
             prefix_table,
             global: BTreeMap::new(),
+            ..KeybindingsCfg::default()
         }
     }
 
