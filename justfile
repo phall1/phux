@@ -188,8 +188,18 @@ toolchain:
 dist TAG:
     bash scripts/dist.sh {{TAG}}
 
-# Check that a release tag matches the resolved Cargo package versions before
-# cutting/pushing the tag.
+# Local release preflight before pressing the GitHub Actions release button.
+# Runs version/tag checks, install-surface drift checks, formula generation,
+# and a phux-protocol crates.io package dry-run.
+release-preflight TAG:
+    bash scripts/release-preflight.sh {{TAG}}
+
+# Same release preflight, but skip the crates.io dry-run when offline or when
+# this is a binary/Homebrew-only release and cargo registry access is flaky.
+release-preflight-fast TAG:
+    bash scripts/release-preflight.sh {{TAG}} --skip-crate-dry-run
+
+# Check that a release tag matches the resolved Cargo package versions.
 release-check TAG:
     bash scripts/check-release-version.sh {{TAG}}
 
