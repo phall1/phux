@@ -1837,6 +1837,7 @@ dependencies = [
  "phux-client-core",
  "phux-config",
  "phux-core",
+ "phux-plugin",
  "phux-protocol",
  "phux-server",
  "proptest",

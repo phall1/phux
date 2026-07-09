@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-17
+last-reviewed: 2026-07-09
 ---
 
 # The phux reference TUI
@@ -494,6 +494,13 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+# Optional: contribute a prefix-table keybinding for this action
+# (chord syntax per section 5.1, e.g. "g" or "g s"). The TUI merges it
+# at attach; a chord that conflicts with the user's own [keybindings]
+# (exact chord or ambiguous prefix) is dropped with a logged warning —
+# user config always wins. Plugin actions also always appear in the
+# command palette (section 5.5) whether or not keys is set.
+keys = "g"
 
 [[events]]
 id = "idle"
@@ -783,6 +790,7 @@ test, so this table cannot silently drift):
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
+| `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
 
 ### 5.5 Command palette and pickers
 
@@ -794,6 +802,19 @@ matches are ranked best-first by a scored fuzzy match (contiguous runs,
 word-boundary hits, and earliness all raise a row's rank), so typing `sp`
 floats `split-pane` to the top. Enter commits the selected row through the
 same `run_action` path a keybinding takes.
+
+Enabled plugins' manifest `[[actions]]` appear under a trailing
+**Plugin** header, one namespaced row per action
+(`plugin: <plugin-name>: <action title>`). Committing one runs
+`plugin-action { plugin, action }`, which executes the manifest's argv
+through the same child-process runtime as `phux config run PLUGIN
+ACTION` — spawned off the input loop, so a slow plugin never freezes the
+TUI. A failed run (non-zero exit, timeout, or spawn error) pops a
+dismissable toast showing the captured output; successes only log. A
+manifest action may also declare `keys = "..."` to contribute a
+prefix-table binding (see the plugin-manifest block in §4.2); user
+config always wins on conflict, and the palette row shows whichever
+chord actually ended up bound.
 
 The **session picker** (`session-picker`, `C-a s`, alias `C-a a`) lists the
 server's other sessions; choosing one re-attaches this client to it

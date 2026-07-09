@@ -48,6 +48,7 @@ use super::input_dispatch::{
 use super::paint::{
     SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
 };
+use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::handle_server_frame;
 use crate::layout::Workspace;
@@ -1178,12 +1179,9 @@ async fn main_loop<W: super::RenderSink>(
     // `workspace.render_window(zoomed)` (a synthetic single-leaf layout)
     // instead of the real tiled tree, which is left untouched for mutation.
     let mut zoomed: Option<TerminalId> = None;
-    // phux-4li.5: keybind resolver + request-id allocator for L3 GET
-    // correlation. The resolver consumes `InputEvent::Key` events
-    // *before* they would be forwarded to the focused pane; a chord
-    // that resolves to a layout action mutates the active window here
-    // and never reaches the server's input pipe.
-    let mut resolver = build_resolver();
+    // phux-4li.5: request-id allocator for L3 GET correlation. (The
+    // keybind resolver is built below, from the plugin-merged
+    // keybindings snapshot.)
     let mut layout_get_request_id: Option<u32> = None;
     let mut next_request_id: u32 = 1;
     // phux-4li.12: in-flight `split-pane` actions parked by request id.
@@ -1212,8 +1210,31 @@ async fn main_loop<W: super::RenderSink>(
     // modal shows "no bindings" and chrome paints with the built-in
     // palette.
     let loaded_cfg = phux_config::loader::load().ok();
-    let keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
-        loaded_cfg.as_ref().map(|c| c.keybindings.clone());
+    // phux-r82.5: snapshot the enabled plugins' manifest actions once at
+    // driver start (same policy as the keybindings snapshot — no config
+    // I/O under user fingers). The palette lists them; manifest-declared
+    // `keys` merge into the prefix table below with user config winning
+    // every conflict. A broken manifest is skipped with a warning.
+    let plugin_actions: Vec<PluginActionEntry> = loaded_cfg
+        .as_ref()
+        .map(plugin_actions::load_plugin_action_entries)
+        .unwrap_or_default();
+    // The plugin-events channel: spawned plugin-action tasks report
+    // completion here; the select! arm below toasts failures. Sender is
+    // lent to `DispatchCtx` each batch.
+    let (plugin_tx, mut plugin_rx) = tokio::sync::mpsc::unbounded_channel::<PluginRunResult>();
+    let keybindings_snapshot: Option<phux_config::KeybindingsCfg> = loaded_cfg.as_ref().map(|c| {
+        let mut kb = c.keybindings.clone();
+        plugin_actions::merge_plugin_bindings(&mut kb, &plugin_actions);
+        kb
+    });
+    // phux-4li.5: keybind resolver, built from the plugin-merged snapshot
+    // so a manifest `keys` chord resolves exactly like a user binding.
+    // The resolver consumes `InputEvent::Key` events *before* they would
+    // be forwarded to the focused pane; a chord that resolves to an
+    // action mutates the active window here and never reaches the
+    // server's input pipe.
+    let mut resolver = keybindings_snapshot.as_ref().and_then(build_resolver_from);
     // phux-ahv.4: single source of truth for chrome + overlay colors,
     // owned alongside the keybindings snapshot and threaded into the
     // overlay render path via `DispatchCtx`.
@@ -1506,6 +1527,8 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
                     drag: &mut drag,
+                    plugin_actions: &plugin_actions,
+                    plugin_tx: Some(&plugin_tx),
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1873,6 +1896,8 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
                     drag: &mut drag,
+                    plugin_actions: &plugin_actions,
+                    plugin_tx: Some(&plugin_tx),
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2103,6 +2128,39 @@ async fn main_loop<W: super::RenderSink>(
                 }
             }
 
+            // phux-r82.5: a spawned plugin action finished. Successes just
+            // log (no modal to dismiss on the happy path); failures push a
+            // dismissable toast carrying the captured output, so a broken
+            // plugin is *seen* without ever having blocked the input loop.
+            // The channel can't close while this loop holds `plugin_tx`,
+            // so the `Some` pattern always matches when the arm fires.
+            Some(result) = plugin_rx.recv() => {
+                tracing::info!(
+                    plugin = %result.plugin_id,
+                    action = %result.action_id,
+                    ok = plugin_actions::run_succeeded(&result),
+                    "plugin action finished",
+                );
+                if let Some((title, lines)) = plugin_actions::failure_toast(&result) {
+                    overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+                        title, lines, &theme,
+                    )));
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        &session_name,
+                        &theme,
+                    );
+                }
+            }
+
             // SIGINT — restore the terminal explicitly (Drop wouldn't
             // fire on `exit(130)`), then exit with the shell-conventional
             // 130. `phux-roz`: this is the path that fires when the user
@@ -2168,20 +2226,16 @@ pub(super) fn is_layout_key_string(key: &str) -> bool {
 /// won't match).
 pub(super) const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
-/// phux-4li.5: build a [`phux_config::keybind::Resolver`] from the
-/// on-disk config. Failures log and return `None` — a malformed
-/// `[keybindings]` table degrades to "no actions are bound" rather
-/// than blocking attach. Detach is a normal keybinding action, so a
-/// disabled resolver also disables configured detach chords.
-fn build_resolver() -> Option<phux_config::keybind::Resolver> {
-    let cfg = match phux_config::loader::load() {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::warn!(error = %err, "phux-config load failed; keybind resolver disabled");
-            return None;
-        }
-    };
-    match phux_config::keybind::Resolver::new(&cfg.keybindings) {
+/// phux-4li.5: build a [`phux_config::keybind::Resolver`] from a
+/// keybindings snapshot (post phux-r82.5: the plugin-merged one, so
+/// manifest `keys` chords resolve like user bindings — the merge already
+/// validated each contributed chord, so a plugin can't poison this
+/// build). Failures log and return `None` — a malformed `[keybindings]`
+/// table degrades to "no actions are bound" rather than blocking attach.
+/// Detach is a normal keybinding action, so a disabled resolver also
+/// disables configured detach chords.
+fn build_resolver_from(kb: &phux_config::KeybindingsCfg) -> Option<phux_config::keybind::Resolver> {
+    match phux_config::keybind::Resolver::new(kb) {
         Ok(r) => Some(r),
         Err(err) => {
             tracing::warn!(error = %err, "keybind resolver build failed; disabled");
@@ -2293,7 +2347,7 @@ async fn emit_zoom_reflow(
 /// silently either. On a load or build failure we surface a visible
 /// error line (`StatusBarPainter::error_line`) on the bar row pointing
 /// the user at `phux config show` for the full diagnostic, instead of
-/// dropping to an empty bar (and, alongside [`build_resolver`], no
+/// dropping to an empty bar (and, alongside [`build_resolver_from`], no
 /// keybindings) with only a `tracing::warn` nobody sees. Returns `None`
 /// only when the config is valid and the bar would be empty (no widgets
 /// configured) — callers short-circuit on that.

@@ -37,6 +37,7 @@ pub mod driver;
 pub mod input;
 pub mod input_dispatch;
 pub mod paint;
+pub mod plugin_actions;
 pub mod quic;
 pub mod reflow;
 mod remote_tls;
