@@ -78,6 +78,12 @@ pub(super) struct PaneSlot {
     /// "the wheel"), or `None` when the pane is `Open`. Compared against the
     /// driver's own `ClientId` to render "you" vs another client.
     pub input_holder: Option<ClientId>,
+    /// phux-foz.1: `true` when an agent in this pane is waiting on a human
+    /// answer. Set by an inbound ADR-0035 `AgentEvent::Asked`; cleared when
+    /// the user sends key/paste input to the pane (see
+    /// [`clear_attention_on_input`]). Read at chrome-paint time for the
+    /// window tab marker and the status-bar attention hint.
+    pub attention: bool,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -114,6 +120,7 @@ impl PaneSlot {
             // these — a pane that exists before its control state is benign.
             lifecycle: TerminalLifecycle::Running,
             input_holder: None,
+            attention: false,
         })
     }
 
@@ -163,12 +170,39 @@ fn format_supervisory_badge(
     }
 }
 
-/// Refresh the window strip AND the supervisory badge together (ADR-0033).
+/// phux-foz.1: compose the status-bar attention hint, or `None` when no pane
+/// is waiting on a human answer. Counts every pane with the ADR-0035 asked
+/// flag set (across ALL windows, not just the active one — the hint's job is
+/// to surface a question the user cannot currently see).
+fn attention_hint(panes: &HashMap<TerminalId, PaneSlot>) -> Option<String> {
+    format_attention_hint(panes.values().filter(|slot| slot.attention).count())
+}
+
+/// Pure hint formatter (split out from [`attention_hint`] so the count→string
+/// mapping is testable without a libghostty-backed `PaneSlot`). `None` ⇒ no
+/// hint (nothing is asking). Plain ASCII chrome, matching the ADR-0033
+/// supervisory badge convention.
+fn format_attention_hint(asking: usize) -> Option<String> {
+    match asking {
+        0 => None,
+        1 => Some("[ ASK ]".to_owned()),
+        n => Some(format!("[ ASK x{n} ]")),
+    }
+}
+
+/// Refresh the window strip AND the supervisory badge together (ADR-0033),
+/// plus the phux-foz.1 attention hint.
 ///
-/// Both feed one status-bar paint, so they must stay in lockstep: a site that
-/// refreshed the window list on a focus/layout change but forgot the badge
-/// would silently desync them. This single chokepoint makes that impossible —
-/// every focus/layout-change site calls it instead of hand-rolling the pair.
+/// All three feed one status-bar paint, so they must stay in lockstep: a site
+/// that refreshed the window list on a focus/layout change but forgot the
+/// badge would silently desync them. This single chokepoint makes that
+/// impossible — every focus/layout-change site calls it instead of
+/// hand-rolling the trio.
+///
+/// Returns `true` when any painter input actually changed, so a caller that
+/// paints nothing else (the `chrome_dirty` event path) can gate its repaint
+/// on it instead of repainting the full frame for state the user already
+/// sees.
 fn refresh_window_chrome(
     status_bar: Option<&mut StatusBarPainter>,
     sidebar_painter: &mut SidebarPainter,
@@ -177,13 +211,16 @@ fn refresh_window_chrome(
     focused_pane: Option<&TerminalId>,
     zoomed: Option<&TerminalId>,
     own_client_id: Option<ClientId>,
-) {
+) -> bool {
     let windows = window_infos(workspace, panes, zoomed);
+    let mut changed = false;
     if let Some(sb) = status_bar {
-        sb.set_windows(windows.clone());
-        sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
+        changed |= sb.set_windows(windows.clone());
+        changed |= sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
+        changed |= sb.set_attention(attention_hint(panes));
     }
-    sidebar_painter.set_windows(windows);
+    changed |= sidebar_painter.set_windows(windows);
+    changed
 }
 
 /// Re-anchor the predictive-echo layer to a (newly) focused pane (phux-7ry0).
@@ -1243,6 +1280,11 @@ async fn main_loop<W: super::RenderSink>(
         .map_or_else(crate::render::Theme::default, |c| {
             crate::render::Theme::from_cfg(&c.theme)
         });
+    // phux-foz.1: the attention hint's chip color comes from the theme's
+    // `attention` slot rather than a hardcoded SGR in the painter.
+    if let Some(sb) = status_bar.as_mut() {
+        sb.set_attention_color(theme.attention);
+    }
     // phux-4h5a: window-sidebar render state, driver-local like `zoomed`. The
     // `[sidebar]` config seeds the initial enabled flag, width, and edge; the
     // `toggle-sidebar` action flips `sidebar_enabled` at runtime. Each frame
@@ -1710,23 +1752,27 @@ async fn main_loop<W: super::RenderSink>(
                             sessions = list;
                             focused_session = Some(focused);
                         }
-                        // ADR-0033: a `TerminalControl` event changed a pane's
-                        // lease/lifecycle. The event frame paints nothing, so
-                        // refresh the badge and repaint the bar here — but only
-                        // when the FOCUSED pane's badge actually changed
-                        // (`set_supervisory` reports it), so an event on a
-                        // background pane doesn't force a full-window repaint for
-                        // state the user can't see. (`own_client_id` is fixed for
-                        // the life of this loop; it was captured at bootstrap.)
+                        // ADR-0033 / phux-foz.1: a `TerminalControl` or `Asked`
+                        // event changed a pane's lease/lifecycle/attention. The
+                        // event frame paints nothing, so refresh the chrome
+                        // (supervisory badge, attention hint, window markers)
+                        // and repaint here — but only when a painter input
+                        // actually changed (`refresh_window_chrome` reports
+                        // it), so an event that alters no visible state doesn't
+                        // force a full-window repaint. (`own_client_id` is
+                        // fixed for the life of this loop; it was captured at
+                        // bootstrap.)
                         if outcome.chrome_dirty {
-                            let badge_changed = status_bar.as_mut().is_some_and(|sb| {
-                                sb.set_supervisory(supervisory_badge(
-                                    &panes,
-                                    focused_pane.as_ref(),
-                                    own_client_id,
-                                ))
-                            });
-                            if badge_changed
+                            let chrome_changed = refresh_window_chrome(
+                                status_bar.as_mut(),
+                                &mut sidebar_painter,
+                                &workspace,
+                                &panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                            );
+                            if chrome_changed
                                 && !overlays.is_active()
                                 && let Some(ls) =
                                     workspace.render_window(zoomed.as_ref()).as_deref()
@@ -2281,13 +2327,42 @@ fn window_infos(
                 .filter(|t| !t.is_empty())
                 .map(ToOwned::to_owned);
             let active = i == workspace.active;
+            // phux-foz.1: a window carries attention when ANY of its leaves
+            // has the ADR-0035 asked flag set — not just the focused leaf —
+            // so a question in a background split still marks the tab.
+            let attention = w
+                .state
+                .tree
+                .as_ref()
+                .map(crate::layout::leaves)
+                .unwrap_or_default()
+                .iter()
+                .any(|id| panes.get(id).is_some_and(|slot| slot.attention));
             phux_config::widget::WindowInfo {
                 name: title.unwrap_or_else(|| w.name.clone()),
                 active,
                 zoomed: active && zoomed.is_some(),
+                attention,
             }
         })
         .collect()
+}
+
+/// phux-foz.1: clear a pane's asked-attention flag because the user sent it
+/// input (the clearing rule documented in `docs/consumers/tui.md`). Returns
+/// `true` when the flag actually flipped, so the caller can schedule a
+/// chrome repaint only on a real transition.
+pub(super) fn clear_attention_on_input(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    pane: &TerminalId,
+) -> bool {
+    match panes.get_mut(pane) {
+        Some(slot) if slot.attention => {
+            slot.attention = false;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// phux-x2hm: the per-leaf rect map of the **zoom-honoring** view, used as the
@@ -2847,6 +2922,73 @@ mod tests {
             format_supervisory_badge(false, Some(me), None).as_deref(),
             Some("[ WHEEL:c7 ]")
         );
+    }
+
+    /// phux-foz.1: the status-bar attention hint. Nothing asking shows
+    /// nothing; one asking pane shows the plain chip; several asking panes
+    /// carry the count.
+    #[test]
+    fn attention_hint_formats_every_count() {
+        assert_eq!(format_attention_hint(0), None);
+        assert_eq!(format_attention_hint(1).as_deref(), Some("[ ASK ]"));
+        assert_eq!(format_attention_hint(3).as_deref(), Some("[ ASK x3 ]"));
+    }
+
+    /// phux-foz.1: key/paste input forwarded to a pane clears its asked
+    /// flag exactly once — the transition reports `true`, repeats and
+    /// unknown panes report `false` (no spurious chrome repaints).
+    #[test]
+    fn clear_attention_on_input_clears_once() {
+        let id = TerminalId::local(1);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.attention = true;
+        panes.insert(id.clone(), slot);
+
+        assert!(clear_attention_on_input(&mut panes, &id), "first clear");
+        assert!(
+            !panes.get(&id).expect("slot").attention,
+            "flag must be down after the clear"
+        );
+        assert!(
+            !clear_attention_on_input(&mut panes, &id),
+            "already-clear pane reports no transition"
+        );
+        assert!(
+            !clear_attention_on_input(&mut panes, &TerminalId::local(9)),
+            "unknown pane reports no transition"
+        );
+    }
+
+    /// phux-foz.1: `window_infos` marks a window when ANY of its leaves has
+    /// the asked flag — including a non-focused leaf — and only that window.
+    #[test]
+    fn window_infos_flags_attention_on_the_asking_window() {
+        let front = TerminalId::local(1);
+        let back = TerminalId::local(2);
+        let mut workspace = Workspace::single(front.clone());
+        workspace.add_window("2".to_owned(), back.clone());
+        workspace.select(0);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(front, PaneSlot::new_with_size(80, 24).expect("slot"));
+        let mut asking = PaneSlot::new_with_size(80, 24).expect("slot");
+        asking.attention = true;
+        panes.insert(back.clone(), asking);
+
+        let infos = window_infos(&workspace, &panes, None);
+        assert!(
+            !infos[0].attention,
+            "quiet window must not carry the marker"
+        );
+        assert!(
+            infos[1].attention,
+            "the asking (background) window carries the marker"
+        );
+
+        // Clearing the flag clears the marker.
+        assert!(clear_attention_on_input(&mut panes, &back));
+        let infos = window_infos(&workspace, &panes, None);
+        assert!(!infos[1].attention);
     }
 
     #[test]

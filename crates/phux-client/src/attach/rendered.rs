@@ -338,11 +338,13 @@ mod tests {
                 name: "editor".to_owned(),
                 active: true,
                 zoomed: false,
+                attention: false,
             },
             WindowInfo {
                 name: "shell".to_owned(),
                 active: false,
                 zoomed: false,
+                attention: false,
             },
         ]);
 

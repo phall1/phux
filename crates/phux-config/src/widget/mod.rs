@@ -100,6 +100,11 @@ pub struct WindowInfo {
     /// Only ever set on the active window; the `windows` widget appends a
     /// `Z` marker to its tab (tmux's zoomed-pane indicator).
     pub zoomed: bool,
+    /// phux-foz.1: `true` when a pane in this window is waiting on a human
+    /// answer (an ADR-0035 `AgentEvent::Asked` landed and has not been
+    /// cleared by user input). The `windows` widget appends a `!` marker to
+    /// the tab so the asking window is findable from any window.
+    pub attention: bool,
 }
 
 /// Context passed to a [`StatusWidget`] at render time.

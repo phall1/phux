@@ -43,8 +43,16 @@ impl SidebarPainter {
 
     /// Replace the window list (driver calls this from the same
     /// `window_infos` snapshot that feeds the status-bar tab strip).
-    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) {
+    /// Returns `true` if the list actually changed, so a caller with no
+    /// other paint trigger (the agent-event chrome path) can gate a repaint
+    /// on it; the paint cache below makes an unchanged repaint free either
+    /// way.
+    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) -> bool {
+        if self.windows == windows {
+            return false;
+        }
         self.windows = windows;
+        true
     }
 
     /// Drop the paint cache so the next [`Self::paint`] re-emits even if its
@@ -88,12 +96,16 @@ impl SidebarPainter {
         // Text occupies every column except the 1-cell right separator.
         let text_w = rect.w.saturating_sub(1);
         if text_w > 0 {
-            let label_w = usize::from(text_w).saturating_sub(2); // marker is 2 cells
             let lines: Vec<Line<'static>> = self
                 .windows
                 .iter()
                 .map(|w| {
                     let marker = if w.active { "▸ " } else { "  " };
+                    // phux-foz.1: reserve 2 cells for the ` !` attention
+                    // suffix so a long label can't push it off the strip.
+                    let label_w = usize::from(text_w)
+                        .saturating_sub(2) // marker is 2 cells
+                        .saturating_sub(if w.attention { 2 } else { 0 });
                     let label = truncate(&w.name, label_w);
                     let style = if w.active {
                         Style::default()
@@ -102,7 +114,18 @@ impl SidebarPainter {
                     } else {
                         Style::default().fg(self.theme.action)
                     };
-                    Line::from(Span::styled(format!("{marker}{label}"), style))
+                    let mut spans = vec![Span::styled(format!("{marker}{label}"), style)];
+                    // phux-foz.1: a window holding a pane that asked for a
+                    // human answer (ADR-0035) gets a themed `!` marker.
+                    if w.attention {
+                        spans.push(Span::styled(
+                            " !",
+                            Style::default()
+                                .fg(self.theme.attention)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                    Line::from(spans)
                 })
                 .collect();
             Paragraph::new(lines).render(RataRect::new(0, 0, text_w, rect.h), &mut buf);
@@ -165,6 +188,14 @@ mod tests {
             name: name.to_owned(),
             active,
             zoomed: false,
+            attention: false,
+        }
+    }
+
+    fn win_attention(name: &str, active: bool) -> WindowInfo {
+        WindowInfo {
+            attention: true,
+            ..win(name, active)
         }
     }
 
@@ -263,6 +294,43 @@ mod tests {
             !paint_to_string(&mut p, rect).is_empty(),
             "changed windows must re-emit"
         );
+    }
+
+    /// phux-foz.1: a window whose pane asked for a human answer (ADR-0035)
+    /// carries a `!` marker on its sidebar tab; unmarked tabs stay plain.
+    /// The marker change also busts the paint cache.
+    #[test]
+    fn attention_window_gets_a_marker() {
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(vec![win("editor", true), win("shell", false)]);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 6,
+        };
+        let plain = strip_ansi(&paint_to_string(&mut p, rect));
+        assert!(!plain.contains('!'), "no attention, no marker: {plain:?}");
+        // The asking window gets the marker; the cache re-emits.
+        assert!(
+            p.set_windows(vec![win("editor", true), win_attention("shell", false)]),
+            "attention flip must report a change"
+        );
+        let plain = strip_ansi(&paint_to_string(&mut p, rect));
+        assert!(
+            plain.contains("shell !"),
+            "asking window tab must carry the marker: {plain:?}"
+        );
+    }
+
+    /// An identical window list reports no change (the agent-event chrome
+    /// path gates its repaint on this).
+    #[test]
+    fn set_windows_reports_change_only_on_difference() {
+        let mut p = SidebarPainter::new(Theme::default());
+        assert!(p.set_windows(vec![win("a", true)]));
+        assert!(!p.set_windows(vec![win("a", true)]));
+        assert!(p.set_windows(vec![win_attention("a", true)]));
     }
 
     #[test]

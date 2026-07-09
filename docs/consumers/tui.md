@@ -676,6 +676,7 @@ Recognized slots:
 | `shadow`         | `#1c1c26`   | Modal drop shadow                         |
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
+| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint) |
 
 ```toml
 [theme]
@@ -1039,6 +1040,35 @@ implemented built-ins today are `session-name`, `time`, `windows`, and
 - Not server-rendered. Every client owns its chrome. This is what
   enables a future GUI client with native chrome to coexist with the
   TUI client trivially.
+
+### 8.6 Agent attention (the asked chrome)
+
+When an agent in a pane blocks for a human answer, the server emits
+`AgentEvent::Asked` on the subscribed event stream
+([ADR-0035](../../ADR/0035-agent-asked-event.md); detection sources in
+[ADR-0036](../../ADR/0036-agent-asked-detection.md)). The interactive
+TUI folds that event into per-pane state (the same fold as the
+ADR-0033 `TerminalControl` badge) and renders it on every chrome
+surface that names windows, colored by the `attention` theme slot
+(§4.4):
+
+- **Window tab marker.** The asking pane's window gets a ` !` suffix on
+  its tab, in both the sidebar strip and the status bar's `windows`
+  widget — including for a background window, so the question is
+  findable from anywhere. (The sidebar marker is themed; the `windows`
+  widget marker rides the segment's own style, like the zoom `Z`.)
+- **Status-bar hint.** A right-aligned `[ ASK ]` chip on the bar row
+  (`[ ASK xN ]` when several panes are asking), sitting left of the
+  ADR-0033 supervisory badge when one is up.
+
+**Clearing rule.** Attention clears when the client forwards key or
+paste input to the asking pane — i.e. you focused it and typed
+(presumably answering). Merely focusing or clicking the pane does
+*not* clear it: looking at a question is not answering it. A repeated
+`Asked` for a still-flagged pane changes nothing; the flag re-raises
+on the next `Asked` after input cleared it. The flag is client-local
+and per-attach — it does not persist across detach/reattach (a
+re-emitted `Asked` from the ADR-0036 detector re-raises it).
 
 ---
 

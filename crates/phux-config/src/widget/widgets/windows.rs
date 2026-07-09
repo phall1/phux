@@ -70,6 +70,12 @@ impl StatusWidget for WindowsWidget {
             if w.zoomed {
                 text.push_str(" Z");
             }
+            // phux-foz.1: a window holding a pane that asked for a human
+            // answer (ADR-0035) gets a `!` marker so it is findable from
+            // any window. Plain ASCII, matching the `Z` marker convention.
+            if w.attention {
+                text.push_str(" !");
+            }
             let style = if w.active {
                 self.active.clone()
             } else {

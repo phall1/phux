@@ -86,6 +86,10 @@ pub struct Theme {
     /// Background of selection chrome: the copy-mode status strip (and
     /// future selected list rows).
     pub selection_bg: Color,
+    /// Attention chrome (phux-foz.1): the sidebar tab marker and the
+    /// status-bar hint painted when an agent in a pane is waiting on a
+    /// human answer (ADR-0035 `AgentEvent::Asked`).
+    pub attention: Color,
 }
 
 impl Default for Theme {
@@ -110,6 +114,9 @@ impl Default for Theme {
             // dark gray) now that it routes through the theme.
             selection_fg: Color::White,
             selection_bg: Color::Indexed(240),
+            // Amber: reads as "needs you" without colliding with `error`
+            // red or the lime `accent`.
+            attention: Color::Rgb(251, 191, 36),
         }
     }
 }
@@ -162,6 +169,7 @@ impl Theme {
             "shadow" => Some(&mut self.shadow),
             "selection_fg" => Some(&mut self.selection_fg),
             "selection_bg" => Some(&mut self.selection_bg),
+            "attention" => Some(&mut self.attention),
             _ => None,
         }
     }
@@ -203,6 +211,15 @@ mod tests {
         assert_eq!(t.shadow, Color::Rgb(28, 28, 38));
         assert_eq!(t.selection_fg, Color::White);
         assert_eq!(t.selection_bg, Color::Indexed(240));
+        // phux-foz.1: attention chrome for the agent-asked (ADR-0035) badge.
+        assert_eq!(t.attention, Color::Rgb(251, 191, 36));
+    }
+
+    #[test]
+    fn attention_slot_is_overridable() {
+        let t = Theme::from_cfg(&cfg(&[("attention", "#f38ba8")]));
+        assert_eq!(t.attention, Color::Rgb(0xf3, 0x8b, 0xa8));
+        assert_eq!(t.accent, Theme::default().accent);
     }
 
     #[test]
