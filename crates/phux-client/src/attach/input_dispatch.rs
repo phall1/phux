@@ -3091,6 +3091,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         dispatch_input_events(
             &mut out,
