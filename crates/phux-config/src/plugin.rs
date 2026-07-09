@@ -6,7 +6,7 @@ mod source;
 mod validate;
 mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use loader::load_plugin_manifest;
 use serde::{Deserialize, Serialize};
@@ -140,6 +140,14 @@ pub struct PluginManifestAction {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Command argv to execute.
     pub command: Vec<String>,
+    /// Optional prefix-table chord sequence (e.g. `"g"` or `"g s"`,
+    /// chord syntax per [`crate::keybind`]) the TUI merges into its
+    /// prefix table so this action can fire from a keybinding.
+    /// Contributed bindings never override user config: on any conflict
+    /// (same chord, or an ambiguous-prefix relationship) the user's
+    /// binding wins and the plugin's is dropped with a logged warning.
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
 /// Event hook entrypoint declared in a plugin manifest.
@@ -244,6 +252,55 @@ pub enum PluginPanePlacement {
     Tab,
     /// Zoomed pane view.
     Zoomed,
+}
+
+/// Resolve a configured manifest path against the config file's directory.
+///
+/// Absolute paths pass through; relative paths resolve under
+/// `config_path`'s parent (the documented `[[plugins]]` contract — see
+/// `docs/consumers/tui.md`).
+#[must_use]
+pub fn resolve_manifest_path(manifest: &Path, config_path: &Path) -> PathBuf {
+    if manifest.is_absolute() {
+        return manifest.to_path_buf();
+    }
+    config_path
+        .parent()
+        .map_or_else(|| manifest.to_path_buf(), |parent| parent.join(manifest))
+}
+
+/// Load the manifests of every **enabled** plugin in `entries`,
+/// resolving relative manifest paths against `config_path`'s directory.
+///
+/// Best-effort by design: a manifest that fails to load or validate is
+/// skipped with a `tracing::warn!` rather than failing the whole batch —
+/// one broken plugin must not take down a consumer (e.g. the attach TUI)
+/// that only wants to surface the healthy ones. Disabled entries are
+/// skipped silently. Callers that need per-manifest errors should use
+/// [`load_plugin_manifest`] directly.
+#[must_use]
+pub fn load_enabled_manifests(
+    config_path: &Path,
+    entries: &[PluginConfigEntry],
+) -> Vec<PluginManifest> {
+    let mut manifests = Vec::new();
+    for entry in entries {
+        if !entry.enabled {
+            continue;
+        }
+        let manifest_path = resolve_manifest_path(&entry.manifest, config_path);
+        match load_plugin_manifest(&manifest_path) {
+            Ok(manifest) => manifests.push(manifest),
+            Err(err) => {
+                tracing::warn!(
+                    manifest = %manifest_path.display(),
+                    error = %err,
+                    "skipping plugin manifest that failed to load",
+                );
+            }
+        }
+    }
+    manifests
 }
 
 /// Error raised while reading or validating a plugin manifest.

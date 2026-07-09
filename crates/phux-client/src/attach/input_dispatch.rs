@@ -21,6 +21,7 @@ use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
 use super::paint::{SidebarReservation, content_rect};
+use super::plugin_actions::{PluginActionEntry, PluginRunResult};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -126,6 +127,15 @@ pub(super) struct DispatchCtx<'a> {
     /// pointer position; a release clears it. Owned by `main_loop` (it
     /// must survive across dispatch batches) and threaded in by reference.
     pub drag: &'a mut Option<DragGrab>,
+    /// phux-r82.5: enabled plugins' manifest `[[actions]]`, snapshotted at
+    /// driver start (same lifecycle as `keybindings`). The command palette
+    /// appends one namespaced row per entry under a "Plugin" header.
+    pub plugin_actions: &'a [PluginActionEntry],
+    /// phux-r82.5: sender half of the driver's plugin-events channel. A
+    /// dispatched `plugin-action` spawns the child-process run off the
+    /// input loop and reports completion here; the driver's `select!`
+    /// surfaces failures as a toast. `None` in unit tests (no runtime).
+    pub plugin_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<PluginRunResult>>,
 }
 
 /// An active divider drag (ADR-0035).
@@ -688,6 +698,10 @@ fn quantize_cell(p: f64) -> u16 {
     clippy::cognitive_complexity,
     reason = "flat per-effect dispatch — one guarded block per ActionEffects field (zoom, focus, metadata, bell, detach, spawn, kill); splitting would thread the same transport + render context through helpers"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "same flat per-effect dispatch; phux-r82.5 added the plugin-run spawn block"
+)]
 async fn apply_action_effects<W: super::RenderSink>(
     effects: ActionEffects,
     out: &mut W,
@@ -773,6 +787,21 @@ async fn apply_action_effects<W: super::RenderSink>(
     // broadcast drive the chrome; the input loop does not block on the reply.
     for frame in effects.command_frames {
         conn.send(&frame).await?;
+    }
+    // phux-r82.5: a plugin action runs as a spawned child-process task —
+    // fire-and-forget from the input loop's perspective. The driver's
+    // `select!` picks up the completion report and toasts failures. All
+    // client-local (config + exec); nothing goes on the wire (ADR-0017).
+    if let Some((plugin_id, action_id)) = effects.run_plugin {
+        if let Some(tx) = ctx.plugin_tx {
+            super::plugin_actions::spawn_plugin_action(tx.clone(), plugin_id, action_id);
+        } else {
+            tracing::warn!(
+                plugin = %plugin_id,
+                action = %action_id,
+                "plugin-action dispatched with no plugin runtime channel; dropping",
+            );
+        }
     }
     // phux-eb0 / new-session: an in-process re-attach request. Hand the
     // target up to the driver via `ctx.switch_request`; `main_loop` reads
@@ -957,6 +986,13 @@ struct ActionEffects {
     /// snapshot correct the optimistic name rather than blocking the input
     /// loop on the reply.
     rename_session: Option<String>,
+    /// phux-r82.5: a `plugin-action` dispatch carrying
+    /// `(plugin_id, action_id)`. The async caller
+    /// ([`apply_action_effects`]) spawns the child-process run via
+    /// [`super::plugin_actions::spawn_plugin_action`] so the input loop
+    /// never blocks on the plugin; completion lands on the driver's
+    /// plugin-events channel (failure output toasts there).
+    run_plugin: Option<(String, String)>,
 }
 
 /// An in-process re-attach request raised by a dispatched action.
@@ -1010,6 +1046,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "take-input",
     "give-input",
     "signal-terminal",
+    "plugin-action",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -1344,7 +1381,7 @@ fn run_action(
             // commits that action's `ResolvedAction`, which flows back
             // through this same `run_action` — keybinds and the palette
             // share one dispatch path (the architectural invariant).
-            let items = super::action_registry::palette_items(ctx.keybindings);
+            let items = super::action_registry::palette_items(ctx.keybindings, ctx.plugin_actions);
             ctx.overlays.push(Box::new(SelectList::new(
                 "command palette",
                 items,
@@ -1416,6 +1453,25 @@ fn run_action(
         }
         "detach" => {
             effects.detach = true;
+        }
+        "plugin-action" => {
+            // phux-r82.5: run a plugin manifest action through the same
+            // child-process runtime `phux config run PLUGIN ACTION` uses.
+            // Sync dispatch only records the intent; the async caller
+            // (`apply_action_effects`) spawns the run off the input loop so
+            // a slow plugin never freezes the TUI. Completion arrives on
+            // the driver's plugin-events channel; failures toast.
+            let (Some(plugin), Some(action)) =
+                (str_arg(resolved, "plugin"), str_arg(resolved, "action"))
+            else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "plugin-action missing/bad `plugin`/`action` args",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            effects.run_plugin = Some((plugin, action));
         }
         "next-pane" => {
             if let Some(ls) = ctx.workspace.active_window_mut()
@@ -1511,6 +1567,13 @@ fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
 /// Pull a window name out of a [`phux_config::keybind::ResolvedAction`]'s `name = "..."` arg.
 fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
     resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
+}
+
+/// Pull an arbitrary string arg out of a
+/// [`phux_config::keybind::ResolvedAction`] (phux-r82.5: `plugin` /
+/// `action` on `plugin-action`).
+fn str_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option<String> {
+    resolved.args.get(key)?.as_str().map(ToOwned::to_owned)
 }
 
 /// Build the `<leader> w` grouped window picker's rows (phux-4li.19 / nav).
@@ -1995,6 +2058,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -2194,6 +2259,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         let mut out: Vec<u8> = Vec::new();
@@ -2238,6 +2305,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         apply_action_effects(
@@ -2315,6 +2384,8 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
                 drag: &mut drag,
+                plugin_actions: &[],
+                plugin_tx: None,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -2354,7 +2425,7 @@ mod tests {
             std::path::Path::new("default.toml"),
         )
         .expect("default config parses");
-        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings));
+        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings), &[]);
         let detach = items
             .iter()
             .find(|i| i.action.action == "detach")
@@ -2362,6 +2433,42 @@ mod tests {
         let mut workspace = Workspace::default();
         let effects = run(&detach.action, &mut workspace);
         assert!(effects.detach, "committing the detach palette row detaches");
+    }
+
+    #[test]
+    fn plugin_action_records_run_intent_for_the_async_caller() {
+        // phux-r82.5: the sync dispatcher never execs the plugin itself —
+        // it records (plugin, action) and the async caller spawns the
+        // child-process run so the input loop can't freeze on a plugin.
+        let mut args = BTreeMap::new();
+        args.insert(
+            "plugin".to_owned(),
+            toml::Value::String("com.example.tools".to_owned()),
+        );
+        args.insert(
+            "action".to_owned(),
+            toml::Value::String("summarize".to_owned()),
+        );
+        let action = phux_config::keybind::ResolvedAction {
+            action: "plugin-action".to_owned(),
+            args,
+        };
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.run_plugin,
+            Some(("com.example.tools".to_owned(), "summarize".to_owned()))
+        );
+        assert!(!effects.bell);
+        assert!(!effects.layout_mutated, "no repaint for a spawned run");
+    }
+
+    #[test]
+    fn plugin_action_missing_args_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("plugin-action"), &mut workspace);
+        assert!(effects.bell, "missing plugin/action args must bell");
+        assert!(effects.run_plugin.is_none());
     }
 
     #[test]
@@ -2617,6 +2724,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -2685,6 +2794,8 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
                 drag: &mut drag,
+                plugin_actions: &[],
+                plugin_tx: None,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -2832,6 +2943,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         dispatch_input_events(
             &mut out,
@@ -2926,6 +3039,8 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
         };
         let page_up = KeyEvent {
             action: KeyAction::Press,

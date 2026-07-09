@@ -27,6 +27,11 @@ serde_json.workspace = true
 # phux-nz4.5: status-bar composer (`StatusBar`) + widget contract live
 # in phux-config; the client owns rendering the composed bar to VT.
 phux-config.workspace = true
+# phux-r82.5: the TUI executes plugin manifest actions through the same
+# child-process runtime `phux config run` uses -- workspace-internal crate,
+# no new external surface. The attach driver spawns the run off the input
+# loop and toasts captured failure output.
+phux-plugin.workspace = true
 # phux-nz4.5: TOML values reach the status-bar painter's tests via
 # `WidgetSpec::opts`; dev-only use, declared here for `toml::Value`
 # constructor access.

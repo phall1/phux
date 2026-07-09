@@ -76,6 +76,8 @@ struct RawPluginManifestAction {
     #[serde(default)]
     platforms: Option<Vec<PluginPlatform>>,
     command: Vec<String>,
+    #[serde(default)]
+    keys: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -247,6 +249,7 @@ fn normalize_action(
         contexts,
         platforms: raw.platforms,
         command,
+        keys: raw.keys.as_deref().and_then(trim_optional),
     })
 }
 

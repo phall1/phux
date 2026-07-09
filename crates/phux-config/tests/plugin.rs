@@ -395,3 +395,102 @@ fn plugin_manifest_parse_errors_use_supplied_symlink_path() -> Result<(), Box<dy
     );
     Ok(())
 }
+
+#[test]
+fn plugin_action_keys_field_parses_and_defaults_to_none() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.keys"
+name = "Keys"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "bound"
+title = "Bound action"
+command = ["true"]
+keys = "g"
+
+[[actions]]
+id = "unbound"
+title = "Unbound action"
+command = ["true"]
+
+[[actions]]
+id = "blank"
+title = "Blank keys action"
+command = ["true"]
+keys = "   "
+"#,
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.actions[0].keys.as_deref(), Some("g"));
+    assert_eq!(loaded.actions[1].keys, None, "keys defaults to None");
+    assert_eq!(
+        loaded.actions[2].keys, None,
+        "whitespace-only keys normalizes to None"
+    );
+    Ok(())
+}
+
+#[test]
+fn load_enabled_manifests_skips_disabled_and_broken_plugins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let config_path = dir.path().join("config.toml");
+    // Three manifests: one healthy + enabled, one healthy + disabled, one
+    // missing entirely. Only the first must load; the rest are skipped
+    // without failing the batch.
+    let good = dir.path().join("good.toml");
+    std::fs::write(
+        &good,
+        r#"
+id = "example.good"
+name = "Good"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "act"
+title = "Act"
+command = ["true"]
+"#,
+    )?;
+    let off = dir.path().join("off.toml");
+    std::fs::write(
+        &off,
+        r#"
+id = "example.off"
+name = "Off"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+"#,
+    )?;
+
+    let entries = vec![
+        plugin::PluginConfigEntry {
+            // Relative path: resolves against the config file's directory.
+            manifest: std::path::PathBuf::from("good.toml"),
+            enabled: true,
+        },
+        plugin::PluginConfigEntry {
+            manifest: off,
+            enabled: false,
+        },
+        plugin::PluginConfigEntry {
+            manifest: dir.path().join("missing.toml"),
+            enabled: true,
+        },
+    ];
+
+    let manifests = plugin::load_enabled_manifests(&config_path, &entries);
+
+    assert_eq!(manifests.len(), 1, "only the enabled, healthy manifest");
+    assert_eq!(manifests[0].id, "example.good");
+    Ok(())
+}

@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-06-17
+last-reviewed: 2026-07-09
 ---
 
 # Configuration and keybindings
@@ -216,6 +216,7 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+keys = "g"   # optional TUI prefix-table binding; user config wins on conflict
 
 [[agents]]
 id = "codex"
@@ -250,6 +251,12 @@ expansion; a manifest only gets shell behavior when it explicitly declares an
 argv such as `["sh", "-c", "…"]`. The runtime inherits the phux process
 environment and adds `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and
 `PHUX_PLUGIN_ROOT`.
+
+Enabled plugins' actions also surface in the attach TUI: every action gets
+a command-palette row, and an action may declare an optional
+`keys = "..."` chord that merges into the TUI's prefix table (user
+`[keybindings]` always win on conflict). See
+[`consumers/tui.md`](./consumers/tui.md) §5.5.
 
 The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`,
 `[[links]]`, and `[[workspaces]]` entries. Agent declarations are static status

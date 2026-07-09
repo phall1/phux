@@ -36,12 +36,14 @@ pub mod copy_mode;
 pub mod help;
 pub mod prompt;
 pub mod select_list;
+pub mod toast;
 pub mod widgets;
 
 pub use copy_mode::CopyModeOverlay;
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};
+pub use toast::ToastOverlay;
 
 /// Test double: a [`RenderOverlay`] that records every key handed to it and
 /// never dismisses, so a test can assert exactly which keystrokes reached
