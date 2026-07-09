@@ -25,6 +25,8 @@ fn entry(name: &str, endpoint: &str, enabled: bool) -> SatelliteConfigEntry {
         name: name.to_owned(),
         endpoint: endpoint.to_owned(),
         enabled,
+        token_file: None,
+        cert_fingerprint: None,
     }
 }
 
