@@ -6,7 +6,11 @@ last-reviewed: 2026-06-09
 
 # Install
 
-**TL;DR.** Source builds are the only install path guaranteed to work while the latest GitHub release is the seeded `v0.0.1`. Homebrew becomes the primary binary path after a post-`v0.0.1` Formula lands. The curl installer is a convenience wrapper around portable GitHub release tarballs and their .sha256 sidecars. crates.io is for `phux-protocol`; `cargo install phux is unsupported` while the binary/internal crates are unpublished. Windows is not supported.
+**TL;DR.** Use Homebrew on supported Homebrew platforms, or the curl installer
+for the latest GitHub release. To install from source, clone the repo and run
+the two `cargo install --path` commands below inside the Nix-pinned toolchain.
+crates.io is for `phux-protocol`; `cargo install phux is unsupported` because
+the binary/internal crates are unpublished. Windows is not supported.
 
 ---
 
@@ -14,32 +18,30 @@ last-reviewed: 2026-06-09
 
 | Channel | Best for | Status |
 |---|---|---|
-| Homebrew | Day-to-day binary install on supported Homebrew platforms | Primary binary path after a post-`v0.0.1` Formula lands |
-| Curl installer | Scripted install from GitHub release tarballs | Use after a post-`v0.0.1` portable release is latest, or pass `--version` for a known portable tag |
+| Homebrew | Day-to-day binary install on supported Homebrew platforms | Primary binary path where the tap has an artifact |
+| Curl installer | Scripted install from GitHub release tarballs | Installs the latest GitHub release by default |
 | Release tarball | Manual install and verification | CI-built tarballs include `phux`, `phux-mcp`, licenses, README, and `.sha256` sidecars |
-| From source | Contributors and early users today | Works now on macOS and Linux through the Nix-pinned toolchain |
+| From source | Contributors and source-first users | Clone, build, and install through the Nix-pinned toolchain |
 
 Not supported yet: `cargo install phux`, Windows, mise/asdf shims, and the
-seeded `v0.0.1` Linux tarball as a portable binary. The crates.io package today
-is `phux-protocol`, not the CLI.
+seeded `v0.0.1` Linux tarball as a portable binary. `v0.0.3` is the current
+portable public release. The crates.io package today is `phux-protocol`, not
+the CLI.
 
 ## Homebrew
 
-Once `Formula/phux.rb` is published in
-[`phall1/homebrew-phux`](https://github.com/phall1/homebrew-phux), install with:
+Install from the published tap:
 
 ```sh
 brew install phall1/phux/phux
 ```
 
-Use this path first on supported Homebrew platforms after a post-`v0.0.1`
-Formula lands. If the Formula has not reached the tap for your target yet,
-use a source build.
+This installs both `phux` and `phux-mcp`. Use a source build if the Formula has
+not reached your target yet.
 
 ## Curl installer
 
-The installer is a convenience wrapper over the same GitHub release assets.
-Use it once a post-`v0.0.1` release is available:
+The installer is a convenience wrapper over the same GitHub release assets:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
@@ -48,16 +50,15 @@ curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh
 It verifies the release `.sha256` sidecar before unpacking and installs
 `phux` and `phux-mcp` into `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`. Set
 `PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
-uses the latest GitHub release; latest is currently `v0.0.1`, and the installer
-refuses that release because it is not a portable binary release.
+uses the latest GitHub release.
 In plain terms: it verifies the release .sha256 sidecar before unpacking, then
 installs both binaries. `phux-mcp is bundled` with every portable tarball and
 installer path; do not install a separate MCP package.
 
-To install a specific future tag before it is latest:
+To pin a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.3
 ```
 
 ## Release tarball
@@ -80,21 +81,23 @@ Nix-store dynamic loader and is not portable.
 
 ## From source
 
-Building from source uses the Nix dev shell, which pins the toolchain —
-including the Zig compiler libghostty's build needs — to known-good versions.
-The setup block (dev shell, off-Nix pins, `just ci`) lives in
-[`QUICKSTART.md`](./QUICKSTART.md); follow it there rather than duplicating it
-here. The short version:
+Installing from source uses the Nix dev shell to pin the Rust toolchain and the
+Zig compiler libghostty's build needs. The commands still install binaries into
+Cargo's bin directory:
 
 ```sh
 git clone https://github.com/phall1/phux
 cd phux
-nix develop          # or `direnv allow` once, then it loads on cd
-cargo run --bin phux # auto-spawns a server and attaches
+nix develop -c cargo install --locked --path crates/phux
+nix develop -c cargo install --locked --path crates/phux-mcp
+phux
 ```
 
 `phux` with no arguments auto-spawns a server and attaches to it. Detach with
 `Ctrl-A d`; run `phux` again to re-attach.
+
+If you are developing rather than installing, use `nix develop` or `direnv
+allow` and then the `just` commands in [`QUICKSTART.md`](./QUICKSTART.md).
 
 ## crates.io
 
@@ -152,8 +155,8 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 
 | Platform | Status |
 |---|---|
-| macOS (Apple Silicon) | Source: yes. Homebrew Formula/artifact pending. |
+| macOS (Apple Silicon) | Homebrew: yes. Curl/tarball: yes. Source: yes. |
 | macOS (x86_64) | Source: yes. No official release artifact. |
-| Linux x86_64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
-| Linux aarch64 | Source: yes. Portable release artifacts are built by the tag workflow after `v0.0.1`. |
+| Linux x86_64 | Curl/tarball: yes. Homebrew: yes where Linuxbrew supports the host. Source: yes. |
+| Linux aarch64 | Curl/tarball: yes. Homebrew: yes where Linuxbrew supports the host. Source: yes. |
 | Windows | No. Windows is not supported and is not on the near roadmap. |

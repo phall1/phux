@@ -6,12 +6,57 @@ last-reviewed: 2026-05-30
 
 # Releasing
 
-**TL;DR.** Prefer the `release` workflow's manual button. It creates or
-verifies the `v*` tag, publishes GitHub release tarballs, refreshes the
-Homebrew tap (`phall1/homebrew-phux`), and can publish `phux-protocol` to
-crates.io when explicitly confirmed. `cargo install phux is unsupported`
-because the binary/internal crates are not publishable. Windows is not
-supported by this release lane.
+**TL;DR.** One button ships the project: bump the root workspace version, run
+`just release-preflight vX.Y.Z`, merge to the default branch, then dispatch
+**Actions -> release -> Run workflow** with that tag. The workflow creates or
+verifies the tag, publishes GitHub release tarballs, refreshes the Homebrew tap,
+and can publish `phux-protocol` to crates.io when explicitly confirmed.
+`cargo install phux is unsupported` because the binary/internal crates are not
+publishable. Windows is not supported by this release lane.
+
+## Release cockpit
+
+| You want to | Do this |
+|---|---|
+| Prove the release is locally coherent | `just release-preflight vX.Y.Z` |
+| Skip crates.io packaging during a fast/offline binary-only check | `just release-preflight-fast vX.Y.Z` |
+| Ship binaries + Homebrew | Dispatch **Actions -> release** with `tag=vX.Y.Z`, `publish_protocol=false` |
+| Ship binaries + Homebrew + `phux-protocol` | Dispatch **Actions -> release** with `publish_protocol=true` and `crates_io_confirm=publish phux-protocol` |
+| Retry only the crates.io package | Dispatch **Actions -> publish-crate** with an existing `vX.Y.Z` tag |
+| Check a suspected install-doc drift | `bash scripts/check-install-surface.sh` |
+
+The release workflow is the source of truth. Local commands are preflight and
+emergency fallback only; they should not be the normal publishing path.
+
+## What runs when
+
+| Flow | Trigger | What it does |
+|---|---|---|
+| Pull request CI | `pull_request` | Docs-only detection, docs check, fmt, clippy, rustdoc, cargo-deny, unit tests, and fast real-PTY e2e unless the change is docs-only. |
+| Main CI | push to `main` | Same gates as PR CI, always full, and refreshes the warm caches. |
+| Stress lane | nightly, manual, or PR label `stress` | Heavy resize/output/lifecycle storms that are useful but too slow for every PR. |
+| Build timings | manual | Cold `cargo --timings` report for compile-time diagnosis. |
+| Full release | manual `release` workflow | Tag create/verify, portable binary tarballs + checksums, GitHub release, Homebrew tap update, optional crates.io publish. |
+| Crate retry | manual `publish-crate` workflow | `phux-protocol` package dry-run, then publish when `dry_run=false`. |
+
+Required secrets:
+
+| Secret | Used by | Required for |
+|---|---|---|
+| `HOMEBREW_TAP_DEPLOY_KEY` | `release.yml` | Automatic push to `phall1/homebrew-phux`. If absent, the GitHub release still publishes and the tap step warns/skips. |
+| `CARGO_REGISTRY_TOKEN` | `release.yml`, `publish-crate.yml` | Publishing `phux-protocol` to crates.io. Not needed for binary/Homebrew-only releases. |
+
+Post-release verification:
+
+```sh
+scripts/install.sh --dry-run --version vX.Y.Z
+brew fetch --formula phall1/phux/phux
+cargo search phux-protocol --limit 1
+```
+
+Use the GitHub release page to confirm that the expected target tarballs and
+`.sha256` sidecars uploaded. The current release lane builds macOS arm64,
+Linux x86_64, and Linux arm64.
 
 ## What ships where
 
@@ -50,12 +95,12 @@ requirements so release bumps do not require duplicate manifest edits.
 `phux-protocol` still ships to crates.io by manual dispatch, but its package
 version is the same root workspace version for the checkout being published.
 
-To bump the binary release version:
+To bump the release version:
 
 1. Edit `[workspace.package].version` in the root `Cargo.toml`.
 2. `cargo check --workspace` to refresh `Cargo.lock`.
-3. `just release-check vX.Y.Z` to verify the tag and resolved package versions
-   agree.
+3. `just release-preflight vX.Y.Z` to verify the tag, install surface, formula
+   generation, and `phux-protocol` package dry-run.
 4. Commit the bump.
 
 ## Cutting a full release
@@ -79,14 +124,14 @@ creates/updates the GitHub release, updates the Homebrew tap when
 `HOMEBREW_TAP_DEPLOY_KEY` is configured, and publishes `phux-protocol` only
 when the crates.io confirmation input is present.
 
-The manual workflow is the release entrypoint. Running these locally is now
-only a preflight, not the publish trigger:
+The manual workflow is the release entrypoint. Running this locally is a
+preflight, not the publish trigger:
 
 ```sh
 just release-check v0.1.0
 ```
 
-`release.yml` then builds `phux` + `phux-mcp` for
+`release.yml` builds `phux` + `phux-mcp` for
 `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
 `aarch64-unknown-linux-gnu`, packages
 `phux-<tag>-<target>.tar.gz` + `.sha256`, creates the GitHub release, and
@@ -96,20 +141,22 @@ of the Nix dev shell, because portable release binaries must not record
 `/nix/store` dynamic library paths. The workflow checks macOS binaries with
 `otool -L` before packaging. It also runs `just release-check <tag>` before
 building, so a pushed tag that does not match Cargo's resolved package versions
-fails before any artifact or tap update is published. `v0.0.1` was seeded with a
-Linux x86_64 tarball plus checksum, but that first artifact is Nix-linked and
-not portable; do not point installers or the tap at it.
+fails before any artifact or tap update is published. `v0.0.3` is the current
+portable public release. `v0.0.1` was seeded with a Linux x86_64 tarball plus
+checksum, but that first artifact is Nix-linked and not portable; do not point
+installers or the tap at it.
 
-Seed a host-only release locally without CI:
+For an emergency host-only artifact, use the same dist layout locally:
 
 ```sh
 cargo build --release --bin phux --bin phux-mcp
-just dist v0.0.2                       # -> dist/phux-v0.0.2-<host>.tar.gz (+ .sha256)
-gh release create v0.0.2 dist/*        # attach the tarball + checksum
+just dist vX.Y.Z                       # -> dist/phux-vX.Y.Z-<host>.tar.gz (+ .sha256)
+gh release upload vX.Y.Z dist/*        # attach the tarball + checksum
 ```
 
-Do not run the local seed build inside `nix develop`; use a host toolchain plus
-Zig on `PATH` so the packaged binaries do not link to Nix-store libraries.
+Do not use this for normal releases. Do not run a local release build inside
+`nix develop`; use a host toolchain plus Zig on `PATH` so the packaged binaries
+do not link to Nix-store libraries.
 
 ### Required secret
 
@@ -124,8 +171,8 @@ built — so a partial-matrix release still yields an installable formula.
 ### Curl installer contract
 
 The curl installer is a convenience layer over GitHub release artifacts. The
-unversioned command is user-facing only after a post-`v0.0.1` release is the
-latest GitHub release:
+unversioned command is user-facing because `v0.0.3` or newer is now the latest
+GitHub release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
@@ -135,9 +182,9 @@ Keep it aligned with the release layout above. It should download the target
 tarball and `.sha256` sidecar from the selected release, verify the checksum
 before unpacking, and install `phux` + `phux-mcp` into
 `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`. With no `--version`, it resolves the
-latest GitHub release. Keep the explicit `v0.0.1` Linux refusal until a newer
-portable Linux release is published, and keep install docs version-pinned or
-source-first until latest no longer resolves to `v0.0.1`.
+current GitHub release. Keep the explicit `v0.0.1` refusal as a historical
+safety guard. User-facing docs should identify `v0.0.3` or newer as the current
+portable release.
 
 ### CPU baseline caveat
 

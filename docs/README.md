@@ -52,6 +52,7 @@ To understand phux, top to bottom:
 | Implementing against the wire | [`spec/README.md`](./spec/README.md) — normative, versioned with `phux-protocol` |
 | Reading how it is built | [`architecture/README.md`](./architecture/README.md) — process model, threading, transport, rendering, verification |
 | Operating it | [`operations.md`](./operations.md) — errors, logging, telemetry, security boundaries |
+| Shipping a release | [`RELEASING.md`](./RELEASING.md) — preflight, GitHub Actions release button, Homebrew, crates.io |
 | Understanding a past decision | [`../ADR/README.md`](../ADR/README.md) |
 | Recording the README demo | [`demo.md`](./demo.md) |
 | Touching the docs themselves | [`CONVENTIONS.md`](./CONVENTIONS.md) |
