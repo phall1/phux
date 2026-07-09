@@ -78,10 +78,11 @@ pub(super) struct FrameOutcome {
     /// another client holding it when rendering the supervisory badge. Set ONLY
     /// by the `Attached` arm.
     pub(super) own_client_id: Option<ClientId>,
-    /// ADR-0033: `true` ⇒ a `TerminalControl` event updated a pane's lifecycle
-    /// or input-lease holder, so the driver must repaint the status-bar chrome
-    /// (the supervisory badge) even though no grid content changed. Set ONLY by
-    /// the `Event` arm.
+    /// ADR-0033 / phux-foz.1: `true` ⇒ an agent event updated a pane's
+    /// lifecycle, input-lease holder (`TerminalControl`), or asked-attention
+    /// flag (ADR-0035 `Asked`), so the driver must repaint the chrome
+    /// (supervisory badge, attention hint, window-tab markers) even though no
+    /// grid content changed. Set ONLY by the `Event` arms.
     pub(super) chrome_dirty: bool,
 }
 
@@ -975,8 +976,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // ADR-0033: a pushed agent event. We subscribed to the stream at
         // attach (SUBSCRIBE_EVENTS) for the supervisory `TerminalControl`
         // broadcast; fold its lifecycle + lease-holder into the pane's slot so
-        // the next paint renders the "FROZEN" / "wheel" badge. Other event
-        // kinds (dirty/idle/bell/...) are not consumed by the interactive TUI.
+        // the next paint renders the "FROZEN" / "wheel" badge. The ADR-0035
+        // `Asked` event is folded into the same per-pane state below. Other
+        // event kinds (dirty/idle/bell/...) are not consumed by the
+        // interactive TUI.
         FrameKind::Event {
             terminal: Some(terminal),
             event:
@@ -997,6 +1000,35 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // A control event for a pane we have no slot for yet (it can
                 // precede the first snapshot). Harmless to drop — the lease is
                 // server-authoritative and the next event re-states it.
+                Ok(FrameOutcome::default())
+            }
+        }
+        // phux-foz.1 / ADR-0035: an agent in `terminal` is waiting on a human
+        // answer. Mirror the `TerminalControl` fold above: raise the pane's
+        // attention flag so the next chrome paint renders the window-tab `!`
+        // marker and the status-bar `[ ASK ]` hint. The flag clears when the
+        // user sends key/paste input to the pane (see
+        // `driver::clear_attention_on_input`); a repeated `Asked` while
+        // already flagged changes nothing, so no repaint is requested for it.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::Asked { .. },
+        } => {
+            if let Some(slot) = panes.get_mut(&terminal) {
+                if slot.attention {
+                    Ok(FrameOutcome::default())
+                } else {
+                    slot.attention = true;
+                    Ok(FrameOutcome {
+                        chrome_dirty: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+            } else {
+                // An Asked for a pane we have no slot for yet (it can precede
+                // the first snapshot). Dropped like an early TerminalControl;
+                // the ADR-0036 detector coalesces repeated markers, so the
+                // next re-ask re-raises it once the slot exists.
                 Ok(FrameOutcome::default())
             }
         }
@@ -2051,6 +2083,116 @@ mod tests {
         assert!(
             !panes.contains_key(&pane),
             "the closed pane's slot must be dropped",
+        );
+    }
+
+    /// Drive an `EVENT { terminal, Asked }` through [`handle_server_frame`]
+    /// and return the outcome (phux-foz.1 / ADR-0035).
+    fn drive_asked(
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+    ) -> FrameOutcome {
+        use phux_protocol::wire::frame::AgentEvent;
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            &mut out,
+            FrameKind::Event {
+                terminal: Some(terminal_id.clone()),
+                event: AgentEvent::Asked {
+                    id: "q1".to_owned(),
+                    question: "deploy to prod?".to_owned(),
+                    suggestions: vec!["yes".to_owned(), "no".to_owned()],
+                    elapsed_seconds: None,
+                },
+            },
+            panes,
+            layout,
+            focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-foz.1: an ADR-0035 `Asked` event raises the pane's attention
+    /// flag and asks the driver to repaint the chrome — including for a
+    /// NON-focused pane (the whole point is surfacing a question the user
+    /// is not looking at).
+    #[test]
+    fn asked_event_sets_attention_and_dirties_chrome() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let outcome = drive_asked(&mut layout, &mut focused, &mut panes, &right);
+
+        assert!(
+            panes.get(&right).expect("slot").attention,
+            "the asking pane's attention flag must raise"
+        );
+        assert!(
+            !panes.get(&left).expect("slot").attention,
+            "the other pane stays quiet"
+        );
+        assert!(outcome.chrome_dirty, "the chrome must repaint");
+    }
+
+    /// phux-foz.1: a repeated `Asked` while the flag is already up changes
+    /// no visible state, so it must not request another repaint.
+    #[test]
+    fn repeated_asked_event_does_not_redirty_chrome() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+
+        let first = drive_asked(&mut layout, &mut focused, &mut panes, &pane);
+        assert!(first.chrome_dirty);
+        let second = drive_asked(&mut layout, &mut focused, &mut panes, &pane);
+        assert!(
+            !second.chrome_dirty,
+            "an already-flagged pane must not force a repaint"
+        );
+        assert!(panes.get(&pane).expect("slot").attention, "flag stays up");
+    }
+
+    /// phux-foz.1: an `Asked` for a pane with no slot yet (it can precede
+    /// the first snapshot) is dropped without a repaint, mirroring the
+    /// early-`TerminalControl` policy.
+    #[test]
+    fn asked_event_for_unknown_pane_is_dropped() {
+        let known = tid(1);
+        let unknown = tid(9);
+        let mut layout = Workspace::single(known.clone());
+        let mut focused = Some(known.clone());
+        let mut panes = panes_for(&[&known]);
+
+        let outcome = drive_asked(&mut layout, &mut focused, &mut panes, &unknown);
+
+        assert!(!outcome.chrome_dirty, "no slot, nothing to repaint");
+        assert!(
+            !panes.contains_key(&unknown),
+            "no slot is allocated for an event-only pane"
         );
     }
 

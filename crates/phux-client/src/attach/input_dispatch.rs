@@ -522,6 +522,16 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
+        // phux-foz.1: forwarding key/paste input to a pane answers (or at
+        // least engages) its pending agent question, so clear its asked
+        // attention flag. Focus/mouse events don't clear — merely looking
+        // at a pane is not answering it. A real transition schedules the
+        // chrome repaint via `layout_changed`.
+        if matches!(ev, InputEvent::Key(_) | InputEvent::Paste(_))
+            && super::driver::clear_attention_on_input(panes, pane)
+        {
+            layout_changed = true;
+        }
         let frame = ev.into_frame(pane.clone());
         conn.send(&frame).await?;
     }

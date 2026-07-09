@@ -283,6 +283,7 @@ fn win(name: &str, active: bool) -> WindowInfo {
         name: name.to_owned(),
         active,
         zoomed: false,
+        attention: false,
     }
 }
 
@@ -291,6 +292,16 @@ fn win_zoomed(name: &str, active: bool) -> WindowInfo {
         name: name.to_owned(),
         active,
         zoomed: true,
+        attention: false,
+    }
+}
+
+fn win_attention(name: &str, active: bool) -> WindowInfo {
+    WindowInfo {
+        name: name.to_owned(),
+        active,
+        zoomed: false,
+        attention: true,
     }
 }
 
@@ -367,6 +378,14 @@ fn windows_widget_appends_z_marker_when_zoomed() {
     // (non-zoomed) tab is unmarked.
     let cells = render_windows(&[], &[win_zoomed("a", true), win("b", false)]);
     assert_eq!(text_of(&cells), "0:a Z 1:b");
+}
+
+#[test]
+fn windows_widget_appends_attention_marker() {
+    // phux-foz.1: a window whose pane asked for a human answer (ADR-0035)
+    // gets a ` !` suffix on its tab; unmarked windows stay plain.
+    let cells = render_windows(&[], &[win("a", true), win_attention("b", false)]);
+    assert_eq!(text_of(&cells), "0:a 1:b !");
 }
 
 #[test]

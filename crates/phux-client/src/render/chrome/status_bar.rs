@@ -283,21 +283,55 @@ fn paint_supervisory_overlay<W: Write>(
     out.flush()
 }
 
-/// ADR-0033: overlay the badge into a composed bar buffer (the
-/// `phux snapshot --rendered` path), right-aligned with reverse-video + bold so
-/// the dense-cell snapshot matches the live VT paint.
-fn overlay_badge_into_buffer(buffer: &mut Buffer, badge: &str, cols: u16) {
-    if cols == 0 || badge.is_empty() {
+/// phux-foz.1: emit the agent-attention hint as a chip immediately left of
+/// the supervisory badge (`right_offset` cells in from the right edge; `0`
+/// when no badge is present). Same reverse+bold treatment as the ADR-0033
+/// badge, but the foreground rides the theme's `attention` slot — under
+/// reverse video it reads as the chip's fill color.
+fn paint_attention_overlay<W: Write>(
+    out: &mut W,
+    hint: &str,
+    row_index: u16,
+    cols: u16,
+    right_offset: u16,
+    color: Color,
+) -> io::Result<()> {
+    let avail = cols.saturating_sub(right_offset);
+    if avail == 0 || hint.is_empty() {
+        return Ok(());
+    }
+    let visible: String = hint.chars().take(avail as usize).collect();
+    let width = u16::try_from(visible.chars().count()).unwrap_or(avail);
+    let start_col = avail.saturating_sub(width);
+    let one_based_row = row_index.saturating_add(1);
+    let one_based_col = start_col.saturating_add(1);
+    write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[7;1m")?;
+    crate::render::sgr::write_sgr_color(out, color, true)?;
+    write!(out, "{visible}\x1b[0m")?;
+    out.flush()
+}
+
+/// ADR-0033 / phux-foz.1: overlay a badge into a composed bar buffer (the
+/// `phux snapshot --rendered` path), right-aligned `right_offset` cells in
+/// from the right edge, so the dense-cell snapshot matches the live VT paint.
+fn overlay_badge_into_buffer(
+    buffer: &mut Buffer,
+    badge: &str,
+    cols: u16,
+    right_offset: u16,
+    style: Style,
+) {
+    let avail = cols.saturating_sub(right_offset);
+    if avail == 0 || badge.is_empty() {
         return;
     }
-    let visible: Vec<char> = badge.chars().take(cols as usize).collect();
-    let width = u16::try_from(visible.len()).unwrap_or(cols);
-    let start = cols.saturating_sub(width);
-    let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let visible: Vec<char> = badge.chars().take(avail as usize).collect();
+    let width = u16::try_from(visible.len()).unwrap_or(avail);
+    let start = avail.saturating_sub(width);
     let mut tmp = [0u8; 4];
     for (i, ch) in visible.iter().enumerate() {
         let x = start.saturating_add(u16::try_from(i).unwrap_or(0));
-        if x >= cols {
+        if x >= avail {
             break;
         }
         let cell = &mut buffer[(x, 0)];
@@ -338,6 +372,15 @@ pub struct StatusBarPainter {
     /// change invalidates the cache so the row repaints (and erases a cleared
     /// badge). Painted over the composed widget row, not replacing it.
     supervisory: Option<String>,
+    /// phux-foz.1: when `Some`, the agent-attention hint (e.g. `[ ASK ]`)
+    /// is overlaid immediately left of the supervisory badge. Set by the
+    /// driver whenever a pane's ADR-0035 asked flag flips; same cache
+    /// semantics as `supervisory`.
+    attention: Option<String>,
+    /// phux-foz.1: chip foreground for the attention hint, from the theme's
+    /// `attention` slot (the painter never hardcodes it). Under the chip's
+    /// reverse video the foreground reads as the fill color.
+    attention_fg: Color,
     prefix: String,
 }
 
@@ -354,6 +397,8 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("windows.len", &self.windows.len())
             .field("error", &self.error)
             .field("supervisory", &self.supervisory)
+            .field("attention", &self.attention)
+            .field("attention_fg", &self.attention_fg)
             .field("prefix", &self.prefix)
             .finish()
     }
@@ -371,6 +416,8 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: None,
             supervisory: None,
+            attention: None,
+            attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
         }
     }
@@ -395,6 +442,8 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: Some(message.into()),
             supervisory: None,
+            attention: None,
+            attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
         }
     }
@@ -411,11 +460,15 @@ impl StatusBarPainter {
     /// Update the window list rendered by the `windows` widget. A change
     /// forces the next paint to redraw (the list isn't part of the
     /// widget-row cache key — the widget reads it from the context).
-    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) {
-        if self.windows != windows {
-            self.windows = windows;
-            self.invalidate();
+    /// Returns `true` if the list actually changed (so a caller with no
+    /// other paint trigger can gate a repaint on it).
+    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) -> bool {
+        if self.windows == windows {
+            return false;
         }
+        self.windows = windows;
+        self.invalidate();
+        true
     }
 
     /// ADR-0033: set (or clear, with `None`) the supervisory badge overlaid on
@@ -434,6 +487,41 @@ impl StatusBarPainter {
         self.supervisory = badge;
         self.invalidate();
         true
+    }
+
+    /// phux-foz.1: set (or clear, with `None`) the agent-attention hint
+    /// overlaid left of the supervisory badge. Returns `true` if the hint
+    /// actually changed; same error-line suppression and cache semantics as
+    /// [`Self::set_supervisory`].
+    pub fn set_attention(&mut self, hint: Option<String>) -> bool {
+        if self.error.is_some() || self.attention == hint {
+            return false;
+        }
+        self.attention = hint;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.1: set the attention chip's foreground from the theme's
+    /// `attention` slot. The driver calls this once at attach; the painter
+    /// itself never hardcodes the color.
+    pub fn set_attention_color(&mut self, color: Color) {
+        if self.attention_fg != color {
+            self.attention_fg = color;
+            self.invalidate();
+        }
+    }
+
+    /// Cells the attention chip is shifted in from the right edge: the
+    /// supervisory badge's width plus a 1-cell gap, or `0` when no badge is
+    /// showing. Shared by the live paint and the snapshot compose so both
+    /// place the chip identically.
+    fn attention_offset(&self) -> u16 {
+        self.supervisory.as_ref().map_or(0, |badge| {
+            u16::try_from(badge.chars().count())
+                .unwrap_or(u16::MAX)
+                .saturating_add(1)
+        })
     }
 
     /// True if the underlying bar has no widgets configured.
@@ -527,6 +615,19 @@ impl StatusBarPainter {
         if let Some(badge) = &self.supervisory {
             paint_supervisory_overlay(out, badge, row_index, cols)?;
         }
+        // phux-foz.1: the attention hint chips in immediately left of the
+        // badge (or at the right edge when no badge is up). Same repaint
+        // discipline: the full-row repaint erased any cleared hint.
+        if let Some(hint) = &self.attention {
+            paint_attention_overlay(
+                out,
+                hint,
+                row_index,
+                cols,
+                self.attention_offset(),
+                self.attention_fg,
+            )?;
+        }
         self.last_row = Some((cols, new_row));
         self.last_viewport = Some((cols, rows));
         Ok(())
@@ -593,7 +694,26 @@ impl StatusBarPainter {
         // ADR-0033: overlay the supervisory badge into the snapshot buffer so
         // `phux snapshot --rendered` shows the same chip the live paint draws.
         if let Some(badge) = &self.supervisory {
-            overlay_badge_into_buffer(&mut buffer, badge, cols);
+            overlay_badge_into_buffer(
+                &mut buffer,
+                badge,
+                cols,
+                0,
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            );
+        }
+        // phux-foz.1: the attention hint composes left of the badge, themed
+        // like the live paint.
+        if let Some(hint) = &self.attention {
+            overlay_badge_into_buffer(
+                &mut buffer,
+                hint,
+                cols,
+                self.attention_offset(),
+                Style::default()
+                    .fg(self.attention_fg)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            );
         }
         Some((buffer, row_index))
     }
@@ -939,11 +1059,13 @@ mod tests {
                 name: "bash".to_owned(),
                 active: true,
                 zoomed: false,
+                attention: false,
             },
             WindowInfo {
                 name: "vim".to_owned(),
                 active: false,
                 zoomed: false,
+                attention: false,
             },
         ];
         let ctx = StatusBarContext {
@@ -990,6 +1112,7 @@ mod tests {
             name: "a".to_owned(),
             active: true,
             zoomed: false,
+            attention: false,
         }]);
         let mut buf = Vec::new();
         p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
@@ -997,6 +1120,94 @@ mod tests {
         assert!(
             s.contains("0:a"),
             "painter should render the strip; got {s:?}"
+        );
+    }
+
+    /// phux-foz.1: the attention hint paints as a right-aligned chip on the
+    /// bar row, colored by the theme-fed `attention_fg` (reverse video makes
+    /// the fg the chip fill).
+    #[test]
+    fn painter_paints_attention_hint_right_aligned() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+        }]);
+        p.set_attention_color(Color::Rgb(251, 191, 36));
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Right-aligned: "[ ASK ]" is 7 cells wide in a 40-col bar on the
+        // bottom row (row 10) => CUP col 34.
+        assert!(
+            s.contains("\x1b[10;34H"),
+            "attention chip must right-align; got {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[38;2;251;191;36m"),
+            "chip must carry the themed attention color; got {s:?}"
+        );
+        assert!(strip_csi(&s).contains("[ ASK ]"), "chip text; got {s:?}");
+    }
+
+    /// phux-foz.1: with a supervisory badge up, the attention chip shifts
+    /// left of it (badge width + 1-cell gap) instead of overpainting it.
+    #[test]
+    fn attention_hint_sits_left_of_the_supervisory_badge() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+        }]);
+        assert!(p.set_supervisory(Some("[ FROZEN ]".to_owned())));
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Badge: 10 cells at cols 31..40. Chip: offset 11 from the right
+        // edge => right-aligned at col 40-11-7+1 = 23.
+        assert!(
+            s.contains("\x1b[10;31H"),
+            "badge keeps the right edge; got {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[10;23H"),
+            "chip must shift left of the badge; got {s:?}"
+        );
+        let visible = strip_csi(&s);
+        assert!(visible.contains("[ ASK ]") && visible.contains("[ FROZEN ]"));
+    }
+
+    /// phux-foz.1: clearing the hint reports the change and the repainted
+    /// row no longer carries it.
+    #[test]
+    fn cleared_attention_hint_stops_painting() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+        }]);
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        assert!(
+            !p.set_attention(Some("[ ASK ]".to_owned())),
+            "unchanged hint must report no change"
+        );
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert!(p.set_attention(None), "clearing must report a change");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8(buf).unwrap());
+        assert!(
+            !visible.contains("ASK"),
+            "cleared hint must not repaint; got {visible:?}"
         );
     }
 
