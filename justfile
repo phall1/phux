@@ -40,7 +40,8 @@ test:
     cargo nextest run --workspace --all-features
 
 # Fast e2e lane — gates every PR (the `e2e` step in ci.yml). Covers the
-# headless agent-surface contract (`run_wait_e2e`) plus the wall-clock perf
+# headless agent-surface contract (`run_wait_e2e`), the ADR-0040 agent
+# identity record loop (`agent_record_e2e`), plus the wall-clock perf
 # gates (`perf_latency`, `perf_colored_output`). These spin a real server +
 # PTY, so they are `#[ignore]`d out of the default `just test` pool and run
 # serially with `--retries=2`: serial removes the CPU contention that makes
@@ -51,8 +52,8 @@ test:
 
 # Fast e2e lane (run_wait_e2e + perf gates) — gates every PR.
 e2e:
-    cargo nextest run -p phux --test run_wait_e2e --run-ignored all \
-      --test-threads=1 --retries=2
+    cargo nextest run -p phux --test run_wait_e2e --test agent_record_e2e \
+      --run-ignored all --test-threads=1 --retries=2
     cargo nextest run -p phux-server --run-ignored ignored-only \
       --test-threads=1 --retries=2 \
       --test perf_latency --test perf_colored_output

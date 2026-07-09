@@ -1,3 +1,4 @@
+use phux_client::agent_meta::{AgentAttention, AgentMetaState, AgentRecord};
 use phux_config::plugin::{PluginAgentAttention, PluginAgentState};
 use phux_protocol::ids::TerminalId;
 use serde::Serialize;
@@ -30,6 +31,9 @@ pub(super) enum AgentKind {
     Codex,
     Claude,
     Plugin,
+    /// ADR-0040: identity declared via a `phux.agent/v1` record whose kind
+    /// slug is neither a first-party agent nor a configured plugin.
+    Declared,
     Unknown,
 }
 
@@ -79,6 +83,9 @@ pub(super) struct PaneEvidence {
     pub(super) window: String,
     pub(super) title: Option<String>,
     pub(super) cwd: Option<String>,
+    /// ADR-0040: the pane's decoded `phux.agent/v1` record, when declared.
+    /// Outranks every heuristic source below.
+    pub(super) record: Option<AgentRecord>,
     pub(super) lines: Vec<String>,
     pub(super) semantic_input: bool,
 }
@@ -92,6 +99,7 @@ impl PaneEvidence {
             window: "window-0".to_owned(),
             title: title.map(str::to_owned),
             cwd: None,
+            record: None,
             lines: lines.iter().map(|line| (*line).to_owned()).collect(),
             semantic_input: false,
         }
@@ -153,6 +161,28 @@ pub(super) const fn plugin_attention(attention: PluginAgentAttention) -> Attenti
         PluginAgentAttention::Low => Attention::Low,
         PluginAgentAttention::Normal => Attention::Normal,
         PluginAgentAttention::High => Attention::High,
+    }
+}
+
+/// ADR-0040: map a declared `phux.agent/v1` state onto the report vocabulary.
+pub(super) const fn record_state(state: AgentMetaState) -> AgentState {
+    match state {
+        AgentMetaState::Unknown => AgentState::Unknown,
+        AgentMetaState::Idle => AgentState::Idle,
+        AgentMetaState::Working => AgentState::Working,
+        AgentMetaState::Blocked => AgentState::Blocked,
+        AgentMetaState::Done => AgentState::Done,
+    }
+}
+
+/// ADR-0040: map a declared `phux.agent/v1` attention level onto the
+/// report vocabulary.
+pub(super) const fn record_attention(attention: AgentAttention) -> Attention {
+    match attention {
+        AgentAttention::None => Attention::None,
+        AgentAttention::Low => Attention::Low,
+        AgentAttention::Normal => Attention::Normal,
+        AgentAttention::High => Attention::High,
     }
 }
 
