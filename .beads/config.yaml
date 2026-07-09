@@ -5,3 +5,5 @@ export.auto: false
 types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step
 gc.endpoint_origin: inherited_city
 gc.endpoint_status: verified
+sync:
+    remote: "git+https://github.com/phall1/phux.git"
