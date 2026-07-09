@@ -73,7 +73,22 @@ impl ServerState {
             policy_bundle: crate::policy::PolicyBundle::default(),
             peer_identities: HashMap::new(),
             upgrade_ctx: None,
+            hub_table: None,
         }
+    }
+
+    /// Install the validated hub satellite table (phux-v45.1). Called once
+    /// at server startup, only in hub mode, after
+    /// [`crate::hub::resolve_hub_table`] succeeds.
+    pub fn set_hub_table(&mut self, table: crate::hub::HubTable) {
+        self.hub_table = Some(table);
+    }
+
+    /// Read the hub satellite table set by [`Self::set_hub_table`].
+    /// `None` on a non-hub server.
+    #[must_use]
+    pub const fn hub_table(&self) -> Option<&crate::hub::HubTable> {
+        self.hub_table.as_ref()
     }
 
     /// Set the policy extension bundle. Called once at server startup.

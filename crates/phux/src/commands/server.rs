@@ -26,11 +26,17 @@ const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// is backed by a real PTY running the user's `$SHELL` (falling back
 /// to `/bin/sh`). On Ctrl-C, `run_async` returns `Ok(())` and the
 /// process exits 0.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
+    reason = "1:1 mirror of the `phux server` clap surface; bundling into a struct would just restate the clap enum"
+)]
 pub(crate) fn run_server(
     session: &str,
     socket: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
     quic: Option<std::net::SocketAddr>,
+    hub: bool,
     daemonize: bool,
     seed_command: Option<&str>,
     resume: Option<std::os::fd::RawFd>,
@@ -118,12 +124,15 @@ pub(crate) fn run_server(
         }
     };
 
-    let extra = match (listen, quic) {
+    let mut extra = match (listen, quic) {
         (Some(ws), Some(q)) => format!(" + ws://{ws} + quic://{q}"),
         (Some(ws), None) => format!(" + ws://{ws}"),
         (None, Some(q)) => format!(" + quic://{q}"),
         (None, None) => String::new(),
     };
+    if hub {
+        extra.push_str(" [hub]");
+    }
     eprintln!(
         "phux server listening on {}{extra} (session={session}; Ctrl-C to stop)",
         socket_path.display()
@@ -135,6 +144,21 @@ pub(crate) fn run_server(
     }
     if let Some(addr) = quic {
         server = server.listen_quic(addr);
+    }
+    // Hub mode (phux-v45.1, ADR-0007): hand the `[[satellites]]` registry to
+    // the runtime, which validates it into the satellite table before
+    // binding. Unlike the `defaults.*` reads above, a failed config load is
+    // NOT swallowed here — the user explicitly asked for a hub, and starting
+    // one with a silently empty table would drop every configured satellite.
+    if hub {
+        let satellites = match config_loader::load() {
+            Ok(cfg) => cfg.satellites,
+            Err(err) => {
+                eprintln!("phux server --hub: cannot read the satellite registry: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        server = server.hub(satellites);
     }
     if let Some(fd) = resume {
         server = server.resume(fd);

@@ -104,10 +104,12 @@ phux attach --ws ws://127.0.0.1:8787
                               # attach over the WebSocket/TCP fallback locally
 phux attach --ws wss://HOST:PORT --cert-fingerprint FP --token HEX
                               # attach over TLS WebSocket when UDP/QUIC is blocked
-phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT]
+phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
                               # run server in foreground (incl. for SSH; no --stdio yet)
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
                               # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
+                              # --hub validates [[satellites]] into the runtime
+                              # satellite table at startup (no dialing/routing yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
 phux ls                       # list sessions (alias: list)
@@ -585,9 +587,17 @@ agent-tools demo launches and drives an `agent-bench` profile through
 **Federation satellites** live under `[[satellites]]`. This is the
 hub-side registry for remote phux servers; routing is a later federation
 slice, but the registry name is already the host token that will appear in
-`TerminalId::Satellite.host`. `endpoint` is an opaque URI string so
-`ssh://devbox`, `quic://host:8788`, and `wss://host:8787` can share one
-control-plane shape; `enabled` defaults to `true`.
+`TerminalId::Satellite.host`. `endpoint` is an opaque URI string in the
+registry CRUD so `ssh://devbox`, `quic://host:8788`, and `wss://host:8787`
+can share one control-plane shape; `enabled` defaults to `true`.
+
+A server started with `phux server --hub` consumes this registry: at
+startup it validates every enabled entry's endpoint by scheme (`quic://`
+requires an explicit `host:port`; `ssh://` is accepted but its transport
+is deferred) into a runtime satellite table keyed by the registry name,
+and refuses to start on a malformed enabled endpoint or a duplicate name.
+Disabled entries are skipped. Dialing and routing are later federation
+slices; without `--hub` the server ignores the registry entirely.
 
 ```toml
 [[satellites]]

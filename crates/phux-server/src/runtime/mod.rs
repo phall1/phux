@@ -222,6 +222,12 @@ pub enum ServerError {
     /// Failed to build the tokio runtime.
     #[error("failed to build tokio runtime: {0}")]
     Runtime(#[source] io::Error),
+
+    /// Hub mode was requested but the satellite registry did not validate
+    /// (phux-v45.1). A hub with a half-parsed table would silently drop
+    /// satellites, so startup fails instead.
+    #[error("hub: {0}")]
+    Hub(#[from] crate::hub::HubTableError),
 }
 
 /// Server runtime owning the listener loop and per-client task scaffolding.
@@ -244,6 +250,16 @@ pub struct ServerRuntime {
     /// inherited listener, and rebuilds the session tree instead of binding a
     /// fresh socket and seeding an empty state. Set by `phux server --resume`.
     resume_fd: Option<RawFd>,
+    /// Whether this server runs as a federation hub (phux-v45.1, ADR-0007).
+    /// Off by default; `phux server --hub` populates this. Only a hub
+    /// consumes [`Self::satellites`] — a non-hub server ignores the registry
+    /// entirely.
+    hub: bool,
+    /// The satellite registry from `config.toml` (`[[satellites]]`), as
+    /// loaded by the binary. Read only when [`Self::hub`] is set, at which
+    /// point every enabled entry's endpoint is validated into the runtime
+    /// [`crate::hub::HubTable`]; a validation failure fails startup.
+    satellites: Vec<phux_config::SatelliteConfigEntry>,
 }
 
 impl ServerRuntime {
@@ -255,6 +271,8 @@ impl ServerRuntime {
             ws_addr: None,
             quic_addr: None,
             resume_fd: None,
+            hub: false,
+            satellites: Vec::new(),
         }
     }
 
@@ -289,6 +307,23 @@ impl ServerRuntime {
     #[must_use]
     pub const fn listen_quic(mut self, addr: SocketAddr) -> Self {
         self.quic_addr = Some(addr);
+        self
+    }
+
+    /// Run as a federation hub (phux-v45.1, ADR-0007): consume `satellites`
+    /// (the `[[satellites]]` registry from `config.toml`) at startup,
+    /// validating every enabled entry's endpoint into the runtime
+    /// [`crate::hub::HubTable`]. A malformed enabled endpoint or a duplicate
+    /// satellite name fails startup with [`ServerError::Hub`].
+    ///
+    /// Without this call the registry is never read: non-hub servers ignore
+    /// `[[satellites]]` entirely. No dialing or routing happens yet — this
+    /// is the validated table only (dialing is phux-v45.3, routing
+    /// phux-v45.4).
+    #[must_use]
+    pub fn hub(mut self, satellites: Vec<phux_config::SatelliteConfigEntry>) -> Self {
+        self.hub = true;
+        self.satellites = satellites;
         self
     }
 
@@ -332,6 +367,22 @@ impl ServerRuntime {
         // client input and the routing table for fanout (see
         // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
         let state = SharedState::new();
+
+        // Hub mode (phux-v45.1, ADR-0007): validate the satellite registry
+        // into the runtime hub table before any I/O, so a malformed registry
+        // fails fast — before the socket is bound. Non-hub servers skip the
+        // registry entirely (`resolve_hub_table` returns `Ok(None)`).
+        // No dialing, no routing: the table is held for phux-v45.3/v45.4.
+        if let Some(table) = crate::hub::resolve_hub_table(self.hub, &self.satellites)? {
+            info!(
+                satellites = table.len(),
+                "hub mode: satellite registry validated"
+            );
+            for (host, target) in table.iter() {
+                info!(satellite = %host, target = %target, "hub satellite registered");
+            }
+            state.with_mut(|s| s.set_hub_table(table));
+        }
 
         // Graceful upgrade (ADR-0032): when resuming, read the handoff blob and
         // adopt the inherited listener instead of binding a fresh socket. The
