@@ -115,6 +115,26 @@ fn empty_input_is_full_defaults() {
 }
 
 #[test]
+fn which_key_defaults_on_with_600ms_delay() {
+    // phux-foz.2: the popup ships enabled with a 600 ms hesitation delay.
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert!(cfg.keybindings.which_key);
+    assert_eq!(cfg.keybindings.which_key_delay_ms, 600);
+}
+
+#[test]
+fn which_key_keys_parse_under_keybindings() {
+    let input = r"
+[keybindings]
+which-key = false
+which-key-delay-ms = 250
+";
+    let cfg = parse_str(input, &path()).expect("which-key keys parse");
+    assert!(!cfg.keybindings.which_key);
+    assert_eq!(cfg.keybindings.which_key_delay_ms, 250);
+}
+
+#[test]
 fn unknown_field_at_top_level_is_rejected() {
     let input = r#"
 not-a-real-section = "oops"

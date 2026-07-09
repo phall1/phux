@@ -37,6 +37,7 @@ pub mod help;
 pub mod prompt;
 pub mod select_list;
 pub mod toast;
+pub mod which_key;
 pub mod widgets;
 
 pub use copy_mode::CopyModeOverlay;
@@ -44,6 +45,7 @@ pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};
 pub use toast::ToastOverlay;
+pub use which_key::WhichKeyOverlay;
 
 /// Test double: a [`RenderOverlay`] that records every key handed to it and
 /// never dismisses, so a test can assert exactly which keystrokes reached
@@ -120,6 +122,16 @@ pub trait RenderOverlay {
     /// selected cells invert.
     fn copy_selection(&self) -> Option<SelectionRect> {
         None
+    }
+
+    /// `true` for a display-only overlay that must never capture input
+    /// (phux-foz.2: the which-key popup). The dispatcher checks this
+    /// BEFORE overlay routing: instead of feeding keys to the overlay it
+    /// dismisses it and processes the event exactly as if the overlay
+    /// were not there, so a passthrough overlay can never eat or delay a
+    /// chord. Default `false` — every modal overlay captures input.
+    fn is_input_passthrough(&self) -> bool {
+        false
     }
 }
 
@@ -283,6 +295,15 @@ impl OverlayState {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.stack.len()
+    }
+
+    /// `true` when the top overlay is input-passthrough (phux-foz.2:
+    /// the which-key popup). The dispatcher consults this before overlay
+    /// routing so a passthrough overlay is dismissed by — and never
+    /// consumes — the next input event.
+    #[must_use]
+    pub fn top_is_passthrough(&self) -> bool {
+        self.stack.last().is_some_and(|o| o.is_input_passthrough())
     }
 
     /// Push `overlay` onto the top of the stack. It becomes the input

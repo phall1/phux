@@ -23,6 +23,7 @@ fn cfg(prefix: &str, prefix_table: &[(&str, &str)], global: &[(&str, &str)]) -> 
         prefix: prefix.to_owned(),
         prefix_table: mk_table(prefix_table),
         global: mk_table(global),
+        ..KeybindingsCfg::default()
     }
 }
 
@@ -303,6 +304,86 @@ fn resolver_reset_clears_partial() {
         r.feed(chord(ModSet::empty(), PhysicalKey::C)),
         Feed::NoMatch
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pending state (which-key popup trigger, phux-foz.2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pending_at_prefix_tracks_the_prefix_walk() {
+    let c = cfg("C-b", &[("c", "new-window")], &[]);
+    let mut r = Resolver::new(&c).unwrap();
+
+    // At the root: nothing pending.
+    assert!(!r.is_pending());
+    assert!(!r.pending_at_prefix());
+
+    // After the prefix chord: pending, and pending AT the prefix — the
+    // which-key popup's arm condition.
+    assert_eq!(r.feed(chord(ModSet::CTRL, PhysicalKey::B)), Feed::Partial);
+    assert!(r.is_pending());
+    assert!(r.pending_at_prefix());
+
+    // A resolving continuation clears the pending state entirely.
+    assert!(matches!(
+        r.feed(chord(ModSet::empty(), PhysicalKey::C)),
+        Feed::Resolved(_)
+    ));
+    assert!(!r.is_pending());
+    assert!(!r.pending_at_prefix());
+}
+
+#[test]
+fn pending_at_prefix_cleared_by_nomatch_and_reset() {
+    let c = cfg("C-b", &[("c", "new-window")], &[]);
+    let mut r = Resolver::new(&c).unwrap();
+
+    // NoMatch clears it.
+    assert_eq!(r.feed(chord(ModSet::CTRL, PhysicalKey::B)), Feed::Partial);
+    assert_eq!(
+        r.feed(chord(ModSet::empty(), PhysicalKey::X)),
+        Feed::NoMatch
+    );
+    assert!(!r.is_pending());
+    assert!(!r.pending_at_prefix());
+
+    // Explicit reset (the Esc-cancel path) clears it too.
+    assert_eq!(r.feed(chord(ModSet::CTRL, PhysicalKey::B)), Feed::Partial);
+    assert!(r.pending_at_prefix());
+    r.reset();
+    assert!(!r.is_pending());
+    assert!(!r.pending_at_prefix());
+}
+
+#[test]
+fn pending_deeper_than_the_prefix_is_not_at_prefix() {
+    // A nested `"c x"` prefix-table sequence: after `<prefix> c` the
+    // resolver is pending but one level BELOW the prefix node, so the
+    // which-key popup (which lists prefix-table continuations) must not
+    // re-arm for that state.
+    let c = cfg("C-b", &[("c x", "nested-action")], &[]);
+    let mut r = Resolver::new(&c).unwrap();
+    assert_eq!(r.feed(chord(ModSet::CTRL, PhysicalKey::B)), Feed::Partial);
+    assert!(r.pending_at_prefix());
+    assert_eq!(
+        r.feed(chord(ModSet::empty(), PhysicalKey::C)),
+        Feed::Partial
+    );
+    assert!(r.is_pending());
+    assert!(!r.pending_at_prefix());
+}
+
+#[test]
+fn pending_multichord_global_is_not_at_prefix() {
+    // A multi-chord GLOBAL binding ("M-g g") goes Partial after its first
+    // chord, but that pending state is not the prefix table's — the
+    // which-key popup must stay quiet.
+    let c = cfg("C-b", &[("c", "new-window")], &[("M-g g", "global-seq")]);
+    let mut r = Resolver::new(&c).unwrap();
+    assert_eq!(r.feed(chord(ModSet::ALT, PhysicalKey::G)), Feed::Partial);
+    assert!(r.is_pending());
+    assert!(!r.pending_at_prefix());
 }
 
 // ---------------------------------------------------------------------------

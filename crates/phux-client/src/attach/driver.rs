@@ -1353,6 +1353,23 @@ async fn main_loop<W: super::RenderSink>(
     // highlight repaints) a lone Escape could be deferred far past the
     // intended window. `None` ⇔ nothing pending.
     let mut esc_deadline: Option<tokio::time::Instant> = None;
+    // phux-foz.2: which-key popup arming. When the resolver sits at the
+    // pending-prefix state (`<prefix>` pressed, continuation awaited) for
+    // `which_key_delay` without a follow-up chord, the loop pushes a
+    // which-key overlay listing the prefix-table continuations. Config
+    // comes from the same `[keybindings]` snapshot the help overlay uses;
+    // with no loaded config there is no resolver (and so no prefix to
+    // hesitate on), so the popup is naturally inert. `None` ⇔ not armed.
+    // Same anchored-deadline pattern as `esc_deadline`: the deadline is
+    // set once when the pending state is first observed and survives
+    // unrelated arms firing, so a busy output stream cannot starve it.
+    let which_key_enabled = keybindings_snapshot.as_ref().is_some_and(|kb| kb.which_key);
+    let which_key_delay = Duration::from_millis(
+        keybindings_snapshot
+            .as_ref()
+            .map_or(600, |kb| kb.which_key_delay_ms),
+    );
+    let mut which_key_deadline: Option<tokio::time::Instant> = None;
     // phux-eb0: set by `apply_action_effects` when the user commits a
     // `switch-session`. Checked after each input-dispatch batch; a value
     // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
@@ -1505,6 +1522,27 @@ async fn main_loop<W: super::RenderSink>(
             esc_deadline = None;
         }
         let flush_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = match esc_deadline {
+            Some(deadline) => Box::pin(tokio::time::sleep_until(deadline)),
+            None => Box::pin(std::future::pending::<()>()),
+        };
+
+        // phux-foz.2: (dis)arm the which-key deadline from the resolver's
+        // CURRENT pending state. An early continuation chord (dispatched
+        // in the stdin arm) leaves the resolver non-pending, so the next
+        // pass through here disarms the timer before it can fire — the
+        // popup is suppressed without any explicit cancellation call.
+        update_which_key_deadline(
+            &mut which_key_deadline,
+            resolver
+                .as_ref()
+                .is_some_and(phux_config::keybind::Resolver::pending_at_prefix),
+            which_key_enabled,
+            overlays.is_active(),
+            tokio::time::Instant::now(),
+            which_key_delay,
+        );
+        let which_key_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = match which_key_deadline
+        {
             Some(deadline) => Box::pin(tokio::time::sleep_until(deadline)),
             None => Box::pin(std::future::pending::<()>()),
         };
@@ -2024,6 +2062,37 @@ async fn main_loop<W: super::RenderSink>(
                 }
             }
 
+            // phux-foz.2: which-key idle timeout. Armed only while the
+            // resolver sits at the pending-prefix state (see the update
+            // above); fires once per hesitation. Pushing the popup does
+            // not touch the resolver — the pending prefix stays live, so
+            // the next chord executes exactly as if the popup never
+            // appeared (the dispatcher's passthrough branch dismisses it
+            // on the way through).
+            () = which_key_sleep => {
+                which_key_deadline = None;
+                if push_which_key_overlay(
+                    &mut overlays,
+                    resolver.as_ref(),
+                    keybindings_snapshot.as_ref(),
+                    &theme,
+                ) {
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        &session_name,
+                        &theme,
+                    );
+                }
+            }
+
             // SIGWINCH — terminal was resized. Read the new viewport
             // and ship a VIEWPORT_RESIZE upstream (SPEC §7.1 / §10.5).
             // The server uses this to recompute layout and update the
@@ -2288,6 +2357,61 @@ fn build_resolver_from(kb: &phux_config::KeybindingsCfg) -> Option<phux_config::
             None
         }
     }
+}
+
+/// phux-foz.2: (dis)arm the which-key popup deadline for one loop pass.
+///
+/// Arms (`Some(now + delay)`) only while ALL of: the resolver is pending
+/// exactly at the prefix, the popup is enabled in config, and no overlay
+/// is already active (a modal owns the screen; and once the popup itself
+/// is up, re-arming would re-push it forever). Re-invocations while armed
+/// keep the ORIGINAL deadline (anchored, like `esc_deadline`) so other
+/// select! arms firing cannot postpone the popup. Any pass that sees the
+/// conditions no longer met — e.g. an early continuation chord resolved
+/// the prefix — disarms, which is how a fast chord suppresses the popup.
+fn update_which_key_deadline(
+    deadline: &mut Option<tokio::time::Instant>,
+    pending_at_prefix: bool,
+    enabled: bool,
+    overlay_active: bool,
+    now: tokio::time::Instant,
+    delay: Duration,
+) {
+    if enabled && pending_at_prefix && !overlay_active {
+        deadline.get_or_insert(now + delay);
+    } else {
+        *deadline = None;
+    }
+}
+
+/// phux-foz.2: push the which-key popup when the timeout fires.
+///
+/// Re-checks the arming conditions against the CURRENT state (the select!
+/// arm may race a same-iteration resolver mutation) and pushes a
+/// [`WhichKeyOverlay`] built from the same keybindings snapshot the help
+/// overlay uses. Returns `true` iff the popup was pushed (the caller then
+/// paints the overlay layer). Never touches the resolver: the pending
+/// prefix must stay live so the next chord still completes normally.
+fn push_which_key_overlay(
+    overlays: &mut OverlayState,
+    resolver: Option<&phux_config::keybind::Resolver>,
+    keybindings: Option<&phux_config::KeybindingsCfg>,
+    theme: &crate::render::Theme,
+) -> bool {
+    if overlays.is_active() {
+        return false;
+    }
+    if !resolver.is_some_and(phux_config::keybind::Resolver::pending_at_prefix) {
+        return false;
+    }
+    let Some(kb) = keybindings else {
+        return false;
+    };
+    tracing::debug!("which-key: prefix hesitation timeout; showing popup");
+    overlays.push(Box::new(
+        crate::render::overlay::WhichKeyOverlay::from_config(kb, theme),
+    ));
+    true
 }
 
 /// phux-ahv.3: snapshot the current [`Workspace`] as the `windows`
@@ -2996,6 +3120,138 @@ mod tests {
         let err = AttachError::Io(io::Error::other("boom"));
         let msg = err.to_string();
         assert!(msg.contains("attach loop io error"));
+    }
+
+    // -- which-key popup arming (phux-foz.2) ------------------------------
+
+    /// Build a resolver from the shipped defaults and walk it to the
+    /// pending-prefix state (`C-a` fed, continuation awaited).
+    fn pending_resolver() -> phux_config::keybind::Resolver {
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let mut r = phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        let prefix = phux_config::keybind::parse_chord(&cfg.keybindings.prefix).expect("prefix");
+        assert_eq!(r.feed(prefix), phux_config::keybind::Feed::Partial);
+        assert!(r.pending_at_prefix());
+        r
+    }
+
+    #[test]
+    fn which_key_deadline_arms_once_and_holds_its_anchor() {
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert_eq!(deadline, Some(now + delay), "arms at now + delay");
+        // A later pass (other select! arms fired) keeps the ORIGINAL
+        // anchor — the popup is not postponed by unrelated wakeups.
+        update_which_key_deadline(
+            &mut deadline,
+            true,
+            true,
+            false,
+            now + Duration::from_millis(300),
+            delay,
+        );
+        assert_eq!(deadline, Some(now + delay), "anchor survives re-passes");
+    }
+
+    #[test]
+    fn which_key_deadline_disarms_when_an_early_chord_resolves() {
+        // The suppression path: prefix pressed (armed), then a fast
+        // continuation resolves the chord BEFORE the timeout — the next
+        // loop pass sees pending=false and must disarm, so the popup
+        // never appears.
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert!(deadline.is_some());
+        update_which_key_deadline(&mut deadline, false, true, false, now, delay);
+        assert_eq!(deadline, None, "early chord suppresses the popup");
+    }
+
+    #[test]
+    fn which_key_deadline_respects_disable_and_active_overlay() {
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        // Disabled in config: never arms.
+        update_which_key_deadline(&mut deadline, true, false, false, now, delay);
+        assert_eq!(deadline, None);
+        // A modal already up: never arms (it owns input; the resolver was
+        // reset on entry anyway).
+        update_which_key_deadline(&mut deadline, true, true, true, now, delay);
+        assert_eq!(deadline, None);
+        // Armed, then an overlay appears before the timeout: disarms.
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert!(deadline.is_some());
+        update_which_key_deadline(&mut deadline, true, true, true, now, delay);
+        assert_eq!(deadline, None);
+    }
+
+    #[test]
+    fn which_key_timeout_pushes_the_popup_and_keeps_the_prefix_pending() {
+        // The timeout path: a pending-at-prefix resolver + keybindings
+        // snapshot ⇒ the popup is pushed; the resolver still holds the
+        // pending prefix so the NEXT chord completes normally.
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let resolver = pending_resolver();
+        let mut overlays = OverlayState::new();
+        let theme = crate::render::Theme::default();
+        let pushed = push_which_key_overlay(
+            &mut overlays,
+            Some(&resolver),
+            Some(&cfg.keybindings),
+            &theme,
+        );
+        assert!(pushed, "timeout must push the which-key popup");
+        assert!(overlays.is_active());
+        assert!(
+            overlays.top_is_passthrough(),
+            "the popup must be input-passthrough so it can never eat a chord"
+        );
+        assert!(
+            resolver.pending_at_prefix(),
+            "pushing the popup must not consume the pending prefix"
+        );
+    }
+
+    #[test]
+    fn which_key_push_declines_without_pending_prefix_or_over_a_modal() {
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let theme = crate::render::Theme::default();
+
+        // Resolver at the root (no pending prefix): no push.
+        let idle = phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        let mut overlays = OverlayState::new();
+        assert!(!push_which_key_overlay(
+            &mut overlays,
+            Some(&idle),
+            Some(&cfg.keybindings),
+            &theme,
+        ));
+        assert!(!overlays.is_active());
+
+        // A modal already up: no push (would stack over user input).
+        let pending = pending_resolver();
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(crate::render::overlay::HelpOverlay::from_config(
+            &cfg.keybindings,
+            &theme,
+        )));
+        assert!(!push_which_key_overlay(
+            &mut overlays,
+            Some(&pending),
+            Some(&cfg.keybindings),
+            &theme,
+        ));
+        assert_eq!(overlays.depth(), 1, "nothing stacked on the modal");
     }
 
     /// phux-jy4t: the layout metadata key is per-session, so two sessions

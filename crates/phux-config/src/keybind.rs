@@ -559,11 +559,16 @@ pub struct Resolver {
     /// The trie rooted at "no input yet". The prefix chord is one of its
     /// children whose subtree carries the prefix-table bindings.
     root: TrieNode,
-    /// The parsed prefix chord, retained for `Debug` and for tests.
-    #[allow(dead_code)]
+    /// The parsed prefix chord. Compared against the pending path by
+    /// [`Resolver::pending_at_prefix`] (the which-key popup trigger).
     prefix: KeyChord,
     /// Cursor: `None` means "at the root, waiting for the first chord".
     cursor: Option<TrieNode>,
+    /// The chords fed since the last reset that led to the current
+    /// partial state. Empty whenever `cursor` is `None`. Lets callers
+    /// (the which-key popup) ask *which* pending state we are in
+    /// without re-deriving it from raw key events.
+    pending_path: Vec<KeyChord>,
 }
 
 /// Outcome of feeding one chord into a [`Resolver`].
@@ -620,6 +625,7 @@ impl Resolver {
             root,
             prefix,
             cursor: None,
+            pending_path: Vec::new(),
         })
     }
 
@@ -629,32 +635,53 @@ impl Resolver {
         let current = self.cursor.as_ref().unwrap_or(&self.root);
 
         let Some(next) = current.children.get(&chord) else {
-            self.cursor = None;
+            self.reset();
             return Feed::NoMatch;
         };
 
         if let Some(action) = &next.action {
             let resolved = action.clone();
-            self.cursor = None;
+            self.reset();
             return Feed::Resolved(resolved);
         }
 
         if next.children.is_empty() {
             // Defensive: an inner node with no children and no action
             // would be a no-op leaf. Treat as no-match.
-            self.cursor = None;
+            self.reset();
             return Feed::NoMatch;
         }
 
         // Advance: clone the next node into the cursor. Trie nodes are
         // small and binding tables are short, so the clone is cheap.
         self.cursor = Some(next.clone());
+        self.pending_path.push(chord);
         Feed::Partial
     }
 
     /// Clear any in-progress sequence and return to the root.
     pub fn reset(&mut self) {
         self.cursor = None;
+        self.pending_path.clear();
+    }
+
+    /// `true` while a partial sequence is in flight (the last
+    /// [`Resolver::feed`] returned [`Feed::Partial`] and no reset has
+    /// happened since).
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// `true` when the pending state is exactly "the prefix chord was
+    /// pressed, awaiting a prefix-table continuation" — the state the
+    /// which-key popup describes. `false` at the root, mid-way through
+    /// a longer sequence (e.g. a nested `"c x"` prefix-table binding
+    /// after `<prefix> c`), or mid-way through a multi-chord *global*
+    /// binding that does not start with the prefix.
+    #[must_use]
+    pub fn pending_at_prefix(&self) -> bool {
+        self.pending_path.as_slice() == [self.prefix]
     }
 }
 

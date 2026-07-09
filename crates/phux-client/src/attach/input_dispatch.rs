@@ -194,6 +194,42 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     let mut predicted_any = false;
     let mut layout_changed = false;
     for ev in events {
+        // phux-foz.2: the which-key popup is transparent to input. It is
+        // dismissed by — and never consumes — the next event: a key press
+        // pops it and then executes exactly as if the popup were absent
+        // (the resolver still holds the pending prefix, so the chord
+        // completes normally), except Esc, which pops it AND cancels the
+        // pending prefix without reaching the pane. Mouse input pops it
+        // and cancels the prefix too (a click is not a chord
+        // continuation), then routes normally. Non-press key events and
+        // paste/focus bypass the popup entirely (it stays up; they flow
+        // to the pane) — the popup must never eat or delay real input.
+        if ctx.overlays.top_is_passthrough() {
+            use phux_protocol::input::key::{KeyAction, PhysicalKey};
+            match &ev {
+                InputEvent::Key(key_event) if matches!(key_event.action, KeyAction::Press) => {
+                    ctx.overlays.dismiss();
+                    layout_changed = true;
+                    if key_event.key == PhysicalKey::Escape {
+                        if let Some(resolver) = ctx.resolver.as_deref_mut() {
+                            resolver.reset();
+                        }
+                        tracing::debug!("which-key: Esc cancelled the pending prefix");
+                        continue;
+                    }
+                    // Fall through: the key executes as if no popup existed.
+                }
+                InputEvent::Mouse(_) => {
+                    ctx.overlays.dismiss();
+                    layout_changed = true;
+                    if let Some(resolver) = ctx.resolver.as_deref_mut() {
+                        resolver.reset();
+                    }
+                    // Fall through to normal mouse routing.
+                }
+                _ => {}
+            }
+        }
         // phux-5ke.4: while any overlay is active the stack captures all
         // input. Key events flow to `OverlayState::handle_key`, which
         // routes them to the *top* overlay (which may dismiss, popping
@@ -210,7 +246,13 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // modal is open is reachable by dismissing first (Esc), then
         // chording. The resolver is reset on entry so a partial chord begun
         // before the overlay opened cannot leak into post-dismiss input.
-        if ctx.overlays.is_active() {
+        //
+        // phux-foz.2: a passthrough popup (which-key) is excluded — the
+        // block above already dismissed it for presses/mouse, and events
+        // it deliberately ignores (key release/repeat, paste, focus) must
+        // flow to the pane, not be captured (and must NOT reset the
+        // resolver, which is holding the pending prefix the popup shows).
+        if ctx.overlays.is_active() && !ctx.overlays.top_is_passthrough() {
             if let InputEvent::Key(ref key_event) = ev {
                 if let Some(resolver) = ctx.resolver.as_deref_mut() {
                     resolver.reset();
@@ -2979,6 +3021,143 @@ mod tests {
         assert_eq!(received[0].key, PhysicalKey::A);
         assert!(received[0].mods.contains(ModSet::CTRL));
         assert_eq!(received[1].key, PhysicalKey::X);
+    }
+
+    // -- which-key popup passthrough (phux-foz.2) --------------------------
+
+    /// Drive `dispatch_input_events` with the given events against a
+    /// resolver already pending at the prefix and the which-key popup on
+    /// the overlay stack. Returns `(overlays_active_after, detach_pending,
+    /// resolver_pending_after)`.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_with_which_key_popup(events: Vec<InputEvent>) -> (bool, bool, bool) {
+        let cfg = phux_config::parse_str(
+            phux_config::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        let mut resolver =
+            phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        // Walk to the pending-prefix state the popup describes.
+        let prefix =
+            phux_config::keybind::parse_chord(&cfg.keybindings.prefix).expect("prefix parses");
+        assert_eq!(resolver.feed(prefix), phux_config::keybind::Feed::Partial);
+        assert!(resolver.pending_at_prefix());
+
+        let theme = Theme::default();
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(
+            crate::render::overlay::WhichKeyOverlay::from_config(&cfg.keybindings, &theme),
+        ));
+        assert!(overlays.top_is_passthrough());
+
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut ctx = DispatchCtx {
+            resolver: Some(&mut resolver),
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: Some(&cfg.keybindings),
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
+            drag: &mut drag,
+        };
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            events,
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+        (overlays.is_active(), detach_pending, resolver.is_pending())
+    }
+
+    fn press(key: phux_protocol::input::key::PhysicalKey, text: Option<&str>) -> InputEvent {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet};
+        InputEvent::Key(KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: text.map(ToOwned::to_owned),
+            unshifted_codepoint: text.and_then(|t| t.chars().next()).map(u32::from),
+        })
+    }
+
+    /// phux-foz.2 requirement 3 (execute path): with the which-key popup
+    /// up and the prefix pending, the next key must dismiss the popup AND
+    /// execute its prefix-table binding exactly as if the popup had never
+    /// appeared — the popup eats nothing.
+    #[tokio::test]
+    async fn which_key_popup_next_chord_dismisses_and_executes() {
+        use phux_protocol::input::key::PhysicalKey;
+        // Default prefix table binds `d` = detach.
+        let (overlay_active, detach_pending, resolver_pending) =
+            dispatch_with_which_key_popup(vec![press(PhysicalKey::D, Some("d"))]).await;
+        assert!(!overlay_active, "the chord must dismiss the popup");
+        assert!(
+            detach_pending,
+            "the chord must still execute its binding (C-a d = detach)"
+        );
+        assert!(!resolver_pending, "the chord resolved; nothing pending");
+    }
+
+    /// phux-foz.2 requirement 3 (cancel path): Esc dismisses the popup
+    /// and cancels the pending prefix — the binding does NOT run, and a
+    /// following prefix-table key is a plain keystroke for the pane.
+    #[tokio::test]
+    async fn which_key_popup_esc_cancels_the_prefix() {
+        use phux_protocol::input::key::PhysicalKey;
+        let (overlay_active, detach_pending, resolver_pending) =
+            dispatch_with_which_key_popup(vec![
+                press(PhysicalKey::Escape, None),
+                // With the prefix cancelled, `d` must NOT resolve to detach.
+                press(PhysicalKey::D, Some("d")),
+            ])
+            .await;
+        assert!(!overlay_active, "Esc must dismiss the popup");
+        assert!(!resolver_pending, "Esc must cancel the pending prefix");
+        assert!(
+            !detach_pending,
+            "after Esc, `d` is a plain pane keystroke, not `C-a d`"
+        );
     }
 
     #[tokio::test]
