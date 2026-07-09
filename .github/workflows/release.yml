@@ -5,9 +5,9 @@
 # Trigger: run manually with a `tag` input. Manual dispatch uses an existing
 # tag, or creates it from the default branch if it does not already exist.
 #
-# Release binaries are built with rustup plus setup-zig. Nix is useful for local
-# development, but Nix-built release binaries can record `/nix/store` dynamic
-# library paths and are not portable to ordinary hosts.
+# Release binaries are built with rustup plus the official Zig tarballs. Nix is
+# useful for local development, but Nix-built release binaries can record
+# `/nix/store` dynamic library paths and are not portable to ordinary hosts.
 #
 # CPU baseline caveat: libghostty-vt's build.rs lets zig auto-detect the host
 # CPU for native builds, so Linux artifacts may carry instructions specific to
@@ -49,7 +49,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -129,7 +129,7 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@v7
 
       - name: Check out release tag
         shell: bash
@@ -146,9 +146,37 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: bash scripts/check-release-version.sh "$TAG"
 
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
-        with:
-          version: 0.15.2
+      - name: Install Zig
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ZIG_VERSION: 0.15.2
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            aarch64-apple-darwin)
+              archive="zig-aarch64-macos-${ZIG_VERSION}.tar.xz"
+              sha="3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b"
+              ;;
+            x86_64-unknown-linux-gnu)
+              archive="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+              sha="02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
+              ;;
+            aarch64-unknown-linux-gnu)
+              archive="zig-aarch64-linux-${ZIG_VERSION}.tar.xz"
+              sha="958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f"
+              ;;
+            *)
+              echo "::error::unsupported Zig target: ${TARGET}"
+              exit 1
+              ;;
+          esac
+          curl -fsSLO "https://ziglang.org/download/${ZIG_VERSION}/${archive}"
+          echo "${sha}  ${archive}" | shasum -a 256 -c -
+          tar -xf "$archive"
+          zig_dir="${archive%.tar.xz}"
+          echo "${PWD}/${zig_dir}" >> "$GITHUB_PATH"
+          "${zig_dir}/zig" version
 
       - name: Install Rust toolchain
         run: rustup toolchain install 1.90.0 --profile default
@@ -200,7 +228,7 @@ jobs:
           echo "${sha}  ${stage}.tar.gz" > "${stage}.tar.gz.sha256"
           echo "artifact=${stage}.tar.gz" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -216,13 +244,13 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Create / update GitHub release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65
+        uses: softprops/action-gh-release@v3.0.1
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           name: phux ${{ needs.prepare.outputs.tag }}
@@ -258,9 +286,9 @@ jobs:
 
       - name: Checkout phux (for the generator script)
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@v8
         if: steps.gate.outputs.enabled == 'true'
         with:
           path: dist
@@ -268,7 +296,7 @@ jobs:
 
       - name: Checkout tap
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        uses: actions/checkout@v7
         with:
           repository: phall1/homebrew-phux
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
@@ -300,7 +328,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() && needs.release.result == 'success' && inputs.publish_protocol == true }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.tag }}
 
@@ -320,8 +348,8 @@ jobs:
             exit 1
           fi
 
-      - uses: DeterminateSystems/nix-installer-action@a7ad9c4f0c65208097f4d34f3cfa1913b80cce5c
-      - uses: DeterminateSystems/magic-nix-cache-action@76aaf8814cdb385b86597c32b8c51b66b69b0839
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
 
       - name: Package + verify phux-protocol
         run: nix develop -c cargo publish --dry-run -p phux-protocol

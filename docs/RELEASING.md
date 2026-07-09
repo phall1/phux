@@ -136,9 +136,9 @@ just release-check v0.1.0
 `aarch64-unknown-linux-gnu`, packages
 `phux-<tag>-<target>.tar.gz` + `.sha256`, creates the GitHub release, and
 — if the `HOMEBREW_TAP_DEPLOY_KEY` secret is set — regenerates and pushes
-`Formula/phux.rb` to the tap. Release builds use rustup plus setup-zig instead
-of the Nix dev shell, because portable release binaries must not record
-`/nix/store` dynamic library paths. The workflow checks macOS binaries with
+`Formula/phux.rb` to the tap. Release builds use rustup plus the official Zig
+tarballs instead of the Nix dev shell, because portable release binaries must
+not record `/nix/store` dynamic library paths. The workflow checks macOS binaries with
 `otool -L` before packaging. It also runs `just release-check <tag>` before
 building, so a pushed tag that does not match Cargo's resolved package versions
 fails before any artifact or tap update is published. `v0.0.3` is the current
