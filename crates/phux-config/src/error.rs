@@ -26,6 +26,40 @@ pub enum ConfigError {
     /// I/O failure reading the config file.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A layer named by `extends` could not be read (missing file,
+    /// permission failure, ...). Names both the layer and the file
+    /// that referenced it.
+    #[error("{}: extends layer {}: {source}", referenced_from.display(), layer.display())]
+    LayerRead {
+        /// The layer file that failed to read.
+        layer: PathBuf,
+        /// The config file whose `extends` named the layer.
+        referenced_from: PathBuf,
+        /// The underlying read failure.
+        source: std::io::Error,
+    },
+
+    /// An `extends` entry points back at a file already on the current
+    /// resolution chain.
+    #[error("{}: extends layer {} creates a cycle", referenced_from.display(), layer.display())]
+    LayerCycle {
+        /// The layer file that closed the cycle.
+        layer: PathBuf,
+        /// The config file whose `extends` named the layer.
+        referenced_from: PathBuf,
+    },
+
+    /// A layer file violates the layering rules (ADR-0039): a bad
+    /// `extends` value, nesting past the depth cap, or `-append`
+    /// misuse. `path` is the offending layer file.
+    #[error("{}: {message}", path.display())]
+    Layer {
+        /// The layer file the rule violation was found in.
+        path: PathBuf,
+        /// Human-readable description of the violation.
+        message: String,
+    },
 }
 
 /// Convert a byte offset within `input` to a 1-indexed `(line, col)`.

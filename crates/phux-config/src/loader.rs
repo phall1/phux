@@ -9,6 +9,11 @@
 //! A missing config file is *not* an error: callers get
 //! [`Config::default`] and a `tracing::debug!` line. Any other I/O error
 //! propagates as [`ConfigError::Io`].
+//!
+//! Loading routes through [`parse_with_defaults`], so a config that
+//! declares `extends` (ADR-0039) has its layer stack resolved relative
+//! to the config file's directory; a missing or cyclic *layer* IS an
+//! error, unlike a missing root config.
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
