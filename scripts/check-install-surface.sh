@@ -92,7 +92,14 @@ require_fixed .github/workflows/release.yml 'cp -f target/release/phux target/re
 require_fixed .github/workflows/release.yml 'target: aarch64-apple-darwin'
 require_fixed .github/workflows/release.yml 'target: x86_64-unknown-linux-gnu'
 require_fixed .github/workflows/release.yml 'target: aarch64-unknown-linux-gnu'
+require_fixed .github/workflows/release.yml 'https://ziglang.org/download/${ZIG_VERSION}/${archive}'
 require_regex .github/workflows/release.yml 'test -x .*phux-mcp|command -v .*phux-mcp|./phux-mcp --'
+
+forbid_fixed .github/workflows/release.yml 'mlugg/setup-zig'
+forbid_fixed .github/workflows/release.yml 'actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5'
+forbid_fixed .github/workflows/release.yml 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
+forbid_fixed .github/workflows/release.yml 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093'
+forbid_fixed .github/workflows/release.yml 'softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65'
 
 if [ "$failures" -ne 0 ]; then
   printf 'install surface check failed: %d missing contract item(s)\n' "$failures" >&2
