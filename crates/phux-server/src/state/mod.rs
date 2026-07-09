@@ -275,6 +275,13 @@ pub struct ServerState {
     /// handoff blob and to re-pass `--socket` to the re-exec'd image. `None`
     /// until [`Self::set_upgrade_context`] runs (i.e. before serving).
     upgrade_ctx: Option<(std::os::fd::RawFd, std::path::PathBuf)>,
+    /// Validated satellite table for a federation hub (phux-v45.1,
+    /// ADR-0007). `None` on every non-hub server — the registry is never
+    /// read outside hub mode. Set once at startup by the runtime via
+    /// [`Self::set_hub_table`] after `crate::hub::resolve_hub_table`
+    /// succeeds. Held for the upcoming dial (phux-v45.3) and route
+    /// (phux-v45.4) beads; nothing consumes it for I/O yet.
+    hub_table: Option<crate::hub::HubTable>,
 }
 
 impl Default for ServerState {

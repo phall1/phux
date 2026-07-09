@@ -153,6 +153,16 @@ pub(crate) enum Command {
         #[arg(long, value_name = "HOST:PORT")]
         quic: Option<std::net::SocketAddr>,
 
+        /// Run as a federation hub (ADR-0007): consume the `[[satellites]]`
+        /// registry from `config.toml` at startup, validating every enabled
+        /// entry's endpoint (`quic://`, `ws://`, `wss://`, or the deferred
+        /// `ssh://`) into the runtime satellite table. A malformed enabled
+        /// endpoint or a duplicate satellite name fails startup. Without
+        /// this flag the registry is ignored. No dialing or routing happens
+        /// yet — this is the validated table only.
+        #[arg(long)]
+        hub: bool,
+
         /// Detach from the controlling terminal via `setsid(2)` before
         /// binding. Set by the auto-spawn path so the server outlives
         /// the launching client's terminal; a foreground `phux server`
