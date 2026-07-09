@@ -599,21 +599,37 @@ and refuses to start on a malformed enabled endpoint or a duplicate name.
 Disabled entries are skipped. Dialing and routing are later federation
 slices; without `--hub` the server ignores the registry entirely.
 
+The hub authenticates to a satellite as an ordinary remote consumer
+(ADR-0038): a pairing bearer token plus a TLS certificate-fingerprint pin,
+both produced by running `phux pair` on the satellite host. The token is
+stored **by reference** — `token-file` is an absolute path to an owner-only
+file holding the hex token (the same shape as the server's token store); the
+secret never appears in `config.toml` and is never printed by the lifecycle
+verbs. `cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
+digits, optionally colon-separated; not a secret, stored inline).
+
 ```toml
 [[satellites]]
 name = "devbox"
-endpoint = "ssh://devbox"
+endpoint = "quic://devbox.example:8788"
 enabled = true
+token-file = "/home/me/.local/state/phux/satellites/devbox.token"
+cert-fingerprint = "AB:CD:..."
 ```
 
 The lifecycle verbs edit `[[satellites]]` in `config.toml` without
 starting a server:
 
 ```
-phux satellite add devbox ssh://devbox
+phux satellite add devbox quic://devbox.example:8788 \
+    --token-file /home/me/.local/state/phux/satellites/devbox.token \
+    --cert-fingerprint AB:CD:...
 phux satellite list --json
 phux satellite remove devbox
 ```
+
+`add` is add-or-update and replaces the whole entry, so repeat the auth
+flags when re-adding a name; omitting them clears the stored auth material.
 
 ### 4.3 Reloading
 
