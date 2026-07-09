@@ -266,6 +266,8 @@ mod tests {
             name: name.to_owned(),
             endpoint: endpoint.to_owned(),
             enabled,
+            token_file: None,
+            cert_fingerprint: None,
         }
     }
 
