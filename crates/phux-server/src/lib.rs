@@ -15,6 +15,7 @@ pub mod downsample;
 pub mod extract;
 pub mod grid;
 pub mod hub;
+pub mod hooks;
 pub mod id_bridge;
 pub mod input;
 pub mod policy;

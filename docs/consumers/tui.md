@@ -1023,10 +1023,16 @@ implemented built-ins today are `session-name`, `time`, `windows`, and
 
 ## 9. Hooks
 
-> **Status:** Design intent. Config parsing for `[[hooks.<name>]]`
-> entries ships in `phux-config` (see `schema.rs`); the server-side
-> dispatcher that actually fires hooks on real events is **not yet
-> implemented** as of 2026-05-25. No tickets filed.
+> **Status:** Partially shipped (phux-r82.1). Config parsing for
+> `[[hooks.<name>]]` entries ships in `phux-config` (see `schema.rs`),
+> and the server-side dispatcher (`phux-server::hooks`) fires a starter
+> set of real events: `after-new-pane`, `pane-exit`, `focus-changed`,
+> `client-attached`, and `client-detached`. Enabled plugin manifests'
+> `[[events]]` entries whose `on` names one of these events fire through
+> the same dispatcher. The remaining hook points in the table below
+> (`after-new-session`, `after-new-window`, `after-kill-pane`,
+> `output-silenced`, `output-active`) stay design intent — the server
+> does not observe those edges yet.
 
 Hooks fire at named events. Each hook in the config is an
 array-of-tables (TOML `[[hooks.<name>]]`) of `{ when, action }` pairs.
@@ -1067,6 +1073,27 @@ Hook points (initial):
 | `focus-changed`       | any client changes focus                 |
 | `output-silenced`     | configurable silence threshold elapsed   |
 | `output-active`       | first byte after a silence               |
+
+Server-side execution semantics (the shipped subset):
+
+- **Child processes only.** There is no in-process plugin host. A `run`
+  action's `command` may be a string (executed via `/bin/sh -c`) or an
+  argv array (executed directly). `noop` matches and does nothing;
+  other action kinds (e.g. `message`) are client-side and the server
+  dispatcher skips them (the entry still consumes the event under
+  first-match-wins).
+- **Event context rides environment variables.** Every hook child gets
+  `PHUX_EVENT` plus one `PHUX_*` variable per context key:
+  `PHUX_TERMINAL_ID`, `PHUX_SESSION`, `PHUX_EXIT_CODE` (absent for
+  signal-killed children), `PHUX_CLIENT_ID`. Plugin event hooks
+  additionally get `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_EVENT_ID`, and
+  `PHUX_PLUGIN_ROOT`, and run with the plugin root as their working
+  directory.
+- **Fire-and-forget, bounded.** Events queue onto the dispatcher through
+  a non-blocking bounded channel (a full queue drops the event); at most
+  a fixed number of hook children run concurrently, each under a timeout
+  with kill-on-drop. A slow or wedged hook never blocks the terminal
+  actor hot path.
 
 ---
 

@@ -36,10 +36,16 @@ pub(crate) fn seed_session_with_actor(
         exit_notify,
         ..
     } = bundle;
-    state.with_mut(|s| {
+    let wire_terminal_id = state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
+        s.intern_terminal_wire(terminal)
     });
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the pane's actor is live.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, Some(name)),
+    );
     Ok(terminal)
 }
 
@@ -88,8 +94,14 @@ pub fn seed_session_with_pty(
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
-    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
+    spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the pane's actor is live and
+    // its PTY child spawned.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, Some(name)),
+    );
     Ok(terminal)
 }
 
@@ -134,8 +146,14 @@ pub fn spawn_pane_with_pty(
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
-    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
+    spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the split pane's actor is live.
+    let session_name = state.with(|s| s.registry.session(session).map(|sess| sess.name.clone()));
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, session_name.as_deref()),
+    );
     Ok(Some(terminal))
 }
 
@@ -1487,7 +1505,16 @@ pub(crate) fn handle_terminal_input(
         );
         return;
     }
-    state.with_mut(|s| {
+    // docs/consumers/tui.md §9 (phux-r82.1): an INPUT_FOCUS gained event
+    // that passes every routing gate below means a client's focus landed
+    // on this pane — the `focus-changed` hook point. Computed up front
+    // because `input` moves into the closure; fired AFTER the `with_mut`
+    // scope closes (the hook helper re-takes the state lock).
+    let is_focus_gained = matches!(
+        input,
+        TerminalInput::Focus(phux_protocol::input::focus::FocusEvent::Gained)
+    );
+    let routed = state.with_mut(|s| {
         let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
             warn!(
                 ?client_id,
@@ -1495,7 +1522,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input frame for unknown pane; dropping",
             );
-            return;
+            return false;
         };
         let Some(attached) = s.attached.get(&client_id) else {
             warn!(
@@ -1504,7 +1531,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input frame from non-attached client; dropping",
             );
-            return;
+            return false;
         };
         // Subscription gate: the pane must be one the client is observing.
         // For byc.8's "active pane only" subscription model this is the
@@ -1521,7 +1548,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "client not subscribed to pane; dropping input",
             );
-            return;
+            return false;
         }
         // Input-lease gate (ADR-0033, "take the wheel"): when another client
         // holds the lease, drop this client's input. Dropped, not errored —
@@ -1534,7 +1561,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input dropped: another client holds the input lease",
             );
-            return;
+            return false;
         }
         s.touch_session(session);
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
@@ -1544,7 +1571,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "no TerminalHandle for pane; dropping input",
             );
-            return;
+            return false;
         };
         match handle.input.try_send(input) {
             Ok(()) => {
@@ -1554,6 +1581,7 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "input routed to TerminalActor"
                 );
+                true
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
@@ -1562,6 +1590,7 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
                 );
+                false
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 debug!(
@@ -1570,9 +1599,16 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "pane actor gone; dropping input",
                 );
+                false
             }
         }
     });
+    if routed && is_focus_gained {
+        crate::hooks::fire_hook(
+            state,
+            crate::hooks::HookEvent::focus_changed(wire_terminal_id, client_id),
+        );
+    }
 }
 
 /// Route an inbound `FRAME_ACK` (SPEC §7.proto.1 / §12.2) to the

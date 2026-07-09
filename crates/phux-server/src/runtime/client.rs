@@ -123,6 +123,15 @@ pub(crate) fn spawn_terminal_exit_watcher(
             }
         });
 
+        // docs/consumers/tui.md §9 (phux-r82.1): the inner process exited —
+        // the `pane-exit` hook point. Fired off-lock (the hook helper
+        // re-takes the state lock briefly to clone the dispatcher handle);
+        // `fire` itself is a non-blocking try_send.
+        crate::hooks::fire_hook(
+            &state,
+            crate::hooks::HookEvent::pane_exit(&wire_terminal_id, exit_status),
+        );
+
         // phux-4li.11 / phux-4r1: broadcast the L1 lifecycle event
         // TERMINAL_CLOSED to every client that was subscribed to the
         // dying pane at reap time. The server's job ends here — it
@@ -246,6 +255,18 @@ pub(crate) async fn broadcast_terminal_closed(
 /// observes the mailbox as `Closed` on its next tick and reaps the
 /// orphaned per-consumer entry itself (phux-ddg, the self-healing path).
 pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
+    // docs/consumers/tui.md §9 (phux-r82.1): capture whether this client
+    // was actually attached (and to which session, if it still exists)
+    // BEFORE tearing anything down. Runs for every connection teardown,
+    // but the `client-detached` hook fires only for attached clients —
+    // a connection that never attached never "detaches".
+    let attached_session: Option<Option<String>> = state.with(|s| {
+        s.attached.get(&client_id).map(|client| {
+            s.registry
+                .session(client.session)
+                .map(|session| session.name.clone())
+        })
+    });
     state.with_mut(|s| s.remove_peer_identity(client_id));
     let wire_client_id =
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
@@ -292,6 +313,15 @@ pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: 
             });
     }
     state.with_mut(|s| s.detach(client_id));
+    // docs/consumers/tui.md §9 (phux-r82.1): the client is fully detached —
+    // the `client-detached` hook point (any reason: explicit DETACH,
+    // transport drop, EOF). Skipped for connections that never attached.
+    if let Some(session_name) = attached_session {
+        crate::hooks::fire_hook(
+            state,
+            crate::hooks::HookEvent::client_detached(client_id, session_name.as_deref()),
+        );
+    }
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.

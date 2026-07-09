@@ -29,6 +29,16 @@ phux-core.workspace = true
 # the server reads the schema's default and threads the resolved value into
 # each `TerminalActor`'s scrollback cap.
 phux-config.workspace = true
+# phux-plugin supplies the shared child-process runner (`run_command_spec`:
+# env injection, kill_on_drop, timeout) behind the server-side event-hook
+# dispatcher (`crate::hooks`, phux-r82.1). Reusing it keeps a single
+# execution path — the no-in-process-host rule — for plugin actions and
+# event hooks. Internal workspace crate; adds no new external dependencies.
+phux-plugin.workspace = true
+# `[[hooks.<name>]]` `when` predicates are `BTreeMap<String, toml::Value>`
+# in the phux-config schema, so the hook dispatcher's matcher names
+# `toml::Value` directly. Already in the graph via phux-config.
+toml.workspace = true
 # `GET_SCREEN` serializes `phux_core::ScreenState` into the COMMAND_RESULT
 # JSON payload (ADR-0022 §2); the CLI deserializes the same contract.
 chrono.workspace = true
