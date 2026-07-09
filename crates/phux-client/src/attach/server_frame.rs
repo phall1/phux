@@ -2170,6 +2170,7 @@ mod tests {
         let overlay = Overlay;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
+        let mut agent_meta = AgentMetaIndex::default();
         handle_server_frame(
             &mut out,
             FrameKind::Event {
@@ -2194,6 +2195,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut agent_meta,
             false,
             false,
         )
