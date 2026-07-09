@@ -50,7 +50,8 @@ use super::paint::{
 };
 use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
-use super::server_frame::handle_server_frame;
+use super::server_frame::{AgentMetaIndex, handle_server_frame};
+use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::sidebar::SidebarPainter;
@@ -203,6 +204,10 @@ fn format_attention_hint(asking: usize) -> Option<String> {
 /// paints nothing else (the `chrome_dirty` event path) can gate its repaint
 /// on it instead of repainting the full frame for state the user already
 /// sees.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "arg list mirrors the driver's chrome state; the ADR-0040 agent index made it 8"
+)]
 fn refresh_window_chrome(
     status_bar: Option<&mut StatusBarPainter>,
     sidebar_painter: &mut SidebarPainter,
@@ -211,8 +216,11 @@ fn refresh_window_chrome(
     focused_pane: Option<&TerminalId>,
     zoomed: Option<&TerminalId>,
     own_client_id: Option<ClientId>,
+    // ADR-0040: structured `phux.agent/v1` records; a window whose focused
+    // leaf carries one is labelled from it instead of the OSC title.
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
 ) -> bool {
-    let windows = window_infos(workspace, panes, zoomed);
+    let windows = window_infos(workspace, panes, zoomed, agent_meta);
     let mut changed = false;
     if let Some(sb) = status_bar {
         changed |= sb.set_windows(windows.clone());
@@ -743,6 +751,9 @@ pub async fn run_headless_rendered(
     let mut pending_splits: HashMap<u32, PendingSplit> = HashMap::new();
     let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
     let mut layout_get_request_id: Option<u32> = None;
+    // ADR-0040: one-shot `phux.agent/v1` reads so the composited window
+    // labels prefer structured agent records, matching a live attach.
+    let mut agent_meta = AgentMetaIndex::default();
 
     // Replay ATTACHED so the focused-pane + workspace bootstrap runs once.
     let outcome = handle_server_frame(
@@ -761,10 +772,29 @@ pub async fn run_headless_rendered(
         layout_get_request_id,
         &mut pending_splits,
         &mut pending_windows,
+        &mut agent_meta,
         false,
         true,
     )?;
     let focused_session = outcome.sessions.map(|(_, focused)| focused);
+
+    // ADR-0040: pipeline one `phux.agent/v1` GET per pane (no SUBSCRIBE —
+    // this is a one-shot composite). Replies drain through the settle loop
+    // below and land in `agent_meta.records`. Request ids start high above
+    // the layout GET's `1` so the two reply streams cannot collide.
+    {
+        let mut req_id: u32 = 1000;
+        for id in panes.keys() {
+            agent_meta.pending.insert(req_id, id.clone());
+            conn.send(&FrameKind::GetMetadata {
+                request_id: req_id,
+                scope: Scope::Terminal(id.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+            })
+            .await?;
+            req_id = req_id.wrapping_add(1);
+        }
+    }
 
     // Pull any persisted multi-pane layout for this session so dividers +
     // tiling match a live attach. One-shot, so we GET but do not SUBSCRIBE.
@@ -804,6 +834,7 @@ pub async fn run_headless_rendered(
                         layout_get_request_id,
                         &mut pending_splits,
                         &mut pending_windows,
+                        &mut agent_meta,
                         false,
                         true,
                     )?;
@@ -817,7 +848,7 @@ pub async fn run_headless_rendered(
 
     // Seed the window/tab strip exactly as the live loop does before its
     // first bar paint, so the composited bar shows the windows.
-    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
+    let windows = window_infos(&workspace, &panes, zoomed.as_ref(), &agent_meta.records);
     if let Some(sb) = status_bar.as_mut() {
         sb.set_windows(windows.clone());
     }
@@ -1232,6 +1263,12 @@ async fn main_loop<W: super::RenderSink>(
     // same lifecycle as `pending_splits`. The TerminalSpawned arm checks
     // this map first; a hit opens a new window on the spawned pane.
     let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
+    // ADR-0040 (phux-3ert): the structured agent-identity index. Each pane
+    // gets a one-shot `GET_METADATA` + a live `SUBSCRIBE_METADATA` on
+    // `phux.agent/v1` (see `sync_agent_meta_subscriptions`); decoded records
+    // feed the window labels so the sidebar/tab strip renders agent
+    // name/state from structured data, with the OSC title as the fallback.
+    let mut agent_meta = AgentMetaIndex::default();
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -1400,6 +1437,7 @@ async fn main_loop<W: super::RenderSink>(
         layout_get_request_id,
         &mut pending_splits,
         &mut pending_windows,
+        &mut agent_meta,
         overlays.is_active(),
         // Single replayed frame — no burst to coalesce, paint it.
         false,
@@ -1445,6 +1483,16 @@ async fn main_loop<W: super::RenderSink>(
         })
         .await?;
     }
+    // ADR-0040: read + watch every bootstrap pane's `phux.agent/v1` record
+    // so window labels can prefer structured agent identity from the first
+    // paint. The same sweep re-runs whenever the pane set changes.
+    sync_agent_meta_subscriptions(
+        conn,
+        panes.keys().cloned().collect(),
+        &mut agent_meta,
+        &mut next_request_id,
+    )
+    .await?;
     // phux-4li.17: seed the window/tab strip from the bootstrap layout so
     // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
     // phux-4h5a: the sidebar painter tracks the same window list so the strip's
@@ -1458,6 +1506,7 @@ async fn main_loop<W: super::RenderSink>(
             focused_pane.as_ref(),
             zoomed.as_ref(),
             own_client_id,
+            &agent_meta.records,
         );
     }
 
@@ -1651,6 +1700,15 @@ async fn main_loop<W: super::RenderSink>(
                     .await?;
                 }
                 if layout_changed {
+                    // ADR-0040: an input action may have split/closed panes;
+                    // keep the agent-metadata watches in step with the set.
+                    sync_agent_meta_subscriptions(
+                        conn,
+                        panes.keys().cloned().collect(),
+                        &mut agent_meta,
+                        &mut next_request_id,
+                    )
+                    .await?;
                     refresh_window_chrome(
                         status_bar.as_mut(),
                         &mut sidebar_painter,
@@ -1659,6 +1717,7 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
+                        &agent_meta.records,
                     );
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
@@ -1777,11 +1836,26 @@ async fn main_loop<W: super::RenderSink>(
                             layout_get_request_id,
                             &mut pending_splits,
                             &mut pending_windows,
+                            &mut agent_meta,
                             overlays.is_active(),
                             defer_paint,
                         )?;
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
+                        }
+                        // ADR-0040: the frame may have added panes
+                        // (TerminalSpawned, a peer's layout broadcast) or
+                        // removed them (TerminalClosed). Re-sweep so every
+                        // live pane has a `phux.agent/v1` watch; the len
+                        // guard keeps the steady state zero-cost.
+                        if panes.len() != agent_meta.subscribed.len() {
+                            sync_agent_meta_subscriptions(
+                                conn,
+                                panes.keys().cloned().collect(),
+                                &mut agent_meta,
+                                &mut next_request_id,
+                            )
+                            .await?;
                         }
                         // phux-4li.20: refresh the cached session graph
                         // whenever an ATTACHED snapshot lands so the
@@ -1809,6 +1883,7 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
+                                &agent_meta.records,
                             );
                             if chrome_changed
                                 && !overlays.is_active()
@@ -1911,6 +1986,7 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
+                                &agent_meta.records,
                             );
                             if !overlays.is_active()
                                 && let Some(ls) =
@@ -1932,6 +2008,39 @@ async fn main_loop<W: super::RenderSink>(
                             // pending request id so a stray late
                             // MetadataValue can't trample state.
                             layout_get_request_id = None;
+                        }
+                        // ADR-0040: a `phux.agent/v1` record changed (GET
+                        // reply or subscribed broadcast). The window labels
+                        // derive from it, so recompose the tab strip +
+                        // sidebar and repaint — the same shape as the
+                        // layout_replaced arm, minus the layout bookkeeping.
+                        if outcome.agent_meta_changed {
+                            refresh_window_chrome(
+                                status_bar.as_mut(),
+                                &mut sidebar_painter,
+                                &workspace,
+                                &panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                                &agent_meta.records,
+                            );
+                            if !overlays.is_active()
+                                && let Some(ls) =
+                                    workspace.render_window(zoomed.as_ref()).as_deref()
+                            {
+                                paint_full_frame(
+                                    out,
+                                    ls,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
+                                    &session_name,
+                                );
+                            }
                         }
                         }
                     }
@@ -2019,6 +2128,15 @@ async fn main_loop<W: super::RenderSink>(
                     .await?;
                 }
                 if layout_changed {
+                    // ADR-0040: keep the agent-metadata watches in step
+                    // with a pane set changed by this flush's actions.
+                    sync_agent_meta_subscriptions(
+                        conn,
+                        panes.keys().cloned().collect(),
+                        &mut agent_meta,
+                        &mut next_request_id,
+                    )
+                    .await?;
                     refresh_window_chrome(
                         status_bar.as_mut(),
                         &mut sidebar_painter,
@@ -2027,6 +2145,7 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
+                        &agent_meta.records,
                     );
                 }
                 if layout_changed
@@ -2420,14 +2539,20 @@ fn push_which_key_overlay(
 /// Snapshot the window/tab strip, preferring each window's live OSC
 /// title over its stored name.
 ///
-/// A window's display label is the OSC 0/2 title of its focused leaf — the
-/// title the running program set (a shell shows the cwd/command, `vim` the
-/// file, an agent its task) — read straight from that pane's client-side
-/// libghostty mirror ([`PaneSlot::terminal`]). This is the tmux
-/// "automatic-rename" behaviour and Warp's tab titling, entirely
-/// client-local: titles flow in the PTY VT the mirror already consumes, so
-/// no wire frame or L3 key is involved. When the focused leaf has no slot
-/// yet or its title is empty, fall back to the window's stored `name`.
+/// A window's display label prefers, in order (ADR-0040):
+///
+/// 1. **The structured `phux.agent/v1` record** of the window's focused
+///    leaf, when one is declared — [`AgentRecord::label`], e.g.
+///    `reviewer (blocked)`. No title parsing, no substring heuristics.
+/// 2. **The OSC 0/2 title** of the focused leaf — the title the running
+///    program set (a shell shows the cwd/command, `vim` the file, an agent
+///    its task) — read straight from that pane's client-side libghostty
+///    mirror ([`PaneSlot::terminal`]). This is the tmux "automatic-rename"
+///    behaviour and Warp's tab titling, entirely client-local: titles flow
+///    in the PTY VT the mirror already consumes. It stays as the
+///    compatibility path for agents that only speak title conventions.
+/// 3. **The window's stored `name`**, when the focused leaf has no slot
+///    yet or its title is empty.
 fn window_infos(
     workspace: &Workspace,
     panes: &HashMap<TerminalId, PaneSlot>,
@@ -2435,16 +2560,20 @@ fn window_infos(
     // `Z` marker (`WindowInfo.zoomed`) when a pane is zoomed; non-active tabs
     // never show it (zoom is per the active window).
     zoomed: Option<&TerminalId>,
+    // ADR-0040: Terminal → decoded `phux.agent/v1` record, kept live by the
+    // driver's per-pane metadata subscriptions.
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
 ) -> Vec<phux_config::widget::WindowInfo> {
     workspace
         .windows
         .iter()
         .enumerate()
         .map(|(i, w)| {
-            let title = w
-                .state
-                .focus
-                .as_ref()
+            let focus = w.state.focus.as_ref();
+            let agent_label = focus
+                .and_then(|fid| agent_meta.get(fid))
+                .map(AgentRecord::label);
+            let title = focus
                 .and_then(|fid| panes.get(fid))
                 .and_then(|slot| slot.terminal.title().ok())
                 .map(str::trim)
@@ -2463,7 +2592,7 @@ fn window_infos(
                 .iter()
                 .any(|id| panes.get(id).is_some_and(|slot| slot.attention));
             phux_config::widget::WindowInfo {
-                name: title.unwrap_or_else(|| w.name.clone()),
+                name: agent_label.or(title).unwrap_or_else(|| w.name.clone()),
                 active,
                 zoomed: active && zoomed.is_some(),
                 attention,
@@ -2487,6 +2616,55 @@ pub(super) fn clear_attention_on_input(
         }
         _ => false,
     }
+}
+
+/// ADR-0040 (phux-3ert): reconcile the agent-metadata index with the live
+/// pane set.
+///
+/// For every pane that has no live `phux.agent/v1` watch yet, send a
+/// one-shot `GET_METADATA` (the read-back for a record set before we
+/// attached; the reply is correlated through `AgentMetaIndex::pending`) plus
+/// a `SUBSCRIBE_METADATA` (the push path for later `SET`/`DELETE`
+/// broadcasts). Panes that closed are pruned from every side table — the
+/// server already dropped their per-Terminal store and our subscription
+/// with the Terminal, so pruning is purely local hygiene. Idempotent: a
+/// pane already in `subscribed` is skipped, so callers can re-run the sweep
+/// on every pane-set change (bootstrap, split, new window, layout
+/// broadcast) without duplicate wire traffic.
+async fn sync_agent_meta_subscriptions(
+    conn: &mut Connection,
+    // Owned id list (not `&HashMap<_, PaneSlot>`): `PaneSlot` holds a
+    // libghostty mirror that is not `Send`, and holding a reference to it
+    // across the sends would make this future `!Send` (clippy
+    // `future_not_send`). Callers pass `panes.keys().cloned().collect()`.
+    pane_ids: Vec<TerminalId>,
+    agent_meta: &mut AgentMetaIndex,
+    next_request_id: &mut u32,
+) -> Result<(), AttachError> {
+    agent_meta.subscribed.retain(|id| pane_ids.contains(id));
+    agent_meta.records.retain(|id, _| pane_ids.contains(id));
+    agent_meta.pending.retain(|_, id| pane_ids.contains(id));
+    for id in &pane_ids {
+        if agent_meta.subscribed.contains(id) {
+            continue;
+        }
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.wrapping_add(1);
+        agent_meta.pending.insert(request_id, id.clone());
+        conn.send(&FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Terminal(id.clone()),
+            key: TERMINAL_AGENT_KEY.to_owned(),
+        })
+        .await?;
+        conn.send(&FrameKind::SubscribeMetadata {
+            scope: Scope::Terminal(id.clone()),
+            key: TERMINAL_AGENT_KEY.to_owned(),
+        })
+        .await?;
+        agent_meta.subscribed.insert(id.clone());
+    }
+    Ok(())
 }
 
 /// phux-x2hm: the per-leaf rect map of the **zoom-honoring** view, used as the
@@ -3099,7 +3277,7 @@ mod tests {
         asking.attention = true;
         panes.insert(back.clone(), asking);
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert!(
             !infos[0].attention,
             "quiet window must not carry the marker"
@@ -3111,7 +3289,7 @@ mod tests {
 
         // Clearing the flag clears the marker.
         assert!(clear_attention_on_input(&mut panes, &back));
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert!(!infos[1].attention);
     }
 
@@ -3358,7 +3536,7 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert_eq!(infos.len(), 1);
         assert_eq!(
             infos[0].name, "~/src/phux",
@@ -3375,7 +3553,7 @@ mod tests {
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         panes.insert(id, PaneSlot::new_with_size(80, 24).expect("slot"));
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert_eq!(infos[0].name, "1");
     }
 
@@ -3389,8 +3567,51 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;   \x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert_eq!(infos[0].name, "1");
+    }
+
+    #[test]
+    fn window_infos_prefers_agent_record_over_osc_title() {
+        // ADR-0040: a declared `phux.agent/v1` record labels the window from
+        // structured data — the OSC title (set here to an unrelated string)
+        // must NOT leak through, and no substring parsing is involved.
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
+        panes.insert(id.clone(), slot);
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "reviewer".to_owned(),
+                state: crate::agent_meta::AgentMetaState::Blocked,
+                ..AgentRecord::default()
+            },
+        );
+
+        let infos = window_infos(&workspace, &panes, None, &records);
+        assert_eq!(
+            infos[0].name, "!reviewer (blocked)",
+            "structured record must beat the OSC title"
+        );
+    }
+
+    #[test]
+    fn window_infos_falls_back_to_title_when_record_cleared() {
+        // ADR-0040 compatibility path: no record ⇒ the OSC title labels the
+        // tab exactly as before.
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;claude task\x07");
+        panes.insert(id, slot);
+
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        assert_eq!(infos[0].name, "claude task");
     }
 
     #[test]
@@ -3403,12 +3624,12 @@ mod tests {
         workspace.select(0); // active window is index 0
         let panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
 
-        let infos = window_infos(&workspace, &panes, Some(&active));
+        let infos = window_infos(&workspace, &panes, Some(&active), &HashMap::new());
         assert!(infos[0].zoomed, "active window reflects the zoom state");
         assert!(!infos[1].zoomed, "a non-active window is never zoomed");
 
         // No zoom ⇒ no window is marked.
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
         assert!(!infos[0].zoomed && !infos[1].zoomed);
     }
 

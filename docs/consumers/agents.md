@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
 # The phux agent CLI
@@ -147,13 +147,30 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   suggestions, excessive suggestion counts, and unknown panes fail without
   emitting an event.
 - **`phux agent <list|show|explain> [TARGET] [--json] [--socket P]`** —
-  project public agent state from already-phux-shaped evidence: session/pane
-  metadata, OSC/title hints, side-effect-free `snapshot --cells`, and enabled
-  plugin `[[agents]]` declarations. `list` covers every pane; `show` returns
-  the selected pane; `explain` keeps the same state but expands the evidence
-  trail in the human view. `--json` emits `AgentStateJson` (§4.7). States are
-  `unknown`, `idle`, `working`, `blocked`, or `done`; each state carries
-  confidence and ordered provenance so consumers can show why phux believes it.
+  project public agent state. A pane carrying a declared `phux.agent/v1`
+  record (ADR-0040; see `agent set` below) reports straight from it with
+  `agent_record` provenance and no heuristics; otherwise state is inferred
+  from already-phux-shaped evidence: session/pane metadata, OSC/title hints,
+  side-effect-free `snapshot --cells`, and enabled plugin `[[agents]]`
+  declarations. `list` covers every pane; `show` returns the selected pane;
+  `explain` keeps the same state but expands the evidence trail in the human
+  view. `--json` emits `AgentStateJson` (§4.7). States are `unknown`, `idle`,
+  `working`, `blocked`, or `done`; each state carries confidence and ordered
+  provenance so consumers can show why phux believes it.
+- **`phux agent set [TARGET] --name NAME [--kind K] [--state S]
+  [--attention A] [--session L] [--socket P]`** — declare the target pane's
+  agent identity by writing the whole `phux.agent/v1` L3 record
+  ([`docs/spec/L3.md`](../spec/L3.md) §3.7, ADR-0040; last writer wins). An
+  agent integration calls it (or issues the equivalent `SET_METADATA`) when
+  it starts, changes state, or hands off, instead of encoding lifecycle into
+  its OSC title. The declared record outranks title/screen heuristics in
+  every consumer, and the reference TUI labels the pane's window/sidebar tab
+  from it. States: `unknown|idle|working|blocked|done`; attention:
+  `none|low|normal|high` (defaults derive from state). Prints the confirmed
+  record as `@N<TAB>json`.
+- **`phux agent clear [TARGET] [--socket P]`** — delete the declared record
+  (`DELETE_METADATA`); consumers fall back to the OSC-title and screen
+  heuristics. Prints `@N<TAB>-` on confirmation.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a new session. Without `--json` it creates and attaches: an explicit
   `-s NAME` that already exists is an error (like tmux's duplicate-session

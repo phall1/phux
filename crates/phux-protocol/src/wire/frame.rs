@@ -217,6 +217,23 @@ pub const TERMINAL_TAGS_KEY: &str = "phux.tags/v1";
 /// ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)).
 pub const TERMINAL_LINK_KEY: &str = "phux.link/v1";
 
+/// Conventional L3 metadata key holding a Terminal's declared agent
+/// identity and lifecycle record (ADR-0040, `phux-3ert`).
+///
+/// Scope: the Terminal the agent runs in. Value: a UTF-8 JSON object
+/// `{ "name": str, "kind"?: str, "state"?: str, "attention"?: str,
+/// "session"?: str }` where `state` and `attention` are OPEN string enums —
+/// a consumer reading an unrecognized value treats it as `unknown` /
+/// `normal` rather than failing the parse. The server stores the bytes
+/// without interpreting them ([`docs/spec/L3.md`](../../../docs/spec/L3.md)
+/// §3.7); the *schema* is the normative client convention this key names, so
+/// a record written by one integration (CLI, plugin, provider hook) reads
+/// identically in every consumer. A consumer that finds this record MUST
+/// prefer it over OSC-title or screen-scrape heuristics; heuristics remain
+/// the fallback when the key is absent. Set via `SET_METADATA`, cleared via
+/// `DELETE_METADATA`, observed via `GET_METADATA`/`SUBSCRIBE_METADATA`.
+pub const TERMINAL_AGENT_KEY: &str = "phux.agent/v1";
+
 /// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries

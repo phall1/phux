@@ -14,9 +14,40 @@ use phux_protocol::wire::info::SessionInfo;
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot};
 use super::paint::{SidebarReservation, content_rect, paint_bar_after_pane, paint_focused_pane};
+use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY, parse_agent_record};
 use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
 use crate::render::chrome::status_bar::StatusBarPainter;
+
+/// ADR-0040 (`phux-3ert`): the driver-held index of `phux.agent/v1` records.
+///
+/// `records` is what the window chrome reads (structured agent labels for
+/// the sidebar/tab strip); `pending` correlates in-flight `GET_METADATA`
+/// request ids to the Terminal they asked about; `subscribed` tracks which
+/// Terminals already have a live `SUBSCRIBE_METADATA` so the driver's
+/// subscription sweep is idempotent.
+#[derive(Debug, Default)]
+pub(super) struct AgentMetaIndex {
+    /// Terminal → its decoded agent record (absent = no declared agent).
+    pub(super) records: HashMap<TerminalId, AgentRecord>,
+    /// In-flight `GET_METADATA` request id → the Terminal it targets.
+    pub(super) pending: HashMap<u32, TerminalId>,
+    /// Terminals with a live `SUBSCRIBE_METADATA` on the agent key.
+    pub(super) subscribed: std::collections::HashSet<TerminalId>,
+}
+
+impl AgentMetaIndex {
+    /// Apply a metadata value for `terminal` (a `GET` reply or a
+    /// `METADATA_CHANGED` broadcast; `None` bytes = tombstone). Returns
+    /// `true` when the stored record actually changed, so the driver only
+    /// repaints chrome for real transitions.
+    fn apply(&mut self, terminal: &TerminalId, bytes: Option<&[u8]>) -> bool {
+        match bytes.and_then(parse_agent_record) {
+            Some(record) => self.records.insert(terminal.clone(), record.clone()) != Some(record),
+            None => self.records.remove(terminal).is_some(),
+        }
+    }
+}
 
 /// Outcome of processing a single server-to-client frame.
 ///
@@ -84,6 +115,12 @@ pub(super) struct FrameOutcome {
     /// (supervisory badge, attention hint, window-tab markers) even though no
     /// grid content changed. Set ONLY by the `Event` arms.
     pub(super) chrome_dirty: bool,
+    /// ADR-0040: `true` ⇒ a `phux.agent/v1` record changed for some pane
+    /// (a `GET_METADATA` reply or a `METADATA_CHANGED` broadcast). Window
+    /// labels derive from it, so the driver refreshes the window chrome
+    /// (tab strip + sidebar) and repaints. Set ONLY by the
+    /// `MetadataValue` / `MetadataChanged` arms.
+    pub(super) agent_meta_changed: bool,
 }
 
 /// Payload-free label for the inbound `FrameKind` — the `kind` field on
@@ -151,6 +188,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     pending_layout_request: Option<u32>,
     pending_splits: &mut HashMap<u32, PendingSplit>,
     pending_windows: &mut HashMap<u32, PendingWindow>,
+    // ADR-0040: the driver-held `phux.agent/v1` index. The MetadataValue /
+    // MetadataChanged arms decode agent records into it; the driver reads
+    // it when composing window labels.
+    agent_meta: &mut AgentMetaIndex,
     // phux-5ke.4: when `true` an overlay is on top; pane libghostty
     // mirrors keep ingesting `vt_write` (per ADR-0013) but stdout
     // flushes (render_at, bar paint, predict-overlay paint) are
@@ -702,6 +743,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // the workspace in place. `value: None` means "no persisted
         // layout" — keep the single-pane bootstrap untouched.
         FrameKind::MetadataValue { request_id, value } => {
+            // ADR-0040: a pending per-Terminal `phux.agent/v1` GET reply.
+            // `value: None` (key absent) clears any stale record.
+            if let Some(terminal) = agent_meta.pending.remove(&request_id) {
+                let changed = agent_meta.apply(&terminal, value.as_deref());
+                return Ok(FrameOutcome {
+                    agent_meta_changed: changed,
+                    ..FrameOutcome::default()
+                });
+            }
             if Some(request_id) != pending_layout_request {
                 tracing::debug!(
                     request_id,
@@ -735,6 +785,19 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // fall back to the single-pane bootstrap so the next render
         // doesn't try to draw against a stale tree.
         FrameKind::MetadataChanged { scope, key, value } => {
+            // ADR-0040: a `phux.agent/v1` broadcast for a subscribed pane.
+            // A tombstone (`value: None`, the DELETE_METADATA path) clears
+            // the record and the label falls back to the OSC title.
+            if key == TERMINAL_AGENT_KEY {
+                if let Scope::Terminal(terminal) = &scope {
+                    let changed = agent_meta.apply(terminal, value.as_deref());
+                    return Ok(FrameOutcome {
+                        agent_meta_changed: changed,
+                        ..FrameOutcome::default()
+                    });
+                }
+                return Ok(FrameOutcome::default());
+            }
             if !is_layout_key(&scope, &key) {
                 return Ok(FrameOutcome::default());
             }
@@ -1209,7 +1272,7 @@ fn reconcile_loaded_layout(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{FrameOutcome, handle_server_frame};
+    use super::{AgentMetaIndex, FrameOutcome, handle_server_frame};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1467,6 +1530,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -1547,6 +1611,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -1701,6 +1766,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -2007,6 +2073,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -2051,6 +2118,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -2228,6 +2296,144 @@ mod tests {
             outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes,
             "the fold triggers repaint + sibling broadcast + survivor reflow",
         );
+    }
+
+    /// ADR-0040: drive one frame through [`handle_server_frame`] with a
+    /// caller-owned [`AgentMetaIndex`], for the agent-metadata arms.
+    fn drive_meta_frame(frame: FrameKind, agent_meta: &mut AgentMetaIndex) -> FrameOutcome {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            &mut out,
+            frame,
+            &mut panes,
+            &mut layout,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            agent_meta,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// ADR-0040: a subscribed `phux.agent/v1` broadcast decodes into the
+    /// index and flags the chrome refresh; the tombstone (DELETE) clears
+    /// the record so labels fall back to the OSC-title path.
+    #[test]
+    fn agent_metadata_broadcast_updates_index_and_tombstone_clears_it() {
+        use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(br#"{"name":"reviewer","state":"blocked"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "a new record must flag chrome");
+        let record = agent_meta.records.get(&pane).expect("record stored");
+        assert_eq!(record.name, "reviewer");
+        assert_eq!(record.state, crate::agent_meta::AgentMetaState::Blocked);
+
+        // Re-asserting the identical record is a no-op (no repaint churn).
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(br#"{"name":"reviewer","state":"blocked"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(
+            !outcome.agent_meta_changed,
+            "identical record must not flag"
+        );
+
+        // Tombstone (DELETE_METADATA) clears the record.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "a cleared record must flag");
+        assert!(!agent_meta.records.contains_key(&pane));
+    }
+
+    /// ADR-0040: a `GET_METADATA` reply correlated through
+    /// `AgentMetaIndex::pending` seeds the record for a pane whose agent
+    /// declared itself before we attached; an absent key (`value: None`)
+    /// resolves the pending entry without inventing a record.
+    #[test]
+    fn agent_metadata_get_reply_is_correlated_by_request_id() {
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+        agent_meta.pending.insert(77, pane.clone());
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataValue {
+                request_id: 77,
+                value: Some(br#"{"name":"codex","kind":"codex","state":"working"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed);
+        assert!(agent_meta.pending.is_empty(), "pending entry consumed");
+        assert_eq!(agent_meta.records.get(&pane).expect("record").name, "codex");
+
+        agent_meta.pending.insert(78, pane);
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataValue {
+                request_id: 78,
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "absent key clears the record");
+        assert!(agent_meta.records.is_empty());
+    }
+
+    /// ADR-0040: malformed record bytes (bad JSON, empty name) must read
+    /// as "no declared agent" — never a stored record, never a crash.
+    #[test]
+    fn agent_metadata_rejects_malformed_records() {
+        use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(b"not json at all".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.agent_meta_changed);
+        assert!(agent_meta.records.is_empty());
     }
 }
 
