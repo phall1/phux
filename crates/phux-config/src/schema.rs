@@ -291,6 +291,20 @@ pub struct KeybindingsCfg {
     /// Bindings that fire any time (typically `super`/`hyper` chords).
     #[serde(default)]
     pub global: BTreeMap<String, Action>,
+
+    /// Show the which-key popup: after the prefix is pressed, if no
+    /// continuation chord arrives within [`Self::which_key_delay_ms`],
+    /// the client pops a panel listing the available prefix-table
+    /// bindings. Any key dismisses it and executes normally; Esc
+    /// cancels the prefix. Default `true`.
+    #[serde(default = "default_true", rename = "which-key")]
+    pub which_key: bool,
+
+    /// Milliseconds to wait after the prefix before showing the
+    /// which-key popup. Default `600`. A fast continuation chord always
+    /// suppresses the popup entirely.
+    #[serde(default = "default_which_key_delay_ms", rename = "which-key-delay-ms")]
+    pub which_key_delay_ms: u64,
 }
 
 impl Default for KeybindingsCfg {
@@ -299,12 +313,19 @@ impl Default for KeybindingsCfg {
             prefix: default_prefix(),
             prefix_table: BTreeMap::new(),
             global: BTreeMap::new(),
+            which_key: true,
+            which_key_delay_ms: default_which_key_delay_ms(),
         }
     }
 }
 
 fn default_prefix() -> String {
     "C-a".to_owned()
+}
+
+/// Serde default for [`KeybindingsCfg::which_key_delay_ms`].
+const fn default_which_key_delay_ms() -> u64 {
+    600
 }
 
 /// An action attached to a binding, hook, or status slot.

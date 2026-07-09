@@ -76,6 +76,15 @@ window-size = "smallest"
 # the prefix, your next keystroke is matched against `prefix-table`.
 prefix = "C-a"
 
+# Which-key popup: press the prefix and hesitate for which-key-delay-ms
+# and a small panel pops up listing every prefix-table continuation
+# (built from YOUR bindings, including rebinds). It is display-only: any
+# key dismisses it and executes its binding exactly as if the popup were
+# not there; Esc dismisses it and cancels the prefix. Set
+# which-key = false to disable.
+which-key = true
+which-key-delay-ms = 600
+
 [keybindings.prefix-table]
 # Pane splits, tmux-style: " stacks panes (horizontal divider), % places
 # them side-by-side (vertical divider).

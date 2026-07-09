@@ -828,6 +828,31 @@ another session switches to that session (its windows then list under its
 own picker). Directly selecting a window inside a different session in one
 step is not yet wired — see the picker's source for the gap.
 
+### 5.6 Which-key popup
+
+Press the prefix and hesitate, and a small floating panel lists every
+prefix-table continuation — key on the left, action on the right — built
+from your live bindings (rebinds included; it is the same config snapshot
+the help overlay reads). The numeric window-jump keys collapse into a
+single `0-9` row.
+
+The popup is display-only and never captures input:
+
+- **Any key** dismisses it and executes its binding exactly as if the
+  popup had never appeared. A continuation typed *before* the delay
+  elapses suppresses the popup entirely — it can never eat or delay a
+  chord.
+- **Esc** dismisses it and cancels the pending prefix (nothing is sent to
+  the pane).
+
+Configured under `[keybindings]`:
+
+```toml
+[keybindings]
+which-key = true          # default; false disables the popup
+which-key-delay-ms = 600  # hesitation before it appears
+```
+
 ---
 
 ## 6. Layout
@@ -1215,6 +1240,7 @@ The shipped defaults, in one place:
 | Backpressure threshold        | 32 unacked frames                        |
 | Journal size cap (per pane)   | 10 MiB ring                              |
 | Prefix key                    | `C-a`                                    |
+| Which-key popup               | on, 600 ms hesitation delay              |
 | Pane on PTY exit              | close                                    |
 | Mouse                         | on                                       |
 | New-pane CWD inheritance      | `inherit-focused` (tmux-shaped)          |
@@ -1247,9 +1273,15 @@ Discoverability: the default status bar keeps the highest-value prefix
 affordances visible without consuming pane space. If the prefix is
 rebound, the `help-hints` widget renders the configured prefix.
 
-Beyond that, `?` after the prefix opens a popup listing every binding.
-The popup is rendered server-side (a temporary overlay pane) so
-keyboard users and GUI clients both see the same list.
+Beyond that, two client-rendered overlays teach the bindings themselves
+(the TUI owns its chrome — nothing here is server-rendered):
+
+- `C-a ?` opens the **help modal**, a centered reference listing every
+  prefix-table and global binding. Esc (or `?` again) dismisses it.
+- Press `C-a` and *hesitate*, and the **which-key popup** appears after
+  `which-key-delay-ms` (default 600 ms), listing the available prefix
+  continuations. Any key dismisses it and executes normally; Esc cancels
+  the prefix. See §5.6.
 
 ---
 
