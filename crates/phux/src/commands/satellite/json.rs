@@ -22,6 +22,10 @@ fn satellite_json(entry: &SatelliteEntry) -> serde_json::Value {
         "name": entry.name,
         "endpoint": entry.endpoint,
         "enabled": entry.enabled,
+        // ADR-0038 auth material, by reference only: the token-file *path*
+        // is machine-readable, the token bytes behind it never appear.
+        "token_file": entry.token_file.as_ref().map(|p| p.display().to_string()),
+        "cert_fingerprint": entry.cert_fingerprint,
     })
 }
 

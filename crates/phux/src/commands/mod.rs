@@ -811,6 +811,10 @@ pub(crate) enum SatelliteAction {
     },
 
     /// Add or update a satellite endpoint in `config.toml`.
+    ///
+    /// Updating replaces the whole entry, so repeat `--token-file` /
+    /// `--cert-fingerprint` when re-adding a name or the auth material
+    /// is cleared.
     Add {
         /// Hub-local satellite name.
         name: String,
@@ -822,6 +826,20 @@ pub(crate) enum SatelliteAction {
         /// Register the satellite but leave it disabled.
         #[arg(long)]
         disabled: bool,
+
+        /// Path to a file holding the pairing bearer token for this
+        /// satellite, minted by running `phux pair` on the satellite host
+        /// (ADR-0038). The file holds one hex token and should be
+        /// owner-only (0600); only the path lands in `config.toml` — the
+        /// token itself is never written to config or printed.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<std::path::PathBuf>,
+
+        /// SHA-256 fingerprint of the satellite server's TLS certificate,
+        /// as printed by `phux pair` on the satellite host. Pins the
+        /// certificate for routable endpoints; not a secret.
+        #[arg(long, value_name = "FINGERPRINT")]
+        cert_fingerprint: Option<String>,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]

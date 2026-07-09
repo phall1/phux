@@ -256,11 +256,18 @@ prefix = "C-a"
 
 # Federation satellites are remote phux servers a hub can route to. The registry
 # lands before routing so operators can declare stable names and endpoints.
+# The hub authenticates to a satellite as an ordinary remote consumer
+# (ADR-0038): run `phux pair` on the satellite host, save the printed token
+# into an owner-only file on the hub, and record that file's path plus the
+# printed certificate fingerprint here. The token itself never goes in this
+# file — only the path to it.
 #
 # [[satellites]]
 # name = "devbox"
-# endpoint = "ssh://devbox"
+# endpoint = "quic://devbox.example:8788"
 # enabled = true
+# token-file = "/home/me/.local/state/phux/satellites/devbox.token"
+# cert-fingerprint = "AB:CD:..."
 
 [status]
 # Left: the window/tab bar. The `windows` widget renders one tab per

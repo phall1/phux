@@ -14,8 +14,19 @@ pub(crate) fn run_satellite(action: &SatelliteAction) -> ExitCode {
             name,
             endpoint,
             disabled,
+            token_file,
+            cert_fingerprint,
             json,
-        } => run_add(NewSatellite::new(name, endpoint, !disabled), *json),
+        } => run_add(
+            NewSatellite::new(
+                name,
+                endpoint,
+                !disabled,
+                token_file.as_deref(),
+                cert_fingerprint.as_deref(),
+            ),
+            *json,
+        ),
         SatelliteAction::Remove { name, json } => run_remove(name, *json),
     }
 }
@@ -25,8 +36,7 @@ fn run_list(json: bool) -> ExitCode {
         Ok(entries) if json => print_satellites_json(&entries),
         Ok(entries) => {
             for entry in entries {
-                let state = if entry.enabled { "enabled" } else { "disabled" };
-                println!("{} {} ({state})", entry.name, entry.endpoint);
+                println!("{}", describe(&entry));
             }
             ExitCode::SUCCESS
         }
@@ -42,12 +52,28 @@ fn run_add(new: Result<NewSatellite, String>, json: bool) -> ExitCode {
     match add_or_update(&satellite) {
         Ok(entry) if json => print_satellite_json("satellite", &entry),
         Ok(entry) => {
-            let state = if entry.enabled { "enabled" } else { "disabled" };
-            println!("satellite {} {} ({state})", entry.name, entry.endpoint);
+            println!("satellite {}", describe(&entry));
             ExitCode::SUCCESS
         }
         Err(err) => fail(&err),
     }
+}
+
+/// One human-readable line per entry. Auth material (ADR-0038) is shown by
+/// reference only: the token-file *path* and the certificate fingerprint are
+/// displayable, the token bytes never are (and are never read here).
+fn describe(entry: &registry::SatelliteEntry) -> String {
+    use std::fmt::Write as _;
+
+    let state = if entry.enabled { "enabled" } else { "disabled" };
+    let mut line = format!("{} {} ({state})", entry.name, entry.endpoint);
+    if let Some(token_file) = &entry.token_file {
+        let _ = write!(line, " token-file={}", token_file.display());
+    }
+    if let Some(fingerprint) = &entry.cert_fingerprint {
+        let _ = write!(line, " cert-fingerprint={fingerprint}");
+    }
+    line
 }
 
 fn run_remove(name: &str, json: bool) -> ExitCode {
