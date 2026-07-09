@@ -134,6 +134,13 @@ pub struct ServerConfig {
     /// Optional policy extension bundle. When `None`, the server uses the
     /// default permissive policy (allow everything, audit nothing).
     pub policy_bundle: Option<crate::policy::PolicyBundle>,
+    /// Event-hook catalog (`docs/consumers/tui.md` §9, phux-r82.1): config
+    /// `[[hooks.<name>]]` entries plus enabled plugin manifests'
+    /// `[[events]]`, resolved by [`crate::hooks::HookCatalog::from_config`].
+    /// When non-empty the runtime spawns the hook dispatcher at startup and
+    /// registers its handle in shared state; when empty (the default) no
+    /// dispatcher task exists and firing events is a no-op.
+    pub hook_catalog: crate::hooks::HookCatalog,
 }
 
 impl ServerConfig {
@@ -151,6 +158,7 @@ impl ServerConfig {
             term: phux_config::DefaultsCfg::default().term,
             window_size: phux_config::WindowSize::default(),
             policy_bundle: None,
+            hook_catalog: crate::hooks::HookCatalog::default(),
         }
     }
 }
@@ -463,6 +471,9 @@ impl ServerRuntime {
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));
         }
+        // Event-hook catalog (phux-r82.1): moved into the LocalSet block
+        // below, where the dispatcher task can `spawn_local`.
+        let hook_catalog = self.cfg.hook_catalog.clone();
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -485,6 +496,16 @@ impl ServerRuntime {
                         debug!("shutdown future resolved; cancelling root token");
                         token.cancel();
                     });
+                }
+
+                // Event-hook dispatcher (docs/consumers/tui.md §9,
+                // phux-r82.1). Spawned BEFORE the seed/resume paths so a
+                // pre-seeded session's pane fires `after-new-pane` too.
+                // Skipped entirely when nothing is configured: firing an
+                // event with no dispatcher registered is a no-op.
+                if !hook_catalog.is_empty() {
+                    let dispatcher = crate::hooks::spawn_hook_dispatcher(hook_catalog);
+                    state.with_mut(|s| s.set_hook_dispatcher(dispatcher));
                 }
 
                 // Graceful-upgrade resume (ADR-0032): rebuild the whole
@@ -1355,6 +1376,197 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): seeding a session fires the
+    /// `after-new-pane` hook with the pane's wire id and the session name
+    /// in context.
+    #[test]
+    fn seed_session_fires_after_new_pane_hook() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(tx));
+            });
+            let token = CancellationToken::new();
+            seed_session_with_actor(&state, "hooked", 100, &token).expect("seed");
+            let event = rx.try_recv().expect("after-new-pane fired");
+            assert_eq!(event.name, crate::hooks::AFTER_NEW_PANE);
+            assert_eq!(
+                event.context.get("session").map(String::as_str),
+                Some("hooked"),
+            );
+            assert!(
+                event.context.contains_key("terminal-id"),
+                "context must carry the pane's wire id",
+            );
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): the per-pane exit watcher
+    /// fires `pane-exit` with the reported exit code in context.
+    #[test]
+    fn exit_watcher_fires_pane_exit_hook_with_exit_code() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, pane) = state.with_mut(|s| s.seed_session("dying"));
+            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<Option<i32>>();
+            let token = CancellationToken::new();
+            spawn_terminal_exit_watcher(state.clone(), pane, Some(exit_rx), token);
+            exit_tx.send(Some(3)).expect("exit notify");
+            let event = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+                .await
+                .expect("pane-exit hook timed out")
+                .expect("hook channel closed");
+            assert_eq!(event.name, crate::hooks::PANE_EXIT);
+            assert_eq!(
+                event.context.get("exit-code").map(String::as_str),
+                Some("3"),
+            );
+            assert!(event.context.contains_key("terminal-id"));
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): a routed `INPUT_FOCUS`
+    /// gained event fires `focus-changed`; a lost event (or a gated
+    /// frame) does not.
+    #[test]
+    fn focus_gained_fires_focus_changed_hook_and_lost_does_not() {
+        use phux_protocol::input::focus::FocusEvent;
+        use tokio::sync::{broadcast, mpsc};
+
+        use crate::terminal_actor::TerminalHandle;
+
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, pane) = state.with_mut(|s| s.seed_session("focus"));
+
+            // Hand-built handle: only the input channel matters here.
+            let (input_tx, _input_rx) = mpsc::channel(8);
+            let (output_tx, _output_rx_seed) =
+                broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
+            let handle = TerminalHandle {
+                input: input_tx,
+                snapshot: mpsc::channel(8).0,
+                screen: mpsc::channel(8).0,
+                upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
+                pwd: mpsc::channel(8).0,
+                output: output_tx,
+                resize: mpsc::channel::<ResizeRequest>(8).0,
+                consumer_attach: mpsc::channel(8).0,
+                consumer_detach: mpsc::channel(8).0,
+                consumer_ack: mpsc::channel(8).0,
+                subscribe_to_events: mpsc::channel(8).0,
+                unsubscribe_from_events: mpsc::channel(8).0,
+                control: mpsc::channel(8).0,
+                cols: 80,
+                rows: 24,
+            };
+            let wire_terminal_id = state.with_mut(|s| {
+                let _ = s.register_terminal_handle(pane, handle, CancellationToken::new());
+                s.intern_terminal_wire(pane)
+            });
+
+            let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            state
+                .with_mut(|s| s.attach_default_caps(client_id, "focus", tx))
+                .expect("attach");
+
+            // Focus gained → hook fires.
+            handle_terminal_input(
+                &state,
+                client_id,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Gained),
+                "INPUT_FOCUS",
+            );
+            let event = hook_rx.try_recv().expect("focus-changed fired");
+            assert_eq!(event.name, crate::hooks::FOCUS_CHANGED);
+            assert!(event.context.contains_key("terminal-id"));
+            assert!(event.context.contains_key("client-id"));
+
+            // Focus lost → no hook.
+            handle_terminal_input(
+                &state,
+                client_id,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Lost),
+                "INPUT_FOCUS",
+            );
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "focus lost must not fire focus-changed",
+            );
+
+            // Focus gained from a non-attached client is gated → no hook.
+            let stranger = ClientId(4242);
+            handle_terminal_input(
+                &state,
+                stranger,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Gained),
+                "INPUT_FOCUS",
+            );
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "a gated focus frame must not fire focus-changed",
+            );
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): tearing down an attached
+    /// client fires `client-detached` with the session name; a connection
+    /// that never attached fires nothing.
+    #[test]
+    fn detach_fires_client_detached_hook_only_for_attached_clients() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, _pane) = state.with_mut(|s| s.seed_session("leaving"));
+
+            // Never-attached connection: teardown fires nothing.
+            let stranger = state.with_mut(crate::state::ServerState::new_client_id);
+            detach_and_release_consumer_state(&state, stranger);
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "an unattached connection must not fire client-detached",
+            );
+
+            // Attached client: teardown fires client-detached.
+            let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            state
+                .with_mut(|s| s.attach_default_caps(client_id, "leaving", tx))
+                .expect("attach");
+            detach_and_release_consumer_state(&state, client_id);
+            let event = hook_rx.try_recv().expect("client-detached fired");
+            assert_eq!(event.name, crate::hooks::CLIENT_DETACHED);
+            assert_eq!(
+                event.context.get("session").map(String::as_str),
+                Some("leaving"),
+            );
+        });
     }
 
     /// A `VIEWPORT_RESIZE` from a non-attached client is a benign no-op —

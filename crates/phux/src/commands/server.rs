@@ -101,6 +101,15 @@ pub(crate) fn run_server(
         |cfg| cfg.defaults.window_size,
     );
 
+    // `[[hooks.<name>]]` entries plus enabled plugin manifests' `[[events]]`
+    // feed the server-side hook dispatcher (docs/consumers/tui.md §9,
+    // phux-r82.1). Relative manifest paths resolve against the config file's
+    // directory. Same fallback-on-error policy as the other config reads.
+    let hook_catalog = config_loader::load().map_or_else(
+        |_| phux_server::hooks::HookCatalog::default(),
+        |cfg| phux_server::hooks::HookCatalog::from_config(&cfg, &config_loader::config_path()),
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
@@ -111,6 +120,7 @@ pub(crate) fn run_server(
         term,
         window_size,
         policy_bundle: None,
+        hook_catalog,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()

@@ -790,6 +790,13 @@ pub(crate) async fn handle_attach(
         return;
     }
 
+    // docs/consumers/tui.md §9 (phux-r82.1): the attach mutation landed and
+    // ATTACHED queued — the `client-attached` hook point.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::client_attached(client_id, &session_name),
+    );
+
     // Fan out all `SnapshotRequest`s concurrently. The mpsc sends below
     // are fast (they just push into each actor's mailbox); the slow part
     // is awaiting the oneshot reply once the actor synthesizes. Doing

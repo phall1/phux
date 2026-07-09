@@ -282,6 +282,13 @@ pub struct ServerState {
     /// succeeds. Held for the upcoming dial (phux-v45.3) and route
     /// (phux-v45.4) beads; nothing consumes it for I/O yet.
     hub_table: Option<crate::hub::HubTable>,
+    /// Server-side event-hook dispatcher handle (`docs/consumers/tui.md`
+    /// §9, phux-r82.1). `None` until the runtime spawns the dispatcher
+    /// (it does so only when the hook catalog is non-empty), which is
+    /// also the default for every test that never configures hooks —
+    /// firing an event is then a no-op. Set once at startup via
+    /// [`Self::set_hook_dispatcher`].
+    hook_dispatcher: Option<crate::hooks::HookDispatcher>,
 }
 
 impl Default for ServerState {
