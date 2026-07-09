@@ -6,7 +6,7 @@ last-reviewed: 2026-06-17
 
 # Configuration and keybindings
 
-**TL;DR.** Config lives in `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`); phux merges your file atop the shipped defaults. Customize keybindings (prefix + global chords), status bar widgets, and hooks via TOML tables.
+**TL;DR.** Config lives in `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`); phux merges your file atop the shipped defaults, with an optional `extends` stack of shared layers in between. Customize keybindings (prefix + global chords), status bar widgets, and hooks via TOML tables.
 
 ---
 
@@ -15,10 +15,13 @@ last-reviewed: 2026-06-17
 phux loads configuration in this order:
 
 1. **Shipped defaults** — embedded in the binary as `default.toml`
-2. **User config** — `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml` if `$XDG_CONFIG_HOME` is not set)
-3. **Override via `$PHUX_CONFIG`** — if set, this path replaces the default location (used by `phux --config`)
+2. **Extended layers** — any files your config (or a layer) names via `extends`, in listed order (see the next section)
+3. **User config** — `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml` if `$XDG_CONFIG_HOME` is not set)
+4. **Override via `$PHUX_CONFIG`** — if set, this path replaces the default location (used by `phux --config`)
 
 Later files override earlier ones, key-by-key. A key you omit keeps the default, so a phux upgrade reaches you automatically without losing your overrides.
+
+See "Layered configs" below for the `extends` mechanics.
 
 ### Getting started
 
@@ -57,6 +60,45 @@ phux config run PLUGIN ACTION --json  # execute a configured plugin action
 There is no live-reload verb today. To apply edits to the interactive client, restart it — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start. Local config/plugin subcommands (`init`, `path`, `show`, `plugins`, `agents`, `plugin ...`, and plugin action `run`) read the file fresh on each invocation.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
+
+---
+
+## Layered configs: `extends`
+
+A config file may name shared layers — a team baseline, a curated distribution — with a top-level `extends` key ([ADR-0039](../ADR/0039-layered-config.md)):
+
+```toml
+extends = ["distro.toml", "minimal"]
+
+[keybindings]
+prefix = "C-b"        # your overrides win over every layer
+```
+
+Rules:
+
+- **Order.** Layers merge in listed order, each atop the previous; your file merges last and wins per key. The shipped defaults always sit at the bottom.
+- **Resolution.** An entry with a path separator or a `.toml` suffix is a path, resolved relative to the directory of the file that declares it (absolute paths pass through). A bare name `n` means `layers/n.toml` beside the declaring file — so `extends = ["minimal"]` in `~/.config/phux/config.toml` loads `~/.config/phux/layers/minimal.toml`.
+- **Layers can extend layers**, up to 4 levels below your file. Cycles, missing layer files, and over-deep nesting are errors that name the offending file. A layer reachable through two branches merges once.
+
+### Array merge: replace by default, `-append` to add
+
+Tables merge per key across layers, but an array assignment replaces the inherited array wholesale — TOML arrays have no per-element identity to merge on. When a layer should *contribute to* a list instead of owning it, use the `-append` key suffix:
+
+```toml
+# In a distro layer or your own config:
+
+[[plugins-append]]                      # adds to inherited [[plugins]]
+manifest = "/opt/distro/phux-plugin.toml"
+
+[status]
+right-append = [{ kind = "time", format = "%H:%M" }]   # adds a widget
+
+[[hooks.pane-exit-append]]              # adds a pane-exit hook
+when   = { exit-code = "*" }
+action = "noop"
+```
+
+`x-append` must hold an array and appends its elements to the stack's current `x` (creating it when absent). Setting both `x` and `x-append` in one file, appending to a non-array, or a non-array `-append` value are errors naming that file. Keybindings need no append form: `prefix-table` and `global` are tables and already merge per chord. The `-append` suffix is reserved at every level; don't end a free-form key (for example a `[theme]` slot) with it. To *drop* an inherited entry, assign the full array plainly — replacement always wins over inheritance.
 
 ---
 
