@@ -69,6 +69,7 @@ amends / extends) are hand-curated from each ADR's body.
 | [0035](./0035-agent-asked-event.md) | Agent-asked event: a pending human-answerable question on the wire | Accepted |
 | [0036](./0036-agent-asked-detection.md) | Agent-asked detection sources | Accepted |
 | [0037](./0037-overlay-network-reachability.md) | Overlay-network reachability for remote self-host consumers | Accepted (forward-compat, builds on [0007](./0007-mosh-class-transport-and-satellites.md), [0031](./0031-remote-consumer-auth-and-encryption.md)) |
+| [0038](./0038-hub-satellite-auth.md) | Hub-to-satellite authentication | Accepted (builds on [0031](./0031-remote-consumer-auth-and-encryption.md)) |
 
 ## When to write an ADR
 
