@@ -928,6 +928,33 @@ Resize commands modify the relevant interior node's `ratio` (not
 absolute sizes). After a subsequent window resize, the new ratio is
 preserved.
 
+### 6.4 Window sidebar
+
+> **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`).
+
+`[sidebar]` docks a vertical window strip on the left (default) or
+right edge; `toggle-sidebar` (`C-a b`) flips it at runtime. Panes tile
+into the remaining content rect, so the strip never overlaps content.
+
+Each window occupies a fixed **two-row block**, top to bottom in
+`select-window` index order:
+
+- **Name row.** The window's display label (agent record, OSC title, or
+  stored name — same resolution as the status-bar tab strip), with the
+  active-window marker and the §8.6 attention `!`.
+- **Branch row.** The VCS branch of the window's focused pane, dim and
+  nested under the label (`main`, a `wave2/...` branch, or a short
+  commit hash for a detached HEAD). Blank when the pane's working
+  directory is not inside a git repository.
+
+Branch inference is **client-local and read-only**: the pane's working
+directory (carried by the `ATTACHED` snapshot) is walked up to the
+enclosing `.git`, worktree gitfiles (`gitdir: ...`) are resolved, and
+`HEAD` is read directly — one cached file read, never a `git`
+subprocess, and nothing added to the wire. The cache re-validates on a
+short TTL keyed by `HEAD`'s mtime, so a `git switch` shows up on the
+next chrome refresh without stat storms.
+
 ---
 
 ## 7. Mouse
