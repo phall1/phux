@@ -3124,6 +3124,8 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout = std::collections::HashSet::new();
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -3135,17 +3137,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_panes: panes,
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
@@ -4457,6 +4462,7 @@ mod tests {
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
+                plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
             };
@@ -4634,6 +4640,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
