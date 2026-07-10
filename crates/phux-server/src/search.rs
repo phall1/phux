@@ -20,7 +20,8 @@
 //! region's own coordinate space. Those coordinates are what a consumer
 //! would hand to a libghostty `Selection` + `Formatter` to pull the matched
 //! text, VT, or HTML back out. This module owns *finding* only; it does not
-//! highlight, maintain a cursor, or (yet) extract — see the note below.
+//! highlight, maintain a cursor, or extract — extraction is
+//! [`crate::extract`]'s job; see the note below.
 //!
 //! ## Selection + extraction: the delegation boundary, and the unblocked bridge
 //!
@@ -171,9 +172,10 @@ pub enum Scope {
 /// scrolls the viewport nor mutates `terminal`, so it is safe to poll
 /// against a live pane.
 ///
-/// To extract the text under a returned [`Match`], hand its coordinates to a
-/// libghostty `Selection` + `Formatter`; see the module-level note on why
-/// that extraction bridge is blocked on an upstream fix at the current pin.
+/// To extract the content under a returned [`Match`], hand it to
+/// [`crate::extract`] — [`extract_match_in_scope`](crate::extract::extract_match_in_scope)
+/// for plain text, or the format-generic
+/// [`extract`](crate::extract::extract) for text/VT/HTML bytes.
 ///
 /// The synthesizer and terminal share the libghostty allocator lifetime
 /// `'alloc`: the pooled render iterators inside `synth` borrow from the same
