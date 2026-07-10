@@ -17,10 +17,10 @@
 //!
 //! ## Placement routing
 //!
-//! * `split`  — spawn + park a [`PendingSplit`](super::actions::PendingSplit)
+//! * `split`  — spawn + park a `PendingSplit` (see `super::actions`)
 //!   against the focused pane (side-by-side, like the palette's
 //!   `split-pane` default).
-//! * `tab`    — spawn + park a [`PendingWindow`](super::actions::PendingWindow)
+//! * `tab`    — spawn + park a `PendingWindow` (see `super::actions`)
 //!   named after the pane's manifest `title`.
 //! * `zoomed` — like `split`, but the spawn reply zooms the new pane to
 //!   fill the window (`PendingSplit::zoom_on_spawn`); un-zooming reveals
