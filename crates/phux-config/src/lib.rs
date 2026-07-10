@@ -31,7 +31,8 @@ pub use layer::{
 pub use satellite::SatelliteConfigEntry;
 pub use schema::{
     Action, Config, CwdInheritance, DefaultsCfg, ExperimentalCfg, HookEntry, KeybindingsCfg,
-    ParamAction, SidebarCfg, SidebarPosition, StatusCfg, ThemeCfg, Widget, WidgetSpec, WindowSize,
+    ParamAction, SidebarCfg, SidebarPosition, StatusCfg, StatusPosition, ThemeCfg, Widget,
+    WidgetSpec, WindowSize,
 };
 pub use widget::{
     Cell, CellStyle, SessionNameWidget, StatusBar, StatusWidget, TimeWidget, WidgetCells,

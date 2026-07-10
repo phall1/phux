@@ -299,3 +299,5 @@ which-key-delay-ms = 600
 left   = [{ kind = "windows" }]
 center = [{ kind = "help-hints" }]
 right  = ["session-name", { kind = "time", format = " %H:%M" }]
+# Which outer-terminal row the bar reserves: "bottom" (default) or "top".
+# position = "bottom"

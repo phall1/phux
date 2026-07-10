@@ -905,7 +905,7 @@ test, so this table cannot silently drift):
 | `window-picker`   | (opens the grouped window picker — §5.5)    |
 | `session-picker`  | (opens the session picker — §5.5)           |
 | `new-session`     | `name?` (bare opens an interactive prompt)  |
-| `switch-session`  | `name` (re-attaches this client)            |
+| `switch-session`  | `name`, `window?` (re-attaches this client; `window` selects that window index after the switch — §5.5) |
 | `detach`          |                                             |
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
@@ -944,10 +944,18 @@ in-process (`switch-session`). A trailing "+ New session" row creates one.
 
 The **window picker** (`window-picker`, `C-a w`) is hierarchical: every
 session is a section header with its windows nested beneath it. Choosing a
-window in the **current** session switches to it directly; choosing
-another session switches to that session (its windows then list under its
-own picker). Directly selecting a window inside a different session in one
-step is not yet wired — see the picker's source for the gap.
+window in the **current** session switches to it directly
+(`select-window { index }`). Other sessions' windows are **one-step
+jumps**: the client fetches each peer session's persisted layout right
+after attach, so the picker lists their windows (`index:name`, pane
+count) too, and choosing one commits `switch-session { name, window }` —
+a single Enter re-attaches to that session and selects that window once
+its layout loads. A peer session with nothing persisted yet (or one
+created after this client attached) falls back to a single "switch to
+this session" row; its own picker then lists its windows. The cached
+foreign layouts are an attach-time snapshot: if a peer rearranged its
+windows since, the jump still switches sessions and the stale window
+index degrades to the session's own remembered focus (logged, no bell).
 
 ### 5.6 Which-key popup
 
@@ -1168,7 +1176,8 @@ We do not ship copy-mode mouse drag selection — see §11.
 
 The status bar is **rendered entirely client-side**. A GUI client may
 ignore it and render its own chrome; the TUI client composes it from
-widgets and draws it on the bottom row of the outer terminal.
+widgets and draws it on one reserved row of the outer terminal — the
+bottom row by default, or the top row with `position = "top"`.
 
 Every slot's contents are a list of **widgets**. A widget is a typed
 thing that produces styled text. The default config looks short because
@@ -1179,7 +1188,13 @@ a bare string is shorthand for a no-parameters widget:
 left   = ["session-name"]                               # → [{ kind = "session-name" }]
 center = []
 right  = [{ kind = "time", format = " %H:%M" }]
+position = "bottom"   # or "top"; default "bottom"
 ```
+
+`position` moves the whole reserved row: with `"top"` the bar draws on
+the outer terminal's first row and the panes (and sidebar strip) shift
+down one row, so nothing ever underlaps the bar. Everything else —
+widgets, styling, refresh — is identical in both positions.
 
 There are three categories of widgets:
 
@@ -1270,8 +1285,9 @@ timed-out run keeps the last good output.
 
 ### 8.5 What the status bar is not
 
-- Not multi-row. One row, bottom of the outer terminal. If you need
-  more, dedicate a pane.
+- Not multi-row. One row — bottom of the outer terminal by default,
+  top with `position = "top"` (§8.1). If you need more, dedicate a
+  pane.
 - Not themable via a styling engine. Per-widget `style` tables only.
 - Not server-rendered. Every client owns its chrome. This is what
   enables a future GUI client with native chrome to coexist with the
@@ -1459,6 +1475,7 @@ The shipped defaults, in one place:
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
 | Status bar                    | `[{ kind = "windows" }]` / `[{ kind = "help-hints" }]` / `["session-name", { kind = "time", format = " %H:%M" }]` |
+| Status bar position           | `bottom` (`[status] position`, or `top`) |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
 | Cursor blink                  | follow inner program request             |

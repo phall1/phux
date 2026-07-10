@@ -282,7 +282,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // viewport (the same dimensions used for rendering) rather
             // than the historical 80x24 placeholder.
             if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
-                let content = content_rect(viewport_dims, status_bar.is_some(), sidebar);
+                let content = content_rect(
+                    viewport_dims,
+                    status_bar.as_ref().map(|p| p.position()),
+                    sidebar,
+                );
                 v.insert(PaneSlot::new_with_size(content.w, content.h)?);
             }
             // phux-17u: stash the session name for the status-bar
@@ -337,8 +341,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // Resolve the pane's outer-viewport Rect BEFORE the
             // `panes.entry(terminal_id)` move. Multi-pane: ask the
             // layout. Single-pane / no layout: anchor at (0,0).
-            let has_bar = status_bar.is_some();
-            let content = content_rect(viewport_dims, has_bar, sidebar);
+            let bar = status_bar.as_ref().map(|p| p.position());
+            let content = content_rect(viewport_dims, bar, sidebar);
             // The pane's outer-viewport Rect: origin positions the paint,
             // (w, h) clips it. Multi-pane: ask the layout. Single-pane / no
             // layout: anchor at the content rect spanning the full pane area.
@@ -570,8 +574,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // default `phux=info` filter.
             let sync_output_active = {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
-                let has_bar = status_bar.is_some();
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let bar = status_bar.as_ref().map(|p| p.position());
+                let content = content_rect(viewport_dims, bar, sidebar);
                 // Best-known dims for sizing a freshly-allocated slot only. An
                 // existing slot's libghostty grid is server-authoritative and
                 // must NOT be resized here: the server authored these bytes for
@@ -628,14 +632,14 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // default filter.
                 let _paint_trigger =
                     tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
-                let has_bar = status_bar.is_some();
+                let bar = status_bar.as_ref().map(|p| p.position());
                 let _ = paint_focused_pane(
                     out,
                     active_ls,
                     panes,
                     fid,
                     viewport_dims,
-                    has_bar,
+                    bar,
                     sidebar,
                     false,
                 );
@@ -685,7 +689,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // `last_cursor` is None. Without this fallback the
                 // bar's final write leaves the host terminal cursor
                 // at bottom-right.
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let content = content_rect(viewport_dims, bar, sidebar);
                 let fallback_origin =
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims)
                         .rects
@@ -713,8 +717,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // painting into this pane's rect we restore the focused
                 // pane's cursor so the host cursor stays where the user is
                 // typing.
-                let has_bar = status_bar.is_some();
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let bar = status_bar.as_ref().map(|p| p.position());
+                let content = content_rect(viewport_dims, bar, sidebar);
                 let rects =
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {

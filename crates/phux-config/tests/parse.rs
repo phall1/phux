@@ -11,7 +11,8 @@
 use std::path::PathBuf;
 
 use phux_config::{
-    Config, ConfigError, CwdInheritance, DefaultsCfg, SidebarPosition, WindowSize, parse_str,
+    Config, ConfigError, CwdInheritance, DefaultsCfg, SidebarPosition, StatusPosition, WindowSize,
+    parse_str,
 };
 
 /// The canonical example from `docs/consumers/tui.md` §4.2.
@@ -307,6 +308,41 @@ fn sidebar_unknown_field_is_rejected() {
 wdith = 20
 ";
     let err = parse_str(input, &path()).expect_err("typo rejected by deny_unknown_fields");
+    assert!(matches!(err, ConfigError::Parse { .. }));
+}
+
+// ---------------------------------------------------------------------------
+// [status] position  (phux-foz.8)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_position_defaults_to_bottom_when_absent() {
+    let cfg = parse_str("", &path()).expect("empty parses");
+    assert_eq!(cfg.status.position, StatusPosition::Bottom);
+}
+
+#[test]
+fn status_position_top_parses_and_round_trips() {
+    let input = r#"
+[status]
+left     = ["session-name"]
+position = "top"
+"#;
+    let cfg = parse_str(input, &path()).expect("[status] position parses");
+    assert_eq!(cfg.status.position, StatusPosition::Top);
+
+    let reser = toml::to_string(&cfg).expect("reserialize");
+    let reparsed = parse_str(&reser, &path()).expect("reparse");
+    assert_eq!(cfg, reparsed);
+}
+
+#[test]
+fn status_unknown_position_is_rejected() {
+    let input = r#"
+[status]
+position = "floating"
+"#;
+    let err = parse_str(input, &path()).expect_err("unknown position rejected");
     assert!(matches!(err, ConfigError::Parse { .. }));
 }
 

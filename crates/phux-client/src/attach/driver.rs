@@ -59,7 +59,7 @@ use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::sidebar::SidebarPainter;
-use crate::render::chrome::status_bar::{Position, StatusBarPainter};
+use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
 
@@ -1078,6 +1078,12 @@ async fn attach_session<W: super::RenderSink>(
     // switch (which re-enters `main_loop` with fresh session state) does
     // not re-show a hint the user already dismissed.
     let mut show_onboarding = super::onboarding::should_show(&phux_config::loader::config_path());
+    // phux-foz.8: window index to select after a one-step cross-session
+    // window pick (`switch-session { name, window }`) re-attaches. `None`
+    // on the first attach and after plain switches; set per-iteration by
+    // the SwitchTo arm below, consumed by `main_loop` once the target's
+    // persisted layout loads.
+    let mut pending_window: Option<usize> = None;
     loop {
         let show_onboarding_hint = std::mem::take(&mut show_onboarding);
         let exit = match main_loop(
@@ -1088,6 +1094,7 @@ async fn attach_session<W: super::RenderSink>(
             resync,
             wants_state_sync,
             show_onboarding_hint,
+            pending_window.take(),
         )
         .await
         {
@@ -1138,8 +1145,14 @@ async fn attach_session<W: super::RenderSink>(
                 // to any single session. An existing session re-attaches
                 // by name; a new-session request creates it (or attaches if
                 // the name is already taken) via CreateIfMissing.
+                // phux-foz.8: a one-step window pick carries the target
+                // window; stash it for the next `main_loop` entry, which
+                // resolves it once the new session's layout loads.
                 let attach_target = match target {
-                    ReattachTarget::Existing(name) => AttachTarget::ByName(name),
+                    ReattachTarget::Existing { name, window } => {
+                        pending_window = window;
+                        AttachTarget::ByName(name)
+                    }
                     ReattachTarget::Create(name) => AttachTarget::CreateIfMissing {
                         name,
                         command: None,
@@ -1364,6 +1377,13 @@ async fn main_loop<W: super::RenderSink>(
     // only on the first `main_loop` entry, so a session switch never
     // re-shows a hint the user already dismissed.
     show_onboarding: bool,
+    // phux-foz.8: window index to select once this session's persisted
+    // layout loads. Set by the outer loop when a one-step cross-session
+    // window pick (`switch-session { name, window }`) drove the re-attach;
+    // `None` on a plain attach/switch. Resolved (and consumed) on the
+    // first layout reconcile; out-of-range degrades to the session's own
+    // restored focus with a warning.
+    initial_window: Option<usize>,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -1532,6 +1552,17 @@ async fn main_loop<W: super::RenderSink>(
     // client is currently attached to (excluded from the picker).
     let mut sessions: Vec<phux_protocol::wire::info::SessionInfo> = Vec::new();
     let mut focused_session: Option<phux_protocol::ids::SessionId> = None;
+    // phux-foz.8: peer sessions' persisted layouts, fetched right after the
+    // session graph lands (one GET_METADATA per peer, correlated through
+    // `foreign_layout_pending`). The window picker reads the cache to render
+    // one-step cross-session window rows; sessions with no entry fall back
+    // to the plain "switch to this session" row. Attach-time snapshot only —
+    // we do not subscribe to peers' layout keys.
+    let mut foreign_layouts: HashMap<phux_protocol::ids::SessionId, Workspace> = HashMap::new();
+    let mut foreign_layout_pending: HashMap<u32, phux_protocol::ids::SessionId> = HashMap::new();
+    // phux-foz.8: the deferred window select of a one-step cross-session
+    // pick, consumed on the first layout reconcile below.
+    let mut pending_window = initial_window;
     let mut parser = StdinParser::new();
     // Predictive local echo (phux-9gw.1). State is updated alongside
     // every keystroke and drained on every TERMINAL_OUTPUT; when
@@ -1624,6 +1655,18 @@ async fn main_loop<W: super::RenderSink>(
         sessions = list;
         focused_session = Some(focused);
     }
+    // phux-foz.8: fetch each peer session's persisted layout so the window
+    // picker can list foreign windows as one-step jump rows. Fire-and-forget:
+    // replies drain through the recv arm below; a peer with nothing persisted
+    // never replies with a value and simply keeps its fallback row.
+    request_foreign_layouts(
+        conn,
+        &sessions,
+        focused_session,
+        &mut next_request_id,
+        &mut foreign_layout_pending,
+    )
+    .await?;
     // ADR-0033: cache our own ClientId (for the "you hold the wheel" badge) and
     // opt into the agent-event stream so `TerminalControl` broadcasts (lease +
     // lifecycle) reach this client. Server-scoped (`terminal: None`) so we see
@@ -1877,7 +1920,11 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
@@ -1891,13 +1938,14 @@ async fn main_loop<W: super::RenderSink>(
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
                     sessions: &sessions,
+                    foreign_layouts: &foreign_layouts,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
-                    has_bar: status_bar.is_some(),
+                    bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
@@ -1940,7 +1988,11 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                        content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     )
                     .await?;
                 }
@@ -2065,6 +2117,25 @@ async fn main_loop<W: super::RenderSink>(
                             .collect();
                         let defer_flags = coalesce_defer_flags(&paint_targets);
                         for (frame_idx, f) in batch.into_iter().enumerate() {
+                        // phux-foz.8: a peer session's persisted-layout GET
+                        // reply. Picker display data only — decode into the
+                        // cache and skip the general frame handler (whose
+                        // MetadataValue arm would drop the unmatched id).
+                        let f = match f {
+                            FrameKind::MetadataValue { request_id, value }
+                                if foreign_layout_pending.contains_key(&request_id) =>
+                            {
+                                if let Some(session) = foreign_layout_pending.remove(&request_id) {
+                                    apply_foreign_layout_reply(
+                                        &mut foreign_layouts,
+                                        session,
+                                        value.as_deref(),
+                                    );
+                                }
+                                continue;
+                            }
+                            other => other,
+                        };
                         let defer_paint = frame_defers_paint(defer_flags[frame_idx], &f);
                         // phux-tnh: snapshot the current per-leaf rects
                         // BEFORE the frame may fold (close) or split the
@@ -2085,7 +2156,7 @@ async fn main_loop<W: super::RenderSink>(
                                         ls.as_ref(),
                                         content_rect(
                                             viewport_dims,
-                                            status_bar.is_some(),
+                                            status_bar.as_ref().map(StatusBarPainter::position),
                                             sidebar,
                                         ),
                                         viewport_dims,
@@ -2136,9 +2207,21 @@ async fn main_loop<W: super::RenderSink>(
                         // phux-p4vp: the same snapshot refreshes the
                         // pane-cwd index behind the sidebar branch line.
                         vcs.apply_snapshot(outcome.pane_cwds);
+                        // phux-foz.8: re-request the peers' persisted
+                        // layouts against the fresh graph so the window
+                        // picker's one-step rows track it; replies
+                        // overwrite stale cache entries.
                         if let Some((list, focused)) = outcome.sessions {
                             sessions = list;
                             focused_session = Some(focused);
+                            request_foreign_layouts(
+                                conn,
+                                &sessions,
+                                focused_session,
+                                &mut next_request_id,
+                                &mut foreign_layout_pending,
+                            )
+                            .await?;
                         }
                         // ADR-0033 / phux-foz.1: a `TerminalControl` or `Asked`
                         // event changed a pane's lease/lifecycle/attention. The
@@ -2231,7 +2314,11 @@ async fn main_loop<W: super::RenderSink>(
                             && ls.tree.is_some()
                         {
                             let new_content =
-                                content_rect(viewport_dims, status_bar.is_some(), sidebar);
+                                content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    );
                             let diff = super::reflow::compute_reflow(
                                 ls.as_ref(),
                                 prev_rects,
@@ -2247,6 +2334,29 @@ async fn main_loop<W: super::RenderSink>(
                             }
                         }
                         if outcome.layout_replaced {
+                            // phux-foz.8: a one-step cross-session window
+                            // pick drove this attach; the multi-window
+                            // layout just landed, so resolve the deferred
+                            // select against it before the repaint below.
+                            // Out-of-range (a peer mutated the layout
+                            // between pick and load) keeps the session's
+                            // restored focus with a warning.
+                            if let Some(idx) = pending_window.take() {
+                                if workspace.select(idx) {
+                                    focused_pane = workspace
+                                        .active_window()
+                                        .and_then(|ls| ls.focus.clone());
+                                    if let Some(fid) = focused_pane.as_ref() {
+                                        reanchor_predict_to_pane(&mut predict, &panes, fid);
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        index = idx,
+                                        windows = workspace.windows.len(),
+                                        "cross-session window pick out of range; keeping restored focus",
+                                    );
+                                }
+                            }
                             // phux-4li.5: layout changed under us
                             // (either the GET reply or a peer's broadcast).
                             // Trigger a full repaint: clear screen + paint
@@ -2410,7 +2520,11 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
@@ -2424,13 +2538,14 @@ async fn main_loop<W: super::RenderSink>(
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
                     sessions: &sessions,
+                    foreign_layouts: &foreign_layouts,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
-                    has_bar: status_bar.is_some(),
+                    bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
@@ -2468,7 +2583,11 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                        content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     )
                     .await?;
                 }
@@ -2620,13 +2739,13 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(ls) = workspace.render_window(zoomed.as_ref())
                     && ls.tree.is_some()
                 {
-                    let has_bar = status_bar.is_some();
+                    let bar = status_bar.as_ref().map(StatusBarPainter::position);
                     // phux-4h5a: size each PTY to the inset content rect (the
                     // pane area after the status bar + sidebar reservation),
                     // not the full viewport — otherwise an enabled sidebar
                     // resizes panes to the full width while they paint inset.
-                    let prev_content = content_rect(prev_dims, has_bar, sidebar);
-                    let new_content = content_rect(viewport_dims, has_bar, sidebar);
+                    let prev_content = content_rect(prev_dims, bar, sidebar);
+                    let new_content = content_rect(viewport_dims, bar, sidebar);
                     let prev_rects =
                         super::multi_pane::compute_layout_in(ls.as_ref(), prev_content, prev_dims)
                             .rects;
@@ -2696,8 +2815,8 @@ async fn main_loop<W: super::RenderSink>(
                     // hasn't seeded yet) the old code passed None →
                     // paint_bar_after_pane emitted no CUP → cursor
                     // stranded at the bar's last cell every tick.
-                    let has_bar = status_bar.is_some();
-                    let content = content_rect(viewport_dims, has_bar, sidebar);
+                    let bar = status_bar.as_ref().map(StatusBarPainter::position);
+                    let content = content_rect(viewport_dims, bar, sidebar);
                     let fallback_origin = Some(
                         focused_pane
                             .as_ref()
@@ -2816,6 +2935,64 @@ pub(super) const LAYOUT_KEY: &str = "phux.tui.layout/v1";
 /// thus one layout + subscription); different sessions are isolated.
 pub(super) fn layout_key(session: phux_protocol::ids::SessionId) -> String {
     format!("{LAYOUT_KEY}/{}", session.get())
+}
+
+/// phux-foz.8: fetch each peer session's persisted layout — one
+/// `GET_METADATA` on the per-session layout key per session other than
+/// `focused` — so the window picker can render one-step cross-session
+/// window rows. Correlation is via `pending` (request id -> session id);
+/// replies drain through the driver's recv arm into the foreign-layout
+/// cache. Best-effort: a peer with nothing persisted replies `value: None`
+/// (dropped by [`apply_foreign_layout_reply`]) and keeps its fallback
+/// "switch to this session" row.
+async fn request_foreign_layouts(
+    conn: &mut Connection,
+    sessions: &[phux_protocol::wire::info::SessionInfo],
+    focused: Option<phux_protocol::ids::SessionId>,
+    next_request_id: &mut u32,
+    pending: &mut HashMap<u32, phux_protocol::ids::SessionId>,
+) -> Result<(), AttachError> {
+    for s in sessions.iter().filter(|s| Some(s.id) != focused) {
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.wrapping_add(1);
+        pending.insert(request_id, s.id);
+        conn.send(&FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Group(DEFAULT_GROUP_ID),
+            key: layout_key(s.id),
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// phux-foz.8: fold one foreign-session layout GET reply into the picker's
+/// cache. `value: None` (nothing persisted) or an undecodable envelope
+/// clears the entry, so the picker falls back to the plain
+/// "switch to this session" row rather than showing stale windows.
+fn apply_foreign_layout_reply(
+    cache: &mut HashMap<phux_protocol::ids::SessionId, Workspace>,
+    session: phux_protocol::ids::SessionId,
+    value: Option<&[u8]>,
+) {
+    match value {
+        Some(bytes) => match Workspace::decode_cbor(bytes) {
+            Ok(ws) => {
+                cache.insert(session, ws);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    session = session.get(),
+                    error = %err,
+                    "foreign layout decode failed; window picker keeps the fallback row",
+                );
+                cache.remove(&session);
+            }
+        },
+        None => {
+            cache.remove(&session);
+        }
+    }
 }
 
 /// Whether `key` is any session's layout key — the bare [`LAYOUT_KEY`] (legacy
@@ -3249,7 +3426,10 @@ fn build_status_bar_painter() -> Option<StatusBarPainter> {
     match phux_config::widget::StatusBar::build(&status, &registry) {
         Ok(bar) if bar.is_empty() => None,
         Ok(bar) => {
-            let mut painter = StatusBarPainter::new(bar, Position::default());
+            // phux-foz.8: `[status] position = "top" | "bottom"` picks the
+            // reserved row; the pane content rect shifts to match (see
+            // `paint::content_rect`).
+            let mut painter = StatusBarPainter::new(bar, cfg.status.position.into());
             painter.set_prefix(cfg.keybindings.prefix);
             Some(painter)
         }
@@ -3997,6 +4177,33 @@ mod tests {
         assert_eq!(b, "phux.tui.layout/v1/2");
         assert_ne!(a, b, "different sessions get different keys");
         assert!(a.starts_with(LAYOUT_KEY), "still under the layout prefix");
+    }
+
+    /// phux-foz.8: a foreign session's layout GET reply round-trips into
+    /// the picker cache; a tombstone (`None`) or garbage clears/skips the
+    /// entry so the picker falls back to the plain switch row.
+    #[test]
+    fn apply_foreign_layout_reply_caches_clears_and_survives_garbage() {
+        use phux_protocol::ids::SessionId;
+        let sid = SessionId::new(7);
+        let mut cache: HashMap<SessionId, Workspace> = HashMap::new();
+
+        // A decodable envelope lands in the cache with its windows intact.
+        let mut ws = Workspace::single(TerminalId::local(1));
+        ws.add_window("logs".to_owned(), TerminalId::local(2));
+        let bytes = ws.encode_cbor().expect("encode");
+        apply_foreign_layout_reply(&mut cache, sid, Some(&bytes));
+        assert_eq!(cache.get(&sid).map(|w| w.windows.len()), Some(2));
+
+        // Garbage clears the stale entry rather than keeping it.
+        apply_foreign_layout_reply(&mut cache, sid, Some(b"not cbor"));
+        assert!(!cache.contains_key(&sid), "undecodable reply clears");
+
+        // Re-cache, then a tombstone (nothing persisted) clears again.
+        apply_foreign_layout_reply(&mut cache, sid, Some(&bytes));
+        assert!(cache.contains_key(&sid));
+        apply_foreign_layout_reply(&mut cache, sid, None);
+        assert!(!cache.contains_key(&sid), "tombstone clears");
     }
 
     #[test]
