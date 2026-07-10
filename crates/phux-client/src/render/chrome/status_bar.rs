@@ -75,6 +75,13 @@ pub struct StatusBarContext<'a> {
     /// by the `windows` widget. Empty ⇒ no window bar. TUI-side data fed
     /// into the widget pipeline via [`Self::as_widget`].
     pub windows: &'a [WindowInfo],
+    /// phux-foz.4: the focused pane's live working directory (`""` when
+    /// unknown), consumed by the `cwd` widget. Injected by the painter
+    /// from driver-fed state, like `windows`.
+    pub cwd: &'a str,
+    /// phux-foz.4: the focused pane's last known command exit code
+    /// (OSC-133 `command_finished`), consumed by the `exit` widget.
+    pub last_exit: Option<i32>,
 }
 
 impl<'a> StatusBarContext<'a> {
@@ -87,6 +94,8 @@ impl<'a> StatusBarContext<'a> {
             session_name: self.session_name,
             prefix: self.prefix,
             windows: self.windows,
+            cwd: self.cwd,
+            last_exit: self.last_exit,
         }
     }
 }
@@ -96,7 +105,8 @@ impl<'a> StatusBarContext<'a> {
 /// Kept so callers in `attach/` can construct one without depending on
 /// `phux-config`'s internals directly. Window data is injected by the
 /// painter (see [`StatusBarPainter::paint`]); standalone callers pass an
-/// empty slice.
+/// empty slice. The focused-pane data feeds (`cwd`, `last_exit`) are
+/// painter-owned too and injected the same way.
 #[must_use]
 pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarContext<'_> {
     StatusBarContext {
@@ -104,6 +114,8 @@ pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarConte
         session_name,
         prefix: "C-a",
         windows: &[],
+        cwd: "",
+        last_exit: None,
     }
 }
 
@@ -382,6 +394,14 @@ pub struct StatusBarPainter {
     /// reverse video the foreground reads as the fill color.
     attention_fg: Color,
     prefix: String,
+    /// phux-foz.4: the focused pane's live working directory, fed by the
+    /// driver from `cwd_changed` events (via the pane slots) and injected
+    /// into the render context like `windows`. `None` ⇒ unknown (the
+    /// `cwd` widget renders nothing).
+    focused_cwd: Option<String>,
+    /// phux-foz.4: the focused pane's last known command exit code, fed
+    /// by the driver from `command_finished` events. `None` ⇒ unknown.
+    last_exit: Option<i32>,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -400,6 +420,8 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("attention", &self.attention)
             .field("attention_fg", &self.attention_fg)
             .field("prefix", &self.prefix)
+            .field("focused_cwd", &self.focused_cwd)
+            .field("last_exit", &self.last_exit)
             .finish()
     }
 }
@@ -419,6 +441,8 @@ impl StatusBarPainter {
             attention: None,
             attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
+            focused_cwd: None,
+            last_exit: None,
         }
     }
 
@@ -445,6 +469,8 @@ impl StatusBarPainter {
             attention: None,
             attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
+            focused_cwd: None,
+            last_exit: None,
         }
     }
 
@@ -467,6 +493,30 @@ impl StatusBarPainter {
             return false;
         }
         self.windows = windows;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.4: set (or clear, with `None`) the focused pane's live
+    /// working directory rendered by the `cwd` widget. Returns `true` if
+    /// the value actually changed; a change invalidates the row cache.
+    pub fn set_focused_cwd(&mut self, cwd: Option<String>) -> bool {
+        if self.focused_cwd == cwd {
+            return false;
+        }
+        self.focused_cwd = cwd;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.4: set (or clear, with `None`) the focused pane's last
+    /// command exit code rendered by the `exit` widget. Returns `true` if
+    /// the value actually changed; a change invalidates the row cache.
+    pub fn set_last_exit(&mut self, last_exit: Option<i32>) -> bool {
+        if self.last_exit == last_exit {
+            return false;
+        }
+        self.last_exit = last_exit;
         self.invalidate();
         true
     }
@@ -602,6 +652,8 @@ impl StatusBarPainter {
         let ctx = StatusBarContext {
             prefix: &self.prefix,
             windows: &self.windows,
+            cwd: self.focused_cwd.as_deref().unwrap_or(""),
+            last_exit: self.last_exit,
             ..*ctx
         };
         // Delegate to the ratatui-backed renderer. We pre-composed
@@ -686,6 +738,8 @@ impl StatusBarPainter {
         let ctx = StatusBarContext {
             prefix: &self.prefix,
             windows: &self.windows,
+            cwd: self.focused_cwd.as_deref().unwrap_or(""),
+            last_exit: self.last_exit,
             ..*ctx
         };
         let row = self.bar.render(&ctx.as_widget(), cols);
@@ -769,6 +823,14 @@ impl StatusBarPainter {
         Ok(())
     }
 
+    /// phux-r82.6: the async data feeds behind the bar's `exec` widgets.
+    /// The driver spawns one bounded interval runner per feed; an
+    /// error-line painter (empty bar) has none.
+    #[must_use]
+    pub fn exec_feeds(&self) -> Vec<phux_config::widget::ExecFeed> {
+        self.bar.exec_feeds()
+    }
+
     /// Force the next [`Self::paint`] to redraw unconditionally —
     /// e.g. after a SIGWINCH or after the pane renderer wrote the
     /// bottom row.
@@ -787,12 +849,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     fn ctx_default(session: &str) -> StatusBarContext<'_> {
-        StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: session,
-            prefix: "C-a",
-            windows: &[],
-        }
+        make_context(session, UNIX_EPOCH)
     }
 
     fn spec(kind: &str, opts: &[(&str, toml::Value)]) -> Widget {
@@ -1069,10 +1126,8 @@ mod tests {
             },
         ];
         let ctx = StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: "",
-            prefix: "C-a",
             windows: &windows,
+            ..make_context("", UNIX_EPOCH)
         };
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
@@ -1092,12 +1147,7 @@ mod tests {
     #[test]
     fn empty_bar_and_no_windows_is_noop() {
         let bar = build_bar(&StatusCfg::default());
-        let ctx = StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: "",
-            prefix: "C-a",
-            windows: &[],
-        };
+        let ctx = make_context("", UNIX_EPOCH);
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
         assert!(buf.is_empty(), "empty bar + no windows must not paint");

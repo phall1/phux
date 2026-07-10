@@ -23,7 +23,9 @@ pub struct PluginConfigEntry {
 }
 
 /// Parsed `phux-plugin.toml` manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// `Eq` is not derived: `PluginManifestWidget.opts` carries `toml::Value`
+// (not `Eq` because of `f64`), matching the schema-crate convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginManifest {
     /// Globally unique plugin id.
     pub id: String,
@@ -55,6 +57,8 @@ pub struct PluginManifest {
     pub links: Vec<PluginManifestLinkHandler>,
     /// Workspace profiles declared by the plugin.
     pub workspaces: Vec<PluginManifestWorkspace>,
+    /// Status-bar widgets contributed by the plugin (phux-r82.6).
+    pub widgets: Vec<PluginManifestWidget>,
 }
 
 /// Platform names accepted in plugin manifests.
@@ -237,6 +241,81 @@ pub struct PluginWorkspacePane {
     pub role: String,
     /// Optional human-readable description.
     pub description: Option<String>,
+}
+
+/// Status-bar widget contributed by a plugin manifest (phux-r82.6,
+/// `[[widgets]]` in `phux-plugin.toml`).
+///
+/// The entry is a [`crate::WidgetSpec`]-shaped table (`kind` plus
+/// kind-specific options) with two extra fields: a plugin-local `id` and
+/// the bar `slot` to append to. Contributions never displace user config:
+/// the TUI appends them after the user's own `[status]` widgets, and an
+/// entry whose spec fails widget validation is dropped with a logged
+/// warning (mirroring the [`PluginManifestAction::keys`] conflict policy).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginManifestWidget {
+    /// Plugin-local widget id.
+    pub id: String,
+    /// Which status-bar slot the widget appends to.
+    pub slot: PluginWidgetSlot,
+    /// Widget kind (`exec`, `text`, ... — any registered kind).
+    pub kind: String,
+    /// Kind-specific options, exactly as a `[status]` widget table would
+    /// carry them.
+    pub opts: std::collections::BTreeMap<String, toml::Value>,
+}
+
+/// Status-bar slot a plugin widget appends to.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginWidgetSlot {
+    /// Append to the left slot.
+    Left,
+    /// Append to the center slot.
+    Center,
+    /// Append to the right slot (the conventional home for indicators).
+    #[default]
+    Right,
+}
+
+/// Fold enabled plugins' `[[widgets]]` contributions into a `[status]`
+/// config (phux-r82.6), appending each contributed spec after the user's
+/// own widgets in its declared slot.
+///
+/// Contributions are validated against `registry` first; a spec that does
+/// not build (unknown kind, bad option) is dropped with a `tracing::warn!`
+/// so one broken plugin cannot degrade the whole bar into the error strip.
+pub fn merge_widget_contributions(
+    status: &mut crate::schema::StatusCfg,
+    manifests: &[PluginManifest],
+    registry: &crate::widget::WidgetRegistry,
+) {
+    for manifest in manifests {
+        for widget in &manifest.widgets {
+            let spec = crate::schema::WidgetSpec {
+                kind: widget.kind.clone(),
+                opts: widget.opts.clone(),
+            };
+            match registry.build(&spec) {
+                Ok(_) => {
+                    let slot = match widget.slot {
+                        PluginWidgetSlot::Left => &mut status.left,
+                        PluginWidgetSlot::Center => &mut status.center,
+                        PluginWidgetSlot::Right => &mut status.right,
+                    };
+                    slot.push(crate::schema::Widget::Spec(spec));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        plugin = %manifest.id,
+                        widget = %widget.id,
+                        error = %err,
+                        "dropping plugin status-widget contribution that failed validation",
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Placement requested by a plugin pane entrypoint.

@@ -26,7 +26,9 @@
 use std::collections::BTreeMap;
 
 use crate::schema::{StatusCfg, Widget, WidgetSpec};
-use crate::widget::{Cell, StatusWidget, WidgetCells, WidgetContext, WidgetError, WidgetRegistry};
+use crate::widget::{
+    Cell, ExecFeed, StatusWidget, WidgetCells, WidgetContext, WidgetError, WidgetRegistry,
+};
 
 /// One composed slot's worth of widgets.
 struct Slot {
@@ -119,6 +121,22 @@ impl StatusBar {
         }
     }
 
+    /// phux-r82.6: the asynchronous data feeds behind this bar's `exec`
+    /// widgets, in slot order (left, center, right). The host runs each
+    /// feed's command on its interval and pushes output through
+    /// [`ExecFeed::apply_output`]; a bar with no `exec` widgets returns
+    /// an empty vec and the host spawns nothing.
+    #[must_use]
+    pub fn exec_feeds(&self) -> Vec<ExecFeed> {
+        self.left
+            .widgets
+            .iter()
+            .chain(&self.center.widgets)
+            .chain(&self.right.widgets)
+            .filter_map(|w| w.exec_feed())
+            .collect()
+    }
+
     /// True if no slot carries any widgets — caller may then skip
     /// reserving a status row entirely.
     #[must_use]
@@ -208,12 +226,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn ctx_with(session: &str) -> WidgetContext<'_> {
-        WidgetContext {
-            now: UNIX_EPOCH + Duration::from_secs(0),
-            session_name: session,
-            prefix: "C-a",
-            windows: &[],
-        }
+        WidgetContext::new(UNIX_EPOCH + Duration::from_secs(0), session, "C-a", &[])
     }
 
     fn spec(kind: &str, opts: &[(&str, toml::Value)]) -> Widget {

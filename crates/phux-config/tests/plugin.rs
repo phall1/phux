@@ -494,3 +494,136 @@ min_phux_version = "0.0.2"
     assert_eq!(manifests[0].id, "example.good");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// phux-r82.6: [[widgets]] status-bar contributions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plugin_manifest_loads_widget_contributions() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.battery"
+name = "Battery"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "battery"
+slot = "right"
+kind = "exec"
+command = "battery.sh"
+interval = "30s"
+
+[[widgets]]
+id = "branch"
+kind = "exec"
+command = ["git-branch-widget"]
+"#,
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.widgets.len(), 2);
+    assert_eq!(loaded.widgets[0].id, "battery");
+    assert_eq!(loaded.widgets[0].kind, "exec");
+    assert_eq!(
+        loaded.widgets[0].slot,
+        plugin::PluginWidgetSlot::Right,
+        "explicit slot"
+    );
+    assert_eq!(
+        loaded.widgets[0].opts.get("interval"),
+        Some(&toml::Value::String("30s".to_owned())),
+        "kind-specific options ride the flattened opts map"
+    );
+    assert_eq!(
+        loaded.widgets[1].slot,
+        plugin::PluginWidgetSlot::Right,
+        "slot defaults to right"
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_duplicate_widget_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.dup"
+name = "Dup"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "w"
+kind = "exec"
+command = "a"
+
+[[widgets]]
+id = "w"
+kind = "exec"
+command = "b"
+"#,
+    )?;
+    assert!(plugin::load_plugin_manifest(&manifest).is_err());
+    Ok(())
+}
+
+#[test]
+fn merge_widget_contributions_appends_after_user_widgets_and_drops_invalid()
+-> Result<(), Box<dyn std::error::Error>> {
+    use phux_config::widget::WidgetRegistry;
+    use phux_config::{StatusCfg, Widget};
+
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.mixed"
+name = "Mixed"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "ok"
+slot = "left"
+kind = "exec"
+command = "ok.sh"
+
+[[widgets]]
+id = "bad-kind"
+kind = "no-such-widget"
+
+[[widgets]]
+id = "bad-opts"
+kind = "exec"
+interval = "30s"
+"#,
+    )?;
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    let mut status = StatusCfg {
+        left: vec![Widget::Bare("session-name".to_owned())],
+        ..StatusCfg::default()
+    };
+    plugin::merge_widget_contributions(
+        &mut status,
+        std::slice::from_ref(&loaded),
+        &WidgetRegistry::with_builtins(),
+    );
+
+    // The valid contribution appended AFTER the user's widget; the unknown
+    // kind and the command-less exec were both dropped.
+    assert_eq!(status.left.len(), 2);
+    assert!(matches!(&status.left[0], Widget::Bare(k) if k == "session-name"));
+    match &status.left[1] {
+        Widget::Spec(spec) => assert_eq!(spec.kind, "exec"),
+        other @ Widget::Bare(_) => panic!("expected contributed spec, got {other:?}"),
+    }
+    assert!(status.center.is_empty() && status.right.is_empty());
+    Ok(())
+}
