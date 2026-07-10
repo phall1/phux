@@ -16,8 +16,13 @@ use crate::commands::{
 
 use self::config::configured_agents;
 use self::detect::infer_agent_state;
-use self::model::{AgentStateReport, PaneEvidence, format_terminal};
-use self::record::{fetch_agent_index, run_agent_clear, run_agent_set};
+use self::model::{AgentStateReport, PaneEvidence};
+use self::record::{run_agent_clear, run_agent_set};
+
+// Shared with the `phux config agents` live projection (phux-r82.10):
+// the pipelined per-pane `phux.agent/v1` index and the pane formatter.
+pub(crate) use self::model::format_terminal;
+pub(crate) use self::record::fetch_agent_index;
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum AgentAction {

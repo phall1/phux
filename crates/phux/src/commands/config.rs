@@ -1,4 +1,5 @@
 mod config_json;
+mod live_feed;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -6,12 +7,20 @@ use std::time::Duration;
 
 use phux_config::loader as config_loader;
 use phux_config::plugin::{self, PluginManifest};
+use phux_server::runtime::default_socket_path;
 
 use super::config_action::ConfigAction;
 use config_json::{print_agents_json, print_plugins_json};
+use live_feed::{
+    AgentProjection, LiveAgentFeed, ManifestAgentRow, ProjectionSource, fetch_live_feed,
+    merge_agents,
+};
 
-/// `phux config <action>` (phux-ijp). Entirely client-local: inspects
-/// and scaffolds the on-disk config without contacting a server.
+/// `phux config <action>` (phux-ijp). Mostly client-local: inspects and
+/// scaffolds the on-disk config without contacting a server. The one
+/// exception is `config agents`, which best-effort reads live
+/// `phux.agent/v1` state from a running server (phux-r82.10) and degrades
+/// to the declared manifest values when none answers.
 pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
     match action {
         ConfigAction::Path => {
@@ -44,7 +53,7 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
             json,
         } => run_config_show(*default, *layers, *json),
         ConfigAction::Plugins { json } => run_config_plugins(*json),
-        ConfigAction::Agents { json } => run_config_agents(*json),
+        ConfigAction::Agents { json, socket } => run_config_agents(*json, socket.clone()),
         ConfigAction::Run {
             plugin,
             action,
@@ -211,7 +220,7 @@ fn run_config_plugins(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_config_agents(json: bool) -> ExitCode {
+fn run_config_agents(json: bool, socket: Option<PathBuf>) -> ExitCode {
     let loaded = match load_configured_plugins() {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -219,23 +228,62 @@ fn run_config_agents(json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let rows = manifest_agent_rows(&loaded);
+    // phux-r82.10: best-effort live feed. No server (or any transport
+    // failure) means `feed` is `None` and the projection reports the
+    // declared manifest values, exactly as before.
+    let feed = fetch_feed_blocking(socket);
+    let merged = merge_agents(&rows, feed.as_ref());
     if json {
-        return print_agents_json(&loaded);
+        return print_agents_json(&merged, feed.is_some());
     }
-    for plugin in loaded {
-        let plugin_state = if plugin.enabled {
+    for row in &merged {
+        let plugin_state = if row.plugin_enabled {
             "enabled"
         } else {
             "disabled"
         };
-        for agent in plugin.manifest.agents {
-            println!(
-                "{}:{} {} {:?} {:?} ({plugin_state})",
-                plugin.manifest.id, agent.id, agent.label, agent.state, agent.attention
-            );
-        }
+        println!(
+            "{}:{} {} {} {} ({plugin_state}, {})",
+            row.plugin_id,
+            row.id,
+            row.label,
+            row.state,
+            row.attention,
+            provenance_word(row)
+        );
     }
     ExitCode::SUCCESS
+}
+
+/// Flatten the loaded manifests into the merge input rows.
+fn manifest_agent_rows(loaded: &[LoadedPlugin]) -> Vec<ManifestAgentRow> {
+    loaded
+        .iter()
+        .flat_map(|plugin| {
+            plugin.manifest.agents.iter().map(|agent| ManifestAgentRow {
+                plugin_id: plugin.manifest.id.clone(),
+                plugin_enabled: plugin.enabled,
+                agent: agent.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Fetch the live feed on a throwaway current-thread runtime; `None` when
+/// no runtime can be built or no server answers.
+fn fetch_feed_blocking(socket: Option<PathBuf>) -> Option<LiveAgentFeed> {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = crate::commands::cli_runtime().ok()?;
+    rt.block_on(fetch_live_feed(&socket_path))
+}
+
+/// Human-output provenance suffix: where the effective state came from.
+fn provenance_word(row: &AgentProjection) -> String {
+    match (&row.source, &row.runtime) {
+        (ProjectionSource::Runtime, Some(binding)) => format!("live {}", binding.terminal),
+        _ => "declared".to_owned(),
+    }
 }
 
 fn run_config_action(

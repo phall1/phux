@@ -615,10 +615,15 @@ path does not move. With `--json`, the result is a `schema_version = 1`
 document whose `updated` array carries `id`, `version`, and `rev` per
 plugin.
 
-`phux config agents --json` projects `[[agents]]` entries into a flat
-`schema_version = 1` document with `plugin_id`, `id`, `label`, `state`,
-`attention`, and `contexts`, so consumers can render
-unknown/idle/working/blocked state without knowing every plugin entrypoint.
+`phux config agents --json [--socket PATH]` projects `[[agents]]` entries
+into a flat `schema_version = 2` document with `plugin_id`, `id`, `label`,
+`state`, `attention`, `source`, `declared`, `runtime`, and `contexts`, so
+consumers can render unknown/idle/working/blocked/done state without knowing
+every plugin entrypoint. The projection is live (phux-r82.10): when a server
+answers on the socket, per-pane `phux.agent/v1` records (ADR-0040) and asked
+state override the declared manifest baseline; without a server the declared
+values are reported with `source = "manifest"`. See
+`docs/consumers/agents.md` §4.6 for the normative shape.
 The config/plugin commands load the user config, resolve every configured
 manifest, and validate ids and non-empty command argv values. Invalid manifests
 are hard failures: they are never silently skipped, because the runtime host

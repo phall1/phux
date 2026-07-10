@@ -46,11 +46,18 @@ pub(crate) enum ConfigAction {
         json: bool,
     },
 
-    /// List agent states declared by configured plugin manifests.
+    /// List agent states from configured plugin manifests, merged with
+    /// live `phux.agent/v1` records when a server is running.
     Agents {
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
         json: bool,
+
+        /// Server socket to read live agent state from. Defaults to the
+        /// per-user socket; no reachable server means declared manifest
+        /// values are reported.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
     },
 
     /// Execute one action declared by a configured plugin manifest.
