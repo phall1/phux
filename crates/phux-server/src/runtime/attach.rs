@@ -143,15 +143,19 @@ pub(crate) async fn resolve_attach_target(
 ///   or no-PTY via [`seed_session_with_actor`] otherwise), and return
 ///   the name so the caller proceeds with the normal attach path.
 ///
-/// `command` and `cwd` from the wire frame are honored only when the
-/// PTY mode is on AND no explicit
+/// `command` from the wire frame is honored only when the PTY mode is
+/// on AND no explicit
 /// [`crate::state::ServerState::attach_create_seed_command`] preempts
-/// them: an explicit per-server seed command always wins (it's how the
+/// it: an explicit per-server seed command always wins (it's how the
 /// `phux server` binary pins `default_shell_command()` for the user).
-/// The PTY path also currently ignores `cwd` — pre-seeded PTY launches
-/// land in the server's CWD today, and lifting that into a
-/// per-`CreateIfMissing` override is filed as a follow-up rather than
-/// snuck in here. The no-PTY path ignores both, matching the existing
+/// `cwd` from the wire frame (phux-3mtf) seeds the PTY child's working
+/// directory when it names an existing directory on the server host; a
+/// missing or non-directory path falls back to the pre-existing
+/// behavior (the builder's cwd stays unset, so the spawn lands where a
+/// `cwd: None` spawn would) rather than failing the attach — the
+/// client's idea of a path may be stale or belong to another host. A
+/// cwd already set on the server-wide override command is never
+/// clobbered. The no-PTY path ignores both, matching the existing
 /// `seed_session_with_actor` shape.
 ///
 /// On terminal-actor spawn failure (e.g. PTY allocation fails on a
@@ -167,7 +171,7 @@ pub(crate) async fn resolve_create_if_missing(
     state: &SharedState,
     name: String,
     command: Option<Vec<String>>,
-    _cwd: Option<String>,
+    cwd: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
@@ -203,7 +207,7 @@ pub(crate) async fn resolve_create_if_missing(
         //      use to spawn (e.g.) `phux new -- vim foo.txt`.
         //   3. `default_shell_command()` (the user's `$SHELL`, or
         //      `/bin/sh`) — same fallback the pre-seed path uses.
-        let mut cmd = override_cmd.unwrap_or_else(|| match command {
+        let mut seed_cmd = override_cmd.unwrap_or_else(|| match command {
             Some(argv) if !argv.is_empty() => {
                 let mut head = argv.into_iter();
                 // Safe: argv is non-empty here.
@@ -216,13 +220,40 @@ pub(crate) async fn resolve_create_if_missing(
             }
             _ => crate::terminal_actor::default_shell_command(),
         });
+        // phux-3mtf: honor the wire `cwd` when it names an existing
+        // directory on this host. Validated up front (rather than passed
+        // through blindly) because portable_pty's spawn fails outright on
+        // a nonexistent cwd, which would turn a stale client-supplied path
+        // into a failed attach; an invalid path instead falls back to the
+        // pre-existing behavior (the builder's cwd stays unset).
+        // Skipped when the builder already carries an explicit cwd —
+        // only possible via the server-wide override command, whose
+        // configuration wins wholesale (same precedence as `command`).
+        // The stamp in `seed_session_with_pty_and_colors` reads the
+        // builder's cwd back (`spawn_cwd_of`), so the honored value also
+        // lands on the pane's registry descriptor for the ATTACHED
+        // snapshot.
+        if seed_cmd.get_cwd().is_none()
+            && let Some(path) = cwd
+        {
+            if std::path::Path::new(&path).is_dir() {
+                seed_cmd.cwd(path);
+            } else {
+                warn!(
+                    session = %name,
+                    cwd = %path,
+                    "CreateIfMissing: wire cwd is not an existing directory; \
+                     falling back to the default spawn directory",
+                );
+            }
+        }
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
-        crate::terminal_actor::apply_term(&mut cmd, &term);
+        crate::terminal_actor::apply_term(&mut seed_cmd, &term);
         seed_session_with_pty_and_colors(
             state,
             &name,
-            cmd,
+            seed_cmd,
             history_limit,
             root_token,
             default_colors,
