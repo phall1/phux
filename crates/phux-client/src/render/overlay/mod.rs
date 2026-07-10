@@ -133,6 +133,17 @@ pub trait RenderOverlay {
     fn is_input_passthrough(&self) -> bool {
         false
     }
+
+    /// phux-foz.7: offer this overlay a freshly rebuilt row set tagged
+    /// `key`. A *live* overlay whose data projects shared client state —
+    /// the agent-fleet dashboard — replaces its rows in place (preserving
+    /// query/selection) and returns `true` so the driver repaints it; every
+    /// other overlay ignores the offer (default `false`). This is push, not
+    /// poll: the driver calls it only when a server frame actually changed
+    /// the projected state.
+    fn refresh_items(&mut self, _key: &str, _items: &[SelectItem]) -> bool {
+        false
+    }
 }
 
 /// What an overlay wants the driver to do after [`RenderOverlay::handle_key`].
@@ -345,6 +356,19 @@ impl OverlayState {
             }
             OverlayCommand::ScrollViewport(delta) => OverlayOutcome::ScrollViewport(delta),
         }
+    }
+
+    /// phux-foz.7: hand a freshly rebuilt row set tagged `key` to the
+    /// stacked overlays, top-down. The first overlay that accepts it (a
+    /// live [`SelectList`] carrying the matching key — the agent-fleet
+    /// dashboard) replaces its rows and stops the walk; `true` means some
+    /// overlay refreshed and the caller should repaint the overlay layer.
+    /// `false` (no live overlay in the stack) costs nothing downstream.
+    pub fn refresh_items(&mut self, key: &str, items: &[SelectItem]) -> bool {
+        self.stack
+            .iter_mut()
+            .rev()
+            .any(|overlay| overlay.refresh_items(key, items))
     }
 
     /// Dispatch a mouse event to the top overlay. The overlay stays active;
@@ -677,6 +701,57 @@ mod tests {
         s.dismiss();
         s.handle_key(&key(PhysicalKey::Escape));
         assert!(!s.is_active());
+    }
+
+    // ---------- phux-foz.7: live row refresh routing ----------
+
+    fn live_fleet_list() -> SelectList {
+        let items = vec![SelectItem::new(
+            "stale-row",
+            phux_config::keybind::ResolvedAction {
+                action: "focus-pane".to_owned(),
+                args: std::collections::BTreeMap::new(),
+            },
+        )];
+        SelectList::new("agent fleet", items, &crate::render::Theme::default())
+            .with_live_key("agent-fleet")
+    }
+
+    fn fresh_rows() -> Vec<SelectItem> {
+        vec![SelectItem::new(
+            "fresh-row",
+            phux_config::keybind::ResolvedAction {
+                action: "focus-pane".to_owned(),
+                args: std::collections::BTreeMap::new(),
+            },
+        )]
+    }
+
+    #[test]
+    fn refresh_items_reaches_a_live_overlay() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(live_fleet_list()));
+        assert!(s.refresh_items("agent-fleet", &fresh_rows()));
+    }
+
+    #[test]
+    fn refresh_items_reaches_a_live_overlay_under_the_top() {
+        // A modal stacked on top of the fleet (e.g. help) must not shield
+        // it from data refreshes — the walk descends the stack.
+        let mut s = OverlayState::new();
+        s.push(Box::new(live_fleet_list()));
+        s.push(Box::new(EscDismiss));
+        assert!(s.refresh_items("agent-fleet", &fresh_rows()));
+    }
+
+    #[test]
+    fn refresh_items_false_without_a_live_overlay() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(EscDismiss));
+        assert!(!s.refresh_items("agent-fleet", &fresh_rows()));
+        // Empty stack: also false.
+        let mut s = OverlayState::new();
+        assert!(!s.refresh_items("agent-fleet", &fresh_rows()));
     }
 
     #[test]

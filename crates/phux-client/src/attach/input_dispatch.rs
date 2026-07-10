@@ -172,6 +172,15 @@ pub(super) struct DispatchCtx<'a> {
     /// inside dispatch because the resolver/theme/keybindings borrows in
     /// this ctx ARE the state being replaced.
     pub reload_request: &'a mut bool,
+    /// phux-foz.7 / ADR-0040: the driver's decoded `phux.agent/v1` records
+    /// (`AgentMetaIndex::records`), kept live by the per-pane metadata
+    /// subscriptions. The `agent-fleet` action projects them into the
+    /// dashboard rows.
+    pub agent_meta: &'a HashMap<TerminalId, crate::agent_meta::AgentRecord>,
+    /// phux-foz.7 / phux-p4vp: the driver's pane-cwd index + memoized
+    /// branch cache. The fleet rows resolve each pane's branch through it
+    /// (mut only for the memo).
+    pub vcs: &'a mut super::driver::VcsIndex,
 }
 
 /// An active divider drag (ADR-0035).
@@ -299,7 +308,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 // it through the same path as a keybinding.
                 match ctx.overlays.handle_key(key_event) {
                     OverlayOutcome::RunAction(resolved) => {
-                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
                         if apply_action_effects(
                             effects,
                             out,
@@ -357,7 +366,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         }
                     }
                     OverlayOutcome::RunAction(resolved) => {
-                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
                         if apply_action_effects(
                             effects,
                             out,
@@ -391,7 +400,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     continue;
                 }
                 ChordOutcome::Resolved(resolved) => {
-                    let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                    let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
                     if apply_action_effects(
                         effects,
                         out,
@@ -497,7 +506,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                             sidebar_click_action(strip, ctx.workspace.windows.len(), cell_x, cell_y)
                     {
                         tracing::debug!(action = %resolved.action, "sidebar: click dispatched");
-                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
                         if apply_action_effects(
                             effects,
                             out,
@@ -1275,6 +1284,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "command-palette",
     "window-picker",
     "session-picker",
+    "agent-fleet",
+    "focus-pane",
     "switch-session",
     "new-session",
     "take-input",
@@ -1301,6 +1312,12 @@ fn run_action(
     resolved: &phux_config::keybind::ResolvedAction,
     ctx: &mut DispatchCtx<'_>,
     focused: Option<&TerminalId>,
+    // phux-foz.7: read-only view of the live pane slots. The `agent-fleet`
+    // arm snapshots each pane's asked flag / OSC title / cwd from it;
+    // every other arm ignores it. Threaded as a parameter (not a ctx
+    // field) because the driver also passes `panes` mutably alongside the
+    // ctx into `dispatch_input_events`.
+    panes: &HashMap<TerminalId, PaneSlot>,
 ) -> ActionEffects {
     // One event per resolved action the user triggered. Info level: a
     // keybinding firing is a user-lifecycle event a trace reader wants under
@@ -1719,6 +1736,76 @@ fn run_action(
             ctx.overlays
                 .push(Box::new(SelectList::new("sessions", items, ctx.theme)));
         }
+        "agent-fleet" => {
+            // phux-foz.7: push the agent-fleet dashboard — every pane of
+            // the attached session grouped under session headers, with its
+            // ADR-0040 agent record (name/kind + state glyph), ADR-0035
+            // asked/attention highlight, and branch/cwd. Rows commit
+            // `focus-pane { window, pane }` (current session) or
+            // `switch-session { name }` (foreign sessions) through the
+            // single dispatch path. Constructed with the fleet live key so
+            // the driver can refresh the rows in place as agent events
+            // land while it is open. With nothing to list it bells.
+            let meta = super::fleet::collect_pane_meta(panes, ctx.vcs);
+            let items = super::fleet::fleet_items(
+                ctx.workspace,
+                ctx.sessions,
+                ctx.focused_session,
+                ctx.agent_meta,
+                &meta,
+            );
+            if items.iter().all(SelectItem::is_header) {
+                effects.bell = true;
+                return effects;
+            }
+            ctx.overlays.push(Box::new(
+                SelectList::new("agent fleet", items, ctx.theme)
+                    .with_live_key(super::fleet::FLEET_LIVE_KEY),
+            ));
+        }
+        "focus-pane" => {
+            // phux-foz.7: focus a specific pane addressed as
+            // (window index, DFS leaf ordinal) — the commit the fleet
+            // dashboard's current-session rows carry. Per-client, like
+            // `select-window` (no broadcast): switch to the window, then
+            // move its client-local focus onto the target leaf. Stale
+            // coordinates (the layout changed since the rows were built)
+            // bell rather than focusing the wrong pane.
+            let (Some(win), Some(ord)) =
+                (usize_arg(resolved, "window"), usize_arg(resolved, "pane"))
+            else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "focus-pane missing/bad `window`/`pane` args",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let target = ctx
+                .workspace
+                .windows
+                .get(win)
+                .and_then(|w| w.state.tree.as_ref())
+                .map(crate::layout::leaves)
+                .and_then(|leaves| leaves.get(ord).cloned());
+            let Some(target) = target else {
+                tracing::warn!(
+                    window = win,
+                    pane = ord,
+                    "focus-pane: no such pane (layout changed?)",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            switch_window(ctx, &mut effects, |w| {
+                w.select(win);
+            });
+            if let Some(ls) = ctx.workspace.active_window_mut() {
+                ls.focus = Some(target.clone());
+            }
+            effects.layout_mutated = true;
+            effects.set_focus = Some(target);
+        }
         "switch-session" => {
             // phux-4li.20 / phux-eb0: re-target this client to another
             // session. The effect carries the target up to
@@ -1942,7 +2029,15 @@ fn amount_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<i16> {
 /// Pull a window index out of a [`phux_config::keybind::ResolvedAction`]'s `index = N` arg.
 /// Negative or non-integer values yield `None` (the caller bells).
 fn index_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<usize> {
-    let v = resolved.args.get("index")?.as_integer()?;
+    usize_arg(resolved, "index")
+}
+
+/// Pull a non-negative integer arg (`key = N`) out of a
+/// [`phux_config::keybind::ResolvedAction`] (phux-foz.7: `window` / `pane`
+/// on `focus-pane`). Negative or non-integer values yield `None` (the
+/// caller bells).
+fn usize_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option<usize> {
+    let v = resolved.args.get(key)?.as_integer()?;
     usize::try_from(v).ok()
 }
 
@@ -2516,6 +2611,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -2541,9 +2638,11 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
-        run_action(action, &mut ctx, focused.as_ref())
+        run_action(action, &mut ctx, focused.as_ref(), &HashMap::new())
     }
 
     #[test]
@@ -2817,7 +2916,7 @@ mod tests {
     /// second toggle.
     #[allow(
         clippy::too_many_lines,
-        reason = "two full DispatchCtx constructions; each new ctx field (mouse_optout, reload_request) adds two lines"
+        reason = "two hand-built DispatchCtx values exercise the full toggle round trip"
     )]
     #[tokio::test]
     async fn apply_effects_flips_sidebar_enabled_state() {
@@ -2835,6 +2934,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2860,8 +2961,15 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
-        let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
+        let effects = run_action(
+            &bare_action("toggle-sidebar"),
+            &mut ctx,
+            None,
+            &HashMap::new(),
+        );
         let mut out: Vec<u8> = Vec::new();
         let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
         let mut conn = Connection::from_stream(a);
@@ -2886,6 +2994,8 @@ mod tests {
 
         // A second toggle disables it again.
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2911,8 +3021,15 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
-        let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
+        let effects = run_action(
+            &bare_action("toggle-sidebar"),
+            &mut ctx,
+            None,
+            &HashMap::new(),
+        );
         apply_action_effects(
             effects,
             &mut out,
@@ -2972,6 +3089,8 @@ mod tests {
             std::collections::HashSet::new();
         let effects = {
             let mut reload_request = false;
+            let fleet_agent_meta = HashMap::new();
+            let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace,
@@ -2997,9 +3116,11 @@ mod tests {
                 plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
+                agent_meta: &fleet_agent_meta,
+                vcs: &mut fleet_vcs,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
-            run_action(action, &mut ctx, focused.as_ref())
+            run_action(action, &mut ctx, focused.as_ref(), &HashMap::new())
         };
         (effects, overlays)
     }
@@ -3126,6 +3247,8 @@ mod tests {
         let mut drag: Option<DragGrab> = None;
         let mut mouse_optout = std::collections::HashSet::new();
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -3151,9 +3274,11 @@ mod tests {
             plugin_panes: panes,
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
-        run_action(action, &mut ctx, focused.as_ref())
+        run_action(action, &mut ctx, focused.as_ref(), &HashMap::new())
     }
 
     /// The spawn frame's plugin-relevant fields, destructured for
@@ -3491,6 +3616,172 @@ mod tests {
         assert!(!effects.set_metadata, "window switch is per-client");
     }
 
+    // ---------- phux-foz.7: agent-fleet dashboard + focus-pane ----------
+
+    #[test]
+    fn agent_fleet_action_pushes_overlay() {
+        let mut workspace = Workspace::single(tid(1));
+        let (effects, overlays) = run_capturing(&bare_action("agent-fleet"), &mut workspace);
+        assert!(overlays.is_active(), "agent-fleet should push the overlay");
+        assert_eq!(overlays.depth(), 1);
+        assert!(!effects.bell);
+    }
+
+    #[test]
+    fn agent_fleet_on_empty_workspace_bells() {
+        let mut workspace = Workspace::default();
+        let (effects, overlays) = run_capturing(&bare_action("agent-fleet"), &mut workspace);
+        assert!(!overlays.is_active(), "nothing to list => no overlay");
+        assert!(effects.bell);
+    }
+
+    #[test]
+    fn agent_fleet_overlay_accepts_live_fleet_refresh() {
+        // The pushed overlay is constructed with the fleet live key, so the
+        // driver's push-based refresh (rows rebuilt when an agent event
+        // lands) reaches it in place.
+        let mut workspace = Workspace::single(tid(1));
+        let (_effects, mut overlays) = run_capturing(&bare_action("agent-fleet"), &mut workspace);
+        let fresh = crate::attach::fleet::fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            overlays.refresh_items(crate::attach::fleet::FLEET_LIVE_KEY, &fresh),
+            "the fleet overlay must accept a matching live refresh"
+        );
+    }
+
+    #[test]
+    fn command_palette_ignores_fleet_refresh() {
+        // Static overlays (the palette, the pickers) must never swap their
+        // rows for fleet data.
+        let mut workspace = Workspace::single(tid(1));
+        let (_effects, mut overlays) =
+            run_capturing(&bare_action("command-palette"), &mut workspace);
+        assert!(
+            !overlays.refresh_items(crate::attach::fleet::FLEET_LIVE_KEY, &[]),
+            "a static overlay must ignore the fleet refresh"
+        );
+    }
+
+    /// Window 0 split into panes 1|2, window 1 a single pane 3.
+    fn fleet_workspace() -> Workspace {
+        use crate::layout::{LayoutNode, LayoutState, SplitDir, WindowState, split_at};
+        let tree = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        Workspace {
+            windows: vec![
+                WindowState {
+                    name: "main".to_owned(),
+                    state: LayoutState {
+                        tree: Some(tree),
+                        focus: Some(tid(1)),
+                    },
+                },
+                WindowState {
+                    name: "logs".to_owned(),
+                    state: LayoutState::single(tid(3)),
+                },
+            ],
+            active: 1,
+        }
+    }
+
+    #[test]
+    fn focus_pane_switches_window_and_focuses_leaf() {
+        let mut workspace = fleet_workspace(); // active = window 1
+        let mut action = bare_action("focus-pane");
+        action
+            .args
+            .insert("window".to_owned(), toml::Value::Integer(0));
+        action
+            .args
+            .insert("pane".to_owned(), toml::Value::Integer(1));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(workspace.active, 0, "switched to the target window");
+        assert_eq!(
+            workspace.windows[0].state.focus,
+            Some(tid(2)),
+            "focus landed on the second DFS leaf"
+        );
+        assert_eq!(effects.set_focus, Some(tid(2)));
+        assert!(effects.layout_mutated);
+        assert!(!effects.set_metadata, "focus is per-client, no broadcast");
+        assert!(!effects.bell);
+    }
+
+    #[test]
+    fn focus_pane_within_active_window_moves_focus_only() {
+        let mut workspace = fleet_workspace();
+        workspace.select(0); // active = 0, focus = tid(1)
+        let mut action = bare_action("focus-pane");
+        action
+            .args
+            .insert("window".to_owned(), toml::Value::Integer(0));
+        action
+            .args
+            .insert("pane".to_owned(), toml::Value::Integer(1));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(workspace.active, 0);
+        assert_eq!(workspace.windows[0].state.focus, Some(tid(2)));
+        assert_eq!(effects.set_focus, Some(tid(2)));
+    }
+
+    #[test]
+    fn focus_pane_missing_args_bells() {
+        let mut workspace = fleet_workspace();
+        let effects = run(&bare_action("focus-pane"), &mut workspace);
+        assert!(effects.bell);
+        assert!(effects.set_focus.is_none());
+    }
+
+    #[test]
+    fn focus_pane_stale_coordinates_bell_without_mutation() {
+        // The fleet rows may outlive a layout change; a stale (window, pane)
+        // address must bell rather than focus the wrong pane.
+        let mut workspace = fleet_workspace();
+        let mut action = bare_action("focus-pane");
+        action
+            .args
+            .insert("window".to_owned(), toml::Value::Integer(0));
+        action
+            .args
+            .insert("pane".to_owned(), toml::Value::Integer(9));
+        let effects = run(&action, &mut workspace);
+        assert!(effects.bell);
+        assert_eq!(workspace.active, 1, "no window switch on a stale address");
+        assert!(effects.set_focus.is_none());
+    }
+
+    #[test]
+    fn fleet_commit_routes_focus_pane_through_run_action() {
+        // The architectural invariant: a fleet row's committed ResolvedAction,
+        // fed back through run_action, performs the same per-client focus a
+        // keybinding path would.
+        let mut workspace = fleet_workspace();
+        let items = crate::attach::fleet::fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        // Row 1 is window 0's second pane (tid 2).
+        let effects = run(&items[1].action.clone(), &mut workspace);
+        assert_eq!(workspace.active, 0);
+        assert_eq!(effects.set_focus, Some(tid(2)));
+    }
+
     fn sinfo(id: u32, name: &str) -> phux_protocol::wire::info::SessionInfo {
         phux_protocol::wire::info::SessionInfo::new(phux_protocol::ids::SessionId::new(id), name)
             .with_window_count(1)
@@ -3632,6 +3923,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3657,13 +3950,15 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
             args: BTreeMap::new(),
         };
 
-        let effects = run_action(&action, &mut ctx, None);
+        let effects = run_action(&action, &mut ctx, None, &HashMap::new());
 
         assert!(effects.detach);
         assert!(!effects.layout_mutated);
@@ -3709,6 +4004,8 @@ mod tests {
             std::collections::HashSet::new();
         let effects = {
             let mut reload_request = false;
+            let fleet_agent_meta = HashMap::new();
+            let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace: &mut workspace,
@@ -3734,8 +4031,15 @@ mod tests {
                 plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
+                agent_meta: &fleet_agent_meta,
+                vcs: &mut fleet_vcs,
             };
-            run_action(&bare_action("rename-session"), &mut ctx, None)
+            run_action(
+                &bare_action("rename-session"),
+                &mut ctx,
+                None,
+                &HashMap::new(),
+            )
         };
         assert!(
             overlays.is_active(),
@@ -3869,6 +4173,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3894,6 +4200,8 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         dispatch_input_events(
             &mut out,
@@ -3972,6 +4280,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3997,6 +4307,8 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         dispatch_input_events(
             &mut out,
@@ -4066,6 +4378,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "full copy-mode page-up/page-down round trip needs a complete dispatch context"
+    )]
     #[tokio::test]
     async fn copy_mode_page_scroll_mutates_focused_terminal_viewport() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
@@ -4118,6 +4434,8 @@ mod tests {
         let mut reload_request = false;
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -4143,6 +4461,8 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         let page_up = KeyEvent {
             action: KeyAction::Press,
@@ -4273,6 +4593,8 @@ mod tests {
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -4301,6 +4623,8 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         dispatch_input_events(
             &mut out,
@@ -4443,6 +4767,8 @@ mod tests {
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             seed_optout.iter().cloned().collect();
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -4469,6 +4795,8 @@ mod tests {
                 plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
+                agent_meta: &fleet_agent_meta,
+                vcs: &mut fleet_vcs,
             };
             dispatch_input_events(
                 &mut out,
@@ -4622,6 +4950,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -4647,13 +4977,15 @@ mod tests {
             plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
         let mut action = bare_action("set-pane");
         if let Some(v) = mouse {
             action.args.insert("mouse".to_owned(), v);
         }
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
-        run_action(&action, &mut ctx, focused.as_ref())
+        run_action(&action, &mut ctx, focused.as_ref(), &HashMap::new())
     }
 
     #[test]

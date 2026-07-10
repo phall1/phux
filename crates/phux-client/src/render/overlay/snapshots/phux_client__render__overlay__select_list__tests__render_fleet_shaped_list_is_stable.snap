@@ -1,0 +1,16 @@
+---
+source: crates/phux-client/src/render/overlay/select_list.rs
+expression: out
+---
+
+
+          ┌──────── agent fleet ────────┐
+          │>                            │
+          │                             │
+          │work (current)               │
+          │  ! 0:main.0 reviewer [claude│
+          │  * 0:main.1 builder working │
+          │scratch                      │
+          │  switch to this session 2 wi│
+          │                             │
+          └─────────────────────────────┘
