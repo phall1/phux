@@ -349,6 +349,59 @@ manifest = "/opt/shared/phux-plugin.toml"
 }
 
 #[test]
+fn extended_layer_manifests_resolve_relative_to_the_layer_file() {
+    // A distro layer wires plugins with paths relative to ITSELF; plugin
+    // loaders resolve relative manifests against the user config's
+    // directory, so layer resolution must absolutize them (phux-r82.9).
+    let tmp = TempDir::new().expect("tempdir");
+    write(
+        tmp.path(),
+        "distro/distro.toml",
+        r#"
+[[plugins-append]]
+manifest = "/already/absolute/phux-plugin.toml"
+
+[[plugins-append]]
+manifest = "plugins/one/phux-plugin.toml"
+"#,
+    );
+    let user = r#"extends = ["distro/distro.toml"]"#;
+    // The user config lives at the tempdir root — NOT in distro/ — so a
+    // path that leaked through unrewritten would resolve wrongly.
+    let cfg = parse_with_defaults(user, &tmp.path().join("config.toml")).expect("layered parse");
+
+    assert_eq!(cfg.plugins.len(), 2);
+    assert_eq!(
+        cfg.plugins[0].manifest,
+        Path::new("/already/absolute/phux-plugin.toml"),
+        "absolute manifests pass through untouched"
+    );
+    assert_eq!(
+        cfg.plugins[1].manifest,
+        tmp.path()
+            .join("distro")
+            .join("plugins/one/phux-plugin.toml"),
+        "relative manifests absolutize against the layer's directory"
+    );
+}
+
+#[test]
+fn root_config_manifests_are_left_verbatim() {
+    // Only *extended* layers are rewritten: the root file's relative
+    // manifests keep the documented resolve-against-config-dir behavior
+    // (and `phux config show` keeps echoing what the user wrote).
+    let user = r#"
+[[plugins]]
+manifest = "plugins/mine/phux-plugin.toml"
+"#;
+    let cfg = parse_with_defaults(user, Path::new("/tmp/config.toml")).expect("parse");
+    assert_eq!(
+        cfg.plugins[0].manifest,
+        Path::new("plugins/mine/phux-plugin.toml")
+    );
+}
+
+#[test]
 fn loader_resolves_extends_relative_to_the_config_file() {
     let tmp = TempDir::new().expect("tempdir");
     write(

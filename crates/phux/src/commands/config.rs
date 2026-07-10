@@ -27,26 +27,7 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
             println!("{}", config_loader::config_path().display());
             ExitCode::SUCCESS
         }
-        ConfigAction::Init { force } => {
-            let path = config_loader::config_path();
-            match phux_config::scaffold::write_reference_config(&path, *force) {
-                Ok(phux_config::scaffold::ScaffoldOutcome::Wrote(p)) => {
-                    println!("wrote {}", p.display());
-                    ExitCode::SUCCESS
-                }
-                Ok(phux_config::scaffold::ScaffoldOutcome::Skipped(p)) => {
-                    eprintln!(
-                        "phux: {} already exists; refusing to overwrite (use --force)",
-                        p.display()
-                    );
-                    ExitCode::FAILURE
-                }
-                Err(err) => {
-                    eprintln!("phux: could not write config: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        ConfigAction::Init { force, distro } => run_config_init(*force, distro.as_deref()),
         ConfigAction::Show {
             default,
             layers,
@@ -166,6 +147,55 @@ fn layer_short_label(layer: &phux_config::LayerSource) -> String {
             |n| n.to_string_lossy().into_owned(),
         ),
         phux_config::LayerSource::User(_) => "user".to_owned(),
+    }
+}
+
+/// `phux config init [--distro <name-or-path>]`: scaffold the starter
+/// config, plain or extending a starter distribution (phux-r82.9).
+///
+/// The distro flavor resolves the spec to an absolute layer path, then
+/// **validates the full merged stack before writing anything** — a
+/// broken or missing distro layer fails the command instead of leaving
+/// the user a config that errors on every subsequent invocation.
+fn run_config_init(force: bool, distro: Option<&str>) -> ExitCode {
+    let path = config_loader::config_path();
+    let contents = match distro {
+        None => phux_config::scaffold::reference_config(),
+        Some(spec) => {
+            let layer = match phux_config::distro::resolve_distro(spec) {
+                Ok(layer) => layer,
+                Err(err) => {
+                    eprintln!("phux: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let contents = phux_config::scaffold::distro_reference_config(&layer);
+            if let Err(err) = phux_config::parse_with_defaults(&contents, &path) {
+                eprintln!(
+                    "phux: distro layer {} does not produce a valid config: {err}",
+                    layer.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            contents
+        }
+    };
+    match phux_config::scaffold::write_scaffold(&path, &contents, force) {
+        Ok(phux_config::scaffold::ScaffoldOutcome::Wrote(p)) => {
+            println!("wrote {}", p.display());
+            ExitCode::SUCCESS
+        }
+        Ok(phux_config::scaffold::ScaffoldOutcome::Skipped(p)) => {
+            eprintln!(
+                "phux: {} already exists; refusing to overwrite (use --force)",
+                p.display()
+            );
+            ExitCode::FAILURE
+        }
+        Err(err) => {
+            eprintln!("phux: could not write config: {err}");
+            ExitCode::FAILURE
+        }
     }
 }
 

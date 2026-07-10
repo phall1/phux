@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod distro;
 mod error;
 mod layer;
 pub mod plugin;

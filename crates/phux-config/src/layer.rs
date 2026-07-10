@@ -92,6 +92,16 @@ pub struct ConfigProvenance {
     pub keys: BTreeMap<String, KeyOrigin>,
 }
 
+/// Top-level array keys whose elements carry a `manifest` path.
+///
+/// Plugin loaders resolve a relative `[[plugins]]` manifest against the
+/// *user config file's* directory (`crate::plugin::resolve_manifest_path`).
+/// A shared layer — a distro, a team baseline — lives somewhere else
+/// entirely, so a relative manifest it declares would dangle once merged.
+/// Layer resolution therefore rewrites those paths to absolute against
+/// the layer's own directory before the merge erases provenance.
+const MANIFEST_ARRAY_KEYS: [&str; 2] = ["plugins", "plugins-append"];
+
 /// Parse `input` as a plain TOML table, mapping errors to
 /// [`ConfigError::Parse`] with `line:col` pointing into `input`.
 fn parse_table(input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
@@ -242,8 +252,63 @@ fn push_layer(
             visiting.pop();
         }
     }
+    if depth > 0 {
+        // Only *extended* layers are rewritten: the root file's relative
+        // manifests already resolve against its own directory by the
+        // documented `[[plugins]]` contract, and leaving them untouched
+        // keeps `phux config show` output identical to what the user wrote.
+        let layer_dir = path.parent().unwrap_or_else(|| Path::new(""));
+        absolutize_plugin_manifests(&mut table, layer_dir);
+    }
     out.push((path.to_path_buf(), table));
     Ok(())
+}
+
+/// Rewrite relative `manifest` paths in [`MANIFEST_ARRAY_KEYS`] arrays to
+/// absolute paths under `layer_dir`, so a shared layer's plugin wiring
+/// keeps working no matter where the user's config file lives.
+fn absolutize_plugin_manifests(table: &mut toml::Table, layer_dir: &Path) {
+    for key in MANIFEST_ARRAY_KEYS {
+        let Some(toml::Value::Array(entries)) = table.get_mut(key) else {
+            continue;
+        };
+        for entry in entries {
+            let Some(toml::Value::String(manifest)) = entry
+                .as_table_mut()
+                .and_then(|entry| entry.get_mut("manifest"))
+            else {
+                continue;
+            };
+            if !Path::new(manifest.as_str()).is_absolute() {
+                *manifest = lexical_normalize(&layer_dir.join(manifest.as_str()))
+                    .display()
+                    .to_string();
+            }
+        }
+    }
+}
+
+/// Fold `.` and `..` components lexically (no filesystem access, no
+/// symlink resolution) so a distro layer's `../../plugins/...` manifest
+/// reads cleanly in `phux config show` output and error messages.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // The parent of the root is the root.
+                Some(Component::RootDir) => {}
+                _ => out.push(".."),
+            },
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Validate the `extends` value: an array of strings.
