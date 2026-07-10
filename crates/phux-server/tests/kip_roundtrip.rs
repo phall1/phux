@@ -295,8 +295,14 @@ struct TuiProbe {
 }
 
 impl TuiProbe {
-    /// Attach to the pre-seeded session and swallow the
-    /// `ATTACHED`/`TERMINAL_SNAPSHOT` handshake.
+    /// Attach to the pre-seeded session, consuming the
+    /// `ATTACHED`/`TERMINAL_SNAPSHOT` handshake. The snapshot payload is
+    /// REPLAYED into the accumulators, not discarded: per frame.rs, the
+    /// snapshot's `vt_replay_bytes` reproduce the grid state at emission,
+    /// so any pane output that raced ahead of the attach (e.g. the seed
+    /// command's first paint) arrives here and never again as
+    /// `TERMINAL_OUTPUT`. Dropping it would blind the `Screen` oracle to
+    /// the pane's first paint and make fast-printing scenarios flake.
     async fn attach(mut stream: UnixStream) -> Self {
         send_frame(&mut stream, &attach_by_name("default")).await;
         let (type_byte, attached) = recv_typed(&mut stream).await;
@@ -308,15 +314,32 @@ impl TuiProbe {
             }
             other => panic!("expected ATTACHED, got {other:?}"),
         };
-        let (type_byte, _snap) = recv_typed(&mut stream).await;
+        let (type_byte, snap) = recv_typed(&mut stream).await;
         assert_eq!(type_byte, TYPE_TERMINAL_SNAPSHOT);
-        Self {
+        let mut probe = Self {
             stream,
             terminal_id,
             screen: Screen::new(80, 24).expect("screen oracle"),
             raw: Vec::new(),
             closed: false,
+        };
+        match snap {
+            FrameKind::TerminalSnapshot {
+                vt_replay_bytes,
+                scrollback_bytes,
+                ..
+            } => {
+                // Scrollback first, per the frame's documented ordering.
+                if let Some(scrollback) = scrollback_bytes {
+                    probe.raw.extend_from_slice(&scrollback);
+                    probe.screen.write(&scrollback);
+                }
+                probe.raw.extend_from_slice(&vt_replay_bytes);
+                probe.screen.write(&vt_replay_bytes);
+            }
+            other => panic!("expected TERMINAL_SNAPSHOT, got {other:?}"),
         }
+        probe
     }
 
     async fn send_key(&mut self, event: KeyEvent) {
