@@ -46,6 +46,7 @@ use super::input::StdinParser;
 use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
 };
+use super::exec_widgets::spawn_exec_feed_runners;
 use super::paint::{
     SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
 };
@@ -90,6 +91,17 @@ pub(super) struct PaneSlot {
     pub sync_output_since: Option<tokio::time::Instant>,
     /// Whether mirror state changed during the transaction.
     pub sync_output_dirty: bool,
+    /// phux-foz.4: the pane's working directory as the server last
+    /// announced it — seeded from the `ATTACHED` snapshot's
+    /// `TerminalInfo.cwd` (the spawn cwd) and refined by `cwd_changed`
+    /// events. `None` until either lands. Projected into the status-bar
+    /// `cwd` widget when this pane is focused.
+    pub cwd: Option<String>,
+    /// phux-foz.4: exit code of the last command that finished in this
+    /// pane (`command_finished.exit_code`, OSC-133 `D` mark). `None`
+    /// before the first command finishes or when the shell reported no
+    /// code. Projected into the status-bar `exit` widget when focused.
+    pub last_exit: Option<i32>,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -129,6 +141,8 @@ impl PaneSlot {
             attention: false,
             sync_output_since: None,
             sync_output_dirty: false,
+            cwd: None,
+            last_exit: None,
         })
     }
 
@@ -247,6 +261,14 @@ fn refresh_window_chrome(
         changed |= sb.set_windows(windows.clone());
         changed |= sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
         changed |= sb.set_attention(attention_hint(panes));
+        // phux-foz.4: project the focused pane's data feeds into the bar so
+        // the `cwd` / `exit` widgets track focus changes and inbound
+        // `cwd_changed` / `command_finished` events through this same
+        // chokepoint. Unfocused (or unknown) folds to None => the widgets
+        // render nothing.
+        let focused = focused_pane.and_then(|id| panes.get(id));
+        changed |= sb.set_focused_cwd(focused.and_then(|slot| slot.cwd.clone()));
+        changed |= sb.set_last_exit(focused.and_then(|slot| slot.last_exit));
     }
     changed |= sidebar_painter.set_windows(windows);
     changed
@@ -1358,6 +1380,17 @@ async fn main_loop<W: super::RenderSink>(
     if let Some(sb) = status_bar.as_mut() {
         sb.set_attention_color(theme.attention);
     }
+    // phux-r82.6: spawn one bounded interval runner per `exec` widget. The
+    // runners execute off-loop and write into the widgets' shared caches;
+    // the bar's normal repaint tick picks changed cells up, so the render
+    // loop never blocks on a widget command. The guard aborts the tasks
+    // (and via kill_on_drop, their children) when this attach loop ends.
+    let _exec_runners = spawn_exec_feed_runners(
+        status_bar
+            .as_ref()
+            .map(StatusBarPainter::exec_feeds)
+            .unwrap_or_default(),
+    );
     // phux-4h5a: window-sidebar render state, driver-local like `zoomed`. The
     // `[sidebar]` config seeds the initial enabled flag, width, and edge; the
     // `toggle-sidebar` action flips `sidebar_enabled` at runtime. Each frame
@@ -2822,7 +2855,18 @@ fn build_status_bar_painter() -> Option<StatusBarPainter> {
         }
     };
     let registry = phux_config::WidgetRegistry::with_builtins();
-    match phux_config::widget::StatusBar::build(&cfg.status, &registry) {
+    // phux-r82.6: fold enabled plugins' `[[widgets]]` contributions in
+    // after the user's own `[status]` widgets. Invalid contributions are
+    // dropped with a warning inside the merge (mirroring the plugin
+    // keybinding policy), so a broken plugin cannot flip the bar into the
+    // error strip; a genuinely broken USER config still can, below.
+    let mut status = cfg.status.clone();
+    if !cfg.plugins.is_empty() {
+        let config_path = phux_config::loader::config_path();
+        let manifests = phux_config::plugin::load_enabled_manifests(&config_path, &cfg.plugins);
+        phux_config::plugin::merge_widget_contributions(&mut status, &manifests, &registry);
+    }
+    match phux_config::widget::StatusBar::build(&status, &registry) {
         Ok(bar) if bar.is_empty() => None,
         Ok(bar) => {
             let mut painter = StatusBarPainter::new(bar, Position::default());

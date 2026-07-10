@@ -34,6 +34,7 @@ pub mod actions;
 pub mod connection;
 pub mod copy;
 pub mod driver;
+mod exec_widgets;
 pub mod input;
 pub mod input_dispatch;
 pub mod paint;

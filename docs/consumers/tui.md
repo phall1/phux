@@ -508,6 +508,19 @@ title = "Pane idle"
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
 
+# Optional: contribute status-bar widgets (section 8.3). Each entry is a
+# widget table (kind + kind-specific options) plus a plugin-local id and
+# the bar slot ("left" | "center" | "right", default "right") to append
+# to. Contributions never displace user config: the TUI appends them
+# after the user's own [status] widgets, and an entry whose spec fails
+# widget validation is dropped with a logged warning.
+[[widgets]]
+id = "battery"
+slot = "right"
+kind = "exec"
+command = "./battery.sh"
+interval = "30s"
+
 [[agents]]
 id = "codex"
 label = "Codex"
@@ -1030,21 +1043,37 @@ architectural revision to grow a status bar plugin story.
 | `help-hints`    | prefix-aware help / palette / copy affordances — **implemented** |
 | `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |
-| `cwd`           | `format?`, `truncate?` (chars)                               |
-| `exit`          | `format?` (last command exit code, OSC 133)                  |
+| `cwd`           | `format?`, `truncate?` (chars; keeps the path tail), `$HOME` collapses to `~` — **implemented** |
+| `exit`          | `format?` (`{code}` placeholder; last command exit code, OSC 133) — **implemented** |
 | `host`          | `format?`                                                    |
 | `mode`          | `format?` (current input mode)                               |
 | `key-indicator` | shows the last key/chord pressed; reserved for v0.2          |
 | `text`          | `value` (literal styled text)                                |
 | `spacer`        | flexible expanding space; no parameters                      |
-| `exec`          | `command`, `interval?` (default `5s`), `parse-ansi?` (true)  |
+| `exec`          | `command` (string via `/bin/sh -c`, or argv array), `interval?` (default `5s`, floor `1s`), `parse-ansi?` (true) — **implemented** |
 
 Every widget kind accepts a `style` table with optional `fg`, `bg`
 (color strings: names, `#rrggbb`, or palette indices), and the boolean
 attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
-implemented built-ins today are `session-name`, `time`, `windows`, and
-`help-hints` (the others above are design intent); `windows` takes its
-`active` and `inactive` segments as such style tables.
+implemented built-ins today are `session-name`, `time`, `windows`,
+`help-hints`, `cwd`, `exit`, and `exec` (the others above are design
+intent); `windows` takes its `active` and `inactive` segments as such
+style tables. Plugin manifests can contribute additional widget entries
+via `[[widgets]]` (section 7's manifest contract): each contribution is a
+widget table plus a `slot`, appended after the user's own widgets, and a
+contribution that fails validation is dropped with a logged warning
+rather than degrading the bar.
+
+Data feeds behind the server-fact widgets: `cwd` renders the focused
+pane's live directory from `cwd_changed` events (the server queries the
+PTY child's kernel cwd at OSC-133 prompt boundaries and on output
+settle; the `ATTACHED` snapshot's spawn cwd seeds it), and `exit`
+renders `command_finished.exit_code` (the OSC-133 `D`-mark code, so it
+requires shell integration). `exec` widgets never run on the render
+path: the client runs the command per `interval` as a bounded
+`kill_on_drop` child process (10s hard cap) and folds captured stdout —
+first line only — into a cached strip the widget renders; a failed or
+timed-out run keeps the last good output.
 
 ### 8.4 Refresh and ordering
 

@@ -248,7 +248,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // and absolute cursor movement for wider/taller viewports.
             for pane in &snapshot.panes {
                 if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(pane.id.clone()) {
-                    v.insert(PaneSlot::new_with_size(pane.cols, pane.rows)?);
+                    let slot = v.insert(PaneSlot::new_with_size(pane.cols, pane.rows)?);
+                    // phux-foz.4: seed the pane's cwd from the snapshot (the
+                    // spawn cwd); `cwd_changed` events refine it live.
+                    slot.cwd.clone_from(&pane.cwd);
                 }
             }
             // Ensure the focused pane has a slot even if an older server's
@@ -1108,6 +1111,47 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // the ADR-0036 detector coalesces repeated markers, so the
                 // next re-ask re-raises it once the slot exists.
                 Ok(FrameOutcome::default())
+            }
+        }
+        // phux-foz.4: the pane's shell changed directory (kernel-observed,
+        // announced at prompt boundaries / output settle). Fold it into the
+        // slot so the status-bar `cwd` widget tracks the focused pane;
+        // `chrome_dirty` only when the value actually moved, and the chrome
+        // refresh itself no-ops for an unfocused pane's change.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::CwdChanged { cwd },
+        } => {
+            match panes.get_mut(&terminal) {
+                Some(slot) if slot.cwd.as_deref() != Some(cwd.as_str()) => {
+                    slot.cwd = Some(cwd);
+                    Ok(FrameOutcome {
+                        chrome_dirty: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+                // Unchanged value, or a pane we have no slot for yet — the
+                // next cwd_changed (or the ATTACHED seed) covers it.
+                _ => Ok(FrameOutcome::default()),
+            }
+        }
+        // phux-foz.4: a command finished in the pane; record its OSC-133
+        // exit code for the status-bar `exit` widget. `None` is recorded
+        // too — "the last command reported no code" honestly blanks the
+        // widget rather than pinning a stale code.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::CommandFinished { exit_code },
+        } => {
+            match panes.get_mut(&terminal) {
+                Some(slot) if slot.last_exit != exit_code => {
+                    slot.last_exit = exit_code;
+                    Ok(FrameOutcome {
+                        chrome_dirty: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+                _ => Ok(FrameOutcome::default()),
             }
         }
         other => {
@@ -2354,6 +2398,140 @@ mod tests {
             !panes.contains_key(&unknown),
             "no slot is allocated for an event-only pane"
         );
+    }
+
+    /// phux-foz.4: drive one agent event through [`handle_server_frame`]
+    /// with minimal single-pane scaffolding; returns the outcome.
+    fn drive_event(
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        event: phux_protocol::wire::frame::AgentEvent,
+    ) -> FrameOutcome {
+        let mut layout = Workspace::single(terminal_id.clone());
+        let mut focused = Some(terminal_id.clone());
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut agent_meta = AgentMetaIndex::default();
+        handle_server_frame(
+            &mut out,
+            FrameKind::Event {
+                terminal: Some(terminal_id.clone()),
+                event,
+            },
+            panes,
+            &mut layout,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut agent_meta,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-foz.4: a `cwd_changed` event lands in the pane's slot and
+    /// dirties the chrome; repeating the same directory is a no-op.
+    #[test]
+    fn cwd_changed_event_updates_slot_and_coalesces() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let pane = tid(1);
+        let mut panes = panes_for(&[&pane]);
+
+        let first = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CwdChanged {
+                cwd: "/tmp/work".to_owned(),
+            },
+        );
+        assert!(first.chrome_dirty, "a new cwd must repaint the chrome");
+        assert_eq!(
+            panes.get(&pane).expect("slot").cwd.as_deref(),
+            Some("/tmp/work")
+        );
+
+        let repeat = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CwdChanged {
+                cwd: "/tmp/work".to_owned(),
+            },
+        );
+        assert!(!repeat.chrome_dirty, "unchanged cwd must not repaint");
+    }
+
+    /// phux-foz.4: a `command_finished` event records the exit code (and a
+    /// later code replaces it); an unchanged value is a no-op.
+    #[test]
+    fn command_finished_event_records_last_exit() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let pane = tid(1);
+        let mut panes = panes_for(&[&pane]);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, None);
+
+        let first = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished { exit_code: Some(0) },
+        );
+        assert!(first.chrome_dirty);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, Some(0));
+
+        let repeat = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished { exit_code: Some(0) },
+        );
+        assert!(!repeat.chrome_dirty, "same code must not repaint");
+
+        let failed = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished {
+                exit_code: Some(127),
+            },
+        );
+        assert!(failed.chrome_dirty);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, Some(127));
+    }
+
+    /// phux-foz.4: cwd/exit events for a pane with no slot yet are dropped
+    /// without a repaint, mirroring the early-`TerminalControl` policy.
+    #[test]
+    fn cwd_and_exit_events_for_unknown_pane_are_dropped() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let known = tid(1);
+        let unknown = tid(9);
+        let mut panes = panes_for(&[&known]);
+
+        let cwd = drive_event(
+            &mut panes,
+            &unknown,
+            AgentEvent::CwdChanged {
+                cwd: "/x".to_owned(),
+            },
+        );
+        let exit = drive_event(
+            &mut panes,
+            &unknown,
+            AgentEvent::CommandFinished { exit_code: Some(1) },
+        );
+        assert!(!cwd.chrome_dirty && !exit.chrome_dirty);
+        assert!(!panes.contains_key(&unknown));
     }
 
     /// phux-4r1: closing one of several panes is NOT a detach. The
