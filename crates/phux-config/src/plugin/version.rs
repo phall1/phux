@@ -58,7 +58,7 @@ fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
         parts[count] = part.parse().ok()?;
         count += 1;
     }
-    (count > 0).then_some((parts[0], parts[1], parts[2]))
+    (count > 0).then_some(parts.into())
 }
 
 #[cfg(test)]

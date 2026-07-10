@@ -126,7 +126,7 @@ phux config <init|path|show>  # scaffold + inspect config
 phux config plugins [--json]  # compatibility alias: inspect plugin manifests
 phux config agents [--json]   # inspect configured plugin agent states
 phux config run PLUGIN ACTION # execute a configured plugin action
-phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
+phux plugin <COMMAND>         # install/update/link/list/toggle/unlink/validate plugins
 phux satellite <COMMAND>      # add/list/remove federation satellites
 phux --version                # print version
 phux help [COMMAND]
@@ -569,12 +569,46 @@ The lifecycle verbs edit `[[plugins]]` in `config.toml` without starting
 a server:
 
 ```
+phux plugin install https://example.com/agent-tools.git
+phux plugin install ./plugins/agent-tools       # local dir or .tar/.tar.gz/.tgz
+phux plugin update [example.agent-tools]
 phux plugin link ./plugins/agent-tools/phux-plugin.toml
 phux plugin list --json
 phux plugin disable example.agent-tools
 phux plugin enable example.agent-tools
 phux plugin unlink example.agent-tools
 ```
+
+Manifest validation includes the `min_phux_version` gate: a manifest whose
+floor is newer than the running phux is rejected at link, install, and load
+time with an error naming both versions (best-effort batch consumers such
+as the attach TUI skip the gated plugin with a logged warning instead of
+failing wholesale).
+
+`phux plugin install REF` fetches a whole plugin package into the managed
+plugins directory — `$XDG_DATA_HOME/phux/plugins`, else
+`~/.local/share/phux/plugins`. `REF` is a git URL (`https://`, `git@`,
+`file://`; cloned shallow with the system `git`, `--rev BRANCH_OR_TAG` picks
+a ref), a local plugin directory (copied, `.git` excluded), or a local
+tarball (`.tar`, `.tar.gz`, `.tgz`; extracted with the system `tar`). After
+the fetch, the manifest's `[[build]]` steps for the current platform run as
+child processes from the plugin root with a five-minute per-step timeout and
+captured output; a failing or timed-out build aborts the install with the
+step's stdout/stderr and leaves nothing linked. The validated package is
+then linked into `[[plugins]]` exactly like `phux plugin link` (pass
+`--disabled` to link it disabled), and its provenance — source kind, ref,
+requested branch, and the resolved commit for git sources — is recorded in
+the managed directory's `plugins.lock`. With `--json`, the result is a
+`schema_version = 1` document under an `installed` key with `id`, `version`,
+`dir`, `source`, `ref`, `branch`, `rev`, and `enabled`.
+
+`phux plugin update [NAME]` re-fetches from the lockfile's recorded sources
+(every entry, or just `NAME`), reruns the build steps, revalidates the
+manifest (id changes are refused), swaps the managed copy, and records the
+new resolved commit. `config.toml` is untouched because the linked manifest
+path does not move. With `--json`, the result is a `schema_version = 1`
+document whose `updated` array carries `id`, `version`, and `rev` per
+plugin.
 
 `phux config agents --json` projects `[[agents]]` entries into a flat
 `schema_version = 1` document with `plugin_id`, `id`, `label`, `state`,

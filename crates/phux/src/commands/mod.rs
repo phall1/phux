@@ -722,6 +722,53 @@ pub(crate) enum PluginAction {
         json: bool,
     },
 
+    /// Fetch, build, validate, and link a plugin package.
+    ///
+    /// REF is a git URL (`https://…`, `git@…`, `file://…` — cloned with
+    /// the system `git`), a local plugin directory (copied), or a local
+    /// tarball (`.tar`, `.tar.gz`, `.tgz` — extracted with the system
+    /// `tar`). The package lands under the managed plugins directory
+    /// (`$XDG_DATA_HOME/phux/plugins`, else `~/.local/share/phux/plugins`),
+    /// its manifest `[[build]]` steps for this platform run with a bounded
+    /// timeout and captured output, the manifest is validated (including
+    /// the `min_phux_version` gate), and the result is linked into
+    /// `config.toml` like `phux plugin link`. Provenance (ref, branch,
+    /// resolved commit) is recorded in the managed directory's
+    /// `plugins.lock` so `phux plugin update` can re-fetch it later.
+    Install {
+        /// Git URL, local plugin directory, or local tarball path.
+        #[arg(value_name = "REF")]
+        reference: String,
+
+        /// Branch or tag to clone (git sources only).
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+
+        /// Install and link the plugin but leave it disabled.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-fetch, rebuild, and revalidate installed plugins.
+    ///
+    /// Reads the managed directory's `plugins.lock`, re-fetches each
+    /// recorded source (all of them, or just NAME), reruns its `[[build]]`
+    /// steps, revalidates the manifest, swaps the managed copy, and
+    /// records the new resolved commit. `config.toml` is untouched — the
+    /// linked manifest path does not move.
+    Update {
+        /// Plugin id to update. Omit to update every installed plugin.
+        name: Option<String>,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Remove a configured plugin by id.
     Unlink {
         /// Plugin id from its manifest.
