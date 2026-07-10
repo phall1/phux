@@ -275,6 +275,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         description: "Signal the focused pane's process group (freeze/resume/kill, ADR-0033)",
         args: &[("signal", ArgValue::Str("freeze"))],
     },
+    ActionSpec {
+        name: "set-pane",
+        category: Category::Pane,
+        description: "Toggle per-pane mouse opt-out for the focused pane (ADR-0035)",
+        args: &[("mouse", ArgValue::Str("toggle"))],
+    },
 ];
 
 /// Build the palette's [`SelectItem`] rows from the [`REGISTRY`],

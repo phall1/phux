@@ -1508,6 +1508,17 @@ async fn main_loop<W: super::RenderSink>(
     // different `select!` wakeups), so it is owned here and lent to
     // `DispatchCtx` by reference each batch.
     let mut drag: Option<super::input_dispatch::DragGrab> = None;
+    // phux-npb3 (ADR-0035 decision 3 follow-up): per-pane mouse opt-out.
+    // `set-pane mouse off` puts the focused pane in this set; the dispatcher
+    // then never synthesizes INPUT_MOUSE for it, and the sync at the top of
+    // each loop iteration drops the outer-terminal mouse-tracking DECSET
+    // whenever the focused pane is opted out — so the host's raw mouse
+    // handling (native selection etc.) returns for that pane alone while
+    // sibling panes keep drag-to-resize. Client-local; nothing on the wire.
+    // `mouse_capture_cfg` mirrors the global `mouse` gate the RawModeGuard
+    // install used: with `mouse = false` capture stays off unconditionally.
+    let mouse_capture_cfg = loaded_cfg.as_ref().is_none_or(|c| c.defaults.mouse);
+    let mut mouse_optout: std::collections::HashSet<TerminalId> = std::collections::HashSet::new();
     // Track the current outer-terminal viewport so the painter knows
     // which row is "bottom". Initialized to a sensible default and
     // updated by SIGWINCH; the server doesn't drive client-side
@@ -1726,6 +1737,19 @@ async fn main_loop<W: super::RenderSink>(
             edge: sidebar_edge,
             width: sidebar_width,
         });
+        // phux-npb3: capture follows focus. Re-derive the outer-terminal
+        // mouse-tracking DECSET from the focused pane's opt-out state every
+        // iteration — one call site covers every way focus or the set can
+        // change (set-pane, click-to-focus, keybind navigation, spawn/close
+        // reflows). `sync_mouse_capture` is a no-op when nothing changed, so
+        // the steady-state cost is one bool compare. Closed panes are pruned
+        // so a recycled TerminalId can never inherit a stale opt-out.
+        if !mouse_optout.is_empty() {
+            mouse_optout.retain(|id| panes.contains_key(id));
+        }
+        let want_capture =
+            desired_mouse_capture(mouse_capture_cfg, focused_pane.as_ref(), &mouse_optout);
+        sync_mouse_capture(out, want_capture).map_err(AttachError::Io)?;
         // phux-fysb: the off-loop stdout writer dropped a stale backlog under
         // a slow terminal. Repaint the latest state from scratch — a
         // self-contained full frame (or overlay) supersedes the dropped
@@ -1875,6 +1899,7 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
                     drag: &mut drag,
+                    mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
@@ -2407,6 +2432,7 @@ async fn main_loop<W: super::RenderSink>(
                     sidebar_enabled: &mut sidebar_enabled,
                     has_bar: status_bar.is_some(),
                     drag: &mut drag,
+                    mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
@@ -3509,6 +3535,39 @@ fn write_enter_alt_screen<W: Write>(out: &mut W, mouse: bool) -> io::Result<()> 
     out.flush()
 }
 
+/// Reconcile the client's outer-terminal mouse-tracking DECSET with
+/// `want` (phux-npb3: capture follows focus).
+///
+/// The current state lives in [`MOUSE_CAPTURE_ACTIVE`] — the same flag
+/// [`write_enter_alt_screen`] sets and [`write_terminal_reset`] consumes —
+/// so a detach or signal reset while an opted-out pane holds focus never
+/// emits a redundant leave sequence. No-op when the state already
+/// matches; otherwise emits the ADR-0035 enter pair (`?1002h?1006h`) or
+/// its reverse-order leave (`?1006l?1002l`).
+/// Whether the client's outer-terminal mouse capture should currently be
+/// on (phux-npb3): the global `mouse` config gate must be on AND the
+/// focused pane must not have opted out via `set-pane mouse off`. With no
+/// focused pane yet (pre-ATTACHED) the global gate alone decides.
+fn desired_mouse_capture(
+    cfg_on: bool,
+    focused: Option<&TerminalId>,
+    optout: &std::collections::HashSet<TerminalId>,
+) -> bool {
+    cfg_on && !focused.is_some_and(|id| optout.contains(id))
+}
+
+fn sync_mouse_capture<W: Write>(out: &mut W, want: bool) -> io::Result<()> {
+    if MOUSE_CAPTURE_ACTIVE.swap(want, Ordering::SeqCst) == want {
+        return Ok(());
+    }
+    if want {
+        out.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+    } else {
+        out.write_all(b"\x1b[?1006l\x1b[?1002l")?;
+    }
+    out.flush()
+}
+
 /// Restore the outer terminal to a sane post-attach state: drop SGR,
 /// show the cursor, and (if we ever entered the alt screen) leave it.
 ///
@@ -4446,6 +4505,58 @@ mod tests {
             !reset.windows(8).any(|w| w == b"\x1b[?1006l"),
             "no capture ⇒ no SGR mouse-disable on reset: {reset:?}"
         );
+    }
+
+    /// phux-npb3: `sync_mouse_capture` reconciles the outer DECSET with the
+    /// desired state — leave pair when dropping, enter pair when restoring,
+    /// and nothing at all when the state already matches.
+    #[test]
+    fn sync_mouse_capture_emits_transitions_only() {
+        let _guard = TERMINAL_RESET_TEST_LOCK
+            .lock()
+            .expect("terminal reset test lock");
+        MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+
+        // Already on ⇒ no bytes.
+        let mut out = Vec::new();
+        sync_mouse_capture(&mut out, true).unwrap();
+        assert!(out.is_empty(), "no transition ⇒ no bytes: {out:?}");
+
+        // On → off emits the reverse-order leave pair.
+        sync_mouse_capture(&mut out, false).unwrap();
+        assert_eq!(out, b"\x1b[?1006l\x1b[?1002l");
+
+        // Off is now recorded ⇒ a second off is a no-op.
+        out.clear();
+        sync_mouse_capture(&mut out, false).unwrap();
+        assert!(out.is_empty(), "idempotent off ⇒ no bytes: {out:?}");
+
+        // Off → on emits the entry pair, and the reset path sees capture as
+        // active again (the shared MOUSE_CAPTURE_ACTIVE flag).
+        sync_mouse_capture(&mut out, true).unwrap();
+        assert_eq!(out, b"\x1b[?1002h\x1b[?1006h");
+        assert!(MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst));
+
+        MOUSE_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    /// phux-npb3: capture follows focus — wanted iff the global gate is on
+    /// AND the focused pane has not opted out.
+    #[test]
+    fn desired_mouse_capture_follows_focused_pane_optout() {
+        let t1 = TerminalId::local(1);
+        let t2 = TerminalId::local(2);
+        let mut optout = std::collections::HashSet::new();
+        optout.insert(t2.clone());
+
+        // Global gate off wins unconditionally.
+        assert!(!desired_mouse_capture(false, Some(&t1), &optout));
+        assert!(!desired_mouse_capture(false, None, &optout));
+        // Gate on: an opted-in focused pane (or none yet) keeps capture.
+        assert!(desired_mouse_capture(true, Some(&t1), &optout));
+        assert!(desired_mouse_capture(true, None, &optout));
+        // Gate on but the focused pane opted out ⇒ capture drops.
+        assert!(!desired_mouse_capture(true, Some(&t2), &optout));
     }
 
     #[test]
