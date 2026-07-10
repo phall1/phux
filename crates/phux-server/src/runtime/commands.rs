@@ -259,13 +259,28 @@ pub(crate) fn handle_terminal_resize(
     rows: u16,
 ) {
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            cols,
-            rows,
-            "TERMINAL_RESIZE: SATELLITE-routed pane id rejected on non-federation-hub server",
-        );
+        // Federation relay (phux-v45.4): forward the frame verbatim with
+        // the id rewritten to the satellite's Local space. Off-hub (or
+        // for an unknown host) it stays a warn-drop.
+        if !relay_satellite_frame(
+            state,
+            client_id,
+            wire_terminal_id,
+            "TERMINAL_RESIZE",
+            |id| FrameKind::TerminalResize {
+                terminal_id: id,
+                cols,
+                rows,
+            },
+        ) {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                cols,
+                rows,
+                "TERMINAL_RESIZE: SATELLITE-routed pane id rejected on non-federation-hub server",
+            );
+        }
         return;
     }
     state.with_mut(|s| {
@@ -413,6 +428,22 @@ pub(crate) async fn handle_command(
         return;
     }
 
+    // Federation relay (phux-v45.4, ADR-0007 §4): a command targeting a
+    // satellite-owned terminal never touches local dispatch — see
+    // `handle_satellite_command`.
+    if let Some((sat_host, local_command)) = crate::hub::relay::route_to_satellite(&command) {
+        handle_satellite_command(
+            state,
+            client_id,
+            request_id,
+            &sat_host,
+            local_command,
+            out_tx,
+        )
+        .await;
+        return;
+    }
+
     let result = match command {
         Command::GetState { scope } => handle_get_state(state, &scope),
         Command::GetScreen {
@@ -424,28 +455,7 @@ pub(crate) async fn handle_command(
             handle_route_input(state, client_id, &terminal_id, event)
         }
         Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
-        Command::KillTerminal { terminal_id } => {
-            // Resolve the wire id to the core pane, then cancel its actor.
-            // Cancellation drops the actor's `exit_notify`, which the
-            // per-pane EOF watcher (phux-it8) treats identically to PTY
-            // EOF: it broadcasts `TERMINAL_CLOSED` and reaps the pane
-            // (phux-60s), cascading to session removal + server self-exit
-            // when the last session empties. So KILL_TERMINAL reuses the
-            // exact teardown a natural shell exit takes — no separate
-            // kill plumbing, and the async `TERMINAL_CLOSED` still fires.
-            state
-                .with(|s| s.terminal_from_wire(&terminal_id))
-                .map_or_else(
-                    || CommandResult::Error {
-                        code: ErrorCode::TerminalNotFound,
-                        message: format!("no such terminal: {terminal_id:?}"),
-                    },
-                    |core_id| {
-                        state.with_mut(|s| s.detach_terminal_actor(core_id));
-                        CommandResult::Ok
-                    },
-                )
-        }
+        Command::KillTerminal { terminal_id } => handle_kill_terminal(state, &terminal_id),
         Command::GetTerminalState {
             terminal_id,
             include_scrollback,
@@ -510,6 +520,32 @@ pub(crate) async fn handle_command(
         .await;
 }
 
+/// Build the reply for `KILL_TERMINAL`: resolve the wire id to the core
+/// pane, then cancel its actor. Cancellation drops the actor's
+/// `exit_notify`, which the per-pane EOF watcher (phux-it8) treats
+/// identically to PTY EOF: it broadcasts `TERMINAL_CLOSED` and reaps the
+/// pane (phux-60s), cascading to session removal + server self-exit when
+/// the last session empties. So `KILL_TERMINAL` reuses the exact teardown
+/// a natural shell exit takes — no separate kill plumbing, and the async
+/// `TERMINAL_CLOSED` still fires.
+fn handle_kill_terminal(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+) -> CommandResult {
+    state
+        .with(|s| s.terminal_from_wire(terminal_id))
+        .map_or_else(
+            || CommandResult::Error {
+                code: ErrorCode::TerminalNotFound,
+                message: format!("no such terminal: {terminal_id:?}"),
+            },
+            |core_id| {
+                state.with_mut(|s| s.detach_terminal_actor(core_id));
+                CommandResult::Ok
+            },
+        )
+}
+
 /// Handle `UPGRADE` (ADR-0032): prepare the graceful re-exec, ack the client,
 /// then replace the process. Acks itself (rather than returning a
 /// `CommandResult`) because on success it never returns.
@@ -552,6 +588,100 @@ async fn handle_upgrade(
         .await;
 }
 
+/// Relay one satellite-targeted command over the owning hub link and send
+/// the correlated `COMMAND_RESULT` (phux-v45.4, ADR-0007 §4): the command
+/// arrives here already rewritten to the satellite's `Local` id space by
+/// [`crate::hub::relay::route_to_satellite`], and the reply correlates
+/// through the link's own request-id remap. On a non-hub server (or for a
+/// host absent from the hub table) this resolves to a typed
+/// `UnsupportedSatelliteRoute` error, and an unreachable satellite fails
+/// fast with `SatelliteUnreachable` — never a hang.
+///
+/// `SUBSCRIBE_TERMINAL_EVENTS` additionally registers the caller's
+/// outbound mailbox as a hub-side proxy subscriber before forwarding, so
+/// the `EVENT` frames the satellite pushes back on the link are re-tagged
+/// `Local -> Satellite { host, .. }` and fanned out to this consumer. The
+/// proxy subscription is torn down with the consumer (detach/disconnect)
+/// or with the link (satellite disconnect, with a typed notification).
+async fn handle_satellite_command(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    host: &phux_protocol::ids::SatelliteHost,
+    command: Command,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) {
+    let result = match state.with(|s| s.hub_relay(host)) {
+        None => CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!(
+                "no satellite route to {host:?}: this server is not a federation hub \
+                 for that host (check `phux server --hub` and the [[satellites]] registry)"
+            ),
+        },
+        Some(relay) => {
+            if let Command::SubscribeTerminalEvents { terminal_id, .. } = &command
+                && let Some(id) = terminal_id.local_id()
+            {
+                relay.subscribe(id, client_id, out_tx.clone());
+            }
+            relay.command(command).await
+        }
+    };
+    debug!(
+        ?client_id,
+        request_id,
+        satellite = %host,
+        "satellite-routed COMMAND relayed; sending COMMAND_RESULT"
+    );
+    let _ = out_tx
+        .send(Outbound::Frame(FrameKind::CommandResult {
+            request_id,
+            result,
+        }))
+        .await;
+}
+
+/// Forward one fire-and-forget frame (`INPUT_*`, `FRAME_ACK`, `TERMINAL_RESIZE`)
+/// targeting a satellite terminal over the hub link (phux-v45.4): `build`
+/// receives the id rewritten to the satellite's `Local` space and produces
+/// the frame to relay verbatim.
+///
+/// Returns `true` when a relay route existed (the frame was queued, or
+/// dropped under the same bounded-mailbox backpressure contract these
+/// frames have locally); `false` when this server has no route to the
+/// host — the caller keeps its non-hub warn-drop.
+///
+/// Scope honesty (phux-v45.4): the satellite applies its own attach /
+/// subscription / lease gates to what arrives on the link. Until attach
+/// relay lands (phux-v45.7) the hub's link consumer is not attached on
+/// the satellite, so attach-scoped `INPUT_*` / `FRAME_ACK` frames are relayed
+/// faithfully but gated satellite-side; `ROUTE_INPUT` (the attach-free
+/// command path) is the working input route through a hub today.
+fn relay_satellite_frame(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    frame_label: &'static str,
+    build: impl FnOnce(phux_protocol::ids::TerminalId) -> FrameKind,
+) -> bool {
+    let Some((host, id)) = crate::hub::relay::satellite_route(wire_terminal_id) else {
+        return false;
+    };
+    let Some(relay) = state.with(|s| s.hub_relay(&host)) else {
+        return false;
+    };
+    trace!(
+        ?client_id,
+        ?wire_terminal_id,
+        frame_label,
+        satellite = %host,
+        "relaying satellite-routed frame"
+    );
+    relay.forward(build(phux_protocol::ids::TerminalId::local(id)));
+    true
+}
+
 /// Build the `Ok` reply for `KILL_TERMINALS` — the atomic multi-terminal
 /// teardown the v0.3.0 "Option B" re-tier left in place of the dissolved
 /// L2 `KILL_COLLECTION` verb (ADR-0019 / ADR-0027).
@@ -568,23 +698,64 @@ async fn handle_upgrade(
 /// `KILL_TERMINAL` (or a natural shell exit) takes, but resolves the whole
 /// group in one pass.
 ///
-/// Idempotent: an `id` that is unknown, satellite-routed, or already-dead is
-/// skipped silently rather than failing the batch, so a caller racing a
-/// natural pane exit still succeeds. The reply is `Ok` the moment the actors
-/// are cancelled; the `TERMINAL_CLOSED` frames follow asynchronously as the
-/// panes reap (SPEC §5). The op is structurally infallible — an empty `ids`
-/// list is a no-op that still acks `Ok`.
+/// Idempotent: an `id` that is unknown or already-dead is skipped silently
+/// rather than failing the batch, so a caller racing a natural pane exit
+/// still succeeds. Satellite-routed ids (phux-v45.4) are partitioned by
+/// host and forwarded as per-satellite `KILL_TERMINALS` batches over the
+/// hub links, detached — the satellite applies the same idempotent
+/// semantics, and a down link degrades to the silent skip the contract
+/// already allows. The reply is `Ok` the moment the local actors are
+/// cancelled and the relays are queued; the `TERMINAL_CLOSED` frames follow
+/// asynchronously as the panes reap (SPEC §5). The op is structurally
+/// infallible — an empty `ids` list is a no-op that still acks `Ok`.
 pub(crate) fn handle_kill_terminals(
     state: &SharedState,
     ids: &[phux_protocol::ids::TerminalId],
 ) -> CommandResult {
+    // Satellite partition first (phux-v45.4): group `Satellite { host, id }`
+    // entries per host and forward each group as one satellite-local
+    // KILL_TERMINALS over the hub link. Detached relay: the batch op is
+    // idempotent and tolerates skips, so the hub does not await or merge
+    // per-satellite results. Non-hub servers (no relay) keep the silent
+    // skip these ids always had here.
+    let mut by_host: std::collections::BTreeMap<
+        phux_protocol::ids::SatelliteHost,
+        Vec<phux_protocol::ids::TerminalId>,
+    > = std::collections::BTreeMap::new();
+    for wire_id in ids {
+        if let Some((host, id)) = crate::hub::relay::satellite_route(wire_id) {
+            by_host
+                .entry(host)
+                .or_default()
+                .push(phux_protocol::ids::TerminalId::local(id));
+        }
+    }
+    for (host, local_ids) in by_host {
+        match state.with(|s| s.hub_relay(&host)) {
+            Some(relay) => {
+                debug!(
+                    satellite = %host,
+                    count = local_ids.len(),
+                    "KILL_TERMINALS: relaying satellite partition"
+                );
+                relay.command_detached(Command::KillTerminals { ids: local_ids });
+            }
+            None => {
+                debug!(
+                    satellite = %host,
+                    "KILL_TERMINALS: no route to satellite; skipping its ids"
+                );
+            }
+        }
+    }
+
     // Single lock scope: resolve every wire id to its core pane and cancel
     // its actor before releasing the lock. All-or-nothing for a local
     // server — no other command interleaves between the first and last
     // removal. `detach_terminal_actor` is idempotent (cancelling an
-    // already-cancelled token is a no-op), so an id racing a natural exit,
-    // an unknown id, and a satellite-routed id (no local pane) all collapse
-    // to a silent skip.
+    // already-cancelled token is a no-op), so an id racing a natural exit
+    // and an unknown id both collapse to a silent skip (satellite ids were
+    // partitioned above and resolve to no local pane here).
     let killed = state.with_mut(|s| {
         let mut killed = 0u32;
         for wire_id in ids {
@@ -1567,6 +1738,52 @@ pub(crate) fn handle_viewport_resize(
 /// runtime, and an unbounded queue would let a slow PTY producer push
 /// memory through the roof. `Full` is treated as a backpressure event
 /// (warn-drop); `Closed` is logged at debug and dropped (actor gone).
+/// The satellite branch of [`handle_terminal_input`] (phux-v45.4):
+/// rebuild the wire `INPUT_*` frame with the id rewritten satellite-local
+/// and forward it verbatim over the owning hub link; warn-drop when this
+/// server has no route (the non-hub contract).
+fn relay_satellite_input(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    input: TerminalInput,
+    frame_label: &'static str,
+) {
+    let relayed =
+        relay_satellite_frame(
+            state,
+            client_id,
+            wire_terminal_id,
+            frame_label,
+            |id| match input {
+                TerminalInput::Key(event) => FrameKind::InputKey {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Mouse(event) => FrameKind::InputMouse {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Focus(event) => FrameKind::InputFocus {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Paste(event) => FrameKind::InputPaste {
+                    terminal_id: id,
+                    event,
+                },
+            },
+        );
+    if !relayed {
+        warn!(
+            ?client_id,
+            ?wire_terminal_id,
+            frame_label,
+            "input frame carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+        );
+    }
+}
+
 pub(crate) fn handle_terminal_input(
     state: &SharedState,
     client_id: ClientId,
@@ -1574,18 +1791,16 @@ pub(crate) fn handle_terminal_input(
     input: TerminalInput,
     frame_label: &'static str,
 ) {
-    // v0.1 non-federation-hub servers reject SATELLITE-routed input frames
-    // (per ADR-0016 / SPEC §10.1). The protocol-level response is `ERROR
-    // { UnsupportedSatelliteRoute }`; this dispatch helper just drops the
-    // frame with a warn — the surrounding read loop will surface the
-    // error response in a follow-up tied to phux-byc.9.
+    // Satellite-routed input (phux-v45.4): on a hub, forward the frame
+    // verbatim over the owning link with the id rewritten to the
+    // satellite's Local space — the satellite applies its own routing
+    // gates (see `relay_satellite_frame`'s scope note). Non-hub servers
+    // keep the ADR-0016 / SPEC §10.1 behavior: drop with a warn (the
+    // protocol-level response is `ERROR { UnsupportedSatelliteRoute }`;
+    // surfacing it from this fire-and-forget helper is still a follow-up
+    // tied to phux-byc.9).
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            frame_label,
-            "input frame carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
-        );
+        relay_satellite_input(state, client_id, wire_terminal_id, input, frame_label);
         return;
     }
     // docs/consumers/tui.md §9 (phux-r82.1): an INPUT_FOCUS gained event
@@ -1722,15 +1937,25 @@ pub(crate) fn handle_frame_ack(
     wire_terminal_id: &phux_protocol::ids::TerminalId,
     seq: u64,
 ) {
-    // v0.1 servers reject SATELLITE-routed acks for the same reason input
-    // frames are dropped above: this server is not a federation hub.
+    // Satellite-routed acks relay like input frames (phux-v45.4): forward
+    // verbatim on a hub, warn-drop off one. FRAME_ACK is hint-shaped
+    // (ADR-0018), so the bounded-relay drop contract is safe here too.
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            seq,
-            "FRAME_ACK carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
-        );
+        let relayed =
+            relay_satellite_frame(state, client_id, wire_terminal_id, "FRAME_ACK", |id| {
+                FrameKind::FrameAck {
+                    terminal_id: id,
+                    seq,
+                }
+            });
+        if !relayed {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                seq,
+                "FRAME_ACK carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+            );
+        }
         return;
     }
     state.with_mut(|s| {

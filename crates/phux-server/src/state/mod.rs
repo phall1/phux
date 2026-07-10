@@ -292,8 +292,14 @@ pub struct ServerState {
     /// supervisors (phux-v45.3). `None` on every non-hub server. Set once
     /// at startup via [`Self::set_hub_link_statuses`] alongside the link
     /// spawn; the handle is the read surface a future `LIST` aggregation
-    /// (phux-v45.4+) consumes.
+    /// (phux-v45.5) consumes.
     hub_link_statuses: Option<crate::hub::link::HubLinkStatuses>,
+    /// Per-satellite frame-relay handles (phux-v45.4, ADR-0007 §4).
+    /// `None` on every non-hub server. Set once at hub startup via
+    /// [`Self::set_hub_relays`] alongside the link spawn; command and
+    /// input dispatch resolve `TerminalId::Satellite { host, .. }`
+    /// through it to the owning link's relay mailbox.
+    hub_relays: Option<crate::hub::relay::HubRelays>,
     /// Server-side event-hook dispatcher handle (`docs/consumers/tui.md`
     /// §9, phux-r82.1). `None` until the runtime spawns the dispatcher
     /// (it does so only when the hook catalog is non-empty), which is

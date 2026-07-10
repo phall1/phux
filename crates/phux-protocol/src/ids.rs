@@ -5,9 +5,10 @@
 //! entity is destroyed.
 //!
 //! [`TerminalId`] is the exception: per [ADR-0016] it is a tagged union that
-//! also records the host that owns the terminal. v0.1 servers only ever
+//! also records the host that owns the terminal. Non-hub servers only ever
 //! construct [`TerminalId::Local`]; the [`TerminalId::Satellite`] variant is
-//! the federation-forward-compat reservation required by [ADR-0007].
+//! how a federation hub addresses (and re-tags) satellite-owned terminals
+//! per [ADR-0007].
 //!
 //! [ADR-0007]: https://github.com/phall1/phux/blob/main/ADR/0007-mosh-class-transport-and-satellites.md
 //! [ADR-0016]: https://github.com/phall1/phux/blob/main/ADR/0016-terminal-id-as-wire-primary.md
@@ -156,11 +157,15 @@ pub enum TerminalId {
     },
     /// A terminal owned by a federation peer (wire tag = 1).
     ///
-    /// Reserved for v0.2+ federation work. v0.1 servers construct this only
-    /// when negotiated as a federation hub; v0.1 decoders MUST accept the
-    /// shape but MAY respond with [`UnsupportedSatelliteRoute`].
+    /// A federation hub (ADR-0007) relays frames carrying this tag over
+    /// its outbound satellite links, rewriting to the peer's `Local`
+    /// space outbound and re-tagging responses/streams on the way back
+    /// (SPEC L1 §9.1). Decoders on non-hub servers MUST still accept the
+    /// shape and respond with [`UnsupportedSatelliteRoute`]; a hub whose
+    /// link to `host` is down responds with [`SatelliteUnreachable`].
     ///
     /// [`UnsupportedSatelliteRoute`]: crate::wire::frame::ErrorCode::UnsupportedSatelliteRoute
+    /// [`SatelliteUnreachable`]: crate::wire::frame::ErrorCode::SatelliteUnreachable
     Satellite {
         /// Federation peer that owns the terminal.
         host: SatelliteHost,
@@ -181,8 +186,10 @@ impl TerminalId {
 
     /// Construct a `Satellite` terminal id.
     ///
-    /// Reserved for federation-hub servers. v0.1 single-attach servers
-    /// MUST NOT emit `Satellite` ids.
+    /// Constructed by federation hubs when re-tagging satellite-owned
+    /// terminals for their consumers (ADR-0007), and by consumers
+    /// addressing those terminals. Non-hub servers MUST NOT emit
+    /// `Satellite` ids.
     #[must_use]
     pub fn satellite(host: impl Into<SatelliteHost>, id: u32) -> Self {
         Self::Satellite {

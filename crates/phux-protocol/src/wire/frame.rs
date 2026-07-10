@@ -603,9 +603,18 @@ pub enum ErrorCode {
     /// The requested client id does not exist.
     ClientNotFound = 105,
     /// SPEC §10.1 / ADR-0016: the frame carried a `TerminalId::Satellite`
-    /// but this server is not configured as a federation hub. v0.1 servers
+    /// but this server is not configured as a federation hub, or names a
+    /// satellite host absent from the hub's registry. Non-hub servers
     /// always respond with this code when handed a `Satellite` id.
     UnsupportedSatelliteRoute = 106,
+    /// ADR-0007 / SPEC §14: the frame's `TerminalId::Satellite` names a
+    /// satellite this hub knows but cannot reach right now — the outbound
+    /// link is down, still dialing, refused fail-closed, or dropped before
+    /// the relayed reply arrived. Distinct from
+    /// [`Self::UnsupportedSatelliteRoute`] (a routing/configuration
+    /// refusal): this one is transient and a retry may succeed once the
+    /// link supervisor reconnects.
+    SatelliteUnreachable = 107,
 
     /// SPEC §11: the requested COMMAND payload was structurally invalid.
     InvalidCommand = 200,
@@ -649,6 +658,7 @@ impl ErrorCode {
             104 => Self::TerminalNotFound,
             105 => Self::ClientNotFound,
             106 => Self::UnsupportedSatelliteRoute,
+            107 => Self::SatelliteUnreachable,
             200 => Self::InvalidCommand,
             201 => Self::PermissionDenied,
             202 => Self::ResourceExhausted,
