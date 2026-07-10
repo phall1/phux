@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
 # Crate dependency graph
@@ -57,6 +57,18 @@ Three crate boundaries carry weight:
    `ratatui` dependency, and `phux-client` re-exports
    `phux_client_core::{layout, multi_pane, predict}` so consumers keep
    stable `phux_client::…` paths.
+4. **`phux-dial` is the shared outbound-transport establishment layer**
+   (phux-v45.3). Remote *consumers* (the `phux-client` attach loop) and
+   the federation *hub* (`phux-server --hub`, which dials its satellites
+   as an ordinary remote consumer per ADR-0038) establish QUIC/WebSocket
+   connections identically: TLS 1.3 with a fingerprint-pinned (or
+   loopback skip-verify) certificate verifier plus the ADR-0031 bearer
+   token. Both crates depend on `phux-dial` so that
+   security-sensitive path exists once; the crate stops at the byte
+   stream — SPEC §5 framing and lifecycles stay with its consumers,
+   preserving ADR-0007's transport-trait shape. `phux-client` re-exports
+   the dial types under the established `phux_client::attach::{quic,ws}`
+   paths.
 
 `server` and `client` both depend on `protocol`. Both also depend on
 `libghostty-vt` directly: the server's `Terminal` is the canonical

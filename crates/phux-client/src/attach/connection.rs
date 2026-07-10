@@ -456,7 +456,7 @@ impl WsWriter {
     async fn send(&mut self, frame: &FrameKind) -> Result<(), AttachError> {
         self.out.clear();
         frame.encode(&mut self.out);
-        self.inner.send(&self.out).await
+        self.inner.send(&self.out).await.map_err(AttachError::from)
     }
 }
 
