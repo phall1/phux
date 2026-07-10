@@ -105,6 +105,8 @@ action = "noop"
 
 `x-append` must hold an array and appends its elements to the stack's current `x` (creating it when absent). Setting both `x` and `x-append` in one file, appending to a non-array, or a non-array `-append` value are errors naming that file. Keybindings need no append form: `prefix-table` and `global` are tables and already merge per chord. The `-append` suffix is reserved at every level; don't end a free-form key (for example a `[theme]` slot) with it. To *drop* an inherited entry, assign the full array plainly — replacement always wins over inheritance.
 
+**Plugin manifests in layers.** A relative `manifest` in `[[plugins]]` / `[[plugins-append]]` normally resolves against *your config file's* directory. Inside an extended layer that base would be wrong — the layer lives elsewhere — so layer resolution rewrites a relative manifest to an absolute path under the layer file's own directory (lexically normalized) before merging. Your root `config.toml` is left verbatim; only extended layers are rewritten. This is what lets a distro wire plugins that live next to it.
+
 ### Where did this value come from?
 
 With several layers in play, `phux config show` tells you *what* the effective config is but not *who* set it. `phux config show --layers` answers that: it prints the resolved layer stack in merge order, then one row per effective leaf key naming the layer that set it. Arrays expand to one row per element, so an `-append` list shows exactly which layer contributed each entry:
@@ -124,6 +126,26 @@ keys:
 ```
 
 `--layers --json` emits the same information as a stable document (`schema_version` 1): a `layers` array (1-based `index`, `kind` of `defaults` / `extended` / `user`, `path`) and a `keys` array (`key`, owning `layer` index, and for arrays an `element_layers` list, one entry per element).
+
+### Starter distributions: `config init --distro`
+
+A *distro* is a config layer curated as a starting point — the lazyvim idea applied to phux: keybindings, a status lineup, a theme, and a plugin set, shipped as one referenced file rather than pasted into yours. The repo bundles one, [`herdr`](../distros/herdr/README.md).
+
+```sh
+phux config init --distro herdr            # bundled name
+phux config init --distro ./my/layer.toml  # or any path (a directory
+                                           #   means <dir>/<dirname>.toml)
+```
+
+This writes the usual commented starter config with exactly one live statement at the top:
+
+```toml
+extends = ["/absolute/path/to/distros/herdr/herdr.toml"]
+```
+
+Nothing is copied out of the distro. Your file stays a sparse overlay: keys you set win over the distro, keys the distro sets win over the shipped defaults, and updating the distro file updates every config that extends it. `init --distro` validates the full merged stack before writing anything, so a broken or missing distro layer fails the command instead of leaving you an invalid config; `phux config show` then renders the effective result.
+
+A bundled name `n` resolves to `<dir>/n/n.toml` across, in order: `$PHUX_DISTROS_DIR` (explicit override), `$XDG_DATA_HOME/phux/distros` (default `~/.local/share/phux/distros`), and — as a dev-build convenience — the repo checkout's `distros/` directory. An unknown name lists every path that was checked.
 
 ---
 

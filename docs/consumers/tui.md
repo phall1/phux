@@ -286,6 +286,10 @@ alone. To get a documented starting point and to inspect what's active:
 phux config path            # print the resolved config path (no I/O)
 phux config init            # scaffold a commented starter config there;
                             #   refuses to overwrite (use --force)
+phux config init --distro herdr
+                            # same scaffold plus one active extends line
+                            #   layering a starter distribution (bundled
+                            #   name or path); see docs/CONFIG.md
 phux config show            # print the effective config (defaults + your
                             #   overrides) as canonical TOML
 phux config show --default  # print the shipped defaults verbatim,
@@ -305,7 +309,12 @@ phux plugin validate        # validate every configured plugin manifest
 out*: the file documents every option next to its real default value, yet
 imposes no overrides until you uncomment a line. That is what keeps the
 binary's defaults authoritative — uncommenting is the only way the file
-changes behavior. `config show` renders the merged TOML *table*, so it
+changes behavior. The `--distro` flavor adds exactly one live statement —
+an `extends` line layering a curated starter distribution (ADR-0039)
+between the defaults and your file; the distro layer is referenced, never
+copied, so its updates keep reaching you. Distribution mechanics and the
+bundled `herdr` starter are documented in
+[docs/CONFIG.md](../CONFIG.md#starter-distributions-config-init---distro). `config show` renders the merged TOML *table*, so it
 answers "what is my effective config" rather than reproducing your file's
 comments or key order; `cat` the file for the latter.
 
