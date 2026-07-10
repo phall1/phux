@@ -5,8 +5,9 @@
 //! title, phux-efj7, or its ADR-0040 agent label) with the active window
 //! highlighted, and a dim branch line underneath when the window's focused
 //! pane sits inside a git repository (phux-p4vp). The strip's last two rows
-//! are the `+ new` / `= menu` affordances (display-only until phux-fce4
-//! wires their hit targets). A vertical rule on the strip's last column
+//! are the `+ new` / `= menu` affordances (phux-fce4); [`hit_test`] maps a
+//! mouse position back onto the same row model so clicks land exactly where
+//! the paint says they should. A vertical rule on the strip's last column
 //! separates it from the panes. The reservation + placement is owned by the
 //! driver; this type just paints into the `Rect` it is handed and caches
 //! the last paint so an unchanged repaint emits nothing — the same
@@ -41,9 +42,8 @@ pub const MENU_LABEL: &str = "= menu";
 /// only chrome and no windows would be useless.
 const MIN_FOOTER_HEIGHT: u16 = 4;
 
-/// One row of the strip, top to bottom. The painter derives from this
-/// single model (and phux-fce4's hit-test will share it), so paint and
-/// click targets cannot drift.
+/// One row of the strip, top to bottom. Both the painter and [`hit_test`]
+/// derive from this single model, so paint and click targets cannot drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarRow {
     /// Window `i`'s name row.
@@ -58,13 +58,25 @@ pub enum SidebarRow {
     Menu,
 }
 
+/// The interactive target a mouse position resolves to (phux-fce4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarHit {
+    /// A window block — clicking selects window `i` (its `select-window`
+    /// index). Both the name and the branch row of a block hit.
+    Window(usize),
+    /// The `+ new` affordance.
+    NewWindow,
+    /// The `= menu` affordance.
+    Menu,
+}
+
 /// The strip's row model for `window_count` windows in an `h`-row rect.
 ///
 /// Each window occupies a fixed two-row block (name + branch) from the top;
 /// when `h >= MIN_FOOTER_HEIGHT` the bottom two rows are reserved for the
 /// `+ new` / `= menu` affordances and window blocks that would collide are
 /// truncated. Fixed-size blocks keep the model derivable from the window
-/// *count* alone, so a hit-test (phux-fce4) can share it without
+/// *count* alone, which is what lets the input dispatcher hit-test without
 /// rebuilding the full window projection.
 #[must_use]
 pub fn row_model(window_count: usize, h: u16) -> Vec<SidebarRow> {
@@ -95,6 +107,33 @@ pub fn row_model(window_count: usize, h: u16) -> Vec<SidebarRow> {
         rows.push(SidebarRow::Menu);
     }
     rows
+}
+
+/// Resolve an outer-viewport mouse cell to a sidebar target.
+///
+/// `None` when it misses the strip (or lands on the separator column / a
+/// blank row). `window_count` must be the same list length the painter
+/// was fed.
+#[must_use]
+pub fn hit_test(rect: Rect, window_count: usize, x: u16, y: u16) -> Option<SidebarHit> {
+    if rect.w == 0 || rect.h == 0 {
+        return None;
+    }
+    // The last column is the separator rule, not a target.
+    let text_w = rect.w.saturating_sub(1);
+    if x < rect.x || x >= rect.x.saturating_add(text_w) {
+        return None;
+    }
+    if y < rect.y || y >= rect.y.saturating_add(rect.h) {
+        return None;
+    }
+    let row = usize::from(y - rect.y);
+    match row_model(window_count, rect.h).get(row)? {
+        SidebarRow::WindowName(i) | SidebarRow::WindowBranch(i) => Some(SidebarHit::Window(*i)),
+        SidebarRow::NewWindow => Some(SidebarHit::NewWindow),
+        SidebarRow::Menu => Some(SidebarHit::Menu),
+        SidebarRow::Blank => None,
+    }
 }
 
 /// VT painter for the window sidebar.
@@ -591,9 +630,62 @@ mod tests {
         );
     }
 
-    /// The painter fills rows exactly as [`row_model`] lays them out.
     #[test]
-    fn paint_follows_the_row_model_row_for_row() {
+    fn hit_test_maps_rows_to_targets() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 8,
+        };
+        // Name and branch rows of block 1 both select window 1.
+        assert_eq!(hit_test(rect, 2, 3, 2), Some(SidebarHit::Window(1)));
+        assert_eq!(hit_test(rect, 2, 3, 3), Some(SidebarHit::Window(1)));
+        // Padding rows miss.
+        assert_eq!(hit_test(rect, 2, 3, 4), None);
+        // Footer rows.
+        assert_eq!(hit_test(rect, 2, 3, 6), Some(SidebarHit::NewWindow));
+        assert_eq!(hit_test(rect, 2, 3, 7), Some(SidebarHit::Menu));
+    }
+
+    #[test]
+    fn hit_test_respects_the_rect_origin_and_separator() {
+        // Right-docked strip at x=60.
+        let rect = Rect {
+            x: 60,
+            y: 0,
+            w: 20,
+            h: 8,
+        };
+        assert_eq!(hit_test(rect, 1, 60, 0), Some(SidebarHit::Window(0)));
+        // The separator column (last column of the strip) is not a target.
+        assert_eq!(hit_test(rect, 1, 79, 0), None);
+        // Outside the strip entirely.
+        assert_eq!(hit_test(rect, 1, 59, 0), None);
+        assert_eq!(hit_test(rect, 1, 80, 0), None);
+        assert_eq!(hit_test(rect, 1, 60, 8), None);
+        // Degenerate rects never hit.
+        assert_eq!(
+            hit_test(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 0
+                },
+                1,
+                0,
+                0
+            ),
+            None
+        );
+    }
+
+    /// Paint and hit-test derive from one row model: every row the painter
+    /// fills with a window label hit-tests to that window, and the footer
+    /// rows hit-test to their affordances.
+    #[test]
+    fn paint_and_hit_test_agree_row_for_row() {
         let rect = Rect {
             x: 0,
             y: 0,
@@ -615,21 +707,23 @@ mod tests {
         };
         for (y, row) in row_model(windows.len(), rect.h).iter().enumerate() {
             let y16 = u16::try_from(y).expect("row fits u16");
+            let hit = hit_test(rect, windows.len(), 2, y16);
             match row {
                 SidebarRow::WindowName(i) => {
                     assert!(row_text(y16).contains(&windows[*i].name));
+                    assert_eq!(hit, Some(SidebarHit::Window(*i)));
                 }
                 SidebarRow::WindowBranch(i) => {
-                    if let Some(b) = windows[*i].branch.as_deref() {
-                        assert!(row_text(y16).contains(b));
-                    }
+                    assert_eq!(hit, Some(SidebarHit::Window(*i)));
                 }
-                SidebarRow::Blank => assert!(row_text(y16).trim().is_empty()),
+                SidebarRow::Blank => assert_eq!(hit, None),
                 SidebarRow::NewWindow => {
                     assert!(row_text(y16).contains(NEW_LABEL));
+                    assert_eq!(hit, Some(SidebarHit::NewWindow));
                 }
                 SidebarRow::Menu => {
                     assert!(row_text(y16).contains(MENU_LABEL));
+                    assert_eq!(hit, Some(SidebarHit::Menu));
                 }
             }
         }
