@@ -35,7 +35,8 @@ pub mod mouse;
 pub mod rasterize;
 
 pub use layout::{
-    PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in, split_content_span_at,
+    PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in,
+    pane_rects_proportional_in, split_content_span_at,
 };
 pub use mouse::{RouteDecision, route_mouse_event};
 pub use rasterize::{DividerCell, DividerHit};
@@ -377,6 +378,132 @@ mod tests {
             }
             TerminalId::Satellite { .. } => '?',
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Min-size freezing on viewport reflow — phux-foz.3 (TUI doc §6.2)
+    // -------------------------------------------------------------------------
+
+    /// A ratio that would squeeze the right pane below its 2-col floor
+    /// freezes it there; the deficit goes back to the left pane. The
+    /// proportional view (what the ratio asks for; the ADR-0019 resize
+    /// gate's input) still reports the sub-minimum width.
+    #[test]
+    fn freeze_holds_squeezed_pane_at_min_cols_and_redistributes() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.9).unwrap();
+        // Viewport 12 wide: content = 11, proportional cut = 10/1.
+        let frozen = pane_rects(&tree, (12, 24));
+        assert_eq!(
+            frozen.get(&t(2)).unwrap().w,
+            2,
+            "right pane frozen at floor"
+        );
+        assert_eq!(
+            frozen.get(&t(1)).unwrap().w,
+            9,
+            "left pane absorbs the deficit"
+        );
+
+        let proportional = pane_rects_proportional_in(
+            &tree,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 12,
+                h: 24,
+            },
+        );
+        assert_eq!(
+            proportional.get(&t(2)).unwrap().w,
+            1,
+            "the raw ratio still asks for a sub-minimum pane"
+        );
+    }
+
+    /// Nested splits: the root clamp reserves the right subtree's
+    /// aggregate minimum (two 2-col leaves + one divider = 5), then the
+    /// inner split holds both grandchildren at their floor. Every leaf
+    /// keeps >= 2 cols; the leftover cell lands on the lone left leaf.
+    #[test]
+    fn freeze_reserves_aggregate_minimums_through_nested_splits() {
+        // (1 | (2 | 3)), both ratios 0.5.
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let tree = split_at(&tree, &t(2), &t(3), SplitDir::Horizontal, 0.5).unwrap();
+        // Aggregate minimum width: 2 + 1 + (2 + 1 + 2) = 8; viewport 9.
+        let rects = pane_rects(&tree, (9, 24));
+        assert_eq!(rects.get(&t(1)).unwrap().w, 3, "spare cell goes left");
+        assert_eq!(rects.get(&t(2)).unwrap().w, 2);
+        assert_eq!(rects.get(&t(3)).unwrap().w, 2);
+        // Exact tiling: 3 + divider + 2 + divider + 2 = 9.
+        let total: u16 = rects.values().map(|r| r.w).sum();
+        assert_eq!(total, 7);
+    }
+
+    /// The row floor is 1 (not 2): a vertical squeeze freezes the bottom
+    /// pane at one row.
+    #[test]
+    fn freeze_holds_squeezed_pane_at_min_one_row() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.9).unwrap();
+        // Viewport 5 tall: content = 4, proportional cut = 4/0.
+        let rects = pane_rects(&tree, (80, 5));
+        assert_eq!(
+            rects.get(&t(2)).unwrap().h,
+            1,
+            "bottom pane frozen at 1 row"
+        );
+        assert_eq!(rects.get(&t(1)).unwrap().h, 3);
+    }
+
+    /// Below the aggregate minimums the clamp disengages: frozen and
+    /// proportional tilings agree, sub-viable rects appear, and the
+    /// exact-tiling invariant still holds (no panic, no hole).
+    #[test]
+    fn freeze_disengages_below_aggregate_minimum_viewport() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        // Aggregate minimum width is 5; viewport 4 cannot fit it.
+        let content = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 24,
+        };
+        let frozen = pane_rects_in(&tree, content);
+        let proportional = pane_rects_proportional_in(&tree, content);
+        assert_eq!(frozen, proportional, "degenerate fallback is proportional");
+        assert!(
+            frozen.values().any(|r| r.w < 2),
+            "some pane is sub-viable in the degenerate regime"
+        );
+        let total: u16 = frozen.values().map(|r| r.w).sum();
+        assert_eq!(total + 1, 4, "leaves + divider still tile exactly");
+    }
+
+    /// The drag-span geometry ([`split_content_span_at`]) descends with
+    /// the same freeze clamp the paint walk uses, so a grabbed inner
+    /// divider's span matches the frozen tiling — not the proportional
+    /// child bounds the unclamped math would produce.
+    #[test]
+    fn freeze_drag_span_matches_frozen_tiling() {
+        use crate::layout::{NodePath, NodeStep};
+        // (1 | (2 | 3)) in a 9-wide viewport: the root clamp gives the
+        // right subtree x = 4..9 (width 5), not the proportional x = 5..9.
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let tree = split_at(&tree, &t(2), &t(3), SplitDir::Horizontal, 0.5).unwrap();
+        let content = Rect {
+            x: 0,
+            y: 0,
+            w: 9,
+            h: 24,
+        };
+        let inner = NodePath(vec![NodeStep::Right]);
+        let (start, len) = split_content_span_at(&tree, content, &inner).unwrap();
+        // Frozen tiling: pane 2 paints at x = 4 (see the frozen rects), so
+        // the inner split's span starts there with a 4-cell budget
+        // (5 minus its own divider).
+        let rects = pane_rects_in(&tree, content);
+        assert_eq!(rects.get(&t(2)).unwrap().x, start);
+        assert_eq!(start, 4);
+        assert_eq!(len, 4);
     }
 
     // -------------------------------------------------------------------------

@@ -905,4 +905,37 @@ mod tests {
         Resolver::new(&cfg.keybindings)
             .expect("default keybindings build a resolver with no overlap");
     }
+
+    /// phux-foz.3: the default prefix table binds `H`/`J`/`K`/`L` to
+    /// `resize-pane` left/down/up/right by 5 — the documented tmux-style
+    /// resize row in the TUI doc's keybinding table (§5.3). Unlike the
+    /// no-overlap test above, this pins the exact bindings: the doc table
+    /// promises them, so changing them is a doc change too.
+    #[test]
+    fn default_config_binds_shift_hjkl_to_resize_pane() {
+        let cfg = crate::parse_str(
+            crate::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        for (chord, direction) in [("H", "left"), ("J", "down"), ("K", "up"), ("L", "right")] {
+            let action = cfg
+                .keybindings
+                .prefix_table
+                .get(chord)
+                .unwrap_or_else(|| panic!("default prefix table binds `{chord}`"));
+            let resolved = ResolvedAction::from(action);
+            assert_eq!(resolved.action, "resize-pane", "chord `{chord}`");
+            assert_eq!(
+                resolved.args.get("direction"),
+                Some(&toml::Value::String(direction.to_owned())),
+                "chord `{chord}` resizes {direction}"
+            );
+            assert_eq!(
+                resolved.args.get("amount"),
+                Some(&toml::Value::Integer(5)),
+                "chord `{chord}` resizes by the documented 5 cells"
+            );
+        }
+    }
 }

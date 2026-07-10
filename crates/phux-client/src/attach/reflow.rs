@@ -33,12 +33,14 @@
 //!
 //! # Sub-viable viewport handling
 //!
-//! Per [ADR-0019] decision 5 we explicitly punt min-size freezing in v0.1.
-//! If the new outer dims would force some leaf to render with `w < 2` or
-//! `h < 1`, we surface [`ReflowDiff::too_small`] = `true` and let the caller
-//! log + render garbage (no panic, no clamp). The follow-up that
-//! reintroduces min-size freezing flips this from a passive flag to an
-//! active "freeze" branch; the API doesn't change.
+//! Min-size freezing shipped with phux-foz.3 (TUI doc §6.2): the tiling
+//! walk itself clamps each split so a leaf squeezed to its floor (2 cols
+//! x 1 row of inner content) freezes there and the remaining space
+//! redistributes to its siblings. [`ReflowDiff::too_small`] therefore
+//! only fires in the degenerate regime — a viewport too small to cover
+//! even the aggregate minimums, where the freeze clamp disengages and
+//! proportional tiling resumes (some leaf renders with `w < 2` or
+//! `h < 1`). The caller logs + renders garbage; no panic, no hole.
 //!
 //! # One tiling for paint and reflow
 //!
@@ -77,9 +79,12 @@ pub struct ReflowDiff {
     /// new to this snapshot (no entry in `prev_rects`). x/y-only movement
     /// does **not** appear here — see the module docs for why.
     pub changed: Vec<(TerminalId, Rect)>,
-    /// Any leaf in `new_rects` would render with `w < 2` or `h < 1`. The
-    /// caller logs a warning and renders garbage; we do not clamp, freeze,
-    /// or panic. ADR-0019 decision 5 punts min-size freezing to v0.2.
+    /// Some leaf in `new_rects` renders with `w < 2` or `h < 1`: the
+    /// viewport is below the layout's aggregate minimums, so §6.2
+    /// min-size freezing disengaged and proportional tiling resumed
+    /// (phux-foz.3). The caller logs a warning and renders garbage; we
+    /// do not panic. Above that threshold freezing holds every leaf at
+    /// its floor and this stays `false`.
     pub too_small: bool,
 }
 

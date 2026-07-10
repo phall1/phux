@@ -956,10 +956,10 @@ the `phux-4li` epic.
 
 ### 6.2 Resize behavior
 
-> **Status:** Design intent. Not yet implemented as of 2026-05-25.
-> The layout tree, split, kill-pane, and directional focus shipped in
-> `phux-byc.2`; viewport-driven re-flow, minimum-size freezing, and
-> the `resize-pane` command have no tickets filed yet.
+> **Status:** Shipped (phux-foz.3). Proportional re-flow and
+> minimum-size freezing are implemented in the layout walk itself, so
+> paint, reflow (`TERMINAL_RESIZE` sizing), and mouse hit-testing all
+> read the same frozen tiling.
 
 When the client viewport (or server-aggregated viewport for multi-client
 sessions) resizes, split ratios are preserved and dimensions are
@@ -968,10 +968,18 @@ redistributed proportionally. A leaf that hits its minimum size
 client) freezes; remaining space redistributes among non-frozen leaves.
 This mirrors tmux's resize behavior.
 
+Below the layout's aggregate minimums (every leaf at its floor plus one
+cell per interior divider) freezing disengages and pure proportional
+tiling resumes: panes degrade to sub-viable rectangles rather than
+disappearing, and the exact-tiling invariant (no gaps, no overlaps)
+holds at every viewport size.
+
 ### 6.3 Resize commands
 
-> **Status:** Design intent. Not yet implemented as of 2026-05-25.
-> No `resize-pane` action wired into the dispatcher; no ticket filed.
+> **Status:** Shipped (ADR-0035, phux-foz.3). `resize-pane` dispatches
+> through the single-dispatch action registry, `C-a H/J/K/L` are the
+> default bindings (see §5.3), the command palette offers a resize row,
+> and drag-on-divider (§7) commits through the same ratio math.
 
 `resize-pane direction=right amount=5` moves the boundary between the
 focused pane and its right neighbor by 5 columns toward the right,
@@ -980,6 +988,14 @@ giving the focused pane more width. Negative amounts shrink.
 Resize commands modify the relevant interior node's `ratio` (not
 absolute sizes). After a subsequent window resize, the new ratio is
 preserved.
+
+A resize that would push either side of the boundary below 2 cells on
+the resize axis is a bell-no-op (ADR-0019 decision 5). The gate measures
+the ratio's *proportional* tiling — what the ratio asks for — not the
+frozen tiling of §6.2, so a command cannot silently bank ratio behind a
+frozen divider that the layout would snap to on the next viewport grow.
+The new layout broadcasts to other attached clients via `SET_METADATA`
+(`phux.tui.layout/v1`), like every other layout mutation.
 
 ### 6.4 Window sidebar
 
