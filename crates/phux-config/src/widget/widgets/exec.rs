@@ -550,6 +550,7 @@ mod tests {
             left: vec![Widget::Bare("session-name".to_owned()), exec("left")],
             center: vec![exec("center")],
             right: vec![exec("right")],
+            position: Default::default(),
         };
         let bar = StatusBar::build(&cfg, &WidgetRegistry::with_builtins()).unwrap();
         let feeds = bar.exec_feeds();
