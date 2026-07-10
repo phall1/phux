@@ -47,7 +47,7 @@ use super::paint::{SidebarReservation, content_rect};
 use crate::layout::{
     self, Direction, LayoutError, LayoutNode, LayoutState, NodePath, Rect, SplitDir,
 };
-use crate::multi_pane::{pane_rects_in, split_content_span_at};
+use crate::multi_pane::{pane_rects_proportional_in, split_content_span_at};
 
 /// Errors returned by the pure action helpers.
 ///
@@ -362,6 +362,12 @@ fn clamp_ratio(r: f32) -> f32 {
 /// always measured against the full pane-row budget, and the
 /// `content_rect(.., false, None)` form reproduces the prior
 /// `pane_rects(tree, viewport)` byte-for-byte on the disabled path.
+///
+/// phux-foz.3: measures the *proportional* tiling
+/// ([`pane_rects_proportional_in`]), not the frozen tiling paint uses.
+/// The §6.2 viewport-reflow floor would otherwise pin every rect at
+/// minimum and this gate would never trip, letting `resize-pane` bank
+/// unbounded ratio behind a frozen divider.
 fn violates_min_cell(
     state: &LayoutState,
     viewport: (u16, u16),
@@ -370,7 +376,7 @@ fn violates_min_cell(
     let Some(tree) = state.tree.as_ref() else {
         return false;
     };
-    let rects = pane_rects_in(tree, content_rect(viewport, false, sidebar));
+    let rects = pane_rects_proportional_in(tree, content_rect(viewport, false, sidebar));
     rects
         .values()
         .any(|r: &Rect| r.w < MIN_PANE_CELL || r.h < MIN_PANE_CELL)

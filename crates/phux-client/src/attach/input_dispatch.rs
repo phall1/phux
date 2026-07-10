@@ -2347,6 +2347,100 @@ mod tests {
         assert!(!effects.layout_mutated);
     }
 
+    /// A two-pane Horizontal split with focus on the left leaf, root
+    /// ratio 0.5 — the fixture the `resize-pane` dispatch tests mutate.
+    fn two_pane_workspace() -> Workspace {
+        use crate::layout::{LayoutState, WindowState, split_at};
+        let tree = split_at(
+            &crate::layout::LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(1)),
+                },
+            }],
+            active: 0,
+        }
+    }
+
+    /// The root split's ratio, for asserting a resize actually moved it.
+    fn root_ratio(workspace: &Workspace) -> f32 {
+        match workspace.active_window().unwrap().tree.as_ref().unwrap() {
+            crate::layout::LayoutNode::Split { ratio, .. } => *ratio,
+            other => panic!("expected root Split, got {other:?}"),
+        }
+    }
+
+    /// phux-foz.3: `resize-pane { direction, amount }` dispatches through
+    /// `run_action` — the ratio moves by amount/axis-cells, the layout
+    /// repaints, and the mutation broadcasts via `SET_METADATA` (unlike
+    /// per-client focus moves).
+    #[test]
+    fn resize_pane_dispatch_moves_ratio_and_broadcasts() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let mut action = bare_action("resize-pane");
+        action
+            .args
+            .insert("direction".to_owned(), toml::Value::String("right".into()));
+        action
+            .args
+            .insert("amount".to_owned(), toml::Value::Integer(8));
+        let effects = run(&action, &mut workspace);
+        assert!(!effects.bell);
+        assert!(effects.layout_mutated, "resize repaints the layout");
+        assert!(
+            effects.set_metadata,
+            "a layout mutation broadcasts to other clients"
+        );
+        let after = root_ratio(&workspace);
+        // Growing the focused (left) pane rightward by 8 of 80 cols.
+        assert!(
+            (after - before - 0.1).abs() < 1e-4,
+            "ratio moved {before} -> {after}, wanted +0.1"
+        );
+    }
+
+    /// phux-foz.3: a `resize-pane` missing its args bells and mutates
+    /// nothing (ADR-0019 decision 5 bell-no-op contract).
+    #[test]
+    fn resize_pane_dispatch_missing_args_bells() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let effects = run(&bare_action("resize-pane"), &mut workspace);
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
+        assert!(!effects.set_metadata);
+        assert!((root_ratio(&workspace) - before).abs() < f32::EPSILON);
+    }
+
+    /// phux-foz.3: a resize that would squeeze a pane below the 2-cell
+    /// floor (ADR-0019 decision 5) bells and leaves the ratio unchanged.
+    #[test]
+    fn resize_pane_dispatch_min_cell_floor_bells() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let mut action = bare_action("resize-pane");
+        action
+            .args
+            .insert("direction".to_owned(), toml::Value::String("right".into()));
+        action
+            .args
+            .insert("amount".to_owned(), toml::Value::Integer(80));
+        let effects = run(&action, &mut workspace);
+        assert!(effects.bell, "floor violation is a bell-no-op");
+        assert!(!effects.layout_mutated);
+        assert!((root_ratio(&workspace) - before).abs() < f32::EPSILON);
+    }
+
     /// phux-4h5a: `toggle-sidebar` requests the driver-side flip
     /// (`toggle_sidebar`) plus a repaint (`layout_mutated`), unconditionally —
     /// even single-pane, since the strip lists windows. It never bells and
