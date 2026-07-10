@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-10
 ---
 
 # The phux web client
@@ -147,7 +147,11 @@ its `scripts/build-client.sh` for the copy-the-artifact step.
   job. The web client mirrors one terminal.
 - **Text, color, cursor.** The canvas renderer paints grapheme cells with fg/bg
   and a blinking block cursor. Images and sixel (which the engine does parse)
-  are a future renderer pass.
+  are a future renderer pass. Accordingly, the client's `HELLO` advertises **no
+  image protocols** (`Session::client_caps`), so the server strips kitty
+  graphics, sixel, and iTerm2 image escapes before forwarding (SPEC 6.2,
+  ADR-0034) instead of shipping payloads the canvas would drop. When the
+  renderer pass lands, the advertisement widens with it.
 - **Engine boundary copies.** Bytes cross two wasm linear memories (the Rust
   client and `ghostty-vt.wasm`), which is fine for terminal traffic.
 
