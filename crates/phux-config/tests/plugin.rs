@@ -627,3 +627,123 @@ interval = "30s"
     assert!(status.center.is_empty() && status.right.is_empty());
     Ok(())
 }
+
+/// The `min_phux_version` gate (phux-r82.2): a manifest whose floor is at
+/// or below the current phux version loads; equality is the boundary case.
+#[test]
+fn manifest_at_current_phux_version_loads() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        &format!(
+            r#"
+id = "example.current"
+name = "Current"
+version = "0.1.0"
+min_phux_version = "{}"
+"#,
+            plugin::CURRENT_PHUX_VERSION
+        ),
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.id, "example.current");
+    assert_eq!(loaded.min_phux_version, plugin::CURRENT_PHUX_VERSION);
+    Ok(())
+}
+
+/// A manifest demanding a future phux is rejected at load time with an
+/// error naming the plugin, its floor, and the running version — so both
+/// `phux plugin link` (which loads the manifest) and every load-time
+/// consumer see the same clear refusal.
+#[test]
+fn manifest_requiring_future_phux_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.future"
+name = "Future"
+version = "0.1.0"
+min_phux_version = "99.0.0"
+"#,
+    )?;
+
+    let err = plugin::load_plugin_manifest(&manifest).expect_err("future floor must be rejected");
+
+    let message = err.to_string();
+    assert!(message.contains("example.future"), "{message}");
+    assert!(message.contains("99.0.0"), "{message}");
+    assert!(message.contains(plugin::CURRENT_PHUX_VERSION), "{message}");
+    Ok(())
+}
+
+/// A `min_phux_version` that is not a dotted numeric version is a schema
+/// error, not a silent pass.
+#[test]
+fn manifest_with_malformed_min_phux_version_is_rejected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.badfloor"
+name = "Bad Floor"
+version = "0.1.0"
+min_phux_version = "latest"
+"#,
+    )?;
+
+    let err = plugin::load_plugin_manifest(&manifest).expect_err("malformed floor must be rejected");
+
+    let message = err.to_string();
+    assert!(message.contains("malformed min_phux_version"), "{message}");
+    Ok(())
+}
+
+/// The best-effort batch loader skips (never propagates) a plugin gated
+/// out by `min_phux_version`, so one too-new plugin cannot take down the
+/// TUI or server consuming the healthy ones.
+#[test]
+fn load_enabled_manifests_skips_version_gated_plugin() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let config_path = dir.path().join("config.toml");
+    let good = dir.path().join("good.toml");
+    std::fs::write(
+        &good,
+        r#"
+id = "example.good-floor"
+name = "Good"
+version = "0.1.0"
+min_phux_version = "0.0.1"
+"#,
+    )?;
+    let future = dir.path().join("future.toml");
+    std::fs::write(
+        &future,
+        r#"
+id = "example.future-floor"
+name = "Future"
+version = "0.1.0"
+min_phux_version = "99.0.0"
+"#,
+    )?;
+
+    let entries = vec![
+        plugin::PluginConfigEntry {
+            manifest: good,
+            enabled: true,
+        },
+        plugin::PluginConfigEntry {
+            manifest: future,
+            enabled: true,
+        },
+    ];
+
+    let manifests = plugin::load_enabled_manifests(&config_path, &entries);
+
+    assert_eq!(manifests.len(), 1, "the gated plugin is skipped");
+    assert_eq!(manifests[0].id, "example.good-floor");
+    Ok(())
+}

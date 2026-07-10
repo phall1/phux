@@ -4,12 +4,14 @@ mod link;
 mod loader;
 mod source;
 mod validate;
+mod version;
 mod workspace;
 
 use std::path::{Path, PathBuf};
 
 pub use loader::load_plugin_manifest;
 use serde::{Deserialize, Serialize};
+pub use version::CURRENT_PHUX_VERSION;
 
 /// A plugin declared in `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
