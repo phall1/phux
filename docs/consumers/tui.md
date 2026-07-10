@@ -910,6 +910,7 @@ test, so this table cannot silently drift):
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
+| `set-pane`        | `mouse` = `on`\|`off`\|`toggle` — per-pane mouse opt-out (§7, ADR-0035) |
 | `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
 | `reload-config`   | re-read the config and apply it in place (§4.3) |
 
@@ -1099,12 +1100,12 @@ targets stay keyboard-reachable through their actions (`C-a c`,
 
 ## 7. Mouse
 
-> **Status:** Shipped (ADR-0035). Click-to-focus, drag-on-divider to
-> resize, and default outer-terminal mouse capture are implemented. The
-> client enables its own mouse tracking on attach so divider drags work
-> without an inner program turning mouse mode on. The per-pane
-> `set-pane mouse off` escape hatch is **follow-up** — the global
-> `mouse = false` config is the current opt-out.
+> **Status:** Shipped (ADR-0035; per-pane opt-out in phux-npb3).
+> Click-to-focus, drag-on-divider to resize, and default outer-terminal
+> mouse capture are implemented. The client enables its own mouse
+> tracking on attach so divider drags work without an inner program
+> turning mouse mode on. Opt-outs: the global `mouse = false` config,
+> and the per-pane `set-pane mouse off` action described below.
 
 Mouse handling is enabled by default. On attach the client emits DECSET
 `?1002h` (button-event tracking) + `?1006h` (SGR coordinates) for the
@@ -1140,10 +1141,22 @@ terminal's click-drag text selection inside the phux viewport. Hold
 enforce it). A host that does not honour Shift-bypass needs
 `mouse = false` for easy selection.
 
-**Escape hatch.** `mouse = false` in `[defaults]` skips the DECSET
+**Escape hatches.** `mouse = false` in `[defaults]` skips the DECSET
 entirely and reverts to pass-through-only (the client only sees mouse
-when an inner program enables it). The per-pane `set-pane mouse off`
-remains follow-up work (needs a `set-pane` verb + per-pane client state).
+when an inner program enables it).
+
+Per-pane (phux-npb3): the `set-pane` action with `mouse = "on"`,
+`"off"`, or `"toggle"` (bindable, and offered by the command palette as
+a toggle) opts the *focused* pane out of client mouse handling without
+touching its siblings. The state is client-local and capture follows
+focus: while an opted-out pane is focused the client drops its own
+mouse-tracking DECSET, so the host terminal's raw handling (native
+click-drag selection and friends) returns for that pane; focusing any
+opted-in pane re-enables capture and drag-to-resize. While capture is
+on (another pane focused), a click on the opted-out pane still focuses
+it — that is the mouse path back in — but the client never synthesizes
+`INPUT_MOUSE` (or the local wheel viewport scroll) for an opted-out
+pane. Nothing crosses the wire; a pane's opt-out ends when it closes.
 
 We do not ship copy-mode mouse drag selection — see §11.
 

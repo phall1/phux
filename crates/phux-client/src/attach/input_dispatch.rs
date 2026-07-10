@@ -127,6 +127,15 @@ pub(super) struct DispatchCtx<'a> {
     /// pointer position; a release clears it. Owned by `main_loop` (it
     /// must survive across dispatch batches) and threaded in by reference.
     pub drag: &'a mut Option<DragGrab>,
+    /// phux-npb3 (ADR-0035 decision 3 follow-up): panes that opted out of
+    /// client mouse handling via `set-pane mouse off`. Client-local state,
+    /// owned by `main_loop` like `drag` and lent in by reference. Two
+    /// consumers: the dispatcher skips synthesizing `INPUT_MOUSE` (and the
+    /// local wheel-scroll) for an opted-out pane, and the driver drops the
+    /// outer-terminal mouse-tracking DECSET whenever the focused pane is in
+    /// this set — so the host terminal's raw mouse handling returns for that
+    /// pane without forcing the whole session to `mouse = false`.
+    pub mouse_optout: &'a mut std::collections::HashSet<TerminalId>,
     /// phux-r82.5: enabled plugins' manifest `[[actions]]`, snapshotted at
     /// driver start (same lifecycle as `keybindings`). The command palette
     /// appends one namespaced row per entry under a "Plugin" header.
@@ -432,6 +441,23 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 continue;
             }
+            // phux-npb3 hardening (PR #142 review, recorded in ADR-0035):
+            // while a divider drag is active, ONLY a release ends it and
+            // ONLY motion re-tunes it — both handled above. Anything else
+            // (notably a second Press from a chorded button, a wheel tick,
+            // or a re-encoded press glitch) is consumed here so it cannot
+            // fall through to normal routing mid-drag, where it would
+            // forward to a pane, move focus, or grab a second divider while
+            // the first grab is still live.
+            if ctx.drag.is_some() {
+                tracing::trace!(
+                    action = ?mouse.action,
+                    button = ?mouse.button,
+                    "dropping mouse event during divider drag"
+                );
+                continue;
+            }
+
             // phux-fce4: the sidebar strip claims every pointer event over
             // its own cells BEFORE pane routing — its rows are hit targets,
             // not pane content. A left press resolves against the strip's
@@ -516,6 +542,20 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         // dividers + all leaves so the focused pane's
                         // surrounding edges render heavy.
                         layout_changed = true;
+                    }
+                    // phux-npb3: a pane opted out via `set-pane mouse off`
+                    // receives no client-synthesized mouse at all — no
+                    // INPUT_MOUSE forward, no local wheel viewport scroll.
+                    // Click-to-focus above still applies: it is chrome-level
+                    // (the pane never sees it) and it is also the path that
+                    // makes the driver drop outer capture once the opted-out
+                    // pane is focused, restoring the host's raw handling.
+                    if ctx.mouse_optout.contains(&target) {
+                        tracing::trace!(
+                            terminal = ?target,
+                            "dropping mouse event: pane opted out (set-pane mouse off)"
+                        );
+                        continue;
                     }
                     let mut routed = *mouse;
                     routed.x = pane_x;
@@ -1207,6 +1247,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "take-input",
     "give-input",
     "signal-terminal",
+    "set-pane",
     "plugin-action",
     "reload-config",
 ];
@@ -1364,6 +1405,46 @@ fn run_action(
                     signal,
                 },
             });
+        }
+        "set-pane" => {
+            // phux-npb3 (ADR-0035 decision 3 follow-up): flip the focused
+            // pane's per-pane mouse opt-out. `mouse = "off"` opts the pane
+            // out of client mouse handling (no synthesized INPUT_MOUSE; the
+            // driver drops outer capture while the pane is focused, so the
+            // host terminal's raw mouse handling returns for it alone);
+            // `"on"` opts back in; `"toggle"` flips. Entirely client-local —
+            // nothing crosses the wire.
+            let Some(mode) = mouse_arg(resolved) else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "set-pane missing/bad `mouse` arg (expected on|off|toggle or a bool)",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("set-pane: no focused pane; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let opt_out = match mode {
+                PaneMouseArg::Off => true,
+                PaneMouseArg::On => false,
+                PaneMouseArg::Toggle => !ctx.mouse_optout.contains(&focused_id),
+            };
+            if opt_out {
+                ctx.mouse_optout.insert(focused_id.clone());
+            } else {
+                ctx.mouse_optout.remove(&focused_id);
+            }
+            tracing::info!(
+                terminal = ?focused_id,
+                mouse = !opt_out,
+                "set-pane: per-pane mouse opt-out updated"
+            );
+            // No repaint needed: the opt-out has no chrome today, and the
+            // driver re-syncs the outer capture DECSET from this set at the
+            // top of every loop iteration.
         }
         "new-window" => {
             // phux-4li.15: open a new window. Spawn a fresh Terminal
@@ -1745,6 +1826,38 @@ fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
 /// `action` on `plugin-action`).
 fn str_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option<String> {
     resolved.args.get(key)?.as_str().map(ToOwned::to_owned)
+}
+
+/// The `mouse` argument of `set-pane` (phux-npb3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneMouseArg {
+    /// Opt the pane back in to client mouse handling.
+    On,
+    /// Opt the pane out (`set-pane mouse off`, ADR-0035's escape hatch).
+    Off,
+    /// Flip the pane's current state (the palette default).
+    Toggle,
+}
+
+/// Pull the `mouse = ...` arg out of a `set-pane` action. Accepts the
+/// documented strings (`"on"` / `"off"` / `"toggle"`) and, for TOML
+/// ergonomics in keybinding tables, plain booleans (`mouse = false` ≡
+/// `"off"`). Anything else yields `None` (the caller bells).
+fn mouse_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<PaneMouseArg> {
+    match resolved.args.get("mouse")? {
+        toml::Value::String(s) => match s.as_str() {
+            "on" => Some(PaneMouseArg::On),
+            "off" => Some(PaneMouseArg::Off),
+            "toggle" => Some(PaneMouseArg::Toggle),
+            _ => None,
+        },
+        toml::Value::Boolean(b) => Some(if *b {
+            PaneMouseArg::On
+        } else {
+            PaneMouseArg::Off
+        }),
+        _ => None,
+    }
 }
 
 /// Build the `<leader> w` grouped window picker's rows (phux-4li.19 / nav).
@@ -2211,6 +2324,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -2230,6 +2345,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -2521,6 +2637,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2540,6 +2658,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -2588,6 +2707,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -2648,6 +2768,8 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let effects = {
             let mut reload_request = false;
             let mut ctx = DispatchCtx {
@@ -2669,6 +2791,7 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
                 drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
@@ -2992,6 +3115,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3011,6 +3136,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -3062,6 +3188,8 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let effects = {
             let mut reload_request = false;
             let mut ctx = DispatchCtx {
@@ -3083,6 +3211,7 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 has_bar: false,
                 drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
@@ -3215,6 +3344,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3234,6 +3365,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -3313,6 +3445,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3332,6 +3466,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -3454,6 +3589,8 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3473,6 +3610,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: false,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
@@ -3603,6 +3741,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = true;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3625,8 +3766,10 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             has_bar: true,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         dispatch_input_events(
             &mut out,
@@ -3687,5 +3830,396 @@ mod tests {
         assert_eq!(active, 0);
         assert!(!overlay_active);
         assert_eq!(pending, 0);
+    }
+
+    // -- phux-npb3: per-pane mouse opt-out + drag double-press hardening ---
+
+    /// A two-pane horizontal split (`tid(1) | tid(2)`), focus on `tid(1)`.
+    fn two_pane_workspace() -> Workspace {
+        use crate::layout::{LayoutNode, LayoutState, WindowState, split_at};
+        let tree = split_at(
+            &LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .expect("two-pane split");
+        Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(1)),
+                },
+            }],
+            active: 0,
+        }
+    }
+
+    /// Build a mouse event in outer-viewport cell coordinates.
+    fn mev(action: MouseAction, button: MouseButton, x: f64, y: f64) -> MouseEvent {
+        MouseEvent {
+            action,
+            button,
+            mods: phux_protocol::input::key::ModSet::empty(),
+            x,
+            y,
+        }
+    }
+
+    /// The divider column of [`two_pane_workspace`] at viewport 80x24 (no
+    /// bar, no sidebar), found by hit-testing rather than hardcoding the
+    /// rasterizer's rounding.
+    fn two_pane_divider_x() -> u16 {
+        use crate::multi_pane::{RouteDecision, route_mouse_event};
+        let workspace = two_pane_workspace();
+        let ls = workspace.active_window().expect("active window");
+        let content = content_rect((80, 24), false, None);
+        (0..80u16)
+            .find(|&x| {
+                matches!(
+                    route_mouse_event(
+                        ls,
+                        content,
+                        (80, 24),
+                        &mev(MouseAction::Press, MouseButton::Left, f64::from(x), 5.0),
+                    ),
+                    RouteDecision::Divider { .. }
+                )
+            })
+            .expect("a two-pane split has a divider column")
+    }
+
+    /// Drive `dispatch_input_events` with `events` against
+    /// [`two_pane_workspace`] (viewport 80x24, no bar / sidebar), seeding
+    /// the per-pane opt-out set with `seed_optout`. Returns every frame the
+    /// peer end of the connection received plus the post-dispatch drag,
+    /// focus, and opt-out state.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_mouse_two_pane(
+        events: Vec<InputEvent>,
+        seed_optout: &[TerminalId],
+    ) -> (
+        Vec<FrameKind>,
+        Option<DragGrab>,
+        Option<TerminalId>,
+        std::collections::HashSet<TerminalId>,
+    ) {
+        let mut workspace = two_pane_workspace();
+        let (a, b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut peer = Connection::from_stream(b);
+        let mut out: Vec<u8> = Vec::new();
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            seed_optout.iter().cloned().collect();
+        let mut reload_request = false;
+        {
+            let mut ctx = DispatchCtx {
+                resolver: None,
+                workspace: &mut workspace,
+                viewport: (80, 24),
+                next_request_id: &mut next_request_id,
+                pending_splits: &mut pending_splits,
+                pending_windows: &mut pending_windows,
+                overlays: &mut overlays,
+                keybindings: None,
+                theme: &theme,
+                sessions: &[],
+                focused_session: None,
+                session_name: &mut session_name,
+                switch_request: &mut switch_request,
+                zoomed: &mut zoomed,
+                sidebar: None,
+                sidebar_enabled: &mut sidebar_enabled,
+                has_bar: false,
+                drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
+                plugin_actions: &[],
+                plugin_tx: None,
+                reload_request: &mut reload_request,
+            };
+            dispatch_input_events(
+                &mut out,
+                &mut conn,
+                events,
+                &mut focused_pane,
+                &mut detach_pending,
+                &mut predict,
+                &overlay,
+                &mut panes,
+                &mut ctx,
+            )
+            .await
+            .expect("dispatch");
+        }
+        // Close the writer so the peer's drain terminates: once the buffered
+        // frames are consumed, `recv` sees the EOF and returns Disconnected.
+        // (`try_recv` is not used here — tokio's non-blocking read reports
+        // WouldBlock until the reactor has observed readiness, which this
+        // freshly-paired socket never awaited.)
+        drop(conn);
+        let mut received = Vec::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
+                .await
+                .expect("timed out draining the peer connection");
+            match next {
+                Ok(frame) => received.push(frame),
+                Err(_) => break, // EOF after the writer dropped
+            }
+        }
+        (received, drag, focused_pane, mouse_optout)
+    }
+
+    /// phux-npb3 hardening: a second Press arriving while a divider drag is
+    /// active must be consumed — not fall through to normal routing, where
+    /// it would move focus and forward an `INPUT_MOUSE` mid-drag.
+    #[tokio::test]
+    async fn second_press_during_divider_drag_is_consumed() {
+        let dx = f64::from(two_pane_divider_x());
+        let (received, drag, focused, _) = dispatch_mouse_two_pane(
+            vec![
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, dx, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, 70.0, 5.0)),
+            ],
+            &[],
+        )
+        .await;
+        assert!(drag.is_some(), "the divider press grabs a drag");
+        assert_eq!(
+            focused,
+            Some(tid(1)),
+            "a press mid-drag must not move focus"
+        );
+        assert!(
+            received.is_empty(),
+            "a press mid-drag must not forward to a pane; got {received:?}"
+        );
+    }
+
+    /// The double-press guard must not eat the release that ends the drag.
+    #[tokio::test]
+    async fn release_after_guarded_press_still_ends_drag() {
+        let dx = f64::from(two_pane_divider_x());
+        let (_received, drag, _focused, _) = dispatch_mouse_two_pane(
+            vec![
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, dx, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Right, 70.0, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Release, MouseButton::Left, 70.0, 5.0)),
+            ],
+            &[],
+        )
+        .await;
+        assert!(
+            drag.is_none(),
+            "the release must still end the drag after a guarded press"
+        );
+    }
+
+    /// phux-npb3 routing: a press inside an opted-out pane still
+    /// click-focuses it (chrome-level — that is also what makes the driver
+    /// drop outer capture), but no `INPUT_MOUSE` is synthesized for it.
+    #[tokio::test]
+    async fn press_in_opted_out_pane_focuses_but_does_not_forward() {
+        let (received, _, focused, _) = dispatch_mouse_two_pane(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Left,
+                70.0,
+                5.0,
+            ))],
+            &[tid(2)],
+        )
+        .await;
+        assert_eq!(
+            focused,
+            Some(tid(2)),
+            "click-to-focus still applies to an opted-out pane"
+        );
+        assert!(
+            received.is_empty(),
+            "an opted-out pane must receive no INPUT_MOUSE; got {received:?}"
+        );
+    }
+
+    /// The opt-out is per-pane: a sibling that did NOT opt out still gets
+    /// its `INPUT_MOUSE` forwarded (with pane-local coordinates) while the
+    /// other pane sits in the opt-out set.
+    #[tokio::test]
+    async fn press_in_opted_in_sibling_still_forwards() {
+        let dx = two_pane_divider_x();
+        let (received, _, focused, _) = dispatch_mouse_two_pane(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Left,
+                70.0,
+                5.0,
+            ))],
+            &[tid(1)], // the OTHER pane is opted out
+        )
+        .await;
+        assert_eq!(focused, Some(tid(2)));
+        match received.as_slice() {
+            [FrameKind::InputMouse { terminal_id, event }] => {
+                assert_eq!(*terminal_id, tid(2));
+                assert!(
+                    event.x < f64::from(dx),
+                    "forwarded coordinates are pane-local; got x = {}",
+                    event.x
+                );
+            }
+            other => panic!("expected exactly one INPUT_MOUSE, got {other:?}"),
+        }
+    }
+
+    /// Run a `set-pane` action against `workspace` with a caller-owned
+    /// opt-out set, returning the effects.
+    fn run_set_pane(
+        mouse: Option<toml::Value>,
+        workspace: &mut Workspace,
+        mouse_optout: &mut std::collections::HashSet<TerminalId>,
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
+            drag: &mut drag,
+            mouse_optout,
+            plugin_actions: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+        };
+        let mut action = bare_action("set-pane");
+        if let Some(v) = mouse {
+            action.args.insert("mouse".to_owned(), v);
+        }
+        let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+        run_action(&action, &mut ctx, focused.as_ref())
+    }
+
+    #[test]
+    fn set_pane_mouse_off_then_on_updates_optout() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(
+            Some(toml::Value::String("off".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!effects.bell);
+        assert!(optout.contains(&tid(1)), "`mouse = off` opts the pane out");
+
+        let effects = run_set_pane(
+            Some(toml::Value::String("on".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!effects.bell);
+        assert!(
+            !optout.contains(&tid(1)),
+            "`mouse = on` opts the pane back in"
+        );
+    }
+
+    #[test]
+    fn set_pane_toggle_flips_state() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let toggle = || toml::Value::String("toggle".to_owned());
+        run_set_pane(Some(toggle()), &mut workspace, &mut optout);
+        assert!(optout.contains(&tid(1)), "first toggle opts out");
+        run_set_pane(Some(toggle()), &mut workspace, &mut optout);
+        assert!(!optout.contains(&tid(1)), "second toggle opts back in");
+    }
+
+    #[test]
+    fn set_pane_bool_arg_maps_to_on_off() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        run_set_pane(
+            Some(toml::Value::Boolean(false)),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(optout.contains(&tid(1)), "`mouse = false` means off");
+        run_set_pane(
+            Some(toml::Value::Boolean(true)),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!optout.contains(&tid(1)), "`mouse = true` means on");
+    }
+
+    #[test]
+    fn set_pane_missing_or_bad_mouse_arg_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(None, &mut workspace, &mut optout);
+        assert!(effects.bell, "missing `mouse` arg bells");
+        let effects = run_set_pane(
+            Some(toml::Value::String("sideways".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(effects.bell, "unknown `mouse` value bells");
+        assert!(optout.is_empty());
+    }
+
+    #[test]
+    fn set_pane_without_focused_pane_bells() {
+        let mut workspace = Workspace::default();
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(
+            Some(toml::Value::String("off".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(effects.bell, "no focused pane to set");
+        assert!(optout.is_empty());
     }
 }
