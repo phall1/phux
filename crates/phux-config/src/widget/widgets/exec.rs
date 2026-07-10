@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn status_bar_exec_feeds_walks_all_slots() {
-        use crate::schema::{StatusCfg, Widget};
+        use crate::schema::{StatusCfg, StatusPosition, Widget};
         use crate::widget::StatusBar;
         let exec = |cmd: &str| {
             Widget::Spec(WidgetSpec {
@@ -550,7 +550,7 @@ mod tests {
             left: vec![Widget::Bare("session-name".to_owned()), exec("left")],
             center: vec![exec("center")],
             right: vec![exec("right")],
-            position: Default::default(),
+            position: StatusPosition::default(),
         };
         let bar = StatusBar::build(&cfg, &WidgetRegistry::with_builtins()).unwrap();
         let feeds = bar.exec_feeds();
