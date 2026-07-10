@@ -21,6 +21,8 @@
 
 pub mod quic;
 pub mod tls;
+#[cfg(feature = "webtransport")]
+pub mod webtransport;
 
 use std::io;
 use std::net::SocketAddr;

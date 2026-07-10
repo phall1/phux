@@ -153,6 +153,17 @@ pub(crate) enum Command {
         #[arg(long, value_name = "HOST:PORT")]
         quic: Option<std::net::SocketAddr>,
 
+        /// Also accept WebTransport (HTTP/3 over QUIC) clients on this
+        /// `HOST:PORT` (the UDS stays on) — the browser's door to QUIC-class
+        /// transport; `phux-web` dials it, falling back to WebSocket.
+        /// Always TLS 1.3-encrypted; a loopback address skips token auth
+        /// (local dev), while any routable address requires a `phux pair`
+        /// token carried in the CONNECT request (`Authorization: Bearer`
+        /// from native consumers, `?token=<hex>` on the session URL from
+        /// browsers; ADR-0031). Overrides `$PHUX_WT_ADDR`.
+        #[arg(long, value_name = "HOST:PORT")]
+        webtransport: Option<std::net::SocketAddr>,
+
         /// Run as a federation hub (ADR-0007): consume the `[[satellites]]`
         /// registry from `config.toml` at startup, validating every enabled
         /// entry's endpoint (`quic://`, `ws://`, `wss://`, or the deferred

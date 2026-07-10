@@ -284,6 +284,14 @@ pub struct ServerRuntime {
     /// encrypted, and binding off-loopback requires a paired bearer token
     /// (see [`build_quic_listener`]).
     quic_addr: Option<SocketAddr>,
+    /// Optional WebTransport listen address (in addition to the always-on
+    /// UDS). `None` falls back to the `PHUX_WT_ADDR` environment variable.
+    /// The `phux server --webtransport <ADDR>` flag populates this;
+    /// WebTransport is always TLS-encrypted (HTTP/3 over QUIC), and binding
+    /// off-loopback requires a paired bearer token (see
+    /// [`build_wt_listener`]).
+    #[cfg(feature = "webtransport")]
+    wt_addr: Option<SocketAddr>,
     /// Graceful-upgrade resume descriptor (ADR-0032). When `Some`, the runtime
     /// reads the handoff state blob from this inherited fd, adopts the
     /// inherited listener, and rebuilds the session tree instead of binding a
@@ -309,6 +317,8 @@ impl ServerRuntime {
             cfg,
             ws_addr: None,
             quic_addr: None,
+            #[cfg(feature = "webtransport")]
+            wt_addr: None,
             resume_fd: None,
             hub: false,
             satellites: Vec::new(),
@@ -346,6 +356,33 @@ impl ServerRuntime {
     #[must_use]
     pub const fn listen_quic(mut self, addr: SocketAddr) -> Self {
         self.quic_addr = Some(addr);
+        self
+    }
+
+    /// Also accept WebTransport connections on `addr` (the UDS stays on).
+    ///
+    /// Overrides the `PHUX_WT_ADDR` environment variable. WebTransport is
+    /// HTTP/3 over QUIC — always TLS 1.3-encrypted — and is the browser's
+    /// door to QUIC-class transport (`phux-web` dials it, falling back to
+    /// WebSocket). A loopback address skips token auth (local dev), while
+    /// any routable address requires a paired bearer token carried in the
+    /// `CONNECT` request (ADR-0031 parity with `wss://`).
+    #[cfg(feature = "webtransport")]
+    #[must_use]
+    pub const fn listen_webtransport(mut self, addr: SocketAddr) -> Self {
+        self.wt_addr = Some(addr);
+        self
+    }
+
+    /// Built without the `webtransport` feature: the listen address is
+    /// ignored (with a warning) so callers keep one call site.
+    #[cfg(not(feature = "webtransport"))]
+    #[must_use]
+    pub fn listen_webtransport(self, addr: SocketAddr) -> Self {
+        warn!(
+            %addr,
+            "phux-server was built without the `webtransport` feature; ignoring the WebTransport listen address"
+        );
         self
     }
 
@@ -510,6 +547,11 @@ impl ServerRuntime {
         // QUIC listen address: the `--quic` flag (via `listen_quic`) wins;
         // otherwise fall back to `PHUX_QUIC_ADDR` inside the accept setup.
         let quic_addr_override = self.quic_addr;
+        // WebTransport listen address: the `--webtransport` flag (via
+        // `listen_webtransport`) wins; otherwise fall back to `PHUX_WT_ADDR`
+        // inside the accept setup.
+        #[cfg(feature = "webtransport")]
+        let webtransport_addr_override = self.wt_addr;
         // Wire policy bundle from config into shared state.
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));
@@ -623,6 +665,14 @@ impl ServerRuntime {
                 // QUIC carries the identical frames over a TLS 1.3 stream.
                 let quic_addr = quic_addr_override.or_else(|| env_socket_addr("PHUX_QUIC_ADDR"));
                 let quic_listener = quic_addr.and_then(build_quic_listener);
+                // Optionally also accept WebTransport connections (phux-0wmf):
+                // HTTP/3 over QUIC, the browser's QUIC-class door (`phux-web`
+                // dials it, falling back to WebSocket). Opt-in via
+                // `phux server --webtransport <ADDR>` or `PHUX_WT_ADDR`.
+                #[cfg(feature = "webtransport")]
+                let webtransport_listener = webtransport_addr_override
+                    .or_else(|| env_socket_addr("PHUX_WT_ADDR"))
+                    .and_then(build_wt_listener);
 
                 // UDS is always on; WS and QUIC are additive. Each transport's
                 // accept loop runs until the root token cancels; whichever
@@ -644,6 +694,10 @@ impl ServerRuntime {
                         state.clone(),
                         root_token.clone(),
                     )));
+                }
+                #[cfg(feature = "webtransport")]
+                if let Some(wt) = &webtransport_listener {
+                    accepts.push(Box::pin(accept_loop(wt, state.clone(), root_token.clone())));
                 }
                 let (result, _index, _remaining) = futures_util::future::select_all(accepts).await;
                 result
@@ -839,6 +893,81 @@ fn build_quic_listener(addr: SocketAddr) -> Option<crate::transport::quic::QuicL
         }
         Err(err) => {
             warn!(addr = %addr, error = %err, "failed to bind QUIC; UDS only");
+            None
+        }
+    }
+}
+
+/// Build the optional WebTransport listener for `addr` (phux-0wmf). Returns
+/// `None` (WebTransport disabled, other transports unaffected) on any setup
+/// failure rather than failing the whole server.
+///
+/// WebTransport is HTTP/3 over QUIC, so it is **always** TLS 1.3-encrypted;
+/// a certificate is provisioned in both modes. It shares the persisted
+/// self-signed cert and token store with the `wss://` and QUIC paths (one
+/// `phux pair` token authorizes all three), keyed off the same
+/// `PHUX_WS_TLS_CERT` / `PHUX_WS_TLS_KEY` / `PHUX_WS_TOKENS` overrides:
+///
+/// * **Loopback address → TLS, no token.** Local dev; the `CONNECT` carries
+///   no token.
+/// * **Routable address (or `PHUX_WS_SECURE=1`) → TLS + bearer token.**
+///   Off-loopback is treated as exposing the server, so a paired token is
+///   required exactly as for a remote WebSocket consumer (ADR-0031). Native
+///   consumers send `Authorization: Bearer <hex>`; browsers — whose
+///   `WebTransport` JS API cannot set headers — append `?token=<hex>` to the
+///   session URL, still inside TLS.
+#[cfg(feature = "webtransport")]
+fn build_wt_listener(addr: SocketAddr) -> Option<crate::transport::webtransport::WtListener> {
+    let force_secure = std::env::var_os("PHUX_WS_SECURE").is_some_and(|v| !v.is_empty());
+    let secure = !addr.ip().is_loopback() || force_secure;
+
+    let cert_env = std::env::var_os("PHUX_WS_TLS_CERT").map(PathBuf::from);
+    let key_env = std::env::var_os("PHUX_WS_TLS_KEY").map(PathBuf::from);
+    let operator_cert = cert_env.is_some() || key_env.is_some();
+    let cert_path = cert_env.unwrap_or_else(crate::transport::tls::default_cert_path);
+    let key_path = key_env.unwrap_or_else(crate::transport::tls::default_key_path);
+    if !operator_cert
+        && let Err(err) = crate::transport::tls::ensure_self_signed(&cert_path, &key_path)
+    {
+        error!(error = %err, "failed to provision self-signed certificate; WebTransport disabled");
+        return None;
+    }
+
+    let tokens = if secure {
+        let tokens_path = std::env::var_os("PHUX_WS_TOKENS")
+            .map_or_else(crate::auth::default_token_store_path, PathBuf::from);
+        let store = match crate::auth::TokenStore::load(&tokens_path) {
+            Ok(store) => store,
+            Err(err) => {
+                error!(error = %err, path = %tokens_path.display(), "failed to load token store; WebTransport disabled");
+                return None;
+            }
+        };
+        if store.is_empty() {
+            warn!(
+                path = %tokens_path.display(),
+                "no pairing tokens; every remote WebTransport consumer is rejected until `phux pair`"
+            );
+        }
+        Some(std::sync::Arc::new(store))
+    } else {
+        None
+    };
+    let token_count = tokens.as_ref().map_or(0, |s| s.len());
+
+    match crate::transport::webtransport::WtListener::from_pem(addr, &cert_path, &key_path, tokens)
+    {
+        Ok(wt) => {
+            let bound = wt.local_addr().map(|a| a.to_string()).unwrap_or_default();
+            if secure {
+                info!(addr = %bound, tokens = token_count, "WebTransport listening with TLS + token auth");
+            } else {
+                info!(addr = %bound, "WebTransport listening (TLS, loopback, unauthenticated)");
+            }
+            Some(wt)
+        }
+        Err(err) => {
+            warn!(addr = %addr, error = %err, "failed to bind WebTransport; UDS only");
             None
         }
     }

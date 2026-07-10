@@ -1,6 +1,20 @@
-//! Browser glue: a WebSocket to the phux server, a `<canvas>`, and the keyboard,
-//! all driving a [`Session`]. This is the only part that touches the DOM/WS; the
-//! protocol logic lives in [`crate::session`].
+//! Browser glue: a transport to the phux server (WebTransport or WebSocket),
+//! a `<canvas>`, and the keyboard, all driving a [`Session`](crate::Session).
+//! This is the only part that touches the DOM/network; the protocol logic
+//! lives in [`crate::session`].
+//!
+//! Two connect paths speak the identical wire (ADR-0025: the transport is a
+//! byte-stream detail below the frame codec):
+//!
+//! * **WebSocket** ([`run`]) — one binary message per encoded frame. The
+//!   historical path; works everywhere.
+//! * **WebTransport** ([`run_webtransport`]) — HTTP/3 over QUIC, the
+//!   browser's door to QUIC-class transport. One bidirectional stream
+//!   carries length-prefixed frames (reassembled by
+//!   [`FrameBuffer`](crate::framing::FrameBuffer), since stream chunks
+//!   arrive at arbitrary boundaries). [`run_with_fallback`] tries this
+//!   first and falls back to WebSocket when the API or the endpoint is
+//!   unavailable.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -10,10 +24,13 @@ use phux_protocol::wire::frame::FrameKind;
 use phux_vt_web::Vt;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    BinaryType, CanvasRenderingContext2d, HtmlCanvasElement, KeyboardEvent, MessageEvent, WebSocket,
+    BinaryType, CanvasRenderingContext2d, HtmlCanvasElement, KeyboardEvent, MessageEvent,
+    ReadableStreamDefaultReader, WebSocket, WebTransport, WritableStreamDefaultWriter,
 };
 
+use crate::framing::FrameBuffer;
 use crate::{Metrics, render};
 
 /// Connect to a phux server over WebSocket and render the attached terminal
@@ -29,23 +46,10 @@ pub async fn run(
     cols: u16,
     rows: u16,
 ) -> Result<Client, JsValue> {
-    let vt = Vt::load().await?;
-    let ctx: CanvasRenderingContext2d = canvas
-        .get_context("2d")?
-        .ok_or_else(|| JsValue::from_str("no 2D context"))?
-        .dyn_into()?;
-
     let ws = WebSocket::new(ws_url)?;
     ws.set_binary_type(BinaryType::Arraybuffer);
 
-    let app = Rc::new(RefCell::new(App {
-        session: crate::Session::new(&vt, cols, rows),
-        ws: ws.clone(),
-        canvas,
-        ctx,
-        metrics: Metrics::default(),
-        cursor_on: Cell::new(true),
-    }));
+    let app = build_app(WireTx::Ws(ws.clone()), canvas, cols, rows).await?;
 
     // On open: send HELLO + ATTACH.
     {
@@ -58,7 +62,8 @@ pub async fn run(
         onopen.forget();
     }
 
-    // On message: decode one frame, drive the session, ack, repaint.
+    // On message: decode one frame, drive the session, ack, repaint. Each
+    // binary message is one complete encoded frame — no reassembly.
     {
         let app = Rc::clone(&app);
         let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |e: MessageEvent| {
@@ -66,54 +71,132 @@ pub async fn run(
             let Ok((frame, _rest)) = FrameKind::decode(&buf) else {
                 return;
             };
-            let mut a = app.borrow_mut();
-            let outcome = a.session.on_frame(frame);
-            if !outcome.send.is_empty() {
-                a.send(outcome.send);
-            }
-            if outcome.render {
-                a.paint();
-            }
+            handle_frame(&app, frame);
         });
         ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         onmessage.forget();
     }
 
-    // Keyboard: each keydown becomes an INPUT_KEY for the attached terminal.
-    {
-        let app = Rc::clone(&app);
-        let document = web_sys::window()
-            .and_then(|w| w.document())
-            .ok_or_else(|| JsValue::from_str("no document"))?;
-        let onkey = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
-            let Some(event) = key_event_from_browser(&e) else {
-                return;
-            };
-            let a = app.borrow();
-            if let Some(frame) = a.session.key_frame(event) {
-                let _ = a.ws.send_with_u8_array(&frame);
-                e.prevent_default();
-            }
-        });
-        document.add_event_listener_with_callback("keydown", onkey.as_ref().unchecked_ref())?;
-        onkey.forget();
+    install_keyboard(&app)?;
+    install_cursor_blink(&app)?;
+
+    Ok(Client { app })
+}
+
+/// Connect over WebTransport (HTTP/3 over QUIC), falling back to the
+/// WebSocket path when WebTransport is unavailable — an older browser
+/// without the API, or a server not listening on the WebTransport endpoint.
+///
+/// `wt_url` is an `https://` session URL (`phux server --webtransport`; on a
+/// token-authenticated listener append `?token=<hex>`, since the JS
+/// `WebTransport` API cannot set request headers). `ws_url` is the
+/// WebSocket URL used as the fallback.
+///
+/// # Errors
+/// Fails only if *both* paths fail to come up.
+pub async fn run_with_fallback(
+    wt_url: &str,
+    ws_url: &str,
+    canvas: HtmlCanvasElement,
+    cols: u16,
+    rows: u16,
+) -> Result<Client, JsValue> {
+    match run_webtransport(wt_url, canvas.clone(), cols, rows).await {
+        Ok(client) => Ok(client),
+        Err(err) => {
+            web_sys::console::warn_2(
+                &JsValue::from_str("phux-web: WebTransport unavailable; falling back to WebSocket"),
+                &err,
+            );
+            run(ws_url, canvas, cols, rows).await
+        }
+    }
+}
+
+/// Connect over WebTransport only (no fallback): establish the session, open
+/// the single bidirectional wire stream, send the handshake, and start the
+/// read pump.
+///
+/// # Errors
+/// Fails if the engine can't load, the canvas has no 2D context, the
+/// `WebTransport` API is missing, or the session/stream can't be established.
+pub async fn run_webtransport(
+    wt_url: &str,
+    canvas: HtmlCanvasElement,
+    cols: u16,
+    rows: u16,
+) -> Result<Client, JsValue> {
+    // `WebTransport::new` throws (rather than returning Err) when the API is
+    // absent from the global scope; the `catch` binding surfaces both cases
+    // as Err so the caller's fallback fires either way.
+    let wt = WebTransport::new(wt_url)?;
+    if let Err(err) = JsFuture::from(wt.ready()).await {
+        wt.close();
+        return Err(err);
     }
 
-    // Cursor blink: toggle the phase and repaint on a fixed cadence.
+    // One bidirectional stream carries the whole wire, mirroring the QUIC
+    // transport's one-stream-per-connection contract.
+    let stream = match JsFuture::from(wt.create_bidirectional_stream()).await {
+        Ok(stream) => stream,
+        Err(err) => {
+            wt.close();
+            return Err(err);
+        }
+    };
+    let writer = WritableStreamDefaultWriter::new(&stream.writable())?;
+    let reader = ReadableStreamDefaultReader::new(&stream.readable())?;
+
+    let app = build_app(WireTx::Wt(writer), canvas, cols, rows).await?;
+
+    // The session is already established (unlike the WebSocket path there is
+    // no onopen moment): send HELLO + ATTACH immediately.
+    {
+        let a = app.borrow();
+        a.send(a.session.handshake());
+    }
+
+    // Read pump: stream chunks land at arbitrary boundaries, so reassemble
+    // complete frames before decoding. `wt` is moved in to keep the session
+    // handle alive for the pump's lifetime.
     {
         let app = Rc::clone(&app);
-        let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
-        let blink = Closure::<dyn FnMut()>::new(move || {
-            let a = app.borrow();
-            a.cursor_on.set(!a.cursor_on.get());
-            a.paint();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _session = wt;
+            let mut frames = FrameBuffer::new();
+            loop {
+                let Ok(result) = JsFuture::from(reader.read()).await else {
+                    break;
+                };
+                let done = js_sys::Reflect::get(&result, &JsValue::from_str("done"))
+                    .ok()
+                    .and_then(|d| d.as_bool())
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+                let Ok(value) = js_sys::Reflect::get(&result, &JsValue::from_str("value")) else {
+                    break;
+                };
+                frames.push(&js_sys::Uint8Array::new(&value).to_vec());
+                while let Some(framed) = frames.next_frame() {
+                    let Ok((frame, _rest)) = FrameKind::decode(&framed) else {
+                        continue;
+                    };
+                    handle_frame(&app, frame);
+                }
+                if frames.poisoned() {
+                    web_sys::console::error_1(&JsValue::from_str(
+                        "phux-web: WebTransport stream desynchronized; closing",
+                    ));
+                    break;
+                }
+            }
         });
-        window.set_interval_with_callback_and_timeout_and_arguments_0(
-            blink.as_ref().unchecked_ref(),
-            530,
-        )?;
-        blink.forget();
     }
+
+    install_keyboard(&app)?;
+    install_cursor_blink(&app)?;
 
     Ok(Client { app })
 }
@@ -137,9 +220,38 @@ impl Client {
     }
 }
 
+/// The send half of whichever transport carried the connection. Both carry
+/// identical encoded frames; only the byte-stream mechanics differ.
+enum WireTx {
+    /// One binary message per frame.
+    Ws(WebSocket),
+    /// Length-prefixed frames over the session's single bidirectional stream.
+    Wt(WritableStreamDefaultWriter),
+}
+
+impl WireTx {
+    fn send(&self, frame: &[u8]) {
+        match self {
+            Self::Ws(ws) => {
+                let _ = ws.send_with_u8_array(frame);
+            }
+            Self::Wt(writer) => {
+                let chunk = js_sys::Uint8Array::from(frame);
+                // Writer chunks queue in call order; await the promise off
+                // the hot path only to observe (and drop) failures, so a
+                // rejected write never surfaces as an unhandled rejection.
+                let pending = writer.write_with_chunk(&chunk);
+                wasm_bindgen_futures::spawn_local(async move {
+                    let _ = JsFuture::from(pending).await;
+                });
+            }
+        }
+    }
+}
+
 struct App {
     session: crate::Session,
-    ws: WebSocket,
+    tx: WireTx,
     canvas: HtmlCanvasElement,
     ctx: CanvasRenderingContext2d,
     metrics: Metrics,
@@ -150,7 +262,7 @@ struct App {
 impl App {
     fn send(&self, frames: Vec<Vec<u8>>) {
         for f in frames {
-            let _ = self.ws.send_with_u8_array(&f);
+            self.tx.send(&f);
         }
     }
 
@@ -167,6 +279,81 @@ impl App {
         }
         render(&self.ctx, &grid, &self.metrics, self.cursor_on.get());
     }
+}
+
+/// Load the engine, grab the canvas 2D context, and assemble the shared
+/// [`App`] around an established transport send half.
+async fn build_app(
+    tx: WireTx,
+    canvas: HtmlCanvasElement,
+    cols: u16,
+    rows: u16,
+) -> Result<Rc<RefCell<App>>, JsValue> {
+    let vt = Vt::load().await?;
+    let ctx: CanvasRenderingContext2d = canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("no 2D context"))?
+        .dyn_into()?;
+
+    Ok(Rc::new(RefCell::new(App {
+        session: crate::Session::new(&vt, cols, rows),
+        tx,
+        canvas,
+        ctx,
+        metrics: Metrics::default(),
+        cursor_on: Cell::new(true),
+    })))
+}
+
+/// Drive the session with one decoded server frame: ack and repaint as the
+/// session asks. Shared by both transports' receive paths.
+fn handle_frame(app: &Rc<RefCell<App>>, frame: FrameKind) {
+    let mut a = app.borrow_mut();
+    let outcome = a.session.on_frame(frame);
+    if !outcome.send.is_empty() {
+        a.send(outcome.send);
+    }
+    if outcome.render {
+        a.paint();
+    }
+}
+
+/// Keyboard: each keydown becomes an `INPUT_KEY` for the attached terminal.
+fn install_keyboard(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
+    let app = Rc::clone(app);
+    let document = web_sys::window()
+        .and_then(|w| w.document())
+        .ok_or_else(|| JsValue::from_str("no document"))?;
+    let onkey = Closure::<dyn FnMut(KeyboardEvent)>::new(move |e: KeyboardEvent| {
+        let Some(event) = key_event_from_browser(&e) else {
+            return;
+        };
+        let a = app.borrow();
+        if let Some(frame) = a.session.key_frame(event) {
+            a.tx.send(&frame);
+            e.prevent_default();
+        }
+    });
+    document.add_event_listener_with_callback("keydown", onkey.as_ref().unchecked_ref())?;
+    onkey.forget();
+    Ok(())
+}
+
+/// Cursor blink: toggle the phase and repaint on a fixed cadence.
+fn install_cursor_blink(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
+    let app = Rc::clone(app);
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let blink = Closure::<dyn FnMut()>::new(move || {
+        let a = app.borrow();
+        a.cursor_on.set(!a.cursor_on.get());
+        a.paint();
+    });
+    window.set_interval_with_callback_and_timeout_and_arguments_0(
+        blink.as_ref().unchecked_ref(),
+        530,
+    )?;
+    blink.forget();
+    Ok(())
 }
 
 /// Map a browser `KeyboardEvent` to a wire `KeyEvent`. Returns `None` for

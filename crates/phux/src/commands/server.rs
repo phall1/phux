@@ -29,6 +29,7 @@ const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 #[allow(
     clippy::too_many_arguments,
     clippy::fn_params_excessive_bools,
+    clippy::too_many_lines,
     reason = "1:1 mirror of the `phux server` clap surface; bundling into a struct would just restate the clap enum"
 )]
 pub(crate) fn run_server(
@@ -36,6 +37,7 @@ pub(crate) fn run_server(
     socket: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
     quic: Option<std::net::SocketAddr>,
+    webtransport: Option<std::net::SocketAddr>,
     hub: bool,
     daemonize: bool,
     seed_command: Option<&str>,
@@ -140,6 +142,11 @@ pub(crate) fn run_server(
         (None, Some(q)) => format!(" + quic://{q}"),
         (None, None) => String::new(),
     };
+    if let Some(wt) = webtransport {
+        // WebTransport session URLs are https:// (HTTP/3 CONNECT).
+        let _ =
+            std::fmt::Write::write_fmt(&mut extra, format_args!(" + webtransport https://{wt}"));
+    }
     if hub {
         extra.push_str(" [hub]");
     }
@@ -154,6 +161,9 @@ pub(crate) fn run_server(
     }
     if let Some(addr) = quic {
         server = server.listen_quic(addr);
+    }
+    if let Some(addr) = webtransport {
+        server = server.listen_webtransport(addr);
     }
     // Hub mode (phux-v45.1, ADR-0007): hand the `[[satellites]]` registry to
     // the runtime, which validates it into the satellite table before
