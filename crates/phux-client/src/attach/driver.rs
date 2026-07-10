@@ -42,11 +42,11 @@ use tracing::Instrument as _;
 
 use super::actions::{PendingSplit, PendingWindow};
 use super::connection::{Connection, Dial};
+use super::exec_widgets::spawn_exec_feed_runners;
 use super::input::StdinParser;
 use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
 };
-use super::exec_widgets::spawn_exec_feed_runners;
 use super::paint::{
     SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
 };

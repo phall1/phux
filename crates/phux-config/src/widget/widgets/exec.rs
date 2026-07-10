@@ -306,9 +306,13 @@ fn strip_escapes(line: &str) -> String {
 /// Fold one SGR parameter list (the bytes between `CSI` and `m`) into a
 /// running [`CellStyle`]. Unknown parameters are ignored.
 fn apply_sgr(style: &mut CellStyle, params: &str) {
-    let mut iter = params
-        .split(';')
-        .map(|p| if p.is_empty() { Ok(0) } else { p.parse::<u16>() });
+    let mut iter = params.split(';').map(|p| {
+        if p.is_empty() {
+            Ok(0)
+        } else {
+            p.parse::<u16>()
+        }
+    });
     while let Some(param) = iter.next() {
         let Ok(param) = param else { return };
         match param {
@@ -441,10 +445,10 @@ mod tests {
     #[test]
     fn invalid_options_are_rejected() {
         for opts in [
-            vec![],                                                     // no command
-            vec![("command", toml::Value::String("  ".to_owned()))],   // blank
-            vec![("command", toml::Value::Array(vec![]))],              // empty argv
-            vec![("command", toml::Value::Integer(3))],                 // wrong type
+            vec![],                                                  // no command
+            vec![("command", toml::Value::String("  ".to_owned()))], // blank
+            vec![("command", toml::Value::Array(vec![]))],           // empty argv
+            vec![("command", toml::Value::Integer(3))],              // wrong type
             vec![
                 ("command", toml::Value::String("true".to_owned())),
                 ("interval", toml::Value::String("fast".to_owned())),
@@ -490,7 +494,10 @@ mod tests {
     #[test]
     fn parse_ansi_extended_colors() {
         let cells = parse_ansi_line("\u{1b}[38;5;208mX\u{1b}[48;2;16;32;48mY");
-        assert_eq!(cells.cells[0].style.as_ref().unwrap().fg.as_deref(), Some("208"));
+        assert_eq!(
+            cells.cells[0].style.as_ref().unwrap().fg.as_deref(),
+            Some("208")
+        );
         let y = cells.cells[1].style.as_ref().unwrap();
         assert_eq!(y.bg.as_deref(), Some("#102030"));
         assert_eq!(y.fg.as_deref(), Some("208"), "fg persists across cells");
@@ -509,8 +516,7 @@ mod tests {
     fn parse_ansi_strips_non_sgr_escapes_and_controls() {
         // Cursor-move CSI, an OSC title, a two-char escape, and a tab all
         // strip; printable text survives.
-        let cells =
-            parse_ansi_line("\u{1b}[2Ka\u{1b}]0;title\u{7}b\u{1b}(Bc\td");
+        let cells = parse_ansi_line("\u{1b}[2Ka\u{1b}]0;title\u{7}b\u{1b}(Bc\td");
         assert_eq!(text_of(&cells), "abcd");
         assert!(cells.cells.iter().all(|c| c.style.is_none()));
     }
@@ -536,11 +542,8 @@ mod tests {
         let exec = |cmd: &str| {
             Widget::Spec(WidgetSpec {
                 kind: "exec".to_owned(),
-                opts: std::iter::once((
-                    "command".to_owned(),
-                    toml::Value::String(cmd.to_owned()),
-                ))
-                .collect(),
+                opts: std::iter::once(("command".to_owned(), toml::Value::String(cmd.to_owned())))
+                    .collect(),
             })
         };
         let cfg = StatusCfg {

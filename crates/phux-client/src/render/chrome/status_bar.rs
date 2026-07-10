@@ -1292,7 +1292,7 @@ mod tests {
     }
 
     /// phux-foz.4: the painter-owned last-exit feeds the `exit` widget.
-    /// Clearing it (a code-less command_finished) blanks the widget again.
+    /// Clearing it (a code-less `command_finished`) blanks the widget again.
     #[test]
     fn painter_renders_last_exit_through_exit_widget() {
         let cfg = StatusCfg {

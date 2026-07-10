@@ -84,7 +84,12 @@ fn session_name_renders_prefix_and_truncated_name() {
         ]),
     };
     let w = r.build(&spec).expect("session-name builds");
-    let cells = w.render(&WidgetContext::new(fixed_time(), "very-long-session-name", "C-a", &[]));
+    let cells = w.render(&WidgetContext::new(
+        fixed_time(),
+        "very-long-session-name",
+        "C-a",
+        &[],
+    ));
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
     assert_eq!(chars, "[sess]very");
 }
