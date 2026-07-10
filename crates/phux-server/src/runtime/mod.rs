@@ -143,6 +143,37 @@ pub struct ServerConfig {
     pub hook_catalog: crate::hooks::HookCatalog,
 }
 
+/// The server's effective opt-in runtime flags, captured from the running
+/// [`ServerRuntime`] configuration at startup (phux-v45.10).
+///
+/// A graceful upgrade (ADR-0032) re-execs the current binary; the new image
+/// must be started with the same transport and federation surface the old one
+/// was serving, or `--listen` / `--quic` / `--hub` silently vanish across
+/// `phux server upgrade`. These are derived from the runtime's own fields —
+/// the values the builder methods ([`ServerRuntime::listen_ws`],
+/// [`ServerRuntime::listen_quic`], [`ServerRuntime::hub`]) actually applied —
+/// not from a stashed copy of the original argv, so config-derived state stays
+/// consistent with what the server is really running.
+///
+/// Environment-derived fallbacks (`PHUX_WS_ADDR`, `PHUX_QUIC_ADDR`) are
+/// deliberately *not* captured here: the environment survives the `execve`,
+/// so the resumed image re-derives them with the same precedence (explicit
+/// flag wins over environment) as the original start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeFlags {
+    /// WebSocket listen address from `phux server --listen <ADDR>`
+    /// ([`ServerRuntime::listen_ws`]). Re-emitted as `--listen` on resume.
+    pub ws_addr: Option<SocketAddr>,
+    /// QUIC listen address from `phux server --quic <ADDR>`
+    /// ([`ServerRuntime::listen_quic`]). Re-emitted as `--quic` on resume.
+    pub quic_addr: Option<SocketAddr>,
+    /// Federation-hub mode from `phux server --hub` ([`ServerRuntime::hub`]).
+    /// Re-emitted as `--hub` on resume; the resumed image re-reads and
+    /// re-validates the `[[satellites]]` registry from config, exactly like a
+    /// fresh `--hub` start.
+    pub hub: bool,
+}
+
 impl ServerConfig {
     /// Build a config with `socket_path` resolved via [`default_socket_path`]
     /// and no pre-seeded session.
@@ -418,9 +449,19 @@ impl ServerRuntime {
         };
 
         // Capture the upgrade context (ADR-0032): the listening socket's fd +
-        // path, so `handle_upgrade` can build the handoff blob and re-pass
-        // `--socket` to the re-exec'd image.
-        state.with_mut(|s| s.set_upgrade_context(listener.as_raw_fd(), socket_path.clone()));
+        // path + effective runtime flags, so `handle_upgrade` can build the
+        // handoff blob and re-pass `--socket` / `--listen` / `--quic` /
+        // `--hub` to the re-exec'd image (phux-v45.10). The flags come from
+        // the runtime's own configuration — what the builder methods applied
+        // — not a stashed copy of the original argv.
+        let runtime_flags = RuntimeFlags {
+            ws_addr: self.ws_addr,
+            quic_addr: self.quic_addr,
+            hub: self.hub,
+        };
+        state.with_mut(|s| {
+            s.set_upgrade_context(listener.as_raw_fd(), socket_path.clone(), runtime_flags);
+        });
 
         // The LocalSet hosts per-client tasks and per-pane actors —
         // both `!Send`. `LocalSet::run_until` drives the set to the
