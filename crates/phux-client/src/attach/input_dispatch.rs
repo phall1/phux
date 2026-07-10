@@ -22,6 +22,7 @@ use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
 use super::paint::{SidebarReservation, content_rect};
 use super::plugin_actions::{PluginActionEntry, PluginRunResult};
+use super::plugin_panes::{HostedPlacement, PluginPaneEntry};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -151,6 +152,12 @@ pub(super) struct DispatchCtx<'a> {
     /// driver start (same lifecycle as `keybindings`). The command palette
     /// appends one namespaced row per entry under a "Plugin" header.
     pub plugin_actions: &'a [PluginActionEntry],
+    /// phux-r82.7: enabled plugins' hostable manifest `[[panes]]`
+    /// (placement `split`/`tab`/`zoomed`; overlay is deferred), snapshotted
+    /// at driver start alongside `plugin_actions`. The command palette
+    /// appends one namespaced row per entry; a dispatched `plugin-pane`
+    /// looks its argv + placement up here.
+    pub plugin_panes: &'a [PluginPaneEntry],
     /// phux-r82.5: sender half of the driver's plugin-events channel. A
     /// dispatched `plugin-action` spawns the child-process run off the
     /// input loop and reports completion here; the driver's `select!`
@@ -1275,6 +1282,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "signal-terminal",
     "set-pane",
     "plugin-action",
+    "plugin-pane",
     "reload-config",
 ];
 
@@ -1343,6 +1351,7 @@ fn run_action(
                 PendingSplit {
                     focused_at_request: focused_id,
                     dir,
+                    zoom_on_spawn: false,
                 },
                 frame,
             ));
@@ -1659,7 +1668,11 @@ fn run_action(
             // commits that action's `ResolvedAction`, which flows back
             // through this same `run_action` — keybinds and the palette
             // share one dispatch path (the architectural invariant).
-            let items = super::action_registry::palette_items(ctx.keybindings, ctx.plugin_actions);
+            let items = super::action_registry::palette_items(
+                ctx.keybindings,
+                ctx.plugin_actions,
+                ctx.plugin_panes,
+            );
             ctx.overlays.push(Box::new(SelectList::new(
                 "command palette",
                 items,
@@ -1767,6 +1780,80 @@ fn run_action(
                 return effects;
             };
             effects.run_plugin = Some((plugin, action));
+        }
+        "plugin-pane" => {
+            // phux-r82.7: open a plugin manifest `[[panes]]` entry as a
+            // real server-side Terminal running the pane's argv. Routes
+            // through the SAME SPAWN_TERMINAL machinery `split-pane` /
+            // `new-window` use (ADR-0017: no plugin-privileged wire
+            // surface) — the manifest supplies the command, the plugin
+            // root the cwd, and PHUX_PLUGIN_* the additive env. Placement
+            // picks the parked intent: `split`/`zoomed` park a
+            // PendingSplit (zoomed also zooms the new pane when the
+            // reply lands), `tab` parks a PendingWindow named after the
+            // pane title. `overlay` entries never reach the snapshot
+            // (deferred), so an unknown (plugin, pane) pair here also
+            // covers a disabled plugin or an overlay declaration bound
+            // directly in user config.
+            let (Some(plugin), Some(pane)) =
+                (str_arg(resolved, "plugin"), str_arg(resolved, "pane"))
+            else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "plugin-pane missing/bad `plugin`/`pane` args",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(entry) = ctx
+                .plugin_panes
+                .iter()
+                .find(|e| e.plugin_id == plugin && e.pane_id == pane)
+            else {
+                tracing::warn!(
+                    plugin = %plugin,
+                    pane = %pane,
+                    "plugin-pane names no hostable pane (unknown, disabled, or overlay-deferred); dropping",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            let frame = entry.spawn_frame(request_id);
+            match entry.placement {
+                HostedPlacement::Split | HostedPlacement::Zoomed => {
+                    let Some(focused_id) = focused.cloned() else {
+                        tracing::warn!(
+                            plugin = %plugin,
+                            pane = %pane,
+                            "plugin-pane split/zoomed placement needs a focused pane; dropping",
+                        );
+                        effects.bell = true;
+                        return effects;
+                    };
+                    effects.spawn_terminal = Some((
+                        request_id,
+                        PendingSplit {
+                            focused_at_request: focused_id,
+                            // Side-by-side, matching the palette's
+                            // `split-pane` default (vertical divider).
+                            dir: SplitDir::Horizontal,
+                            zoom_on_spawn: entry.placement == HostedPlacement::Zoomed,
+                        },
+                        frame,
+                    ));
+                }
+                HostedPlacement::Tab => {
+                    effects.spawn_window = Some((
+                        request_id,
+                        PendingWindow {
+                            name: entry.title.clone(),
+                        },
+                        frame,
+                    ));
+                }
+            }
         }
         "next-pane" => {
             if let Some(ls) = ctx.workspace.active_window_mut()
@@ -2451,6 +2538,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -2769,6 +2857,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -2819,6 +2908,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -2904,6 +2994,7 @@ mod tests {
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
+                plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
             };
@@ -2945,7 +3036,7 @@ mod tests {
             std::path::Path::new("default.toml"),
         )
         .expect("default config parses");
-        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings), &[]);
+        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings), &[], &[]);
         let detach = items
             .iter()
             .find(|i| i.action.action == "detach")
@@ -2989,6 +3080,185 @@ mod tests {
         let effects = run(&bare_action("plugin-action"), &mut workspace);
         assert!(effects.bell, "missing plugin/action args must bell");
         assert!(effects.run_plugin.is_none());
+    }
+
+    // ---------- phux-r82.7: plugin-pane placement routing ----------
+
+    /// Build the `plugin-pane { plugin, pane }` dispatcher action.
+    fn plugin_pane_action(plugin: &str, pane: &str) -> phux_config::keybind::ResolvedAction {
+        let mut args = BTreeMap::new();
+        args.insert("plugin".to_owned(), toml::Value::String(plugin.to_owned()));
+        args.insert("pane".to_owned(), toml::Value::String(pane.to_owned()));
+        phux_config::keybind::ResolvedAction {
+            action: "plugin-pane".to_owned(),
+            args,
+        }
+    }
+
+    /// A hostable pane snapshot entry with the given placement.
+    fn pane_entry(placement: HostedPlacement) -> PluginPaneEntry {
+        PluginPaneEntry {
+            plugin_id: "com.example.board".to_owned(),
+            plugin_name: "Board".to_owned(),
+            pane_id: "board".to_owned(),
+            title: "Agent Board".to_owned(),
+            placement,
+            command: vec!["agent-board".to_owned(), "--watch".to_owned()],
+            plugin_root: std::path::PathBuf::from("/plugins/board"),
+        }
+    }
+
+    /// Like [`run`], but with a plugin-pane snapshot installed.
+    fn run_with_panes(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+        panes: &[PluginPaneEntry],
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            has_bar: false,
+            drag: &mut drag,
+            plugin_actions: &[],
+            plugin_panes: panes,
+            plugin_tx: None,
+        };
+        let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+        run_action(action, &mut ctx, focused.as_ref())
+    }
+
+    /// The spawn frame's plugin-relevant fields, destructured for
+    /// assertions.
+    struct SpawnParts {
+        command: Option<Vec<String>>,
+        cwd: Option<String>,
+        env: Option<Vec<(String, String)>>,
+    }
+
+    fn spawn_frame_parts(frame: &FrameKind) -> SpawnParts {
+        let FrameKind::SpawnTerminal {
+            command, cwd, env, ..
+        } = frame
+        else {
+            panic!("expected SpawnTerminal, got {frame:?}");
+        };
+        SpawnParts {
+            command: command.clone(),
+            cwd: cwd.clone(),
+            env: env.clone(),
+        }
+    }
+
+    #[test]
+    fn plugin_pane_split_placement_parks_pending_split_with_argv_and_env() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        let (_req, pending, frame) = effects
+            .spawn_terminal
+            .expect("split placement parks a PendingSplit + SPAWN");
+        assert_eq!(pending.focused_at_request, tid(1));
+        assert!(!pending.zoom_on_spawn, "plain split must not zoom");
+        assert!(effects.spawn_window.is_none());
+        let SpawnParts { command, cwd, env } = spawn_frame_parts(&frame);
+        assert_eq!(
+            command,
+            Some(vec!["agent-board".to_owned(), "--watch".to_owned()]),
+            "spawn runs the manifest argv, not the default shell",
+        );
+        assert_eq!(cwd.as_deref(), Some("/plugins/board"));
+        let env = env.expect("identity env injected");
+        assert!(env.contains(&("PHUX_PLUGIN_ID".to_owned(), "com.example.board".to_owned())));
+        assert!(env.contains(&("PHUX_PLUGIN_PANE_ID".to_owned(), "board".to_owned())));
+        assert!(env.contains(&("PHUX_PLUGIN_ROOT".to_owned(), "/plugins/board".to_owned())));
+    }
+
+    #[test]
+    fn plugin_pane_zoomed_placement_requests_zoom_on_spawn() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Zoomed)],
+        );
+        let (_req, pending, _frame) = effects
+            .spawn_terminal
+            .expect("zoomed placement parks a PendingSplit + SPAWN");
+        assert!(pending.zoom_on_spawn, "zoomed placement zooms on reply");
+    }
+
+    #[test]
+    fn plugin_pane_tab_placement_parks_pending_window_named_after_title() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Tab)],
+        );
+        let (_req, pending, frame) = effects
+            .spawn_window
+            .expect("tab placement parks a PendingWindow + SPAWN");
+        assert_eq!(pending.name, "Agent Board");
+        assert!(effects.spawn_terminal.is_none());
+        let SpawnParts { command, .. } = spawn_frame_parts(&frame);
+        assert_eq!(
+            command,
+            Some(vec!["agent-board".to_owned(), "--watch".to_owned()])
+        );
+    }
+
+    #[test]
+    fn plugin_pane_unknown_entry_bells() {
+        // Covers a disabled plugin, a typo'd id, or an overlay declaration
+        // (never snapshotted) reached via a user-config binding.
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.absent", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        assert!(effects.bell);
+        assert!(effects.spawn_terminal.is_none());
+        assert!(effects.spawn_window.is_none());
+    }
+
+    #[test]
+    fn plugin_pane_split_without_focused_pane_bells() {
+        let mut workspace = Workspace::default(); // empty: no focus
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        assert!(effects.bell);
+        assert!(effects.spawn_terminal.is_none());
     }
 
     #[test]
@@ -3379,6 +3649,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -3455,6 +3726,7 @@ mod tests {
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
+                plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
             };
@@ -3610,6 +3882,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -3712,6 +3985,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -3857,6 +4131,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };
@@ -4014,6 +4289,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
+            plugin_panes: &[],
             plugin_tx: None,
             reload_request: &mut reload_request,
         };

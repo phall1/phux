@@ -21,6 +21,7 @@ use phux_config::keybind::Resolver;
 use phux_config::{Config, KeybindingsCfg};
 
 use super::plugin_actions::{self, PluginActionEntry};
+use super::plugin_panes::{self, PluginPaneEntry};
 use crate::render::Theme;
 use crate::render::chrome::status_bar::{Position, StatusBarPainter};
 
@@ -42,6 +43,9 @@ pub(super) struct ReloadedConfig {
     pub status_bar: Option<StatusBarPainter>,
     /// Enabled plugins' manifest `[[actions]]` (palette "Plugin" rows).
     pub plugin_actions: Vec<PluginActionEntry>,
+    /// Enabled plugins' manifest `[[panes]]` (palette "Plugin" rows that
+    /// commit `plugin-pane`; phux-r82.7).
+    pub plugin_panes: Vec<PluginPaneEntry>,
     /// `[keybindings].which-key` toggle.
     pub which_key_enabled: bool,
     /// `[keybindings].which-key-delay-ms`, as a [`Duration`].
@@ -87,10 +91,17 @@ fn build(cfg: &Config) -> Result<ReloadedConfig, String> {
         Some(painter)
     };
 
-    // Plugin actions + their manifest `keys`, merged exactly like the
-    // startup path so a chord resolves the same before and after reload
-    // (user config wins every conflict).
-    let plugin_actions = plugin_actions::load_plugin_action_entries(cfg);
+    // Plugin manifests load once (relative to the canonical config path,
+    // exactly like the startup path); actions + their manifest `keys`
+    // merge like at startup so a chord resolves the same before and after
+    // reload (user config wins every conflict), and the hostable pane
+    // rows (phux-r82.7) refresh from the same snapshot.
+    let manifests = phux_config::plugin::load_enabled_manifests(
+        &phux_config::loader::config_path(),
+        &cfg.plugins,
+    );
+    let plugin_actions = plugin_actions::entries_from_manifests(&manifests);
+    let plugin_panes = plugin_panes::entries_from_manifests(&manifests);
     let mut keybindings = cfg.keybindings.clone();
     plugin_actions::merge_plugin_bindings(&mut keybindings, &plugin_actions);
 
@@ -104,6 +115,7 @@ fn build(cfg: &Config) -> Result<ReloadedConfig, String> {
         theme,
         status_bar,
         plugin_actions,
+        plugin_panes,
     };
     // phux-foz.1: the attention chip color rides the theme.
     if let Some(sb) = reloaded.status_bar.as_mut() {
@@ -134,6 +146,7 @@ pub(super) fn reload_in_place(
     theme: &mut Theme,
     status_bar: &mut Option<StatusBarPainter>,
     plugin_actions: &mut Vec<PluginActionEntry>,
+    plugin_panes: &mut Vec<PluginPaneEntry>,
     which_key_enabled: &mut bool,
     which_key_delay: &mut Duration,
 ) -> Result<(), String> {
@@ -143,6 +156,7 @@ pub(super) fn reload_in_place(
     *theme = new.theme;
     *status_bar = new.status_bar;
     *plugin_actions = new.plugin_actions;
+    *plugin_panes = new.plugin_panes;
     *which_key_enabled = new.which_key_enabled;
     *which_key_delay = new.which_key_delay;
     Ok(())
@@ -220,6 +234,7 @@ mod tests {
         let old_theme = theme;
         let mut status_bar = None;
         let mut plugin_actions = vec![];
+        let mut plugin_panes = vec![];
         let mut which_key_enabled = false;
         let mut which_key_delay = Duration::from_millis(123);
 
@@ -231,6 +246,7 @@ mod tests {
             &mut theme,
             &mut status_bar,
             &mut plugin_actions,
+            &mut plugin_panes,
             &mut which_key_enabled,
             &mut which_key_delay,
         )
@@ -243,6 +259,7 @@ mod tests {
         assert_eq!(theme, old_theme);
         assert!(status_bar.is_none());
         assert!(plugin_actions.is_empty());
+        assert!(plugin_panes.is_empty());
         assert!(!which_key_enabled);
         assert_eq!(which_key_delay, Duration::from_millis(123));
     }
@@ -270,6 +287,7 @@ mod tests {
         let mut theme = Theme::default();
         let mut status_bar = None;
         let mut plugin_actions = vec![];
+        let mut plugin_panes = vec![];
         let mut which_key_enabled = true;
         let mut which_key_delay = Duration::from_millis(600);
 
@@ -289,6 +307,7 @@ mod tests {
             &mut theme,
             &mut status_bar,
             &mut plugin_actions,
+            &mut plugin_panes,
             &mut which_key_enabled,
             &mut which_key_delay,
         )
