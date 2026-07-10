@@ -1,15 +1,15 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
-# docs/spec/
+# Protocol reference
 
-**TL;DR.** A map of the normative phux wire protocol, split by tier.
-Each file is the source of truth for one part of the wire that
-`phux-protocol` and downstream consumers implement. RFC-2119
-SHALL / SHOULD / MAY language is used only inside this directory.
+**TL;DR.** The normative phux wire protocol, versioned with
+`phux-protocol`. Start with the tutorial for one complete connection, then use
+the framing, L1 terminal, L3 metadata, input, and encoding pages as the source
+of truth for implementations.
 
 ---
 

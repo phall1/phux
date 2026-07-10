@@ -1,68 +1,79 @@
 ---
 audience: humans, agents, consumers, contributors
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
-# docs/
+# phux documentation
 
-**TL;DR.** The doc tree and the order to read it in. Concepts and consumer
-guides are single files; the normative wire spec and the architecture
-description split per concept under their own subdirectories. Each subtree
-has its own README index. Editing docs is governed by CONVENTIONS, which is
-the law on frontmatter, the TL;DR rule, the ADR template, and the CI gates.
+**TL;DR.** Start with the quickstart if you want a persistent terminal you and
+an agent can share. The first half of these docs is task-oriented: install,
+run, automate, and configure phux. Protocol, architecture, operations, and
+decision records live in clearly separated reference sections when you need
+to understand or extend the substrate.
 
 ---
 
-## Read in this order
+## Start here
 
-To understand phux, top to bottom:
+You do not need to understand the protocol before using phux.
 
-1. [`CONCEPTS.md`](./CONCEPTS.md) — what phux is, the terminal as the unit,
-   human and agent as peer consumers, and the current maturity status
-   (phux is pre-1.0 and still spec-led). Read this even if you read nothing
-   else.
-2. [`QUICKSTART.md`](./QUICKSTART.md) — the nix dev-shell and `just ci`
-   setup, then get a session running and poke at the TUI, agent, MCP, plugin,
-   and workspace surfaces that work today.
-3. [`spec/`](./spec/) — the normative wire surface, versioned with
-   `phux-protocol`. Start at [`spec/README.md`](./spec/README.md).
-4. [`consumers/`](./consumers/) — how the CLI, agents, MCP, TUI, and web
-   client drive the wire. Start at
-   [`consumers/README.md`](./consumers/README.md).
-5. [`architecture/`](./architecture/) — how it is built: process model,
-   threading, transport, rendering, verification. Start at
-   [`architecture/README.md`](./architecture/README.md).
-6. [`../ADR/README.md`](../ADR/README.md) — the decision index. Read
-   [`../ADR/0030-engine-delegated-wire-and-projection-consumers.md`](../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
-   to understand why structured views are consumer-side projections, not a
-   wire tier.
-
-## Pick a lane
-
-| You are | Go to |
+| Your goal | Best first page |
 |---|---|
-| Understanding phux | [`CONCEPTS.md`](./CONCEPTS.md) |
-| Installing it | [`INSTALL.md`](./INSTALL.md) |
-| Setting up the dev shell / running it | [`QUICKSTART.md`](./QUICKSTART.md) |
-| Configuring keys / status bar | [`CONFIG.md`](./CONFIG.md) |
-| Driving it from an agent | [`consumers/agents.md`](./consumers/agents.md) (CLI) · [`consumers/mcp.md`](./consumers/mcp.md) (MCP) |
-| Composing an agent bench | [`CONFIG.md`](./CONFIG.md#plugins) · [`../examples/plugins/agent-tools/README.md`](../examples/plugins/agent-tools/README.md) |
-| Writing a different consumer | [`consumers/tui.md`](./consumers/tui.md) · [`consumers/web.md`](./consumers/web.md) |
-| Implementing against the wire | [`spec/README.md`](./spec/README.md) — normative, versioned with `phux-protocol` |
-| Reading how it is built | [`architecture/README.md`](./architecture/README.md) — process model, threading, transport, rendering, verification |
-| Operating it | [`operations.md`](./operations.md) — errors, logging, telemetry, security boundaries |
-| Shipping a release | [`RELEASING.md`](./RELEASING.md) — preflight, GitHub Actions release button, Homebrew, crates.io |
-| Understanding a past decision | [`../ADR/README.md`](../ADR/README.md) |
-| Recording the README demo | [`demo.md`](./demo.md) |
-| Touching the docs themselves | [`CONVENTIONS.md`](./CONVENTIONS.md) |
+| Run a persistent terminal and reattach to it | [Quickstart](./QUICKSTART.md) |
+| Let an agent inspect and drive that same terminal | [Agent CLI guide](./consumers/agents.md) |
+| Install through Homebrew, a release, or source | [Install guide](./INSTALL.md) |
+| Decide whether phux fits your workflow today | [When to use phux](./when-to-use.md) |
+| Change the prefix, keys, status bar, or hooks | [Configuration](./CONFIG.md) |
 
-## What is deliberately not here
+The shortest path is the quickstart. It gets a real session running first,
+then shows the read, act, wait, read loop that makes the same terminal useful
+to an agent.
 
-- **Code-level docs** live in `crates/*/src/` as rustdoc.
-  `cargo doc --workspace --all-features` renders them.
-- **Scratch research** lives in [`../research/`](../research/) at
-  `stability: scratch`. Once a finding is ratified it graduates into an ADR
-  or one of the reference docs above; it does not linger here as half-truth.
-</content>
-</invoke>
+## Two speeds
+
+### Use phux
+
+These pages are for people trying to get work done:
+
+- [Quickstart](./QUICKSTART.md) gets the first shared terminal running.
+- [Install](./INSTALL.md) covers every supported installation path.
+- [Configuration](./CONFIG.md) owns keybindings, status, and hooks.
+- [The reference TUI](./consumers/tui.md) is the interactive terminal guide.
+- [Agents and the CLI](./consumers/agents.md) is the headless CLI and JSON guide.
+- [The MCP adapter](./consumers/mcp.md) connects the same controls to MCP clients.
+
+### Understand or extend phux
+
+These are reference material. Read them when you are building against phux,
+operating it, or checking why the system has a particular shape:
+
+- [How phux works](./CONCEPTS.md) explains the terminal, wire, and peer-consumer model.
+- [Protocol reference](./spec/) is the normative, versioned wire protocol.
+- [Consumer interfaces](./consumers/) documents each interface built on the wire.
+- [Architecture](./architecture/) explains the process, transport, rendering, and state-sync internals.
+- [Operations](./operations.md) owns errors, logging, telemetry, and security boundaries.
+- [Decision records](../ADR/) explain why consequential decisions were made.
+
+The distinction is deliberate. A user should be able to install and operate
+phux without reading an ADR. A protocol implementer should be able to find the
+normative answer without pulling behavior from a tutorial.
+
+## What phux is
+
+phux treats a terminal as an addressable object that can outlive any one view.
+A person in the reference TUI, an agent using the CLI, and a browser client can
+observe or drive the same terminal through peer interfaces. The terminal
+stream stays a terminal stream; structured views are projected by consumers.
+
+phux is pre-alpha. The local TUI, persistent sessions, multi-client attach,
+headless commands, and MCP adapter are real. Interfaces may still move, and
+some of the longer-range protocol design is intentionally documented before
+it ships. [`CONCEPTS.md`](./CONCEPTS.md) owns the exact maturity boundary.
+
+## Working on the project
+
+Contributors should read [`../CONTRIBUTING.md`](../CONTRIBUTING.md). Documentation
+structure and review rules live in [`CONVENTIONS.md`](./CONVENTIONS.md); release
+procedure lives in [`RELEASING.md`](./RELEASING.md). Code-level API docs are
+generated from Rust source with `cargo doc --workspace --all-features`.

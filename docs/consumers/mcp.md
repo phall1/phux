@@ -68,7 +68,7 @@ the loop, which runs until stdin EOF.
 ## 2. How a tool resolves a target
 
 Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`, `phux_ask`) takes a `target` selector string in the **same
+`phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`) takes a `target` selector string in the **same
 grammar as the CLI's `TARGET`**, whose table and examples live in
 [`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
 (last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`

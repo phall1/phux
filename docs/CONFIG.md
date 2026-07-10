@@ -17,9 +17,8 @@ phux loads configuration in this order:
 1. **Shipped defaults** — embedded in the binary as `default.toml`
 2. **Extended layers** — any files your config (or a layer) names via `extends`, in listed order (see the next section)
 3. **User config** — `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml` if `$XDG_CONFIG_HOME` is not set)
-4. **Override via `$PHUX_CONFIG`** — if set, this path replaces the default location (used by `phux --config`)
 
-Later files override earlier ones, key-by-key. A key you omit keeps the default, so a phux upgrade reaches you automatically without losing your overrides.
+Later files override earlier ones, key-by-key. A key you omit keeps the default, so a phux upgrade reaches you automatically without losing your overrides. phux does not currently expose a global config-path override; set `XDG_CONFIG_HOME` when a command needs an isolated config tree.
 
 See "Layered configs" below for the `extends` mechanics.
 

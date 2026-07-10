@@ -1,16 +1,15 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-06-09
+last-reviewed: 2026-07-09
 ---
 
 # Install
 
-**TL;DR.** Use Homebrew on supported Homebrew platforms, or the curl installer
-for the latest GitHub release. To install from source, clone the repo and run
-the two `cargo install --path` commands below inside the Nix-pinned toolchain.
-crates.io is for `phux-protocol`; `cargo install phux is unsupported` because
-the binary/internal crates are unpublished. Windows is not supported.
+**TL;DR.** Homebrew is the recommended install on supported macOS and Linux
+machines. The verified curl installer and release tarballs install the same
+`phux` and `phux-mcp` binaries. Source builds use the Nix-pinned Rust and Zig
+toolchain. Windows and `cargo install phux` are not supported.
 
 ---
 
@@ -23,10 +22,8 @@ the binary/internal crates are unpublished. Windows is not supported.
 | Release tarball | Manual install and verification | CI-built tarballs include `phux`, `phux-mcp`, licenses, README, and `.sha256` sidecars |
 | From source | Contributors and source-first users | Clone, build, and install through the Nix-pinned toolchain |
 
-Not supported yet: `cargo install phux`, Windows, mise/asdf shims, and the
-seeded `v0.0.1` Linux tarball as a portable binary. `v0.0.3` is the current
-portable public release. The crates.io package today is `phux-protocol`, not
-the CLI.
+Not supported: `cargo install phux`, Windows, and mise/asdf shims. The
+crates.io package is `phux-protocol`, not the CLI.
 
 ## Homebrew
 
@@ -51,9 +48,8 @@ It verifies the release `.sha256` sidecar before unpacking and installs
 `phux` and `phux-mcp` into `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`. Set
 `PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
 uses the latest GitHub release.
-In plain terms: it verifies the release .sha256 sidecar before unpacking, then
-installs both binaries. `phux-mcp is bundled` with every portable tarball and
-installer path; do not install a separate MCP package.
+Every portable tarball and installer path includes `phux-mcp`; there is no
+separate MCP package to install.
 
 To pin a specific release:
 
@@ -66,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh
 Release tags include target-specific tarballs and checksum sidecars:
 
 ```sh
-tag=v0.1.0
+tag=v0.0.3
 target=aarch64-apple-darwin
 base="https://github.com/phall1/phux/releases/download/${tag}"
 curl -LO "${base}/phux-${tag}-${target}.tar.gz"
@@ -127,9 +123,9 @@ From a second terminal, drive the same persistent pane through the agent loop:
 
 ```sh
 phux ls --json
-phux run . --json "printf 'phux-agent-loop\n'"
-phux wait . --until "phux-agent-loop" --timeout 10
-phux snapshot . --json --scrollback 50 > phux-screen.json
+phux send-keys . "printf '%s\n' phux-ready | tr a-z A-Z" Enter
+phux wait --until "PHUX-READY" --timeout 10 .
+phux snapshot --json --scrollback 50 . > phux-screen.json
 ```
 
 That is the read -> act -> wait -> read pattern from

@@ -204,9 +204,9 @@ that same persistent pane:
 
 ```sh
 phux ls --json
-phux run . --json "printf 'phux-agent-loop\n'"
-phux wait . --until "phux-agent-loop" --timeout 10
-phux snapshot . --json --scrollback 50
+phux send-keys . "printf '%s\n' phux-ready | tr a-z A-Z" Enter
+phux wait --until "PHUX-READY" --timeout 10 .
+phux snapshot --json --scrollback 50 .
 ```
 
 For MCP clients, point the client at the bundled `phux-mcp` binary. It exposes
@@ -223,7 +223,7 @@ phux ls --json                         # list sessions and panes
 phux snapshot .                        # read the focused pane
 phux send-keys . 'cargo test' Enter    # type into the focused pane
 phux run . "cargo test"                # run in a real pane, return its exit code
-phux wait . --until "0 failed"         # block until output appears
+phux wait --until "0 failed" .         # block until output appears
 phux watch --json .                    # stream pane events
 ```
 
@@ -316,12 +316,14 @@ The line between shipped and promised is kept explicit:
 - Config scaffolding and effective-config inspection
 - Workspace restore that recreates sessions and seed processes from a typed
   archive; live PTY handoff belongs to `phux upgrade`, not restore
+- Predictive local echo behind the opt-in `[experimental]` configuration,
+  with authoritative reconciliation and adaptive backoff
 
 **Designed and addressed-for, not wired yet**
 
 - Federation across machines. The wire already carries `SATELLITE { host, id }`;
   nothing routes it yet. That is the v0.2 arc.
-- A native GUI consumer, a typed Rust SDK crate, predictive local echo.
+- A native GUI consumer and a typed public Rust SDK crate.
 
 Anything not in the first two lists is a direction, not a feature.
 
@@ -330,7 +332,7 @@ Anything not in the first two lists is a direction, not a feature.
 | You want to | Read |
 |---|---|
 | Run your first session | [Quickstart](./docs/QUICKSTART.md) |
-| Install without Nix | [Install](./docs/INSTALL.md) |
+| Install phux | [Install](./docs/INSTALL.md) |
 | Customize keys and config | [Configuration](./docs/CONFIG.md) |
 | Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
 | Understand the model | [Concepts](./docs/CONCEPTS.md) |

@@ -1,138 +1,134 @@
 ---
 audience: humans, contributors
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
 # Quickstart
 
-**TL;DR.** This doc owns the setup path: drop into the Nix-pinned dev shell,
-run `just ci` to verify the toolchain, then `cargo run --bin phux` to spawn a
-server and attach. It also catalogs the TUI, agent, MCP, plugin, and workspace
-surfaces that run today versus the ones that are designed but not built.
+**TL;DR.** Install phux, run `phux`, and you have a shell-backed terminal that
+survives detach. Open a second terminal to inspect and drive that same pane
+through the structured CLI. This guide gets both the human and agent paths
+working before it sends you into configuration or protocol reference.
 
 ---
 
-## Prerequisites
+## 1. Install phux
 
-- macOS or Linux
-- [Nix with flakes](https://nixos.org/download.html), or, off-Nix: Rust 1.90, `zig` 0.15, `cargo-nextest`, and `cargo-deny` on your PATH
-
-## Install Nix
-
-If you don't have Nix yet, the Determinate Systems installer sets it up with
-flakes enabled:
+On a Homebrew-supported macOS or Linux machine:
 
 ```sh
-curl -fsSL https://install.determinate.systems/nix | sh -s -- install
+brew install phall1/phux/phux
 ```
 
-## Drop into the dev shell
+This installs both `phux` and the bundled `phux-mcp` adapter. The
+[`INSTALL.md`](./INSTALL.md) guide covers the verified curl installer, release
+tarballs, supported platforms, and source builds.
+
+Check that the binary is available:
 
 ```sh
-nix develop          # one-shot
-# or
-direnv allow         # once; then automatic on cd
+phux --version
 ```
 
-The shell pins Rust 1.90, `zig_0_15` (libghostty-vt's build needs it), `nextest`, `deny`, `watch`, `insta`, `mutants`, and `just`.
-
-## Verify
+## 2. Start a terminal
 
 ```sh
-just check           # quick type-check across the workspace
-just ci              # full CI: fmt-check + lint + test + deny + doc
+phux
 ```
 
-`just ci` is the bar. PRs do not land until it is green.
+With no arguments, phux starts a per-user server if needed, creates a
+shell-backed session, and attaches the interactive client. Work in it like a
+normal terminal.
 
-## Run it
+The default prefix is `Ctrl-A`. Four continuations are enough for a first run:
+
+| Keys | Action |
+|---|---|
+| `Ctrl-A ?` | Open the complete keybinding help. |
+| `Ctrl-A %` | Split left and right. |
+| `Ctrl-A "` | Split top and bottom. |
+| `Ctrl-A d` | Detach without stopping the shell. |
+
+After detaching, run `phux` again. You return to the same live session.
+
+## 3. See it from the outside
+
+Leave the interactive session running and open a second terminal. The control
+commands below address the focused pane with `.`:
 
 ```sh
-cargo run --bin phux           # auto-spawns a server, then attaches
+phux ls
+phux snapshot .
 ```
 
-Behind that one command: a `phux server` daemon binds to `$XDG_RUNTIME_DIR/phux/phux.sock`, spawns one PTY-backed terminal running your `$SHELL`, and the client attaches and renders it. Detach with the default prefix (`Ctrl-A d`); the server keeps running. Run `cargo run --bin phux` again to re-attach where you left off.
+`ls` shows the sessions the server owns. `snapshot` reads the current terminal
+without attaching to it or changing its size.
 
-## What works today
-
-Interactive TUI:
-
-- Attach and detach to a single auto-spawned session, with multiple clients on the same session.
-- Split panes (horizontal and vertical) and kill panes.
-- A status bar with widgets; the typed widget contract is in [`consumers/tui.md`](./consumers/tui.md).
-- Prefix-aware help hints in the default status bar (`Ctrl-A ?`, `Ctrl-A :`,
-  `Ctrl-A [`), so first-run discovery is visible without opening docs.
-- Keybindings via a TOML config that layers over the shipped `default.toml`, with prefix-table and global chord resolution.
-- A help overlay (`prefix ?`).
-- Terminal content as bytes on the wire with structured input: Kitty keyboard, OSC 8, OSC 133, true colour, and image protocols pass through to the engine on both ends.
-
-Headless verbs you can run without a TTY:
-
-```
-attach   server   ls   new   kill   rename
-snapshot send-keys wait watch run    config
-ask      agent     plugin workspace
-```
-
-Read verbs take `--json` for a machine-readable shape, and every verb addresses panes by the same selector grammar the TUI uses. This is the surface a script or an agent drives; the per-verb catalog and JSON contracts live in [`consumers/agents.md`](./consumers/agents.md).
-
-There is also an MCP adapter, `phux-mcp`, exposing the core verbs as JSON-RPC
-tools plus `phux_ask` and plugin workspace profile discovery — see
-[`consumers/mcp.md`](./consumers/mcp.md).
-
-Remote attach for a phone or another native client uses the same server:
+Now type into the same pane and wait for output that is not present in the
+command itself:
 
 ```sh
-phux pair
-phux server --listen 0.0.0.0:8787 --quic 0.0.0.0:8788
-phux attach --ws wss://HOST:8787 --token HEX --cert-fingerprint FP
-phux attach --quic HOST:8788 --token HEX --cert-fingerprint FP
+phux send-keys . "printf '%s\n' phux-ready | tr a-z A-Z" Enter
+phux wait --until "PHUX-READY" --timeout 10 .
+phux snapshot --json --scrollback 50 .
 ```
 
-WebSocket/TCP is the fallback for networks that block UDP; QUIC is the roaming
-path when UDP is available.
+That is the core automation loop:
 
-Try the headless side once a session is up:
-
-```sh
-phux ls --json                       # list sessions
-phux run . "echo hello && exit 3"    # run in the focused pane, get exit code 3 back
-phux watch --json .                  # stream live events; Ctrl-C to stop
+```text
+read state -> act -> wait for a condition -> read again
 ```
 
-Try the agent workbench pieces:
+A script, coding agent, or MCP client uses this loop against the same terminal
+a person can see and take over. Add `--json` to read commands when the caller
+needs a versioned machine-readable result. Use `phux run` when you want phux to
+execute a one-shot command and return its output and exit code directly.
+
+## 4. Connect an agent
+
+The release includes two agent-facing surfaces:
+
+- The `phux` CLI for direct shell calls and scripts.
+- `phux-mcp`, a JSON-RPC stdio adapter for MCP clients.
+
+Start with the CLI guide for selectors, safe input, events, and result shapes:
+[`consumers/agents.md`](./consumers/agents.md). Use
+[`consumers/mcp.md`](./consumers/mcp.md) when the client speaks MCP.
+
+Useful first commands:
 
 ```sh
-phux agent list --json
+phux ls --json
+phux snapshot --json .
+phux watch --json .
 phux agent explain .
-XDG_CONFIG_HOME="$PWD/examples/plugins/agent-tools/config" \
-  phux config run com.phux.demo.agent-tools smoke-integrations
 ```
 
-`phux agent` reports explainable public state (`working`, `blocked`, `idle`,
-`done`, or `unknown`) with confidence and evidence sources. The checked-in
-agent-tools package demonstrates external Codex and Claude Code integration
-records without requiring private credentials.
+`watch` streams terminal events until interrupted. `agent explain` reports the
+public state phux can infer for a coding agent in the pane, including its
+confidence and evidence.
 
-## What does not work yet
+## Know the edges
 
-- **`split` and `detach` as CLI subcommands.** Splitting and detaching exist inside the interactive TUI, but they are not headless verbs. Tracked as bead phux-99te.
-- **Federation routing.** The wire accepts `SATELLITE { host, id }`, but nothing routes it to a remote host. See the maturity note in [`CONCEPTS.md`](./CONCEPTS.md).
-- **Predictive local echo.** Designed, gated on a transport whose round-trip actually needs it.
-- **Live PTY resurrection through workspace restore.** `workspace restore`
-  recreates sessions and seed processes from a typed archive. Live handoff
-  across a server re-exec is the `upgrade` path.
+phux is pre-alpha. Local persistent sessions, attach and detach, splits,
+multiple clients, modern terminal passthrough, the headless CLI, and the MCP
+adapter work today. Interfaces can still change before 1.0.
 
-The wire encoding is positional (big-endian, length-prefixed) today; a move to field-tagged TLV is deferred future work (beads phux-ktte, relates phux-i58). The normative codec statement is in [`spec/appendix-encoding.md`](./spec/appendix-encoding.md).
+Cross-machine federation is designed but not yet complete. Predictive local
+echo is implemented as an opt-in `[experimental]` setting and remains off by
+default. The exact line between shipped behavior and design intent lives in
+[`CONCEPTS.md`](./CONCEPTS.md); suitability by workflow lives in
+[`when-to-use.md`](./when-to-use.md).
 
-For where phux sits on the maturity curve overall, and which behaviors are spec-first rather than shipped, [`CONCEPTS.md`](./CONCEPTS.md) owns that picture.
+## Next steps
 
-## Next
-
-You have a server running and a terminal attached. Where you go next depends on what you came for:
-
-- To understand why the wire is shaped this way → [`CONCEPTS.md`](./CONCEPTS.md)
-- To read the actual bytes → [`spec/README.md`](./spec/README.md)
-- To drive it from an agent → [`consumers/agents.md`](./consumers/agents.md)
-- To build something on it, or fix something in it → [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+| You want to | Go to |
+|---|---|
+| Change keys, status, or hooks | [`CONFIG.md`](./CONFIG.md) |
+| Drive terminals from an agent | [`consumers/agents.md`](./consumers/agents.md) |
+| Connect an MCP client | [`consumers/mcp.md`](./consumers/mcp.md) |
+| Learn the terminal-on-a-wire model | [`CONCEPTS.md`](./CONCEPTS.md) |
+| Study the internal Rust client | [`consumers/sdk.md`](./consumers/sdk.md) |
+| Implement the protocol | [`spec/TUTORIAL.md`](./spec/TUTORIAL.md) |
+| Build phux from source | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) |

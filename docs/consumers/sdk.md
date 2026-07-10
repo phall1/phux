@@ -4,26 +4,23 @@ stability: evolving
 last-reviewed: 2026-06-06
 ---
 
-# The phux client library
+# The internal Rust client library
 
-**TL;DR.** The phux SDK is `phux-client`: a Rust library crate over the
-`phux-protocol` wire codec. It is not a separate crate, not gRPC, and not
-unbuilt — it exists today and is what `phux-mcp` is built from. It targets
-L1 (the terminal substrate) and follows the carry-your-own-engine projection
-pattern from ADR-0030: a consumer that wants structured terminal state runs
-the engine and reads it locally. This file explains the crate's place among
-the consumer surfaces and where to read its code-level types.
+**TL;DR.** `phux-client` is the in-tree Rust library behind the CLI and MCP
+adapter. It speaks `phux-protocol` and exposes useful internal client
+functions, but it is unpublished and its typed `Agent` facade is incomplete.
+Treat the CLI and versioned JSON shapes as the supported programmatic surface
+today, not this crate as a stable public SDK.
 
 ---
 
 ## What it is
 
-There is no `phux-client-sdk` crate and no gRPC service. The library a
-program links to drive phux is `phux-client`, and it already ships: it is the
-crate the CLI agent verbs and the [MCP adapter](./mcp.md) are both written
-against. `phux-client` wraps the `phux-protocol` codec and exposes the same
-resolution, snapshot, run, and wait functions the CLI surfaces as
-subcommands.
+There is no published `phux-client-sdk` crate and no gRPC service.
+`phux-client` exists inside the workspace and powers the CLI agent verbs and
+the [MCP adapter](./mcp.md), but downstream consumers cannot depend on a
+versioned crates.io package yet. It wraps the `phux-protocol` codec and the
+internal resolution, snapshot, run, and wait functions used by the binaries.
 
 This sits at **L1** — the terminal substrate ([`../spec/L1.md`](../spec/L1.md)).
 A program using it speaks terminal lifecycle, input atoms, snapshots, and
@@ -53,19 +50,14 @@ Either way the wire stays identical; only the projection differs.
 
 ## The agent handle
 
-`phux-client` also carries a typed `Agent` handle (`Agent::connect_uds`,
-`run`, `wait_for_prompt`, `get_state`) for programs that want a Rust API
-rather than shelling out to the CLI. It is L1-shaped: no `Session`, no
-`Window`, no `Pane`. The structured shapes it returns are the same ones the
-[CLI agent surface](./agents.md) documents (`ScreenState`, `RunResult`,
-`WaitOutcome`), which are the stable agent contract.
+`phux-client` also contains a typed `Agent` handle, but it is not a complete
+public facade. Command execution, event subscription, signals, attach/create,
+and prompt-readiness behavior are incomplete or stubbed. Its types show the
+direction of a native SDK; they are not a shipped compatibility promise.
 
-Divergence: parts of the `Agent` handle are designed, not
-built. `subscribe_events` and `send_signal` are present in the type surface
-but currently stubs, and the push-event story they front (`watch`) is the one
-documented in [`agents.md`](./agents.md). Treat the handle's event and signal
-methods as a direction, not shipped behavior; the CLI verbs and their JSON
-shapes are the contract programs should depend on now.
+Use the [CLI agent surface](./agents.md) or [MCP adapter](./mcp.md) today. Their
+`ScreenState`, `RunResult`, and `WaitOutcome` JSON shapes are versioned, though
+still pre-1.0.
 
 ## Where to read
 
