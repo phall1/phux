@@ -2727,6 +2727,10 @@ mod tests {
     /// phux-4h5a: `apply_action_effects` flips the driver-owned
     /// `sidebar_enabled` when `toggle_sidebar` is set — off→on and back on a
     /// second toggle.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "two full DispatchCtx constructions; each new ctx field (mouse_optout, reload_request) adds two lines"
+    )]
     #[tokio::test]
     async fn apply_effects_flips_sidebar_enabled_state() {
         let mut workspace = Workspace::single(tid(1));

@@ -1357,6 +1357,10 @@ enum LoopExit {
     clippy::cognitive_complexity,
     reason = "select! arms + phux-4li.5 outcome dispatch; ditto"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "per-entry knobs from attach_session's outer loop; foz-6 onboarding + foz-8 window pick made it 8"
+)]
 async fn main_loop<W: super::RenderSink>(
     conn: &mut Connection,
     initial_attached: FrameKind,
