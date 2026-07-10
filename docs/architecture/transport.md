@@ -91,7 +91,15 @@ mailbox so one slow consumer never stalls the link. While the link is down
 mailbox and fails every request with the typed `SatelliteUnreachable`
 error; a satellite disconnect fails in-flight commands the same way and
 pushes one typed error to every proxy-subscribed consumer before the
-registry clears. Normative routing semantics: `docs/spec/L1.md` §9.1.
+registry clears. A satellite that dies *silently* is bounded too: each
+relayed command carries a hub-side deadline resolving to the same typed
+error, and every link enforces a keepalive / idle contract — QUIC via the
+transport (`phux-dial` sets `keep_alive_interval` / `max_idle_timeout`),
+WebSocket via hub-originated pings plus an inbound-idle limit in
+`phux-server::hub::link` — so a partition without FIN/RST is torn down
+like an ordinary disconnect instead of pinning consumers on a link that
+still looks connected. Normative routing semantics: `docs/spec/L1.md`
+§9.1.
 
 ## Transports designed but not built
 

@@ -27,7 +27,16 @@
 //! disconnect fails all in-flight commands the same way and pushes one
 //! typed `ERROR { SatelliteUnreachable }` frame to every proxy-subscribed
 //! consumer before the registry is cleared — teardown is observable, not
-//! silence.
+//! silence. A *silently* dead satellite — one whose link still looks
+//! `Connected` because the network partitioned without FIN/RST, or one
+//! that reads frames but never answers — is bounded twice over: every
+//! relayed command carries a hub-side deadline (`RELAY_COMMAND_TIMEOUT`)
+//! resolving to the same typed error, and the link supervisor enforces a
+//! transport keepalive / idle contract (`super::link`) so the partition
+//! itself is detected and torn down. Abandoned entries in the
+//! pending-command map are pruned on the supervisor's keepalive tick
+//! (`RelaySession::prune_abandoned`), so a satellite that swallows
+//! frames cannot grow hub state without bound.
 //!
 //! **Backpressure.** The relay mailbox is bounded (`RELAY_MAILBOX`) and
 //! every producer uses `try_send`: a saturated link fails commands with
@@ -52,6 +61,17 @@ use crate::state::{ClientId, Outbound};
 /// link is a single ordered stream, so queueing more than a burst behind
 /// it only adds latency. Producers `try_send` and fail fast on `Full`.
 pub(crate) const RELAY_MAILBOX: usize = 64;
+
+/// Upper bound on one relayed command round trip, measured at the
+/// consumer-facing [`RelayHandle::command`]. Deliberately equal to the
+/// transport idle timeout (`phux-dial`'s QUIC `max_idle_timeout`, mirrored
+/// by the WS keepalive in `super::link`): a link that dies loudly resolves
+/// in-flight commands through session teardown well before this fires, so
+/// the deadline is the backstop for the quiet failures — a partition the
+/// transport has not noticed yet, or a satellite that reads frames but
+/// never answers. Elapsing resolves to a typed `SatelliteUnreachable`
+/// error, never an indefinite wait (L1 §9.1).
+pub(crate) const RELAY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A request from a hub-side consumer path to one satellite's relay.
 #[derive(Debug)]
@@ -114,7 +134,15 @@ impl RelayHandle {
     /// saturated mailbox, a dead link task, or a link lost mid-flight all
     /// produce a typed error instead of a hang (the session and the link
     /// supervisor's drain phases guarantee the oneshot always resolves or
-    /// drops promptly).
+    /// drops promptly) — and fails *bounded* even when nothing else does:
+    /// [`RELAY_COMMAND_TIMEOUT`] caps the wait against a silently
+    /// partitioned or frame-swallowing satellite whose link still looks
+    /// `Connected`. This is the whole-connection safety valve: the caller
+    /// (`handle_command`) is awaited inline in the consumer's read loop,
+    /// so an unbounded wait here would wedge every subsequent frame from
+    /// that consumer. Timing out drops the oneshot receiver, which marks
+    /// the session's pending entry for pruning
+    /// ([`RelaySession::prune_abandoned`]).
     pub(crate) async fn command(&self, command: Command) -> CommandResult {
         let (reply, rx) = oneshot::channel();
         match self.tx.try_send(RelayRequest::Command { command, reply }) {
@@ -132,10 +160,21 @@ impl RelayHandle {
                 };
             }
         }
-        rx.await.unwrap_or_else(|_| CommandResult::Error {
-            code: ErrorCode::SatelliteUnreachable,
-            message: format!("satellite {} link dropped before the reply", self.host),
-        })
+        match tokio::time::timeout(RELAY_COMMAND_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => CommandResult::Error {
+                code: ErrorCode::SatelliteUnreachable,
+                message: format!("satellite {} link dropped before the reply", self.host),
+            },
+            Err(_) => CommandResult::Error {
+                code: ErrorCode::SatelliteUnreachable,
+                message: format!(
+                    "satellite {} did not answer within {}s",
+                    self.host,
+                    RELAY_COMMAND_TIMEOUT.as_secs()
+                ),
+            },
+        }
     }
 
     /// Relay `command` without awaiting the result (the idempotent batch
@@ -488,6 +527,30 @@ impl RelaySession {
             );
         }
         self.subscribers.clear();
+    }
+
+    /// Drop pending entries whose consumer stopped waiting (the
+    /// [`RelayHandle::command`] deadline elapsed, the consumer
+    /// disconnected, or the relay was detached from the start). Returns
+    /// how many entries were pruned.
+    ///
+    /// Called from the link supervisor's keepalive tick: without it, a
+    /// satellite that reads relayed commands but never answers would grow
+    /// the pending map without bound (only [`RELAY_MAILBOX`] entries drain
+    /// per mailbox refill, and nothing else removes them).
+    pub(crate) fn prune_abandoned(&mut self) -> usize {
+        let before = self.pending.len();
+        self.pending.retain(|_, reply| !reply.is_closed());
+        let pruned = before - self.pending.len();
+        if pruned > 0 {
+            debug!(
+                satellite = %self.host,
+                pruned,
+                remaining = self.pending.len(),
+                "pruned relayed commands whose consumer stopped waiting"
+            );
+        }
+        pruned
     }
 
     /// Resolve a link-side `request_id` back to its waiting consumer.
@@ -1069,6 +1132,66 @@ mod tests {
         );
         assert!(matches!(
             rx.await.expect("resolved"),
+            CommandResult::Error {
+                code: ErrorCode::SatelliteUnreachable,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handle_command_times_out_against_a_silent_satellite() {
+        let (handle, rx) = RelayHandle::new(host());
+        // Keep the receiver alive but never drain it: the link looks up
+        // (mailbox accepts) yet no reply ever arrives — the silent
+        // partition / frame-swallowing satellite shape. Paused time
+        // auto-advances past the deadline.
+        let result = handle.command(Command::Upgrade).await;
+        assert!(matches!(
+            result,
+            CommandResult::Error {
+                code: ErrorCode::SatelliteUnreachable,
+                ref message,
+            } if message.contains("did not answer within")
+        ));
+        drop(rx);
+    }
+
+    #[test]
+    fn prune_abandoned_drops_only_commands_whose_consumer_gave_up() {
+        let mut session = RelaySession::new(host());
+        let (reply_live, mut live_rx) = oneshot::channel();
+        let (reply_gone, gone_rx) = oneshot::channel();
+        let _ = session.handle_request(RelayRequest::Command {
+            command: Command::Upgrade,
+            reply: reply_live,
+        });
+        let wire = session
+            .handle_request(RelayRequest::Command {
+                command: Command::Upgrade,
+                reply: reply_gone,
+            })
+            .expect("wire frame");
+        let FrameKind::Command { request_id, .. } = decode(&wire) else {
+            panic!("expected COMMAND");
+        };
+
+        assert_eq!(session.prune_abandoned(), 0, "both consumers still wait");
+
+        // The consumer of the second command times out / disconnects.
+        drop(gone_rx);
+        assert_eq!(session.prune_abandoned(), 1, "abandoned entry pruned");
+
+        // A late reply for the pruned id is dropped without touching the
+        // still-live command; the live one still resolves (via teardown).
+        session.handle_inbound(&encode(&FrameKind::CommandResult {
+            request_id,
+            result: CommandResult::Ok,
+        }));
+        assert!(live_rx.try_recv().is_err(), "live command still pending");
+        session.teardown("done");
+        assert!(matches!(
+            live_rx.try_recv().expect("live command survived pruning"),
             CommandResult::Error {
                 code: ErrorCode::SatelliteUnreachable,
                 ..
