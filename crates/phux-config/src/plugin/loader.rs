@@ -146,6 +146,11 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
     let name = non_empty(&raw.name, "plugin name")?;
     let version = non_empty(&raw.version, "plugin version")?;
     let min_phux_version = non_empty(&raw.min_phux_version, "plugin min_phux_version")?;
+    super::version::enforce_min_phux_version(
+        &id,
+        &min_phux_version,
+        super::version::CURRENT_PHUX_VERSION,
+    )?;
     let description = raw.description.as_deref().and_then(trim_optional);
 
     let build = raw
