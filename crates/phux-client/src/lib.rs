@@ -39,6 +39,7 @@ pub mod run;
 pub mod selector;
 pub mod send_keys;
 pub mod snapshot;
+pub mod vcs;
 pub mod wait;
 pub mod watch;
 

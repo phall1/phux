@@ -121,6 +121,12 @@ pub(super) struct FrameOutcome {
     /// (tab strip + sidebar) and repaints. Set ONLY by the
     /// `MetadataValue` / `MetadataChanged` arms.
     pub(super) agent_meta_changed: bool,
+    /// phux-p4vp: per-pane working directories carried by the `ATTACHED`
+    /// snapshot (`TerminalInfo::cwd`). The driver folds these into its
+    /// pane-cwd index, from which the sidebar's branch line is derived
+    /// client-side (see `crate::vcs`). Set ONLY by the `Attached` arm;
+    /// empty otherwise.
+    pub(super) pane_cwds: Vec<(TerminalId, String)>,
 }
 
 /// Payload-free label for the inbound `FrameKind` — the `kind` field on
@@ -254,6 +260,13 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     slot.cwd.clone_from(&pane.cwd);
                 }
             }
+            // phux-p4vp: hand the per-pane cwds up to the driver so the
+            // sidebar can derive each window's VCS branch client-side.
+            let pane_cwds: Vec<(TerminalId, String)> = snapshot
+                .panes
+                .iter()
+                .filter_map(|p| p.cwd.clone().map(|cwd| (p.id.clone(), cwd)))
+                .collect();
             // Ensure the focused pane has a slot even if an older server's
             // ATTACHED graph omitted it. Fall back to the current pane
             // viewport (the same dimensions used for rendering) rather
@@ -291,6 +304,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // ADR-0033: cache our own ClientId so the supervisory badge can
                 // distinguish "you hold the wheel" from another client.
                 own_client_id: Some(initial_client_id),
+                pane_cwds,
                 ..FrameOutcome::default()
             })
         }

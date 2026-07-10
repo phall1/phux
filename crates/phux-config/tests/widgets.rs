@@ -259,6 +259,7 @@ fn win(name: &str, active: bool) -> WindowInfo {
         active,
         zoomed: false,
         attention: false,
+        branch: None,
     }
 }
 
@@ -268,6 +269,7 @@ fn win_zoomed(name: &str, active: bool) -> WindowInfo {
         active,
         zoomed: true,
         attention: false,
+        branch: None,
     }
 }
 
@@ -277,6 +279,7 @@ fn win_attention(name: &str, active: bool) -> WindowInfo {
         active,
         zoomed: false,
         attention: true,
+        branch: None,
     }
 }
 

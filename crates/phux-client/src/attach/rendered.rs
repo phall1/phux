@@ -339,12 +339,14 @@ mod tests {
                 active: true,
                 zoomed: false,
                 attention: false,
+                branch: None,
             },
             WindowInfo {
                 name: "shell".to_owned(),
                 active: false,
                 zoomed: false,
                 attention: false,
+                branch: None,
             },
         ]);
 

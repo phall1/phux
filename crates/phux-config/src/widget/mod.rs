@@ -108,6 +108,13 @@ pub struct WindowInfo {
     /// cleared by user input). The `windows` widget appends a `!` marker to
     /// the tab so the asking window is findable from any window.
     pub attention: bool,
+    /// phux-p4vp: the VCS branch of the window's focused pane, when its
+    /// working directory sits inside a git repository (e.g. `main`, or a
+    /// short commit hash for a detached HEAD). `None` when the cwd is
+    /// unknown or not under version control. The sidebar renders this as a
+    /// dim branch line under the window label (herdr-style); the status-bar
+    /// `windows` widget ignores it.
+    pub branch: Option<String>,
 }
 
 /// Context passed to a [`StatusWidget`] at render time.

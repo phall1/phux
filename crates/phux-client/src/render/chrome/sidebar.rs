@@ -1,12 +1,16 @@
-//! Window sidebar painter (phux-4h5a).
+//! Window sidebar painter (phux-4h5a, herdr-shaped by phux-p4vp/phux-fce4).
 //!
-//! A vertical strip of window "tabs" — one row per window, labelled by the
+//! A vertical strip of window "tabs" — one two-row block per window: the
 //! window's name (which upstream already resolves to the pane's live OSC
-//! title, phux-efj7), the active window highlighted. A vertical rule on the
-//! strip's last column separates it from the panes. The reservation +
-//! placement is owned by the driver; this type just paints into the `Rect`
-//! it is handed and caches the last paint so an unchanged repaint emits
-//! nothing — the same incremental discipline as the status bar.
+//! title, phux-efj7, or its ADR-0040 agent label) with the active window
+//! highlighted, and a dim branch line underneath when the window's focused
+//! pane sits inside a git repository (phux-p4vp). The strip's last two rows
+//! are the `+ new` / `= menu` affordances (display-only until phux-fce4
+//! wires their hit targets). A vertical rule on the strip's last column
+//! separates it from the panes. The reservation + placement is owned by the
+//! driver; this type just paints into the `Rect` it is handed and caches
+//! the last paint so an unchanged repaint emits nothing — the same
+//! incremental discipline as the status bar.
 
 use std::io::{self, Write};
 
@@ -19,6 +23,79 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::layout::Rect;
 use crate::render::Theme;
+
+/// Label of the "create" affordance row (phux-fce4).
+///
+/// Clicking it runs the `new-window` action — the sidebar lists windows,
+/// so `+ new` creates one.
+pub const NEW_LABEL: &str = "+ new";
+/// Label of the "menu" affordance row (phux-fce4).
+///
+/// Clicking it opens the command palette — the one menu that covers
+/// window, session, and plugin actions (`new-session` included) through
+/// the action registry.
+pub const MENU_LABEL: &str = "= menu";
+
+/// Minimum strip height (rows) at which the footer affordances render.
+/// Below this every row goes to window blocks — a 2–3 row strip showing
+/// only chrome and no windows would be useless.
+const MIN_FOOTER_HEIGHT: u16 = 4;
+
+/// One row of the strip, top to bottom. The painter derives from this
+/// single model (and phux-fce4's hit-test will share it), so paint and
+/// click targets cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarRow {
+    /// Window `i`'s name row.
+    WindowName(usize),
+    /// Window `i`'s branch row (dim; blank when the window has no branch).
+    WindowBranch(usize),
+    /// Unused padding between the window blocks and the footer.
+    Blank,
+    /// The `+ new` affordance (create a window).
+    NewWindow,
+    /// The `= menu` affordance (open the command palette).
+    Menu,
+}
+
+/// The strip's row model for `window_count` windows in an `h`-row rect.
+///
+/// Each window occupies a fixed two-row block (name + branch) from the top;
+/// when `h >= MIN_FOOTER_HEIGHT` the bottom two rows are reserved for the
+/// `+ new` / `= menu` affordances and window blocks that would collide are
+/// truncated. Fixed-size blocks keep the model derivable from the window
+/// *count* alone, so a hit-test (phux-fce4) can share it without
+/// rebuilding the full window projection.
+#[must_use]
+pub fn row_model(window_count: usize, h: u16) -> Vec<SidebarRow> {
+    let h = usize::from(h);
+    let footer = if h >= usize::from(MIN_FOOTER_HEIGHT) {
+        2
+    } else {
+        0
+    };
+    let window_area = h - footer;
+    let mut rows = Vec::with_capacity(h);
+    'blocks: for i in 0..window_count {
+        for row in [SidebarRow::WindowName(i), SidebarRow::WindowBranch(i)] {
+            if rows.len() >= window_area {
+                break 'blocks;
+            }
+            rows.push(row);
+        }
+    }
+    // A truncated block must not show a name row without room for its
+    // branch row being *reserved* — but a dangling name row is still more
+    // useful than a blank, so we keep it (the branch row is simply absent).
+    while rows.len() < window_area {
+        rows.push(SidebarRow::Blank);
+    }
+    if footer == 2 {
+        rows.push(SidebarRow::NewWindow);
+        rows.push(SidebarRow::Menu);
+    }
+    rows
+}
 
 /// VT painter for the window sidebar.
 #[derive(Debug)]
@@ -89,43 +166,82 @@ impl SidebarPainter {
         self.compose(rect)
     }
 
-    /// Render the tab list + separator into a fresh `rect`-sized buffer.
+    /// Render one window's name row.
+    fn name_line(&self, w: &WindowInfo, text_w: u16) -> Line<'static> {
+        let marker = if w.active { "▸ " } else { "  " };
+        // phux-foz.1: reserve 2 cells for the ` !` attention
+        // suffix so a long label can't push it off the strip.
+        let label_w = usize::from(text_w)
+            .saturating_sub(2) // marker is 2 cells
+            .saturating_sub(if w.attention { 2 } else { 0 });
+        let label = truncate(&w.name, label_w);
+        let style = if w.active {
+            Style::default()
+                .fg(self.theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.theme.action)
+        };
+        let mut spans = vec![Span::styled(format!("{marker}{label}"), style)];
+        // phux-foz.1: a window holding a pane that asked for a
+        // human answer (ADR-0035) gets a themed `!` marker.
+        if w.attention {
+            spans.push(Span::styled(
+                " !",
+                Style::default()
+                    .fg(self.theme.attention)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        Line::from(spans)
+    }
+
+    /// Render one window's branch row (phux-p4vp): the focused pane's VCS
+    /// branch, dim and nested under the label. Blank when unknown.
+    fn branch_line(&self, w: &WindowInfo, text_w: u16) -> Line<'static> {
+        let Some(branch) = w.branch.as_deref() else {
+            return Line::from("");
+        };
+        let label = truncate(branch, usize::from(text_w).saturating_sub(4));
+        Line::from(Span::styled(
+            format!("    {label}"),
+            Style::default()
+                .fg(self.theme.action)
+                .add_modifier(Modifier::DIM),
+        ))
+    }
+
+    /// Render an affordance row (phux-fce4).
+    fn affordance_line(&self, label: &str, text_w: u16) -> Line<'static> {
+        let label = truncate(label, usize::from(text_w).saturating_sub(2));
+        Line::from(Span::styled(
+            format!("  {label}"),
+            Style::default().fg(self.theme.action),
+        ))
+    }
+
+    /// Render the tab list + affordances + separator into a fresh
+    /// `rect`-sized buffer, row-for-row from [`row_model`].
     fn compose(&self, rect: Rect) -> Buffer {
         let area = RataRect::new(0, 0, rect.w, rect.h);
         let mut buf = Buffer::empty(area);
         // Text occupies every column except the 1-cell right separator.
         let text_w = rect.w.saturating_sub(1);
         if text_w > 0 {
-            let lines: Vec<Line<'static>> = self
-                .windows
-                .iter()
-                .map(|w| {
-                    let marker = if w.active { "▸ " } else { "  " };
-                    // phux-foz.1: reserve 2 cells for the ` !` attention
-                    // suffix so a long label can't push it off the strip.
-                    let label_w = usize::from(text_w)
-                        .saturating_sub(2) // marker is 2 cells
-                        .saturating_sub(if w.attention { 2 } else { 0 });
-                    let label = truncate(&w.name, label_w);
-                    let style = if w.active {
-                        Style::default()
-                            .fg(self.theme.accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(self.theme.action)
-                    };
-                    let mut spans = vec![Span::styled(format!("{marker}{label}"), style)];
-                    // phux-foz.1: a window holding a pane that asked for a
-                    // human answer (ADR-0035) gets a themed `!` marker.
-                    if w.attention {
-                        spans.push(Span::styled(
-                            " !",
-                            Style::default()
-                                .fg(self.theme.attention)
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                    }
-                    Line::from(spans)
+            let lines: Vec<Line<'static>> = row_model(self.windows.len(), rect.h)
+                .into_iter()
+                .map(|row| match row {
+                    SidebarRow::WindowName(i) => self
+                        .windows
+                        .get(i)
+                        .map_or_else(|| Line::from(""), |w| self.name_line(w, text_w)),
+                    SidebarRow::WindowBranch(i) => self
+                        .windows
+                        .get(i)
+                        .map_or_else(|| Line::from(""), |w| self.branch_line(w, text_w)),
+                    SidebarRow::Blank => Line::from(""),
+                    SidebarRow::NewWindow => self.affordance_line(NEW_LABEL, text_w),
+                    SidebarRow::Menu => self.affordance_line(MENU_LABEL, text_w),
                 })
                 .collect();
             Paragraph::new(lines).render(RataRect::new(0, 0, text_w, rect.h), &mut buf);
@@ -189,12 +305,20 @@ mod tests {
             active,
             zoomed: false,
             attention: false,
+            branch: None,
         }
     }
 
     fn win_attention(name: &str, active: bool) -> WindowInfo {
         WindowInfo {
             attention: true,
+            ..win(name, active)
+        }
+    }
+
+    fn win_branch(name: &str, active: bool, branch: &str) -> WindowInfo {
+        WindowInfo {
+            branch: Some(branch.to_owned()),
             ..win(name, active)
         }
     }
@@ -239,7 +363,7 @@ mod tests {
                 x: 0,
                 y: 0,
                 w: 20,
-                h: 6,
+                h: 8,
             },
         );
         let plain = strip_ansi(&raw);
@@ -307,7 +431,7 @@ mod tests {
             x: 0,
             y: 0,
             w: 20,
-            h: 6,
+            h: 8,
         };
         let plain = strip_ansi(&paint_to_string(&mut p, rect));
         assert!(!plain.contains('!'), "no attention, no marker: {plain:?}");
@@ -331,6 +455,10 @@ mod tests {
         assert!(p.set_windows(vec![win("a", true)]));
         assert!(!p.set_windows(vec![win("a", true)]));
         assert!(p.set_windows(vec![win_attention("a", true)]));
+        // phux-p4vp: a branch change alone busts the cache too — a
+        // `git switch` must repaint the branch line.
+        assert!(p.set_windows(vec![win_branch("a", true, "main")]));
+        assert!(p.set_windows(vec![win_branch("a", true, "feature")]));
     }
 
     #[test]
@@ -347,5 +475,163 @@ mod tests {
             },
         );
         assert!(s.contains('…'), "overflowing label should be elided: {s:?}");
+    }
+
+    /// phux-p4vp: a window with a branch renders it dim on the row under
+    /// its label, herdr-style; a window without one leaves the row blank.
+    #[test]
+    fn branch_renders_on_the_row_under_the_label() {
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(vec![
+            win_branch("phux", true, "wave2/herdr"),
+            win("scratch", false),
+        ]);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 8,
+        };
+        let plain = strip_ansi(&paint_to_string(&mut p, rect));
+        assert!(
+            plain.contains("wave2/herdr"),
+            "branch line missing: {plain:?}"
+        );
+        // Row order: name, branch, next name — check via the composed
+        // buffer, whose rows are addressable.
+        let buf = p.compose_buffer(rect);
+        let row_text = |y: u16| -> String {
+            (0..rect.w.saturating_sub(1))
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        assert!(row_text(0).contains("phux"), "row 0: {:?}", row_text(0));
+        assert!(
+            row_text(1).contains("wave2/herdr"),
+            "row 1: {:?}",
+            row_text(1)
+        );
+        assert!(row_text(2).contains("scratch"), "row 2: {:?}", row_text(2));
+        assert!(
+            row_text(3).trim().is_empty(),
+            "branchless window's branch row must be blank: {:?}",
+            row_text(3)
+        );
+    }
+
+    /// phux-fce4: the footer affordances render on the strip's last two
+    /// rows when the strip is tall enough, and drop out below the minimum.
+    #[test]
+    fn footer_affordances_render_on_the_last_two_rows() {
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(vec![win("shell", true)]);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 8,
+        };
+        let buf = p.compose_buffer(rect);
+        let row_text = |y: u16| -> String {
+            (0..rect.w.saturating_sub(1))
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        assert!(
+            row_text(6).contains(NEW_LABEL),
+            "row 6 should hold the new affordance: {:?}",
+            row_text(6)
+        );
+        assert!(
+            row_text(7).contains(MENU_LABEL),
+            "row 7 should hold the menu affordance: {:?}",
+            row_text(7)
+        );
+        // A 3-row strip is below the footer minimum: no affordances.
+        let short = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 3,
+        };
+        let plain = strip_ansi(&paint_to_string(&mut p, short));
+        assert!(
+            !plain.contains(NEW_LABEL) && !plain.contains(MENU_LABEL),
+            "short strip must not render the footer: {plain:?}"
+        );
+    }
+
+    // ---------- phux-fce4: row model + hit-test ----------
+
+    #[test]
+    fn row_model_reserves_footer_and_truncates_blocks() {
+        // 3 windows in 8 rows: 6 window-area rows fit exactly 3 blocks.
+        let rows = row_model(3, 8);
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], SidebarRow::WindowName(0));
+        assert_eq!(rows[1], SidebarRow::WindowBranch(0));
+        assert_eq!(rows[4], SidebarRow::WindowName(2));
+        assert_eq!(rows[5], SidebarRow::WindowBranch(2));
+        assert_eq!(rows[6], SidebarRow::NewWindow);
+        assert_eq!(rows[7], SidebarRow::Menu);
+        // 3 windows in 6 rows: 4 window-area rows truncate the third block.
+        let rows = row_model(3, 6);
+        assert_eq!(rows[3], SidebarRow::WindowBranch(1));
+        assert_eq!(rows[4], SidebarRow::NewWindow);
+        assert_eq!(rows[5], SidebarRow::Menu);
+        // Below the minimum height there is no footer.
+        let rows = row_model(1, 3);
+        assert_eq!(
+            rows,
+            vec![
+                SidebarRow::WindowName(0),
+                SidebarRow::WindowBranch(0),
+                SidebarRow::Blank
+            ]
+        );
+    }
+
+    /// The painter fills rows exactly as [`row_model`] lays them out.
+    #[test]
+    fn paint_follows_the_row_model_row_for_row() {
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 10,
+        };
+        let windows = vec![
+            win_branch("alpha", true, "main"),
+            win("beta", false),
+            win_branch("gamma", false, "dev"),
+        ];
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(windows.clone());
+        let buf = p.compose_buffer(rect);
+        let row_text = |y: u16| -> String {
+            (0..rect.w.saturating_sub(1))
+                .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+                .collect()
+        };
+        for (y, row) in row_model(windows.len(), rect.h).iter().enumerate() {
+            let y16 = u16::try_from(y).expect("row fits u16");
+            match row {
+                SidebarRow::WindowName(i) => {
+                    assert!(row_text(y16).contains(&windows[*i].name));
+                }
+                SidebarRow::WindowBranch(i) => {
+                    if let Some(b) = windows[*i].branch.as_deref() {
+                        assert!(row_text(y16).contains(b));
+                    }
+                }
+                SidebarRow::Blank => assert!(row_text(y16).trim().is_empty()),
+                SidebarRow::NewWindow => {
+                    assert!(row_text(y16).contains(NEW_LABEL));
+                }
+                SidebarRow::Menu => {
+                    assert!(row_text(y16).contains(MENU_LABEL));
+                }
+            }
+        }
     }
 }

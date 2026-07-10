@@ -1117,12 +1117,14 @@ mod tests {
                 active: true,
                 zoomed: false,
                 attention: false,
+                branch: None,
             },
             WindowInfo {
                 name: "vim".to_owned(),
                 active: false,
                 zoomed: false,
                 attention: false,
+                branch: None,
             },
         ];
         let ctx = StatusBarContext {
@@ -1163,6 +1165,7 @@ mod tests {
             active: true,
             zoomed: false,
             attention: false,
+            branch: None,
         }]);
         let mut buf = Vec::new();
         p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
@@ -1184,6 +1187,7 @@ mod tests {
             active: true,
             zoomed: false,
             attention: false,
+            branch: None,
         }]);
         p.set_attention_color(Color::Rgb(251, 191, 36));
         assert!(p.set_attention(Some("[ ASK ]".to_owned())));
@@ -1213,6 +1217,7 @@ mod tests {
             active: true,
             zoomed: false,
             attention: false,
+            branch: None,
         }]);
         assert!(p.set_supervisory(Some("[ FROZEN ]".to_owned())));
         assert!(p.set_attention(Some("[ ASK ]".to_owned())));
@@ -1243,6 +1248,7 @@ mod tests {
             active: true,
             zoomed: false,
             attention: false,
+            branch: None,
         }]);
         assert!(p.set_attention(Some("[ ASK ]".to_owned())));
         assert!(

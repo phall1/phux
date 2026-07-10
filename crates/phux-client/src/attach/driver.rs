@@ -226,6 +226,42 @@ fn format_attention_hint(asking: usize) -> Option<String> {
     }
 }
 
+/// phux-p4vp: the driver's per-pane workspace metadata — each pane's
+/// working directory (from the `ATTACHED` snapshot's `TerminalInfo::cwd`)
+/// plus the memoizing branch cache that turns a cwd into a VCS branch
+/// label by reading `.git/HEAD` (see [`crate::vcs`]). Entirely
+/// client-local: nothing here touches the wire or the server's actor
+/// path, and lookups are cached file reads, never a `git` subprocess.
+#[derive(Debug, Default)]
+pub(super) struct VcsIndex {
+    /// Pane → working directory, seeded from the `ATTACHED` snapshot.
+    cwds: HashMap<TerminalId, std::path::PathBuf>,
+    /// cwd → branch memo.
+    cache: crate::vcs::BranchCache,
+}
+
+impl VcsIndex {
+    /// Fold an `ATTACHED` snapshot's `(pane, cwd)` pairs into the index.
+    /// The snapshot is authoritative for the panes it names; panes that no
+    /// longer exist are dropped (re-attach hygiene).
+    pub(super) fn apply_snapshot(&mut self, pane_cwds: Vec<(TerminalId, String)>) {
+        if pane_cwds.is_empty() {
+            return;
+        }
+        self.cwds = pane_cwds
+            .into_iter()
+            .map(|(id, cwd)| (id, std::path::PathBuf::from(cwd)))
+            .collect();
+    }
+
+    /// The VCS branch label for `pane`'s working directory, or `None` when
+    /// the cwd is unknown or not inside a repository.
+    pub(super) fn branch_for_pane(&mut self, pane: &TerminalId) -> Option<String> {
+        let cwd = self.cwds.get(pane)?.clone();
+        self.cache.branch_for(&cwd)
+    }
+}
+
 /// Refresh the window strip AND the supervisory badge together (ADR-0033),
 /// plus the phux-foz.1 attention hint.
 ///
@@ -241,7 +277,7 @@ fn format_attention_hint(asking: usize) -> Option<String> {
 /// sees.
 #[allow(
     clippy::too_many_arguments,
-    reason = "arg list mirrors the driver's chrome state; the ADR-0040 agent index made it 8"
+    reason = "arg list mirrors the driver's chrome state; the ADR-0040 agent index made it 8 and the phux-p4vp vcs index 9"
 )]
 fn refresh_window_chrome(
     status_bar: Option<&mut StatusBarPainter>,
@@ -254,8 +290,11 @@ fn refresh_window_chrome(
     // ADR-0040: structured `phux.agent/v1` records; a window whose focused
     // leaf carries one is labelled from it instead of the OSC title.
     agent_meta: &HashMap<TerminalId, AgentRecord>,
+    // phux-p4vp: pane cwd + branch memo; each window's branch line derives
+    // from its focused leaf's working directory.
+    vcs: &mut VcsIndex,
 ) -> bool {
-    let windows = window_infos(workspace, panes, zoomed, agent_meta);
+    let windows = window_infos(workspace, panes, zoomed, agent_meta, vcs);
     let mut changed = false;
     if let Some(sb) = status_bar {
         changed |= sb.set_windows(windows.clone());
@@ -802,6 +841,9 @@ pub async fn run_headless_rendered(
     // ADR-0040: one-shot `phux.agent/v1` reads so the composited window
     // labels prefer structured agent records, matching a live attach.
     let mut agent_meta = AgentMetaIndex::default();
+    // phux-p4vp: pane cwd + branch memo so the composited sidebar carries
+    // the same branch lines a live attach would.
+    let mut vcs = VcsIndex::default();
 
     // Replay ATTACHED so the focused-pane + workspace bootstrap runs once.
     let outcome = handle_server_frame(
@@ -824,6 +866,7 @@ pub async fn run_headless_rendered(
         false,
         true,
     )?;
+    vcs.apply_snapshot(outcome.pane_cwds);
     let focused_session = outcome.sessions.map(|(_, focused)| focused);
 
     // ADR-0040: pipeline one `phux.agent/v1` GET per pane (no SUBSCRIBE —
@@ -896,7 +939,13 @@ pub async fn run_headless_rendered(
 
     // Seed the window/tab strip exactly as the live loop does before its
     // first bar paint, so the composited bar shows the windows.
-    let windows = window_infos(&workspace, &panes, zoomed.as_ref(), &agent_meta.records);
+    let windows = window_infos(
+        &workspace,
+        &panes,
+        zoomed.as_ref(),
+        &agent_meta.records,
+        &mut vcs,
+    );
     if let Some(sb) = status_bar.as_mut() {
         sb.set_windows(windows.clone());
     }
@@ -1327,6 +1376,9 @@ async fn main_loop<W: super::RenderSink>(
     // feed the window labels so the sidebar/tab strip renders agent
     // name/state from structured data, with the OSC title as the fallback.
     let mut agent_meta = AgentMetaIndex::default();
+    // phux-p4vp: pane cwd + branch memo behind the sidebar's branch line.
+    // Seeded from every ATTACHED snapshot; read at chrome-refresh time.
+    let mut vcs = VcsIndex::default();
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -1514,6 +1566,7 @@ async fn main_loop<W: super::RenderSink>(
     if outcome.exit {
         return Ok(LoopExit::Detached);
     }
+    vcs.apply_snapshot(outcome.pane_cwds);
     if let Some((list, focused)) = outcome.sessions {
         sessions = list;
         focused_session = Some(focused);
@@ -1576,6 +1629,7 @@ async fn main_loop<W: super::RenderSink>(
             zoomed.as_ref(),
             own_client_id,
             &agent_meta.records,
+            &mut vcs,
         );
     }
 
@@ -1801,6 +1855,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         own_client_id,
                         &agent_meta.records,
+                    &mut vcs,
                     );
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
@@ -1943,6 +1998,9 @@ async fn main_loop<W: super::RenderSink>(
                         // phux-4li.20: refresh the cached session graph
                         // whenever an ATTACHED snapshot lands so the
                         // session picker lists the current peer set.
+                        // phux-p4vp: the same snapshot refreshes the
+                        // pane-cwd index behind the sidebar branch line.
+                        vcs.apply_snapshot(outcome.pane_cwds);
                         if let Some((list, focused)) = outcome.sessions {
                             sessions = list;
                             focused_session = Some(focused);
@@ -1967,6 +2025,7 @@ async fn main_loop<W: super::RenderSink>(
                                 zoomed.as_ref(),
                                 own_client_id,
                                 &agent_meta.records,
+                            &mut vcs,
                             );
                             if chrome_changed
                                 && !overlays.is_active()
@@ -2070,6 +2129,7 @@ async fn main_loop<W: super::RenderSink>(
                                 zoomed.as_ref(),
                                 own_client_id,
                                 &agent_meta.records,
+                            &mut vcs,
                             );
                             if !overlays.is_active()
                                 && let Some(ls) =
@@ -2107,6 +2167,7 @@ async fn main_loop<W: super::RenderSink>(
                                 zoomed.as_ref(),
                                 own_client_id,
                                 &agent_meta.records,
+                            &mut vcs,
                             );
                             if !overlays.is_active()
                                 && let Some(ls) =
@@ -2264,6 +2325,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         own_client_id,
                         &agent_meta.records,
+                    &mut vcs,
                     );
                 }
                 if layout_changed
@@ -2681,6 +2743,9 @@ fn window_infos(
     // ADR-0040: Terminal → decoded `phux.agent/v1` record, kept live by the
     // driver's per-pane metadata subscriptions.
     agent_meta: &HashMap<TerminalId, AgentRecord>,
+    // phux-p4vp: pane-cwd index + branch memo. The window's branch line is
+    // its focused leaf's VCS branch (mut only for the memo).
+    vcs: &mut VcsIndex,
 ) -> Vec<phux_config::widget::WindowInfo> {
     workspace
         .windows
@@ -2709,11 +2774,15 @@ fn window_infos(
                 .unwrap_or_default()
                 .iter()
                 .any(|id| panes.get(id).is_some_and(|slot| slot.attention));
+            // phux-p4vp: the branch line under the label — the focused
+            // leaf's cwd resolved to its VCS branch (cached file read).
+            let branch = focus.and_then(|fid| vcs.branch_for_pane(fid));
             phux_config::widget::WindowInfo {
                 name: agent_label.or(title).unwrap_or_else(|| w.name.clone()),
                 active,
                 zoomed: active && zoomed.is_some(),
                 attention,
+                branch,
             }
         })
         .collect()
@@ -3406,7 +3475,13 @@ mod tests {
         asking.attention = true;
         panes.insert(back.clone(), asking);
 
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(
             !infos[0].attention,
             "quiet window must not carry the marker"
@@ -3418,7 +3493,13 @@ mod tests {
 
         // Clearing the flag clears the marker.
         assert!(clear_attention_on_input(&mut panes, &back));
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(!infos[1].attention);
     }
 
@@ -3665,7 +3746,13 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos.len(), 1);
         assert_eq!(
             infos[0].name, "~/src/phux",
@@ -3682,7 +3769,13 @@ mod tests {
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         panes.insert(id, PaneSlot::new_with_size(80, 24).expect("slot"));
 
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos[0].name, "1");
     }
 
@@ -3696,7 +3789,13 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;   \x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos[0].name, "1");
     }
 
@@ -3721,7 +3820,7 @@ mod tests {
             },
         );
 
-        let infos = window_infos(&workspace, &panes, None, &records);
+        let infos = window_infos(&workspace, &panes, None, &records, &mut VcsIndex::default());
         assert_eq!(
             infos[0].name, "!reviewer (blocked)",
             "structured record must beat the OSC title"
@@ -3739,7 +3838,13 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;claude task\x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos[0].name, "claude task");
     }
 
@@ -3753,12 +3858,24 @@ mod tests {
         workspace.select(0); // active window is index 0
         let panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
 
-        let infos = window_infos(&workspace, &panes, Some(&active), &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            Some(&active),
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(infos[0].zoomed, "active window reflects the zoom state");
         assert!(!infos[1].zoomed, "a non-active window is never zoomed");
 
         // No zoom ⇒ no window is marked.
-        let infos = window_infos(&workspace, &panes, None, &HashMap::new());
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(!infos[0].zoomed && !infos[1].zoomed);
     }
 
