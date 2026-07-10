@@ -8,10 +8,21 @@ pub(crate) enum ConfigAction {
     /// The file is the shipped defaults, fully commented out: inert until
     /// you uncomment a line, so the binary's defaults stay authoritative.
     /// Refuses to overwrite an existing config unless `--force`.
+    ///
+    /// With `--distro`, the scaffold additionally carries one active
+    /// `extends` line layering the named starter distribution (a bundled
+    /// name like `herdr`, or a path to a distro layer `.toml`) between
+    /// the shipped defaults and your file.
     Init {
         /// Overwrite an existing config file instead of refusing.
         #[arg(long)]
         force: bool,
+
+        /// Starter distribution to extend: a bundled name (resolved
+        /// under `$PHUX_DISTROS_DIR`, the XDG data dir, or the repo
+        /// checkout) or a path to a distro layer `.toml` / directory.
+        #[arg(long, value_name = "NAME_OR_PATH")]
+        distro: Option<String>,
     },
 
     /// Print the resolved config path. Pure path math — prints the path
