@@ -112,11 +112,8 @@ mod tests {
     fn exec_widget(cmd: &str) -> Box<dyn StatusWidget> {
         let spec = WidgetSpec {
             kind: "exec".to_owned(),
-            opts: std::iter::once((
-                "command".to_owned(),
-                toml::Value::String(cmd.to_owned()),
-            ))
-            .collect(),
+            opts: std::iter::once(("command".to_owned(), toml::Value::String(cmd.to_owned())))
+                .collect(),
         };
         WidgetRegistry::with_builtins()
             .build(&spec)

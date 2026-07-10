@@ -1142,18 +1142,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         FrameKind::Event {
             terminal: Some(terminal),
             event: AgentEvent::CommandFinished { exit_code },
-        } => {
-            match panes.get_mut(&terminal) {
-                Some(slot) if slot.last_exit != exit_code => {
-                    slot.last_exit = exit_code;
-                    Ok(FrameOutcome {
-                        chrome_dirty: true,
-                        ..FrameOutcome::default()
-                    })
-                }
-                _ => Ok(FrameOutcome::default()),
+        } => match panes.get_mut(&terminal) {
+            Some(slot) if slot.last_exit != exit_code => {
+                slot.last_exit = exit_code;
+                Ok(FrameOutcome {
+                    chrome_dirty: true,
+                    ..FrameOutcome::default()
+                })
             }
-        }
+            _ => Ok(FrameOutcome::default()),
+        },
         other => {
             // Anything else — `HELLO_OK`, `PONG`, future spec frames — is
             // accepted-but-ignored. The protocol decoder rejects unknown

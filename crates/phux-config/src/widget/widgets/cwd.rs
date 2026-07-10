@@ -172,11 +172,7 @@ mod tests {
 
     #[test]
     fn collapses_home_prefix_to_tilde() {
-        let w = CwdWidget::new(
-            "{cwd}".to_owned(),
-            None,
-            Some("/Users/phall".to_owned()),
-        );
+        let w = CwdWidget::new("{cwd}".to_owned(), None, Some("/Users/phall".to_owned()));
         assert_eq!(render(&w, "/Users/phall/work/phux"), "~/work/phux");
         assert_eq!(render(&w, "/Users/phall"), "~");
     }
@@ -184,11 +180,7 @@ mod tests {
     #[test]
     fn home_collapse_respects_component_boundary() {
         // `/Users/phallip` must NOT collapse under home `/Users/phall`.
-        let w = CwdWidget::new(
-            "{cwd}".to_owned(),
-            None,
-            Some("/Users/phall".to_owned()),
-        );
+        let w = CwdWidget::new("{cwd}".to_owned(), None, Some("/Users/phall".to_owned()));
         assert_eq!(render(&w, "/Users/phallip/x"), "/Users/phallip/x");
     }
 
@@ -208,8 +200,8 @@ mod tests {
 
     #[test]
     fn factory_rejects_bad_options() {
-        use crate::widget::WidgetRegistry;
         use crate::schema::WidgetSpec;
+        use crate::widget::WidgetRegistry;
         let reg = WidgetRegistry::with_builtins();
         for (key, value) in [
             ("truncate", toml::Value::Integer(0)),
