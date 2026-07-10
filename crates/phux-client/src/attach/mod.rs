@@ -37,6 +37,7 @@ pub mod driver;
 mod exec_widgets;
 pub mod input;
 pub mod input_dispatch;
+mod onboarding;
 pub mod paint;
 pub mod plugin_actions;
 pub mod quic;

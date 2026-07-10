@@ -325,6 +325,36 @@ For testing config changes inside a checkout without touching your real
 worktree-local `./.phux-xdg` (gitignored); point `XDG_CONFIG_HOME` at it
 to exercise the result.
 
+### 4.0.1 First-run onboarding hint
+
+On attach, when **nothing exists at the resolved config path** (the path
+`phux config path` prints), the TUI shows a small dismissible overlay
+pointing at `phux config init` and the `C-a ?` help binding — the two
+affordances that answer "now what?" on a fresh install. The exact rules:
+
+* **Decided once per `phux attach` invocation**, by a single existence
+  check at attach time. Switching sessions inside the same invocation
+  does not re-show it; creating a config mid-attach does not retract an
+  already-shown hint (the next attach simply won't show one).
+* **Any key dismisses it** for the rest of that invocation. The
+  keystroke is consumed by the overlay (like every modal), so the hint
+  costs exactly one keystroke.
+* **It never appears when anything exists at the config path** — a
+  config file (even one that fails to parse) or a stray directory.
+  Presence, not validity, is the test: an unparsable config means you
+  have already found the config system, and `phux config init` refuses
+  to overwrite, so the hint's advice would be wrong there. When the
+  check itself is undetermined (e.g. a permission error on the config
+  directory), the hint stays suppressed.
+* **Nothing is persisted.** There is no "seen" flag or state file: while
+  no config exists, every attach shows the hint once; running
+  `phux config init` (or writing any config file) silences it
+  permanently.
+
+The hint hardcodes `C-a ?` deliberately — it only ever shows when no
+config file exists, which is exactly when the embedded defaults (prefix
+`C-a`, `?` = `show-help`, section 5.3) are guaranteed to be active.
+
 ### 4.1 File location
 
 Config is read in order, later files overriding earlier:
