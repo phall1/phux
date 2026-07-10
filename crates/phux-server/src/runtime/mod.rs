@@ -148,17 +148,18 @@ pub struct ServerConfig {
 ///
 /// A graceful upgrade (ADR-0032) re-execs the current binary; the new image
 /// must be started with the same transport and federation surface the old one
-/// was serving, or `--listen` / `--quic` / `--hub` silently vanish across
-/// `phux server upgrade`. These are derived from the runtime's own fields —
-/// the values the builder methods ([`ServerRuntime::listen_ws`],
-/// [`ServerRuntime::listen_quic`], [`ServerRuntime::hub`]) actually applied —
-/// not from a stashed copy of the original argv, so config-derived state stays
-/// consistent with what the server is really running.
+/// was serving, or `--listen` / `--quic` / `--webtransport` / `--hub`
+/// silently vanish across `phux server upgrade`. These are derived from the
+/// runtime's own fields — the values the builder methods
+/// ([`ServerRuntime::listen_ws`], [`ServerRuntime::listen_quic`],
+/// [`ServerRuntime::listen_webtransport`], [`ServerRuntime::hub`]) actually
+/// applied — not from a stashed copy of the original argv, so config-derived
+/// state stays consistent with what the server is really running.
 ///
-/// Environment-derived fallbacks (`PHUX_WS_ADDR`, `PHUX_QUIC_ADDR`) are
-/// deliberately *not* captured here: the environment survives the `execve`,
-/// so the resumed image re-derives them with the same precedence (explicit
-/// flag wins over environment) as the original start.
+/// Environment-derived fallbacks (`PHUX_WS_ADDR`, `PHUX_QUIC_ADDR`,
+/// `PHUX_WT_ADDR`) are deliberately *not* captured here: the environment
+/// survives the `execve`, so the resumed image re-derives them with the same
+/// precedence (explicit flag wins over environment) as the original start.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RuntimeFlags {
     /// WebSocket listen address from `phux server --listen <ADDR>`
@@ -167,6 +168,13 @@ pub struct RuntimeFlags {
     /// QUIC listen address from `phux server --quic <ADDR>`
     /// ([`ServerRuntime::listen_quic`]). Re-emitted as `--quic` on resume.
     pub quic_addr: Option<SocketAddr>,
+    /// WebTransport listen address from `phux server --webtransport <ADDR>`
+    /// ([`ServerRuntime::listen_webtransport`]). Re-emitted as
+    /// `--webtransport` on resume. Not feature-gated: a phux-server built
+    /// without the `webtransport` feature ignores the address at the builder
+    /// (with a warning), so this stays `None` there and nothing is
+    /// re-emitted.
+    pub wt_addr: Option<SocketAddr>,
     /// Federation-hub mode from `phux server --hub` ([`ServerRuntime::hub`]).
     /// Re-emitted as `--hub` on resume; the resumed image re-reads and
     /// re-validates the `[[satellites]]` registry from config, exactly like a
@@ -490,12 +498,16 @@ impl ServerRuntime {
         // Capture the upgrade context (ADR-0032): the listening socket's fd +
         // path + effective runtime flags, so `handle_upgrade` can build the
         // handoff blob and re-pass `--socket` / `--listen` / `--quic` /
-        // `--hub` to the re-exec'd image (phux-v45.10). The flags come from
-        // the runtime's own configuration — what the builder methods applied
-        // — not a stashed copy of the original argv.
+        // `--webtransport` / `--hub` to the re-exec'd image (phux-v45.10).
+        // The flags come from the runtime's own configuration — what the
+        // builder methods applied — not a stashed copy of the original argv.
         let runtime_flags = RuntimeFlags {
             ws_addr: self.ws_addr,
             quic_addr: self.quic_addr,
+            #[cfg(feature = "webtransport")]
+            wt_addr: self.wt_addr,
+            #[cfg(not(feature = "webtransport"))]
+            wt_addr: None,
             hub: self.hub,
         };
         state.with_mut(|s| {
