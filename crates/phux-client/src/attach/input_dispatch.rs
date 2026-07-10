@@ -423,6 +423,46 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 continue;
             }
+            // phux-fce4: the sidebar strip claims every pointer event over
+            // its own cells BEFORE pane routing — its rows are hit targets,
+            // not pane content. A left press resolves against the strip's
+            // row model (`sidebar::hit_test`) and dispatches the mapped
+            // action through the same `run_action` path a keybinding or
+            // palette row uses: a window block commits `select-window`, the
+            // `+ new` affordance `new-window`, and `= menu` the command
+            // palette (the session/plugin menu). Everything else over the
+            // strip (motion, non-left presses, blank rows, the separator
+            // column) is consumed and dropped so it can never leak into a
+            // pane whose rect does not contain it anyway.
+            if let Some(res) = ctx.sidebar {
+                let strip = super::paint::sidebar_rect(ctx.viewport, ctx.has_bar, res);
+                let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
+                if strip_contains(strip, cell_x, cell_y) {
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                        && let Some(resolved) =
+                            sidebar_click_action(strip, ctx.workspace.windows.len(), cell_x, cell_y)
+                    {
+                        tracing::debug!(action = %resolved.action, "sidebar: click dispatched");
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        if apply_action_effects(
+                            effects,
+                            out,
+                            conn,
+                            ctx,
+                            focused_pane,
+                            detach_pending,
+                            predict,
+                            panes,
+                        )
+                        .await?
+                        {
+                            layout_changed = true;
+                        }
+                    }
+                    continue;
+                }
+            }
             // Hit-test against the SAME inset content rect the renderer tiles
             // into — status-bar row and sidebar columns folded off the outer
             // viewport. Routing against the full viewport instead disagrees with
@@ -711,6 +751,54 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
         // Min-cell floor or stale grab — keep the divider where it is.
         Ok(None) | Err(_) => false,
     }
+}
+
+/// phux-fce4: whether an outer-viewport cell lies within the sidebar
+/// strip's rect (separator column included — the strip consumes it even
+/// though it is not a hit target).
+const fn strip_contains(rect: crate::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.w)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.h)
+}
+
+/// phux-fce4: map a left press on the sidebar strip to the action it
+/// commits, or `None` when it lands on a blank row or the separator.
+///
+/// The mapping goes through [`ResolvedAction`] so a sidebar click runs
+/// exactly what a keybinding, palette row, or overlay commit would — one
+/// dispatch path, no bespoke click semantics:
+///
+/// * a window block (name or branch row) commits `select-window { index }`;
+/// * `+ new` commits `new-window` (the strip lists windows, so its create
+///   affordance creates one);
+/// * `= menu` commits `command-palette` — the menu covering window,
+///   session (`new-session` included), and plugin actions via the action
+///   registry.
+fn sidebar_click_action(
+    strip: crate::layout::Rect,
+    window_count: usize,
+    x: u16,
+    y: u16,
+) -> Option<phux_config::keybind::ResolvedAction> {
+    use crate::render::chrome::sidebar::{SidebarHit, hit_test};
+    let (action, args) = match hit_test(strip, window_count, x, y)? {
+        SidebarHit::Window(i) => {
+            let mut args = std::collections::BTreeMap::new();
+            args.insert(
+                "index".to_owned(),
+                toml::Value::Integer(i64::try_from(i).ok()?),
+            );
+            ("select-window", args)
+        }
+        SidebarHit::NewWindow => ("new-window", std::collections::BTreeMap::new()),
+        SidebarHit::Menu => ("command-palette", std::collections::BTreeMap::new()),
+    };
+    Some(phux_config::keybind::ResolvedAction {
+        action: action.to_owned(),
+        args,
+    })
 }
 
 /// Quantise an f64 pointer position (1-px-per-cell per SPEC §9.2.1) to an
@@ -3263,5 +3351,185 @@ mod tests {
             before, after,
             "dispatch should apply copy-mode scroll to the focused pane viewport"
         );
+    }
+
+    // ---------- phux-fce4: sidebar hit targets ----------
+
+    /// The pure click→action mapping: window blocks commit
+    /// `select-window { index }`, the footer rows `new-window` and
+    /// `command-palette`, and blank/separator cells nothing.
+    #[test]
+    fn sidebar_click_action_maps_rows_to_registry_actions() {
+        // Left-docked 20-column strip over a 24-row viewport with a status
+        // bar: rows 0..=22, footer on rows 21 (new) and 22 (menu).
+        let strip = crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 23,
+        };
+        // Window 1's name row (y = 2) and branch row (y = 3) both select it.
+        for y in [2, 3] {
+            let resolved = sidebar_click_action(strip, 2, 4, y).expect("window row hits");
+            assert_eq!(resolved.action, "select-window");
+            assert_eq!(index_arg(&resolved), Some(1));
+        }
+        let new = sidebar_click_action(strip, 2, 4, 21).expect("new row hits");
+        assert_eq!(new.action, "new-window");
+        assert!(new.args.is_empty());
+        let menu = sidebar_click_action(strip, 2, 4, 22).expect("menu row hits");
+        assert_eq!(menu.action, "command-palette");
+        // Blank padding row and the separator column commit nothing.
+        assert!(sidebar_click_action(strip, 2, 4, 10).is_none());
+        assert!(sidebar_click_action(strip, 2, 19, 0).is_none());
+    }
+
+    /// Every action a sidebar click can commit must be a dispatched action
+    /// name — the same lockstep the palette registry test enforces.
+    #[test]
+    fn sidebar_click_actions_are_dispatched_names() {
+        let strip = crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 23,
+        };
+        for y in 0..strip.h {
+            if let Some(resolved) = sidebar_click_action(strip, 3, 2, y) {
+                assert!(
+                    ACTION_NAMES.contains(&resolved.action.as_str()),
+                    "sidebar committed `{}`, which run_action does not dispatch",
+                    resolved.action,
+                );
+            }
+        }
+    }
+
+    fn left_press_at(x: u16, y: u16) -> InputEvent {
+        use phux_protocol::input::key::ModSet;
+        InputEvent::Mouse(MouseEvent {
+            action: MouseAction::Press,
+            button: MouseButton::Left,
+            mods: ModSet::empty(),
+            x: f64::from(x),
+            y: f64::from(y),
+        })
+    }
+
+    /// Drive `dispatch_input_events` with a left-docked sidebar reservation
+    /// and one mouse event; returns `(active_window, overlay_active,
+    /// pending_window_count)` so the callers can assert each affordance's
+    /// end-to-end effect.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_sidebar_click(ev: InputEvent) -> (usize, bool, usize) {
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("two".to_owned(), tid(2));
+        workspace.select(0);
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = true;
+        let mut drag: Option<DragGrab> = None;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: Some(SidebarReservation {
+                edge: super::super::paint::SidebarEdge::Left,
+                width: 20,
+            }),
+            sidebar_enabled: &mut sidebar_enabled,
+            has_bar: true,
+            drag: &mut drag,
+            plugin_actions: &[],
+            plugin_tx: None,
+        };
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            vec![ev],
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+        (
+            workspace.active,
+            overlays.is_active(),
+            pending_windows.len(),
+        )
+    }
+
+    /// A left press on the second window's block switches to it — the
+    /// mouse route runs the same `select-window` a keybinding would.
+    #[tokio::test]
+    async fn sidebar_click_on_window_block_selects_it() {
+        // Strip rows with a status bar: h = 23; window 1's name row is y=2.
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 2)).await;
+        assert_eq!(active, 1, "clicking window 1's block must select it");
+        assert!(!overlay_active);
+        assert_eq!(pending, 0);
+    }
+
+    /// A left press on `+ new` parks a `new-window` spawn (the reply opens
+    /// the window), exactly like the `new-window` chord.
+    #[tokio::test]
+    async fn sidebar_click_on_new_parks_a_window_spawn() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 21)).await;
+        assert_eq!(active, 0, "spawn is parked; no window switch yet");
+        assert!(!overlay_active);
+        assert_eq!(pending, 1, "new-window spawn must be parked");
+    }
+
+    /// A left press on `= menu` opens the command palette overlay — the
+    /// session/plugin menu built from the action registry.
+    #[tokio::test]
+    async fn sidebar_click_on_menu_opens_the_command_palette() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 22)).await;
+        assert_eq!(active, 0);
+        assert!(overlay_active, "menu click must push the palette overlay");
+        assert_eq!(pending, 0);
+    }
+
+    /// Pointer events over the strip never leak into pane routing: a press
+    /// on a blank row is consumed, mutating nothing.
+    #[tokio::test]
+    async fn sidebar_consumes_clicks_on_blank_rows() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 10)).await;
+        assert_eq!(active, 0);
+        assert!(!overlay_active);
+        assert_eq!(pending, 0);
     }
 }

@@ -930,7 +930,8 @@ preserved.
 
 ### 6.4 Window sidebar
 
-> **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`).
+> **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`;
+> interactive per `phux-fce4`).
 
 `[sidebar]` docks a vertical window strip on the left (default) or
 right edge; `toggle-sidebar` (`C-a b`) flips it at runtime. Panes tile
@@ -954,6 +955,22 @@ enclosing `.git`, worktree gitfiles (`gitdir: ...`) are resolved, and
 subprocess, and nothing added to the wire. The cache re-validates on a
 short TTL keyed by `HEAD`'s mtime, so a `git switch` shows up on the
 next chrome refresh without stat storms.
+
+The strip's last two rows are **interactive affordances** (`phux-fce4`),
+and the window blocks are click targets. Every sidebar click commits the
+same `ResolvedAction` a keybinding or palette row would — one `run_action`
+dispatch path, no bespoke click semantics:
+
+| Target                      | Committed action                       |
+|-----------------------------|----------------------------------------|
+| A window block (either row) | `select-window { index }`              |
+| `+ new`                     | `new-window`                           |
+| `= menu`                    | `command-palette` (the session/plugin menu; `new-session` lives in its Session group) |
+
+Pointer events over the strip never leak into pane routing: presses on
+blank rows or the separator column are consumed and dropped. The same
+targets stay keyboard-reachable through their actions (`C-a c`,
+`C-a :`, `C-a 0`–`9`).
 
 ---
 
@@ -984,6 +1001,8 @@ the pointer over a divider whenever the inner program has no mouse mode.
 |                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar slot | Slot-defined; default no-op           |
+| Click on a sidebar row   | Select that window; `+ new` / `= menu`|
+|                          | run their actions (§6.4)              |
 
 Only divider cells change meaning. Every event inside a pane's rectangle
 is forwarded to that pane with pane-local coordinates, so an inner TUI
