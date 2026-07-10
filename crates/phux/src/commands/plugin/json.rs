@@ -50,7 +50,7 @@ fn plugin_json(entry: &RegistryEntry) -> serde_json::Value {
     })
 }
 
-fn print_json(value: &serde_json::Value) -> ExitCode {
+pub(super) fn print_json(value: &serde_json::Value) -> ExitCode {
     match serde_json::to_string_pretty(value) {
         Ok(rendered) => {
             println!("{rendered}");

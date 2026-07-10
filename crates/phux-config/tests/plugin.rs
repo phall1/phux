@@ -682,8 +682,8 @@ min_phux_version = "99.0.0"
 /// A `min_phux_version` that is not a dotted numeric version is a schema
 /// error, not a silent pass.
 #[test]
-fn manifest_with_malformed_min_phux_version_is_rejected()
--> Result<(), Box<dyn std::error::Error>> {
+fn manifest_with_malformed_min_phux_version_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
     let dir = TempDir::new()?;
     let manifest = write_manifest(
         &dir,
@@ -695,7 +695,8 @@ min_phux_version = "latest"
 "#,
     )?;
 
-    let err = plugin::load_plugin_manifest(&manifest).expect_err("malformed floor must be rejected");
+    let err =
+        plugin::load_plugin_manifest(&manifest).expect_err("malformed floor must be rejected");
 
     let message = err.to_string();
     assert!(message.contains("malformed min_phux_version"), "{message}");
