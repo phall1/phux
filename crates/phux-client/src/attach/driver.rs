@@ -34,7 +34,9 @@ use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
 use phux_protocol::ids::{ClientId, GroupId, TerminalId};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, TerminalLifecycle, ViewportInfo};
+use phux_protocol::wire::frame::{
+    AttachTarget, CONFIG_RELOAD_KEY, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
+};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
@@ -1408,7 +1410,7 @@ async fn main_loop<W: super::RenderSink>(
     // I/O under user fingers). The palette lists them; manifest-declared
     // `keys` merge into the prefix table below with user config winning
     // every conflict. A broken manifest is skipped with a warning.
-    let plugin_actions: Vec<PluginActionEntry> = loaded_cfg
+    let mut plugin_actions: Vec<PluginActionEntry> = loaded_cfg
         .as_ref()
         .map(plugin_actions::load_plugin_action_entries)
         .unwrap_or_default();
@@ -1416,11 +1418,12 @@ async fn main_loop<W: super::RenderSink>(
     // completion here; the select! arm below toasts failures. Sender is
     // lent to `DispatchCtx` each batch.
     let (plugin_tx, mut plugin_rx) = tokio::sync::mpsc::unbounded_channel::<PluginRunResult>();
-    let keybindings_snapshot: Option<phux_config::KeybindingsCfg> = loaded_cfg.as_ref().map(|c| {
-        let mut kb = c.keybindings.clone();
-        plugin_actions::merge_plugin_bindings(&mut kb, &plugin_actions);
-        kb
-    });
+    let mut keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
+        loaded_cfg.as_ref().map(|c| {
+            let mut kb = c.keybindings.clone();
+            plugin_actions::merge_plugin_bindings(&mut kb, &plugin_actions);
+            kb
+        });
     // phux-4li.5: keybind resolver, built from the plugin-merged snapshot
     // so a manifest `keys` chord resolves exactly like a user binding.
     // The resolver consumes `InputEvent::Key` events *before* they would
@@ -1431,7 +1434,7 @@ async fn main_loop<W: super::RenderSink>(
     // phux-ahv.4: single source of truth for chrome + overlay colors,
     // owned alongside the keybindings snapshot and threaded into the
     // overlay render path via `DispatchCtx`.
-    let theme: crate::render::Theme = loaded_cfg
+    let mut theme: crate::render::Theme = loaded_cfg
         .as_ref()
         .map_or_else(crate::render::Theme::default, |c| {
             crate::render::Theme::from_cfg(&c.theme)
@@ -1530,8 +1533,8 @@ async fn main_loop<W: super::RenderSink>(
     // Same anchored-deadline pattern as `esc_deadline`: the deadline is
     // set once when the pending state is first observed and survives
     // unrelated arms firing, so a busy output stream cannot starve it.
-    let which_key_enabled = keybindings_snapshot.as_ref().is_some_and(|kb| kb.which_key);
-    let which_key_delay = Duration::from_millis(
+    let mut which_key_enabled = keybindings_snapshot.as_ref().is_some_and(|kb| kb.which_key);
+    let mut which_key_delay = Duration::from_millis(
         keybindings_snapshot
             .as_ref()
             .map_or(600, |kb| kb.which_key_delay_ms),
@@ -1542,6 +1545,13 @@ async fn main_loop<W: super::RenderSink>(
     // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
     // loop re-attaches to the named session on the same connection.
     let mut switch_request: Option<ReattachTarget> = None;
+    // phux-foz.5: set by `apply_action_effects` when the user commits a
+    // `reload-config` (palette or bound chord). Checked after each
+    // input-dispatch batch; the driver then re-runs the layered config
+    // loader and swaps its config-derived state in place — or keeps the
+    // old state and toasts the error. The `phux config reload` CLI
+    // doorbell reaches the same handler via `FrameOutcome::config_reload`.
+    let mut reload_request = false;
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place. The sidebar
@@ -1589,6 +1599,16 @@ async fn main_loop<W: super::RenderSink>(
     }
     conn.send(&FrameKind::SubscribeEvents { terminal: None })
         .await?;
+    // phux-foz.5: watch the config-reload doorbell so a `phux config
+    // reload` from any shell reaches this client as a METADATA_CHANGED
+    // broadcast (the config itself never crosses the wire — we re-read
+    // our own file). Torn down implicitly on detach like every metadata
+    // subscription.
+    conn.send(&FrameKind::SubscribeMetadata {
+        scope: Scope::Global,
+        key: CONFIG_RELOAD_KEY.to_owned(),
+    })
+    .await?;
     if outcome.subscribe_layout
         && let Some(session) = focused_session
     {
@@ -1804,6 +1824,7 @@ async fn main_loop<W: super::RenderSink>(
                     drag: &mut drag,
                     plugin_actions: &plugin_actions,
                     plugin_tx: Some(&plugin_tx),
+                    reload_request: &mut reload_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1901,6 +1922,33 @@ async fn main_loop<W: super::RenderSink>(
                         sidebar,
                         &session_name,
                         &theme,
+                    );
+                }
+                // phux-foz.5: a `reload-config` committed in this batch
+                // (palette row or bound chord). Runs LAST in the arm so
+                // its repaint reflects the new theme/bar.
+                if reload_request {
+                    reload_request = false;
+                    handle_config_reload(
+                        out,
+                        &mut keybindings_snapshot,
+                        &mut resolver,
+                        &mut theme,
+                        &mut status_bar,
+                        &mut sidebar_painter,
+                        &mut plugin_actions,
+                        &mut which_key_enabled,
+                        &mut which_key_delay,
+                        &mut overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                        &agent_meta,
+                        viewport_dims,
+                        sidebar,
+                        &session_name,
                     );
                 }
             }
@@ -2195,6 +2243,35 @@ async fn main_loop<W: super::RenderSink>(
                                 );
                             }
                         }
+                        // phux-foz.5: the `phux config reload` doorbell
+                        // rang (a subscribed `phux.config.reload/v1`
+                        // broadcast). Re-read our own config file and swap
+                        // the config-derived state in place — same handler
+                        // as the `reload-config` action; failures keep the
+                        // previous config and toast.
+                        if outcome.config_reload {
+                            handle_config_reload(
+                                out,
+                                &mut keybindings_snapshot,
+                                &mut resolver,
+                                &mut theme,
+                                &mut status_bar,
+                                &mut sidebar_painter,
+                                &mut plugin_actions,
+                                &mut which_key_enabled,
+                                &mut which_key_delay,
+                                &mut overlays,
+                                &workspace,
+                                &mut panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                                &agent_meta,
+                                viewport_dims,
+                                sidebar,
+                                &session_name,
+                            );
+                        }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -2279,6 +2356,7 @@ async fn main_loop<W: super::RenderSink>(
                     drag: &mut drag,
                     plugin_actions: &plugin_actions,
                     plugin_tx: Some(&plugin_tx),
+                    reload_request: &mut reload_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2366,6 +2444,33 @@ async fn main_loop<W: super::RenderSink>(
                         sidebar,
                         &session_name,
                         &theme,
+                    );
+                }
+                // phux-foz.5: same reload-on-commit check as the stdin
+                // arm — a bare-ESC flush can carry the final chord of a
+                // palette selection committing `reload-config`.
+                if reload_request {
+                    reload_request = false;
+                    handle_config_reload(
+                        out,
+                        &mut keybindings_snapshot,
+                        &mut resolver,
+                        &mut theme,
+                        &mut status_bar,
+                        &mut sidebar_painter,
+                        &mut plugin_actions,
+                        &mut which_key_enabled,
+                        &mut which_key_delay,
+                        &mut overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                        &agent_meta,
+                        viewport_dims,
+                        sidebar,
+                        &session_name,
                     );
                 }
             }
@@ -2924,6 +3029,124 @@ async fn emit_zoom_reflow(
 /// keybindings) with only a `tracing::warn` nobody sees. Returns `None`
 /// only when the config is valid and the bar would be empty (no widgets
 /// configured) — callers short-circuit on that.
+/// phux-foz.5: perform one explicit live config reload and repaint.
+///
+/// Re-runs the layered config loader ([`super::reload::reload_in_place`])
+/// and, on success, swaps the driver's config-derived state — keybindings
+/// snapshot, resolver, theme, status bar, plugin-action rows, which-key
+/// knobs — in place, rebuilds the sidebar painter under the new theme
+/// (cache-cold, so the repaint recolors everything), refreshes the window
+/// chrome, and repaints. On ANY parse/validation failure the previous
+/// config stays fully in effect and the error is surfaced as a
+/// dismissable toast. Never crashes, never half-applies.
+///
+/// Reached from both reload surfaces: the `reload-config` action
+/// (`DispatchCtx::reload_request`) and the `phux config reload` CLI
+/// doorbell (`FrameOutcome::config_reload`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the config-derived slots and the repaint context are driver-loop locals threaded by reference, same shape as the paint helpers"
+)]
+fn handle_config_reload<W: super::RenderSink>(
+    out: &mut W,
+    keybindings_snapshot: &mut Option<phux_config::KeybindingsCfg>,
+    resolver: &mut Option<phux_config::keybind::Resolver>,
+    theme: &mut crate::render::Theme,
+    status_bar: &mut Option<StatusBarPainter>,
+    sidebar_painter: &mut SidebarPainter,
+    plugin_actions: &mut Vec<PluginActionEntry>,
+    which_key_enabled: &mut bool,
+    which_key_delay: &mut Duration,
+    overlays: &mut OverlayState,
+    workspace: &Workspace,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    zoomed: Option<&TerminalId>,
+    own_client_id: Option<ClientId>,
+    agent_meta: &AgentMetaIndex,
+    viewport_dims: (u16, u16),
+    sidebar: Option<SidebarReservation>,
+    session_name: &str,
+) {
+    match super::reload::reload_in_place(
+        &phux_config::loader::config_path(),
+        keybindings_snapshot,
+        resolver,
+        theme,
+        status_bar,
+        plugin_actions,
+        which_key_enabled,
+        which_key_delay,
+    ) {
+        Ok(()) => {
+            tracing::info!("config reloaded in place");
+            // Fresh painters carry the new theme and start cache-cold so
+            // the repaint below recolors the whole chrome. The attention
+            // chip color rides the theme (phux-foz.1).
+            *sidebar_painter = SidebarPainter::new(*theme);
+            if let Some(sb) = status_bar.as_mut() {
+                sb.set_attention_color(theme.attention);
+            }
+            refresh_window_chrome(
+                status_bar.as_mut(),
+                sidebar_painter,
+                workspace,
+                panes,
+                focused_pane,
+                zoomed,
+                own_client_id,
+                &agent_meta.records,
+            );
+            if !overlays.is_active()
+                && let Some(ls) = workspace.render_window(zoomed).as_deref()
+            {
+                paint_full_frame(
+                    out,
+                    ls,
+                    panes,
+                    focused_pane,
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    sidebar,
+                    Some(sidebar_painter),
+                    session_name,
+                );
+            }
+        }
+        Err(msg) => {
+            // Keep the old config (reload_in_place touched nothing) and
+            // make the failure visible: a dismissable toast, mirroring
+            // the plugin-action failure surface. The status bar, theme,
+            // and every binding keep working exactly as before.
+            tracing::warn!(error = %msg, "config reload failed; keeping previous config");
+            overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+                "Config reload failed - previous config kept",
+                vec![
+                    msg,
+                    String::new(),
+                    "Fix the file and reload again (see: phux config show)".to_owned(),
+                ],
+                theme,
+            )));
+        }
+    }
+    if overlays.is_active() {
+        paint_active_overlay(
+            out,
+            overlays,
+            workspace,
+            panes,
+            focused_pane,
+            zoomed,
+            viewport_dims,
+            status_bar.as_mut(),
+            sidebar,
+            session_name,
+            theme,
+        );
+    }
+}
+
 fn build_status_bar_painter() -> Option<StatusBarPainter> {
     let cfg = match phux_config::loader::load() {
         Ok(c) => c,

@@ -252,6 +252,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "reload-config",
+        category: Category::View,
+        description: "Reload the config file (keybindings, theme, status bar)",
+        args: &[],
+    },
+    ActionSpec {
         name: "take-input",
         category: Category::Pane,
         description: "Take the wheel: seize exclusive input over the focused pane (ADR-0033)",

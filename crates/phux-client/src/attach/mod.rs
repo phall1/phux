@@ -41,6 +41,7 @@ pub mod paint;
 pub mod plugin_actions;
 pub mod quic;
 pub mod reflow;
+mod reload;
 pub mod render;
 pub mod rendered;
 pub mod server_frame;

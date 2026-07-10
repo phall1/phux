@@ -8,7 +8,9 @@
 use std::collections::HashMap;
 
 use phux_protocol::ids::{ClientId, SessionId, TerminalId};
-use phux_protocol::wire::frame::{AgentEvent, FrameKind, Scope, SpawnError, SpawnResult};
+use phux_protocol::wire::frame::{
+    AgentEvent, CONFIG_RELOAD_KEY, FrameKind, Scope, SpawnError, SpawnResult,
+};
 use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
@@ -127,6 +129,14 @@ pub(super) struct FrameOutcome {
     /// client-side (see `crate::vcs`). Set ONLY by the `Attached` arm;
     /// empty otherwise.
     pub(super) pane_cwds: Vec<(TerminalId, String)>,
+    /// phux-foz.5: `true` ⇒ a subscribed `phux.config.reload/v1`
+    /// doorbell rang (a `phux config reload` from some shell). The driver
+    /// re-runs its layered config loader and swaps its config-derived
+    /// state in place, exactly as for the `reload-config` action; on a
+    /// failed re-read it keeps the previous config and surfaces the
+    /// error. Set ONLY by the `MetadataChanged` arm; tombstones do not
+    /// set it.
+    pub(super) config_reload: bool,
 }
 
 /// Payload-free label for the inbound `FrameKind` — the `kind` field on
@@ -829,6 +839,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     });
                 }
                 return Ok(FrameOutcome::default());
+            }
+            // phux-foz.5: the config-reload doorbell. Value bytes are an
+            // opaque nonce (only there to defeat the server's equal-bytes
+            // SET dedup); a tombstone is not a reload request.
+            if key == CONFIG_RELOAD_KEY && matches!(scope, Scope::Global) {
+                return Ok(FrameOutcome {
+                    config_reload: value.is_some(),
+                    ..FrameOutcome::default()
+                });
             }
             if !is_layout_key(&scope, &key) {
                 return Ok(FrameOutcome::default());
@@ -2697,6 +2716,51 @@ mod tests {
         );
         assert!(outcome.agent_meta_changed, "absent key clears the record");
         assert!(agent_meta.records.is_empty());
+    }
+
+    /// phux-foz.5: the `phux.config.reload/v1` doorbell flags a config
+    /// reload on a non-tombstone Global broadcast; tombstones and
+    /// non-Global scopes do not ring it.
+    #[test]
+    fn config_reload_doorbell_flags_reload_and_ignores_tombstones() {
+        use phux_protocol::wire::frame::{CONFIG_RELOAD_KEY, Scope};
+        let mut agent_meta = AgentMetaIndex::default();
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: Some(b"1234-99".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.config_reload, "the doorbell must flag a reload");
+        assert!(
+            !outcome.layout_replaced && !outcome.agent_meta_changed,
+            "the doorbell must not masquerade as a layout or agent change",
+        );
+
+        // Tombstone (DELETE_METADATA): not a reload request.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.config_reload, "a tombstone must not ring it");
+
+        // Wrong scope: some other consumer's key reuse must not ring it.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(tid(9)),
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: Some(b"5678-99".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.config_reload, "non-Global scope must not ring it");
     }
 
     /// ADR-0040: malformed record bytes (bad JSON, empty name) must read
