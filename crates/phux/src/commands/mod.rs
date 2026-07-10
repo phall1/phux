@@ -439,8 +439,8 @@ pub(crate) enum Command {
     /// Flags (`--until`, `--idle`, `--timeout`, `--json`, `--socket`) MUST
     /// precede TARGET if you give one.
     ///
-    ///   phux wait build --until "BUILD SUCCESSFUL"
-    ///   phux wait repl --idle 750
+    ///   phux wait --until "BUILD SUCCESSFUL" build
+    ///   phux wait --idle 750 repl
     #[command(about = "Block until a pane meets a condition")]
     Wait {
         /// Target selector. Omit for the most-recently-focused session.

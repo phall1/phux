@@ -54,8 +54,9 @@ A satellite is a phux server running on another machine. A hub
 federates them: an authenticated consumer connecting to the hub can
 list Terminals on any satellite, spawn new Terminals on any
 satellite, observe and drive them. The transport between hub and
-satellite is whatever works — SSH-stdio first, QUIC eventually. The
-wire is oblivious.
+satellite is whatever works. Direct consumer attach over QUIC and WSS ships
+today; hub-to-satellite routing and SSH-stdio do not. The wire is oblivious to
+the transport beneath it.
 
 This shape is the answer to "what is this for, beyond a better tmux." A
 fleet of agents working on a fleet of cloud boxes needs terminals as
@@ -65,16 +66,12 @@ its wire to get there; phux's wire is already pointed at it.
 
 ## Lazy state synchronization as the wire's destination
 
-The long-arc wire semantics that make federation scale across lossy
-and high-latency links is **lazy state synchronization** of
-libghostty Terminal state — Mosh's State Synchronization Protocol
-composed with libghostty as the state model
-([ADR-0018](../ADR/0018-lazy-state-synchronization.md)). Today's
-pass-through bytes ([ADR-0013](../ADR/0013-libghostty-bytes-on-wire.md))
-is the degenerate case of that scheme; the destination shape is
-structurally identical on the wire, with the server synthesizing
-minimum-VT transitions per consumer per tick once the per-consumer
-RenderState lifecycle lands.
+Lazy state synchronization of libghostty terminal state ships as an opt-in
+output mode for custom consumers ([ADR-0018](../ADR/0018-lazy-state-synchronization.md)).
+The server synthesizes the minimum VT transition from each consumer's last
+reference state. Bundled TUI and web clients still request raw output, which is
+the lowest-latency path for their current use cases. Federation adds the links
+where StateSync becomes the expected default rather than changing its shape.
 
 The research note (now archived) captures the algorithm composition:
 [`../research/archive/2026-05-26-state-sync-algorithm.md`](../research/archive/2026-05-26-state-sync-algorithm.md).
@@ -90,11 +87,9 @@ splits, status bar, keybindings, prefix table. The user-facing
 vocabulary is tmux's because it's what people know.
 [`consumers/tui.md`](./consumers/tui.md) is the surface doc.
 
-What's on the arc for the TUI past v0.1: command-mode (`:command`
-prompt akin to vim), session/window/pane pickers as overlays, a tab
-strip if multi-window juggling becomes painful enough,
-prefix-discoverable hooks. None of these touch the wire — they're
-chrome the TUI grows over its layered substrate.
+The command palette and session/window pickers ship. Remaining TUI work includes
+a tab strip if multi-window juggling warrants it and deeper prefix-discoverable
+hooks. None of this touches the wire; it is client chrome over the substrate.
 
 ### The agent surface
 
@@ -102,10 +97,10 @@ The agent's universe is *terminals and events*: spawn a build, wait
 for the OSC 133 command-end event, read the exit code, kill the
 terminal, move on. Two ways to reach it ship today — the headless
 `phux` CLI verbs (`run`, `wait`, `watch`, `send-keys`, `snapshot`, …)
-and the [`phux-mcp`](./consumers/mcp.md) adapter, both L1-shaped with no
-sessions, windows, or layout in sight. The structured state an agent
-reads is a local projection over the shared engine, exposed through the
-CLI and a versioned JSON schema, not a structured wire tier
+and the [`phux-mcp`](./consumers/mcp.md) adapter. The current CLI consumes
+server-derived convenience snapshots and exposes versioned JSON; richer
+carry-your-own-engine consumers can project locally. Neither makes structured
+screen state the canonical synchronization tier
 ([ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md)).
 The typed Rust handle over the same wire already exists as the
 `phux-client` library crate over `phux-protocol`.

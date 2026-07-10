@@ -91,30 +91,30 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux ls [--json] [--socket P]`** — list sessions. Does not auto-start a
   server (like `tmux ls`): with none running it reports as much and exits
   non-zero. `--json` emits `SessionListJson` (§4.1).
-- **`phux snapshot [TARGET] [--json] [--scrollback[=N]] [--cells]
-  [--socket P]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
+- **`phux snapshot [--json] [--scrollback[=N]] [--cells] [--socket P]
+  [TARGET]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
   optional (defaults to the focused/last session). `--json` emits `ScreenState`
   (§4.2); without it, a boxed text view.
-- **`phux send-keys TARGET KEYS... [--socket P]`** — route named keys or
+- **`phux send-keys [--socket P] TARGET KEYS...`** — route named keys or
   literal strings to one resolved pane by id (`ROUTE_INPUT`). `TARGET` is
   required. No JSON. `KEYS` are tmux-shaped: named keys (`Enter`, `Tab`,
   `Escape`, `Up`, `C-c`, `M-x`) or a literal string sent character by
   character.
-- **`phux run TARGET CMD... [--timeout SECS] [--json] [--socket P]`** — run a
+- **`phux run [--timeout SECS] [--json] [--socket P] TARGET CMD...`** — run a
   command in a pane and capture its exit code, output, and duration via printed
   sentinels (assumes a POSIX shell: sh/bash/zsh). `TARGET` is required.
   `--json` emits `RunResult` (§4.3). The exit code mirrors the child (§5.2).
-  Flags must precede `CMD`, or clap's `trailing_var_arg` swallows them into the
+  Flags must precede `TARGET`, or clap's `trailing_var_arg` swallows them into the
   command line.
-- **`phux wait [TARGET] [--until TEXT] [--idle MS] [--timeout SECS] [--json]
-  [--socket P]`** — poll the side-effect-free screen read until a condition
+- **`phux wait [--until TEXT] [--idle MS] [--timeout SECS] [--json]
+  [--socket P] [TARGET]`** — poll the side-effect-free screen read until a condition
   holds. `--until` takes precedence over `--idle`; with neither, it settles on
   idle. `--json` emits the final `ScreenState`. Exit 0 when the condition is
   met, 124 on timeout. Two gotchas: flags must precede `TARGET`; and `--until`
   matches any visible row, including the shell's echo of the command you just
   typed — match on text that appears only in command output, never the command
   itself.
-- **`phux watch [TARGET] [--json] [--socket P]`** — stream a pane's live events
+- **`phux watch [--json] [--socket P] [TARGET]`** — stream a pane's live events
   (the push half of the agent surface; see [`../spec/L1.md`](../spec/L1.md)).
   Subscribes to the server's event stream scoped to the resolved pane and
   prints one event per line until EOF (server gone) or Ctrl-C; the
@@ -174,8 +174,9 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a new session. Without `--json` it creates and attaches: an explicit
   `-s NAME` that already exists is an error (like tmux's duplicate-session
-  refusal); an omitted name is auto-assigned the smallest free numeric name
-  (tmux-style); a server is auto-spawned if none is running. With `--json` it
+  refusal); an omitted name starts from `defaults.session-name-template` and
+  gains a numeric suffix when needed; a server is auto-spawned if none is
+  running. With `--json` it
   creates the session without attaching (no attach, no resize), then prints the
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
@@ -213,8 +214,8 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   `--json` emits the satellite registry document (§4.10); failure paths leave
   stdout empty and report diagnostics on stderr.
 
-**Not implemented.** `split` and `detach` do not exist as subcommands today
-(tracked as bead phux-99te). The shipped verbs are listed in
+`split` and `detach` are interactive TUI actions, not headless subcommands; that
+boundary is intentional. The shipped verbs are listed in
 [`tui.md`](./tui.md) §1; the agent-relevant subset is the catalog above plus
 `kill` and `attach`.
 
@@ -641,8 +642,8 @@ worked example in `sh`:
 
 ```sh
 phux send-keys build "cargo test" Enter
-phux wait build --until "test result:" --timeout 120
-phux snapshot build --json --scrollback 200 > out.json
+phux wait --until "test result:" --timeout 120 build
+phux snapshot --json --scrollback 200 build > out.json
 ```
 
 When you only want a command's exit code and output, the one-shot `phux run` is
@@ -650,7 +651,7 @@ the higher-level alternative — it brackets the command with sentinels and
 mirrors `$?`:
 
 ```sh
-phux run build "cargo test" --json
+phux run --json build "cargo test"
 ```
 
 The contrast: `run` is "I want the exit code"; `send-keys` plus `wait` is "I am

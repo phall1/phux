@@ -20,6 +20,7 @@ paragraph go."
 ```
 Orientation (cold-open, ~5 files, stable, ruthlessly small)
   README.md ─────────────► landing page + router
+  docs/README.md ────────► public documentation router
   docs/CONCEPTS.md ──────► canonical "what is phux"
   docs/QUICKSTART.md ────► run it
   CONTRIBUTING.md ───────► how to work in the repo

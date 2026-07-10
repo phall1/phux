@@ -91,7 +91,9 @@ explicit-attach paths.
 
 ### 1.1 The shipped verbs
 
-These are the subcommands the binary ships today:
+These are the main interactive and control entrypoints. `phux --help` is the
+complete generated inventory, including supervision, upgrade, tags, pairing,
+agents, and workspace commands:
 
 ```
 phux                          # attach to default session, autostart server
@@ -357,10 +359,9 @@ config file exists, which is exactly when the embedded defaults (prefix
 
 ### 4.1 File location
 
-Config is read in order, later files overriding earlier:
-
-1. `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`)
-2. `$PHUX_CONFIG` if set, replacing the above (used by `phux --config`)
+Config is read from `$XDG_CONFIG_HOME/phux/config.toml` (or
+`~/.config/phux/config.toml`). Set `XDG_CONFIG_HOME` to isolate configuration
+for a test or alternate environment; there is no global config-path flag.
 
 Runtime and persistent state are split. The Unix socket lives in the
 runtime dir (where it's expected to disappear on reboot); persistent
@@ -370,20 +371,16 @@ state lives in the state dir.
 $XDG_RUNTIME_DIR/phux/phux.sock     # SOCK_STREAM, parent dir mode 0o700
                                     #   (fallback: /tmp/phux-$UID/phux.sock)
 
-$XDG_STATE_HOME/phux/               # design intent; not yet implemented
-├── server.pid
-├── log/
-│   └── server.log                  # tracing output, rotated daily
-└── journal/
-    └── <pane_id>.log               # per-pane PTY journal, capped ring
-                                    #   (default 10 MiB)
+$XDG_STATE_HOME/phux/
+├── client-<pid>.log                # default interactive-client log
+├── remote-cert.pem                 # auto-provisioned remote certificate
+├── remote-key.pem                  # owner-only private key
+└── remote-tokens                   # owner-only pairing tokens
 ```
 
-Today only the socket is real (see
-[`phux-server::runtime::default_socket_path`](../../crates/phux-server/src/runtime/mod.rs)).
-The state-dir layout matches what
-[`../architecture/process-model.md`](../architecture/process-model.md)
-describes; both docs treat it as the destination shape.
+These files are real today. A server PID file, rotated server-log directory,
+and per-terminal PTY journal remain design intent; workspace archives are
+written only when requested with `phux workspace save`.
 
 ### 4.2 Format
 
@@ -1019,10 +1016,11 @@ the `phux-4li` epic.
 
 ### 6.2 Resize behavior
 
-> **Status:** Shipped (phux-foz.3). Proportional re-flow and
-> minimum-size freezing are implemented in the layout walk itself, so
-> paint, reflow (`TERMINAL_RESIZE` sizing), and mouse hit-testing all
-> read the same frozen tiling.
+> **Status:** Viewport-driven reflow ships. Automatic minimum-size freezing
+> now also ships (phux-foz.3): proportional re-flow and freezing are
+> implemented in the layout walk itself, so paint, reflow
+> (`TERMINAL_RESIZE` sizing), and mouse hit-testing all read the same frozen
+> tiling.
 
 When the client viewport (or server-aggregated viewport for multi-client
 sessions) resizes, split ratios are preserved and dimensions are
@@ -1039,10 +1037,11 @@ holds at every viewport size.
 
 ### 6.3 Resize commands
 
-> **Status:** Shipped (ADR-0035, phux-foz.3). `resize-pane` dispatches
-> through the single-dispatch action registry, `C-a H/J/K/L` are the
-> default bindings (see §5.3), the command palette offers a resize row,
-> and drag-on-divider (§7) commits through the same ratio math.
+> **Status:** Keyboard `resize-pane` actions and mouse divider dragging ship
+> (ADR-0035, phux-foz.3). `resize-pane` dispatches through the
+> single-dispatch action registry, `C-a H/J/K/L` are the default bindings
+> (see §5.3), the command palette offers a resize row, and drag-on-divider
+> (§7) commits through the same ratio math.
 
 `resize-pane direction=right amount=5` moves the boundary between the
 focused pane and its right neighbor by 5 columns toward the right,
