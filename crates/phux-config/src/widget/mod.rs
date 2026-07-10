@@ -27,6 +27,9 @@ mod status_bar;
 mod widgets;
 
 pub use status_bar::{StatusBar, row_to_string};
+pub use widgets::cwd::CwdWidget;
+pub use widgets::exec::{ExecFeed, ExecWidget};
+pub use widgets::exit_status::ExitWidget;
 pub use widgets::help_hints::HelpHintsWidget;
 pub use widgets::session_name::SessionNameWidget;
 pub use widgets::time::TimeWidget;
@@ -109,13 +112,13 @@ pub struct WindowInfo {
 
 /// Context passed to a [`StatusWidget`] at render time.
 ///
-/// Kept intentionally narrow for nz4.4: clock time + session name. Future
-/// waves may add active-pane id, cwd, etc.
+/// Kept intentionally narrow: every field is real data the host already
+/// tracks, passed in (rather than read inside the widget) so render is a
+/// pure function of context — that's what makes deterministic snapshot
+/// tests possible.
 #[derive(Debug, Clone, Copy)]
 pub struct WidgetContext<'a> {
-    /// Wall-clock time the status bar is rendering at. Passed in (rather
-    /// than read inside the widget) so render is a pure function of
-    /// context — that's what makes deterministic snapshot tests possible.
+    /// Wall-clock time the status bar is rendering at.
     pub now: SystemTime,
     /// Current session name (`""` if not in a session).
     pub session_name: &'a str,
@@ -125,6 +128,39 @@ pub struct WidgetContext<'a> {
     /// Consumed by the `windows` (tab-bar) widget; empty for consumers
     /// that don't present windows.
     pub windows: &'a [WindowInfo],
+    /// phux-foz.4: the focused pane's live working directory, or `""`
+    /// when unknown. Fed by the server's `cwd_changed` agent events
+    /// (kernel-queried PTY-child cwd); consumed by the `cwd` widget.
+    pub cwd: &'a str,
+    /// phux-foz.4: exit code of the last command that finished in the
+    /// focused pane, when the shell's OSC-133 `D` mark reported one
+    /// (`command_finished.exit_code`). `None` until a command finishes
+    /// (or when the shell integration omits the code); consumed by the
+    /// `exit` widget.
+    pub last_exit: Option<i32>,
+}
+
+impl<'a> WidgetContext<'a> {
+    /// Build a context carrying the universally-available fields, with the
+    /// focused-pane data feeds (`cwd`, `last_exit`) at their unknown
+    /// defaults. Hosts that track those feeds override the fields via
+    /// struct-update syntax.
+    #[must_use]
+    pub const fn new(
+        now: SystemTime,
+        session_name: &'a str,
+        prefix: &'a str,
+        windows: &'a [WindowInfo],
+    ) -> Self {
+        Self {
+            now,
+            session_name,
+            prefix,
+            windows,
+            cwd: "",
+            last_exit: None,
+        }
+    }
 }
 
 /// A horizontal strip of cells produced by a widget for one render pass.
@@ -193,6 +229,16 @@ pub trait StatusWidget: Send + Sync + fmt::Debug + 'static {
     fn poll_interval(&self) -> Option<Duration> {
         None
     }
+
+    /// phux-r82.6: for widgets backed by an external asynchronous data
+    /// feed (the `exec` kind), the shared feed handle the host must
+    /// drive. The host runs the feed's command on its interval and
+    /// pushes output through [`ExecFeed::apply_output`]; `render` then
+    /// reads the cached cells without ever blocking. `None` for pure
+    /// widgets (the default).
+    fn exec_feed(&self) -> Option<ExecFeed> {
+        None
+    }
 }
 
 /// Factory function: builds a widget from a TOML `opts` map.
@@ -225,11 +271,14 @@ impl WidgetRegistry {
         }
     }
 
-    /// Registry pre-populated with the in-tree widgets: `time` and
-    /// `session-name`.
+    /// Registry pre-populated with the in-tree widgets: `cwd`, `exec`,
+    /// `exit`, `help-hints`, `session-name`, `time`, and `windows`.
     #[must_use]
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
+        r.register("cwd", widgets::cwd::factory);
+        r.register("exec", widgets::exec::factory);
+        r.register("exit", widgets::exit_status::factory);
         r.register("help-hints", widgets::help_hints::factory);
         r.register("time", widgets::time::factory);
         r.register("session-name", widgets::session_name::factory);
