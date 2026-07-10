@@ -2070,7 +2070,8 @@ impl FrameKind {
                 });
                 // ClientCapabilities rides as one field whose value is the
                 // positional caps blob: color_support, layers,
-                // image_protocols, kbd_protocols, hyperlinks, output_mode.
+                // image_protocols, kbd_protocols, hyperlinks, output_mode,
+                // optional default foreground/background RGB values.
                 enc.write_field_with(field::hello::CLIENT_CAPS, |e| {
                     e.write_u8(client_caps.color_support.as_wire());
                     e.write_u8(client_caps.layers.as_wire());
@@ -2078,6 +2079,15 @@ impl FrameKind {
                     e.write_u8(client_caps.kbd_protocols.as_wire());
                     e.write_u8(u8::from(client_caps.hyperlinks));
                     e.write_u8(client_caps.output_mode.as_wire());
+                    if let Some(colors) = client_caps.default_colors {
+                        e.write_u8(1);
+                        e.write_u8(colors.foreground.r);
+                        e.write_u8(colors.foreground.g);
+                        e.write_u8(colors.foreground.b);
+                        e.write_u8(colors.background.r);
+                        e.write_u8(colors.background.g);
+                        e.write_u8(colors.background.b);
+                    }
                 });
             }
             Self::HelloOk {

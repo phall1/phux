@@ -83,6 +83,97 @@ const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 /// pixels are always derived as `cells x cell size`.
 const DEFAULT_CELL_PX: (u16, u16) = (8, 16);
 
+/// Streaming recognizer for the OSC 10/11 query form used by terminal-aware
+/// applications (`OSC 10 ; ? ST` / `OSC 11 ; ? ST`). libghostty tracks the
+/// effective colors but the pinned engine does not currently emit replies for
+/// these two OSC queries, so the actor answers them from that canonical state.
+#[derive(Debug, Default)]
+struct ColorQueryScanner {
+    state: ColorQueryState,
+    payload: [u8; 4],
+    len: usize,
+    valid: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum ColorQueryState {
+    #[default]
+    Ground,
+    Escape,
+    Osc,
+    OscEscape,
+}
+
+impl ColorQueryScanner {
+    fn feed(&mut self, bytes: &[u8], mut on_query: impl FnMut(u8)) {
+        for byte in bytes {
+            match self.state {
+                ColorQueryState::Ground => match *byte {
+                    b'\x1b' => self.state = ColorQueryState::Escape,
+                    0x9d => self.start_osc(),
+                    _ => {}
+                },
+                ColorQueryState::Escape => match *byte {
+                    b']' => self.start_osc(),
+                    b'\x1b' => {}
+                    _ => self.state = ColorQueryState::Ground,
+                },
+                ColorQueryState::Osc => match *byte {
+                    b'\x07' | 0x9c => self.finish_osc(&mut on_query),
+                    b'\x1b' => self.state = ColorQueryState::OscEscape,
+                    value => self.push_payload(value),
+                },
+                ColorQueryState::OscEscape => {
+                    if *byte == b'\\' {
+                        self.finish_osc(&mut on_query);
+                    } else {
+                        // An ESC not followed by `\\` is part of an OSC we do
+                        // not recognize. Keep scanning for its terminator but
+                        // never mistake its suffix for a query.
+                        self.valid = false;
+                        self.state = ColorQueryState::Osc;
+                    }
+                }
+            }
+        }
+    }
+
+    const fn start_osc(&mut self) {
+        self.state = ColorQueryState::Osc;
+        self.len = 0;
+        self.valid = true;
+    }
+
+    const fn push_payload(&mut self, byte: u8) {
+        if self.len < self.payload.len() {
+            self.payload[self.len] = byte;
+            self.len += 1;
+        } else {
+            self.valid = false;
+        }
+    }
+
+    fn finish_osc(&mut self, on_query: &mut impl FnMut(u8)) {
+        if self.valid && self.len == self.payload.len() {
+            match &self.payload {
+                b"10;?" => on_query(10),
+                b"11;?" => on_query(11),
+                _ => {}
+            }
+        }
+        self.state = ColorQueryState::Ground;
+        self.len = 0;
+        self.valid = false;
+    }
+}
+
+fn color_query_reply(selector: u8, color: libghostty_vt::style::RgbColor) -> Vec<u8> {
+    let r = u16::from(color.r) * 0x101;
+    let g = u16::from(color.g) * 0x101;
+    let b = u16::from(color.b) * 0x101;
+    format!("\x1b]{selector};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\").into_bytes()
+}
+
 /// Sentinel prefix an in-pane agent writes into the terminal title (OSC 0 /
 /// OSC 2) to signal a pending human-answerable question (phux-2sl6).
 ///
@@ -234,12 +325,14 @@ pub struct TerminalActor {
     /// so probing them here could miss a write a sibling handler already
     /// consumed. A self-owned flag cannot be clobbered that way.
     terminal_dirty_since_tick: bool,
+    color_query_scanner: ColorQueryScanner,
     key_enc: RefCell<PerTerminalKeyEncoder>,
     mouse_enc: RefCell<PerTerminalMouseEncoder>,
     focus_enc: RefCell<PerTerminalFocusEncoder>,
     paste_enc: RefCell<PerTerminalPasteEncoder>,
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
+    set_default_colors_rx: mpsc::Receiver<SetDefaultColorsRequest>,
     screen_rx: mpsc::Receiver<ScreenRequest>,
     upgrade_rx: mpsc::Receiver<UpgradeHandleRequest>,
     pwd_rx: mpsc::Receiver<PwdRequest>,
@@ -537,6 +630,7 @@ impl TerminalActor {
             PtySource::None,
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
+            None,
         )
     }
 
@@ -557,6 +651,7 @@ impl TerminalActor {
             PtySource::Spawn(cmd),
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
+            None,
         )
     }
 
@@ -590,6 +685,27 @@ impl TerminalActor {
             cmd.map_or(PtySource::None, PtySource::Spawn),
             max_scrollback,
             token,
+            None,
+        )
+    }
+
+    /// Runtime constructor that seeds host default colors before the PTY is
+    /// spawned and any child output can be parsed.
+    pub fn build_with_token_and_colors(
+        cols: u16,
+        rows: u16,
+        cmd: Option<CommandBuilder>,
+        max_scrollback: u32,
+        token: CancellationToken,
+        default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
+        Self::build(
+            cols,
+            rows,
+            cmd.map_or(PtySource::None, PtySource::Spawn),
+            max_scrollback,
+            token,
+            default_colors,
         )
     }
 
@@ -618,6 +734,7 @@ impl TerminalActor {
             },
             max_scrollback,
             token,
+            None,
         )?;
         bundle.actor.terminal.borrow_mut().vt_write(seed);
         Ok(bundle)
@@ -633,6 +750,7 @@ impl TerminalActor {
         pty_source: PtySource,
         max_scrollback: u32,
         token: CancellationToken,
+        default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
         let mut terminal = GhosttyTerminal::new(TerminalOptions {
             cols,
@@ -643,6 +761,9 @@ impl TerminalActor {
             max_scrollback: max_scrollback as usize,
         })?;
         phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)?;
+        if let Some(colors) = default_colors {
+            Self::install_default_colors(&mut terminal, colors)?;
+        }
         let size_report = Rc::new(Cell::new(SizeReportSize {
             rows,
             columns: cols,
@@ -654,6 +775,7 @@ impl TerminalActor {
         let mouse_enc = PerTerminalMouseEncoder::new()?;
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (set_default_colors_tx, set_default_colors_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (upgrade_tx, upgrade_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (pwd_tx, pwd_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
@@ -695,12 +817,14 @@ impl TerminalActor {
             // A pane may carry initial content (PTY banner, restored
             // scrollback); start dirty so the first tick always emits.
             terminal_dirty_since_tick: true,
+            color_query_scanner: ColorQueryScanner::default(),
             key_enc: RefCell::new(key_enc),
             mouse_enc: RefCell::new(mouse_enc),
             focus_enc: RefCell::new(PerTerminalFocusEncoder::new()),
             paste_enc: RefCell::new(PerTerminalPasteEncoder::new()),
             input_rx,
             snapshot_rx,
+            set_default_colors_rx,
             screen_rx,
             upgrade_rx,
             pwd_rx,
@@ -744,6 +868,7 @@ impl TerminalActor {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: set_default_colors_tx,
             screen: screen_tx,
             upgrade: upgrade_tx,
             pwd: pwd_tx,
@@ -764,6 +889,60 @@ impl TerminalActor {
             token: bundle_token,
             exit_notify: Some(exit_rx),
         })
+    }
+
+    fn install_default_colors(
+        terminal: &mut GhosttyTerminal<'static, 'static>,
+        colors: phux_protocol::caps::TerminalDefaultColors,
+    ) -> Result<(), TerminalActorError> {
+        use libghostty_vt::style::RgbColor;
+
+        terminal.set_default_fg_color(Some(RgbColor {
+            r: colors.foreground.r,
+            g: colors.foreground.g,
+            b: colors.foreground.b,
+        }))?;
+        terminal.set_default_bg_color(Some(RgbColor {
+            r: colors.background.r,
+            g: colors.background.g,
+            b: colors.background.b,
+        }))?;
+        Ok(())
+    }
+
+    /// Answer OSC 10/11 queries found in a just-parsed PTY chunk from the
+    /// canonical terminal's effective colors. The scanner persists across PTY
+    /// reads, so an escape sequence split at any byte boundary still works.
+    fn answer_color_queries(&mut self, bytes: &[u8]) {
+        let mut queries = 0_u8;
+        self.color_query_scanner.feed(bytes, |selector| {
+            queries |= match selector {
+                10 => 1,
+                11 => 2,
+                _ => 0,
+            };
+        });
+        if queries == 0 {
+            return;
+        }
+        let terminal = self.terminal.borrow();
+        let foreground = (queries & 1 != 0)
+            .then(|| terminal.fg_color().ok().flatten())
+            .flatten();
+        let background = (queries & 2 != 0)
+            .then(|| terminal.bg_color().ok().flatten())
+            .flatten();
+        drop(terminal);
+
+        let Some(pty_tx) = &self.pty_tx else {
+            return;
+        };
+        if let Some(color) = foreground {
+            let _ = pty_tx.send(color_query_reply(10, color));
+        }
+        if let Some(color) = background {
+            let _ = pty_tx.send(color_query_reply(11, color));
+        }
     }
 
     /// Install the libghostty effect handlers the actor relies on.
@@ -1988,6 +2167,7 @@ impl TerminalActor {
                             // byte.
                             debug!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
                             self.terminal.borrow_mut().vt_write(&payload);
+                            self.answer_color_queries(&payload);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).
                             self.terminal_dirty_since_tick = true;
@@ -2032,6 +2212,16 @@ impl TerminalActor {
                         }
                     };
                     let _ = req.reply.send(snap);
+                }
+
+                Some(req) = self.set_default_colors_rx.recv() => {
+                    if let Err(err) = Self::install_default_colors(
+                        &mut self.terminal.borrow_mut(),
+                        req.colors,
+                    ) {
+                        warn!(error = %err, "failed to install client default colors");
+                    }
+                    let _ = req.reply.send(());
                 }
 
                 Some(req) = self.screen_rx.recv() => {
@@ -2523,6 +2713,69 @@ impl TerminalActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_default_colors_are_installed_before_actor_run() {
+        use phux_protocol::caps::{TerminalColor, TerminalDefaultColors};
+
+        let colors = TerminalDefaultColors {
+            foreground: TerminalColor {
+                r: 208,
+                g: 208,
+                b: 208,
+            },
+            background: TerminalColor {
+                r: 18,
+                g: 24,
+                b: 27,
+            },
+        };
+        let bundle = TerminalActor::build_with_token_and_colors(
+            80,
+            24,
+            None,
+            100,
+            CancellationToken::new(),
+            Some(colors),
+        )
+        .expect("actor");
+        let mut actor = bundle.actor;
+        {
+            let terminal = actor.terminal.borrow();
+            assert_eq!(
+                terminal.default_fg_color().expect("foreground"),
+                Some(libghostty_vt::style::RgbColor {
+                    r: 208,
+                    g: 208,
+                    b: 208,
+                })
+            );
+            assert_eq!(
+                terminal.default_bg_color().expect("background"),
+                Some(libghostty_vt::style::RgbColor {
+                    r: 18,
+                    g: 24,
+                    b: 27,
+                })
+            );
+        }
+
+        let (_pty_output, mut pty_input) = actor.install_test_pty_channels();
+        let first = b"\x1b]10;?\x1b";
+        let second = b"\\\x1b]11;?\x1b\\";
+        actor.terminal.borrow_mut().vt_write(first);
+        actor.answer_color_queries(first);
+        actor.terminal.borrow_mut().vt_write(second);
+        actor.answer_color_queries(second);
+        assert_eq!(
+            pty_input.try_recv().expect("OSC 10 reply"),
+            b"\x1b]10;rgb:d0d0/d0d0/d0d0\x1b\\"
+        );
+        assert_eq!(
+            pty_input.try_recv().expect("OSC 11 reply"),
+            b"\x1b]11;rgb:1212/1818/1b1b\x1b\\"
+        );
+    }
 
     /// phux-07y: `shell_command` runs the user's command via
     /// `$SHELL -c <command>` so quoting / args work and the pane closes

@@ -407,6 +407,34 @@ pub struct ClientCapabilities {
     /// human-TUI path; agent / state-sync consumers opt into
     /// [`OutputMode::StateSync`] (phux-fseo).
     pub output_mode: OutputMode,
+    /// The outer terminal's effective default foreground/background colors.
+    ///
+    /// Interactive clients probe OSC 10/11 before entering raw mode and
+    /// advertise the result here. The server installs these defaults on its
+    /// terminal emulator so programs inside phux receive the same OSC query
+    /// replies they receive when run directly in the host terminal. `None`
+    /// is the compatibility value for non-TTY and older clients.
+    pub default_colors: Option<TerminalDefaultColors>,
+}
+
+/// Effective default colors reported by the client's outer terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerminalDefaultColors {
+    /// Effective default foreground (OSC 10).
+    pub foreground: TerminalColor,
+    /// Effective default background (OSC 11).
+    pub background: TerminalColor,
+}
+
+/// A 24-bit RGB color carried in terminal capability negotiation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct TerminalColor {
+    /// Red component.
+    pub r: u8,
+    /// Green component.
+    pub g: u8,
+    /// Blue component.
+    pub b: u8,
 }
 
 impl ClientCapabilities {
@@ -422,6 +450,7 @@ impl ClientCapabilities {
             kbd_protocols: KeyboardProtocolSet::all(),
             hyperlinks: true,
             output_mode: OutputMode::Raw,
+            default_colors: None,
         }
     }
 
@@ -429,6 +458,13 @@ impl ClientCapabilities {
     #[must_use]
     pub const fn with_output_mode(mut self, output_mode: OutputMode) -> Self {
         self.output_mode = output_mode;
+        self
+    }
+
+    /// Builder setter for [`Self::default_colors`].
+    #[must_use]
+    pub const fn with_default_colors(mut self, colors: TerminalDefaultColors) -> Self {
+        self.default_colors = Some(colors);
         self
     }
 

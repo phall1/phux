@@ -14,12 +14,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use super::{
-    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty, send_error,
-    spawn_pane_with_pty,
+    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty_and_colors,
+    send_error, spawn_pane_with_pty_and_colors,
 };
 use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
 use crate::terminal_actor::{
-    ConsumerAttachRequest, PaneOutput, PwdRequest, ResizeRequest, SnapshotRequest,
+    ConsumerAttachRequest, PaneOutput, PwdRequest, ResizeRequest, SetDefaultColorsRequest,
+    SnapshotRequest,
 };
 
 /// Adapt a broadcast byte chunk to a client's capabilities for the wire:
@@ -54,6 +55,7 @@ pub(crate) async fn resolve_attach_target(
     target: AttachTarget,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Option<String> {
     match target {
         AttachTarget::ByName(name) => Some(name),
@@ -103,7 +105,16 @@ pub(crate) async fn resolve_attach_target(
             resolved
         }
         AttachTarget::CreateIfMissing { name, command, cwd } => {
-            resolve_create_if_missing(state, name, command, cwd, out_tx, root_token).await
+            resolve_create_if_missing(
+                state,
+                name,
+                command,
+                cwd,
+                out_tx,
+                root_token,
+                default_colors,
+            )
+            .await
         }
         _ => {
             send_error(
@@ -159,6 +170,7 @@ pub(crate) async fn resolve_create_if_missing(
     _cwd: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Option<String> {
     // Fast path: a session with this name already exists. Fall through
     // to the normal `ByName(name)` attach by returning `name` as-is.
@@ -207,7 +219,14 @@ pub(crate) async fn resolve_create_if_missing(
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
         crate::terminal_actor::apply_term(&mut cmd, &term);
-        seed_session_with_pty(state, &name, cmd, history_limit, root_token)
+        seed_session_with_pty_and_colors(
+            state,
+            &name,
+            cmd,
+            history_limit,
+            root_token,
+            default_colors,
+        )
     } else {
         // No-PTY path: the wire `command` is meaningless without a
         // child to exec it on. We still create the session+pane so
@@ -521,43 +540,56 @@ pub(crate) async fn handle_spawn_terminal(
         return;
     };
 
-    let history_limit = state.with(crate::state::ServerState::history_limit);
-    let core_terminal_id =
-        match spawn_pane_with_pty(state, session, builder, history_limit, root_token) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                warn!(
-                    ?client_id,
+    let (history_limit, default_colors) = state.with(|s| {
+        (
+            s.history_limit(),
+            s.attached
+                .get(&client_id)
+                .and_then(|client| client.client_caps.default_colors),
+        )
+    });
+    let core_terminal_id = match spawn_pane_with_pty_and_colors(
+        state,
+        session,
+        builder,
+        history_limit,
+        root_token,
+        default_colors,
+    ) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            warn!(
+                ?client_id,
+                request_id,
+                ?session,
+                "SPAWN_TERMINAL: attached session has no window to host the pane",
+            );
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::TerminalSpawned {
                     request_id,
-                    ?session,
-                    "SPAWN_TERMINAL: attached session has no window to host the pane",
-                );
-                let _ = out_tx
-                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
-                        request_id,
-                        result: SpawnResult::Err(SpawnError::SpawnFailed(
-                            "attached session has no window to host the pane".to_owned(),
-                        )),
-                    }))
-                    .await;
-                return;
-            }
-            Err(err) => {
-                warn!(
-                    ?client_id,
+                    result: SpawnResult::Err(SpawnError::SpawnFailed(
+                        "attached session has no window to host the pane".to_owned(),
+                    )),
+                }))
+                .await;
+            return;
+        }
+        Err(err) => {
+            warn!(
+                ?client_id,
+                request_id,
+                error = %err,
+                "SPAWN_TERMINAL: failed to spawn pane actor",
+            );
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::TerminalSpawned {
                     request_id,
-                    error = %err,
-                    "SPAWN_TERMINAL: failed to spawn pane actor",
-                );
-                let _ = out_tx
-                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
-                        request_id,
-                        result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
-                    }))
-                    .await;
-                return;
-            }
-        };
+                    result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
+                }))
+                .await;
+            return;
+        }
+    };
 
     // Auto-subscribe the spawning client to the new pane and snapshot
     // its `TerminalHandle` so we can spawn an output pump. Without
@@ -738,7 +770,15 @@ pub(crate) async fn handle_attach(
     // carries this so the actor primes TERMINAL_SNAPSHOT.scrollback_bytes.
     let scrollback_req: Option<u32> = request_scrollback.then_some(scrollback_limit_lines);
 
-    let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
+    let Some(session_name) = resolve_attach_target(
+        state,
+        target,
+        out_tx,
+        root_token,
+        client_caps.default_colors,
+    )
+    .await
+    else {
         return;
     };
 
@@ -764,6 +804,26 @@ pub(crate) async fn handle_attach(
                 return;
             }
         };
+
+    // Terminal defaults are shared pane state. The most recently attached
+    // interactive client that advertises a palette wins; palette-less agent
+    // and legacy attaches leave the last known values untouched. Await each
+    // acknowledgement before snapshotting so OSC 10/11 queries parsed after
+    // ATTACHED observe the selected host palette.
+    if let Some(colors) = client_caps.default_colors {
+        for pane in &panes_to_snapshot {
+            let (reply, done) = oneshot::channel();
+            if pane
+                .handle
+                .set_default_colors
+                .send(SetDefaultColorsRequest { colors, reply })
+                .await
+                .is_ok()
+            {
+                let _ = done.await;
+            }
+        }
+    }
 
     // phux-2lj: apply the client's ATTACH viewport to every pane so
     // freshly-spawned PTYs (currently built at hardcoded 80x24, see

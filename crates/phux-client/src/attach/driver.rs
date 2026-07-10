@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use libghostty_vt::terminal::Mode;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
@@ -85,6 +86,10 @@ pub(super) struct PaneSlot {
     /// [`clear_attention_on_input`]). Read at chrome-paint time for the
     /// window tab marker and the status-bar attention hint.
     pub attention: bool,
+    /// Start of the current DEC synchronized-output transaction (`?2026h`).
+    pub sync_output_since: Option<tokio::time::Instant>,
+    /// Whether mirror state changed during the transaction.
+    pub sync_output_dirty: bool,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -122,6 +127,8 @@ impl PaneSlot {
             lifecycle: TerminalLifecycle::Running,
             input_holder: None,
             attention: false,
+            sync_output_since: None,
+            sync_output_dirty: false,
         })
     }
 
@@ -130,6 +137,20 @@ impl PaneSlot {
     /// viewport, or layout already tells us the pane's real dimensions.
     pub(super) fn new() -> Result<Self, AttachError> {
         Self::new_with_size(80, 24)
+    }
+
+    /// Refresh synchronized-output bookkeeping after a VT write. Returns
+    /// `true` while painting must remain suppressed.
+    pub(super) fn update_sync_output(&mut self, now: tokio::time::Instant) -> bool {
+        let active = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
+        if active {
+            self.sync_output_since.get_or_insert(now);
+            self.sync_output_dirty = true;
+        } else {
+            self.sync_output_since = None;
+            self.sync_output_dirty = false;
+        }
+        active
     }
 }
 
@@ -291,6 +312,10 @@ const ESC_FLUSH_IDLE: Duration = Duration::from_millis(10);
 /// startup) is a few dozen frames; the cap only guards against a server
 /// that streams without pause starving the stdin/signal `select!` arms.
 const FRAME_COALESCE_CAP: usize = 1024;
+
+/// Safety valve for an application that enters DEC synchronized output and
+/// never leaves it. Normal TUI transactions last milliseconds.
+const SYNC_OUTPUT_WATCHDOG: Duration = Duration::from_secs(1);
 
 /// The terminal a frame would repaint under normal handling, if any — the
 /// `vt_write` + render pair a coalesced burst can defer to a later same-pane
@@ -577,6 +602,7 @@ async fn run_buffered(
         predict,
         Some(resync.as_ref()),
         Some(writer),
+        true,
     )
     .await
 }
@@ -664,7 +690,7 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
     // Synchronous-sink test seam: no off-loop writer, no resync flag.
-    attach_session(&Dial::uds(socket), target, out, predict, None, None).await
+    attach_session(&Dial::uds(socket), target, out, predict, None, None, false).await
 }
 
 /// Headless one-shot: attach, ingest the session's snapshot + layout, and
@@ -708,7 +734,7 @@ pub async fn run_headless_rendered(
     const SETTLE_DEADLINE: Duration = Duration::from_secs(3);
 
     let mut conn = Connection::connect(socket).await?;
-    let _mode = handshake(&mut conn).await?;
+    let _mode = handshake(&mut conn, None).await?;
     send_attach(&mut conn, target).await?;
     let attached = wait_for_attached(&mut conn).await?;
 
@@ -896,6 +922,7 @@ async fn attach_session<W: super::RenderSink>(
     predict: PredictiveConfig,
     resync: Option<&AtomicBool>,
     mut writer: Option<super::stdout_writer::WriterHandle>,
+    probe_default_colors: bool,
 ) -> Result<(), AttachError> {
     // STAGE 1 — pre-handshake, on the cooked outer terminal.
     //
@@ -909,7 +936,10 @@ async fn attach_session<W: super::RenderSink>(
     // wants for "why was the first paint slow." Lifecycle-rate, so info.
     let handshake_span = tracing::info_span!("attach_handshake", ?target);
     let (attached, output_mode) = async {
-        let mode = handshake(&mut conn).await?;
+        let default_colors = probe_default_colors
+            .then(super::terminal_probe::default_colors)
+            .flatten();
+        let mode = handshake(&mut conn, default_colors).await?;
         send_attach(&mut conn, target).await?;
         let attached = wait_for_attached(&mut conn).await?;
         Ok::<_, AttachError>((attached, mode))
@@ -1088,7 +1118,10 @@ fn should_emit_frame_ack(
 /// [`OutputMode`] the client advertised — a per-connection HELLO
 /// property the caller threads into the session loop to decide whether
 /// `FRAME_ACK` accounting is load-bearing.
-async fn handshake(conn: &mut Connection) -> Result<OutputMode, AttachError> {
+async fn handshake(
+    conn: &mut Connection,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<OutputMode, AttachError> {
     // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
     // `detect_color_support`. The advertised tier feeds the server's
     // per-client `downsample::rewrite_bytes` (SPEC §6.2).
@@ -1097,9 +1130,12 @@ async fn handshake(conn: &mut Connection) -> Result<OutputMode, AttachError> {
     // `MetadataChanged` events for the `phux.tui.layout/v1` key — the
     // reconcile-on-attach path in `main_loop` subscribes to that key
     // and re-renders multi-pane when another client mutates the layout.
-    let client_caps = ClientCapabilities::new()
+    let mut client_caps = ClientCapabilities::new()
         .with_color_support(detect_color_support())
         .with_layers(LayerSet::with(&[Layer::L3]));
+    if let Some(colors) = default_colors {
+        client_caps = client_caps.with_default_colors(colors);
+    }
     conn.send(&FrameKind::Hello {
         client_name: format!("phux-client/{}", env!("CARGO_PKG_VERSION")),
         protocol_major: PROTOCOL_VERSION.major,
@@ -1608,6 +1644,20 @@ async fn main_loop<W: super::RenderSink>(
             None => Box::pin(std::future::pending::<()>()),
         };
 
+        // Synchronized-output transactions intentionally span arbitrary
+        // socket reads, so their deadline is pane state rather than a
+        // per-batch timer. A stuck producer gets one bounded recovery paint;
+        // later bytes re-arm suppression if mode 2026 is still set.
+        let sync_output_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = panes
+            .values()
+            .filter_map(|slot| slot.sync_output_since)
+            .map(|since| since + SYNC_OUTPUT_WATCHDOG)
+            .min()
+            .map_or_else(
+                || Box::pin(std::future::pending::<()>()) as _,
+                |deadline| Box::pin(tokio::time::sleep_until(deadline)) as _,
+            );
+
         tokio::select! {
             biased;
 
@@ -2052,6 +2102,41 @@ async fn main_loop<W: super::RenderSink>(
                         return Ok(LoopExit::Detached);
                     }
                     Err(err) => return Err(err),
+                }
+            }
+
+            // Bound the failure mode of an application that omits `?2026l`.
+            // Expose the latest complete mirror once, then let subsequent
+            // output re-arm the transaction watchdog.
+            () = sync_output_sleep => {
+                let now = tokio::time::Instant::now();
+                let mut expired = false;
+                for slot in panes.values_mut() {
+                    if slot.sync_output_dirty
+                        && slot.sync_output_since.is_some_and(|since| {
+                            now.saturating_duration_since(since) >= SYNC_OUTPUT_WATCHDOG
+                        })
+                    {
+                        slot.sync_output_since = None;
+                        slot.sync_output_dirty = false;
+                        expired = true;
+                    }
+                }
+                if expired
+                    && !overlays.is_active()
+                    && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
+                {
+                    paint_full_frame(
+                        out,
+                        ls,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        Some(&mut sidebar_painter),
+                        &session_name,
+                    );
                 }
             }
 
@@ -3173,7 +3258,7 @@ fn install_panic_hook_once() {
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use phux_protocol::caps::ServerCapabilities;
+    use phux_protocol::caps::{ServerCapabilities, TerminalColor, TerminalDefaultColors};
     use tokio::net::UnixStream;
 
     static TERMINAL_RESET_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -3688,11 +3773,44 @@ mod tests {
                 .expect("server send hello_ok");
         };
 
-        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        let (res, ()) = tokio::join!(handshake(&mut client, None), server_side);
         assert!(
             res.is_ok(),
             "handshake should succeed when HELLO_OK arrives"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_advertises_probed_default_colors() {
+        let colors = TerminalDefaultColors {
+            foreground: TerminalColor { r: 1, g: 2, b: 3 },
+            background: TerminalColor { r: 4, g: 5, b: 6 },
+        };
+        let (client_stream, server_stream) = UnixStream::pair().expect("pair");
+        let mut client = Connection::from_stream(client_stream);
+        let mut server = Connection::from_stream(server_stream);
+
+        let server_side = async move {
+            let FrameKind::Hello { client_caps, .. } =
+                server.recv().await.expect("server recv hello")
+            else {
+                panic!("first client frame must be HELLO");
+            };
+            assert_eq!(client_caps.default_colors, Some(colors));
+            server
+                .send(&FrameKind::HelloOk {
+                    protocol_major: PROTOCOL_VERSION.major,
+                    protocol_minor: PROTOCOL_VERSION.minor,
+                    protocol_patch: PROTOCOL_VERSION.patch,
+                    server_caps: ServerCapabilities::new(),
+                    server_id: Vec::new(),
+                })
+                .await
+                .expect("server send hello_ok");
+        };
+
+        let (res, ()) = tokio::join!(handshake(&mut client, Some(colors)), server_side);
+        assert!(res.is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3713,7 +3831,7 @@ mod tests {
                 .expect("server send detached");
         };
 
-        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        let (res, ()) = tokio::join!(handshake(&mut client, None), server_side);
         match res {
             Err(AttachError::Protocol(msg)) => {
                 assert!(msg.contains("HELLO_OK"));
