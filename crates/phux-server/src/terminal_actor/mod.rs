@@ -55,6 +55,7 @@ use crate::input::{
 };
 use crate::state::{Outbound, TerminalInput};
 
+mod osc133;
 pub mod requests;
 pub mod spawn;
 pub mod sync;
@@ -476,10 +477,16 @@ pub struct TerminalActor {
     /// implicitly on detach.
     event_subscribers: RefCell<Vec<TerminalEventSubscriber>>,
     /// Last known working directory for this pane. Used to detect CWD
-    /// changes and emit `CwdChanged` events. Queried lazily on prompt via
-    /// `process_cwd` (kernel fcntl `F_GETPATH` on macOS, /proc/PID/cwd on Linux).
-    #[allow(dead_code, reason = "reserved for future CwdChanged event emission")]
+    /// changes and emit `CwdChanged` events (phux-foz.4). Queried lazily at
+    /// OSC-133 prompt boundaries and on output-idle via `process_cwd`
+    /// (`proc_pidinfo` on macOS, `/proc/PID/cwd` on Linux).
     last_known_cwd: RefCell<String>,
+    /// phux-foz.4: incremental OSC-133 prompt-mark scanner over the raw PTY
+    /// byte stream. Sources `command_started` / `command_finished` (with the
+    /// `D`-mark exit code libghostty's grid projection does not retain) and
+    /// triggers the prompt-boundary cwd re-query. Stateful so a mark split
+    /// across two PTY read chunks is still recognised.
+    osc133: osc133::Osc133Scanner,
     /// Whether we've already emitted a Dirty event in the current output
     /// burst. Coalesces multiple grid mutations into one event per burst
     /// (matching the `in_output_burst` coalescing for `AgentEvent`).
@@ -854,6 +861,7 @@ impl TerminalActor {
             in_output_burst: false,
             event_subscribers: RefCell::new(Vec::new()),
             last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
+            osc133: osc133::Osc133Scanner::new(),
             dirty_event_emitted_this_burst: false,
             subscribe_to_events_rx,
             unsubscribe_from_events_rx,
@@ -1323,15 +1331,35 @@ impl TerminalActor {
     /// - `OutputReceived` — broadcast to semantic event subscribers.
     /// - `GridChanged` — broadcast to semantic event subscribers.
     ///
-    /// `command_started` / `command_finished` are NOT sourced here — see
-    /// the wire spec (SPEC §7.5.1) and the bead for the deferral: the
-    /// OSC-133 command boundary is not cleanly observable from the actor
-    /// without disturbing the per-consumer state-sync synthesizer's
-    /// dirty-consumption model. The wire tags are allocated so a future
-    /// server can emit them without a wire change.
+    /// `command_started` / `command_finished` (phux-foz.4) — sourced from a
+    /// direct OSC-133 scan of the raw chunk (see [`osc133`]): `C` emits
+    /// `command_started`, `D` emits `command_finished` with the shell's
+    /// exit code when reported. The grid projection cannot yield the
+    /// `D`-mark exit code, so the byte stream is the honest source. Each
+    /// `D` mark is also a prompt boundary: the pane's kernel cwd is
+    /// re-queried there and a change emits `cwd_changed`.
     fn source_events_from_chunk(&mut self, chunk: &[u8]) {
-        if self.event_sink.is_none() {
+        if self.event_sink.is_none() && self.event_subscribers.borrow().is_empty() {
             return;
+        }
+        // OSC-133 prompt marks (phux-foz.4). Scanned before the coalesced
+        // dirty/title sources below so a command boundary and its dirty
+        // burst arrive in stream order.
+        for mark in self.osc133.feed(chunk) {
+            match mark {
+                osc133::PromptMark::CommandStart => {
+                    self.emit_event(AgentEvent::CommandStarted);
+                    self.broadcast_agent_event(&AgentEvent::CommandStarted);
+                }
+                osc133::PromptMark::CommandEnd { exit_code } => {
+                    self.emit_event(AgentEvent::CommandFinished { exit_code });
+                    self.broadcast_agent_event(&AgentEvent::CommandFinished { exit_code });
+                    // The command just finished: the shell is back at a
+                    // prompt and any `cd` has landed. Re-query the kernel
+                    // cwd and announce a change.
+                    self.check_cwd_changed();
+                }
+            }
         }
         if chunk.contains(&0x07) {
             self.emit_event(AgentEvent::Bell);
@@ -1390,7 +1418,35 @@ impl TerminalActor {
             self.dirty_event_emitted_this_burst = false;
             self.emit_event(AgentEvent::Idle);
             self.broadcast_agent_event(&AgentEvent::Idle);
+            // phux-foz.4: an output burst settling is the fallback prompt
+            // boundary for shells without OSC-133 integration — a `cd`
+            // echoes a prompt (burst), settles (idle), and the kernel cwd
+            // re-query below announces the change. One best-effort syscall
+            // per settled burst.
+            self.check_cwd_changed();
         }
+    }
+
+    /// phux-foz.4: re-query the PTY child's kernel cwd and emit
+    /// [`AgentEvent::CwdChanged`] when it differs from the last
+    /// observation. Best-effort and coalesced: no PTY / dead child /
+    /// denied query all yield silence, and an unchanged directory emits
+    /// nothing. Called at OSC-133 `D` prompt boundaries and on output
+    /// settle.
+    fn check_cwd_changed(&self) {
+        let Some(pid) = self.pty.as_ref().and_then(|p| p.child.process_id()) else {
+            return;
+        };
+        let Some(cwd) = crate::cwd_query::process_cwd(pid) else {
+            return;
+        };
+        let cwd = cwd.to_string_lossy().into_owned();
+        if *self.last_known_cwd.borrow() == cwd {
+            return;
+        }
+        self.last_known_cwd.borrow_mut().clone_from(&cwd);
+        self.emit_event(AgentEvent::CwdChanged { cwd: cwd.clone() });
+        self.broadcast_agent_event(&AgentEvent::CwdChanged { cwd });
     }
 
     /// Register a new event subscriber to receive semantic terminal events.
@@ -1419,6 +1475,7 @@ impl TerminalActor {
             let event_type = match event {
                 AgentEvent::CommandStarted => Some(TerminalEventType::CommandStarted),
                 AgentEvent::CommandFinished { .. } => Some(TerminalEventType::CommandEnded),
+                AgentEvent::CwdChanged { .. } => Some(TerminalEventType::CwdChanged),
                 AgentEvent::Dirty => Some(TerminalEventType::GridChanged),
                 AgentEvent::Idle => Some(TerminalEventType::OutputReceived),
                 // Other event types don't map to semantic filters yet
