@@ -223,18 +223,14 @@ fn install_from_git_url_records_resolved_commit() {
 
     let lock = std::fs::read_to_string(home.lockfile()).expect("read lockfile");
     assert!(lock.contains(&format!(r#"rev = "{rev}""#)), "{lock}");
-    // The managed copy is a snapshot, not a working clone.
+    // The managed copy is a snapshot, not a working clone (ADR-0041).
     assert!(
         !home
             .plugins_dir()
             .join("example.install-git")
             .join(".git")
-            .exists()
-            || home
-                .plugins_dir()
-                .join("example.install-git")
-                .join("phux-plugin.toml")
-                .is_file()
+            .exists(),
+        "managed git install must not retain .git"
     );
 }
 

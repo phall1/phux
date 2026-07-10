@@ -409,6 +409,12 @@ fn fetch_into_staging(source: &InstallSource, staging: &Path) -> Result<Option<S
             let mut head = std::process::Command::new("git");
             head.arg("-C").arg(staging).args(["rev-parse", "HEAD"]);
             let stdout = run_tool(head, "git rev-parse HEAD")?;
+            // The managed copy is a snapshot, not a working clone
+            // (ADR-0041): drop the checkout's .git so the installed tree
+            // matches dir installs and cannot be mutated in place.
+            let git_dir = staging.join(".git");
+            std::fs::remove_dir_all(&git_dir)
+                .map_err(|err| format!("could not remove {}: {err}", git_dir.display()))?;
             Ok(Some(stdout.trim().to_owned()))
         }
     }
