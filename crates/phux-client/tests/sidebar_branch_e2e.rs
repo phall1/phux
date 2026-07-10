@@ -10,9 +10,10 @@
 //! path, one process end to end:
 //!
 //! 1. A real `ServerRuntime` on a UDS with PTY-backed attach-create.
-//! 2. `AttachTarget::CreateIfMissing` seeds a pane whose shell `cd`s
-//!    into a fixture git repo and blocks (`read _` keeps the child
-//!    alive on the PTY).
+//! 2. `AttachTarget::CreateIfMissing` seeds a blocked shell (`read _`
+//!    keeps the child alive on the PTY) with the fixture git repo as
+//!    its wire `cwd` (honored server-side since phux-3mtf; the test
+//!    previously worked around the gap with an in-command `cd`).
 //! 3. The server's `ATTACHED` snapshot carries the pane's kernel cwd
 //!    (spawn-time stamp + attach-time `refresh_registry_cwds`, the
 //!    phux-p4vp server fix).
@@ -53,11 +54,6 @@ const SESSION: &str = "branch-e2e";
 
 /// Composite viewport. Sidebar (default width 20, left) + panes.
 const VIEW: (u16, u16) = (80, 24);
-
-/// Overall deadline for the shell's `cd` to land and a re-attach to
-/// observe it. The kernel-cwd refresh runs at attach time, so each retry
-/// is a fresh attach; generous for slow CI.
-const BRANCH_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Spawn a `ServerRuntime` on `socket_path` with PTY-backed
 /// attach-create (`seed_with_pty` mirrors into
@@ -167,47 +163,36 @@ fn sidebar_branch_line_derives_from_attached_snapshot_cwd() {
         let (shutdown_tx, server_handle) = spawn_server(socket_path.clone());
         wait_for_socket(&socket_path).await;
 
-        // The seed shell `cd`s into the fixture repo and blocks on the
-        // PTY. The snapshot cwd must come from the wire (kernel query at
-        // attach time) — nothing client-side knows this path.
-        let target = || AttachTarget::CreateIfMissing {
+        // The seed shell blocks on the PTY inside the fixture repo,
+        // reached via the wire `cwd` (phux-3mtf). The snapshot cwd must
+        // come from the wire — nothing client-side knows this path.
+        //
+        // No retry loop: the cwd is applied at spawn time (portable_pty
+        // chdirs the child before exec), so unlike the pre-3mtf
+        // workaround — an in-command `cd` racing the attach-time kernel
+        // query — the FIRST attach's snapshot already carries the repo
+        // directory (both the spawn-time stamp and the kernel refresh
+        // resolve to it).
+        let target = AttachTarget::CreateIfMissing {
             name: SESSION.to_owned(),
             command: Some(vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
-                format!("cd '{}' && read _", repo_path.display()),
+                "read _".to_owned(),
             ]),
-            cwd: None,
+            cwd: Some(repo_path.display().to_string()),
         };
 
-        // The kernel-cwd refresh runs once per attach, and the first
-        // attach can race the shell's `cd` (it may still be in the spawn
-        // directory). Re-attach until the branch row lands or the
-        // deadline passes — each iteration is the FULL path: server
-        // snapshot -> wire -> client frame handler -> VcsIndex -> paint.
-        let start = Instant::now();
-        // `Some(frame)` = the deadline passed without a branch row; the
-        // frame is kept for the failure dump. `None` = success.
-        let failed: Option<RenderedFrame> = loop {
-            let frame = run_headless_rendered(&socket_path, target(), VIEW.0, VIEW.1)
-                .await
-                .expect("headless rendered attach");
-            if frame_shows_branch(&frame) {
-                break None;
-            }
-            if start.elapsed() >= BRANCH_DEADLINE {
-                break Some(frame);
-            }
-            sleep(Duration::from_millis(150)).await;
-        };
+        let frame = run_headless_rendered(&socket_path, target, VIEW.0, VIEW.1)
+            .await
+            .expect("headless rendered attach");
 
-        if let Some(frame) = failed {
+        if !frame_shows_branch(&frame) {
             let dump: Vec<String> = (0..frame.rows)
                 .map(|r| sidebar_row_text(&frame, r, frame.cols))
                 .collect();
             panic!(
-                "sidebar never showed branch {BRANCH:?} within {BRANCH_DEADLINE:?}; \
-                 last composited frame:\n{}",
+                "sidebar did not show branch {BRANCH:?}; composited frame:\n{}",
                 dump.join("\n"),
             );
         }
