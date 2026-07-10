@@ -393,6 +393,7 @@ A minimal config:
 ```toml
 [defaults]
 shell                 = "/bin/zsh"
+term                  = "xterm-256color"   # TERM advertised to spawned panes
 history-limit         = 50000
 refresh-rate          = 60
 # Sane-default spawn knobs (phux-4li.1):
@@ -451,6 +452,26 @@ section_header = "yellow"
 **Spawn defaults under `[defaults]`** shape what happens when a new pane
 or session comes into being:
 
+- **`term`** (string, default `"xterm-256color"`) is the `TERM` the
+  server advertises to the inner program of every spawned pane. The
+  resolution order for one spawn, lowest to highest: compiled-in
+  baseline → `defaults.term` → the `SPAWN_TERMINAL.term` wire field → a
+  `TERM` entry in `SPAWN_TERMINAL.env` (spec L1 §3.1). The default is
+  deliberately the safe xterm baseline rather than `ghostty`: ghostty's
+  terminfo advertises the `fullkbd` capability, which ncurses apps read
+  as "kitty keyboard protocol available" and push `CSI > N u` — and at
+  least htop then fails to parse the CSI-u key reports it asked for, so
+  its `q` quit dies (phux-7vx). The phux stack itself round-trips the
+  kitty protocol — the phux-0o8 harness
+  (`crates/phux-server/tests/kip_roundtrip.rs`) drives real TUIs through
+  the full wire path under `TERM=ghostty` and proves nvim's CSI-u
+  opt-in works end-to-end, with fzf/less/vim/btop regression-free — but
+  the canonical ncurses reproducer (htop) remains unproven, so the
+  default stays conservative. Set `term = "ghostty"` to opt into
+  ghostty's extended terminfo (sixel, kitty graphics advertisement,
+  ghostty SGR extensions) once the apps you run are known to round-trip
+  it; apps that opt into kitty mode at runtime get it under either
+  default.
 - **`cwd-inheritance`** (string enum, default `"inherit-focused"`)
   controls how a freshly-spawned pane picks its working directory when a
   `SPAWN_TERMINAL` leaves `cwd` unset (an explicit `cwd` always wins).
@@ -1495,6 +1516,7 @@ The shipped defaults, in one place:
 | Setting                       | Default                                  |
 |-------------------------------|------------------------------------------|
 | Shell                         | `$SHELL`, fallback `/bin/sh`             |
+| `TERM` advertised to panes    | `xterm-256color` (phux-7vx/phux-0o8; set `defaults.term = "ghostty"` to opt in) |
 | History limit per pane        | 50 000 lines                             |
 | Pane refresh rate cap         | 60 Hz                                    |
 | Backpressure threshold        | 32 unacked frames                        |
