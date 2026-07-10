@@ -4074,29 +4074,8 @@ mod tests {
     }
 
     // -- phux-npb3: per-pane mouse opt-out + drag double-press hardening ---
-
-    /// A two-pane horizontal split (`tid(1) | tid(2)`), focus on `tid(1)`.
-    fn two_pane_workspace() -> Workspace {
-        use crate::layout::{LayoutNode, LayoutState, WindowState, split_at};
-        let tree = split_at(
-            &LayoutNode::Leaf(tid(1)),
-            &tid(1),
-            &tid(2),
-            SplitDir::Horizontal,
-            0.5,
-        )
-        .expect("two-pane split");
-        Workspace {
-            windows: vec![WindowState {
-                name: "1".to_owned(),
-                state: LayoutState {
-                    tree: Some(tree),
-                    focus: Some(tid(1)),
-                },
-            }],
-            active: 0,
-        }
-    }
+    // (reuses the `two_pane_workspace` fixture defined for the resize-pane
+    // dispatch tests above.)
 
     /// Build a mouse event in outer-viewport cell coordinates.
     fn mev(action: MouseAction, button: MouseButton, x: f64, y: f64) -> MouseEvent {
@@ -4116,7 +4095,7 @@ mod tests {
         use crate::multi_pane::{RouteDecision, route_mouse_event};
         let workspace = two_pane_workspace();
         let ls = workspace.active_window().expect("active window");
-        let content = content_rect((80, 24), false, None);
+        let content = content_rect((80, 24), None, None);
         (0..80u16)
             .find(|&x| {
                 matches!(
@@ -4186,13 +4165,14 @@ mod tests {
                 keybindings: None,
                 theme: &theme,
                 sessions: &[],
+                foreign_layouts: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
-                has_bar: false,
+                bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -4362,13 +4342,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout,
             plugin_actions: &[],
