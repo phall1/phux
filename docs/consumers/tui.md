@@ -290,6 +290,11 @@ phux config show            # print the effective config (defaults + your
                             #   overrides) as canonical TOML
 phux config show --default  # print the shipped defaults verbatim,
                             #   comments and all — the annotated source
+phux config show --layers   # provenance: which layer of the extends
+                            #   stack (ADR-0039) set each effective key;
+                            #   arrays list each element's contributor.
+                            #   --json for the stable document
+                            #   (schema_version 1)
 phux config plugins --json  # print configured plugin manifests as JSON
 phux config agents --json   # print configured plugin agent states as JSON
 phux plugin list --json     # inspect the plugin registry

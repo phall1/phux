@@ -95,7 +95,8 @@ and legibly, not walk an unbounded include graph.
   which constrains free-form key/value tables like `[theme]`.
 - **`phux config show` output grows less obvious.** The effective merge
   now spans N files; `show` still renders the final table but cannot
-  attribute a value to a layer. Attribution is future work.
+  attribute a value to a layer. Attribution shipped as
+  `phux config show --layers` (phux-r82.4).
 - **Diamond dedupe is positional.** A layer included twice keeps its
   first position in the stack; a later re-include cannot re-raise its
   precedence. Simple, but occasionally surprising.
