@@ -32,8 +32,10 @@
 //!
 //! ### Placement
 //!
-//! Defaults to [`Position::Bottom`] per `docs/consumers/tui.md` §8.5. `Position::Top`
-//! is reserved for a future config knob — no TOML key surfaces it today.
+//! Defaults to [`Position::Bottom`] per `docs/consumers/tui.md` §8.5.
+//! `Position::Top` is surfaced by the `[status] position = "top"` config
+//! key (phux-foz.8); the pane content rect shifts down one row to match
+//! (see `crate::attach::paint::content_rect`).
 
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
@@ -52,9 +54,21 @@ pub enum Position {
     /// One row at the very bottom of the outer terminal.
     #[default]
     Bottom,
-    /// One row at the very top of the outer terminal. Reserved for a
-    /// future config knob; no TOML key surfaces it today.
+    /// One row at the very top of the outer terminal. Surfaced by the
+    /// `[status] position = "top"` config key (phux-foz.8).
     Top,
+}
+
+impl From<phux_config::StatusPosition> for Position {
+    /// Map the `[status] position` config value onto the render enum
+    /// (phux-foz.8). The mapping lives at this boundary so `phux-config`
+    /// stays free of render types (ADR-0020).
+    fn from(pos: phux_config::StatusPosition) -> Self {
+        match pos {
+            phux_config::StatusPosition::Bottom => Self::Bottom,
+            phux_config::StatusPosition::Top => Self::Top,
+        }
+    }
 }
 
 /// Inputs the chrome composer needs to paint one frame of the bar.
@@ -472,6 +486,14 @@ impl StatusBarPainter {
             focused_cwd: None,
             last_exit: None,
         }
+    }
+
+    /// Which row this painter reserves ([`Position::Bottom`] or
+    /// [`Position::Top`]). The paint/layout helpers read this so the pane
+    /// content rect and the bar row agree on the reservation (phux-foz.8).
+    #[must_use]
+    pub const fn position(&self) -> Position {
+        self.position
     }
 
     /// Set the configured prefix chord exposed to prefix-aware widgets.
@@ -903,6 +925,27 @@ mod tests {
         p.paint(&mut buf, 10, 24, &ctx_default("hi")).unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("\x1b[1;1H"), "no CUP-to-row-1: {s:?}");
+    }
+
+    /// phux-foz.8: the `[status] position` config value maps 1:1 onto the
+    /// render enum, and the painter reports it back through `position()`
+    /// (the layout helpers key the content-rect shift off that getter).
+    #[test]
+    fn config_position_maps_onto_render_position() {
+        assert_eq!(
+            Position::from(phux_config::StatusPosition::Bottom),
+            Position::Bottom
+        );
+        assert_eq!(
+            Position::from(phux_config::StatusPosition::Top),
+            Position::Top
+        );
+        let cfg = StatusCfg {
+            left: vec![Widget::Bare("session-name".into())],
+            ..Default::default()
+        };
+        let p = StatusBarPainter::new(build_bar(&cfg), Position::Top);
+        assert_eq!(p.position(), Position::Top);
     }
 
     #[test]

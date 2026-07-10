@@ -222,7 +222,7 @@ pub fn row_to_string(row: &[Cell]) -> String {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::schema::{StatusCfg, Widget, WidgetSpec};
+    use crate::schema::{StatusCfg, StatusPosition, Widget, WidgetSpec};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn ctx_with(session: &str) -> WidgetContext<'_> {
@@ -294,6 +294,7 @@ mod tests {
                 "session-name",
                 &[("prefix", toml::Value::String("R:".into()))],
             )],
+            position: StatusPosition::default(),
         };
         let reg = WidgetRegistry::with_builtins();
         let bar = StatusBar::build(&cfg, &reg).unwrap();
@@ -320,6 +321,7 @@ mod tests {
                 "session-name",
                 &[("prefix", toml::Value::String("RIGHT".into()))],
             )],
+            position: StatusPosition::default(),
         };
         let reg = WidgetRegistry::with_builtins();
         let bar = StatusBar::build(&cfg, &reg).unwrap();

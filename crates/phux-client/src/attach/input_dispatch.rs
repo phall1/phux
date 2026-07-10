@@ -77,6 +77,16 @@ pub(super) struct DispatchCtx<'a> {
     /// from this list. Empty until the first snapshot lands (picker then
     /// bells).
     pub sessions: &'a [phux_protocol::wire::info::SessionInfo],
+    /// phux-foz.8: peer sessions' persisted L3 workspaces, fetched by the
+    /// driver right after ATTACH (one `GET_METADATA` per peer on the
+    /// per-session layout key). The `<leader> w` window picker reads this
+    /// to list a foreign session's windows as one-step jump rows
+    /// (`switch-session { name, window }`); a session with no entry (no
+    /// persisted layout, reply not landed yet, or created after attach)
+    /// falls back to the plain "switch to this session" row. Attach-time
+    /// snapshot — peers' later mutations are not tracked (the post-switch
+    /// select degrades to a logged no-op if the index went stale).
+    pub foreign_layouts: &'a HashMap<phux_protocol::ids::SessionId, Workspace>,
     /// phux-4li.20: id of the session this client is attached to. The
     /// picker marks this row and excludes it from selection (switching
     /// to the current session is a no-op). `None` before the first
@@ -116,11 +126,12 @@ pub(super) struct DispatchCtx<'a> {
     /// the per-frame `sidebar` reservation after dispatch so the toggle repaint
     /// reflects the new state. Owned by the driver like `zoomed`.
     pub sidebar_enabled: &'a mut bool,
-    /// Whether the status bar reserves its row this frame (`status_bar.is_some()`
-    /// in the driver). Mouse routing folds this into the same
-    /// `content_rect(viewport, has_bar, sidebar)` the paint path uses so a
-    /// click hit-tests against the rects actually on screen.
-    pub has_bar: bool,
+    /// The status bar's row reservation this frame (`None` when no bar;
+    /// the painter's `Position` otherwise — phux-foz.8). Mouse routing
+    /// folds this into the same `content_rect(viewport, bar, sidebar)` the
+    /// paint path uses so a click hit-tests against the rects actually on
+    /// screen, including the one-row downshift under a top-docked bar.
+    pub bar: Option<crate::render::chrome::status_bar::Position>,
     /// ADR-0035: the in-flight divider drag, or `None` when no divider is
     /// grabbed. A press on a divider cell records the grabbed split here;
     /// subsequent button-motion events re-tune that split's ratio from the
@@ -505,7 +516,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // status bar) and, with a sidebar docked, one strip-width off in x,
             // so it focuses/forwards to the wrong pane. Clicks in the reserved
             // chrome miss every pane rect and become a Miss (dropped).
-            let content = content_rect(ctx.viewport, ctx.has_bar, ctx.sidebar);
+            let content = content_rect(ctx.viewport, ctx.bar, ctx.sidebar);
             // phux-jow6: hit-test against the RENDER layout, not the real
             // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
             // is a single full-content leaf, so any click lands on the
@@ -735,7 +746,7 @@ fn focused_pane_rect(
         ctx.zoomed.as_ref(),
         focused_pane,
         ctx.viewport,
-        ctx.has_bar,
+        ctx.bar,
         ctx.sidebar,
     )
 }
@@ -745,10 +756,10 @@ fn focused_pane_rect_for(
     zoomed: Option<&TerminalId>,
     focused_pane: Option<&TerminalId>,
     viewport: (u16, u16),
-    has_bar: bool,
+    bar: Option<crate::render::chrome::status_bar::Position>,
     sidebar: Option<SidebarReservation>,
 ) -> crate::layout::Rect {
-    let content = content_rect(viewport, has_bar, sidebar);
+    let content = content_rect(viewport, bar, sidebar);
     let Some(fid) = focused_pane else {
         return content;
     };
@@ -778,7 +789,7 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
     // Snapshot the geometry that feeds the resize before borrowing the
     // workspace mutably for the active window.
     let viewport = ctx.viewport;
-    let has_bar = ctx.has_bar;
+    let bar = ctx.bar;
     let sidebar = ctx.sidebar;
     let Some(ls) = ctx.workspace.active_window_mut() else {
         return false;
@@ -790,7 +801,7 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
         grab.axis,
         pointer,
         viewport,
-        has_bar,
+        bar,
         sidebar,
     ) {
         Ok(Some(new_state)) => {
@@ -1010,13 +1021,17 @@ async fn apply_action_effects<W: super::RenderSink>(
     // existing session just attaches to it.
     if let Some(target) = effects.reattach {
         match target {
-            ReattachTarget::Existing(name) if &name == ctx.session_name => {
+            ReattachTarget::Existing { name, .. } if &name == ctx.session_name => {
+                // A `window` arg naming the CURRENT session is not a
+                // switch; the picker never emits it (current-session rows
+                // commit `select-window` directly), so bell rather than
+                // grow a second local window-select path here.
                 tracing::debug!(target_session = %name, "switch-session to current session; no-op");
                 let _ = actions::write_bell(out);
             }
-            ReattachTarget::Existing(name) => {
-                tracing::info!(target_session = %name, "switch-session requested");
-                *ctx.switch_request = Some(ReattachTarget::Existing(name));
+            ReattachTarget::Existing { name, window } => {
+                tracing::info!(target_session = %name, target_window = ?window, "switch-session requested");
+                *ctx.switch_request = Some(ReattachTarget::Existing { name, window });
             }
             ReattachTarget::Create(name) => {
                 tracing::info!(session = %name, "new-session requested");
@@ -1205,7 +1220,18 @@ struct ActionEffects {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReattachTarget {
     /// Switch to an existing session by name (`switch-session`).
-    Existing(String),
+    Existing {
+        /// Target session name.
+        name: String,
+        /// phux-foz.8: window index to select once the target session's
+        /// persisted layout loads — the one-step cross-session window
+        /// pick. `None` keeps the session's own remembered focus. The
+        /// index addresses the target's L3 workspace (the same order its
+        /// own window picker shows); if the layout changed under us and
+        /// the index is out of range, the switch still lands and the
+        /// select is a logged no-op.
+        window: Option<usize>,
+    },
     /// Create — or attach to, if it already exists — a session by name
     /// (`new-session`).
     Create(String),
@@ -1645,11 +1671,17 @@ fn run_action(
             // picker. Sessions are section headers; under the current
             // session each window (`index:name`, pane count) commits
             // `select-window { index }` (the same per-client switch the
-            // numeric prefix bindings use). Other sessions render a single
-            // "switch to session" row committing `switch-session { name }`
-            // — see the builder's doc-comment for the cross-session-window
-            // gap. With no rows at all it bells.
-            let items = window_picker_items(ctx.workspace, ctx.sessions, ctx.focused_session);
+            // numeric prefix bindings use). Other sessions list their own
+            // windows as one-step `switch-session { name, window }` rows
+            // when their persisted layout is cached (phux-foz.8), falling
+            // back to a single "switch to session" row otherwise. With no
+            // rows at all it bells.
+            let items = window_picker_items(
+                ctx.workspace,
+                ctx.sessions,
+                ctx.foreign_layouts,
+                ctx.focused_session,
+            );
             if items.iter().all(SelectItem::is_header) {
                 effects.bell = true;
                 return effects;
@@ -1680,8 +1712,19 @@ fn run_action(
             // `apply_action_effects`, which routes it to the driver's
             // outer re-attach loop (in-process re-attach on the same
             // connection). A bad/absent `name` arg bells.
+            //
+            // phux-foz.8: an optional `window = N` arg makes it the
+            // one-step cross-session window pick — after the re-attach
+            // loads the target's persisted layout, the driver selects
+            // window `N`. The grouped window picker's foreign-session
+            // rows commit this form.
             if let Some(name) = name_arg(resolved) {
-                effects.reattach = Some(ReattachTarget::Existing(name));
+                let window = resolved
+                    .args
+                    .get("window")
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|v| usize::try_from(v).ok());
+                effects.reattach = Some(ReattachTarget::Existing { name, window });
             } else {
                 tracing::warn!(
                     args = ?resolved.args,
@@ -1871,17 +1914,15 @@ fn mouse_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<PaneMous
 ///   the pane count as the dimmed secondary; it commits
 ///   `select-window { index }` — the same per-client window switch the
 ///   numeric prefix bindings use, routed through the single dispatch path.
-/// - Under **other** sessions, the client cannot enumerate individual
-///   windows: the cached session graph (`ctx.sessions`,
-///   [`phux_protocol::wire::info::SessionInfo`]) carries only a
-///   `window_count`, not per-window names, and the live `WindowInfo` list
-///   from the ATTACHED snapshot is not retained client-side. Each such
-///   session therefore renders a single "switch to session" row committing
-///   `switch-session { name }`, which re-attaches this client to that
-///   session (its own window picker then lists its windows). Selecting a
-///   window directly inside a foreign session in one step would need both
-///   the cached foreign `WindowInfo` list and a combined
-///   switch-session-and-select-window flow; see the PR's risk notes.
+/// - Under **other** sessions with a cached persisted layout
+///   (`foreign_layouts`, fetched by the driver at attach — phux-foz.8),
+///   each window renders the same `index:name` row committing
+///   `switch-session { name, window = index }`: one step re-attaches to
+///   that session AND selects the window once its layout loads.
+/// - A foreign session with **no** cached layout (nothing persisted yet,
+///   the GET reply hasn't landed, or the session appeared after attach)
+///   falls back to a single "switch to this session" row committing
+///   `switch-session { name }` — its own picker then lists its windows.
 ///
 /// Headers are non-selectable; a session with no rows beneath it (the
 /// current session with zero windows) still contributes its header, and
@@ -1889,6 +1930,7 @@ fn mouse_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<PaneMous
 fn window_picker_items(
     workspace: &Workspace,
     sessions: &[phux_protocol::wire::info::SessionInfo],
+    foreign_layouts: &HashMap<phux_protocol::ids::SessionId, Workspace>,
     focused: Option<phux_protocol::ids::SessionId>,
 ) -> Vec<SelectItem> {
     // Order sessions: current first, then the rest alphabetically by name
@@ -1912,8 +1954,17 @@ fn window_picker_items(
 
         if is_current {
             items.extend(current_session_window_rows(workspace));
+        } else if let Some(foreign) = foreign_layouts
+            .get(&session.id)
+            .filter(|ws| !ws.windows.is_empty())
+        {
+            // phux-foz.8: the one-step rows. Same `index:name` + pane-count
+            // shape as the current session's rows, but committing
+            // `switch-session { name, window }` so a single Enter lands in
+            // that window of that session.
+            items.extend(foreign_session_window_rows(&session.name, foreign));
         } else {
-            // No per-window detail for a foreign session; offer a switch.
+            // No cached layout for this foreign session; offer a switch.
             let windows = if session.window_count == 1 {
                 "1 window".to_owned()
             } else {
@@ -1972,6 +2023,52 @@ fn current_session_window_rows(workspace: &Workspace) -> Vec<SelectItem> {
                 label,
                 phux_config::keybind::ResolvedAction {
                     action: "select-window".to_owned(),
+                    args,
+                },
+            )
+            .secondary(secondary)
+            .indented()
+        })
+        .collect()
+}
+
+/// phux-foz.8: the indented one-step jump rows for a **foreign** session,
+/// drawn from its cached persisted [`Workspace`] (`DispatchCtx::
+/// foreign_layouts`). Same `index:name` + pane-count shape as
+/// [`current_session_window_rows`], but each row commits
+/// `switch-session { name, window = index }` — the combined
+/// re-attach-and-select the driver resolves after the target's layout
+/// loads.
+fn foreign_session_window_rows(session_name: &str, workspace: &Workspace) -> Vec<SelectItem> {
+    workspace
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let panes = window
+                .state
+                .tree
+                .as_ref()
+                .map_or(0, |tree| crate::layout::leaves(tree).len());
+            let label = format!("{index}:{}", window.name);
+            let secondary = if panes == 1 {
+                "1 pane".to_owned()
+            } else {
+                format!("{panes} panes")
+            };
+            let mut args = std::collections::BTreeMap::new();
+            args.insert(
+                "name".to_owned(),
+                toml::Value::String(session_name.to_owned()),
+            );
+            // Window counts never approach i64::MAX; the lossless path is
+            // the only one that can fire in practice.
+            let idx_i64 = i64::try_from(index).unwrap_or(i64::MAX);
+            args.insert("window".to_owned(), toml::Value::Integer(idx_i64));
+            SelectItem::new(
+                label,
+                phux_config::keybind::ResolvedAction {
+                    action: "switch-session".to_owned(),
                     args,
                 },
             )
@@ -2261,8 +2358,14 @@ mod tests {
             active: 0,
         };
 
-        let split_rect =
-            focused_pane_rect_for(&workspace, None, Some(&tid(2)), (80, 24), true, None);
+        let split_rect = focused_pane_rect_for(
+            &workspace,
+            None,
+            Some(&tid(2)),
+            (80, 24),
+            Some(crate::render::chrome::status_bar::Position::Bottom),
+            None,
+        );
         assert_eq!(split_rect.y, 0);
         assert_eq!(split_rect.h, 23, "status bar row is not copy-mode content");
         assert_eq!(split_rect.x + split_rect.w, 80);
@@ -2286,7 +2389,7 @@ mod tests {
             Some(&zoomed),
             Some(&tid(2)),
             (80, 24),
-            true,
+            Some(crate::render::chrome::status_bar::Position::Bottom),
             None,
         );
         assert_eq!(
@@ -2337,13 +2440,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -2650,13 +2754,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -2699,13 +2804,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -2783,13 +2889,14 @@ mod tests {
                 keybindings: None,
                 theme: &theme,
                 sessions,
+                foreign_layouts: &HashMap::new(),
                 focused_session,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
-                has_bar: false,
+                bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -2937,6 +3044,7 @@ mod tests {
         let items = window_picker_items(
             &workspace,
             &sessions,
+            &HashMap::new(),
             Some(phux_protocol::ids::SessionId::new(1)),
         );
         // Current session ("work") leads, as a header marked "(current)".
@@ -2956,6 +3064,131 @@ mod tests {
             items[scratch + 1].action.args.get("name"),
             Some(&toml::Value::String("scratch".to_owned())),
         );
+        // No cached layout for "scratch" ⇒ no `window` arg (fallback row,
+        // plain switch).
+        assert!(!items[scratch + 1].action.args.contains_key("window"));
+    }
+
+    /// phux-foz.8: with a peer session's persisted layout cached, the
+    /// picker lists that session's windows as one-step rows committing
+    /// `switch-session { name, window }` — same `index:name` + pane-count
+    /// shape as the current session's rows.
+    #[test]
+    fn window_picker_lists_foreign_windows_one_step_when_layout_cached() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("editor".to_owned(), tid(2));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        // scratch's persisted workspace: two windows, "build" and "logs".
+        let mut scratch_ws = Workspace::single(tid(10));
+        scratch_ws.rename_active("build".to_owned());
+        scratch_ws.add_window("logs".to_owned(), tid(11));
+        let mut foreign = HashMap::new();
+        foreign.insert(phux_protocol::ids::SessionId::new(2), scratch_ws);
+
+        let items = window_picker_items(
+            &workspace,
+            &sessions,
+            &foreign,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        let scratch = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        // Two one-step window rows, indented under the header.
+        let row0 = &items[scratch + 1];
+        let row1 = &items[scratch + 2];
+        assert_eq!(row0.label, "0:build");
+        assert_eq!(row0.secondary.as_deref(), Some("1 pane"));
+        assert!(row0.indented);
+        assert_eq!(row0.action.action, "switch-session");
+        assert_eq!(
+            row0.action.args.get("name"),
+            Some(&toml::Value::String("scratch".to_owned())),
+        );
+        assert_eq!(
+            row0.action.args.get("window"),
+            Some(&toml::Value::Integer(0)),
+        );
+        assert_eq!(row1.label, "1:logs");
+        assert_eq!(
+            row1.action.args.get("window"),
+            Some(&toml::Value::Integer(1)),
+        );
+        // No fallback "switch to this session" row when windows list.
+        assert!(
+            items.iter().all(|i| i.label != "switch to this session"),
+            "one-step rows replace the fallback row"
+        );
+    }
+
+    /// phux-foz.8: an empty cached workspace (decoded but windowless) is
+    /// not useful — the picker falls back to the plain switch row.
+    #[test]
+    fn window_picker_empty_foreign_layout_falls_back_to_switch_row() {
+        let workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        let mut foreign = HashMap::new();
+        foreign.insert(phux_protocol::ids::SessionId::new(2), Workspace::default());
+        let items = window_picker_items(
+            &workspace,
+            &sessions,
+            &foreign,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        let scratch = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        assert_eq!(items[scratch + 1].label, "switch to this session");
+        assert!(!items[scratch + 1].action.args.contains_key("window"));
+    }
+
+    /// phux-foz.8: committing a one-step picker row through `run_action`
+    /// yields the combined reattach target — session name AND window index
+    /// — that the driver resolves after the re-attach.
+    #[test]
+    fn one_step_picker_row_commits_switch_session_with_window() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut scratch_ws = Workspace::single(tid(10));
+        scratch_ws.add_window("logs".to_owned(), tid(11));
+        let rows = foreign_session_window_rows("scratch", &scratch_ws);
+        assert_eq!(rows.len(), 2);
+        let effects = run(&rows[1].action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: Some(1),
+            }),
+            "the one-step row carries the target window through dispatch"
+        );
+        // The switch is a re-attach, not a local window change.
+        assert_eq!(workspace.active, 0);
+    }
+
+    /// phux-foz.8: a `switch-session` with a bad `window` arg (negative /
+    /// non-integer) degrades to a plain switch rather than belling — the
+    /// `name` is still valid and honoring it is strictly more useful.
+    #[test]
+    fn switch_session_bad_window_arg_degrades_to_plain_switch() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut args = BTreeMap::new();
+        args.insert("name".to_owned(), toml::Value::String("scratch".to_owned()));
+        args.insert("window".to_owned(), toml::Value::Integer(-3));
+        let action = phux_config::keybind::ResolvedAction {
+            action: "switch-session".to_owned(),
+            args,
+        };
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: None,
+            }),
+        );
+        assert!(!effects.bell);
     }
 
     #[test]
@@ -3057,7 +3290,10 @@ mod tests {
         let effects = run(&items[0].action, &mut workspace);
         assert_eq!(
             effects.reattach,
-            Some(ReattachTarget::Existing("scratch".to_owned())),
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: None,
+            }),
             "committing the picker row requests a switch to that session"
         );
     }
@@ -3128,13 +3364,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3203,13 +3440,14 @@ mod tests {
                 keybindings: None,
                 theme: &theme,
                 sessions: &[],
+                foreign_layouts: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
-                has_bar: false,
+                bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -3357,13 +3595,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3458,13 +3697,14 @@ mod tests {
             keybindings: Some(&cfg.keybindings),
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3602,13 +3842,14 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],

@@ -6,8 +6,9 @@
 //! * `paint_focused_pane` + `paint_bar_after_pane` — incremental path
 //!   for `TERMINAL_OUTPUT` arrivals where only the focused pane changed.
 //!
-//! `pane_viewport` reserves the bottom row for the status bar so pane
-//! Rects never spill into it.
+//! `content_rect` reserves one outer-terminal row for the status bar —
+//! the bottom row by default, the top row under `[status] position =
+//! "top"` (phux-foz.8) — so pane Rects never spill into it.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -18,7 +19,7 @@ use phux_protocol::ids::TerminalId;
 
 use super::driver::PaneSlot;
 use crate::layout::LayoutState;
-use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
+use crate::render::chrome::status_bar::{Position, StatusBarPainter, make_context};
 
 /// Fallback per-cell pixel size for client-side libghostty mirrors.
 ///
@@ -82,11 +83,11 @@ pub(super) fn paint_focused_pane<W: Write>(
     panes: &mut HashMap<TerminalId, PaneSlot>,
     focused: &TerminalId,
     viewport_dims: (u16, u16),
-    has_bar: bool,
+    bar: Option<Position>,
     sidebar: Option<SidebarReservation>,
     force_full: bool,
 ) -> Option<(u16, u16)> {
-    let content = content_rect(viewport_dims, has_bar, sidebar);
+    let content = content_rect(viewport_dims, bar, sidebar);
     let rect = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims)
         .rects
         .get(focused)
@@ -190,8 +191,8 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
         panes = panes.len()
     )
     .entered();
-    let has_bar = status_bar.is_some();
-    let content = content_rect(viewport_dims, has_bar, sidebar);
+    let bar = status_bar.as_ref().map(|p| p.position());
+    let content = content_rect(viewport_dims, bar, sidebar);
     let multi = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims);
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
     let _ = out.write_all(b"\x1b[2J\x1b[H");
@@ -231,7 +232,7 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     // the columns `content_rect` carved out, so it never overlaps pane content.
     if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
         painter.invalidate();
-        let _ = painter.paint(out, sidebar_rect(viewport_dims, has_bar, res));
+        let _ = painter.paint(out, sidebar_rect(viewport_dims, bar, res));
     }
     // The ED2 above cleared the bar row, so force a re-emit even if the
     // bar's content is byte-identical to the previous frame.
@@ -259,7 +260,7 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
             panes,
             fid,
             viewport_dims,
-            has_bar,
+            bar,
             sidebar,
             true,
         )
@@ -387,31 +388,40 @@ pub(super) struct SidebarReservation {
 /// The residual content `Rect` panes tile into after the status bar and the
 /// (optional) sidebar are folded off the outer viewport.
 ///
-/// Height drops one row for the status bar (mirroring [`pane_viewport`]).
-/// Width and x-origin inset for the sidebar: a left strip pushes the origin
-/// right by `width`; a right strip just narrows the width. `width` is clamped
-/// to the viewport so an over-wide sidebar yields a zero-width content rect
-/// rather than underflowing.
+/// Height drops one row for the status bar (mirroring [`pane_viewport`]);
+/// `bar` carries the bar's row so a top-docked bar (phux-foz.8) shifts the
+/// content origin to `y: 1` instead of trimming the bottom. Width and
+/// x-origin inset for the sidebar: a left strip pushes the origin right by
+/// `width`; a right strip just narrows the width. `width` is clamped to the
+/// viewport so an over-wide sidebar yields a zero-width content rect rather
+/// than underflowing.
 ///
-/// CRITICAL: with `sidebar = None` this is exactly `Rect { x: 0, y: 0, w, h }`
-/// where `(w, h) == pane_viewport(outer, has_bar)`, so
-/// `compute_layout_in(ls, content_rect(outer, has_bar, None), outer)` is
+/// CRITICAL: with `sidebar = None` and a bottom (or absent) bar this is
+/// exactly `Rect { x: 0, y: 0, w, h }` where
+/// `(w, h) == pane_viewport(outer, bar.is_some())`, so
+/// `compute_layout_in(ls, content_rect(outer, bar, None), outer)` is
 /// byte-identical to the pre-sidebar `compute_layout(ls, pane_viewport(..))`.
 pub(super) fn content_rect(
     outer: (u16, u16),
-    has_bar: bool,
+    bar: Option<Position>,
     sidebar: Option<SidebarReservation>,
 ) -> crate::layout::Rect {
     let (cols, rows) = outer;
-    let h = if has_bar {
+    let h = if bar.is_some() {
         rows.saturating_sub(1)
     } else {
         rows
     };
+    // phux-foz.8: a top-docked bar pushes the content down one row; the
+    // bottom (default) reservation keeps the pre-knob `y: 0` origin.
+    let y = match bar {
+        Some(Position::Top) => 1,
+        Some(Position::Bottom) | None => 0,
+    };
     sidebar.map_or(
         crate::layout::Rect {
             x: 0,
-            y: 0,
+            y,
             w: cols,
             h,
         },
@@ -422,7 +432,7 @@ pub(super) fn content_rect(
                 SidebarEdge::Left => width,
                 SidebarEdge::Right => 0,
             };
-            crate::layout::Rect { x, y: 0, w, h }
+            crate::layout::Rect { x, y, w, h }
         },
     )
 }
@@ -433,26 +443,27 @@ pub(super) fn content_rect(
 /// strip docks flush to the left or right outer edge per `res.edge`.
 pub(super) fn sidebar_rect(
     outer: (u16, u16),
-    has_bar: bool,
+    bar: Option<Position>,
     res: SidebarReservation,
 ) -> crate::layout::Rect {
     let (cols, rows) = outer;
-    let h = if has_bar {
+    let h = if bar.is_some() {
         rows.saturating_sub(1)
     } else {
         rows
+    };
+    // phux-foz.8: match `content_rect` — a top bar pushes the strip down
+    // one row so it never underlaps the bar row.
+    let y = match bar {
+        Some(Position::Top) => 1,
+        Some(Position::Bottom) | None => 0,
     };
     let width = res.width.min(cols);
     let x = match res.edge {
         SidebarEdge::Left => 0,
         SidebarEdge::Right => cols - width,
     };
-    crate::layout::Rect {
-        x,
-        y: 0,
-        w: width,
-        h,
-    }
+    crate::layout::Rect { x, y, w: width, h }
 }
 
 #[cfg(test)]
@@ -466,20 +477,59 @@ mod tests {
     #[test]
     fn content_rect_disabled_equals_pane_viewport_rect() {
         for outer in [(80u16, 24u16), (1, 1), (200, 50), (0, 0)] {
-            for has_bar in [false, true] {
-                let (vw, vh) = pane_viewport(outer, has_bar);
+            for bar in [None, Some(Position::Bottom)] {
+                let (vw, vh) = pane_viewport(outer, bar.is_some());
                 assert_eq!(
-                    content_rect(outer, has_bar, None),
+                    content_rect(outer, bar, None),
                     crate::layout::Rect {
                         x: 0,
                         y: 0,
                         w: vw,
                         h: vh,
                     },
-                    "outer={outer:?} has_bar={has_bar}"
+                    "outer={outer:?} bar={bar:?}"
                 );
             }
         }
+    }
+
+    /// phux-foz.8: a top-docked bar keeps the one-row height reservation but
+    /// shifts the content origin down to row 1, so panes never underlap the
+    /// bar row. The sidebar inset composes with the shift unchanged.
+    #[test]
+    fn content_rect_top_bar_shifts_origin_down_one_row() {
+        let outer = (80, 24);
+        assert_eq!(
+            content_rect(outer, Some(Position::Top), None),
+            crate::layout::Rect {
+                x: 0,
+                y: 1,
+                w: 80,
+                h: 23,
+            }
+        );
+        // Composes with a left sidebar: x inset and y shift together.
+        assert_eq!(
+            content_rect(
+                outer,
+                Some(Position::Top),
+                Some(SidebarReservation {
+                    edge: SidebarEdge::Left,
+                    width: 20,
+                }),
+            ),
+            crate::layout::Rect {
+                x: 20,
+                y: 1,
+                w: 60,
+                h: 23,
+            }
+        );
+        // Degenerate 1-row viewport: the reservation empties the content
+        // rect without underflowing.
+        let tiny = content_rect((10, 1), Some(Position::Top), None);
+        assert_eq!(tiny.h, 0);
+        assert_eq!(tiny.y, 1);
     }
 
     /// A left sidebar pushes the content origin right by `width` and narrows
@@ -491,7 +541,7 @@ mod tests {
         // No bar, left dock, width 20: x = 20, w = 60, h = 24.
         let left = content_rect(
             outer,
-            false,
+            None,
             Some(SidebarReservation {
                 edge: SidebarEdge::Left,
                 width: 20,
@@ -509,7 +559,7 @@ mod tests {
         // With bar, right dock, width 20: x = 0, w = 60, h = 23.
         let right = content_rect(
             outer,
-            true,
+            Some(Position::Bottom),
             Some(SidebarReservation {
                 edge: SidebarEdge::Right,
                 width: 20,
@@ -528,7 +578,7 @@ mod tests {
         // underflow.
         let huge = content_rect(
             outer,
-            false,
+            None,
             Some(SidebarReservation {
                 edge: SidebarEdge::Left,
                 width: 999,
@@ -545,7 +595,7 @@ mod tests {
         let outer = (80, 24);
         let left = sidebar_rect(
             outer,
-            true,
+            Some(Position::Bottom),
             SidebarReservation {
                 edge: SidebarEdge::Left,
                 width: 20,
@@ -562,11 +612,29 @@ mod tests {
         );
         let right = sidebar_rect(
             outer,
-            false,
+            None,
             SidebarReservation {
                 edge: SidebarEdge::Right,
                 width: 20,
             },
+        );
+        // phux-foz.8: a top bar pushes the strip down one row.
+        let top = sidebar_rect(
+            outer,
+            Some(Position::Top),
+            SidebarReservation {
+                edge: SidebarEdge::Left,
+                width: 20,
+            },
+        );
+        assert_eq!(
+            top,
+            crate::layout::Rect {
+                x: 0,
+                y: 1,
+                w: 20,
+                h: 23,
+            }
         );
         assert_eq!(
             right,
@@ -601,7 +669,6 @@ mod tests {
     }
 
     use crate::attach::driver::PaneSlot;
-    use crate::render::chrome::status_bar::Position;
     use phux_config::widget::WidgetRegistry;
     use phux_config::{StatusCfg, Widget};
     use phux_protocol::wire::info::{LayoutNode, SplitDir};
@@ -889,7 +956,14 @@ mod tests {
         let viewport = (80u16, 24u16);
         let mut out: Vec<u8> = Vec::new();
         let _ = paint_focused_pane(
-            &mut out, &layout, &mut panes, &id, viewport, true, None, false,
+            &mut out,
+            &layout,
+            &mut panes,
+            &id,
+            viewport,
+            Some(Position::Bottom),
+            None,
+            false,
         );
 
         // The mirror grid size is unchanged — the layout rect did not resize it.

@@ -366,7 +366,8 @@ pub struct ParamAction {
 // [status]
 // ---------------------------------------------------------------------------
 
-/// `[status]` table: three slots, each a list of widgets.
+/// `[status]` table: three slots, each a list of widgets, plus the row
+/// the bar reserves (`position`, phux-foz.8).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StatusCfg {
@@ -379,6 +380,25 @@ pub struct StatusCfg {
     /// Right slot.
     #[serde(default)]
     pub right: Vec<Widget>,
+    /// Which outer-terminal row the bar reserves. Default `bottom`
+    /// (per `docs/consumers/tui.md` section 8).
+    #[serde(default)]
+    pub position: StatusPosition,
+}
+
+/// Which row the [`StatusCfg`] bar occupies (phux-foz.8).
+///
+/// Consumed by the TUI's chrome layer, which maps it onto its own
+/// `Position` render enum; kept as plain config data here (ADR-0020:
+/// phux-config carries no render types).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusPosition {
+    /// One row at the very bottom of the outer terminal (default).
+    #[default]
+    Bottom,
+    /// One row at the very top of the outer terminal.
+    Top,
 }
 
 /// `[sidebar]` — the Warp-style window sidebar (phux-4h5a).
