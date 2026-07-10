@@ -428,6 +428,12 @@ pub(crate) const EVENT_TAG_TERMINAL_CONTROL: u8 = 0x08;
 /// optional elapsed counter are additive and an older decoder skips the whole
 /// event by its length prefix as [`AgentEvent::Unknown`].
 pub(crate) const EVENT_TAG_ASKED: u8 = 0x09;
+/// Wire tag for [`AgentEvent::CwdChanged`]. Appended after `ASKED`'s `0x09`
+/// (phux-foz.4): the scoped Terminal's working directory changed. Sourced
+/// server-side from the kernel cwd of the PTY child (the same query the
+/// spawn-inheritance path uses), polled at OSC-133 prompt boundaries and
+/// output-idle and coalesced on change. Backs the `cwd` status widget.
+pub(crate) const EVENT_TAG_CWD_CHANGED: u8 = 0x0a;
 
 // Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
 // spec catalog order so the allocation is stable as later verbs land:
@@ -1361,6 +1367,19 @@ pub enum AgentEvent {
         suggestions: Vec<String>,
         /// Seconds the agent has been waiting, or `None` when not reported.
         elapsed_seconds: Option<u64>,
+    },
+    /// The scoped Terminal's working directory changed (phux-foz.4).
+    ///
+    /// Sourced from the kernel cwd of the PTY child process (the same
+    /// query the spawn-inheritance path uses — `/proc/<pid>/cwd` on Linux,
+    /// `proc_pidinfo` on macOS), polled at OSC-133 prompt boundaries and
+    /// on output-idle, and coalesced: emitted only when the directory
+    /// actually differs from the last observation. Best-effort like every
+    /// event — a consumer seeds from the `ATTACHED` snapshot's
+    /// `TerminalInfo::cwd` (the spawn cwd) and refines from this stream.
+    CwdChanged {
+        /// The Terminal's new working directory (absolute, lossy UTF-8).
+        cwd: String,
     },
     /// An event whose `tag` this protocol version does not recognise.
     ///
@@ -3449,8 +3468,9 @@ pub(super) fn decode_optional_i32(dec: &mut Decoder<'_>) -> Result<Option<i32>, 
 //   PANE_CLOSED      (0x05) → optional<i32> exit_status
 //   DIRTY            (0x06) → empty
 //   IDLE             (0x07) → empty
-//   ASKED            (0x08) → field-tagged TLV: str id, str question,
+//   ASKED            (0x09) → field-tagged TLV: str id, str question,
 //                            repeated str suggestion, optional u64 elapsed_seconds
+//   CWD_CHANGED      (0x0a) → str cwd
 // -----------------------------------------------------------------------------
 
 pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
@@ -3500,6 +3520,10 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
             } => {
                 encode_asked_fields(id, question, suggestions, *elapsed_seconds, &mut body_enc);
                 EVENT_TAG_ASKED
+            }
+            AgentEvent::CwdChanged { cwd } => {
+                body_enc.write_str(cwd);
+                EVENT_TAG_CWD_CHANGED
             }
             // `Unknown` is decoder-only: an encoder that reaches here has
             // round-tripped an event this version did not understand.
@@ -3588,6 +3612,9 @@ pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, De
             }
         }
         EVENT_TAG_ASKED => decode_asked_event(&mut body_dec)?,
+        EVENT_TAG_CWD_CHANGED => AgentEvent::CwdChanged {
+            cwd: body_dec.read_str()?.to_owned(),
+        },
         // Unknown event tag: preserve the body verbatim and skip. This is
         // the forward-compat path — a v0.2.x server may add event kinds an
         // older client does not know.

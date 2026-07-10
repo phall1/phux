@@ -2339,15 +2339,33 @@ fn event_asked_round_trips_minimal() {
 }
 
 #[test]
+fn event_cwd_changed_round_trips() {
+    // phux-foz.4: the `cwd_changed` event (tag 0x0a) carries the pane's new
+    // working directory and MUST round-trip on the EVENT stream.
+    let frame = FrameKind::Event {
+        terminal: Some(TerminalId::local(7)),
+        event: AgentEvent::CwdChanged {
+            cwd: "/Users/phall/workspace/phux".to_string(),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn event_asked_decodes_as_unknown_for_an_older_decoder() {
-    // Forward-compat guard: prove the unknown-event-tag skip path. ASKED is
-    // `0x09` and TERMINAL_CONTROL is `0x08`, so we build an event with tag
-    // `0x0a` — a tag THIS version does not know — carrying an opaque body, and
-    // assert an older-style decoder skips it by its outer length prefix to
-    // `AgentEvent::Unknown` (body preserved verbatim) rather than failing the
-    // frame parse. This pins the additive forward-compat contract.
+    // Forward-compat guard: prove the unknown-event-tag skip path. The
+    // highest allocated tag is CWD_CHANGED at `0x0a` (phux-foz.4), so we
+    // build an event with tag `0x0b` — a tag THIS version does not know —
+    // carrying an opaque body, and assert an older-style decoder skips it by
+    // its outer length prefix to `AgentEvent::Unknown` (body preserved
+    // verbatim) rather than failing the frame parse. This pins the additive
+    // forward-compat contract.
     let body_bytes = [0x01u8, 0x02, 0x03];
-    let mut agent_event = vec![0x0au8]; // a tag this version does not know
+    let mut agent_event = vec![0x0bu8]; // a tag this version does not know
     agent_event.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
     agent_event.extend_from_slice(&body_bytes);
     let mut fields = Vec::new();
@@ -2360,7 +2378,7 @@ fn event_asked_decodes_as_unknown_for_an_older_decoder() {
         FrameKind::Event {
             terminal: None,
             event: AgentEvent::Unknown {
-                tag: 0x0a,
+                tag: 0x0b,
                 body: body_bytes.to_vec(),
             },
         }
