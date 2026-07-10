@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-07-10
 ---
 
 # 0007 — Mosh-class transport semantics and satellite forward-compat
@@ -76,6 +76,20 @@ Date: 2026-05-25
 > Connection migration / 0-RTT remain inherent-but-unexercised — the dialer
 > reconnects on a dropped link (the graceful-upgrade blink) but does not yet
 > actively roam across network changes.
+
+> **Update 2026-07-10 (phux-v45.9):** the **SSH-stdio transport** is built,
+> closing the "still deferred" note above. Realized shape: the dialing side
+> spawns the system `ssh` binary (override: `$PHUX_SSH`) running the new
+> `phux stdio-bridge` verb on the target host, which splices its
+> stdin/stdout byte-transparently to that host's server UDS — the
+> `SshStdioTransport` of Decision §2, as a child-process pipe rather than a
+> trait impl by name. First consumer is the federation hub: `ssh://`
+> satellite endpoints in the registry now dial through it, with the same
+> supervisor/backoff loop as QUIC/WSS links (an exiting ssh child is a
+> dropped link). Auth on this transport is SSH's own; see the ADR-0038
+> addendum for why no bearer token rides the bridged stream. The
+> phux-v45.4 frame relay runs over ssh links exactly as over QUIC/WSS —
+> the bridged stream carries the identical length-prefixed framing.
 
 ## Context
 

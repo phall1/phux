@@ -126,8 +126,9 @@ The Unix socket lives in `$XDG_RUNTIME_DIR/phux/` (typically `/run/user/$UID/` o
 ### Federation trust model (v0.1+, forward-compatible)
 
 **v0.1 (current):** Remote attach is available for single-server consumers over
-WebSocket/TLS and QUIC/TLS. SSH-tunneled stdio remains the federation-shaped
-design fallback, delegating authentication and encryption to SSH when used.
+WebSocket/TLS and QUIC/TLS. SSH-stdio is built (phux-v45.9): the dialing side
+runs `ssh HOST phux stdio-bridge`, delegating authentication and encryption to
+SSH; the remote bridge is an ordinary local UDS client on the target host.
 
 **v0.2+ (future, wire-compatible):** Satellites are phux servers on other machines. The hub authenticates consumers and routes terminal sessions to satellite servers via the `Transport` trait ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)).
 
@@ -147,8 +148,11 @@ Current remote transports:
   cannot set headers); a missing or invalid token is refused with HTTP 403
   before the session exists. Shares the persisted certificate and token store
   with the WebSocket and QUIC paths.
-- **SSH:** Reuses established SSH auth when operators tunnel or wrap the server;
-  inherits SSH's trust model.
+- **SSH-stdio:** `ssh HOST phux stdio-bridge` splices the wire into the
+  server's Unix socket on HOST. Reuses established SSH auth (the hub dials
+  with `BatchMode=yes`, so key material must work non-interactively);
+  inherits SSH's trust model plus the UDS's owner-only local boundary. No
+  bearer token or certificate pin on this transport (ADR-0038 addendum).
 
 ### Remote consumer trust model (opt-in)
 

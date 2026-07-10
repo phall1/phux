@@ -2,7 +2,7 @@
 //!
 //! Single executable, multiple subcommands. By convention:
 //!   phux           → attach to (or auto-spawn) the user's server
-//!   phux server    → run a server in the foreground (for `--stdio`, supervisord, etc.)
+//!   phux server    → run a server in the foreground (supervisord etc.)
 //!   phux attach    → attach to a session by name (phux-9gw.3)
 //!   phux new       → create a new session
 //!   phux ls        → list sessions
@@ -83,7 +83,8 @@ mod help_inventory;
           workspace  Inspect worktrees and save/restore session archives\n\n\
         FEDERATION\n  \
           satellite  Manage configured federation satellites\n  \
-          pair       Mint a pairing token for a remote consumer\n\n\
+          pair       Mint a pairing token for a remote consumer\n  \
+          stdio-bridge  Bridge stdio to the local server socket (SSH-stdio)\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
         grammar works across kill/snapshot/send-keys/run/wait/ask.",
@@ -102,6 +103,8 @@ mod help_inventory;
         \x20                 `phux server --quic`, which overrides it.\n  \
         PHUX_WT_ADDR       Also accept WebTransport (HTTP/3 over QUIC) clients on\n  \
         \x20                 HOST:PORT. Equivalent to `phux server --webtransport`.\n  \
+        PHUX_SSH           OpenSSH-compatible program a federation hub spawns to\n  \
+        \x20                 dial ssh:// satellites (default: `ssh` on PATH).\n  \
         PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
         PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
         RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\
@@ -343,6 +346,7 @@ fn main() -> ExitCode {
         Some(Command::Workspace { action }) => commands::workspace::run_workspace(&action),
         Some(Command::Satellite { action }) => commands::satellite::run_satellite(&action),
         Some(Command::Tag { socket, action }) => commands::tag::run_tag(&action, socket),
+        Some(Command::StdioBridge { socket }) => commands::stdio_bridge::run_stdio_bridge(socket),
         Some(Command::Pair { tokens, cert }) => commands::pair::run_pair(tokens, cert),
         None => commands::attach::run_naked(),
     }

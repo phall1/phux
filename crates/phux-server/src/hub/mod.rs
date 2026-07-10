@@ -12,13 +12,16 @@
 //! The [`link`] submodule is the outbound dialer (phux-v45.3): one link
 //! supervisor per table entry dials, authenticates, and maintains the
 //! hub-to-satellite connection, exposing a per-satellite
-//! [`link::LinkStatus`]. The [`relay`] submodule (phux-v45.4) routes
-//! frames over the established links: satellite-tagged terminal commands,
-//! input, and acks go out with their ids rewritten to the satellite's
-//! `Local` space, and responses/streams come back re-tagged
-//! `Satellite { host, id }` (ADR-0007 §4, opaque relay). A server not
-//! started in hub mode never reads the registry at all (see
-//! [`resolve_hub_table`]).
+//! [`link::LinkStatus`]. `quic://`, `ws://`, and `wss://` endpoints dial
+//! through the shared `phux-dial` stack; `ssh://` endpoints dial through
+//! the SSH-stdio transport (phux-v45.9): the system `ssh` binary running
+//! the remote `phux stdio-bridge` verb. The [`relay`] submodule
+//! (phux-v45.4) routes frames over the established links regardless of
+//! transport: satellite-tagged terminal commands, input, and acks go out
+//! with their ids rewritten to the satellite's `Local` space, and
+//! responses/streams come back re-tagged `Satellite { host, id }`
+//! (ADR-0007 §4, opaque relay). A server not started in hub mode never
+//! reads the registry at all (see [`resolve_hub_table`]).
 
 pub mod link;
 pub mod relay;
@@ -32,11 +35,10 @@ use phux_protocol::ids::SatelliteHost;
 /// A satellite endpoint parsed into its transport scheme.
 ///
 /// The variants mirror the transports the server itself listens on
-/// (QUIC and WebSocket, plain or TLS); `ssh://` is accepted by the
-/// registry CRUD but its dialer is deferred, so it parses to
-/// [`SatelliteTarget::SshDeferred`] rather than being rejected —
-/// a configured-but-not-yet-dialable satellite is visible in the table
-/// instead of failing startup.
+/// (QUIC and WebSocket, plain or TLS) plus the SSH-stdio dial path
+/// (`ssh://`, phux-v45.9), which reaches a satellite by spawning the
+/// system `ssh` binary and bridging the wire over the remote
+/// `phux stdio-bridge` verb's stdin/stdout (ADR-0007).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SatelliteTarget {
     /// `quic://host:port` — QUIC dial target (ADR-0007).
@@ -56,12 +58,22 @@ pub enum SatelliteTarget {
         /// The full endpoint URL as configured.
         url: String,
     },
-    /// `ssh://...` — accepted in the registry, transport not yet built.
-    /// Held so the table reflects configuration; dialing it is deferred
-    /// work (ADR-0007 "Still deferred: SSH-stdio and satellites").
-    SshDeferred {
-        /// The full endpoint URI as configured.
-        endpoint: String,
+    /// `ssh://[user@]host[:port]` — SSH-stdio dial target (phux-v45.9).
+    ///
+    /// The fields become arguments to the system `ssh` binary (never a
+    /// shell), so they are charset-validated at parse time: a host or
+    /// user that could be read as an `ssh` option (leading `-`) or
+    /// smuggle extra argv/config is rejected outright — the hub table
+    /// fails closed at startup rather than at dial time.
+    Ssh {
+        /// Login user (`-l`), if the endpoint named one.
+        user: Option<String>,
+        /// Hostname, IPv4, IPv6 literal (stored without brackets), or an
+        /// `ssh_config` alias.
+        host: String,
+        /// SSH port (`-p`), if the endpoint named one; `None` defers to
+        /// ssh's own default/config resolution.
+        port: Option<u16>,
     },
 }
 
@@ -70,8 +82,22 @@ impl core::fmt::Display for SatelliteTarget {
         match self {
             Self::Quic { host, port } => write!(f, "quic://{host}:{port}"),
             Self::Ws { url } | Self::Wss { url } => f.write_str(url),
-            Self::SshDeferred { endpoint } => {
-                write!(f, "{endpoint} (ssh transport deferred)")
+            Self::Ssh { user, host, port } => {
+                f.write_str("ssh://")?;
+                if let Some(user) = user {
+                    write!(f, "{user}@")?;
+                }
+                // Re-bracket IPv6 literals so the display round-trips as
+                // a valid endpoint URI.
+                if host.contains(':') {
+                    write!(f, "[{host}]")?;
+                } else {
+                    f.write_str(host)?;
+                }
+                if let Some(port) = port {
+                    write!(f, ":{port}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -285,13 +311,99 @@ fn parse_endpoint(endpoint: &str) -> Result<SatelliteTarget, String> {
                 })
             }
         }
-        "ssh" => Ok(SatelliteTarget::SshDeferred {
-            endpoint: endpoint.to_owned(),
-        }),
+        "ssh" => parse_ssh_authority(rest),
         other => Err(format!(
             "unsupported scheme {other:?} (expected quic://, ws://, wss://, or ssh://)"
         )),
     }
+}
+
+/// Parse the authority of an `ssh://[user@]host[:port]` endpoint.
+///
+/// Stricter than the other schemes because the parts become **argv for
+/// the system `ssh` binary** (see [`link`]): a malformed or hostile
+/// authority must fail the hub table (fail closed at startup), never
+/// reach a spawn. No path, no query, no empty parts; user and host are
+/// charset-allowlisted and must not start with `-` (option injection);
+/// IPv6 literals must be bracketed and are stored bare.
+fn parse_ssh_authority(rest: &str) -> Result<SatelliteTarget, String> {
+    if rest.contains('/') {
+        return Err("ssh endpoint must be [user@]host[:port] with no path".to_owned());
+    }
+    let (user, host_port) = match rest.split_once('@') {
+        Some((user, host_port)) => {
+            validate_ssh_word(user, "user")?;
+            (Some(user.to_owned()), host_port)
+        }
+        None => (None, rest),
+    };
+    let (host, port) = if let Some(inner) = host_port.strip_prefix('[') {
+        // Bracketed IPv6 literal: `[::1]` or `[::1]:2222`.
+        let Some((host, after)) = inner.split_once(']') else {
+            return Err("ssh endpoint has an unclosed '[' in its host".to_owned());
+        };
+        if host.is_empty() {
+            return Err("ssh endpoint has an empty host".to_owned());
+        }
+        if !host
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '.' | '%'))
+        {
+            return Err(format!(
+                "ssh endpoint IPv6 host {host:?} has invalid characters"
+            ));
+        }
+        match after.strip_prefix(':') {
+            None if after.is_empty() => (host.to_owned(), None),
+            None => {
+                return Err(format!(
+                    "ssh endpoint has trailing garbage after ']': {after:?}"
+                ));
+            }
+            Some(port) => (host.to_owned(), Some(parse_ssh_port(port)?)),
+        }
+    } else if let Some((host, port)) = host_port.rsplit_once(':') {
+        validate_ssh_word(host, "host")?;
+        (host.to_owned(), Some(parse_ssh_port(port)?))
+    } else {
+        validate_ssh_word(host_port, "host")?;
+        (host_port.to_owned(), None)
+    };
+    Ok(SatelliteTarget::Ssh { user, host, port })
+}
+
+/// Allowlist one `ssh` user or host token: non-empty, `[A-Za-z0-9._-]`
+/// only (hostnames, IPv4 literals, and `ssh_config` aliases all fit),
+/// and never starting with `-` so it cannot be read as an `ssh` option.
+fn validate_ssh_word(word: &str, what: &str) -> Result<(), String> {
+    if word.is_empty() {
+        return Err(format!("ssh endpoint has an empty {what}"));
+    }
+    if word.starts_with('-') {
+        return Err(format!(
+            "ssh endpoint {what} {word:?} must not start with '-'"
+        ));
+    }
+    if let Some(bad) = word
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')))
+    {
+        return Err(format!(
+            "ssh endpoint {what} {word:?} has invalid character {bad:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Parse an explicit ssh port: 1-65535.
+fn parse_ssh_port(port: &str) -> Result<u16, String> {
+    let parsed: u16 = port
+        .parse()
+        .map_err(|_| format!("ssh endpoint port {port:?} is not a valid port number"))?;
+    if parsed == 0 {
+        return Err("ssh endpoint port must be non-zero".to_owned());
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -348,14 +460,73 @@ mod tests {
         );
     }
 
+    // --- ssh endpoint matrix (phux-v45.9) ------------------------------
+
     #[test]
-    fn ssh_maps_to_deferred_not_rejected() {
-        assert_eq!(
-            parse_endpoint("ssh://devbox"),
-            Ok(SatelliteTarget::SshDeferred {
-                endpoint: "ssh://devbox".to_owned(),
-            })
-        );
+    fn parses_ssh_host_user_port_matrix() {
+        let cases: &[(&str, Option<&str>, &str, Option<u16>)] = &[
+            ("ssh://devbox", None, "devbox", None),
+            ("ssh://devbox.example.com", None, "devbox.example.com", None),
+            ("ssh://devbox:2222", None, "devbox", Some(2222)),
+            ("ssh://me@devbox", Some("me"), "devbox", None),
+            ("ssh://me@devbox:2222", Some("me"), "devbox", Some(2222)),
+            (
+                "ssh://build-agent@10.0.0.7:22",
+                Some("build-agent"),
+                "10.0.0.7",
+                Some(22),
+            ),
+            ("ssh://[::1]", None, "::1", None),
+            ("ssh://[::1]:2222", None, "::1", Some(2222)),
+            (
+                "ssh://me@[2001:db8::1]:2222",
+                Some("me"),
+                "2001:db8::1",
+                Some(2222),
+            ),
+        ];
+        for (endpoint, user, host, port) in cases {
+            assert_eq!(
+                parse_endpoint(endpoint),
+                Ok(SatelliteTarget::Ssh {
+                    user: user.map(str::to_owned),
+                    host: (*host).to_owned(),
+                    port: *port,
+                }),
+                "{endpoint}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_ssh_endpoints() {
+        // (endpoint, expected reason fragment)
+        let cases: &[(&str, &str)] = &[
+            ("ssh://devbox/path", "no path"),
+            ("ssh://@devbox", "empty user"),
+            ("ssh://me@", "empty host"),
+            ("ssh://devbox:", "not a valid port"),
+            ("ssh://devbox:0", "non-zero"),
+            ("ssh://devbox:70000", "not a valid port"),
+            ("ssh://devbox:ssh", "not a valid port"),
+            ("ssh://[::1", "unclosed"),
+            ("ssh://[]", "empty host"),
+            ("ssh://[::1]junk", "trailing garbage"),
+            // Unbracketed IPv6 is ambiguous with `host:port`.
+            ("ssh://::1", "invalid character"),
+            // Option injection: a host or user readable as an ssh flag.
+            ("ssh://-oProxyCommand=evil", "must not start with '-'"),
+            ("ssh://-fool@devbox", "must not start with '-'"),
+            // Shell metacharacters and whitespace never reach argv.
+            ("ssh://dev box", "invalid character"),
+            ("ssh://devbox;rm", "invalid character"),
+            ("ssh://me$@devbox", "invalid character"),
+            ("ssh://dev`box`", "invalid character"),
+        ];
+        for (endpoint, fragment) in cases {
+            let err = parse_endpoint(endpoint).unwrap_err();
+            assert!(err.contains(fragment), "{endpoint}: {err}");
+        }
     }
 
     #[test]
@@ -527,14 +698,18 @@ mod tests {
     }
 
     #[test]
-    fn display_is_log_friendly() {
-        assert_eq!(
-            parse_endpoint("quic://devbox:8788").unwrap().to_string(),
-            "quic://devbox:8788"
-        );
-        assert_eq!(
-            parse_endpoint("ssh://devbox").unwrap().to_string(),
-            "ssh://devbox (ssh transport deferred)"
-        );
+    fn display_is_log_friendly_and_round_trips() {
+        for endpoint in [
+            "quic://devbox:8788",
+            "ssh://devbox",
+            "ssh://me@devbox:2222",
+            "ssh://[::1]:2222",
+        ] {
+            assert_eq!(
+                parse_endpoint(endpoint).unwrap().to_string(),
+                endpoint,
+                "{endpoint}"
+            );
+        }
     }
 }

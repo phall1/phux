@@ -147,9 +147,15 @@ The protocol runs over any reliable, ordered, bidirectional, octet-
 oriented byte stream. This version defines these concrete transports:
 
 - **Unix domain socket** of type `SOCK_STREAM`, for local clients.
-- **Standard I/O of an SSH command**, for remote attaches. The client
-  invokes `ssh host phux serve --stdio`; the protocol flows over the
-  remote process's stdin/stdout.
+- **Standard I/O of an SSH command**, for remote attaches and for
+  federation hubs dialing `ssh://` satellites ([ADR-0007]). The dialing
+  side invokes `ssh host phux stdio-bridge`; the remote bridge process
+  splices its stdin/stdout to the server's Unix domain socket on `host`,
+  byte-transparently, so the identical framing flows over the SSH
+  channel. Authentication and confidentiality are SSH's (the
+  transport-responsibility rule below): the bridge holds an ordinary
+  local UDS connection under the socket's owner-only permissions, and no
+  bearer token is carried on this transport.
 - **QUIC** (`quic://host:port`), for remote clients ([ADR-0007]). A
   single bidirectional QUIC stream carries the identical framing — a
   reliable, ordered octet stream, satisfying the property above. TLS 1.3

@@ -107,12 +107,14 @@ phux attach --ws ws://127.0.0.1:8787
 phux attach --ws wss://HOST:PORT --cert-fingerprint FP --token HEX
                               # attach over TLS WebSocket when UDP/QUIC is blocked
 phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
-                              # run server in foreground (incl. for SSH; no --stdio yet)
+                              # run server in foreground
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
                               # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
                               # --hub validates [[satellites]] into the runtime
-                              # satellite table, dials each entry, and routes
-                              # satellite-tagged traffic over the links (§4.2)
+                              # satellite table at startup, dials each enabled
+                              # satellite (quic/wss per ADR-0038; ssh:// over
+                              # `ssh HOST phux stdio-bridge`), and relays
+                              # satellite-tagged frames over the links (§4.2)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
 phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
@@ -135,6 +137,8 @@ phux config agents [--json]   # inspect configured plugin agent states
 phux config run PLUGIN ACTION # execute a configured plugin action
 phux plugin <COMMAND>         # install/update/link/list/toggle/unlink/validate plugins
 phux satellite <COMMAND>      # add/list/remove federation satellites
+phux stdio-bridge             # splice stdin/stdout to the local server socket
+                              # (the remote end of the SSH-stdio transport)
 phux --version                # print version
 phux help [COMMAND]
 ```
@@ -728,11 +732,13 @@ can share one control-plane shape; `enabled` defaults to `true`.
 
 A server started with `phux server --hub` consumes this registry: at
 startup it validates every enabled entry's endpoint by scheme (`quic://`
-requires an explicit `host:port`; `ssh://` is accepted but its transport
-is deferred) into a runtime satellite table keyed by the registry name,
-and refuses to start on a malformed enabled endpoint or a duplicate name.
-Disabled entries are skipped. The hub then dials each table entry with
-capped-backoff reconnect and routes satellite-tagged traffic over the
+requires an explicit `host:port`; `ssh://` takes `[user@]host[:port]`
+with a strict charset — the parts become `ssh` argv, so anything that
+could read as an option or smuggle arguments is rejected) into a runtime
+satellite table keyed by the registry name, and refuses to start on a
+malformed enabled endpoint or a duplicate name. Disabled entries are
+skipped. The hub then dials each table entry with capped exponential
+backoff reconnect and routes satellite-tagged traffic over the
 established links (SPEC L1 §9.1): per-terminal commands, input, and
 subscribed streams relay both directions with ids re-tagged at the hub;
 `phux ls` / `GET_STATE` on the hub aggregates every satellite's terminals
@@ -743,14 +749,26 @@ returning a satellite-tagged id that routes through the hub immediately.
 Without `--hub` the server ignores the registry entirely and refuses
 satellite-tagged traffic with the typed `UnsupportedSatelliteRoute`.
 
-The hub authenticates to a satellite as an ordinary remote consumer
-(ADR-0038): a pairing bearer token plus a TLS certificate-fingerprint pin,
-both produced by running `phux pair` on the satellite host. The token is
-stored **by reference** — `token-file` is an absolute path to an owner-only
-file holding the hex token (the same shape as the server's token store); the
-secret never appears in `config.toml` and is never printed by the lifecycle
-verbs. `cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
-digits, optionally colon-separated; not a secret, stored inline).
+For `quic://` and `wss://` endpoints the hub authenticates to a satellite
+as an ordinary remote consumer (ADR-0038): a pairing bearer token plus a
+TLS certificate-fingerprint pin, both produced by running `phux pair` on
+the satellite host. The token is stored **by reference** — `token-file` is
+an absolute path to an owner-only file holding the hex token (the same
+shape as the server's token store); the secret never appears in
+`config.toml` and is never printed by the lifecycle verbs.
+`cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
+digits, optionally colon-separated; not a secret, stored inline). Routable
+endpoints without both are refused, fail closed, without dialing.
+
+`ssh://` endpoints take neither (ADR-0038 addendum): the hub spawns the
+system `ssh` binary (override with `$PHUX_SSH`) running
+`phux stdio-bridge` on the satellite host, which splices the connection
+into the satellite server's local Unix socket. SSH authenticates and
+encrypts the channel — use `BatchMode`-compatible key material (the hub
+never answers a prompt) — and the bridge inherits the satellite UDS's
+owner-only local trust, so `token-file` / `cert-fingerprint` on an
+`ssh://` entry are ignored. The satellite host needs `phux` on the
+non-interactive `PATH` of the SSH login.
 
 ```toml
 [[satellites]]
