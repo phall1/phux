@@ -121,6 +121,14 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # wide, inflating every `tracing` macro's expansion (and tripping
 # `clippy::cognitive_complexity` in tracing-heavy functions far from here).
 quinn.workspace = true
+# Hub outbound dialer (phux-v45.3, ADR-0038): the hub authenticates to its
+# satellites exactly like a remote consumer, so it dials through the same
+# shared establishment stack (fingerprint-pin TLS, bearer preamble /
+# Authorization header) the attach CLI uses. Internal workspace crate,
+# factored out of phux-client; adds no new external dependencies — quinn,
+# rustls, tokio-tungstenite, sha2, and hex are all already in this crate's
+# graph for the listener side.
+phux-dial.workspace = true
 # Optional: opt-in via the `tokio-console` feature. See the feature
 # comment above for the build incantation.
 console-subscriber = { version = "0.5", optional = true }

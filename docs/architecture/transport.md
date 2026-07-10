@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-06-11
+last-reviewed: 2026-07-09
 ---
 
 # Transport abstraction
@@ -11,8 +11,9 @@ ends, so the same framing rides any byte stream. Three implementations exist
 today: a Unix-domain-socket transport for local server/client links, a
 WebSocket transport that carries the identical codec to browser consumers,
 and a QUIC transport for remote clients. SSH-stdio is designed as an additive
-transport, not yet built. No domain module names a concrete transport type;
-all I/O goes through the trait.
+transport, not yet built. Outbound establishment for the remote transports is
+shared in `phux-dial` (attach loop and hub dialer alike). No domain module
+names a concrete transport type; all I/O goes through the trait.
 
 ---
 
@@ -43,6 +44,18 @@ additive rather than invasive.
 
 All three run the same codec. A consumer that can frame the codec over a
 stream is a peer regardless of which stream it uses.
+
+## Outbound dialing is shared
+
+The client-side establishment of the two remote transports — TLS 1.3 with
+a fingerprint-pinned (or loopback skip-verify) certificate verifier, plus
+the ADR-0031 bearer token — lives in the `phux-dial` crate, consumed by
+both the `phux-client` attach loop and the federation hub's outbound
+link supervisors (`phux server --hub` dials each enabled satellite as an
+ordinary remote consumer per ADR-0038, with reconnect and capped
+exponential backoff; see `phux-server::hub::link`). `phux-dial` stops at
+the established byte stream; framing stays behind the transport trait on
+each end.
 
 ## Transports designed but not built
 

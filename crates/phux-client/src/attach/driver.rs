@@ -604,6 +604,15 @@ impl From<io::Error> for AttachError {
     }
 }
 
+impl From<phux_dial::DialError> for AttachError {
+    fn from(value: phux_dial::DialError) -> Self {
+        match value {
+            phux_dial::DialError::Io(err) => Self::Io(err),
+            phux_dial::DialError::Connect(msg) => Self::Connect(msg),
+        }
+    }
+}
+
 impl From<super::render::RenderError> for AttachError {
     fn from(value: super::render::RenderError) -> Self {
         match value {

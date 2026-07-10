@@ -27,7 +27,8 @@ pub mod terminal_actor;
 pub mod transport;
 pub mod upgrade;
 
-pub use hub::{HubTable, HubTableError, SatelliteTarget};
+pub use hub::link::{HubLinkStatuses, LinkStatus};
+pub use hub::{HubEntry, HubTable, HubTableError, SatelliteTarget};
 pub use id_bridge::IdBridge;
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
 pub use state::{

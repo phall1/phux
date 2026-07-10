@@ -69,25 +69,16 @@ rustix = { version = "0.38", default-features = false, features = ["std", "termi
 # unicode-width, and unicode-segmentation) moved to `phux-client-core` with
 # phux-0fv, so those deps are declared there now, not here.
 serde = { workspace = true }
-# QUIC dialer (phux-y8v6, ADR-0007). The client opens one bidirectional
-# stream to a `phux server --quic` listener and carries the identical
-# length-prefixed frames the UDS path does; quinn is the same stack the
-# server's `QuicListener` uses (workspace dep, identical features).
+# Shared remote-transport establishment (phux-v45.3): QUIC/WS dialing, the
+# fingerprint-pin TLS trust policy, and the bearer-token auth moved to
+# `phux-dial` so the federation hub's outbound dialer (phux-server) reuses
+# the identical stack. The attach modules re-export its types under the
+# established `crate::attach::{quic,ws}` paths.
+phux-dial.workspace = true
+# QUIC stream types (phux-y8v6, ADR-0007): `connection.rs` holds the quinn
+# endpoint/connection/stream halves phux-dial's establishment returns and
+# frames over them; same stack the server's `QuicListener` uses.
 quinn = { workspace = true }
-# rustls client config for the dialer: TLS 1.3 + the phux ALPN, with a
-# fingerprint-pinning (or loopback skip-verify) server-cert verifier. Same
-# `ring` provider and version the server terminates TLS with.
-rustls = { workspace = true }
-# SHA-256 of the server's leaf certificate, to match the out-of-band
-# fingerprint pin shown by `phux pair` (cert_fingerprint parity).
-sha2 = "0.10"
-# Decode the user-supplied pairing token (hex) into the raw bytes the QUIC
-# auth preamble carries.
-hex = "0.4"
-# Native WebSocket fallback over TCP/TLS. This lets the same attach loop use the
-# server's `--listen` transport when UDP/QUIC is blocked.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 [dev-dependencies]
@@ -95,6 +86,12 @@ phux-server.workspace = true
 # QUIC dialer round-trip test (tests/quic_dial.rs) stands up a real quinn
 # server with a self-signed cert in a tempdir and dials it via Connection.
 tempfile.workspace = true
+# The dial round-trip tests build the *server* side of the transports the
+# production code establishes through phux-dial: a rustls TLS 1.3 config
+# for the mock quinn listener and a tungstenite `accept_async` WebSocket
+# peer. Test-only since phux-v45.3 moved the client-side stack to phux-dial.
+rustls = { workspace = true }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 proptest.workspace = true
 insta.workspace = true
 # Test-only: capture the apply-vs-paint child spans `handle_server_frame`

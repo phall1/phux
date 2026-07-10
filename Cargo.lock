@@ -1831,12 +1831,12 @@ version = "0.0.3"
 dependencies = [
  "bytes",
  "futures-util",
- "hex",
  "insta",
  "libghostty-vt",
  "phux-client-core",
  "phux-config",
  "phux-core",
+ "phux-dial",
  "phux-plugin",
  "phux-protocol",
  "phux-server",
@@ -1847,11 +1847,9 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-rustls",
  "tokio-tungstenite",
  "toml",
  "tracing",
@@ -1898,6 +1896,22 @@ dependencies = [
  "serde_json",
  "slotmap",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "phux-dial"
+version = "0.0.3"
+dependencies = [
+ "futures-util",
+ "hex",
+ "phux-protocol",
+ "quinn",
+ "rustls",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1961,6 +1975,7 @@ dependencies = [
  "nix 0.29.0",
  "phux-config",
  "phux-core",
+ "phux-dial",
  "phux-plugin",
  "phux-protocol",
  "portable-pty",

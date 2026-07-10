@@ -1,18 +1,25 @@
-//! Hub-mode satellite table (phux-v45.1, ADR-0007).
+//! Hub-mode satellite table and outbound dialer (phux-v45.1/v45.3, ADR-0007).
 //!
 //! A phux server acting as a federation *hub* consumes the satellite
 //! registry declared in `config.toml` (`[[satellites]]`, see
 //! [`phux_config::SatelliteConfigEntry`]). At startup the hub validates
 //! every **enabled** entry's endpoint URI into a typed
-//! [`SatelliteTarget`] and holds the result as a [`HubTable`] keyed by
-//! [`SatelliteHost`] — the same host token that tags
-//! `TerminalId::Satellite` on the wire (ADR-0007, ADR-0015).
+//! [`SatelliteTarget`] and holds the result — alongside the entry's
+//! ADR-0038 auth material — as a [`HubTable`] keyed by [`SatelliteHost`],
+//! the same host token that tags `TerminalId::Satellite` on the wire
+//! (ADR-0007, ADR-0015).
 //!
-//! Scope: this module is the *validated table only*. No dialing, no
-//! routing — those are phux-v45.3/phux-v45.4. A server not started in
-//! hub mode never reads the registry at all (see [`resolve_hub_table`]).
+//! The [`link`] submodule is the outbound dialer (phux-v45.3): one link
+//! supervisor per table entry dials, authenticates, and maintains the
+//! hub-to-satellite connection, exposing a per-satellite
+//! [`link::LinkStatus`]. No frame routing yet — that is phux-v45.4. A
+//! server not started in hub mode never reads the registry at all (see
+//! [`resolve_hub_table`]).
+
+pub mod link;
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use phux_config::SatelliteConfigEntry;
 use phux_protocol::ids::SatelliteHost;
@@ -91,15 +98,33 @@ pub enum HubTableError {
     },
 }
 
+/// One validated hub-table entry: the parsed dial target plus the
+/// ADR-0038 auth material the dialer needs to authenticate as a remote
+/// consumer (pairing token by file path, certificate-fingerprint pin).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubEntry {
+    /// The endpoint parsed into its transport scheme.
+    pub target: SatelliteTarget,
+    /// Path to the file holding the pairing bearer token (ADR-0038). The
+    /// dialer re-reads it on every attempt so token rotation needs no hub
+    /// restart. `None` is only dialable for loopback endpoints — the link
+    /// planner fails closed on routable ones (see [`link::plan_link`]).
+    pub token_file: Option<PathBuf>,
+    /// SHA-256 fingerprint pin of the satellite's TLS leaf certificate.
+    /// Same fail-closed rule as the token: required for routable
+    /// endpoints, optional for loopback dev.
+    pub cert_fingerprint: Option<String>,
+}
+
 /// The validated, runtime-held satellite table for a hub server.
 ///
 /// Keyed by [`SatelliteHost`]; ordered (`BTreeMap`) so startup logging
 /// and iteration are deterministic. Built once at startup by
-/// [`resolve_hub_table`]; later beads (phux-v45.3/v45.4) will read it to
-/// dial and route.
+/// [`resolve_hub_table`]; the [`link`] supervisors dial from it, and
+/// phux-v45.4 will route over the established links.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HubTable {
-    entries: BTreeMap<SatelliteHost, SatelliteTarget>,
+    entries: BTreeMap<SatelliteHost, HubEntry>,
 }
 
 impl HubTable {
@@ -134,7 +159,14 @@ impl HubTable {
                     reason,
                 }
             })?;
-            entries.insert(SatelliteHost::new(satellite.name.clone()), target);
+            entries.insert(
+                SatelliteHost::new(satellite.name.clone()),
+                HubEntry {
+                    target,
+                    token_file: satellite.token_file.clone(),
+                    cert_fingerprint: satellite.cert_fingerprint.clone(),
+                },
+            );
         }
         Ok(Self { entries })
     }
@@ -151,14 +183,14 @@ impl HubTable {
         self.entries.is_empty()
     }
 
-    /// Look up a satellite's dial target by host token.
+    /// Look up a satellite's validated entry by host token.
     #[must_use]
-    pub fn get(&self, host: &SatelliteHost) -> Option<&SatelliteTarget> {
+    pub fn get(&self, host: &SatelliteHost) -> Option<&HubEntry> {
         self.entries.get(host)
     }
 
     /// Iterate the table in deterministic (name) order.
-    pub fn iter(&self) -> impl Iterator<Item = (&SatelliteHost, &SatelliteTarget)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&SatelliteHost, &HubEntry)> {
         self.entries.iter()
     }
 }
@@ -377,18 +409,32 @@ mod tests {
         .unwrap();
         assert_eq!(table.len(), 2);
         assert_eq!(
-            table.get(&SatelliteHost::new("devbox")),
+            table.get(&SatelliteHost::new("devbox")).map(|e| &e.target),
             Some(&SatelliteTarget::Quic {
                 host: "devbox".to_owned(),
                 port: 8788,
             })
         );
         assert_eq!(
-            table.get(&SatelliteHost::new("sandbox")),
+            table.get(&SatelliteHost::new("sandbox")).map(|e| &e.target),
             Some(&SatelliteTarget::Wss {
                 url: "wss://sandbox:8787".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn table_entries_carry_auth_material() {
+        let mut satellite = entry("devbox", "quic://devbox:8788", true);
+        satellite.token_file = Some(PathBuf::from("/secrets/devbox.token"));
+        satellite.cert_fingerprint = Some("AB:CD".to_owned());
+        let table = HubTable::from_registry(&[satellite]).unwrap();
+        let held = table.get(&SatelliteHost::new("devbox")).unwrap();
+        assert_eq!(
+            held.token_file.as_deref(),
+            Some(std::path::Path::new("/secrets/devbox.token"))
+        );
+        assert_eq!(held.cert_fingerprint.as_deref(), Some("AB:CD"));
     }
 
     #[test]

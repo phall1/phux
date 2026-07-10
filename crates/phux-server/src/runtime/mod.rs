@@ -410,17 +410,19 @@ impl ServerRuntime {
         // Hub mode (phux-v45.1, ADR-0007): validate the satellite registry
         // into the runtime hub table before any I/O, so a malformed registry
         // fails fast — before the socket is bound. Non-hub servers skip the
-        // registry entirely (`resolve_hub_table` returns `Ok(None)`).
-        // No dialing, no routing: the table is held for phux-v45.3/v45.4.
-        if let Some(table) = crate::hub::resolve_hub_table(self.hub, &self.satellites)? {
+        // registry entirely (`resolve_hub_table` returns `Ok(None)`). The
+        // table is kept locally too: the outbound link supervisors
+        // (phux-v45.3) are spawned from it inside the LocalSet below.
+        let hub_table = crate::hub::resolve_hub_table(self.hub, &self.satellites)?;
+        if let Some(table) = &hub_table {
             info!(
                 satellites = table.len(),
                 "hub mode: satellite registry validated"
             );
-            for (host, target) in table.iter() {
-                info!(satellite = %host, target = %target, "hub satellite registered");
+            for (host, entry) in table.iter() {
+                info!(satellite = %host, target = %entry.target, "hub satellite registered");
             }
-            state.with_mut(|s| s.set_hub_table(table));
+            state.with_mut(|s| s.set_hub_table(table.clone()));
         }
 
         // Graceful upgrade (ADR-0032): when resuming, read the handoff blob and
@@ -547,6 +549,20 @@ impl ServerRuntime {
                 if !hook_catalog.is_empty() {
                     let dispatcher = crate::hooks::spawn_hook_dispatcher(hook_catalog);
                     state.with_mut(|s| s.set_hook_dispatcher(dispatcher));
+                }
+
+                // Hub outbound dialer (phux-v45.3, ADR-0038): one link
+                // supervisor per validated satellite, spawned on the
+                // LocalSet as children of the root token. Each dials,
+                // authenticates like a remote consumer, and maintains the
+                // connection with capped exponential backoff; fail-closed
+                // refusals (routable endpoint without token/pin) surface as
+                // a `Refused` status without dialing. The status handle is
+                // mirrored into shared state for future LIST aggregation.
+                if let Some(table) = &hub_table {
+                    let statuses = crate::hub::link::HubLinkStatuses::default();
+                    state.with_mut(|s| s.set_hub_link_statuses(statuses.clone()));
+                    crate::hub::link::spawn_links(table, &statuses, &root_token);
                 }
 
                 // Graceful-upgrade resume (ADR-0032): rebuild the whole
