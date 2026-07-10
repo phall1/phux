@@ -45,7 +45,7 @@ pub mod kitty_replay;
 
 pub use caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
-    KeyboardProtocolSet, Layer, LayerSet,
+    KeyboardProtocolSet, Layer, LayerSet, TerminalColor, TerminalDefaultColors,
 };
 pub use ids::{ClientId, FrameId, GroupId, SatelliteHost, SessionId, TerminalId, WindowId};
 

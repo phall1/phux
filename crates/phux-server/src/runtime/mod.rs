@@ -965,6 +965,7 @@ mod tests {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,
             upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
             pwd: pwd_tx,
@@ -1101,6 +1102,7 @@ mod tests {
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
+                        set_default_colors: mpsc::channel(8).0,
                         screen: screen_tx,
                         upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
                         pwd: pwd_tx,
@@ -1256,6 +1258,7 @@ mod tests {
                 let handle = TerminalHandle {
                     input: input_tx,
                     snapshot: snapshot_tx,
+                    set_default_colors: mpsc::channel(8).0,
                     screen: screen_tx,
                     upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
                     pwd: pwd_tx,
@@ -1463,6 +1466,7 @@ mod tests {
             let handle = TerminalHandle {
                 input: input_tx,
                 snapshot: mpsc::channel(8).0,
+                set_default_colors: mpsc::channel(8).0,
                 screen: mpsc::channel(8).0,
                 upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
                 pwd: mpsc::channel(8).0,

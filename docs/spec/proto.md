@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-06-07
+last-reviewed: 2026-07-09
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -289,6 +289,10 @@ ClientCapabilities {
     rendering: RenderingMode,      // Diff | VtReplay (deprecated; see prose below)
     layers: bitset<Layer>,         // tiers the client speaks (§11; ADR-0015)
     output_mode: OutputMode,       // emitter the consumer wants
+    default_colors: optional<{     // outer terminal OSC 10/11 defaults
+        foreground: rgb24,
+        background: rgb24,
+    }>,
 }
 
 ServerCapabilities {
@@ -313,12 +317,23 @@ triple, and the `ClientCapabilities` blob each ride as a separate tagged
 field. `ClientCapabilities` itself is a nested positional, big-endian,
 length-prefixed sub-record carried inside its field's value, with the field
 order `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
-`output_mode`. A decoder MUST accept every prefix of that caps sub-record and
+`output_mode`, then `default_colors` as a presence byte followed by foreground
+and background `R,G,B` bytes when present. A decoder MUST accept every prefix
+of that caps sub-record and
 apply defaults for missing trailing bytes — a value that stops before
 `output_mode` decodes as `OutputMode::Raw`, and an unknown `output_mode` tag
 also decodes as `Raw` — and an absent `ClientCapabilities` *field* decodes to
 the default capabilities. New capability bytes append after `output_mode`
 inside the same field.
+
+`default_colors` lets an interactive client report the effective foreground
+and background returned by OSC 10/11 on its outer terminal. The server SHOULD
+install them as the canonical Terminal's default colors before parsing child
+output, so OSC 10/11 queries from programs inside phux receive the same answer
+as they do outside it. This affects theme derivation, not SGR downsampling.
+When several clients share a Terminal, the most recently attached client that
+advertises `default_colors` is authoritative; an attach that omits the field
+MUST NOT erase an established palette. Non-TTY and legacy clients omit it.
 
 `output_mode` lets a consumer choose, per connection, which server emitter
 serves its attached Terminals: `Raw` (the default) keeps the byte-faithful

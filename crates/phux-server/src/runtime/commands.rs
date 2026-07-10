@@ -73,11 +73,29 @@ pub fn seed_session_with_pty(
     history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
+    seed_session_with_pty_and_colors(state, name, cmd, history_limit, root_token, None)
+}
+
+/// Palette-seeded variant used when a client's HELLO creates the session.
+pub fn seed_session_with_pty_and_colors(
+    state: &SharedState,
+    name: &str,
+    cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
+    root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
     let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
     let terminal_token = root_token.child_token();
-    let bundle =
-        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
+    let bundle = TerminalActor::build_with_token_and_colors(
+        80,
+        24,
+        Some(cmd),
+        history_limit,
+        terminal_token.clone(),
+        default_colors,
+    )?;
     let crate::terminal_actor::TerminalActorBundle {
         mut actor,
         handle,
@@ -124,14 +142,33 @@ pub fn spawn_pane_with_pty(
     history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
+    spawn_pane_with_pty_and_colors(state, session, cmd, history_limit, root_token, None)
+}
+
+/// Palette-seeded split variant. The spawning client's advertised defaults
+/// are installed before the child PTY is parsed.
+pub fn spawn_pane_with_pty_and_colors(
+    state: &SharedState,
+    session: phux_core::ids::SessionId,
+    cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
+    root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
     let Some(terminal): Option<TerminalId> = state.with_mut(|s| s.add_pane_to_session(session))
     else {
         return Ok(None);
     };
     let terminal_token = root_token.child_token();
-    let bundle =
-        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
+    let bundle = TerminalActor::build_with_token_and_colors(
+        80,
+        24,
+        Some(cmd),
+        history_limit,
+        terminal_token.clone(),
+        default_colors,
+    )?;
     let crate::terminal_actor::TerminalActorBundle {
         mut actor,
         handle,

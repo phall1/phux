@@ -338,8 +338,9 @@ impl<'a> Decoder<'a> {
                         field::hello::CLIENT_CAPS => {
                             // Caps blob: a prefix of color_support, layers,
                             // image_protocols, kbd_protocols, hyperlinks,
-                            // output_mode. A shorter blob (older peer) leaves
-                            // the trailing caps at their defaults.
+                            // output_mode, then an optional palette-present
+                            // byte + foreground/background RGB. A shorter blob
+                            // (older peer) leaves trailing caps at defaults.
                             let mut d = Decoder::new(value);
                             if !d.at_body_end() {
                                 let cs = crate::caps::ColorSupport::from_wire(d.read_u8()?)
@@ -366,6 +367,24 @@ impl<'a> Decoder<'a> {
                             if !d.at_body_end() {
                                 client_caps = client_caps.with_output_mode(
                                     crate::caps::OutputMode::from_wire(d.read_u8()?),
+                                );
+                            }
+                            if !d.at_body_end() && d.read_u8()? != 0 {
+                                let foreground = crate::caps::TerminalColor {
+                                    r: d.read_u8()?,
+                                    g: d.read_u8()?,
+                                    b: d.read_u8()?,
+                                };
+                                let background = crate::caps::TerminalColor {
+                                    r: d.read_u8()?,
+                                    g: d.read_u8()?,
+                                    b: d.read_u8()?,
+                                };
+                                client_caps = client_caps.with_default_colors(
+                                    crate::caps::TerminalDefaultColors {
+                                        foreground,
+                                        background,
+                                    },
                                 );
                             }
                         }

@@ -13,7 +13,8 @@
 use bytes::BytesMut;
 use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
-    KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities,
+    KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities, TerminalColor,
+    TerminalDefaultColors,
 };
 use phux_protocol::ids::{ClientId, GroupId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
@@ -560,6 +561,34 @@ fn hello_round_trip_state_sync_output_mode() {
 }
 
 #[test]
+fn hello_round_trip_outer_terminal_default_colors() {
+    let colors = TerminalDefaultColors {
+        foreground: TerminalColor {
+            r: 0xd0,
+            g: 0xd0,
+            b: 0xd0,
+        },
+        background: TerminalColor {
+            r: 0x12,
+            g: 0x18,
+            b: 0x1b,
+        },
+    };
+    let frame = FrameKind::Hello {
+        client_name: "phux-client".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new().with_default_colors(colors),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn hello_decoder_defaults_output_mode_raw_when_absent() {
     // A CLIENT_CAPS field (id 5) whose blob stops before the output_mode byte
     // (a pre-fseo client encodes only the first five caps bytes) decodes to the
@@ -585,6 +614,7 @@ fn hello_decoder_defaults_output_mode_raw_when_absent() {
         panic!("expected Hello");
     };
     assert_eq!(client_caps.output_mode, OutputMode::Raw);
+    assert_eq!(client_caps.default_colors, None);
 }
 
 #[test]

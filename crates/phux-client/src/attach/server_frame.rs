@@ -332,6 +332,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     v.insert(PaneSlot::new_with_size(cols, rows)?)
                 }
             };
+            let prior_sync_output = slot.sync_output_since;
             // The mirror grid size is server-authoritative: the TERMINAL_SNAPSHOT
             // carries the server's `(cols, rows)` and this is the ONE place that
             // resizes the pane's libghostty Terminal to them (alongside a future
@@ -346,7 +347,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // apply-vs-paint split as the `TerminalOutput` hot path. The
             // `bytes` field counts the replay payload (the dominant term;
             // scrollback is rarely present in the live attach path).
-            {
+            let sync_output_active = {
                 let _apply =
                     tracing::debug_span!("vt_apply", bytes = vt_replay_bytes.len()).entered();
                 // Apply scrollback first (if any), then the visible-state
@@ -355,7 +356,19 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     slot.terminal.vt_write(&sb);
                 }
                 slot.terminal.vt_write(&vt_replay_bytes);
-            }
+                let active = slot.update_sync_output(tokio::time::Instant::now());
+                if let Some(since) = prior_sync_output {
+                    // A resync snapshot may reset DEC modes in its preamble,
+                    // but it must not tear down a raw transaction that began
+                    // before the snapshot. The matching live `?2026l` remains
+                    // the publication barrier.
+                    slot.sync_output_since = Some(since);
+                    slot.sync_output_dirty = true;
+                    true
+                } else {
+                    active
+                }
+            };
             if is_focused {
                 // A fresh snapshot replaces the world — drop any
                 // outstanding predictions and resize the predict layer.
@@ -370,7 +383,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // excludes `TerminalSnapshot` from the defer mask), so here
                 // `defer_paint` is set only by the headless ingest path, which
                 // suppresses all VT emission and composes once at the end.
-                if overlay_active || defer_paint {
+                if overlay_active || defer_paint || sync_output_active {
                     let _ = overlay;
                 } else {
                     // phux-flywheel: the snapshot paint trigger, timed
@@ -422,7 +435,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         false,
                     );
                 }
-            } else if !overlay_active && !defer_paint {
+            } else if !overlay_active && !defer_paint && !sync_output_active {
                 // phux-paer: a NON-focused pane's snapshot must paint into its
                 // rect — the symmetric counterpart to the `TerminalOutput`
                 // non-focused branch (phux-2x9). Without it, re-attaching to a
@@ -528,7 +541,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // (`paint_full_frame`, opened inside `paint_focused_pane`)
             // separately. Debug-level + a lazy `bytes` field ⇒ free at the
             // default `phux=info` filter.
-            {
+            let sync_output_active = {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
                 let has_bar = status_bar.is_some();
                 let content = content_rect(viewport_dims, has_bar, sidebar);
@@ -557,7 +570,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     }
                 };
                 slot.terminal.vt_write(&bytes);
-            }
+                slot.update_sync_output(tokio::time::Instant::now())
+            };
             // The libghostty mirror is now warm even for panes in a
             // non-active window (off-screen invariant). Rendering only
             // applies to the active window's composition; if there's no
@@ -575,6 +589,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             if is_focused
                 && !overlay_active
                 && !defer_paint
+                && !sync_output_active
                 && let Some(fid) = focused_pane.as_ref()
             {
                 // phux-flywheel: the paint trigger — render the focused
@@ -662,7 +677,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // no-op (incremental-paint win).
                     false,
                 );
-            } else if !overlay_active && !defer_paint {
+            } else if !overlay_active && !defer_paint && !sync_output_active {
                 // phux-2x9: repaint a NON-focused pane on its own output
                 // so it isn't visually frozen — output (and the
                 // post-split/resize resync snapshot) must show without
@@ -1569,6 +1584,81 @@ mod tests {
             .read_grapheme_at(&slot.terminal, 0, 99)
             .expect("read cell");
         assert_eq!(cell, Some('X'));
+    }
+
+    #[test]
+    fn synchronized_output_paints_only_after_end_across_frames() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out = Vec::new();
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026hhalf-drawn",
+        );
+        assert!(out.is_empty(), "begin/body must update only the mirror");
+        assert!(panes[&pane].sync_output_since.is_some());
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b" frame\x1b[?2026l",
+        );
+        assert!(!out.is_empty(), "end must publish the completed frame");
+        assert!(panes[&pane].sync_output_since.is_none());
+        let printable = strip_csi(&String::from_utf8_lossy(&out));
+        assert!(printable.contains("half-drawn frame"));
+    }
+
+    #[test]
+    fn snapshot_during_synchronized_output_waits_for_live_end() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out = Vec::new();
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026hpartial",
+        );
+        drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            80,
+            24,
+            b"\x1b[!p\x1b[2J\x1b[Hstable snapshot",
+            (80, 24),
+        );
+        assert!(out.is_empty(), "snapshot must not break the transaction");
+        assert!(panes[&pane].sync_output_since.is_some());
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026l",
+        );
+        assert!(!out.is_empty());
+        assert!(panes[&pane].sync_output_since.is_none());
     }
 
     /// phux-ih39: the ATTACHED graph already carries per-pane dimensions.

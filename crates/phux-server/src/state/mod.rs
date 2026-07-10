@@ -387,6 +387,7 @@ mod tests {
         TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,
             upgrade: upgrade_tx,
             pwd: pwd_tx,

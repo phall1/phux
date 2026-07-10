@@ -45,6 +45,7 @@ pub mod render;
 pub mod rendered;
 pub mod server_frame;
 mod stdout_writer;
+mod terminal_probe;
 pub mod ws;
 
 pub use connection::{CertTrust, Dial, QuicDial, WsDial};
