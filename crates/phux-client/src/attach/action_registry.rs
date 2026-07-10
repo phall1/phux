@@ -241,6 +241,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "agent-fleet",
+        category: Category::View,
+        description: "Agent fleet: every pane's agent, state, and attention",
+        args: &[],
+    },
+    ActionSpec {
         name: "show-help",
         category: Category::View,
         description: "Show the keybindings help overlay",
@@ -439,6 +445,9 @@ mod tests {
         // `plugin-pane` (phux-r82.7) is the same shape for manifest
         // `[[panes]]`: dynamic rows from `palette_items`'s `plugin_panes`
         // parameter, carrying `plugin`/`pane` args.
+        // `focus-pane` (phux-foz.7) is parameterized by `window`/`pane`
+        // coordinates only the agent-fleet dashboard's rows can supply —
+        // the select-window precedent.
         const PALETTE_EXEMPT: &[&str] = &[
             "command-palette",
             "select-window",
@@ -446,6 +455,7 @@ mod tests {
             "copy-mode",
             "plugin-action",
             "plugin-pane",
+            "focus-pane",
         ];
 
         // The two source-of-truth sets must be identical: the registry's

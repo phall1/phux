@@ -263,6 +263,15 @@ impl VcsIndex {
         let cwd = self.cwds.get(pane)?.clone();
         self.cache.branch_for(&cwd)
     }
+
+    /// phux-foz.7: the VCS branch label for an explicit `cwd` (the fleet
+    /// dashboard resolves against the pane's *live* cwd — snapshot-seeded
+    /// and refined by `cwd_changed` events — rather than this index's
+    /// snapshot-only map). Same memoized `.git/HEAD` read, never a
+    /// subprocess.
+    pub(super) fn branch_for_cwd(&mut self, cwd: &str) -> Option<String> {
+        self.cache.branch_for(std::path::Path::new(cwd))
+    }
 }
 
 /// Refresh the window strip AND the supervisory badge together (ADR-0033),
@@ -1972,6 +1981,8 @@ async fn main_loop<W: super::RenderSink>(
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
+                    agent_meta: &agent_meta.records,
+                    vcs: &mut vcs,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2210,6 +2221,17 @@ async fn main_loop<W: super::RenderSink>(
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
                         }
+                        // phux-foz.7: did this frame change anything the
+                        // agent-fleet dashboard projects (agent records,
+                        // asked/lease state, layout/pane set, session
+                        // graph)? Captured before the move-y outcome
+                        // fields are consumed below; acted on after the
+                        // per-frame handling (the fleet refresh block).
+                        let fleet_dirty = outcome.chrome_dirty
+                            || outcome.agent_meta_changed
+                            || outcome.layout_replaced
+                            || outcome.reflow_panes
+                            || outcome.sessions.is_some();
                         // ADR-0040: the frame may have added panes
                         // (TerminalSpawned, a peer's layout broadcast) or
                         // removed them (TerminalClosed). Re-sweep so every
@@ -2485,6 +2507,42 @@ async fn main_loop<W: super::RenderSink>(
                                 &session_name,
                             );
                         }
+                        // phux-foz.7: the agent-fleet dashboard is a live
+                        // projection — while it is open, a frame that
+                        // changed fleet-projected state (an agent record,
+                        // an ADR-0035 Asked, a pane spawn/close, a layout
+                        // or session-graph change) rebuilds its rows in
+                        // place and repaints the overlay layer. Push, not
+                        // poll: nothing runs when no such frame lands, and
+                        // `refresh_items` is a no-op unless a live fleet
+                        // list is actually in the overlay stack.
+                        if fleet_dirty && overlays.is_active() {
+                            let meta =
+                                super::fleet::collect_pane_meta(&panes, &mut vcs);
+                            let items = super::fleet::fleet_items(
+                                &workspace,
+                                &sessions,
+                                focused_session,
+                                &agent_meta.records,
+                                &meta,
+                            );
+                            if overlays.refresh_items(super::fleet::FLEET_LIVE_KEY, &items)
+                            {
+                                paint_active_overlay(
+                                    out,
+                                    &overlays,
+                                    &workspace,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    zoomed.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    &session_name,
+                                    &theme,
+                                );
+                            }
+                        }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -2577,6 +2635,8 @@ async fn main_loop<W: super::RenderSink>(
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
+                    agent_meta: &agent_meta.records,
+                    vcs: &mut vcs,
                 };
                 let layout_changed = dispatch_input_events(
                     out,

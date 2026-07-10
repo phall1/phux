@@ -78,6 +78,11 @@ pub struct SelectItem {
     /// Indent the label one level (two spaces) so selectable rows nest
     /// visually under the [`SelectKind::Header`] above them.
     pub indented: bool,
+    /// phux-foz.7: paint this row's label in the theme's `attention` slot
+    /// (the same amber the sidebar tab marker and status-bar asked hint
+    /// use), so a row that needs the user reads hot at a glance. The
+    /// selected row keeps plain reverse-video regardless.
+    pub attention: bool,
 }
 
 impl SelectItem {
@@ -91,6 +96,7 @@ impl SelectItem {
             action,
             kind: SelectKind::Item,
             indented: false,
+            attention: false,
         }
     }
 
@@ -108,6 +114,7 @@ impl SelectItem {
             },
             kind: SelectKind::Header,
             indented: false,
+            attention: false,
         }
     }
 
@@ -123,6 +130,15 @@ impl SelectItem {
     #[must_use]
     pub const fn indented(mut self) -> Self {
         self.indented = true;
+        self
+    }
+
+    /// Mark this row as needing the user's attention: its label paints in
+    /// the theme's `attention` slot (phux-foz.7, the agent-fleet rows with
+    /// a pending ADR-0035 question or a declared high-attention state).
+    #[must_use]
+    pub const fn attention(mut self) -> Self {
+        self.attention = true;
         self
     }
 
@@ -162,6 +178,13 @@ pub struct SelectList {
     /// Color slots snapshotted from the active [`Theme`] at construction
     /// (captured, not borrowed, so the overlay stays `'static`).
     theme: Theme,
+    /// phux-foz.7: when `Some`, this list is a *live* projection of shared
+    /// client state and accepts in-place row refreshes tagged with the same
+    /// key via [`RenderOverlay::refresh_items`] (the agent-fleet dashboard
+    /// re-rendering as agent events land while it is open). `None` (the
+    /// default) makes the list a static snapshot — palette and pickers —
+    /// that ignores every refresh.
+    live_key: Option<&'static str>,
 }
 
 impl SelectList {
@@ -176,12 +199,38 @@ impl SelectList {
             query: String::new(),
             selected: 0,
             theme: *theme,
+            live_key: None,
         };
         // The first row may be a header (grouped pickers always open on
         // one); start the cursor on the first selectable row instead.
         let indices = list.filtered_indices();
         list.snap_to_selectable(&indices);
         list
+    }
+
+    /// Opt this list into live row refreshes tagged `key` (phux-foz.7).
+    ///
+    /// See [`RenderOverlay::refresh_items`]: the driver rebuilds the rows
+    /// from fresh client state when a relevant server frame lands and hands
+    /// them to the overlay stack; only a list constructed with the matching
+    /// key replaces its rows (query and selection position are preserved).
+    #[must_use]
+    pub const fn with_live_key(mut self, key: &'static str) -> Self {
+        self.live_key = Some(key);
+        self
+    }
+
+    /// Replace the full item set in place, keeping the current query and
+    /// clamping/snapping the selection so it stays on a selectable row.
+    ///
+    /// The selection is positional: it stays at the same visible row index
+    /// where possible, which keeps the cursor stable when a refresh only
+    /// changes row *content* (an agent flipping working -> blocked) and
+    /// degrades gracefully when rows appear or disappear.
+    pub fn replace_items(&mut self, items: Vec<SelectItem>) {
+        self.items = items;
+        let indices = self.filtered_indices();
+        self.snap_to_selectable(&indices);
     }
 
     /// Indices of items to display for the current query.
@@ -361,8 +410,19 @@ impl SelectList {
                 Style::default().add_modifier(Modifier::REVERSED),
             ))
         } else {
+            // phux-foz.7: an attention row's label paints in the theme's
+            // `attention` slot (bold) — the same semantic amber the sidebar
+            // marker and status-bar asked hint use — so "needs you" rows
+            // stand out inside the fleet dashboard without a new slot.
+            let label_style = if item.attention {
+                Style::default()
+                    .fg(self.theme.attention)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.action)
+            };
             Line::from(vec![
-                Span::styled(label, Style::default().fg(self.theme.action)),
+                Span::styled(label, label_style),
                 Span::raw(padding),
                 Span::styled(secondary, Style::default().fg(self.theme.dim)),
             ])
@@ -385,6 +445,16 @@ impl RenderOverlay for SelectList {
 
     fn bounds(&self, area: Rect) -> Option<Rect> {
         Some(Self::modal_area(area))
+    }
+
+    fn refresh_items(&mut self, key: &str, items: &[SelectItem]) -> bool {
+        // Only a live list whose key matches accepts the refresh; the
+        // palette and the static pickers (no live key) ignore it.
+        if self.live_key != Some(key) {
+            return false;
+        }
+        self.replace_items(items.to_vec());
+        true
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -833,6 +903,133 @@ mod tests {
         sl.handle_key(&press(PhysicalKey::J, Some("j")));
         assert_eq!(sl.query, "dj");
         assert_eq!(sl.filtered_indices().len(), 0);
+    }
+
+    // ---------- phux-foz.7: live refresh + attention rows ----------
+
+    #[test]
+    fn refresh_items_requires_a_matching_live_key() {
+        let fresh = vec![SelectItem::new("fresh-row", action("fresh"))];
+        // A static list (no live key) ignores every refresh.
+        let mut sl = sample();
+        assert!(!sl.refresh_items("agent-fleet", &fresh));
+        assert_eq!(sl.items.len(), 3, "static list keeps its rows");
+        // A live list with a different key ignores it too.
+        let mut sl = sample().with_live_key("other-live-list");
+        assert!(!sl.refresh_items("agent-fleet", &fresh));
+        // The matching key replaces the rows in place.
+        let mut sl = sample().with_live_key("agent-fleet");
+        assert!(sl.refresh_items("agent-fleet", &fresh));
+        assert_eq!(sl.items.len(), 1);
+        assert_eq!(sl.items[0].label, "fresh-row");
+    }
+
+    #[test]
+    fn replace_items_preserves_query_and_reclamps_selection() {
+        let mut sl = sample().with_live_key("agent-fleet");
+        // Filter down to "detach" and select it.
+        for ch in ['d', 'e', 't'] {
+            sl.handle_key(&press(PhysicalKey::A, Some(&ch.to_string())));
+        }
+        assert_eq!(sl.filtered_indices().len(), 1);
+        // A refresh lands: the row set changes but the query survives, so
+        // the user's in-progress filter keeps applying to the new rows.
+        sl.refresh_items(
+            "agent-fleet",
+            &[
+                SelectItem::new("detach-me", action("a")),
+                SelectItem::new("other", action("b")),
+            ],
+        );
+        assert_eq!(sl.query, "det", "query survives the refresh");
+        let idx = sl.filtered_indices();
+        assert_eq!(idx.len(), 1);
+        assert_eq!(sl.items[idx[0]].label, "detach-me");
+        // Enter commits against the refreshed rows without a stale index.
+        let cmd = sl.handle_key(&press(PhysicalKey::Enter, None));
+        let OverlayCommand::Commit(a) = cmd else {
+            panic!("expected Commit, got {cmd:?}");
+        };
+        assert_eq!(a.action, "a");
+    }
+
+    #[test]
+    fn replace_items_snaps_selection_off_a_vanished_row() {
+        let mut sl = sample().with_live_key("agent-fleet");
+        // Select the last row (index 2), then shrink the list to one row.
+        sl.handle_key(&ctrl(PhysicalKey::N));
+        sl.handle_key(&ctrl(PhysicalKey::N));
+        sl.refresh_items("agent-fleet", &[SelectItem::new("only", action("only"))]);
+        let cmd = sl.handle_key(&press(PhysicalKey::Enter, None));
+        let OverlayCommand::Commit(a) = cmd else {
+            panic!("expected Commit after reclamp, got {cmd:?}");
+        };
+        assert_eq!(a.action, "only");
+    }
+
+    #[test]
+    fn attention_row_label_paints_in_the_attention_slot() {
+        let theme = Theme::default();
+        let sl = SelectList::new(
+            "agent fleet",
+            vec![
+                SelectItem::new("calm", action("a")),
+                SelectItem::new("needs-you", action("b")).attention(),
+            ],
+            &theme,
+        );
+        // Unselected rows: attention label takes the theme's attention
+        // color; a calm row keeps the action slot.
+        let calm = sl.item_line(&sl.items[0], false, 40);
+        assert_eq!(calm.spans[0].style.fg, Some(theme.action));
+        let hot = sl.item_line(&sl.items[1], false, 40);
+        assert_eq!(hot.spans[0].style.fg, Some(theme.attention));
+        assert!(hot.spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // The selected row stays plain reverse-video regardless.
+        let selected = sl.item_line(&sl.items[1], true, 40);
+        assert!(
+            selected.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(selected.spans[0].style.fg, None);
+    }
+
+    /// phux-foz.7: pin the painted fleet-shaped layout (session header,
+    /// glyphed rows, attention row present) so layout churn is caught —
+    /// the same snapshot pattern as `render_byte_output_is_stable`.
+    #[test]
+    fn render_fleet_shaped_list_is_stable() {
+        let items = vec![
+            SelectItem::header("work (current)"),
+            SelectItem::new("! 0:main.0 reviewer [claude]", action("focus-pane"))
+                .secondary("blocked - main")
+                .indented()
+                .attention(),
+            SelectItem::new("* 0:main.1 builder", action("focus-pane"))
+                .secondary("working - main")
+                .indented(),
+            SelectItem::header("scratch"),
+            SelectItem::new("switch to this session", action("switch-session"))
+                .secondary("2 windows")
+                .indented(),
+        ];
+        let sl =
+            SelectList::new("agent fleet", items, &Theme::default()).with_live_key("agent-fleet");
+        let area = Rect::new(0, 0, 52, 14);
+        let mut buf = Buffer::empty(area);
+        sl.render(area, &mut buf);
+        let mut out = String::new();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        insta::assert_snapshot!(out);
     }
 
     #[test]

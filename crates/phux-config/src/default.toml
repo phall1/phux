@@ -185,6 +185,17 @@ which-key-delay-ms = 600
 "s" = "session-picker"
 "a" = "session-picker"
 
+#   A — agent-fleet dashboard (`agent-fleet`, phux-foz.7). One filterable
+#       overlay over the whole fleet: every pane of the attached session
+#       grouped under session headers, labelled with its agent's name/kind
+#       (the structured phux.agent/v1 record when declared, the OSC title
+#       otherwise), a state glyph (! blocked, * working, - idle, . done,
+#       ? unknown), an attention highlight for panes waiting on you, and
+#       the pane's branch or cwd. Enter focuses the chosen pane; rows for
+#       other sessions hop there via `switch-session` (their panes list
+#       once attached). The rows refresh live as agent events arrive.
+"A" = "agent-fleet"
+
 # New session: C (Shift-c) creates a fresh session and switches this
 # client to it in-process. With no name it opens a prompt; the session
 # picker (s, alias a) also offers a "+ New session" row. (Lowercase c is

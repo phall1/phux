@@ -820,7 +820,7 @@ Recognized slots:
 | `shadow`         | `#1c1c26`   | Modal drop shadow                         |
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
-| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint) |
+| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint, fleet-dashboard hot rows) |
 
 ```toml
 [theme]
@@ -893,6 +893,7 @@ line of config. The shipped prefix-table bindings:
 | `C-a 0`–`9` | `select-window` by index                                |
 | `C-a w`     | `window-picker` (grouped: sessions, windows nested)      |
 | `C-a s`     | `session-picker` (`C-a a` is a kept alias)               |
+| `C-a A`     | `agent-fleet` (fleet dashboard — §5.6)                   |
 | `C-a C`     | `new-session`                                            |
 | `C-a ,`     | `rename-window` (interactive prompt)                     |
 | `C-a $`     | `rename-session` (interactive prompt)                    |
@@ -929,6 +930,8 @@ test, so this table cannot silently drift):
 | `command-palette` | (opens the palette — §5.5)                  |
 | `window-picker`   | (opens the grouped window picker — §5.5)    |
 | `session-picker`  | (opens the session picker — §5.5)           |
+| `agent-fleet`     | (opens the fleet dashboard — §5.6)          |
+| `focus-pane`      | `window`, `pane` — focus a pane by window index + DFS leaf ordinal (committed by fleet rows, §5.6) |
 | `new-session`     | `name?` (bare opens an interactive prompt)  |
 | `switch-session`  | `name`, `window?` (re-attaches this client; `window` selects that window index after the switch — §5.5) |
 | `detach`          |                                             |
@@ -1009,7 +1012,45 @@ foreign layouts are an attach-time snapshot: if a peer rearranged its
 windows since, the jump still switches sessions and the stale window
 index degrades to the session's own remembered focus (logged, no bell).
 
-### 5.6 Which-key popup
+### 5.6 Agent-fleet dashboard
+
+The **agent-fleet dashboard** (`agent-fleet`, `C-a A`) is the one-view
+answer to "which of my agents needs me?": a filterable overlay listing
+every pane of the attached session, grouped under session headers, each
+row carrying
+
+- the agent's **name and kind** from its structured `phux.agent/v1`
+  record (ADR-0040) when one is declared, falling back to the pane's OSC
+  title otherwise (the record outranks the title);
+- a one-character **state glyph**: `!` blocked, `*` working, `-` idle,
+  `.` done, `?` unknown (also used when no record is declared);
+- an **attention highlight** — the row's label paints in the theme's
+  `attention` slot (§4.4, the same amber as the sidebar marker and the
+  status-bar asked hint) when the pane has a pending ADR-0035 question or
+  its record declares/derives high attention;
+- the pane's **branch or cwd** in the dimmed right column, next to the
+  state word (`working - main`), from the same client-local `.git/HEAD`
+  read as the sidebar branch line.
+
+Enter focuses the chosen pane: current-session rows commit
+`focus-pane { window, pane }` through the single dispatch path (switching
+the window and moving its client-local focus in one step). Rows under
+**other** sessions commit `switch-session { name }` — the attach stream
+describes foreign sessions only as name + window count (their pane
+topology, agent records, and asked flags are per-attached-session state),
+so the dashboard hops there first; reopen it after the in-process
+re-attach to see that fleet's panes. An attach-stream view across all
+sessions at once would need new wire surface and is deliberately out of
+scope (ADR-0030: this overlay is a pure client-side projection).
+
+The dashboard is **live**: while it is open, agent-record changes, asked
+events, pane spawns/closes, and layout changes rebuild its rows in place
+(push, not poll) without disturbing your query or selection. It shares
+the palette's fuzzy filter, `j`/`k` / arrows / `C-n`/`C-p` navigation,
+and Esc dismissal. No new theme slots: headers use `section_header`,
+secondaries `dim`, hot rows `attention`.
+
+### 5.7 Which-key popup
 
 Press the prefix and hesitate, and a small floating panel lists every
 prefix-table continuation — key on the left, action on the right — built
@@ -1564,7 +1605,7 @@ Beyond that, two client-rendered overlays teach the bindings themselves
 - Press `C-a` and *hesitate*, and the **which-key popup** appears after
   `which-key-delay-ms` (default 600 ms), listing the available prefix
   continuations. Any key dismisses it and executes normally; Esc cancels
-  the prefix. See §5.6.
+  the prefix. See §5.7.
 
 ---
 
