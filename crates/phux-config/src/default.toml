@@ -25,7 +25,12 @@
 # advertisement, so ncurses TUIs like htop keep working. A per-spawn
 # SPAWN_TERMINAL env override for TERM always wins over this. Set to
 # "ghostty" to opt into ghostty's extended terminfo once your apps are
-# known to round-trip the kitty keyboard protocol.
+# known to round-trip the kitty keyboard protocol. Evidence so far
+# (phux-0o8 harness, crates/phux-server/tests/kip_roundtrip.rs): the phux
+# stack round-trips the kitty protocol end-to-end — nvim opts in via
+# CSI-u and works, fzf/less/vim/btop are regression-free under
+# TERM=ghostty — but htop, the app that broke last time, is unproven, so
+# the shipped default stays conservative.
 term = "xterm-256color"
 history-limit = 50000
 refresh-rate = 60

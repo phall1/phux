@@ -93,7 +93,12 @@ pub struct DefaultsCfg {
     /// phux-ign). Set explicitly to e.g. `"ghostty"` to opt into ghostty's
     /// extended terminfo (sixel, kitty-graphics advertisement, the ghostty
     /// SGR extensions) once the host's apps are known to round-trip the
-    /// kitty keyboard protocol.
+    /// kitty keyboard protocol. The phux-0o8 harness
+    /// (`crates/phux-server/tests/kip_roundtrip.rs`) records the evidence
+    /// per app: nvim's CSI-u opt-in round-trips end-to-end and
+    /// fzf/less/vim/btop are regression-free under `TERM=ghostty`, but
+    /// htop — the phux-7vx regression app — is unproven, so the shipped
+    /// default stays conservative.
     ///
     /// A per-spawn `SPAWN_TERMINAL.env` entry for `TERM` always wins over
     /// this default — the wire frame is authoritative for the Terminal it

@@ -105,9 +105,19 @@ pub(crate) fn exit_status_to_wire(status: &portable_pty::ExitStatus) -> Option<i
 /// Trade-off: phux loses ghostty-specific terminfo extensions (sixel,
 /// kitty graphics caps as advertised by terminfo, the ghostty-specific
 /// SGR colour extensions). Those features are still reachable when the
-/// app opts in directly. When phux's own input/output layer fully
-/// supports the kitty keyboard protocol round-trip, revert this to
-/// `ghostty` (or expose a config switch).
+/// app opts in directly, and both opt-in paths exist today: the
+/// server-wide `defaults.term` config knob and the per-spawn
+/// `SPAWN_TERMINAL.term` wire field (phux-ign).
+///
+/// Status of the "revert to ghostty" question (phux-0o8): the
+/// round-trip harness in `tests/kip_roundtrip.rs` proves the phux stack
+/// itself round-trips the kitty keyboard protocol end-to-end under
+/// `TERM=ghostty` (nvim opts in via CSI-u and every key still lands;
+/// fzf/less/vim/btop are regression-free) — but htop, the canonical
+/// phux-7vx reproducer, was not available to test and is exactly the
+/// ncurses-`fullkbd` shape that broke before. The default therefore
+/// deliberately stays `xterm-256color`; flip it only with fresh htop
+/// evidence (the harness has an `#[ignore]`d htop probe ready).
 #[must_use]
 pub fn default_shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
