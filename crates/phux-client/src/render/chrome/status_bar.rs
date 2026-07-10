@@ -1261,6 +1261,99 @@ mod tests {
         );
     }
 
+    /// phux-foz.4: the painter-owned focused-pane cwd feeds the `cwd`
+    /// widget; setting it invalidates the cache and the widget renders
+    /// the (home-uncollapsed here) directory.
+    #[test]
+    fn painter_renders_focused_cwd_through_cwd_widget() {
+        let cfg = StatusCfg {
+            left: vec![spec("cwd", &[])],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert!(
+            !strip_csi(&String::from_utf8_lossy(&buf)).contains("/tmp"),
+            "unknown cwd renders nothing"
+        );
+        assert!(p.set_focused_cwd(Some("/tmp/project".to_owned())));
+        assert!(
+            !p.set_focused_cwd(Some("/tmp/project".to_owned())),
+            "unchanged cwd reports no change"
+        );
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("/tmp/project"),
+            "cwd must render; got {visible:?}"
+        );
+    }
+
+    /// phux-foz.4: the painter-owned last-exit feeds the `exit` widget.
+    /// Clearing it (a code-less command_finished) blanks the widget again.
+    #[test]
+    fn painter_renders_last_exit_through_exit_widget() {
+        let cfg = StatusCfg {
+            right: vec![spec(
+                "exit",
+                &[("format", toml::Value::String("rc={code}".into()))],
+            )],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        assert!(p.set_last_exit(Some(127)));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("rc=127"),
+            "exit code must render; got {visible:?}"
+        );
+        assert!(p.set_last_exit(None), "clearing reports a change");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            !visible.contains("rc="),
+            "cleared exit must blank the widget; got {visible:?}"
+        );
+    }
+
+    /// phux-r82.6: the painter exposes its bar's exec feeds so the driver
+    /// can spawn runners; pushing output through a feed shows up on the
+    /// next paint (the async-refresh-into-cached-state contract).
+    #[test]
+    fn painter_exec_feed_output_lands_on_the_bar() {
+        let cfg = StatusCfg {
+            left: vec![spec(
+                "exec",
+                &[("command", toml::Value::String("battery.sh".into()))],
+            )],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        let feeds = p.exec_feeds();
+        assert_eq!(feeds.len(), 1, "one exec widget => one feed");
+
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert!(
+            !strip_csi(&String::from_utf8_lossy(&buf)).contains("BAT"),
+            "no output before the first run"
+        );
+
+        feeds[0].apply_output("BAT 87%\n");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("BAT 87%"),
+            "cached exec output must render; got {visible:?}"
+        );
+    }
+
     #[test]
     fn render_status_bar_function_emits_cup_and_text() {
         // Direct test of the stateless function form.
