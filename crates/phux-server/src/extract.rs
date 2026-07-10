@@ -13,10 +13,21 @@
 //! This module is the copy/extract primitive the selection/copy-mode epic
 //! (`phux-abi`) needs: it converts that `(Region, row, char-col, len)` span
 //! into a [`libghostty_vt::selection::Selection`] over the terminal's grid
-//! and formats just that range back to plain text via the sound one-shot
-//! The `Terminal::format_selection_alloc` path. It is deliberately *only* the
-//! find-coords -> selection -> text extraction primitive: no copy-mode UI,
+//! and formats just that range back out via the sound one-shot
+//! `Terminal::format_selection_alloc` path. It is deliberately *only* the
+//! find-coords -> selection -> extraction primitive: no copy-mode UI,
 //! no cursor, no highlight.
+//!
+//! # Output formats
+//!
+//! The format-generic entry is [`extract`]: it takes a libghostty
+//! [`Format`] (re-exported here) and returns raw bytes, because two of the
+//! three formats are not plain text — [`Format::Plain`] strips styling,
+//! [`Format::Vt`] preserves colors/styles/URLs as escape sequences, and
+//! [`Format::Html`] emits inline-styled markup. The `String`-returning
+//! helpers ([`extract_match`], [`extract_match_in_scope`],
+//! [`extract_active_span`], [`extract_history_span`]) are thin plain-text
+//! conveniences over the same span extraction.
 //!
 //! # The wide-glyph translation (the crux, 3sy's caveat)
 //!
@@ -61,11 +72,14 @@
 
 use libghostty_vt::{
     Terminal as GhosttyTerminal,
-    fmt::Format,
     screen::CellWide,
     selection::{FormatOptions, Selection},
     terminal::{Point, PointCoordinate},
 };
+
+// Re-exported so consumers of the bridge can name the output format without
+// reaching into libghostty_vt themselves.
+pub use libghostty_vt::fmt::Format;
 
 use crate::grid::{GRAPHEME_INLINE, SynthesisError};
 use crate::search::{Match, Region, Scope};
@@ -114,6 +128,54 @@ pub enum ExtractError {
         /// The current retained-history row count.
         total: u32,
     },
+}
+
+/// Extract the content under a [`Match`] in the requested output [`Format`],
+/// as raw bytes.
+///
+/// This is the format-generic entry of the find -> selection -> format bridge
+/// (`phux-97w`): the match's `char`-offset span is translated to grid columns
+/// (wide-glyph aware), a linear [`Selection`] is built from two
+/// `Terminal::grid_ref` endpoints, and the range is formatted via the sound
+/// one-shot `Terminal::format_selection_alloc` path in the chosen format:
+///
+/// - [`Format::Plain`]: the text with styling stripped (what
+///   [`extract_match_in_scope`] returns as a `String`).
+/// - [`Format::Vt`]: VT escape sequences preserving colors, styles, and URLs.
+/// - [`Format::Html`]: markup with inline styles.
+///
+/// Bytes, not `String`, because the VT form deliberately contains escape
+/// sequences and neither non-plain form is guaranteed to please a strict
+/// UTF-8 round-trip through lossy conversion; callers that want plain text
+/// should use the `String` helpers.
+///
+/// A [`Region::Scrollback`] match resolves its history row against `scope`
+/// exactly as [`extract_match_in_scope`] does (and shares its
+/// [`ExtractError::HistoryRowOutOfRange`] staleness check).
+pub fn extract(
+    terminal: &GhosttyTerminal<'_, '_>,
+    m: Match,
+    scope: Scope,
+    format: Format,
+) -> Result<Vec<u8>, ExtractError> {
+    match m.region {
+        Region::Viewport => {
+            let y = u32::try_from(m.row).unwrap_or(u32::MAX);
+            extract_span(terminal, PointSpace::Active, y, m.col, m.len, format)
+                .map_err(|e| restamp_viewport(e, m.row))
+        }
+        Region::Scrollback => {
+            let history_y = resolve_history_y(terminal, m.row, scope)?;
+            extract_span(
+                terminal,
+                PointSpace::History,
+                history_y,
+                m.col,
+                m.len,
+                format,
+            )
+        }
+    }
 }
 
 /// Extract the text under a [`Region::Viewport`] [`Match`] as a plain-text
@@ -168,16 +230,7 @@ pub fn extract_match_in_scope(
     m: Match,
     scope: Scope,
 ) -> Result<String, ExtractError> {
-    match m.region {
-        Region::Viewport => {
-            let y = u32::try_from(m.row).unwrap_or(u32::MAX);
-            extract_active_span(terminal, y, m.col, m.len).map_err(|e| restamp_viewport(e, m.row))
-        }
-        Region::Scrollback => {
-            let history_y = resolve_history_y(terminal, m.row, scope)?;
-            extract_history_span(terminal, history_y, m.col, m.len)
-        }
-    }
+    extract(terminal, m, scope, Format::Plain).map(into_lossy_string)
 }
 
 /// Re-stamp a [`ExtractError::ColumnOutOfRange`] from active-space inputs back
@@ -237,7 +290,15 @@ pub fn extract_active_span(
     char_col: usize,
     len: usize,
 ) -> Result<String, ExtractError> {
-    extract_span(terminal, PointSpace::Active, y, char_col, len)
+    extract_span(
+        terminal,
+        PointSpace::Active,
+        y,
+        char_col,
+        len,
+        Format::Plain,
+    )
+    .map(into_lossy_string)
 }
 
 /// Extract the text spanning `len` `char`s starting at `char` column
@@ -260,7 +321,25 @@ pub fn extract_history_span(
     char_col: usize,
     len: usize,
 ) -> Result<String, ExtractError> {
-    extract_span(terminal, PointSpace::History, history_y, char_col, len)
+    extract_span(
+        terminal,
+        PointSpace::History,
+        history_y,
+        char_col,
+        len,
+        Format::Plain,
+    )
+    .map(into_lossy_string)
+}
+
+/// Decode formatted bytes for the plain-text `String` helpers, consuming the
+/// buffer without a copy in the (expected) valid-UTF-8 case.
+///
+/// Only ever applied to [`Format::Plain`] output, where non-UTF-8 can only
+/// arise from grid corruption; the lossy replacement character is the honest
+/// rendering of that, matching the projection layer's behavior.
+fn into_lossy_string(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// Which point space [`extract_span`] walks/selects in. Active is the live
@@ -292,7 +371,7 @@ impl PointSpace {
 
 /// Shared span extraction over a [`PointSpace`]: translate `char` offsets to
 /// grid columns, build a linear [`Selection`] over `[start_x, end_x]` of row
-/// `y`, and format it with the sound one-shot
+/// `y`, and format it in `format` with the sound one-shot
 /// [`libghostty_vt::Terminal::format_selection_alloc`] API.
 fn extract_span(
     terminal: &GhosttyTerminal<'_, '_>,
@@ -300,9 +379,10 @@ fn extract_span(
     y: u32,
     char_col: usize,
     len: usize,
-) -> Result<String, ExtractError> {
+    format: Format,
+) -> Result<Vec<u8>, ExtractError> {
     if len == 0 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
 
     let out_of_range = |col: usize| ExtractError::ColumnOutOfRange {
@@ -328,15 +408,15 @@ fn extract_span(
         .format_selection_alloc(
             None,
             FormatOptions::new()
-                .with_emit_format(Format::Plain)
+                .with_emit_format(format)
                 .with_trim(true)
                 .with_unwrap(true)
                 .with_selection(&selection),
         )?
         // A non-empty selection over real cells yields Some(bytes); None
         // means libghostty saw nothing selectable in the range, which we
-        // surface as the empty string rather than an error.
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        // surface as empty output rather than an error.
+        .map(|b| b.to_vec())
         .unwrap_or_default();
     Ok(bytes)
 }
@@ -664,6 +744,110 @@ mod tests {
             err,
             ExtractError::HistoryRowOutOfRange { total: 3, .. }
         ));
+    }
+
+    #[test]
+    fn extract_plain_format_matches_string_helper() {
+        // The format-generic entry with Format::Plain yields the same bytes
+        // the plain-text String helper decodes, on both region paths.
+        let mut t = fresh(20, 2);
+        t.vt_write(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\necho bravo");
+        let hits = search_oneshot(&t, "bravo", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 2, "one history hit, one viewport hit");
+        for m in hits {
+            let bytes = extract(&t, m, Scope::AllHistory, Format::Plain).expect("extract bytes");
+            let text = extract_match_in_scope(&t, m, Scope::AllHistory).expect("extract text");
+            assert_eq!(bytes, text.as_bytes(), "plain bytes == String helper");
+            assert_eq!(text, "bravo");
+        }
+    }
+
+    #[test]
+    fn vt_format_preserves_styling_plain_strips_it() {
+        // A red-SGR needle: Plain extraction strips the styling to the bare
+        // text; Vt extraction preserves it as escape sequences carrying the
+        // same text.
+        let mut t = fresh(40, 3);
+        t.vt_write(b"ok \x1b[31mALERT\x1b[0m done");
+        let hits = search_oneshot(&t, "ALERT", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1, "styling must not perturb the projected text");
+        let m = hits[0];
+
+        let plain = extract(&t, m, Scope::AllHistory, Format::Plain).expect("plain");
+        assert_eq!(plain, b"ALERT", "plain output is the bare text");
+
+        let vt = extract(&t, m, Scope::AllHistory, Format::Vt).expect("vt");
+        let vt_text = String::from_utf8_lossy(&vt).into_owned();
+        assert!(
+            vt_text.contains("ALERT"),
+            "VT output carries the text, got {vt_text:?}",
+        );
+        assert!(
+            vt.contains(&0x1b),
+            "VT output preserves escape sequences for the red SGR, got {vt_text:?}",
+        );
+        assert!(
+            vt_text.contains("31"),
+            "the red (SGR 31) styling survives VT extraction, got {vt_text:?}",
+        );
+    }
+
+    #[test]
+    fn html_format_emits_markup() {
+        let mut t = fresh(40, 3);
+        t.vt_write(b"pre \x1b[1mBOLDBIT\x1b[0m post");
+        let hits = search_oneshot(&t, "BOLDBIT", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1);
+        let html = extract(&t, hits[0], Scope::AllHistory, Format::Html).expect("html");
+        let html_text = String::from_utf8_lossy(&html).into_owned();
+        assert!(
+            html_text.contains("BOLDBIT"),
+            "HTML output carries the text, got {html_text:?}",
+        );
+        assert!(
+            html_text.contains('<'),
+            "HTML output is markup, got {html_text:?}",
+        );
+    }
+
+    #[test]
+    fn vt_format_on_scrollback_match() {
+        // The format dimension composes with the history-y resolution: a
+        // styled needle pushed into scrollback extracts as VT (text + escape
+        // bytes) through the same scope-threaded path as plain text.
+        let mut t = fresh(20, 2);
+        t.vt_write(b"\x1b[32mGREENLIT\x1b[0m\r\nfiller-a\r\nfiller-b");
+        let hits = search_oneshot(&t, "GREENLIT", Scope::AllHistory, vp()).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].region,
+            Region::Scrollback,
+            "the styled row is history"
+        );
+        let vt = extract(&t, hits[0], Scope::AllHistory, Format::Vt).expect("vt");
+        let vt_text = String::from_utf8_lossy(&vt).into_owned();
+        assert!(vt_text.contains("GREENLIT"), "got {vt_text:?}");
+        assert!(
+            vt.contains(&0x1b),
+            "history VT extraction preserves styling, got {vt_text:?}",
+        );
+    }
+
+    #[test]
+    fn format_entry_zero_len_is_empty() {
+        // Zero-length spans short-circuit to empty output in every format
+        // without touching the selection path.
+        let t = fresh(20, 2);
+        let m = Match {
+            region: Region::Viewport,
+            row: 0,
+            col: 0,
+            len: 0,
+        };
+        for format in [Format::Plain, Format::Vt, Format::Html] {
+            let bytes = extract(&t, m, Scope::AllHistory, format).expect("extract");
+            assert!(bytes.is_empty(), "{format:?} zero-len span is empty");
+        }
     }
 
     #[test]
