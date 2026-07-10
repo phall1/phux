@@ -75,6 +75,24 @@ exponential backoff; see `phux-server::hub::link`). `phux-dial` stops at
 the established byte stream; framing stays behind the transport trait on
 each end.
 
+## The hub relays frames over its links
+
+While a satellite link is up, the hub routes frames over it
+(`phux-server::hub::relay`, ADR-0007 §4): a frame targeting
+`TerminalId::Satellite { host, id }` is rewritten to the satellite's
+`Local { id }` space and forwarded verbatim — the hub never re-encodes VT
+bytes — and return-leg responses and subscribed streams are re-tagged
+`Local -> Satellite { host, id }` before reaching the consumer. Each link
+owns a bounded relay mailbox (producers `try_send` and fail fast), its own
+link-side `COMMAND.request_id` remap, and a proxy-subscription registry;
+return-leg fan-out `try_send`s into each consumer's bounded outbound
+mailbox so one slow consumer never stalls the link. While the link is down
+(dialing, backoff, ADR-0038 fail-closed refusal) the supervisor drains the
+mailbox and fails every request with the typed `SatelliteUnreachable`
+error; a satellite disconnect fails in-flight commands the same way and
+pushes one typed error to every proxy-subscribed consumer before the
+registry clears. Normative routing semantics: `docs/spec/L1.md` §9.1.
+
 ## Transports designed but not built
 
 ADR-0007 (Mosh-class transport and satellites) keeps one further

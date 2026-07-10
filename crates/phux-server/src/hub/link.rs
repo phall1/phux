@@ -19,9 +19,16 @@
 //!
 //! A lost or failed link is re-dialed with capped exponential backoff;
 //! per-satellite state is published to [`HubLinkStatuses`], the shared
-//! handle a future `LIST` aggregation (phux-v45.4+) reads. No frames are
-//! routed over the link yet — the supervisor holds the authenticated
-//! connection open and watches for it to drop.
+//! handle a future `LIST` aggregation (phux-v45.5) reads.
+//!
+//! While a link is up, the supervisor drives that satellite's
+//! `super::relay::RelaySession` (phux-v45.4): consumer requests arrive
+//! on the per-satellite relay mailbox and are framed onto the connection;
+//! inbound frames resolve relayed replies and fan re-tagged streams out
+//! to proxy-subscribed consumers. While the link is *down* (dialing,
+//! backoff, fail-closed refusal) the supervisor keeps draining the
+//! mailbox, failing every request fast with a typed
+//! `SatelliteUnreachable` — a consumer never hangs on a dead satellite.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -428,17 +435,28 @@ pub(crate) trait LinkTransport {
     async fn connect(&self, spec: &DialSpec, token: Option<String>) -> Result<Self::Conn, String>;
 }
 
-/// An established hub link: the only thing the supervisor can do with it
-/// (until phux-v45.4 routes frames) is wait for it to drop.
+/// An established hub link: a duplex of complete encoded phux frames
+/// (length prefix included, the `FrameKind::encode`/`decode` unit) the
+/// relay session (phux-v45.4) pumps in both directions.
 pub(crate) trait LinkConn {
-    /// Resolve when the connection is gone, with a human-readable reason.
-    async fn closed(self) -> String;
+    /// Put one complete encoded frame on the wire.
+    async fn send_frame(&mut self, frame: &[u8]) -> Result<(), String>;
+
+    /// Receive the next complete frame. `Ok(None)` is a clean close by
+    /// the satellite; `Err` carries a human-readable loss reason.
+    ///
+    /// Must be cancel-safe: the supervisor polls it inside a `select!`
+    /// against the relay mailbox and the cancellation token, recreating
+    /// the future each iteration.
+    async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String>;
 }
 
-/// Supervise one satellite link: plan, dial, hold, redial.
+/// Supervise one satellite link: plan, dial, relay, redial.
 ///
-/// Runs until `cancel` fires. Fail-closed refusals publish
-/// [`LinkStatus::Refused`] and return immediately — no dial, no retry.
+/// Runs until `cancel` fires or every [`super::relay::RelayHandle`] for
+/// this satellite is dropped. Fail-closed refusals publish
+/// [`LinkStatus::Refused`] and never dial, but keep draining the relay
+/// mailbox so consumers get typed fail-fast errors instead of silence.
 #[allow(
     clippy::future_not_send,
     reason = "ADR-0014: hub link supervisors run on the server's LocalSet; the transport seam is generic so tests can inject !Send scripted transports"
@@ -448,6 +466,7 @@ pub(crate) async fn run_link<T: LinkTransport>(
     entry: HubEntry,
     transport: T,
     statuses: HubLinkStatuses,
+    mut relay_rx: tokio::sync::mpsc::Receiver<super::relay::RelayRequest>,
     cancel: CancellationToken,
 ) {
     let spec = match plan_link(&entry) {
@@ -464,7 +483,21 @@ pub(crate) async fn run_link<T: LinkTransport>(
                     reason: refusal.to_string(),
                 },
             );
-            return;
+            // Never dialed, never will be until the registry changes:
+            // fail every relay request fast until shutdown.
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    request = relay_rx.recv() => match request {
+                        Some(request) => super::relay::fail_fast(
+                            request,
+                            &host,
+                            "link refused (fail closed); fix the registry entry",
+                        ),
+                        None => return,
+                    },
+                }
+            }
         }
     };
 
@@ -480,9 +513,18 @@ pub(crate) async fn run_link<T: LinkTransport>(
             let token = read_link_token(spec.token_file())?;
             transport.connect(&spec, token).await
         };
-        let outcome = tokio::select! {
-            () = cancel.cancelled() => return,
-            outcome = connect => outcome,
+        tokio::pin!(connect);
+        // Drain relay requests while the dial is in flight: a consumer
+        // targeting a not-yet-connected satellite fails fast, not late.
+        let outcome = loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                request = relay_rx.recv() => match request {
+                    Some(request) => super::relay::fail_fast(request, &host, "link is connecting"),
+                    None => return,
+                },
+                outcome = &mut connect => break outcome,
+            }
         };
 
         let (failed_attempt, last_error) = match outcome {
@@ -490,16 +532,18 @@ pub(crate) async fn run_link<T: LinkTransport>(
                 info!(satellite = %host, target = %spec, "hub link established");
                 backoff.reset();
                 statuses.set(&host, LinkStatus::Connected);
-                let reason = tokio::select! {
-                    () = cancel.cancelled() => return,
-                    reason = conn.closed() => reason,
-                };
-                warn!(
-                    satellite = %host,
-                    reason = %reason,
-                    "hub link lost; scheduling redial"
-                );
-                (1, reason)
+                match run_relay_session(&host, conn, &mut relay_rx, &cancel).await {
+                    Some(reason) => {
+                        warn!(
+                            satellite = %host,
+                            reason = %reason,
+                            "hub link lost; scheduling redial"
+                        );
+                        (1, reason)
+                    }
+                    // Cancelled or every handle dropped: supervisor done.
+                    None => return,
+                }
             }
             Err(error) => {
                 warn!(
@@ -522,29 +566,85 @@ pub(crate) async fn run_link<T: LinkTransport>(
                 last_error,
             },
         );
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(retry_in) => {}
+        let sleep = tokio::time::sleep(retry_in);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                request = relay_rx.recv() => match request {
+                    Some(request) => super::relay::fail_fast(request, &host, "link is backing off before redial"),
+                    None => return,
+                },
+                () = &mut sleep => break,
+            }
         }
     }
 }
 
-/// Spawn one [`run_link`] supervisor per hub-table entry onto the current
-/// `LocalSet`, all children of `cancel`.
+/// Drive one established connection's relay session (phux-v45.4): pump
+/// consumer requests onto the wire and inbound frames back to consumers.
 ///
-/// Called from the server runtime's hub bring-up; `statuses` is the same
-/// handle mirrored into shared state for future `LIST` aggregation.
+/// Returns `Some(reason)` when the connection was lost (redial), `None`
+/// when the supervisor should exit (cancellation, or every relay handle
+/// dropped). Session teardown — failing in-flight commands and notifying
+/// proxy subscribers with a typed error — runs on every exit path.
+#[allow(
+    clippy::future_not_send,
+    reason = "ADR-0014: runs on the server's LocalSet inside run_link"
+)]
+async fn run_relay_session<C: LinkConn>(
+    host: &SatelliteHost,
+    mut conn: C,
+    relay_rx: &mut tokio::sync::mpsc::Receiver<super::relay::RelayRequest>,
+    cancel: &CancellationToken,
+) -> Option<String> {
+    let mut session = super::relay::RelaySession::new(host.clone());
+    let (lost, reason) = loop {
+        tokio::select! {
+            () = cancel.cancelled() => break (false, "hub is shutting down".to_owned()),
+            request = relay_rx.recv() => {
+                let Some(request) = request else {
+                    break (false, "relay handles dropped".to_owned());
+                };
+                if let Some(frame) = session.handle_request(request)
+                    && let Err(error) = conn.send_frame(&frame).await
+                {
+                    break (true, error);
+                }
+            }
+            inbound = conn.recv_frame() => match inbound {
+                Ok(Some(frame)) => session.handle_inbound(&frame),
+                Ok(None) => break (true, "connection closed by satellite".to_owned()),
+                Err(error) => break (true, error),
+            },
+        }
+    };
+    session.teardown(&reason);
+    lost.then_some(reason)
+}
+
+/// Spawn one [`run_link`] supervisor per hub-table entry onto the current
+/// `LocalSet`, all children of `cancel`, registering each satellite's
+/// [`super::relay::RelayHandle`] in `relays`.
+///
+/// Called from the server runtime's hub bring-up; `statuses` and `relays`
+/// are the same handles mirrored into shared state for command routing
+/// and future `LIST` aggregation.
 pub(crate) fn spawn_links(
     table: &HubTable,
     statuses: &HubLinkStatuses,
+    relays: &super::relay::HubRelays,
     cancel: &CancellationToken,
 ) {
     for (host, entry) in table.iter() {
+        let (handle, relay_rx) = super::relay::RelayHandle::new(host.clone());
+        relays.insert(handle);
         tokio::task::spawn_local(run_link(
             host.clone(),
             entry.clone(),
             NetLinkTransport,
             statuses.clone(),
+            relay_rx,
             cancel.child_token(),
         ));
     }
@@ -555,24 +655,27 @@ pub(crate) fn spawn_links(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct NetLinkTransport;
 
-/// An established production link, held open until the peer (or the
-/// network) drops it.
+/// An established production link, framed in both directions for the
+/// relay session (phux-v45.4).
 #[derive(Debug)]
 pub(crate) enum NetLinkConn {
     /// QUIC connection with its endpoint driver and the opened bidi
-    /// stream halves — kept alive so the satellite sees one consumer,
-    /// ready for phux-v45.4 to frame over.
+    /// stream halves. Frames are length-prefixed on the byte stream,
+    /// byte-for-byte the framing the UDS path uses (`docs/spec/proto.md` §5).
     Quic {
         /// Owns the UDP socket + I/O driver; must outlive the connection.
         _endpoint: quinn::Endpoint,
-        /// The established connection, watched for closure.
-        connection: quinn::Connection,
+        /// The established connection, kept for a clean close.
+        _connection: quinn::Connection,
         /// Opened bidi send half (auth preamble already written).
-        _send: quinn::SendStream,
+        send: quinn::SendStream,
         /// Opened bidi recv half.
-        _recv: quinn::RecvStream,
+        recv: quinn::RecvStream,
+        /// Reassembly buffer: reads land here (cancel-safely) and complete
+        /// length-prefixed frames are peeled off the front.
+        buf: bytes::BytesMut,
     },
-    /// WebSocket connection, drained (and ping-answered) until it closes.
+    /// WebSocket connection: one binary message is one complete frame.
     Ws(Box<phux_dial::ws::Ws>),
 }
 
@@ -606,9 +709,10 @@ impl LinkTransport for NetLinkTransport {
                     .map_err(|err| err.to_string())?;
                 Ok(NetLinkConn::Quic {
                     _endpoint: endpoint,
-                    connection,
-                    _send: send,
-                    _recv: recv,
+                    _connection: connection,
+                    send,
+                    recv,
+                    buf: bytes::BytesMut::with_capacity(8192),
                 })
             }
             DialSpec::Ws { url, trust, .. } => {
@@ -628,26 +732,81 @@ impl LinkTransport for NetLinkTransport {
 }
 
 impl LinkConn for NetLinkConn {
-    async fn closed(self) -> String {
+    async fn send_frame(&mut self, frame: &[u8]) -> Result<(), String> {
         match self {
-            Self::Quic { connection, .. } => {
-                let reason = connection.closed().await;
-                reason.to_string()
-            }
-            Self::Ws(mut ws) => {
-                // Drain the stream: reading is what answers pings and
-                // observes the close. Frames are ignored until phux-v45.4
-                // routes them.
+            Self::Quic { send, .. } => send
+                .write_all(frame)
+                .await
+                .map_err(|err| format!("write to satellite: {err}")),
+            Self::Ws(ws) => futures_util::SinkExt::send(
+                ws.as_mut(),
+                tokio_tungstenite::tungstenite::Message::Binary(frame.to_vec()),
+            )
+            .await
+            .map_err(|err| format!("write to satellite: {err}")),
+        }
+    }
+
+    async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            Self::Quic { recv, buf, .. } => {
+                // Cancel-safe reassembly: `read_buf` lands bytes in the
+                // persistent buffer even if this future is dropped between
+                // polls; complete frames are peeled off the front.
                 loop {
-                    match futures_util::StreamExt::next(ws.as_mut()).await {
-                        None => return "connection closed by satellite".to_owned(),
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => return format!("connection error: {err}"),
+                    if let Some(frame) = split_buffered_frame(buf)? {
+                        return Ok(Some(frame));
+                    }
+                    let n = tokio::io::AsyncReadExt::read_buf(recv, buf)
+                        .await
+                        .map_err(|err| format!("read from satellite: {err}"))?;
+                    if n == 0 {
+                        if buf.is_empty() {
+                            return Ok(None);
+                        }
+                        return Err("satellite closed the stream mid-frame".to_owned());
                     }
                 }
             }
+            Self::Ws(ws) => loop {
+                match futures_util::StreamExt::next(ws.as_mut()).await {
+                    None => return Ok(None),
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                        return Ok(None);
+                    }
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
+                        return Ok(Some(data));
+                    }
+                    // Control frames (ping/pong): reading them is what
+                    // answers pings; skip and keep reading.
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(format!("connection error: {err}")),
+                }
+            },
         }
     }
+}
+
+/// Peel one complete length-prefixed frame (prefix included, the unit
+/// `FrameKind::decode` expects) off the front of `buf`, or `None` when
+/// the buffer holds only a partial frame.
+fn split_buffered_frame(buf: &mut bytes::BytesMut) -> Result<Option<Vec<u8>>, String> {
+    use phux_protocol::wire::frame::MAX_FRAME_LEN;
+    const LENGTH_PREFIX: usize = 4;
+    if buf.len() < LENGTH_PREFIX {
+        return Ok(None);
+    }
+    let body_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if !(1..=MAX_FRAME_LEN).contains(&body_len) {
+        return Err(format!(
+            "satellite sent frame with out-of-range length {body_len}"
+        ));
+    }
+    let total = LENGTH_PREFIX + body_len as usize;
+    if buf.len() < total {
+        return Ok(None);
+    }
+    Ok(Some(buf.split_to(total).to_vec()))
 }
 
 #[cfg(test)]
@@ -883,9 +1042,23 @@ mod tests {
         }
     }
 
-    /// A scripted connection: closes when the oneshot fires, or never.
+    /// A scripted connection: drops with the reason sent on `closed`
+    /// (an mpsc so `recv_frame` stays cancel-safe), or never.
     struct ScriptConn {
-        closed: Option<tokio::sync::oneshot::Receiver<String>>,
+        closed: Option<tokio::sync::mpsc::Receiver<String>>,
+    }
+
+    impl ScriptConn {
+        /// A connection that stays up for the whole test.
+        const fn open_forever() -> Self {
+            Self { closed: None }
+        }
+
+        /// A connection the test can drop by sending a reason.
+        fn closable() -> (tokio::sync::mpsc::Sender<String>, Self) {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (tx, Self { closed: Some(rx) })
+        }
     }
 
     impl LinkTransport for ScriptTransport {
@@ -910,12 +1083,28 @@ mod tests {
     }
 
     impl LinkConn for ScriptConn {
-        async fn closed(self) -> String {
-            match self.closed {
-                Some(rx) => rx.await.unwrap_or_else(|_| "closed".to_owned()),
+        async fn send_frame(&mut self, _frame: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String> {
+            match &mut self.closed {
+                Some(rx) => rx.recv().await.map_or(Ok(None), Err),
                 None => std::future::pending().await,
             }
         }
+    }
+
+    /// A live relay handle + receiver pair for driving [`run_link`]; the
+    /// handle must stay alive or the supervisor treats the relay as
+    /// abandoned and exits.
+    fn relay_pair(
+        host: &SatelliteHost,
+    ) -> (
+        super::super::relay::RelayHandle,
+        tokio::sync::mpsc::Receiver<super::super::relay::RelayRequest>,
+    ) {
+        super::super::relay::RelayHandle::new(host.clone())
     }
 
     fn loopback_entry() -> HubEntry {
@@ -949,16 +1138,18 @@ mod tests {
                 let transport = ScriptTransport::new(vec![
                     Err("boom-1".to_owned()),
                     Err("boom-2".to_owned()),
-                    Ok(ScriptConn { closed: None }),
+                    Ok(ScriptConn::open_forever()),
                 ]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -991,23 +1182,23 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+                let (close_tx, closable) = ScriptConn::closable();
                 let transport = ScriptTransport::new(vec![
                     // Fail once so the backoff has a streak to reset.
                     Err("boom-1".to_owned()),
-                    Ok(ScriptConn {
-                        closed: Some(close_rx),
-                    }),
-                    Ok(ScriptConn { closed: None }),
+                    Ok(closable),
+                    Ok(ScriptConn::open_forever()),
                 ]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -1017,6 +1208,7 @@ mod tests {
                 // again (the success reset the failure streak).
                 close_tx
                     .send("satellite went away".to_owned())
+                    .await
                     .expect("send");
                 wait_for_status(&statuses, &host, |s| {
                     *s == LinkStatus::Backoff {
@@ -1039,15 +1231,20 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let transport = ScriptTransport::new(vec![Ok(ScriptConn { closed: None })]);
+                let transport = ScriptTransport::new(vec![Ok(ScriptConn::open_forever())]);
                 let statuses = HubLinkStatuses::default();
                 let host = host();
                 // Routable QUIC endpoint with no auth material: refused.
+                // Dropping the relay handle up front lets the supervisor's
+                // fail-fast drain loop observe an abandoned relay and exit.
+                let (relay, relay_rx) = relay_pair(&host);
+                drop(relay);
                 run_link(
                     host.clone(),
                     entry("quic://devbox:8788", None, None),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     CancellationToken::new(),
                 )
                 .await;
@@ -1061,6 +1258,46 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn refused_link_fails_relay_commands_fast() {
+        use phux_protocol::wire::frame::{Command, CommandResult, ErrorCode};
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let transport = ScriptTransport::new(vec![]);
+                let statuses = HubLinkStatuses::default();
+                let host = host();
+                let (relay, relay_rx) = relay_pair(&host);
+                let cancel = CancellationToken::new();
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    entry("quic://devbox:8788", None, None),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                // A command through the refused link resolves with a typed
+                // error — no dial, no hang.
+                let result =
+                    tokio::time::timeout(Duration::from_secs(5), relay.command(Command::Upgrade))
+                        .await
+                        .expect("fail fast, not hang");
+                assert!(matches!(
+                    result,
+                    CommandResult::Error {
+                        code: ErrorCode::SatelliteUnreachable,
+                        ..
+                    }
+                ));
+                assert_eq!(transport.calls.get(), 0, "refused link never dials");
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn supervisor_rereads_the_token_file_every_attempt() {
         let local = tokio::task::LocalSet::new();
         local
@@ -1069,16 +1306,13 @@ mod tests {
                 let token_path = dir.path().join("sat.token");
                 std::fs::write(&token_path, "deadbeef\n").expect("write");
 
-                let (close_tx, close_rx) = tokio::sync::oneshot::channel();
-                let transport = ScriptTransport::new(vec![
-                    Ok(ScriptConn {
-                        closed: Some(close_rx),
-                    }),
-                    Ok(ScriptConn { closed: None }),
-                ]);
+                let (close_tx, closable) = ScriptConn::closable();
+                let transport =
+                    ScriptTransport::new(vec![Ok(closable), Ok(ScriptConn::open_forever())]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     entry(
@@ -1088,6 +1322,7 @@ mod tests {
                     ),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -1098,7 +1333,7 @@ mod tests {
                 // the drop to be observed (Backoff) before waiting for the
                 // reconnect, or the first Connected status matches again.
                 std::fs::write(&token_path, "c0ffee\n").expect("rotate");
-                close_tx.send("rotated".to_owned()).expect("send");
+                close_tx.send("rotated".to_owned()).await.expect("send");
                 wait_for_status(&statuses, &host, |s| {
                     matches!(s, LinkStatus::Backoff { last_error, .. } if last_error == "rotated")
                 })
@@ -1124,11 +1359,13 @@ mod tests {
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 let task = tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport,
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
                 wait_for_status(&statuses, &host, |s| {
@@ -1171,11 +1408,13 @@ mod tests {
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     entry(&format!("ws://127.0.0.1:{}", addr.port()), None, None),
                     NetLinkTransport,
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 

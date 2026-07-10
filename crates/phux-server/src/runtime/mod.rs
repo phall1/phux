@@ -612,11 +612,18 @@ impl ServerRuntime {
                 // connection with capped exponential backoff; fail-closed
                 // refusals (routable endpoint without token/pin) surface as
                 // a `Refused` status without dialing. The status handle is
-                // mirrored into shared state for future LIST aggregation.
+                // mirrored into shared state for future LIST aggregation,
+                // and the frame-relay registry (phux-v45.4) alongside it so
+                // command/input dispatch can route satellite-tagged
+                // terminal ids over the established links.
                 if let Some(table) = &hub_table {
                     let statuses = crate::hub::link::HubLinkStatuses::default();
-                    state.with_mut(|s| s.set_hub_link_statuses(statuses.clone()));
-                    crate::hub::link::spawn_links(table, &statuses, &root_token);
+                    let relays = crate::hub::relay::HubRelays::default();
+                    state.with_mut(|s| {
+                        s.set_hub_link_statuses(statuses.clone());
+                        s.set_hub_relays(relays.clone());
+                    });
+                    crate::hub::link::spawn_links(table, &statuses, &relays, &root_token);
                 }
 
                 // Graceful-upgrade resume (ADR-0032): rebuild the whole

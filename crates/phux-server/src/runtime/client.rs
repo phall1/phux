@@ -312,6 +312,15 @@ pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: 
                 actor: wire_client_id,
             });
     }
+    // Federation relay (phux-v45.4): drop every hub-side proxy
+    // subscription this client holds on any satellite link — the
+    // counterpart to the `Subscribe` registrations the satellite-scoped
+    // SUBSCRIBE_EVENTS / SUBSCRIBE_TERMINAL_EVENTS paths performed.
+    // Empty (no-op) on a non-hub server; best-effort try_send per link,
+    // matching the local consumer_detach discipline above.
+    for relay in state.with(crate::state::ServerState::hub_relays_all) {
+        relay.unsubscribe_client(client_id);
+    }
     state.with_mut(|s| s.detach(client_id));
     // docs/consumers/tui.md §9 (phux-r82.1): the client is fully detached —
     // the `client-detached` hook point (any reason: explicit DETACH,
@@ -1083,6 +1092,39 @@ pub(crate) fn handle_subscribe_events(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
     debug!(?client_id, ?terminal, "SUBSCRIBE_EVENTS");
+    // Satellite-scoped subscription (phux-v45.4): register the caller as
+    // a hub-side proxy subscriber on the owning link and forward the
+    // SUBSCRIBE_EVENTS frame (id rewritten satellite-local) so the
+    // satellite starts pushing EVENT frames back over the link; the relay
+    // re-tags them `Local -> Satellite { host, .. }` on the way to this
+    // consumer. SUBSCRIBE_EVENTS has no reply frame, so a missing route
+    // (non-hub server / unknown host) surfaces as a typed ERROR push
+    // rather than silence.
+    if let Some(wire_id) = &terminal
+        && let Some((host, id)) = crate::hub::relay::satellite_route(wire_id)
+    {
+        if let Some(relay) = state.with(|s| s.hub_relay(&host)) {
+            relay.subscribe(id, client_id, out_tx.clone());
+            relay.forward(FrameKind::SubscribeEvents {
+                terminal: Some(phux_protocol::ids::TerminalId::local(id)),
+            });
+        } else {
+            warn!(
+                ?client_id,
+                satellite = %host,
+                "SUBSCRIBE_EVENTS: no route to satellite; refusing subscription"
+            );
+            let _ = out_tx.try_send(Outbound::Frame(FrameKind::Error {
+                request_id: None,
+                code: ErrorCode::UnsupportedSatelliteRoute,
+                message: format!(
+                    "no satellite route to {host:?}: this server is not a federation hub \
+                     for that host"
+                ),
+            }));
+        }
+        return;
+    }
     // Capture the client's mailbox in the subscription so event fanout
     // reaches it even without an ATTACH (a pure `watch` client never
     // attaches).

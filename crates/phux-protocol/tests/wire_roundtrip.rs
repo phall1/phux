@@ -356,6 +356,7 @@ fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
         Just(ErrorCode::TerminalNotFound),
         Just(ErrorCode::ClientNotFound),
         Just(ErrorCode::UnsupportedSatelliteRoute),
+        Just(ErrorCode::SatelliteUnreachable),
         Just(ErrorCode::InvalidCommand),
         Just(ErrorCode::PermissionDenied),
         Just(ErrorCode::ResourceExhausted),
@@ -1192,6 +1193,7 @@ fn error_code_wire_values_match_spec() {
     assert_eq!(ErrorCode::TerminalNotFound.as_wire(), 104);
     assert_eq!(ErrorCode::ClientNotFound.as_wire(), 105);
     assert_eq!(ErrorCode::UnsupportedSatelliteRoute.as_wire(), 106);
+    assert_eq!(ErrorCode::SatelliteUnreachable.as_wire(), 107);
     assert_eq!(ErrorCode::InvalidCommand.as_wire(), 200);
     assert_eq!(ErrorCode::PermissionDenied.as_wire(), 201);
     assert_eq!(ErrorCode::ResourceExhausted.as_wire(), 202);

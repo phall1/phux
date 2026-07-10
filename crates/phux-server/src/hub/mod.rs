@@ -12,11 +12,16 @@
 //! The [`link`] submodule is the outbound dialer (phux-v45.3): one link
 //! supervisor per table entry dials, authenticates, and maintains the
 //! hub-to-satellite connection, exposing a per-satellite
-//! [`link::LinkStatus`]. No frame routing yet — that is phux-v45.4. A
-//! server not started in hub mode never reads the registry at all (see
+//! [`link::LinkStatus`]. The [`relay`] submodule (phux-v45.4) routes
+//! frames over the established links: satellite-tagged terminal commands,
+//! input, and acks go out with their ids rewritten to the satellite's
+//! `Local` space, and responses/streams come back re-tagged
+//! `Satellite { host, id }` (ADR-0007 §4, opaque relay). A server not
+//! started in hub mode never reads the registry at all (see
 //! [`resolve_hub_table`]).
 
 pub mod link;
+pub mod relay;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

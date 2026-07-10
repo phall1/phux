@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-10
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -623,7 +623,16 @@ ErrorCode = enum {
                                  //   (a TUI L3 convention) does not exist
     TERMINAL_NOT_FOUND   = 104,  // renamed from PANE_NOT_FOUND per ADR-0016
     CLIENT_NOT_FOUND     = 105,
-    UNSUPPORTED_SATELLITE_ROUTE = 106,
+    UNSUPPORTED_SATELLITE_ROUTE = 106,  // no route for a SATELLITE-tagged id:
+                                 //   the server is not a federation hub, or
+                                 //   the host is absent from its satellite
+                                 //   registry (a configuration refusal)
+    SATELLITE_UNREACHABLE = 107, // ADR-0007: the hub knows the satellite but
+                                 //   its outbound link is down, dialing,
+                                 //   refused fail-closed (ADR-0038), or was
+                                 //   lost before the relayed reply arrived.
+                                 //   Transient — a retry may succeed once the
+                                 //   hub's link supervisor reconnects.
 
     INVALID_COMMAND      = 200,
     PERMISSION_DENIED    = 201,
