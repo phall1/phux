@@ -185,9 +185,11 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   This never contacts a running server and never executes plugin commands.
   `--json` emits the plugin registry document (§4.5); failure paths leave
   stdout empty and report diagnostics on stderr.
-- **`phux config agents [--json]`** — project configured plugin
-  `[[agents]]` declarations into a flat agent-state list. It never contacts a
-  server. `--json` emits `ConfiguredAgentsJson` (§4.6).
+- **`phux config agents [--json] [--socket PATH]`** — project configured
+  plugin `[[agents]]` declarations into a flat agent-state list, merged with
+  live per-pane `phux.agent/v1` records and asked state when a server answers
+  on the socket (phux-r82.10). No reachable server degrades to the declared
+  manifest values. `--json` emits `ConfiguredAgentsJson` (§4.6).
 - **`phux config run PLUGIN ACTION [--timeout SECS] [--cwd PATH] [--json]`** —
   execute one action declared by an enabled configured plugin manifest. The
   command runs as argv from the plugin root; there is no implicit shell
@@ -407,11 +409,16 @@ nonzero, stdout empty, stderr diagnostic.
 ### 4.6 `ConfiguredAgentsJson` — `phux config agents --json`
 
 `phux config agents --json` emits configured plugin agent declarations as a
-consumer-ready list. It is a config projection, not a live runtime detector:
+consumer-ready list, merged with live runtime state when a server answers
+(phux-r82.10). Schema history: version 1 was the pure manifest projection;
+version 2 (current) makes `state`/`attention` the *effective* values —
+runtime `phux.agent/v1` record first, declared manifest baseline as fallback
+— and adds `live`, `source`, `declared`, and `runtime`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "live": true,
   "agents": [
     {
       "plugin_id": "example.agent-tools",
@@ -419,16 +426,37 @@ consumer-ready list. It is a config projection, not a live runtime detector:
       "id": "codex",
       "label": "Codex",
       "description": "Coding agent",
-      "state": "working",
-      "attention": "normal",
+      "state": "blocked",
+      "attention": "high",
+      "source": "runtime",
+      "declared": { "state": "working", "attention": "normal" },
+      "runtime": {
+        "terminal": "@3",
+        "name": "codex",
+        "kind": "codex",
+        "state": "blocked",
+        "attention": "high",
+        "asked": false
+      },
       "contexts": ["workspace", "pane"]
     }
   ]
 }
 ```
 
-`state` is one of `unknown`, `idle`, `working`, or `blocked`. `attention` is
-one of `none`, `low`, `normal`, or `high`. Invalid manifests are hard failures
+`state` is one of `unknown`, `idle`, `working`, `blocked`, or (runtime only)
+`done`. `attention` is one of `none`, `low`, `normal`, or `high`. `live` is
+whether a server answered; with `live: false` every row is `source:
+"manifest"`. `source` is `"runtime"` when a live `phux.agent/v1` record
+matched the row (record `kind` slug, else lowercased `name`, equals the
+agent id — the same identity derivation as `phux agent`), `"manifest"`
+otherwise; `runtime` is `null` for manifest rows. When several panes declare
+the same agent, the most attention-worthy binding is reported. Attention
+follows the record's convention: declared value first, else derived from
+state (blocked→high, working→normal, done/unknown→low, idle→none). An
+active ADR-0035 ask on the matched pane sets `runtime.asked` and elevates a
+record that declares *no* state to `blocked`; a declared record state
+outranks the ask sentinel (ADR-0040). Invalid manifests are hard failures
 and leave stdout empty on `--json`, preserving the script contract.
 
 ### 4.7 `AgentStateJson` — `phux agent ... --json`

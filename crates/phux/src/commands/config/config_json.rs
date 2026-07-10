@@ -1,10 +1,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use phux_config::plugin::PluginManifestAgent;
 use phux_config::{ConfigProvenance, LayerSource};
 
 use super::LoadedPlugin;
+use super::live_feed::AgentProjection;
 
 /// `phux config show --layers --json`: the provenance document.
 ///
@@ -68,20 +68,16 @@ pub(super) fn print_plugins_json(plugins: &[LoadedPlugin]) -> ExitCode {
     )
 }
 
-pub(super) fn print_agents_json(plugins: &[LoadedPlugin]) -> ExitCode {
-    let agents: Vec<_> = plugins
-        .iter()
-        .flat_map(|plugin| {
-            plugin
-                .manifest
-                .agents
-                .iter()
-                .map(|agent| agent_json(plugin, agent))
-        })
-        .collect();
+/// The merged agents document (phux-r82.10). `schema_version` bumped
+/// 1 -> 2 when the rows grew `source` / `declared` / `runtime` and
+/// `state`/`attention` became the *effective* (runtime-first) values; the
+/// document also gained the top-level `live` flag. See
+/// `docs/consumers/agents.md` section 4.6 for the schema notes.
+pub(super) fn print_agents_json(agents: &[AgentProjection], live: bool) -> ExitCode {
     print_json(
         &serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
+            "live": live,
             "agents": agents,
         }),
         "agents",
@@ -107,19 +103,6 @@ fn plugin_json(plugin: &LoadedPlugin) -> serde_json::Value {
         "panes": manifest.panes,
         "links": manifest.links,
         "workspaces": manifest.workspaces,
-    })
-}
-
-fn agent_json(plugin: &LoadedPlugin, agent: &PluginManifestAgent) -> serde_json::Value {
-    serde_json::json!({
-        "plugin_id": plugin.manifest.id,
-        "plugin_enabled": plugin.enabled,
-        "id": agent.id,
-        "label": agent.label,
-        "description": agent.description,
-        "state": agent.state,
-        "attention": agent.attention,
-        "contexts": agent.contexts,
     })
 }
 

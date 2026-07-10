@@ -205,7 +205,7 @@ fn render_record(pane: &TerminalId, record: Option<&AgentRecord>) -> String {
 /// pane with no record, or bytes that fail the §3.7 validation, is simply
 /// absent from the index. Best-effort: transport failure returns what was
 /// collected so the caller degrades to heuristics instead of erroring.
-pub(super) async fn fetch_agent_index(
+pub(crate) async fn fetch_agent_index(
     socket_path: &std::path::Path,
     snapshot: &SessionSnapshot,
 ) -> std::collections::HashMap<TerminalId, AgentRecord> {
