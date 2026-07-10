@@ -22,7 +22,8 @@
 //! from charset-validated parts (no shell, `--` before the host);
 //! "connected" means the ssh child is running — the first authoritative
 //! liveness signal is the child's exit, which redials like a dropped
-//! connection.
+//! connection. The child's stderr is drained into a bounded tail for
+//! the failure reason (never buffered without limit).
 //!
 //! **Fail closed.** [`plan_link`] refuses to dial a routable endpoint
 //! whose entry lacks a token file or fingerprint pin (and refuses
@@ -33,9 +34,13 @@
 //! [`LinkStatus::Refused`] and fixed by `phux satellite add`. Malformed
 //! `ssh://` endpoints fail earlier still, at hub-table validation.
 //!
-//! A lost or failed link is re-dialed with capped exponential backoff;
-//! per-satellite state is published to [`HubLinkStatuses`], the shared
-//! handle a future `LIST` aggregation (phux-v45.5) reads.
+//! A lost or failed link is re-dialed with capped exponential backoff.
+//! The failure streak resets only after a connection has stayed up for
+//! `LINK_STABLE_AFTER` — a connection that dies young (an ssh child
+//! whose spawn succeeded but whose auth was refused) keeps growing the
+//! backoff exactly like a dial that never connected. Per-satellite
+//! state is published to [`HubLinkStatuses`], the shared handle a
+//! future `LIST` aggregation (phux-v45.5) reads.
 //!
 //! While a link is up, the supervisor drives that satellite's
 //! `super::relay::RelaySession` (phux-v45.4): consumer requests arrive
@@ -93,6 +98,22 @@ const LINK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// an unbounded write would pend forever and wedge the whole supervisor
 /// loop — inbound dispatch and the keepalive tick included.
 const LINK_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a connection must stay up before the failure streak is
+/// forgotten. SSH auth/connect failures surface *after* the spawn
+/// succeeds (the child exits in well under a second), so resetting the
+/// backoff on mere establishment would redial a persistently failing
+/// `ssh://` satellite at the base delay forever — hammering the remote
+/// sshd — instead of backing off toward the cap like a QUIC/WS dial
+/// that fails in `connect`.
+const LINK_STABLE_AFTER: Duration = Duration::from_secs(30);
+
+/// Retained tail of the ssh child's stderr, in bytes. ssh forwards the
+/// *remote command's* stderr into this pipe for the life of the link,
+/// so the hub must drain it into a bounded buffer — an uncapped
+/// `read_to_end` would let one chatty (or hostile) satellite grow hub
+/// memory without bound.
+const SSH_STDERR_TAIL_MAX: usize = 8 * 1024;
 
 /// What the planner decided to dial for one satellite, auth material
 /// resolved into the shared `phux-dial` vocabulary.
@@ -391,9 +412,24 @@ impl Backoff {
         delay
     }
 
-    /// Forget the failure streak after a successful connection.
+    /// Forget the failure streak after a connection that proved stable
+    /// (see `LINK_STABLE_AFTER`).
     pub const fn reset(&mut self) {
         self.failures = 0;
+    }
+
+    /// Settle the streak after a lost connection and return the 1-based
+    /// attempt number to report the loss as. Only a connection that
+    /// stayed up at least [`LINK_STABLE_AFTER`] clears the failure
+    /// streak; one that died young counts like a dial that never
+    /// connected (an ssh child whose spawn succeeded but whose auth was
+    /// refused exits fast — resetting on mere establishment would
+    /// redial it at the base delay forever, hammering the remote sshd).
+    pub fn settle_after_loss(&mut self, up_for: Duration) -> u32 {
+        if up_for >= LINK_STABLE_AFTER {
+            self.reset();
+        }
+        self.failures.saturating_add(1)
     }
 }
 
@@ -657,8 +693,8 @@ pub(crate) async fn run_link<T: LinkTransport>(
         let (failed_attempt, last_error) = match outcome {
             Ok(conn) => {
                 info!(satellite = %host, target = %spec, "hub link established");
-                backoff.reset();
                 statuses.set(&host, LinkStatus::Connected);
+                let connected_at = tokio::time::Instant::now();
                 match run_relay_session(&host, conn, &mut relay_rx, &mut unsub_rx, &cancel).await {
                     Some(reason) => {
                         warn!(
@@ -666,7 +702,8 @@ pub(crate) async fn run_link<T: LinkTransport>(
                             reason = %reason,
                             "hub link lost; scheduling redial"
                         );
-                        (1, reason)
+                        // A fast death is a failed attempt (`settle_after_loss`).
+                        (backoff.settle_after_loss(connected_at.elapsed()), reason)
                     }
                     // Cancelled or every handle dropped: supervisor done.
                     None => return,
@@ -898,7 +935,8 @@ pub(crate) enum NetLinkConn {
         /// Bridged read half — the satellite's frames, length-prefixed.
         stdout: tokio::process::ChildStdout,
         /// ssh's own diagnostics (plus the remote command's stderr),
-        /// read when the child exits to compose the failure reason.
+        /// drained into a bounded tail (`SSH_STDERR_TAIL_MAX`) when the
+        /// child exits to compose the failure reason.
         stderr: tokio::process::ChildStderr,
         /// Reassembly buffer: same cancel-safe frame peeling as the
         /// QUIC path.
@@ -1072,7 +1110,8 @@ impl LinkConn for NetLinkConn {
                 // byte-for-byte). stdout EOF means the link is gone —
                 // remote bridge ended, satellite server closed the UDS,
                 // network died, or the key was refused — and the child's
-                // exit status plus its stderr become the loss reason.
+                // exit status plus a bounded tail of its stderr become
+                // the loss reason.
                 loop {
                     if let Some(frame) = split_buffered_frame(buf)? {
                         return Ok(Some(frame));
@@ -1141,26 +1180,25 @@ fn ws_idle_error(idle_for: Duration) -> Option<String> {
 const SSH_EXIT_GRACE: Duration = Duration::from_secs(5);
 
 /// Compose the loss reason for an ssh link whose bridged stdout hit EOF:
-/// the child's exit status plus its stderr diagnostics.
+/// the child's exit status plus a bounded tail of its stderr.
 ///
 /// stderr is drained alongside the wait — a blocked stderr pipe must not
-/// deadlock the exit. Both are bounded by [`SSH_EXIT_GRACE`]; a child
-/// that will not exit is killed (the redial loop owns recovery, and the
-/// pipes are dropped with the connection either way).
+/// deadlock the exit — into a bounded tail ([`SSH_STDERR_TAIL_MAX`]; the
+/// pipe carries the *remote command's* stderr for the life of the link,
+/// so an uncapped read would let one chatty or hostile satellite grow
+/// hub memory without bound). Both are bounded by [`SSH_EXIT_GRACE`]; a
+/// child that will not exit is killed (the redial loop owns recovery,
+/// and the pipes are dropped with the connection either way).
 async fn ssh_exit_reason(
     child: &mut tokio::process::Child,
     stderr: &mut tokio::process::ChildStderr,
 ) -> String {
-    let mut diagnostics = Vec::new();
     let gathered = tokio::time::timeout(SSH_EXIT_GRACE, async {
-        tokio::join!(
-            child.wait(),
-            tokio::io::AsyncReadExt::read_to_end(stderr, &mut diagnostics),
-        )
+        tokio::join!(child.wait(), read_tail(stderr, SSH_STDERR_TAIL_MAX))
     })
     .await;
     match gathered {
-        Ok((status, _)) => {
+        Ok((status, diagnostics)) => {
             let tail = String::from_utf8_lossy(&diagnostics);
             let tail = tail.trim();
             match status {
@@ -1199,6 +1237,35 @@ fn split_buffered_frame(buf: &mut bytes::BytesMut) -> Result<Option<Vec<u8>>, St
         return Ok(None);
     }
     Ok(Some(buf.split_to(total).to_vec()))
+}
+
+/// Drain `reader` to EOF (or error), retaining only the last `max`
+/// bytes.
+///
+/// The bounded sibling of `read_to_end` for pipes that may carry an
+/// unbounded stream (an ssh child's stderr forwards the remote
+/// command's fd 2 for the whole life of the link). A read error ends
+/// the drain and returns whatever tail was collected — the caller only
+/// wants diagnostics, and the authoritative exit signal is
+/// `child.wait()`, joined alongside.
+async fn read_tail<R>(reader: &mut R, max: usize) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => return tail,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > max {
+                    tail.drain(..tail.len() - max);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1425,6 +1492,27 @@ mod tests {
         assert!(err.contains("read token file"), "{err}");
 
         assert_eq!(read_link_token(None).expect("no file configured"), None);
+    }
+
+    // --- stderr tail ------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_tail_is_bounded_and_keeps_the_end() {
+        // A megabyte of remote stderr chatter must not accumulate on the
+        // hub: only the final `max` bytes survive.
+        let mut input = vec![b'x'; 1024 * 1024];
+        input.extend_from_slice(b"END-MARKER");
+        let mut reader = input.as_slice();
+        let tail = read_tail(&mut reader, SSH_STDERR_TAIL_MAX).await;
+        assert_eq!(tail.len(), SSH_STDERR_TAIL_MAX);
+        assert!(tail.ends_with(b"END-MARKER"));
+
+        // Short input passes through untouched.
+        let mut reader = &b"auth refused\n"[..];
+        assert_eq!(
+            read_tail(&mut reader, SSH_STDERR_TAIL_MAX).await,
+            b"auth refused\n"
+        );
     }
 
     // --- backoff ----------------------------------------------------------
@@ -1677,8 +1765,11 @@ mod tests {
 
                 wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
 
-                // Drop the link: the redial must start from the base delay
-                // again (the success reset the failure streak).
+                // Let the connection prove stability (paused time makes
+                // this instant), then drop the link: the redial must
+                // start from the base delay again (the stable connection
+                // reset the failure streak).
+                tokio::time::sleep(LINK_STABLE_AFTER).await;
                 close_tx
                     .send("satellite went away".to_owned())
                     .await
@@ -1693,6 +1784,66 @@ mod tests {
                 .await;
                 wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
                 assert_eq!(transport.calls.get(), 3);
+
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervisor_keeps_backing_off_when_connections_die_young() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Models an ssh dial whose spawn succeeds but whose auth
+                // is refused: the "connection" is established, then dies
+                // immediately (dropped sender => recv_frame resolves at
+                // once with a clean close). The failure streak must keep
+                // growing — a fast death is a failed attempt, not a
+                // success that resets the backoff to its base.
+                let dead = || {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+                    drop(tx);
+                    Ok(ScriptConn {
+                        closed: Some(rx),
+                        keepalive_error: None,
+                    })
+                };
+                let transport = ScriptTransport::new(vec![
+                    dead(),
+                    dead(),
+                    dead(),
+                    Ok(ScriptConn::open_forever()),
+                ]);
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    loopback_entry(),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                for (attempt, retry_in) in [
+                    (1, Duration::from_millis(500)),
+                    (2, Duration::from_secs(1)),
+                    (3, Duration::from_secs(2)),
+                ] {
+                    wait_for_status(&statuses, &host, |s| {
+                        *s == LinkStatus::Backoff {
+                            attempt,
+                            retry_in,
+                            last_error: "connection closed by satellite".to_owned(),
+                        }
+                    })
+                    .await;
+                }
+                wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                assert_eq!(transport.calls.get(), 4);
 
                 cancel.cancel();
             })
