@@ -24,7 +24,9 @@ pub mod scaffold; // phux-ijp (config init: commented projection of default.toml
 pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Widget is the trait)
 
 pub use error::{ConfigError, byte_offset_to_line_col};
-pub use layer::MAX_EXTENDS_DEPTH;
+pub use layer::{
+    ConfigProvenance, KeyOrigin, LayerSource, MAX_EXTENDS_DEPTH, merged_config_with_provenance,
+};
 pub use satellite::SatelliteConfigEntry;
 pub use schema::{
     Action, Config, CwdInheritance, DefaultsCfg, ExperimentalCfg, HookEntry, KeybindingsCfg,
@@ -141,6 +143,10 @@ pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, Conf
 /// directory for relative `extends` entries; layer files are read from
 /// disk. When `user_input` declares no `extends`, no I/O occurs.
 ///
+/// Callers that also need per-key layer attribution (`phux config show
+/// --layers`) should use [`merged_config_with_provenance`], of which
+/// this is the table-only projection.
+///
 /// # Errors
 ///
 /// Returns [`ConfigError::Parse`] if the embedded defaults,
@@ -149,14 +155,7 @@ pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, Conf
 /// [`ConfigError::Layer`] for layer-resolution and `-append` failures,
 /// each naming the offending file.
 pub fn merged_config_table(user_input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
-    let default_table =
-        layer::parse_table(DEFAULT_CONFIG_TOML, Path::new("<embedded default.toml>"))?;
-    let stack = layer::resolve_user_stack(user_input, path)?;
-    let mut merged = default_table;
-    for (layer_path, table) in stack {
-        merged = layer::merge_layer(merged, table, &layer_path)?;
-    }
-    Ok(merged)
+    merged_config_with_provenance(user_input, path).map(|(table, _)| table)
 }
 
 /// Render a [`DefaultsCfg::session_name_template`] into a concrete

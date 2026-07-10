@@ -11,13 +11,14 @@
 //! Resolution is bounded ([`MAX_EXTENDS_DEPTH`]) and acyclic; a layer
 //! reachable via two branches (diamond) is merged once, at its first
 //! position. Every failure names the offending layer file.
+//!
+//! The merge records **provenance** as it folds: which layer set each
+//! effective leaf key, and — for arrays — which layer contributed each
+//! element. [`merged_config_with_provenance`] returns the merged table
+//! together with a [`ConfigProvenance`]; `phux config show --layers`
+//! renders it.
 
-#![allow(
-    clippy::redundant_pub_crate,
-    reason = "private module: items are crate-internal on purpose; plain `pub` would trip unreachable_pub"
-)]
-
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::{ConfigError, byte_offset_to_line_col};
@@ -33,9 +34,67 @@ pub const MAX_EXTENDS_DEPTH: usize = 4;
 const EXTENDS_KEY: &str = "extends";
 const APPEND_SUFFIX: &str = "-append";
 
+/// Display path used for the embedded defaults layer in errors.
+const DEFAULTS_DISPLAY_PATH: &str = "<embedded default.toml>";
+
+/// One layer of the resolved config stack, in merge order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LayerSource {
+    /// The `default.toml` embedded in the phux binary — always the
+    /// first (lowest-precedence) layer.
+    Defaults,
+    /// A layer file pulled in via `extends` (ADR-0039).
+    Extended(PathBuf),
+    /// The root config file (the user's `config.toml`) — always the
+    /// last (highest-precedence) layer.
+    User(PathBuf),
+}
+
+impl LayerSource {
+    /// The on-disk path of this layer, if it has one (the embedded
+    /// defaults do not).
+    #[must_use]
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Defaults => None,
+            Self::Extended(p) | Self::User(p) => Some(p),
+        }
+    }
+}
+
+/// Provenance of one effective leaf key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyOrigin {
+    /// Index into [`ConfigProvenance::layers`] of the layer that last
+    /// set — or, for arrays, last appended to — this key.
+    pub layer: usize,
+    /// For arrays: the contributing layer index of each element, in
+    /// element order (`-append` elements carry the appending layer;
+    /// a plain assignment attributes every element to the assigning
+    /// layer). `None` for non-array leaves.
+    pub elements: Option<Vec<usize>>,
+}
+
+/// Which layer set each effective config key (ADR-0039 attribution).
+///
+/// Produced by [`merged_config_with_provenance`]. Keys are dotted
+/// paths to the *leaf* values of the merged table (tables themselves
+/// carry no entry; array elements are attributed via
+/// [`KeyOrigin::elements`]). Path segments that are not bare TOML keys
+/// are double-quoted, so entries read like TOML addresses, e.g.
+/// `keybindings.prefix-table."%"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigProvenance {
+    /// The resolved layer stack in merge order: `Defaults` first, the
+    /// root `User` file last, `Extended` layers in between.
+    pub layers: Vec<LayerSource>,
+    /// Dotted leaf path -> origin, sorted by path.
+    pub keys: BTreeMap<String, KeyOrigin>,
+}
+
 /// Parse `input` as a plain TOML table, mapping errors to
 /// [`ConfigError::Parse`] with `line:col` pointing into `input`.
-pub(crate) fn parse_table(input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
+fn parse_table(input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
     toml::from_str(input).map_err(|e| {
         let (line, col) = e
             .span()
@@ -49,12 +108,82 @@ pub(crate) fn parse_table(input: &str, path: &Path) -> Result<toml::Table, Confi
     })
 }
 
+/// Merge the full layer stack, returning table plus provenance.
+///
+/// The stack is the embedded defaults, any layers named via `extends`
+/// (ADR-0039), then `user_input`; the [`ConfigProvenance`] is recorded
+/// during the fold.
+///
+/// The table half is exactly what [`crate::merged_config_table`]
+/// returns (that function delegates here); the provenance half backs
+/// `phux config show --layers`.
+///
+/// `path` is used for error reporting on `user_input` and as the base
+/// directory for relative `extends` entries; layer files are read from
+/// disk. When `user_input` declares no `extends`, no I/O occurs.
+///
+/// # Errors
+///
+/// Returns [`ConfigError::Parse`] if the embedded defaults,
+/// `user_input`, or a layer file are not valid TOML;
+/// [`ConfigError::LayerRead`] / [`ConfigError::LayerCycle`] /
+/// [`ConfigError::Layer`] for layer-resolution and `-append` failures,
+/// each naming the offending file.
+pub fn merged_config_with_provenance(
+    user_input: &str,
+    path: &Path,
+) -> Result<(toml::Table, ConfigProvenance), ConfigError> {
+    let defaults_path = Path::new(DEFAULTS_DISPLAY_PATH);
+    let default_table = parse_table(crate::DEFAULT_CONFIG_TOML, defaults_path)?;
+    let stack = resolve_user_stack(user_input, path)?;
+
+    let mut layers = vec![LayerSource::Defaults];
+    let mut recorded = BTreeMap::new();
+    // Fold the defaults from an empty base so their keys are recorded
+    // like any other layer's; the result is the defaults table itself.
+    let mut merged = merge_layer(
+        toml::Table::new(),
+        default_table,
+        defaults_path,
+        "",
+        &mut Recorder {
+            layer: 0,
+            keys: &mut recorded,
+        },
+    )?;
+
+    // `resolve_user_stack` always ends with the root (user) file.
+    let last = stack.len().saturating_sub(1);
+    for (i, (layer_path, table)) in stack.into_iter().enumerate() {
+        let layer_idx = layers.len();
+        layers.push(if i == last {
+            LayerSource::User(layer_path.clone())
+        } else {
+            LayerSource::Extended(layer_path.clone())
+        });
+        merged = merge_layer(
+            merged,
+            table,
+            &layer_path,
+            "",
+            &mut Recorder {
+                layer: layer_idx,
+                keys: &mut recorded,
+            },
+        )?;
+    }
+
+    let mut keys = BTreeMap::new();
+    finalize_keys(&merged, &recorded, "", &mut keys);
+    Ok((merged, ConfigProvenance { layers, keys }))
+}
+
 /// Resolve the ordered layer stack rooted at `user_input` / `path`.
 ///
 /// Returns `(layer path, table)` pairs in merge order: extended layers
 /// first (depth-first, in listed order), the root file last. Each
 /// table has its `extends` key consumed.
-pub(crate) fn resolve_user_stack(
+fn resolve_user_stack(
     user_input: &str,
     path: &Path,
 ) -> Result<Vec<(PathBuf, toml::Table)>, ConfigError> {
@@ -163,8 +292,78 @@ fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Provenance recorder threaded through one layer's merge: the layer's
+/// stack index plus the shared path -> origin map.
+struct Recorder<'a> {
+    layer: usize,
+    keys: &'a mut BTreeMap<String, KeyOrigin>,
+}
+
+impl Recorder<'_> {
+    /// A plain assignment set `path` to `value` (replacing whatever a
+    /// lower layer put there).
+    fn record_set(&mut self, path: &str, value: &toml::Value) {
+        let elements = match value {
+            toml::Value::Array(items) => Some(vec![self.layer; items.len()]),
+            _ => None,
+        };
+        self.keys.insert(
+            path.to_owned(),
+            KeyOrigin {
+                layer: self.layer,
+                elements,
+            },
+        );
+    }
+
+    /// An `-append` directive added `added` elements to the array at
+    /// `path` (creating it when absent).
+    fn record_append(&mut self, path: &str, added: usize) {
+        match self.keys.get_mut(path) {
+            Some(origin) if origin.elements.is_some() => {
+                origin.layer = self.layer;
+                if let Some(elements) = origin.elements.as_mut() {
+                    elements.extend(std::iter::repeat_n(self.layer, added));
+                }
+            }
+            // No lower layer recorded an array here (or the recorded
+            // shape was not an array, which the merge itself rejects):
+            // the append created the array, so it owns every element.
+            _ => {
+                self.keys.insert(
+                    path.to_owned(),
+                    KeyOrigin {
+                        layer: self.layer,
+                        elements: Some(vec![self.layer; added]),
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Dotted-path segment for `key` under `prefix`: bare TOML keys join
+/// with `.`; anything else is double-quoted so the path stays a valid
+/// TOML address.
+fn child_path(prefix: &str, key: &str) -> String {
+    let is_bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let segment = if is_bare {
+        key.to_owned()
+    } else {
+        format!("\"{}\"", key.replace('\\', "\\\\").replace('"', "\\\""))
+    };
+    if prefix.is_empty() {
+        segment
+    } else {
+        format!("{prefix}.{segment}")
+    }
+}
+
 /// Recursively merge `overlay` (from the layer file at `layer`) into
-/// `base`.
+/// `base`, recording provenance into `recorder`.
 ///
 /// Tables merge per key; any other value type — including arrays —
 /// replaces wholesale. A key `x-append` holding an array appends its
@@ -172,10 +371,12 @@ fn canonical(path: &Path) -> PathBuf {
 /// replacing. Misuse — appending to a non-array, a non-array append
 /// value, or `x` and `x-append` in the same overlay table — is an
 /// error naming `layer`.
-pub(crate) fn merge_layer(
+fn merge_layer(
     mut base: toml::Table,
     overlay: toml::Table,
     layer: &Path,
+    prefix: &str,
+    recorder: &mut Recorder<'_>,
 ) -> Result<toml::Table, ConfigError> {
     let layer_err = |message: String| ConfigError::Layer {
         path: layer.to_path_buf(),
@@ -204,9 +405,13 @@ pub(crate) fn merge_layer(
     }
 
     for (key, value) in plain {
+        let path = child_path(prefix, &key);
         match (base.remove(&key), value) {
             (Some(toml::Value::Table(b)), toml::Value::Table(o)) => {
-                base.insert(key, toml::Value::Table(merge_layer(b, o, layer)?));
+                base.insert(
+                    key,
+                    toml::Value::Table(merge_layer(b, o, layer, &path, recorder)?),
+                );
             }
             (_, toml::Value::Table(o)) => {
                 // No base table to merge into, but the overlay table
@@ -216,21 +421,24 @@ pub(crate) fn merge_layer(
                 // so directive keys never leak into the final table.
                 base.insert(
                     key,
-                    toml::Value::Table(merge_layer(toml::Table::new(), o, layer)?),
+                    toml::Value::Table(merge_layer(toml::Table::new(), o, layer, &path, recorder)?),
                 );
             }
             (_, v) => {
+                recorder.record_set(&path, &v);
                 base.insert(key, v);
             }
         }
     }
 
     for (target, value) in appends {
+        let path = child_path(prefix, &target);
         let toml::Value::Array(mut additions) = value else {
             return Err(layer_err(format!(
                 "`{target}{APPEND_SUFFIX}` must be an array (it appends to the array `{target}`)"
             )));
         };
+        let added = additions.len();
         match base.remove(&target) {
             None => {
                 base.insert(target, toml::Value::Array(additions));
@@ -245,7 +453,48 @@ pub(crate) fn merge_layer(
                 )));
             }
         }
+        recorder.record_append(&path, added);
     }
 
     Ok(base)
+}
+
+/// Project the recorded origins onto the *final* merged table: walk
+/// its leaves and keep exactly one entry per leaf path. This drops
+/// entries left stale by shape changes across layers (a scalar later
+/// replaced by a table leaves its old leaf entry behind; the walk
+/// never visits it).
+fn finalize_keys(
+    table: &toml::Table,
+    recorded: &BTreeMap<String, KeyOrigin>,
+    prefix: &str,
+    out: &mut BTreeMap<String, KeyOrigin>,
+) {
+    for (key, value) in table {
+        let path = child_path(prefix, key);
+        match value {
+            toml::Value::Table(t) => finalize_keys(t, recorded, &path, out),
+            leaf => {
+                // Every leaf was inserted through the recorder, so the
+                // lookup succeeds; the fallback (attribute to the
+                // defaults layer) is purely defensive.
+                let mut origin = recorded.get(&path).cloned().unwrap_or(KeyOrigin {
+                    layer: 0,
+                    elements: None,
+                });
+                if let toml::Value::Array(items) = leaf {
+                    let matches = origin
+                        .elements
+                        .as_ref()
+                        .is_some_and(|e| e.len() == items.len());
+                    if !matches {
+                        origin.elements = Some(vec![origin.layer; items.len()]);
+                    }
+                } else {
+                    origin.elements = None;
+                }
+                out.insert(path, origin);
+            }
+        }
+    }
 }

@@ -1,8 +1,61 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use phux_config::plugin::PluginManifestAgent;
+use phux_config::{ConfigProvenance, LayerSource};
 
 use super::LoadedPlugin;
+
+/// `phux config show --layers --json`: the provenance document.
+///
+/// Layer indexes are 1-based and shared between the `layers` and
+/// `keys` sections. Scalar keys carry `layer` only; array keys add
+/// `element_layers`, one entry per element in order.
+pub(super) fn print_layers_json(config_path: &Path, provenance: &ConfigProvenance) -> ExitCode {
+    let layers: Vec<_> = provenance
+        .layers
+        .iter()
+        .enumerate()
+        .map(|(i, layer)| {
+            let (kind, path) = match layer {
+                LayerSource::Defaults => ("defaults", None),
+                LayerSource::Extended(p) => ("extended", Some(p.display().to_string())),
+                LayerSource::User(p) => ("user", Some(p.display().to_string())),
+            };
+            serde_json::json!({
+                "index": i + 1,
+                "kind": kind,
+                "path": path,
+            })
+        })
+        .collect();
+    let keys: Vec<_> = provenance
+        .keys
+        .iter()
+        .map(|(key, origin)| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("key".to_owned(), serde_json::json!(key));
+            entry.insert("layer".to_owned(), serde_json::json!(origin.layer + 1));
+            if let Some(elements) = &origin.elements {
+                let element_layers: Vec<_> = elements.iter().map(|layer| layer + 1).collect();
+                entry.insert(
+                    "element_layers".to_owned(),
+                    serde_json::json!(element_layers),
+                );
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect();
+    print_json(
+        &serde_json::json!({
+            "schema_version": 1,
+            "config_path": config_path.display().to_string(),
+            "layers": layers,
+            "keys": keys,
+        }),
+        "config layers",
+    )
+}
 
 pub(super) fn print_plugins_json(plugins: &[LoadedPlugin]) -> ExitCode {
     let plugins: Vec<_> = plugins.iter().map(plugin_json).collect();

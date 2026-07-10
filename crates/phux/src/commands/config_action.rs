@@ -20,11 +20,23 @@ pub(crate) enum ConfigAction {
 
     /// Print the effective config (shipped defaults + your overrides) as
     /// TOML. With `--default`, print the shipped defaults verbatim
-    /// instead, ignoring any user config.
+    /// instead, ignoring any user config. With `--layers`, print which
+    /// layer of the `extends` stack set each effective key instead of
+    /// the values.
     Show {
         /// Show the shipped defaults verbatim, not the merged result.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["layers", "json"])]
         default: bool,
+
+        /// Attribute each effective key to the layer that set it
+        /// (embedded defaults / `extends` layers / your config file).
+        #[arg(long)]
+        layers: bool,
+
+        /// With --layers: emit a stable JSON document instead of human
+        /// text.
+        #[arg(long, requires = "layers")]
+        json: bool,
     },
 
     /// List plugin manifests declared by `[[plugins]]`.

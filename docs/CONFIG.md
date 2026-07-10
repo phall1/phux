@@ -38,6 +38,11 @@ phux config show         # print the effective config (defaults merged
 
 phux config show --default  # print the shipped defaults with comments
 
+phux config show --layers   # provenance: which layer (defaults, an
+                            # extends layer, or your file) set each
+                            # effective key; --json for the stable
+                            # machine-readable form
+
 phux plugin link ./my-plugin/phux-plugin.toml --json
                          # add or update a plugin manifest entry
 
@@ -99,6 +104,26 @@ action = "noop"
 ```
 
 `x-append` must hold an array and appends its elements to the stack's current `x` (creating it when absent). Setting both `x` and `x-append` in one file, appending to a non-array, or a non-array `-append` value are errors naming that file. Keybindings need no append form: `prefix-table` and `global` are tables and already merge per chord. The `-append` suffix is reserved at every level; don't end a free-form key (for example a `[theme]` slot) with it. To *drop* an inherited entry, assign the full array plainly — replacement always wins over inheritance.
+
+### Where did this value come from?
+
+With several layers in play, `phux config show` tells you *what* the effective config is but not *who* set it. `phux config show --layers` answers that: it prints the resolved layer stack in merge order, then one row per effective leaf key naming the layer that set it. Arrays expand to one row per element, so an `-append` list shows exactly which layer contributed each entry:
+
+```
+layers (merge order; later layers win):
+  [1] defaults (embedded)
+  [2] /home/me/.config/phux/distro.toml
+  [3] /home/me/.config/phux/config.toml (user)
+
+keys:
+  defaults.history-limit  <- [2] distro.toml
+  keybindings.prefix      <- [3] user
+  status.right[0]         <- [1] defaults
+  status.right[1]         <- [1] defaults
+  status.right[2]         <- [2] distro.toml
+```
+
+`--layers --json` emits the same information as a stable document (`schema_version` 1): a `layers` array (1-based `index`, `kind` of `defaults` / `extended` / `user`, `path`) and a `keys` array (`key`, owning `layer` index, and for arrays an `element_layers` list, one entry per element).
 
 ---
 

@@ -38,42 +38,11 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
                 }
             }
         }
-        ConfigAction::Show { default } => {
-            // `--default` echoes the embedded defaults verbatim, comments
-            // and all — the annotated source of truth. Plain `show`
-            // renders the effective merged document (defaults + the user's
-            // overrides) as canonical TOML.
-            if *default {
-                print!("{}", phux_config::DEFAULT_CONFIG_TOML);
-                return ExitCode::SUCCESS;
-            }
-            let path = config_loader::config_path();
-            let user_input = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(err) => {
-                    eprintln!("phux: could not read {}: {err}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            };
-            let merged = match phux_config::merged_config_table(&user_input, &path) {
-                Ok(table) => table,
-                Err(err) => {
-                    eprintln!("phux: {err}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            match toml::to_string(&merged) {
-                Ok(rendered) => {
-                    print!("{rendered}");
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("phux: could not render config: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        ConfigAction::Show {
+            default,
+            layers,
+            json,
+        } => run_config_show(*default, *layers, *json),
         ConfigAction::Plugins { json } => run_config_plugins(*json),
         ConfigAction::Agents { json } => run_config_agents(*json),
         ConfigAction::Run {
@@ -83,6 +52,111 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
             cwd,
             json,
         } => run_config_action(plugin, action, *timeout, cwd.clone(), *json),
+    }
+}
+
+/// `phux config show [--default | --layers [--json]]`.
+///
+/// `--default` echoes the embedded defaults verbatim, comments and all
+/// — the annotated source of truth. Plain `show` renders the effective
+/// merged document (defaults + `extends` layers + the user's overrides,
+/// ADR-0039) as canonical TOML. `--layers` renders provenance instead:
+/// which layer of the stack set each effective key, and for `-append`
+/// arrays, which layer contributed each element.
+fn run_config_show(default: bool, layers: bool, json: bool) -> ExitCode {
+    if default {
+        print!("{}", phux_config::DEFAULT_CONFIG_TOML);
+        return ExitCode::SUCCESS;
+    }
+    let path = config_loader::config_path();
+    let user_input = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            eprintln!("phux: could not read {}: {err}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    if layers {
+        let provenance = match phux_config::merged_config_with_provenance(&user_input, &path) {
+            Ok((_, provenance)) => provenance,
+            Err(err) => {
+                eprintln!("phux: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if json {
+            return config_json::print_layers_json(&path, &provenance);
+        }
+        return print_layers_human(&provenance);
+    }
+    let merged = match phux_config::merged_config_table(&user_input, &path) {
+        Ok(table) => table,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match toml::to_string(&merged) {
+        Ok(rendered) => {
+            print!("{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: could not render config: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render the provenance view: the layer stack, then one row per
+/// effective leaf key (arrays expand to one row per element) tagged
+/// with the 1-based index and short name of the owning layer.
+fn print_layers_human(provenance: &phux_config::ConfigProvenance) -> ExitCode {
+    println!("layers (merge order; later layers win):");
+    for (i, layer) in provenance.layers.iter().enumerate() {
+        let label = match layer {
+            phux_config::LayerSource::Defaults => "defaults (embedded)".to_owned(),
+            phux_config::LayerSource::Extended(p) => p.display().to_string(),
+            phux_config::LayerSource::User(p) => format!("{} (user)", p.display()),
+        };
+        println!("  [{}] {label}", i + 1);
+    }
+    println!();
+    println!("keys:");
+    let mut rows: Vec<(String, usize)> = Vec::new();
+    for (key, origin) in &provenance.keys {
+        match origin.elements.as_deref() {
+            Some(elements) if !elements.is_empty() => {
+                for (i, layer) in elements.iter().enumerate() {
+                    rows.push((format!("{key}[{i}]"), *layer));
+                }
+            }
+            _ => rows.push((key.clone(), origin.layer)),
+        }
+    }
+    let width = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+    for (key, layer) in rows {
+        let label = provenance
+            .layers
+            .get(layer)
+            .map_or_else(|| "?".to_owned(), layer_short_label);
+        println!("  {key:<width$}  <- [{}] {label}", layer + 1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Short per-row tag for a layer: `defaults`, the layer file's name,
+/// or `user`. The 1-based index printed beside it disambiguates layers
+/// whose file names collide.
+fn layer_short_label(layer: &phux_config::LayerSource) -> String {
+    match layer {
+        phux_config::LayerSource::Defaults => "defaults".to_owned(),
+        phux_config::LayerSource::Extended(p) => p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+        phux_config::LayerSource::User(_) => "user".to_owned(),
     }
 }
 
