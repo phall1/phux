@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-10
 ---
 
 # Operations
@@ -138,6 +138,15 @@ Current remote transports:
 - **QUIC/UDP:** `phux server --quic HOST:PORT`; always TLS 1.3 encrypted.
   Routable binds use the same token store and `phux pair` certificate
   fingerprint as the WebSocket path.
+- **WebTransport/UDP:** `phux server --webtransport HOST:PORT` (or
+  `PHUX_WT_ADDR`); HTTP/3 over QUIC, always TLS 1.3 encrypted — the browser's
+  door to QUIC-class transport, dialed by `phux-web` with a WebSocket
+  fallback. Routable binds require the same `phux pair` token, carried in the
+  CONNECT request: `Authorization: Bearer <hex>` from native consumers, or
+  `?token=<hex>` on the session URL from browsers (the JS `WebTransport` API
+  cannot set headers); a missing or invalid token is refused with HTTP 403
+  before the session exists. Shares the persisted certificate and token store
+  with the WebSocket and QUIC paths.
 - **SSH:** Reuses established SSH auth when operators tunnel or wrap the server;
   inherits SSH's trust model.
 

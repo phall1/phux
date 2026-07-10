@@ -17,10 +17,14 @@ web-sys       ── WebSocket, <canvas>, KeyboardEvent                 "the bro
         └────────────────► phux-web ◄────────────────┘
 ```
 
-`phux-web` opens a WebSocket to a phux server, decodes each binary frame with
-`phux-protocol`, feeds the terminal bytes into the engine via `phux-vt-web`,
-paints the grid (with a blinking cursor), and sends keystrokes back as
-`INPUT_KEY` frames.
+`phux-web` connects to a phux server — over WebTransport (HTTP/3 over QUIC,
+via `phux server --webtransport`; the browser's QUIC-class transport) when a
+session URL is supplied, falling back to a WebSocket — decodes each frame
+with `phux-protocol`, feeds the terminal bytes into the engine via
+`phux-vt-web`, paints the grid (with a blinking cursor), and sends keystrokes
+back as `INPUT_KEY` frames. Both transports carry the identical wire; the
+WebTransport stream is length-prefixed frames reassembled by
+`framing::FrameBuffer`, a WebSocket message is one frame.
 
 ## The dependency chain (build time)
 
@@ -59,13 +63,17 @@ terminal traffic). See [ADR-0024]/[ADR-0025] for why this beats linking them.
 
 ## Public API
 
-One `#[wasm_bindgen]` entry point, designed to be driven from JS:
+Two `#[wasm_bindgen]` entry points, designed to be driven from JS:
 
 ```js
-import init, { start } from "./pkg/phux_web.js";
+import init, { start, start_webtransport } from "./pkg/phux_web.js";
 await init();
 // finds <canvas id="…">, connects, attaches, and runs for the connection's life
 await start("wss://host/session", "my-canvas", /*cols*/ 100, /*rows*/ 24);
+// or WebTransport-first (phux server --webtransport), WebSocket fallback;
+// on a token-authenticated listener append ?token=<hex> to the https URL:
+await start_webtransport("https://host:4433/session", "wss://host/session",
+                         "my-canvas", 100, 24);
 ```
 
 ## Building

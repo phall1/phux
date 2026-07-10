@@ -1,7 +1,10 @@
 //! phux-web binary entry (Trunk builds this).
 //!
 //! On load: read the server URL from `?ws=…` (defaulting to
-//! `ws://<host>/session`) and attach the terminal into `#phux-term`.
+//! `ws://<host>/session`) and attach the terminal into `#phux-term`. A
+//! `?wt=…` parameter (an `https://` WebTransport session URL, from
+//! `phux server --webtransport`) makes the client try WebTransport first,
+//! falling back to the WebSocket URL.
 
 use wasm_bindgen::JsValue;
 
@@ -17,20 +20,32 @@ async fn auto_start() -> Result<(), JsValue> {
     let window = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
     let location = window.location();
     let search = location.search().unwrap_or_default();
-    let ws_url = ws_from_query(&search)
+    let ws_url = url_from_query(&search, "ws=")
         .unwrap_or_else(|| format!("ws://{}/session", location.host().unwrap_or_default()));
-    phux_web::start(ws_url, "phux-term".to_owned(), 80, 24).await
+    match url_from_query(&search, "wt=") {
+        Some(wt_url) => {
+            phux_web::start_webtransport(wt_url, ws_url, "phux-term".to_owned(), 80, 24).await
+        }
+        None => phux_web::start(ws_url, "phux-term".to_owned(), 80, 24).await,
+    }
 }
 
-/// Extract a `ws=` query parameter, decoding the `:` and `/` a browser escapes.
-fn ws_from_query(search: &str) -> Option<String> {
+/// Extract a URL-valued query parameter, decoding the `:`, `/`, `?`, and `=`
+/// a browser escapes (enough for the `ws=`/`wt=` values, including a
+/// `?token=<hex>` suffix on a WebTransport URL).
+fn url_from_query(search: &str, key: &str) -> Option<String> {
     search
         .trim_start_matches('?')
         .split('&')
-        .find_map(|kv| kv.strip_prefix("ws="))
+        .find_map(|kv| kv.strip_prefix(key))
         .map(|v| {
             v.replace("%3A", ":")
+                .replace("%3a", ":")
                 .replace("%2F", "/")
                 .replace("%2f", "/")
+                .replace("%3F", "?")
+                .replace("%3f", "?")
+                .replace("%3D", "=")
+                .replace("%3d", "=")
         })
 }
