@@ -8,8 +8,19 @@
 //!
 //! Spec ref: `docs/spec/L3.md` §3.2 Layout (binary subset; `TABBED` is reserved for
 //! a later version and is intentionally absent here).
-
-use std::collections::HashMap;
+//!
+//! Pane-rect **tiling** deliberately does not live here (bead phux-nnjx).
+//! The canonical tiling walk is client-side, in `phux-client-core`'s
+//! `multi_pane` module (`pane_rects` / `walk_layout`): it reserves one
+//! divider cell per interior split, and it pairs with the client's
+//! min-cell gate (`phux_client::attach::actions`). An earlier server-side
+//! `fill_rects` here was divider-unaware and had drifted from that walk
+//! with no runtime callers; it was removed rather than unified because
+//! the two crates operate on different `LayoutNode` types and sharing the
+//! math would force a new crate-graph edge in either direction. If the
+//! server ever needs pane geometry, reach the client-core walk (or move
+//! it somewhere both crates can depend on) — do not reintroduce a
+//! parallel implementation.
 
 use thiserror::Error;
 
@@ -79,22 +90,6 @@ pub enum Direction {
     Left,
     /// Move focus right.
     Right,
-}
-
-/// An axis-aligned rectangle in cell coordinates.
-///
-/// `x`/`y` are the top-left corner; `w`/`h` are the width and height. The
-/// origin is the window's top-left.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rect {
-    /// Top-left x coordinate (column).
-    pub x: u16,
-    /// Top-left y coordinate (row).
-    pub y: u16,
-    /// Width in cells.
-    pub w: u16,
-    /// Height in cells.
-    pub h: u16,
 }
 
 /// Errors returned by layout operations on a [`Window`].
@@ -179,79 +174,6 @@ impl LayoutNode {
                 }
             }
         }
-    }
-
-    /// Recursively compute pane rectangles given the bounding rectangle.
-    ///
-    /// Rounding ensures the children's dims sum exactly to the parent's
-    /// dim along the split axis — no slop, no overlap.
-    fn fill_rects(&self, bounds: Rect, out: &mut HashMap<TerminalId, Rect>) {
-        match self {
-            Self::Leaf(p) => {
-                out.insert(*p, bounds);
-            }
-            Self::Split {
-                dir,
-                ratio,
-                left,
-                right,
-            } => match dir {
-                SplitDir::Horizontal => {
-                    let left_w = split_dim(bounds.w, *ratio);
-                    let right_w = bounds.w - left_w;
-                    let left_rect = Rect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        w: left_w,
-                        h: bounds.h,
-                    };
-                    let right_rect = Rect {
-                        x: bounds.x + left_w,
-                        y: bounds.y,
-                        w: right_w,
-                        h: bounds.h,
-                    };
-                    left.fill_rects(left_rect, out);
-                    right.fill_rects(right_rect, out);
-                }
-                SplitDir::Vertical => {
-                    let top_h = split_dim(bounds.h, *ratio);
-                    let bot_h = bounds.h - top_h;
-                    let top_rect = Rect {
-                        x: bounds.x,
-                        y: bounds.y,
-                        w: bounds.w,
-                        h: top_h,
-                    };
-                    let bot_rect = Rect {
-                        x: bounds.x,
-                        y: bounds.y + top_h,
-                        w: bounds.w,
-                        h: bot_h,
-                    };
-                    left.fill_rects(top_rect, out);
-                    right.fill_rects(bot_rect, out);
-                }
-            },
-        }
-    }
-}
-
-/// Compute the left/top child's dim, clamped so the right/bottom child's dim
-/// (`total - returned`) is non-negative.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn split_dim(total: u16, ratio: f32) -> u16 {
-    let raw = (f32::from(total) * ratio).round();
-    if raw < 0.0 {
-        0
-    } else if raw > f32::from(total) {
-        total
-    } else {
-        raw as u16
     }
 }
 
@@ -379,28 +301,6 @@ impl Window {
             }
         }
         None
-    }
-
-    /// Compute the bounding rectangle of every leaf given the window dims.
-    ///
-    /// Returns an empty map if the layout is empty. Rectangles tile the
-    /// `(0, 0, dims.0, dims.1)` rect exactly: dims sum to the parent's dim
-    /// along the split axis at every interior node.
-    #[must_use]
-    pub fn pane_rects(&self, dims: (u16, u16)) -> HashMap<TerminalId, Rect> {
-        let mut out = HashMap::new();
-        if let Some(layout) = self.layout.as_ref() {
-            layout.fill_rects(
-                Rect {
-                    x: 0,
-                    y: 0,
-                    w: dims.0,
-                    h: dims.1,
-                },
-                &mut out,
-            );
-        }
-        out
     }
 }
 
