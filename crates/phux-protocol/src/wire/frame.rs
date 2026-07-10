@@ -234,6 +234,24 @@ pub const TERMINAL_LINK_KEY: &str = "phux.link/v1";
 /// `DELETE_METADATA`, observed via `GET_METADATA`/`SUBSCRIBE_METADATA`.
 pub const TERMINAL_AGENT_KEY: &str = "phux.agent/v1";
 
+/// Conventional L3 metadata key acting as the config-reload doorbell for
+/// attached consumers (phux-foz.5).
+///
+/// Scope: [`Scope::Global`]. Value: an opaque, writer-chosen nonce (the
+/// reference CLI writes a UTF-8 `unix-nanos-pid` string); its only job is
+/// to DIFFER from the previous value so the server's equal-bytes SET
+/// dedup does not swallow the broadcast. The server stores the bytes
+/// without interpreting them. A consumer subscribed to this key treats a
+/// non-tombstone `METADATA_CHANGED` as "re-read your local config now":
+/// it re-runs its own layered config load and rebuilds its config-derived
+/// state in place. The config itself NEVER crosses the wire — each
+/// consumer reads its own file — and a consumer whose re-read fails MUST
+/// keep its previous configuration (surface the error locally, never
+/// half-apply). Tombstones (`DELETE_METADATA`) are ignored. Set via
+/// `SET_METADATA`, observed via `SUBSCRIBE_METADATA`. Backs
+/// `phux config reload` and the TUI `reload-config` action.
+pub const CONFIG_RELOAD_KEY: &str = "phux.config.reload/v1";
+
 /// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries

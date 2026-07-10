@@ -136,6 +136,15 @@ pub(super) struct DispatchCtx<'a> {
     /// input loop and reports completion here; the driver's `select!`
     /// surfaces failures as a toast. `None` in unit tests (no runtime).
     pub plugin_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<PluginRunResult>>,
+    /// phux-foz.5: out-channel for a dispatched `reload-config`. Set by
+    /// [`apply_action_effects`]; the driver reads it after the dispatch
+    /// batch and re-runs the layered config loader, swapping its
+    /// config-derived state in place (or keeping the old state and
+    /// surfacing the error when the re-read fails). Same driver-owned
+    /// out-channel shape as `switch_request` — the reload cannot happen
+    /// inside dispatch because the resolver/theme/keybindings borrows in
+    /// this ctx ARE the state being replaced.
+    pub reload_request: &'a mut bool,
 }
 
 /// An active divider drag (ADR-0035).
@@ -943,6 +952,12 @@ async fn apply_action_effects<W: super::RenderSink>(
             );
         }
     }
+    // phux-foz.5: hand a `reload-config` up to the driver, which owns the
+    // config-derived state (resolver, theme, keybindings snapshot, status
+    // bar) this batch is still borrowing.
+    if effects.reload_config {
+        *ctx.reload_request = true;
+    }
     // phux-eb0 / new-session: an in-process re-attach request. Hand the
     // target up to the driver via `ctx.switch_request`; `main_loop` reads
     // it after this dispatch batch and returns a `SwitchTo` exit so the
@@ -1133,6 +1148,12 @@ struct ActionEffects {
     /// never blocks on the plugin; completion lands on the driver's
     /// plugin-events channel (failure output toasts there).
     run_plugin: Option<(String, String)>,
+    /// phux-foz.5: `true` ⇒ the user asked for a live config reload
+    /// (`reload-config`, via palette or a bound chord). Carried up to the
+    /// driver via `DispatchCtx::reload_request`; the driver re-runs the
+    /// layered loader after this batch and swaps its config-derived
+    /// state atomically (old config kept on any failure).
+    reload_config: bool,
 }
 
 /// An in-process re-attach request raised by a dispatched action.
@@ -1187,6 +1208,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "give-input",
     "signal-terminal",
     "plugin-action",
+    "reload-config",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -1487,6 +1509,15 @@ fn run_action(
                 tracing::warn!(args = ?resolved.args, "resize-pane missing args");
                 effects.bell = true;
             }
+        }
+        "reload-config" => {
+            // phux-foz.5: explicit live config reload. The actual re-read
+            // + swap happens in the driver after this batch (see
+            // `DispatchCtx::reload_request`): the resolver that just
+            // resolved this chord, the theme, and the keybindings
+            // snapshot are all borrowed by `ctx` right now — they are
+            // exactly the state the reload replaces.
+            effects.reload_config = true;
         }
         "show-help" => {
             // phux-5ke.4: push the help overlay. The chord is consumed —
@@ -2179,6 +2210,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -2200,9 +2232,23 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
+    }
+
+    #[test]
+    fn reload_config_action_raises_the_reload_effect() {
+        // phux-foz.5: the arm only raises the effect — the driver owns
+        // the actual re-read + swap (the ctx borrows the state to
+        // replace). No layout mutation, no bell, no frames.
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("reload-config"), &mut workspace);
+        assert!(effects.reload_config, "reload-config must raise the effect");
+        assert!(!effects.layout_mutated);
+        assert!(!effects.bell);
+        assert!(effects.kill_frames.is_empty());
     }
 
     #[test]
@@ -2474,6 +2520,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2495,6 +2542,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         let mut out: Vec<u8> = Vec::new();
@@ -2520,6 +2568,7 @@ mod tests {
         assert!(sidebar_enabled, "first toggle enables the sidebar");
 
         // A second toggle disables it again.
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2541,6 +2590,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         apply_action_effects(
@@ -2599,6 +2649,7 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let effects = {
+            let mut reload_request = false;
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace,
@@ -2620,6 +2671,7 @@ mod tests {
                 drag: &mut drag,
                 plugin_actions: &[],
                 plugin_tx: None,
+                reload_request: &mut reload_request,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -2939,6 +2991,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2960,6 +3013,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -3009,6 +3063,7 @@ mod tests {
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
         let effects = {
+            let mut reload_request = false;
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace: &mut workspace,
@@ -3030,6 +3085,7 @@ mod tests {
                 drag: &mut drag,
                 plugin_actions: &[],
                 plugin_tx: None,
+                reload_request: &mut reload_request,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -3158,6 +3214,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3179,6 +3236,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         dispatch_input_events(
             &mut out,
@@ -3254,6 +3312,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -3275,6 +3334,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         dispatch_input_events(
             &mut out,
@@ -3393,6 +3453,7 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3414,6 +3475,7 @@ mod tests {
             drag: &mut drag,
             plugin_actions: &[],
             plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let page_up = KeyEvent {
             action: KeyAction::Press,

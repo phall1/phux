@@ -166,8 +166,8 @@ detach` would have no attached viewport to act on.
 
 > **Status (design intent, not shipped):** `windows`, `panes`, and
 > `messages` are listed in earlier drafts as future read verbs; none
-> ships today. `config` ships `init` / `path` / `show`; `config edit`
-> and `config reload` are design intent (§4.3).
+> ships today. `config` ships `init` / `path` / `show` / `reload` (§4.3);
+> `config edit` is design intent.
 
 **The target convention.** The verbs that address an existing pane —
 `kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
@@ -301,6 +301,8 @@ phux config show --layers   # provenance: which layer of the extends
                             #   (schema_version 1)
 phux config plugins --json  # print configured plugin manifests as JSON
 phux config agents --json   # print configured plugin agent states as JSON
+phux config reload          # validate, then apply the config to running
+                            #   clients in place (see 4.3)
 phux plugin list --json     # inspect the plugin registry
 phux plugin validate        # validate every configured plugin manifest
 ```
@@ -706,16 +708,37 @@ flags when re-adding a name; omitting them clears the stored auth material.
 
 ### 4.3 Reloading
 
-> **Status:** Design intent. No live-reload verb ships today. The shipped
-> `phux config` subcommands are `init`, `path`, `show`, `plugins`, `agents`,
-> and `run` (§4.0); a running client picks up config changes on its next
-> start, not in place.
+Config reloads are **explicit, never automatic** (phux-foz.5). Two
+surfaces trigger the same in-place reload of a running client:
 
-Config reloads are designed to be explicit, not automatic: a future
-reload path re-reads the file and applies it without restarting, and the
-file is deliberately not watched, because watch-reload introduces a class
-of "saved-mid-edit, now my keybindings are gone" papercuts. Until that
-lands, restart the client (or detach and re-attach) to apply edits.
+- **The `reload-config` action** — a command-palette row ("Reload the
+  config file"), also bindable to any chord: `R = "reload-config"` in
+  `[keybindings.prefix-table]`. It ships unbound by default.
+- **`phux config reload`** from any shell. The CLI validates the config
+  locally first — a broken file fails right there with the parse error
+  and signals nothing — then rings a reload doorbell on the server (the
+  conventional L3 key `phux.config.reload/v1`, spec §3.8 of
+  [`../spec/L3.md`](../spec/L3.md)) so **every** attached client re-reads
+  its own config file. The config bytes never cross the wire.
+
+A reload re-runs the full layered loader — `extends` stacks and `-append`
+array merges resolve exactly as at startup — and rebuilds, atomically:
+keybindings (prefix, both tables, plugin-contributed chords, the
+which-key knobs), the theme, the status-bar composition, and the plugin
+action rows in the palette. Failure semantics are all-or-nothing: on any
+parse or validation error the client keeps the **previous** config fully
+in effect and surfaces the error as a dismissable toast — never a crash,
+never a half-applied mix of old and new.
+
+Not covered by a reload (restart the client, or detach and re-attach):
+pane-behavior settings read once at attach, such as `[predict]`,
+`[sidebar]` geometry, and `[defaults]` (which the server owns anyway).
+
+The file is deliberately **not watched**: watch-reload introduces a class
+of "saved-mid-edit, now my keybindings are gone" papercuts, and an
+explicit verb keeps a broken intermediate save inert until you ask for
+it. This was the design intent recorded here before the verb shipped; it
+is now the shipped behavior.
 
 ### 4.4 Theme color slots
 
@@ -858,6 +881,7 @@ test, so this table cannot silently drift):
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
 | `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
+| `reload-config`   | re-read the config and apply it in place (§4.3) |
 
 ### 5.5 Command palette and pickers
 

@@ -588,11 +588,13 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Inspect and scaffold the phux config file (phux-ijp).
+    /// Inspect, scaffold, and reload the phux config file (phux-ijp).
     ///
     /// phux is config-driven (ADR-0023): defaults ship in the binary and
     /// your `config.toml` is a sparse overlay merged on top. These
-    /// subcommands never touch a running server.
+    /// subcommands never touch a running server, except `reload`
+    /// (phux-foz.5), which signals attached clients to re-read their
+    /// config in place.
     Config {
         #[command(subcommand)]
         action: config_action::ConfigAction,

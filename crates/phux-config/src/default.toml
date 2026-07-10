@@ -210,6 +210,14 @@ which-key-delay-ms = 600
 # or ? again dismisses it.
 "?" = "show-help"
 
+# Live config reload (phux-foz.5): re-reads this file (full layered
+# load, `extends` included) and applies keybindings, theme, and status
+# bar in place; a file that fails to parse or validate keeps the old
+# config and surfaces the error in a toast. Unbound by default — the
+# command palette offers it as "Reload the config file"; bind it
+# yourself if you iterate on config a lot:
+#   "R" = "reload-config"
+
 [keybindings.global]
 # No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"

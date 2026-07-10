@@ -17,10 +17,12 @@ use live_feed::{
 };
 
 /// `phux config <action>` (phux-ijp). Mostly client-local: inspects and
-/// scaffolds the on-disk config without contacting a server. The one
-/// exception is `config agents`, which best-effort reads live
+/// scaffolds the on-disk config without contacting a server. The
+/// exceptions are `config agents`, which best-effort reads live
 /// `phux.agent/v1` state from a running server (phux-r82.10) and degrades
-/// to the declared manifest values when none answers.
+/// to the declared manifest values when none answers, and `reload`
+/// (phux-foz.5), which rings
+/// the server-relayed reload doorbell for attached clients.
 pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
     match action {
         ConfigAction::Path => {
@@ -35,6 +37,7 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
         } => run_config_show(*default, *layers, *json),
         ConfigAction::Plugins { json } => run_config_plugins(*json),
         ConfigAction::Agents { json, socket } => run_config_agents(*json, socket.clone()),
+        ConfigAction::Reload { socket } => run_config_reload(socket.clone()),
         ConfigAction::Run {
             plugin,
             action,
@@ -197,6 +200,82 @@ fn run_config_init(force: bool, distro: Option<&str>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `phux config reload` (phux-foz.5): validate the layered config
+/// locally, then ring the `phux.config.reload/v1` doorbell so attached
+/// clients re-read their config in place.
+///
+/// The local validation is the config-iteration fast path: a broken file
+/// fails HERE, with the parse error on stderr, and nothing is signalled
+/// (running clients would have kept their old config anyway — the
+/// doorbell just becomes pointless noise). The signal is a `SET_METADATA`
+/// of the conventional Global key with a fresh nonce value; the config
+/// bytes never cross the wire — every client re-reads its own file. The
+/// trailing `GET_METADATA` round-trip is load-bearing: `SET_METADATA` has
+/// no reply frame, so without it this process could exit and close the
+/// socket before the server reads the SET (same pattern as `phux tag`).
+fn run_config_reload(socket: Option<PathBuf>) -> ExitCode {
+    use phux_client::attach::connection::Connection;
+    use phux_protocol::wire::frame::{CONFIG_RELOAD_KEY, FrameKind, Scope};
+
+    // 1. Validate locally with the full layered loader (extends stacks).
+    let config_path = config_loader::config_path();
+    if let Err(err) = config_loader::load_from(&config_path) {
+        eprintln!("phux: config invalid, not signalling reload: {err}");
+        return ExitCode::FAILURE;
+    }
+
+    // 2. Ring the doorbell. The nonce only has to differ from the
+    // previous value (the server dedups equal-bytes SETs).
+    let socket_path = socket.unwrap_or_else(phux_server::runtime::default_socket_path);
+    let rt = match super::cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    rt.block_on(async move {
+        let mut conn = match Connection::connect(&socket_path).await {
+            Ok(conn) => conn,
+            Err(err) => return super::report_no_server(&err, &socket_path, "config reload"),
+        };
+        let nonce = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+            std::process::id(),
+        );
+        if let Err(err) = conn
+            .send(&FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: nonce.into_bytes(),
+            })
+            .await
+        {
+            return super::report_no_server(&err, &socket_path, "config reload");
+        }
+        if let Err(err) = conn
+            .send(&FrameKind::GetMetadata {
+                request_id: 2,
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+            })
+            .await
+        {
+            return super::report_no_server(&err, &socket_path, "config reload");
+        }
+        loop {
+            match conn.recv().await {
+                Ok(FrameKind::MetadataValue { request_id: 2, .. }) => break,
+                Ok(_) => {}
+                Err(err) => return super::report_no_server(&err, &socket_path, "config reload"),
+            }
+        }
+        println!("config OK; reload signalled to attached clients");
+        ExitCode::SUCCESS
+    })
 }
 
 pub(super) struct LoadedPlugin {

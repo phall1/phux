@@ -71,6 +71,24 @@ pub(crate) enum ConfigAction {
         socket: Option<std::path::PathBuf>,
     },
 
+    /// Re-read the layered config and apply it to running clients in
+    /// place.
+    ///
+    /// Validates the config locally first (a broken file fails here, with
+    /// the parse error, and nothing is signalled), then rings the
+    /// `phux.config.reload/v1` doorbell on the server so every attached
+    /// client re-reads its own config file and rebuilds keybindings,
+    /// theme, and status bar without restarting. Clients whose re-read
+    /// fails keep their previous config. Deliberately explicit — the
+    /// config file is never watched (see docs/consumers/tui.md section
+    /// 4.3).
+    Reload {
+        /// UDS path of the server to signal (default: the per-user
+        /// socket, or `$PHUX_SOCKET`).
+        #[arg(long, value_name = "PATH")]
+        socket: Option<std::path::PathBuf>,
+    },
+
     /// Execute one action declared by a configured plugin manifest.
     Run {
         /// Configured plugin id.
