@@ -398,6 +398,69 @@ pub(crate) async fn query_pane_cwd(
     rx.await.ok().flatten()
 }
 
+/// Refresh every live pane's registry `cwd` from its PTY child's kernel
+/// CWD (phux-p4vp).
+///
+/// `TerminalDescriptor.cwd` is stamped once at spawn time (see
+/// `stamp_spawn_cwd` in `runtime::commands`) and would otherwise go stale
+/// as soon as the shell `cd`s. `handle_attach` calls this right before
+/// `prepare_attach` builds the `ATTACHED` snapshot, so
+/// `SessionSnapshot.panes[].cwd` reflects each pane's *current* directory
+/// — the TUI sidebar derives its per-window VCS branch line from it.
+///
+/// Best-effort per pane: a dead child, an unsupported platform, or a
+/// vanished actor leaves that pane's stamped value untouched. Queries fan
+/// out concurrently (same `FuturesUnordered` rationale as the snapshot
+/// fan-out below: attach latency scales with the MAX pane reply time, not
+/// the SUM) and the whole drain is capped by [`CWD_REFRESH_DEADLINE`]:
+/// an actor that never services its `pwd` mailbox (wedged, or a
+/// synthetic test handle) must not stall the `ATTACHED` frame. Panes
+/// whose replies miss the deadline keep their stamped spawn-time value;
+/// replies that landed before it still apply. Handles are cloned out of
+/// state first — `with` must not be held across an await.
+pub(crate) async fn refresh_registry_cwds(state: &SharedState) {
+    /// Upper bound on the attach-time kernel-cwd fan-out. Real actors
+    /// answer a `PwdRequest` in well under a millisecond (one kernel
+    /// call, no PTY I/O), so this only ever fires for a wedged or
+    /// mock actor — where waiting longer buys nothing and every 100ms
+    /// visibly delays the attacher's first paint.
+    const CWD_REFRESH_DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let handles: Vec<(TerminalId, crate::terminal_actor::TerminalHandle)> =
+        state.with(|s| s.terminals.iter().map(|(id, h)| (*id, h.clone())).collect());
+    if handles.is_empty() {
+        return;
+    }
+    let mut queries: FuturesUnordered<_> = handles
+        .into_iter()
+        .map(|(id, handle)| async move { (id, query_pane_cwd(handle).await) })
+        .collect();
+    let mut resolved: Vec<(TerminalId, std::path::PathBuf)> = Vec::new();
+    let drain = async {
+        while let Some((id, cwd)) = queries.next().await {
+            if let Some(cwd) = cwd {
+                resolved.push((id, std::path::PathBuf::from(cwd)));
+            }
+        }
+    };
+    if tokio::time::timeout(CWD_REFRESH_DEADLINE, drain)
+        .await
+        .is_err()
+    {
+        debug!("attach cwd refresh hit deadline; using stamped values for stragglers");
+    }
+    if resolved.is_empty() {
+        return;
+    }
+    state.with_mut(|s| {
+        for (id, cwd) in resolved {
+            if let Some(desc) = s.registry.terminal_mut(id) {
+                desc.cwd = cwd;
+            }
+        }
+    });
+}
+
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
 /// v0.1 servers expose a single default Group at
@@ -781,6 +844,11 @@ pub(crate) async fn handle_attach(
     else {
         return;
     };
+
+    // phux-p4vp: fold each live pane's kernel CWD into its registry
+    // descriptor before the snapshot is built, so ATTACHED carries a
+    // current `cwd` per pane (the sidebar's VCS branch line depends on it).
+    refresh_registry_cwds(state).await;
 
     let (snapshot, initial_client_id, panes_to_snapshot) =
         match prepare_attach(state, client_id, &session_name, out_tx, client_caps) {

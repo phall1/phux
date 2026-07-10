@@ -86,7 +86,15 @@ pub fn seed_session_with_pty_and_colors(
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
-    let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
+    // phux-p4vp: capture the spawn-time working directory before `cmd`
+    // is moved into the actor build below, so it can be stamped onto the
+    // pane's registry descriptor (see `stamp_spawn_cwd`).
+    let spawn_cwd = spawn_cwd_of(&cmd);
+    let terminal: TerminalId = state.with_mut(|s| {
+        let terminal = s.seed_session(name).2;
+        stamp_spawn_cwd(s, terminal, spawn_cwd);
+        terminal
+    });
     let terminal_token = root_token.child_token();
     let bundle = TerminalActor::build_with_token_and_colors(
         80,
@@ -156,8 +164,13 @@ pub fn spawn_pane_with_pty_and_colors(
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
-    let Some(terminal): Option<TerminalId> = state.with_mut(|s| s.add_pane_to_session(session))
-    else {
+    // phux-p4vp: same spawn-time cwd capture as `seed_session_with_pty`.
+    let spawn_cwd = spawn_cwd_of(&cmd);
+    let Some(terminal): Option<TerminalId> = state.with_mut(|s| {
+        let terminal = s.add_pane_to_session(session)?;
+        stamp_spawn_cwd(s, terminal, spawn_cwd);
+        Some(terminal)
+    }) else {
         return Ok(None);
     };
     let terminal_token = root_token.child_token();
@@ -192,6 +205,39 @@ pub fn spawn_pane_with_pty_and_colors(
         crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, session_name.as_deref()),
     );
     Ok(Some(terminal))
+}
+
+/// The working directory a PTY child spawned from `cmd` starts in
+/// (phux-p4vp): the builder's explicit cwd when set, else the server
+/// process's own CWD (which the child inherits). `None` only when the
+/// server's CWD itself is unreadable.
+fn spawn_cwd_of(cmd: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
+    cmd.get_cwd()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+}
+
+/// Stamp a freshly-spawned pane's working directory onto its registry
+/// descriptor (phux-p4vp).
+///
+/// `phux_core::Registry::new_terminal` initializes `TerminalDescriptor.cwd`
+/// to the empty path, and `build_session_snapshot` filters an empty path
+/// to a wire `cwd: None` — so without this stamp the ATTACHED
+/// `SessionSnapshot.panes[].cwd` never populates for normally spawned
+/// panes and the TUI sidebar's per-window VCS branch line stays blank.
+/// The stamped value is the spawn-time directory; attach refreshes it
+/// from the live PTY child (see
+/// [`crate::runtime::attach::refresh_registry_cwds`]).
+fn stamp_spawn_cwd(
+    s: &mut crate::state::ServerState,
+    terminal: phux_core::ids::TerminalId,
+    cwd: Option<std::path::PathBuf>,
+) {
+    if let Some(cwd) = cwd
+        && let Some(desc) = s.registry.terminal_mut(terminal)
+    {
+        desc.cwd = cwd;
+    }
 }
 
 /// Bounded capacity of the per-pane agent-event sink (SPEC §7.5,
