@@ -1,8 +1,9 @@
 //! Graceful-upgrade orchestration (ADR-0032): build the handoff blob, clear
 //! `FD_CLOEXEC` on the descriptors the new image must inherit, validate the
 //! on-disk binary, and re-exec it as `server --resume <fd>` plus the server's
-//! effective runtime flags (`--listen` / `--quic` / `--hub`, phux-v45.10) so
-//! the resumed image serves the same surface the old one did.
+//! effective runtime flags (`--listen` / `--quic` / `--webtransport` /
+//! `--hub`, phux-v45.10) so the resumed image serves the same surface the old
+//! one did.
 //!
 //! Split into [`prepare_upgrade`] (everything reversible — if it fails the old
 //! image keeps serving and no child is stranded) and [`UpgradePlan::exec`]
@@ -49,7 +50,8 @@ pub(super) struct UpgradePlan {
     socket_path: PathBuf,
     /// The server's effective runtime flags (phux-v45.10), read back from the
     /// upgrade context the runtime captured at startup. Re-emitted on the
-    /// resume argv so `--listen` / `--quic` / `--hub` survive the re-exec.
+    /// resume argv so `--listen` / `--quic` / `--webtransport` / `--hub`
+    /// survive the re-exec.
     flags: RuntimeFlags,
     _blob_file: std::fs::File,
 }
@@ -116,10 +118,11 @@ pub(super) async fn prepare_upgrade(state: &SharedState) -> Result<UpgradePlan, 
 
 impl UpgradePlan {
     /// Re-exec the new binary as `server --resume <blob_fd> --socket <path>`
-    /// plus the effective runtime flags (`--listen` / `--quic` / `--hub`,
-    /// phux-v45.10), replacing this process in place. Returns only on failure
-    /// — and a failure is harmless: nothing was closed, so the old image
-    /// keeps serving and the children stay attached.
+    /// plus the effective runtime flags (`--listen` / `--quic` /
+    /// `--webtransport` / `--hub`, phux-v45.10), replacing this process in
+    /// place. Returns only on failure — and a failure is harmless: nothing
+    /// was closed, so the old image keeps serving and the children stay
+    /// attached.
     pub(super) fn exec(self) -> std::io::Error {
         Command::new(&self.current_exe)
             .args(resume_args(self.blob_fd, &self.socket_path, self.flags))
@@ -145,6 +148,10 @@ fn resume_args(blob_fd: RawFd, socket_path: &Path, flags: RuntimeFlags) -> Vec<O
     }
     if let Some(addr) = flags.quic_addr {
         args.push(OsString::from("--quic"));
+        args.push(OsString::from(addr.to_string()));
+    }
+    if let Some(addr) = flags.wt_addr {
+        args.push(OsString::from("--webtransport"));
         args.push(OsString::from(addr.to_string()));
     }
     if flags.hub {
@@ -188,11 +195,14 @@ mod tests {
 
     const WS: &str = "127.0.0.1:8787";
     const QUIC: &str = "0.0.0.0:4433";
+    const WT: &str = "0.0.0.0:4434";
 
-    fn flags(ws: bool, quic: bool, hub: bool) -> RuntimeFlags {
+    fn flags(ws: Option<&str>, quic: Option<&str>, wt: Option<&str>, hub: bool) -> RuntimeFlags {
+        let addr = |s: &str| s.parse::<SocketAddr>().unwrap();
         RuntimeFlags {
-            ws_addr: ws.then(|| WS.parse::<SocketAddr>().unwrap()),
-            quic_addr: quic.then(|| QUIC.parse::<SocketAddr>().unwrap()),
+            ws_addr: ws.map(addr),
+            quic_addr: quic.map(addr),
+            wt_addr: wt.map(addr),
             hub,
         }
     }
@@ -211,26 +221,97 @@ mod tests {
     /// flags must be reconstructed on the re-exec argv — the original bug was
     /// an argv of only `server --resume <fd> --socket <path>`, silently
     /// dropping `--listen`, `--quic`, and `--hub` across `phux server
-    /// upgrade`.
+    /// upgrade` (and later, in the same class, `--webtransport` — phux-0wmf).
     #[test]
     fn resume_args_reconstructs_every_flag_combination() {
-        let cases: [(bool, bool, bool, &[&str]); 8] = [
-            (false, false, false, &[]),
-            (true, false, false, &["--listen", WS]),
-            (false, true, false, &["--quic", QUIC]),
-            (false, false, true, &["--hub"]),
-            (true, true, false, &["--listen", WS, "--quic", QUIC]),
-            (true, false, true, &["--listen", WS, "--hub"]),
-            (false, true, true, &["--quic", QUIC, "--hub"]),
-            (true, true, true, &["--listen", WS, "--quic", QUIC, "--hub"]),
+        type Case<'a> = (
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<&'a str>,
+            bool,
+            &'a [&'a str],
+        );
+        let cases: [Case<'_>; 16] = [
+            (None, None, None, false, &[]),
+            (Some(WS), None, None, false, &["--listen", WS]),
+            (None, Some(QUIC), None, false, &["--quic", QUIC]),
+            (None, None, Some(WT), false, &["--webtransport", WT]),
+            (None, None, None, true, &["--hub"]),
+            (
+                Some(WS),
+                Some(QUIC),
+                None,
+                false,
+                &["--listen", WS, "--quic", QUIC],
+            ),
+            (
+                Some(WS),
+                None,
+                Some(WT),
+                false,
+                &["--listen", WS, "--webtransport", WT],
+            ),
+            (Some(WS), None, None, true, &["--listen", WS, "--hub"]),
+            (
+                None,
+                Some(QUIC),
+                Some(WT),
+                false,
+                &["--quic", QUIC, "--webtransport", WT],
+            ),
+            (None, Some(QUIC), None, true, &["--quic", QUIC, "--hub"]),
+            (None, None, Some(WT), true, &["--webtransport", WT, "--hub"]),
+            (
+                Some(WS),
+                Some(QUIC),
+                Some(WT),
+                false,
+                &["--listen", WS, "--quic", QUIC, "--webtransport", WT],
+            ),
+            (
+                Some(WS),
+                Some(QUIC),
+                None,
+                true,
+                &["--listen", WS, "--quic", QUIC, "--hub"],
+            ),
+            (
+                Some(WS),
+                None,
+                Some(WT),
+                true,
+                &["--listen", WS, "--webtransport", WT, "--hub"],
+            ),
+            (
+                None,
+                Some(QUIC),
+                Some(WT),
+                true,
+                &["--quic", QUIC, "--webtransport", WT, "--hub"],
+            ),
+            (
+                Some(WS),
+                Some(QUIC),
+                Some(WT),
+                true,
+                &[
+                    "--listen",
+                    WS,
+                    "--quic",
+                    QUIC,
+                    "--webtransport",
+                    WT,
+                    "--hub",
+                ],
+            ),
         ];
-        for (ws, quic, hub, extra) in cases {
+        for (ws, quic, wt, hub, extra) in cases {
             let mut expected: Vec<String> = BASE.iter().map(ToString::to_string).collect();
             expected.extend(extra.iter().map(ToString::to_string));
             assert_eq!(
-                args_as_strings(flags(ws, quic, hub)),
+                args_as_strings(flags(ws, quic, wt, hub)),
                 expected,
-                "argv mismatch for ws={ws} quic={quic} hub={hub}",
+                "argv mismatch for ws={ws:?} quic={quic:?} wt={wt:?} hub={hub}",
             );
         }
     }
@@ -251,7 +332,7 @@ mod tests {
             state.with(|s| s.upgrade_context().is_none()),
             "no context before serving"
         );
-        let captured = flags(true, true, true);
+        let captured = flags(Some(WS), Some(QUIC), Some(WT), true);
         state.with_mut(|s| {
             s.set_upgrade_context(3, PathBuf::from("/tmp/phux.sock"), captured);
         });
