@@ -29,6 +29,18 @@
 //! backoff, fail-closed refusal) the supervisor keeps draining the
 //! mailbox, failing every request fast with a typed
 //! `SatelliteUnreachable` — a consumer never hangs on a dead satellite.
+//!
+//! A dead satellite that *looks* up is handled too: every link enforces a
+//! keepalive / idle contract. QUIC gets it from the transport (`phux-dial`
+//! sets `keep_alive_interval` + `max_idle_timeout`; expiry surfaces as a
+//! read error). WebSocket has no transport-level idle detection, so the
+//! supervisor originates pings on `LINK_KEEPALIVE_INTERVAL` and tears
+//! the link down when nothing (not even a pong) has arrived within
+//! `LINK_IDLE_TIMEOUT` — a silent partition becomes an ordinary
+//! disconnect: session teardown, typed errors, redial. Wire writes are
+//! bounded by `LINK_SEND_TIMEOUT` so a peer with full socket buffers
+//! cannot wedge the supervisor loop, and the keepalive tick doubles as
+//! the sweep that prunes relayed commands whose consumer stopped waiting.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +59,24 @@ const BACKOFF_BASE: Duration = Duration::from_millis(500);
 
 /// Ceiling for the exponential redial delay.
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+/// Period of the relay session's housekeeping tick: drive the transport
+/// keepalive ([`LinkConn::keepalive`]) and prune abandoned pending
+/// commands. Mirrors the QUIC dialer's `keep_alive_interval`
+/// (`phux-dial`), so both transports probe on the same cadence.
+const LINK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Hub-side inbound-idle limit for WS links, mirroring the QUIC dialer's
+/// `max_idle_timeout` (`phux-dial`). A healthy but quiet link stays under
+/// it because every keepalive ping solicits a pong; only a partitioned or
+/// wedged satellite goes silent this long.
+const LINK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stall bound on any single wire write toward the satellite (frames and
+/// keepalive pings). Against a partitioned peer with full socket buffers
+/// an unbounded write would pend forever and wedge the whole supervisor
+/// loop — inbound dispatch and the keepalive tick included.
+const LINK_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What the planner decided to dial for one satellite, auth material
 /// resolved into the shared `phux-dial` vocabulary.
@@ -449,6 +479,15 @@ pub(crate) trait LinkConn {
     /// against the relay mailbox and the cancellation token, recreating
     /// the future each iteration.
     async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String>;
+
+    /// Transport-level liveness probe, driven by the supervisor's
+    /// [`LINK_KEEPALIVE_INTERVAL`] tick while the link is up. WS links
+    /// originate a ping and enforce the hub-side inbound-idle limit
+    /// ([`LINK_IDLE_TIMEOUT`]), mirroring the idle contract the QUIC
+    /// dialer configures at the transport layer; QUIC links are a no-op
+    /// (quinn surfaces idle expiry as a [`Self::recv_frame`] error).
+    /// `Err` carries the reason the link must be torn down.
+    async fn keepalive(&mut self) -> Result<(), String>;
 }
 
 /// Supervise one satellite link: plan, dial, relay, redial.
@@ -599,6 +638,13 @@ async fn run_relay_session<C: LinkConn>(
     cancel: &CancellationToken,
 ) -> Option<String> {
     let mut session = super::relay::RelaySession::new(host.clone());
+    // Housekeeping tick: transport keepalive + pending-map pruning. First
+    // tick one interval out — the connection was live zero seconds ago.
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + LINK_KEEPALIVE_INTERVAL,
+        LINK_KEEPALIVE_INTERVAL,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let (lost, reason) = loop {
         tokio::select! {
             () = cancel.cancelled() => break (false, "hub is shutting down".to_owned()),
@@ -607,7 +653,7 @@ async fn run_relay_session<C: LinkConn>(
                     break (false, "relay handles dropped".to_owned());
                 };
                 if let Some(frame) = session.handle_request(request)
-                    && let Err(error) = conn.send_frame(&frame).await
+                    && let Err(error) = send_bounded(&mut conn, &frame).await
                 {
                     break (true, error);
                 }
@@ -617,10 +663,39 @@ async fn run_relay_session<C: LinkConn>(
                 Ok(None) => break (true, "connection closed by satellite".to_owned()),
                 Err(error) => break (true, error),
             },
+            _ = keepalive.tick() => {
+                session.prune_abandoned();
+                match tokio::time::timeout(LINK_SEND_TIMEOUT, conn.keepalive()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => break (true, error),
+                    Err(_) => break (true, format!(
+                        "keepalive write to satellite stalled for {}s",
+                        LINK_SEND_TIMEOUT.as_secs()
+                    )),
+                }
+            }
         }
     };
     session.teardown(&reason);
     lost.then_some(reason)
+}
+
+/// Put one frame on the wire with [`LINK_SEND_TIMEOUT`] as the stall
+/// bound: a partitioned peer whose socket buffers filled up would
+/// otherwise pend the write forever and wedge the supervisor loop.
+#[allow(
+    clippy::future_not_send,
+    reason = "ADR-0014: runs on the server's LocalSet inside run_relay_session"
+)]
+async fn send_bounded<C: LinkConn>(conn: &mut C, frame: &[u8]) -> Result<(), String> {
+    tokio::time::timeout(LINK_SEND_TIMEOUT, conn.send_frame(frame))
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(format!(
+                "write to satellite stalled for {}s",
+                LINK_SEND_TIMEOUT.as_secs()
+            ))
+        })
 }
 
 /// Spawn one [`run_link`] supervisor per hub-table entry onto the current
@@ -676,7 +751,16 @@ pub(crate) enum NetLinkConn {
         buf: bytes::BytesMut,
     },
     /// WebSocket connection: one binary message is one complete frame.
-    Ws(Box<phux_dial::ws::Ws>),
+    Ws {
+        /// The established stream.
+        ws: Box<phux_dial::ws::Ws>,
+        /// When the satellite last sent *anything* — data or control
+        /// frames. WS has no transport-level idle detection (unlike the
+        /// QUIC path), so this feeds the hub-side idle limit in
+        /// [`LinkConn::keepalive`]; without it a silent partition would
+        /// leave the link `Connected` forever.
+        last_inbound: std::time::Instant,
+    },
 }
 
 impl LinkTransport for NetLinkTransport {
@@ -725,7 +809,10 @@ impl LinkTransport for NetLinkTransport {
                 let ws = phux_dial::ws::dial(&dial)
                     .await
                     .map_err(|err| err.to_string())?;
-                Ok(NetLinkConn::Ws(Box::new(ws)))
+                Ok(NetLinkConn::Ws {
+                    ws: Box::new(ws),
+                    last_inbound: std::time::Instant::now(),
+                })
             }
         }
     }
@@ -738,7 +825,7 @@ impl LinkConn for NetLinkConn {
                 .write_all(frame)
                 .await
                 .map_err(|err| format!("write to satellite: {err}")),
-            Self::Ws(ws) => futures_util::SinkExt::send(
+            Self::Ws { ws, .. } => futures_util::SinkExt::send(
                 ws.as_mut(),
                 tokio_tungstenite::tungstenite::Message::Binary(frame.to_vec()),
             )
@@ -768,23 +855,65 @@ impl LinkConn for NetLinkConn {
                     }
                 }
             }
-            Self::Ws(ws) => loop {
+            Self::Ws { ws, last_inbound } => loop {
                 match futures_util::StreamExt::next(ws.as_mut()).await {
                     None => return Ok(None),
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
-                        return Ok(None);
+                    Some(Ok(message)) => {
+                        // Anything the satellite sends — data or control —
+                        // is liveness for the idle limit.
+                        *last_inbound = std::time::Instant::now();
+                        match message {
+                            tokio_tungstenite::tungstenite::Message::Close(_) => {
+                                return Ok(None);
+                            }
+                            tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                                return Ok(Some(data));
+                            }
+                            // Control frames (ping/pong): reading them is
+                            // what answers pings; skip and keep reading.
+                            _ => {}
+                        }
                     }
-                    Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
-                        return Ok(Some(data));
-                    }
-                    // Control frames (ping/pong): reading them is what
-                    // answers pings; skip and keep reading.
-                    Some(Ok(_)) => {}
                     Some(Err(err)) => return Err(format!("connection error: {err}")),
                 }
             },
         }
     }
+
+    async fn keepalive(&mut self) -> Result<(), String> {
+        match self {
+            // quinn already originates keepalives and enforces the idle
+            // timeout at the transport layer (`phux-dial` sets
+            // `keep_alive_interval` + `max_idle_timeout`); expiry surfaces
+            // as a `recv_frame` error, so there is nothing to drive here.
+            Self::Quic { .. } => Ok(()),
+            Self::Ws { ws, last_inbound } => {
+                if let Some(reason) = ws_idle_error(last_inbound.elapsed()) {
+                    return Err(reason);
+                }
+                // Solicit a pong so a healthy quiet satellite keeps
+                // resetting `last_inbound`; a partitioned one cannot.
+                futures_util::SinkExt::send(
+                    ws.as_mut(),
+                    tokio_tungstenite::tungstenite::Message::Ping(Vec::new()),
+                )
+                .await
+                .map_err(|err| format!("keepalive ping to satellite: {err}"))
+            }
+        }
+    }
+}
+
+/// The teardown reason once a WS link has been inbound-idle for
+/// [`LINK_IDLE_TIMEOUT`] or longer, or `None` while it is live.
+fn ws_idle_error(idle_for: Duration) -> Option<String> {
+    (idle_for >= LINK_IDLE_TIMEOUT).then(|| {
+        format!(
+            "satellite sent nothing for {}s (idle limit {}s); link presumed dead",
+            idle_for.as_secs(),
+            LINK_IDLE_TIMEOUT.as_secs()
+        )
+    })
 }
 
 /// Peel one complete length-prefixed frame (prefix included, the unit
@@ -1046,18 +1175,37 @@ mod tests {
     /// (an mpsc so `recv_frame` stays cancel-safe), or never.
     struct ScriptConn {
         closed: Option<tokio::sync::mpsc::Receiver<String>>,
+        keepalive_error: Option<String>,
     }
 
     impl ScriptConn {
         /// A connection that stays up for the whole test.
         const fn open_forever() -> Self {
-            Self { closed: None }
+            Self {
+                closed: None,
+                keepalive_error: None,
+            }
         }
 
         /// A connection the test can drop by sending a reason.
         fn closable() -> (tokio::sync::mpsc::Sender<String>, Self) {
             let (tx, rx) = tokio::sync::mpsc::channel(1);
-            (tx, Self { closed: Some(rx) })
+            (
+                tx,
+                Self {
+                    closed: Some(rx),
+                    keepalive_error: None,
+                },
+            )
+        }
+
+        /// A connection that never closes on its own but whose keepalive
+        /// probe reports the link dead (the WS idle-limit shape).
+        fn keepalive_fails(reason: &str) -> Self {
+            Self {
+                closed: None,
+                keepalive_error: Some(reason.to_owned()),
+            }
         }
     }
 
@@ -1093,6 +1241,10 @@ mod tests {
                 None => std::future::pending().await,
             }
         }
+
+        async fn keepalive(&mut self) -> Result<(), String> {
+            self.keepalive_error.clone().map_or(Ok(()), Err)
+        }
     }
 
     /// A live relay handle + receiver pair for driving [`run_link`]; the
@@ -1115,13 +1267,15 @@ mod tests {
         SatelliteHost::new("devbox")
     }
 
-    /// Poll `statuses` (under paused time) until `want` matches.
+    /// Poll `statuses` (under paused time) until `want` matches. The
+    /// window is 60s of virtual time — comfortably past the keepalive
+    /// interval and idle limit, which paused-time tests must outlast.
     async fn wait_for_status(
         statuses: &HubLinkStatuses,
         host: &SatelliteHost,
         want: impl Fn(&LinkStatus) -> bool,
     ) {
-        for _ in 0..10_000 {
+        for _ in 0..60_000 {
             if statuses.get(host).as_ref().is_some_and(&want) {
                 return;
             }
@@ -1348,6 +1502,58 @@ mod tests {
                 cancel.cancel();
             })
             .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn supervisor_tears_down_a_link_whose_keepalive_fails() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // First connection stays readable forever but its liveness
+                // probe reports the link dead (a silent partition on a WS
+                // link: no FIN/RST, no inbound traffic, idle limit trips).
+                // The supervisor must tear it down and redial rather than
+                // trust `Connected` forever.
+                let transport = ScriptTransport::new(vec![
+                    Ok(ScriptConn::keepalive_fails("satellite sent nothing")),
+                    Ok(ScriptConn::open_forever()),
+                ]);
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    loopback_entry(),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error == "satellite sent nothing"
+                    )
+                })
+                .await;
+                wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                assert_eq!(transport.calls.get(), 2);
+
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[test]
+    fn ws_idle_error_trips_only_at_the_limit() {
+        assert!(ws_idle_error(Duration::ZERO).is_none());
+        assert!(ws_idle_error(LINK_IDLE_TIMEOUT - Duration::from_secs(1)).is_none());
+        let reason = ws_idle_error(LINK_IDLE_TIMEOUT).expect("at the limit");
+        assert!(reason.contains("idle limit 30s"), "{reason}");
+        assert!(ws_idle_error(LINK_IDLE_TIMEOUT * 2).is_some());
     }
 
     #[tokio::test(start_paused = true)]
