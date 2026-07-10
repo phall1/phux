@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-10
 ---
 
 # The phux reference TUI
@@ -571,6 +571,13 @@ state = "working"
 attention = "normal"
 contexts = ["workspace", "pane"]
 
+# A pane the TUI can open as a real server-side Terminal running this
+# command (section 5.5). `placement` routes where it opens: "split"
+# (beside the focused pane), "tab" (a new window named after `title`),
+# or "zoomed" (a split that opens filling the window). "overlay" is
+# accepted by the schema but NOT hosted yet — a floating live-terminal
+# surface is deferred; overlay entries are skipped with a logged
+# warning and do not appear in the palette.
 [[panes]]
 id = "board"
 title = "Agent Board"
@@ -909,6 +916,7 @@ test, so this table cannot silently drift):
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
 | `set-pane`        | `mouse` = `on`\|`off`\|`toggle` — per-pane mouse opt-out (§7, ADR-0035) |
 | `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
+| `plugin-pane`     | `plugin`, `pane` — open a plugin manifest pane (§5.5) |
 | `reload-config`   | re-read the config and apply it in place (§4.3) |
 
 ### 5.5 Command palette and pickers
@@ -934,6 +942,32 @@ manifest action may also declare `keys = "..."` to contribute a
 prefix-table binding (see the plugin-manifest block in §4.2); user
 config always wins on conflict, and the palette row shows whichever
 chord actually ended up bound.
+
+Manifest `[[panes]]` share the same **Plugin** header, one row per
+hostable pane (`plugin pane: <plugin-name>: <pane title>`). Committing
+one runs `plugin-pane { plugin, pane }`, which opens a real server-side
+Terminal running the pane's argv through the same `SPAWN_TERMINAL` verb
+`split-pane` / `new-window` use — no plugin-privileged wire surface
+(ADR-0017); any consumer could do the same. The spawn's working
+directory is the plugin root, and the child sees `PHUX_PLUGIN_ID`,
+`PHUX_PLUGIN_PANE_ID`, and `PHUX_PLUGIN_ROOT` on top of the server's
+environment (the pane counterpart of the action runtime's identity
+variables). The manifest's `placement` routes where it opens:
+
+- `split` — beside the focused pane (side-by-side), like `split-pane`.
+- `tab` — a new window named after the pane's `title`.
+- `zoomed` — a split whose new pane opens zoomed to fill the window;
+  `toggle-zoom` reveals it tiled beside the anchor pane.
+- `overlay` — **not hosted yet.** A floating live-terminal overlay is a
+  larger chrome surface than the current overlay stack (modal select
+  lists and prompts) supports; entries declaring it are skipped with a
+  logged warning and never listed. The declaration remains valid
+  manifest schema so packages can ship it ahead of the host.
+
+Unlike `[[actions]]`, panes contribute no keybindings today; a user can
+still bind one manually with a parameterized action
+(`{ action = "plugin-pane", plugin = "...", pane = "..." }`).
+Disabled plugins (`enabled = false`) contribute no rows.
 
 The **session picker** (`session-picker`, `C-a s`, alias `C-a a`) lists the
 server's other sessions; choosing one re-attaches this client to it

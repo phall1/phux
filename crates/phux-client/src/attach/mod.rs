@@ -40,6 +40,7 @@ pub mod input_dispatch;
 mod onboarding;
 pub mod paint;
 pub mod plugin_actions;
+pub mod plugin_panes;
 pub mod quic;
 pub mod reflow;
 mod reload;

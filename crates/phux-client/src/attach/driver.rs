@@ -53,6 +53,7 @@ use super::paint::{
     SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
 };
 use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
+use super::plugin_panes;
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::{AgentMetaIndex, handle_server_frame};
 use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
@@ -1452,15 +1453,30 @@ async fn main_loop<W: super::RenderSink>(
     // modal shows "no bindings" and chrome paints with the built-in
     // palette.
     let loaded_cfg = phux_config::loader::load().ok();
-    // phux-r82.5: snapshot the enabled plugins' manifest actions once at
-    // driver start (same policy as the keybindings snapshot — no config
-    // I/O under user fingers). The palette lists them; manifest-declared
-    // `keys` merge into the prefix table below with user config winning
-    // every conflict. A broken manifest is skipped with a warning.
-    let mut plugin_actions: Vec<PluginActionEntry> = loaded_cfg
+    // phux-r82.5 / phux-r82.7: snapshot the enabled plugins' manifests once
+    // at driver start (same policy as the keybindings snapshot — no config
+    // I/O under user fingers), then derive both the action entries (palette
+    // rows + manifest `keys` merged into the prefix table below, user config
+    // winning every conflict) and the hostable pane entries (palette rows
+    // committing `plugin-pane`; placement `split`/`tab`/`zoomed` — overlay
+    // is deferred and dropped with a warning). A broken manifest is skipped
+    // with a warning; manifests resolve relative to the canonical config
+    // path, the same resolution `phux config run` uses. Both derived
+    // vectors are `mut` because the in-place config reload (phux-foz.5)
+    // swaps them when a reload succeeds.
+    let plugin_manifests: Vec<phux_config::plugin::PluginManifest> = loaded_cfg
         .as_ref()
-        .map(plugin_actions::load_plugin_action_entries)
+        .map(|cfg| {
+            phux_config::plugin::load_enabled_manifests(
+                &phux_config::loader::config_path(),
+                &cfg.plugins,
+            )
+        })
         .unwrap_or_default();
+    let mut plugin_actions: Vec<PluginActionEntry> =
+        plugin_actions::entries_from_manifests(&plugin_manifests);
+    let mut plugin_panes: Vec<plugin_panes::PluginPaneEntry> =
+        plugin_panes::entries_from_manifests(&plugin_manifests);
     // The plugin-events channel: spawned plugin-action tasks report
     // completion here; the select! arm below toasts failures. Sender is
     // lent to `DispatchCtx` each batch.
@@ -1953,6 +1969,7 @@ async fn main_loop<W: super::RenderSink>(
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
+                    plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
                 };
@@ -2071,6 +2088,7 @@ async fn main_loop<W: super::RenderSink>(
                         &mut status_bar,
                         &mut sidebar_painter,
                         &mut plugin_actions,
+                        &mut plugin_panes,
                         &mut which_key_enabled,
                         &mut which_key_delay,
                         &mut overlays,
@@ -2451,6 +2469,7 @@ async fn main_loop<W: super::RenderSink>(
                                 &mut status_bar,
                                 &mut sidebar_painter,
                                 &mut plugin_actions,
+                                &mut plugin_panes,
                                 &mut which_key_enabled,
                                 &mut which_key_delay,
                                 &mut overlays,
@@ -2555,6 +2574,7 @@ async fn main_loop<W: super::RenderSink>(
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
+                    plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
                 };
@@ -2663,6 +2683,7 @@ async fn main_loop<W: super::RenderSink>(
                         &mut status_bar,
                         &mut sidebar_painter,
                         &mut plugin_actions,
+                        &mut plugin_panes,
                         &mut which_key_enabled,
                         &mut which_key_delay,
                         &mut overlays,
@@ -3318,6 +3339,7 @@ fn handle_config_reload<W: super::RenderSink>(
     status_bar: &mut Option<StatusBarPainter>,
     sidebar_painter: &mut SidebarPainter,
     plugin_actions: &mut Vec<PluginActionEntry>,
+    plugin_panes: &mut Vec<plugin_panes::PluginPaneEntry>,
     which_key_enabled: &mut bool,
     which_key_delay: &mut Duration,
     overlays: &mut OverlayState,
@@ -3339,6 +3361,7 @@ fn handle_config_reload<W: super::RenderSink>(
         theme,
         status_bar,
         plugin_actions,
+        plugin_panes,
         which_key_enabled,
         which_key_delay,
     ) {

@@ -525,6 +525,11 @@ pub(super) struct PendingSplit {
     pub focused_at_request: TerminalId,
     /// Axis along which to split.
     pub dir: SplitDir,
+    /// phux-r82.7: `true` ⇒ after the split applies, zoom the freshly
+    /// spawned pane to fill the window instead of the default un-zoom
+    /// (`placement = "zoomed"` plugin panes). Built-in `split-pane`
+    /// always parks `false` (a split un-zooms, tmux parity).
+    pub zoom_on_spawn: bool,
 }
 
 /// A `new-window` action that emitted a `SPAWN_TERMINAL` and is awaiting
@@ -1028,6 +1033,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(1),
             dir: SplitDir::Horizontal,
+            zoom_on_spawn: false,
         };
         let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
         // apply_split sets focus to the freshly added pane.
@@ -1057,6 +1063,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(2),
             dir: SplitDir::Horizontal,
+            zoom_on_spawn: false,
         };
         let new_state =
             apply_spawned_ok(&state, t(99), &pending).expect("split applies against request");
@@ -1077,6 +1084,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(42),
             dir: SplitDir::Vertical,
+            zoom_on_spawn: false,
         };
         let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
         let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
@@ -1148,6 +1156,7 @@ mod tests {
             let pending = PendingSplit {
                 focused_at_request: state.focus.clone().expect("focus"),
                 dir,
+                zoom_on_spawn: false,
             };
             state = apply_spawned_ok(&state, t(next_id), &pending).expect("split");
             splits += 1;

@@ -6,8 +6,9 @@
 //! without touching the wire (ADR-0017: the TUI is not protocol-privileged;
 //! everything here is client-local config + child-process execution):
 //!
-//! * [`load_plugin_action_entries`] snapshots enabled plugins' actions at
-//!   driver start (same load-once policy as the keybindings snapshot).
+//! * [`entries_from_manifests`] flattens the driver's load-once manifest
+//!   snapshot (see `attach::driver`; same load-once policy as the
+//!   keybindings snapshot) into per-action entries.
 //! * The command palette lists them as namespaced rows
 //!   (`plugin: <plugin-name>: <action title>`) under a "Plugin" header —
 //!   see [`super::action_registry::palette_items`].
@@ -102,9 +103,13 @@ fn plugin_args(plugin_id: &str, action_id: &str) -> BTreeMap<String, toml::Value
     args
 }
 
-/// Flatten loaded manifests into per-action entries. Pure; separated from
-/// the I/O in [`load_plugin_action_entries`] so tests can drive it with
-/// in-memory manifests.
+/// Flatten loaded manifests into per-action entries.
+///
+/// Pure; separated from the manifest-loading I/O in the driver (which
+/// resolves manifests relative to the canonical config path via
+/// [`phux_config::plugin::load_enabled_manifests`], the same resolution
+/// `phux config run` uses, skipping broken manifests with a warning) so
+/// tests can drive it with in-memory manifests.
 #[must_use]
 pub fn entries_from_manifests(manifests: &[PluginManifest]) -> Vec<PluginActionEntry> {
     manifests
@@ -119,20 +124,6 @@ pub fn entries_from_manifests(manifests: &[PluginManifest]) -> Vec<PluginActionE
             })
         })
         .collect()
-}
-
-/// Snapshot the enabled plugins' actions from the loaded config.
-///
-/// Manifests resolve relative to the canonical config path
-/// ([`phux_config::loader::config_path`]) — the same resolution
-/// `phux config run` uses. Broken manifests are skipped with a logged
-/// warning (see [`phux_config::plugin::load_enabled_manifests`]); a bad
-/// plugin never blocks attach.
-#[must_use]
-pub fn load_plugin_action_entries(cfg: &phux_config::Config) -> Vec<PluginActionEntry> {
-    let config_path = phux_config::loader::config_path();
-    let manifests = phux_config::plugin::load_enabled_manifests(&config_path, &cfg.plugins);
-    entries_from_manifests(&manifests)
 }
 
 /// Merge plugin-contributed `keys` bindings into the prefix table.

@@ -922,7 +922,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             // new pane needs its tile, and the reflow_panes
                             // diff below is taken against the now-cleared
                             // (real, tiled) view.
-                            *zoomed = None;
+                            // phux-r82.7: unless the parked intent asked to
+                            // zoom the spawned pane (`placement = "zoomed"`
+                            // plugin panes) — then the new pane fills the
+                            // window and un-zooming reveals it tiled beside
+                            // its anchor.
+                            *zoomed = if pending.zoom_on_spawn {
+                                Some(new_id.clone())
+                            } else {
+                                None
+                            };
                             // Seed a PaneSlot for the new Terminal so the
                             // first TERMINAL_SNAPSHOT lands on a warm
                             // mirror. Vacant-or-occupied — never overwrite
@@ -2127,6 +2136,74 @@ mod tests {
         assert_eq!(focused, Some(tid(2)), "focus follows the new pane");
         assert!(panes.contains_key(&tid(2)), "new pane got a slot");
         assert!(outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes);
+    }
+
+    /// Drive a `TERMINAL_SPAWNED { Ok }` reply through the full dispatcher
+    /// with one parked [`PendingSplit`], returning the resulting `zoomed`
+    /// state (phux-r82.7's zoom-on-spawn contract lives there).
+    fn drive_spawned_with_pending_split(zoom_on_spawn: bool) -> Option<TerminalId> {
+        use crate::attach::actions::PendingSplit;
+        use phux_protocol::wire::frame::SpawnResult;
+
+        let anchor = tid(1);
+        let mut workspace = Workspace::single(anchor.clone());
+        let mut focused = Some(anchor.clone());
+        let mut panes = panes_for(&[&anchor]);
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = Some(anchor.clone());
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        pending_splits.insert(
+            7,
+            PendingSplit {
+                focused_at_request: anchor,
+                dir: SplitDir::Horizontal,
+                zoom_on_spawn,
+            },
+        );
+        let mut pending_windows = HashMap::new();
+        let outcome = handle_server_frame(
+            &mut out,
+            FrameKind::TerminalSpawned {
+                request_id: 7,
+                result: SpawnResult::Ok(tid(2)),
+            },
+            &mut panes,
+            &mut workspace,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut AgentMetaIndex::default(),
+            false,
+            false,
+        )
+        .expect("handle_server_frame");
+        assert!(outcome.layout_replaced, "split reply replaces the layout");
+        assert_eq!(focused, Some(tid(2)), "focus follows the spawned pane");
+        zoomed
+    }
+
+    /// phux-r82.7: a parked split with `zoom_on_spawn` zooms the freshly
+    /// spawned pane (placement = "zoomed" plugin panes).
+    #[test]
+    fn terminal_spawned_zoom_on_spawn_zooms_the_new_pane() {
+        assert_eq!(drive_spawned_with_pending_split(true), Some(tid(2)));
+    }
+
+    /// phux-x2hm parity guard: a plain split still un-zooms.
+    #[test]
+    fn terminal_spawned_without_zoom_on_spawn_clears_zoom() {
+        assert_eq!(drive_spawned_with_pending_split(false), None);
     }
 
     /// phux-flywheel: the apply-vs-paint split is observable. Driving a
