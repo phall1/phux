@@ -2080,6 +2080,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         own_client_id,
                         &agent_meta,
+                        &mut vcs,
                         viewport_dims,
                         sidebar,
                         &session_name,
@@ -2459,6 +2460,7 @@ async fn main_loop<W: super::RenderSink>(
                                 zoomed.as_ref(),
                                 own_client_id,
                                 &agent_meta,
+                                &mut vcs,
                                 viewport_dims,
                                 sidebar,
                                 &session_name,
@@ -2670,6 +2672,7 @@ async fn main_loop<W: super::RenderSink>(
                         zoomed.as_ref(),
                         own_client_id,
                         &agent_meta,
+                        &mut vcs,
                         viewport_dims,
                         sidebar,
                         &session_name,
@@ -3324,6 +3327,7 @@ fn handle_config_reload<W: super::RenderSink>(
     zoomed: Option<&TerminalId>,
     own_client_id: Option<ClientId>,
     agent_meta: &AgentMetaIndex,
+    vcs: &mut VcsIndex,
     viewport_dims: (u16, u16),
     sidebar: Option<SidebarReservation>,
     session_name: &str,
@@ -3356,6 +3360,7 @@ fn handle_config_reload<W: super::RenderSink>(
                 zoomed,
                 own_client_id,
                 &agent_meta.records,
+                vcs,
             );
             if !overlays.is_active()
                 && let Some(ls) = workspace.render_window(zoomed).as_deref()

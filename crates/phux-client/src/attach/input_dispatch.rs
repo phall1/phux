@@ -481,7 +481,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // column) is consumed and dropped so it can never leak into a
             // pane whose rect does not contain it anyway.
             if let Some(res) = ctx.sidebar {
-                let strip = super::paint::sidebar_rect(ctx.viewport, ctx.has_bar, res);
+                let strip = super::paint::sidebar_rect(ctx.viewport, ctx.bar, res);
                 let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
                 if strip_contains(strip, cell_x, cell_y) {
                     if matches!(mouse.action, MouseAction::Press)
@@ -4000,6 +4000,7 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4009,7 +4010,7 @@ mod tests {
                 width: 20,
             }),
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: true,
+            bar: Some(crate::render::chrome::status_bar::Position::Bottom),
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
