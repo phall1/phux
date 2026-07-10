@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 
-use phux_core::{Direction, LayoutNode, Rect, Registry, SplitDir, TerminalId};
+use phux_core::{Direction, LayoutNode, Registry, SplitDir, TerminalId};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,31 +30,22 @@ fn seeded() -> (Registry, phux_core::WindowId, TerminalId) {
 }
 
 // ---------------------------------------------------------------------------
-// pane_rects
+// Tree shape
+//
+// Pane-rect *tiling* is intentionally not tested here: phux-core carries no
+// tiling walk (bead phux-nnjx). The canonical, divider-aware walk and its
+// exact-tiling tests live in `phux-client-core`'s `multi_pane` module.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn single_pane_layout_is_leaf_and_fills_the_window() {
+fn single_pane_layout_is_a_leaf() {
     let (reg, w, p) = seeded();
     let win = reg.window(w).expect("window exists");
-
     assert_eq!(win.layout, Some(LayoutNode::Leaf(p)));
-
-    let rects = win.pane_rects((80, 24));
-    assert_eq!(rects.len(), 1);
-    assert_eq!(
-        rects.get(&p).copied(),
-        Some(Rect {
-            x: 0,
-            y: 0,
-            w: 80,
-            h: 24
-        })
-    );
 }
 
 #[test]
-fn horizontal_split_half_tiles_exactly() {
+fn split_replaces_the_target_leaf_with_a_split_node() {
     let (mut reg, w, p1) = seeded();
     // Allocate a second pane id by creating it then re-splitting at p1.
     let p2 = reg.new_terminal(w).expect("window exists");
@@ -68,66 +59,47 @@ fn horizontal_split_half_tiles_exactly() {
     }
 
     let win = reg.window(w).expect("window exists");
-    let rects = win.pane_rects((80, 24));
-    assert_eq!(rects.len(), 2);
-    let r1 = rects[&p1];
-    let r2 = rects[&p2];
-    // Horizontal split divides width: left keeps origin, right starts at left.w.
-    assert_eq!(r1.x, 0);
-    assert_eq!(r1.y, 0);
-    assert_eq!(r1.h, 24);
-    assert_eq!(r2.y, 0);
-    assert_eq!(r2.h, 24);
-    // Widths sum exactly to the parent.
-    assert_eq!(u32::from(r1.w) + u32::from(r2.w), 80);
-    // 0.5 ratio → r1.w == 40 (round-to-nearest).
-    assert_eq!(r1.w, 40);
-    assert_eq!(r2.w, 40);
-    assert_eq!(r2.x, 40);
+    assert_eq!(
+        win.layout,
+        Some(LayoutNode::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            left: Box::new(LayoutNode::Leaf(p1)),
+            right: Box::new(LayoutNode::Leaf(p2)),
+        })
+    );
 }
 
 #[test]
-fn vertical_split_half_tiles_exactly() {
+fn nested_split_descends_into_the_target_leaf() {
     let (mut reg, w, p1) = seeded();
     let p2 = reg.new_terminal(w).expect("window exists");
+    let p3 = reg.new_terminal(w).expect("window exists");
     {
         let win = reg.window_mut(w).expect("window exists");
         win.layout = Some(LayoutNode::Leaf(p1));
-        win.split(p1, p2, SplitDir::Vertical, 0.5)
+        win.split(p1, p2, SplitDir::Horizontal, 0.5)
             .expect("split p1");
+        // Splitting p2 must rewrite the *right* leaf only.
+        win.split(p2, p3, SplitDir::Vertical, 0.5)
+            .expect("split p2");
     }
 
     let win = reg.window(w).expect("window exists");
-    let rects = win.pane_rects((80, 24));
-    let r1 = rects[&p1];
-    let r2 = rects[&p2];
-    assert_eq!(r1.x, 0);
-    assert_eq!(r2.x, 0);
-    assert_eq!(r1.w, 80);
-    assert_eq!(r2.w, 80);
-    assert_eq!(u32::from(r1.h) + u32::from(r2.h), 24);
-    assert_eq!(r1.y, 0);
-    assert_eq!(r2.y, r1.h);
-}
-
-#[test]
-fn split_with_awkward_ratio_still_tiles_exactly() {
-    let (mut reg, w, p1) = seeded();
-    let p2 = reg.new_terminal(w).expect("window exists");
-    {
-        let win = reg.window_mut(w).expect("window exists");
-        win.layout = Some(LayoutNode::Leaf(p1));
-        // 0.33 of 100 is 33 (round-half-away-from-zero), so r1.w == 33,
-        // r2.w == 67, and they sum to exactly 100 — no slop.
-        win.split(p1, p2, SplitDir::Horizontal, 0.33)
-            .expect("split p1");
-    }
-
-    let win = reg.window(w).expect("window exists");
-    let rects = win.pane_rects((100, 24));
-    let r1 = rects[&p1];
-    let r2 = rects[&p2];
-    assert_eq!(u32::from(r1.w) + u32::from(r2.w), 100);
+    assert_eq!(
+        win.layout,
+        Some(LayoutNode::Split {
+            dir: SplitDir::Horizontal,
+            ratio: 0.5,
+            left: Box::new(LayoutNode::Leaf(p1)),
+            right: Box::new(LayoutNode::Split {
+                dir: SplitDir::Vertical,
+                ratio: 0.5,
+                left: Box::new(LayoutNode::Leaf(p2)),
+                right: Box::new(LayoutNode::Leaf(p3)),
+            }),
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------

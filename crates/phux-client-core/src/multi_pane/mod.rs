@@ -127,6 +127,57 @@ mod tests {
         }
     }
 
+    /// Ported from phux-core's deleted server-side tiling tests (bead
+    /// phux-nnjx): a stacked (Vertical) half split tiles the height
+    /// exactly — two pane heights plus the one divider row.
+    #[test]
+    fn two_pane_stacked_split_half_tiles_exactly() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        // Both panes span the full width; no horizontal splits.
+        assert_eq!(ra.w, 80);
+        assert_eq!(rb.w, 80);
+        assert_eq!(ra.x, 0);
+        assert_eq!(rb.x, 0);
+        // Top pane starts at the origin; bottom pane starts past the divider.
+        assert_eq!(ra.y, 0);
+        assert_eq!(rb.y, ra.h + 1);
+        // The combined heights plus one divider row equal the viewport.
+        assert_eq!(ra.h + rb.h + 1, 24);
+        // 80 divider cells, all on row ra.h.
+        assert_eq!(out.dividers.len(), 80);
+        for cell in &out.dividers {
+            assert_eq!(cell.y, ra.h);
+        }
+    }
+
+    /// Ported from phux-core's deleted server-side tiling tests (bead
+    /// phux-nnjx): an awkward ratio still tiles exactly — the rounding in
+    /// `split_dim` leaves no slop and no overlap. Ratio 0.33 over a
+    /// 100-col viewport: content is 99 cols after the divider,
+    /// `(99 * 0.33).round() == 33`, so 33 + 66 + 1 divider == 100.
+    #[test]
+    fn awkward_ratio_split_tiles_exactly() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.33).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (100, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        assert_eq!(ra.w, 33);
+        assert_eq!(rb.w, 66);
+        assert_eq!(rb.x, ra.w + 1);
+        assert_eq!(u32::from(ra.w) + u32::from(rb.w) + 1, 100);
+    }
+
     #[test]
     fn compute_layout_in_insets_rects_and_dividers_by_content_origin() {
         let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
@@ -815,13 +866,17 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     enum Op {
-        AddPane,
+        /// Split the most recent pane at this ratio. Ranging over
+        /// awkward ratios (not just 0.5) pins the `split_dim` rounding:
+        /// exact tiling must hold for *any* ratio (ported from the
+        /// deleted phux-core tiling tests, bead phux-nnjx).
+        AddPane(f32),
         KillPaneAt(usize),
     }
 
     fn arb_op() -> impl Strategy<Value = Op> {
         prop_oneof![
-            4 => Just(Op::AddPane),
+            4 => (0.05_f32..0.95).prop_map(Op::AddPane),
             1 => (0_usize..16).prop_map(Op::KillPaneAt),
         ]
     }
@@ -838,7 +893,7 @@ mod tests {
         let mut alive = vec![first];
         for op in ops {
             match op {
-                Op::AddPane => {
+                Op::AddPane(ratio) => {
                     let new_pane = TerminalId::local(next_id);
                     next_id += 1;
                     let Some(target) = alive.last().cloned() else {
@@ -849,7 +904,7 @@ mod tests {
                     } else {
                         SplitDir::Vertical
                     };
-                    if let Ok(t) = split_at(&tree, &target, &new_pane, dir, 0.5) {
+                    if let Ok(t) = split_at(&tree, &target, &new_pane, dir, ratio) {
                         tree = t;
                         alive.push(new_pane);
                     }

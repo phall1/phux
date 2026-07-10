@@ -2176,7 +2176,7 @@ pub(super) fn encode_layout_or_log(workspace: &Workspace) -> Option<Vec<u8>> {
 /// The `direction` string names the DIVIDER orientation (the tmux mental
 /// model the default config documents): `vertical` = a vertical divider,
 /// i.e. side-by-side panes, which geometrically is a `SplitDir::Horizontal`
-/// (split along the width — see `layout::fill_rects`). `horizontal` = a
+/// (split along the width — see `multi_pane::pane_rects`). `horizontal` = a
 /// horizontal divider, i.e. stacked panes = `SplitDir::Vertical`. The
 /// names are deliberately crossed here: the user-facing word describes the
 /// divider; the internal enum describes the split axis.
