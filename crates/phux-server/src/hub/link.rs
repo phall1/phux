@@ -1,4 +1,4 @@
-//! Hub outbound link supervisor (phux-v45.3, ADR-0007/ADR-0038).
+//! Hub outbound link supervisor (phux-v45.3/v45.9, ADR-0007/ADR-0038).
 //!
 //! Under `phux server --hub`, each enabled [`HubEntry`] gets one link
 //! supervisor task (`run_link`, crate-internal) that dials the satellite through the
@@ -9,13 +9,29 @@
 //! header on WebSocket. The token is re-read from its file on every
 //! attempt, so rotating it never needs a hub restart.
 //!
+//! **SSH-stdio** (`ssh://`, phux-v45.9) is the third dial path: the hub
+//! spawns the system `ssh` binary (override with `$PHUX_SSH`) running
+//! the remote `phux stdio-bridge` verb, which splices its stdin/stdout
+//! to the satellite server's local Unix socket. SSH itself
+//! authenticates and encrypts the channel, and the remote bridge
+//! inherits the satellite UDS's local (owner-only) trust, so **no
+//! bearer preamble is sent** and a registry `token-file` /
+//! `cert-fingerprint` on an `ssh://` entry is ignored (there is no TLS
+//! channel to pin) — see the ADR-0038 addendum. The child is spawned
+//! with `BatchMode=yes` (never an interactive prompt) and argv built
+//! from charset-validated parts (no shell, `--` before the host);
+//! "connected" means the ssh child is running — the first authoritative
+//! liveness signal is the child's exit, which redials like a dropped
+//! connection.
+//!
 //! **Fail closed.** [`plan_link`] refuses to dial a routable endpoint
 //! whose entry lacks a token file or fingerprint pin (and refuses
 //! plaintext `ws://` to routable hosts outright), mirroring
 //! `phux attach --quic/--ws`. Loopback endpoints keep the loopback dev
 //! carve-out. A refused link is never dialed and never retried — the
 //! refusal is a configuration error, surfaced as
-//! [`LinkStatus::Refused`] and fixed by `phux satellite add`.
+//! [`LinkStatus::Refused`] and fixed by `phux satellite add`. Malformed
+//! `ssh://` endpoints fail earlier still, at hub-table validation.
 //!
 //! A lost or failed link is re-dialed with capped exponential backoff;
 //! per-satellite state is published to [`HubLinkStatuses`], the shared
@@ -105,14 +121,28 @@ pub enum DialSpec {
         /// Pairing-token file, read per attempt.
         token_file: Option<PathBuf>,
     },
+    /// Spawn the system `ssh` binary bridging to the satellite's UDS via
+    /// the remote `phux stdio-bridge` verb (phux-v45.9). Carries no auth
+    /// material: SSH authenticates the channel, and the bridge inherits
+    /// the satellite UDS's local trust (ADR-0038 addendum).
+    Ssh {
+        /// Login user (`-l`), if configured.
+        user: Option<String>,
+        /// Destination host (bare — IPv6 without brackets).
+        host: String,
+        /// SSH port (`-p`), if configured.
+        port: Option<u16>,
+    },
 }
 
 impl DialSpec {
-    /// The token file this spec dials with, if any.
+    /// The token file this spec dials with, if any. Always `None` for
+    /// SSH-stdio: the channel is SSH-authenticated, not token-bearing.
     #[must_use]
     pub fn token_file(&self) -> Option<&Path> {
         match self {
             Self::Quic { token_file, .. } | Self::Ws { token_file, .. } => token_file.as_deref(),
+            Self::Ssh { .. } => None,
         }
     }
 }
@@ -122,8 +152,58 @@ impl core::fmt::Display for DialSpec {
         match self {
             Self::Quic { host, port, .. } => write!(f, "quic://{host}:{port}"),
             Self::Ws { url, .. } => f.write_str(url),
+            Self::Ssh { user, host, port } => {
+                f.write_str("ssh://")?;
+                if let Some(user) = user {
+                    write!(f, "{user}@")?;
+                }
+                if host.contains(':') {
+                    write!(f, "[{host}]")?;
+                } else {
+                    f.write_str(host)?;
+                }
+                if let Some(port) = port {
+                    write!(f, ":{port}")?;
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// Build the argv (excluding the program itself) for one SSH-stdio dial.
+///
+/// Pure and shell-free: the returned vector is handed to
+/// `tokio::process::Command::args`, never a shell, and the host/user
+/// parts were charset-allowlisted at endpoint parse time (no leading
+/// `-`, no whitespace or metacharacters). `--` still precedes the host
+/// as defense in depth against option injection. `BatchMode=yes` makes
+/// a missing/failed key a fast, non-interactive error; `-T` refuses a
+/// remote PTY (a PTY would translate the byte stream);
+/// `ClearAllForwardings=yes` keeps `ssh_config` forwardings from
+/// piggybacking on hub links.
+#[must_use]
+pub fn ssh_argv(user: Option<&str>, host: &str, port: Option<u16>) -> Vec<String> {
+    let mut argv = vec![
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "ClearAllForwardings=yes".to_owned(),
+        "-T".to_owned(),
+    ];
+    if let Some(port) = port {
+        argv.push("-p".to_owned());
+        argv.push(port.to_string());
+    }
+    if let Some(user) = user {
+        argv.push("-l".to_owned());
+        argv.push(user.to_owned());
+    }
+    argv.push("--".to_owned());
+    argv.push(host.to_owned());
+    argv.push("phux".to_owned());
+    argv.push("stdio-bridge".to_owned());
+    argv
 }
 
 /// Why the planner refused to dial a satellite (fail closed, ADR-0038).
@@ -133,12 +213,6 @@ impl core::fmt::Display for DialSpec {
 /// missing credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkRefusal {
-    /// `ssh://` endpoints are registry-valid but have no dialer yet
-    /// (ADR-0007 "still deferred"; ADR-0038 defers SSH-derived identity).
-    SshUnsupported {
-        /// The configured endpoint.
-        endpoint: String,
-    },
     /// Plaintext `ws://` to a routable host: no TLS means no fingerprint
     /// pin is even possible. Mirrors the attach CLI's refusal.
     PlaintextRoutable {
@@ -168,11 +242,6 @@ pub enum LinkRefusal {
 impl core::fmt::Display for LinkRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SshUnsupported { endpoint } => write!(
-                f,
-                "{endpoint}: ssh transport is not supported yet (ADR-0007 defers the ssh dialer); \
-                 use quic:// or wss:// with `phux pair` credentials"
-            ),
             Self::PlaintextRoutable { url } => write!(
                 f,
                 "{url}: refusing plaintext ws:// to a routable host; use wss:// with `phux pair` \
@@ -331,18 +400,24 @@ impl Backoff {
 /// Decide how (or whether) to dial one hub-table entry. Pure — no I/O.
 ///
 /// This is the fail-closed gate (ADR-0038): routable endpoints without
-/// both a token file and a fingerprint pin are refused, plaintext `ws://`
-/// is loopback-only, and `ssh://` is a clear "not supported yet".
-/// Loopback endpoints keep the dev carve-out (skip-verify TLS, optional
-/// token), matching `phux attach --quic/--ws`.
+/// both a token file and a fingerprint pin are refused, and plaintext
+/// `ws://` is loopback-only. Loopback endpoints keep the dev carve-out
+/// (skip-verify TLS, optional token), matching `phux attach --quic/--ws`.
+/// `ssh://` endpoints need no credential material — SSH authenticates
+/// the channel and the remote bridge inherits the satellite UDS's local
+/// trust (ADR-0038 addendum) — so any configured `token-file` /
+/// `cert-fingerprint` on such an entry is deliberately not carried into
+/// the spec.
 ///
 /// # Errors
 ///
 /// A [`LinkRefusal`] naming the configuration gap.
 pub fn plan_link(entry: &HubEntry) -> Result<DialSpec, LinkRefusal> {
     match &entry.target {
-        SatelliteTarget::SshDeferred { endpoint } => Err(LinkRefusal::SshUnsupported {
-            endpoint: endpoint.clone(),
+        SatelliteTarget::Ssh { user, host, port } => Ok(DialSpec::Ssh {
+            user: user.clone(),
+            host: host.clone(),
+            port: *port,
         }),
         SatelliteTarget::Quic { host, port } => {
             let trust = plan_trust(host_is_loopback(host), host, entry)?;
@@ -743,13 +818,14 @@ pub(crate) fn spawn_links(
     relays: &super::relay::HubRelays,
     cancel: &CancellationToken,
 ) {
+    let transport = NetLinkTransport::from_env();
     for (host, entry) in table.iter() {
         let (handle, mailbox) = super::relay::RelayHandle::new(host.clone());
         relays.insert(handle);
         tokio::task::spawn_local(run_link(
             host.clone(),
             entry.clone(),
-            NetLinkTransport,
+            transport.clone(),
             statuses.clone(),
             mailbox,
             cancel.child_token(),
@@ -757,10 +833,25 @@ pub(crate) fn spawn_links(
     }
 }
 
-/// The production [`LinkTransport`]: the shared `phux-dial` QUIC/WS stack,
-/// authenticating exactly like a remote consumer (ADR-0038).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct NetLinkTransport;
+/// The production [`LinkTransport`]: the shared `phux-dial` QUIC/WS stack
+/// authenticating exactly like a remote consumer (ADR-0038), plus the
+/// SSH-stdio child-process path for `ssh://` endpoints (phux-v45.9).
+#[derive(Debug, Clone)]
+pub(crate) struct NetLinkTransport {
+    /// Program spawned for [`DialSpec::Ssh`] dials. `ssh` on `$PATH` by
+    /// default; `$PHUX_SSH` overrides it (an OpenSSH-compatible wrapper,
+    /// or a stub in tests).
+    ssh_program: std::ffi::OsString,
+}
+
+impl NetLinkTransport {
+    /// Build the production transport, honoring `$PHUX_SSH`.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            ssh_program: std::env::var_os("PHUX_SSH").unwrap_or_else(|| "ssh".into()),
+        }
+    }
+}
 
 /// An established production link, framed in both directions for the
 /// relay session (phux-v45.4).
@@ -792,6 +883,26 @@ pub(crate) enum NetLinkConn {
         /// [`LinkConn::keepalive`]; without it a silent partition would
         /// leave the link `Connected` forever.
         last_inbound: std::time::Instant,
+    },
+    /// SSH-stdio child (phux-v45.9): the running `ssh` process whose
+    /// stdin/stdout carry the bridged, length-prefixed frame stream —
+    /// byte-for-byte the UDS framing, because the remote
+    /// `phux stdio-bridge` is byte-transparent. The child is
+    /// `kill_on_drop`, so tearing down the link (cancellation, redial)
+    /// reaps the ssh process instead of orphaning it.
+    Ssh {
+        /// The spawned ssh process; its exit is the link-loss signal.
+        child: tokio::process::Child,
+        /// Bridged write half — frames land on the remote server's UDS.
+        stdin: tokio::process::ChildStdin,
+        /// Bridged read half — the satellite's frames, length-prefixed.
+        stdout: tokio::process::ChildStdout,
+        /// ssh's own diagnostics (plus the remote command's stderr),
+        /// read when the child exits to compose the failure reason.
+        stderr: tokio::process::ChildStderr,
+        /// Reassembly buffer: same cancel-safe frame peeling as the
+        /// QUIC path.
+        buf: bytes::BytesMut,
     },
 }
 
@@ -846,6 +957,38 @@ impl LinkTransport for NetLinkTransport {
                     last_inbound: std::time::Instant::now(),
                 })
             }
+            DialSpec::Ssh { user, host, port } => {
+                // No token: SSH authenticates the channel and the remote
+                // bridge inherits the satellite UDS's local trust
+                // (ADR-0038 addendum). `token` is None here by
+                // construction (plan_link never carries a token file into
+                // an Ssh spec).
+                debug_assert!(token.is_none(), "ssh dials carry no bearer token");
+                let mut child = tokio::process::Command::new(&self.ssh_program)
+                    .args(ssh_argv(user.as_deref(), host, *port))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    // Reap the ssh process when the link is torn down
+                    // (cancellation, redial) rather than orphaning it.
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|err| {
+                        format!("spawn {}: {err}", self.ssh_program.to_string_lossy())
+                    })?;
+                // The three pipes exist because we just asked for them;
+                // treat their absence as a failed dial, not a panic.
+                let stdin = child.stdin.take().ok_or("ssh child has no stdin pipe")?;
+                let stdout = child.stdout.take().ok_or("ssh child has no stdout pipe")?;
+                let stderr = child.stderr.take().ok_or("ssh child has no stderr pipe")?;
+                Ok(NetLinkConn::Ssh {
+                    child,
+                    stdin,
+                    stdout,
+                    stderr,
+                    buf: bytes::BytesMut::with_capacity(8192),
+                })
+            }
         }
     }
 }
@@ -863,6 +1006,13 @@ impl LinkConn for NetLinkConn {
             )
             .await
             .map_err(|err| format!("write to satellite: {err}")),
+            // The child stdin pipe is the wire: the caller's
+            // `LINK_SEND_TIMEOUT` bound (send_bounded) applies here like
+            // any other transport, so a wedged ssh child with a full pipe
+            // cannot pend the supervisor forever.
+            Self::Ssh { stdin, .. } => tokio::io::AsyncWriteExt::write_all(stdin, frame)
+                .await
+                .map_err(|err| format!("write to ssh transport: {err}")),
         }
     }
 
@@ -909,6 +1059,36 @@ impl LinkConn for NetLinkConn {
                     Some(Err(err)) => return Err(format!("connection error: {err}")),
                 }
             },
+            Self::Ssh {
+                child,
+                stdout,
+                stderr,
+                buf,
+                ..
+            } => {
+                // Same cancel-safe reassembly as the QUIC path: the
+                // bridged stream carries the identical length-prefixed
+                // framing (the remote bridge splices the satellite's UDS
+                // byte-for-byte). stdout EOF means the link is gone —
+                // remote bridge ended, satellite server closed the UDS,
+                // network died, or the key was refused — and the child's
+                // exit status plus its stderr become the loss reason.
+                loop {
+                    if let Some(frame) = split_buffered_frame(buf)? {
+                        return Ok(Some(frame));
+                    }
+                    let n = tokio::io::AsyncReadExt::read_buf(stdout, buf)
+                        .await
+                        .map_err(|err| format!("read from ssh transport: {err}"))?;
+                    if n == 0 {
+                        let mut reason = ssh_exit_reason(child, stderr).await;
+                        if !buf.is_empty() {
+                            reason = format!("{reason} (stream ended mid-frame)");
+                        }
+                        return Err(reason);
+                    }
+                }
+            }
         }
     }
 
@@ -918,7 +1098,12 @@ impl LinkConn for NetLinkConn {
             // timeout at the transport layer (`phux-dial` sets
             // `keep_alive_interval` + `max_idle_timeout`); expiry surfaces
             // as a `recv_frame` error, so there is nothing to drive here.
-            Self::Quic { .. } => Ok(()),
+            // The ssh child likewise *is* the transport: its exit is the
+            // authoritative liveness signal, surfaced as a `recv_frame`
+            // EOF (with the exit status and stderr as the reason). The
+            // bridged stream stays byte-transparent — there is no
+            // in-band phux ping to originate on either.
+            Self::Quic { .. } | Self::Ssh { .. } => Ok(()),
             Self::Ws { ws, last_inbound } => {
                 if let Some(reason) = ws_idle_error(last_inbound.elapsed()) {
                     return Err(reason);
@@ -946,6 +1131,52 @@ fn ws_idle_error(idle_for: Duration) -> Option<String> {
             LINK_IDLE_TIMEOUT.as_secs()
         )
     })
+}
+
+/// How long an ssh child gets to exit after closing its bridged stdout
+/// before the hub kills it. ssh normally exits immediately once the
+/// remote command ends; a child that lingers past this (a wrapper
+/// holding the process open) would otherwise pin the supervisor between
+/// "stream is gone" and "redial".
+const SSH_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Compose the loss reason for an ssh link whose bridged stdout hit EOF:
+/// the child's exit status plus its stderr diagnostics.
+///
+/// stderr is drained alongside the wait — a blocked stderr pipe must not
+/// deadlock the exit. Both are bounded by [`SSH_EXIT_GRACE`]; a child
+/// that will not exit is killed (the redial loop owns recovery, and the
+/// pipes are dropped with the connection either way).
+async fn ssh_exit_reason(
+    child: &mut tokio::process::Child,
+    stderr: &mut tokio::process::ChildStderr,
+) -> String {
+    let mut diagnostics = Vec::new();
+    let gathered = tokio::time::timeout(SSH_EXIT_GRACE, async {
+        tokio::join!(
+            child.wait(),
+            tokio::io::AsyncReadExt::read_to_end(stderr, &mut diagnostics),
+        )
+    })
+    .await;
+    match gathered {
+        Ok((status, _)) => {
+            let tail = String::from_utf8_lossy(&diagnostics);
+            let tail = tail.trim();
+            match status {
+                Ok(status) if tail.is_empty() => format!("ssh transport ended: {status}"),
+                Ok(status) => format!("ssh transport ended: {status}: {tail}"),
+                Err(err) => format!("wait for ssh transport: {err}"),
+            }
+        }
+        Err(_elapsed) => {
+            let _ = child.start_kill();
+            format!(
+                "ssh transport closed its stream but the child did not exit within {}s; killed",
+                SSH_EXIT_GRACE.as_secs()
+            )
+        }
+    }
 }
 
 /// Peel one complete length-prefixed frame (prefix included, the unit
@@ -1038,6 +1269,7 @@ mod tests {
             let spec = plan_link(&entry(endpoint, None, None)).expect("loopback carve-out");
             let trust = match spec {
                 DialSpec::Quic { trust, .. } | DialSpec::Ws { trust, .. } => trust,
+                DialSpec::Ssh { .. } => unreachable!("no ssh endpoints in this matrix"),
             };
             assert_eq!(trust, CertTrust::SkipVerify, "{endpoint}");
         }
@@ -1085,15 +1317,70 @@ mod tests {
         assert!(matches!(refusal, LinkRefusal::PlaintextRoutable { .. }));
     }
 
+    // --- ssh-stdio planning and argv (phux-v45.9) ------------------------
+
     #[test]
-    fn ssh_is_a_clear_unsupported_refusal() {
-        let refusal =
-            plan_link(&entry("ssh://devbox", Some("/t"), Some("AB"))).expect_err("ssh deferred");
-        assert!(matches!(refusal, LinkRefusal::SshUnsupported { .. }));
-        assert!(
-            refusal.to_string().contains("not supported yet"),
-            "{refusal}"
+    fn ssh_plan_needs_no_credentials_and_carries_none() {
+        // Bare entry: dialable with zero auth material (SSH authenticates
+        // the channel; ADR-0038 addendum).
+        let spec = plan_link(&entry("ssh://me@devbox:2222", None, None)).expect("dialable");
+        assert_eq!(
+            spec,
+            DialSpec::Ssh {
+                user: Some("me".to_owned()),
+                host: "devbox".to_owned(),
+                port: Some(2222),
+            }
         );
+        assert_eq!(spec.token_file(), None);
+
+        // Configured token/pin on an ssh entry is ignored, not carried:
+        // there is no TLS channel to pin and no preamble to send.
+        let spec =
+            plan_link(&entry("ssh://devbox", Some("/t"), Some("AB"))).expect("still dialable");
+        assert_eq!(spec.token_file(), None, "{spec:?}");
+    }
+
+    #[test]
+    fn ssh_argv_matrix_is_shell_free_and_option_injection_proof() {
+        assert_eq!(
+            ssh_argv(None, "devbox", None),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-T",
+                "--",
+                "devbox",
+                "phux",
+                "stdio-bridge",
+            ]
+        );
+        assert_eq!(
+            ssh_argv(Some("me"), "devbox", Some(2222)),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-T",
+                "-p",
+                "2222",
+                "-l",
+                "me",
+                "--",
+                "devbox",
+                "phux",
+                "stdio-bridge",
+            ]
+        );
+        // The host always sits after `--`, so even a hostile host token
+        // (which endpoint parsing already rejects) could not be read as
+        // an option — defense in depth.
+        let argv = ssh_argv(Some("me"), "devbox", Some(22));
+        let dashdash = argv.iter().position(|a| a == "--").expect("has --");
+        assert_eq!(argv[dashdash + 1], "devbox");
     }
 
     #[test]
@@ -1650,7 +1937,7 @@ mod tests {
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     entry(&format!("ws://127.0.0.1:{}", addr.port()), None, None),
-                    NetLinkTransport,
+                    NetLinkTransport::from_env(),
                     statuses.clone(),
                     relay_rx,
                     cancel.child_token(),
@@ -1666,6 +1953,154 @@ mod tests {
 
                 cancel.cancel();
                 server.await.expect("server task");
+            })
+            .await;
+    }
+
+    // --- ssh-stdio integration: the real transport over a stub program ---
+    //
+    // The environment cannot be assumed to have non-interactive `ssh
+    // localhost` (keys, host trust, sshd), so these tests exercise the
+    // REAL `NetLinkTransport` ssh path against a stub program — the same
+    // `$PHUX_SSH` seam an operator uses for an OpenSSH wrapper. The stub
+    // records the argv it was spawned with (proving the shell-free,
+    // `--`-guarded command line end to end) and its exit is the drop
+    // signal, exactly as an exiting ssh would be. The stdio *bridge* half
+    // (bytes actually splicing to a UDS) is exercised in
+    // `crates/phux/tests/stdio_bridge_e2e.rs` against the real binary.
+
+    /// Write an executable stub script and return its path.
+    fn write_stub(dir: &std::path::Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-ssh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+        path
+    }
+
+    fn ssh_entry() -> HubEntry {
+        entry("ssh://me@devbox:2222", None, None)
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_spawns_the_planned_argv_and_treats_exit_as_a_drop() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let argv_file = dir.path().join("argv.txt");
+                let stub = write_stub(
+                    dir.path(),
+                    &format!(
+                        "printf '%s\\n' \"$@\" > {}\necho 'stub bridge refused' >&2\nexit 7",
+                        argv_file.display()
+                    ),
+                );
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error.contains("stub bridge refused")
+                                && last_error.contains('7')
+                    )
+                })
+                .await;
+                cancel.cancel();
+
+                // The stub saw exactly the argv the planner built — one
+                // argument per line, host after `--`, no shell expansion.
+                let recorded = std::fs::read_to_string(&argv_file).expect("argv recorded");
+                let expected: Vec<String> = ssh_argv(Some("me"), "devbox", Some(2222));
+                assert_eq!(
+                    recorded.lines().collect::<Vec<_>>(),
+                    expected.iter().map(String::as_str).collect::<Vec<_>>()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_holds_a_live_child_as_connected() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                // The stub bridges nothing but honestly models a live ssh:
+                // it stays up reading stdin (which the hub holds open) and
+                // exits only when the pipe closes or it is killed
+                // (kill_on_drop at cancellation).
+                let stub = write_stub(dir.path(), "exec cat > /dev/null");
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                let task = tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_real_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                cancel.cancel();
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .expect("supervisor exits on cancel")
+                    .expect("no panic");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_missing_program_is_a_failed_attempt_not_a_panic() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let transport = NetLinkTransport {
+                    ssh_program: "/nonexistent/phux-test-no-such-ssh".into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. } if last_error.contains("spawn")
+                    )
+                })
+                .await;
+                cancel.cancel();
             })
             .await;
     }

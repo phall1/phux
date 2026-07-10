@@ -7,12 +7,13 @@ last-reviewed: 2026-07-10
 # Transport abstraction
 
 **TL;DR.** The wire codec sits behind an async `Transport` trait on both
-ends, so the same framing rides any byte stream. Four implementations exist
+ends, so the same framing rides any byte stream. Five implementations exist
 today: a Unix-domain-socket transport for local server/client links, a
 WebSocket transport that carries the identical codec to browser consumers,
-a QUIC transport for remote clients, and a WebTransport (HTTP/3 over QUIC)
-transport that gives browsers QUIC-class transport. SSH-stdio is designed as
-an additive transport, not yet built. Outbound establishment for the remote
+a QUIC transport for remote clients, a WebTransport (HTTP/3 over QUIC)
+transport that gives browsers QUIC-class transport, and an SSH-stdio
+transport that splices the codec through `ssh HOST phux stdio-bridge` (the
+federation hub's `ssh://` dial path). Outbound establishment for the TLS
 transports is shared in `phux-dial` (attach loop and hub dialer alike). No
 domain module names a concrete transport type; all I/O goes through the
 trait.
@@ -59,21 +60,39 @@ additive rather than invasive.
   phux-private one. Opt-in via `phux server --webtransport <HOST:PORT>` or
   `PHUX_WT_ADDR`; `phux-web` dials it first and falls back to WebSocket.
   Feature-gated in `phux-server` as `webtransport` (on by default).
+- **SSH-stdio transport** (ADR-0007, phux-v45.9) — frames the wire codec
+  over a child SSH process's stdin/stdout. The dialing side spawns the
+  system `ssh` binary (`$PHUX_SSH` overrides the program — an
+  OpenSSH-compatible wrapper, or a stub in tests) running the remote
+  `phux stdio-bridge` verb, which splices its stdin/stdout
+  byte-transparently to the server's Unix socket on that host. SSH
+  supplies authentication and encryption; the bridge holds an ordinary
+  local UDS connection under the socket's owner-only permissions, so no
+  bearer token or certificate pin is involved (ADR-0038 addendum). First
+  consumer: the federation hub dialing `ssh://` satellite endpoints. The
+  hub spawns ssh with `BatchMode=yes` (never an interactive prompt), a
+  `--`-guarded, charset-validated argv (endpoint parts that could read as
+  ssh options are rejected at hub-table validation), and treats the child
+  exiting as a dropped link, feeding the same capped-backoff redial loop
+  as the QUIC/WS paths.
 
-All four run the same codec. A consumer that can frame the codec over a
+All five run the same codec. A consumer that can frame the codec over a
 stream is a peer regardless of which stream it uses.
 
 ## Outbound dialing is shared
 
-The client-side establishment of the two remote transports — TLS 1.3 with
-a fingerprint-pinned (or loopback skip-verify) certificate verifier, plus
-the ADR-0031 bearer token — lives in the `phux-dial` crate, consumed by
-both the `phux-client` attach loop and the federation hub's outbound
+The client-side establishment of the two TLS remote transports — TLS 1.3
+with a fingerprint-pinned (or loopback skip-verify) certificate verifier,
+plus the ADR-0031 bearer token — lives in the `phux-dial` crate, consumed
+by both the `phux-client` attach loop and the federation hub's outbound
 link supervisors (`phux server --hub` dials each enabled satellite as an
 ordinary remote consumer per ADR-0038, with reconnect and capped
 exponential backoff; see `phux-server::hub::link`). `phux-dial` stops at
 the established byte stream; framing stays behind the transport trait on
-each end.
+each end. The SSH-stdio path does not go through `phux-dial` — its
+"establishment" is a child-process spawn, and its trust stack is SSH's,
+not rustls — but it feeds the same link supervisors, backoff, and
+per-satellite status reporting on the hub.
 
 ## The hub relays frames over its links
 
@@ -101,14 +120,7 @@ like an ordinary disconnect instead of pinning consumers on a link that
 still looks connected. Normative routing semantics: `docs/spec/L1.md`
 §9.1.
 
-## Transports designed but not built
-
-ADR-0007 (Mosh-class transport and satellites) keeps one further
-transport purely additive — designed, not built:
-
-- **SSH-stdio transport** — frames the wire codec over a child SSH
-  process's stdin/stdout, intended for hub servers reaching satellites over
-  existing SSH paths.
-
-See ADR-0007 for the full forward-compat constraints (URI-shaped session
-IDs, hub-and-spoke satellite topology, per-pane encoder isolation).
+With SSH-stdio built, every transport ADR-0007 designed exists. See
+ADR-0007 for the forward-compat constraints that still govern them
+(URI-shaped session IDs, hub-and-spoke satellite topology, per-pane
+encoder isolation).

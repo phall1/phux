@@ -53,6 +53,7 @@ pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
 pub(crate) mod spawn;
+pub(crate) mod stdio_bridge;
 pub(crate) mod supervise;
 pub(crate) mod tag;
 pub(crate) mod upgrade;
@@ -167,11 +168,13 @@ pub(crate) enum Command {
 
         /// Run as a federation hub: consume the `[[satellites]]`
         /// registry from `config.toml` at startup, validating every enabled
-        /// entry's endpoint (`quic://`, `ws://`, `wss://`, or the deferred
-        /// `ssh://`) into the runtime satellite table. A malformed enabled
-        /// endpoint or a duplicate satellite name fails startup. Without
-        /// this flag the registry is ignored. No dialing or routing happens
-        /// yet — this is the validated table only.
+        /// entry's endpoint (`quic://`, `ws://`, `wss://`, or `ssh://`) into
+        /// the runtime satellite table, then dial and maintain one outbound
+        /// link per satellite (QUIC/WebSocket authenticate per ADR-0038;
+        /// `ssh://` bridges over `ssh HOST phux stdio-bridge`, phux-v45.9),
+        /// relaying satellite-tagged frames over the links (phux-v45.4).
+        /// A malformed enabled endpoint or a duplicate satellite name fails
+        /// startup. Without this flag the registry is ignored.
         #[arg(long)]
         hub: bool,
 
@@ -692,6 +695,21 @@ pub(crate) enum Command {
 
         #[command(subcommand)]
         action: TagAction,
+    },
+
+    /// Bridge stdin/stdout to the local server socket (SSH-stdio, ADR-0007).
+    ///
+    /// The remote end of the SSH-stdio transport: `ssh HOST phux
+    /// stdio-bridge` gives the dialing side a byte-transparent pipe to the
+    /// phux server's Unix socket on HOST — the federation hub dials
+    /// `ssh://` satellites through it (phux-v45.9). The bridge neither
+    /// parses nor injects bytes; stdout is protocol-only and diagnostics
+    /// go to stderr. Exits when either side closes.
+    #[command(name = "stdio-bridge")]
+    StdioBridge {
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
     },
 
     /// Mint a pairing token for a remote consumer.
