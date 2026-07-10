@@ -1071,19 +1071,36 @@ async fn attach_session<W: super::RenderSink>(
     // never left in a bad state. On `Detached` the loop exits via
     // `exit_after_detach` (which never returns — see its doc comment).
     let mut attached = attached;
+    // phux-foz.6: first-run onboarding hint, decided ONCE per attach
+    // invocation by a single existence check at the canonical config path
+    // (see `super::onboarding` for the trigger rule). `mem::take` hands the
+    // flag to the first `main_loop` entry only, so an in-invocation session
+    // switch (which re-enters `main_loop` with fresh session state) does
+    // not re-show a hint the user already dismissed.
+    let mut show_onboarding = super::onboarding::should_show(&phux_config::loader::config_path());
     loop {
-        let exit =
-            match main_loop(&mut conn, attached, predict, out, resync, wants_state_sync).await {
-                Ok(exit) => exit,
-                Err(err) => {
-                    // Drain + stop the off-loop writer before propagating; the
-                    // RawModeGuard's Drop restores the terminal as we unwind.
-                    if let Some(writer) = writer.take() {
-                        writer.shutdown_and_join();
-                    }
-                    return Err(err);
+        let show_onboarding_hint = std::mem::take(&mut show_onboarding);
+        let exit = match main_loop(
+            &mut conn,
+            attached,
+            predict,
+            out,
+            resync,
+            wants_state_sync,
+            show_onboarding_hint,
+        )
+        .await
+        {
+            Ok(exit) => exit,
+            Err(err) => {
+                // Drain + stop the off-loop writer before propagating; the
+                // RawModeGuard's Drop restores the terminal as we unwind.
+                if let Some(writer) = writer.take() {
+                    writer.shutdown_and_join();
                 }
-            };
+                return Err(err);
+            }
+        };
         match exit {
             LoopExit::Detached => {
                 // Lifecycle transition (info): the attach loop is exiting.
@@ -1341,6 +1358,12 @@ async fn main_loop<W: super::RenderSink>(
     // per-frame `FRAME_ACK`: only a state-sync consumer's acks are tracked
     // server-side, so a raw consumer skips them (see `should_emit_frame_ack`).
     wants_state_sync: bool,
+    // phux-foz.6: show the first-run onboarding hint after the bootstrap
+    // paint. The caller decides this once per attach invocation (config-path
+    // existence check in `attach_session`'s outer loop) and passes `true`
+    // only on the first `main_loop` entry, so a session switch never
+    // re-shows a hint the user already dismissed.
+    show_onboarding: bool,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -1659,6 +1682,36 @@ async fn main_loop<W: super::RenderSink>(
             own_client_id,
             &agent_meta.records,
             &mut vcs,
+        );
+    }
+
+    // phux-foz.6: first-run onboarding hint. The caller already applied the
+    // trigger rule (nothing exists at the canonical config path; once per
+    // attach invocation — see `super::onboarding`); here we push the notice
+    // onto the ordinary overlay stack AFTER the bootstrap frame painted, so
+    // it floats over the live pane like any other modal. It reuses
+    // `ToastOverlay`, so any key dismisses it and triggers the standard
+    // dismiss-repaint; while it is up, frames keep applying to the pane
+    // mirrors with the outbound flush paused (ADR-0020 invariant 5), exactly
+    // as for every other overlay.
+    if show_onboarding {
+        overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+            super::onboarding::ONBOARDING_TITLE,
+            super::onboarding::hint_lines(&phux_config::loader::config_path()),
+            &theme,
+        )));
+        paint_active_overlay(
+            out,
+            &overlays,
+            &workspace,
+            &mut panes,
+            focused_pane.as_ref(),
+            zoomed.as_ref(),
+            viewport_dims,
+            status_bar.as_mut(),
+            sidebar,
+            &session_name,
+            &theme,
         );
     }
 
