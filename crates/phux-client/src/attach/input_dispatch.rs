@@ -3804,6 +3804,10 @@ mod tests {
     /// intercepted the next key too. A user typing a name into the rename
     /// prompt that contained the leader chord lost characters.
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture's DispatchCtx grows a line per composed feature (wave-2 + wave-2.5); the scenario itself is one flow"
+    )]
     async fn overlay_active_prefix_key_reaches_overlay_not_resolver() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 
