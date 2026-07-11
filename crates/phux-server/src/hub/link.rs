@@ -962,10 +962,16 @@ pub(crate) enum NetLinkConn {
         stdin: tokio::process::ChildStdin,
         /// Bridged read half — the satellite's frames, length-prefixed.
         stdout: tokio::process::ChildStdout,
-        /// ssh's own diagnostics (plus the remote command's stderr),
-        /// drained into a bounded tail (`SSH_STDERR_TAIL_MAX`) when the
-        /// child exits to compose the failure reason.
-        stderr: tokio::process::ChildStderr,
+        /// Background drainer of ssh's own diagnostics plus the remote
+        /// command's stderr. It reads fd 2 *continuously* for the life of
+        /// the link (not just at EOF): a stderr pipe left unread fills its
+        /// ~64KiB OS buffer, blocks the remote's writes, and — because
+        /// stdout rides the same ssh channel window — stalls inbound frame
+        /// delivery with no loss signal (phux-v45.9). The task retains only
+        /// a bounded tail (`SSH_STDERR_TAIL_MAX`) and yields it at EOF so
+        /// `ssh_exit_reason` can compose the failure reason; it is aborted
+        /// on drop when the link is torn down before EOF.
+        stderr_reader: AbortOnDrop,
         /// Reassembly buffer: same cancel-safe frame peeling as the
         /// QUIC path.
         buf: bytes::BytesMut,
@@ -1046,12 +1052,21 @@ impl LinkTransport for NetLinkTransport {
                 // treat their absence as a failed dial, not a panic.
                 let stdin = child.stdin.take().ok_or("ssh child has no stdin pipe")?;
                 let stdout = child.stdout.take().ok_or("ssh child has no stdout pipe")?;
-                let stderr = child.stderr.take().ok_or("ssh child has no stderr pipe")?;
+                let mut stderr = child.stderr.take().ok_or("ssh child has no stderr pipe")?;
+                // Drain fd 2 for the whole life of the link so it can never
+                // fill its pipe buffer and back-pressure the shared ssh
+                // channel (phux-v45.9). `read_tail` keeps only the bounded
+                // tail and returns it at EOF; `ssh_exit_reason` joins this
+                // task to fold that tail into the loss reason. Spawned on
+                // the supervisor's LocalSet (see `run_link`).
+                let stderr_reader = AbortOnDrop(tokio::task::spawn_local(async move {
+                    read_tail(&mut stderr, SSH_STDERR_TAIL_MAX).await
+                }));
                 Ok(NetLinkConn::Ssh {
                     child,
                     stdin,
                     stdout,
-                    stderr,
+                    stderr_reader,
                     buf: bytes::BytesMut::with_capacity(8192),
                 })
             }
@@ -1128,7 +1143,7 @@ impl LinkConn for NetLinkConn {
             Self::Ssh {
                 child,
                 stdout,
-                stderr,
+                stderr_reader,
                 buf,
                 ..
             } => {
@@ -1148,7 +1163,7 @@ impl LinkConn for NetLinkConn {
                         .await
                         .map_err(|err| format!("read from ssh transport: {err}"))?;
                     if n == 0 {
-                        let mut reason = ssh_exit_reason(child, stderr).await;
+                        let mut reason = ssh_exit_reason(child, stderr_reader).await;
                         if !buf.is_empty() {
                             reason = format!("{reason} (stream ended mid-frame)");
                         }
@@ -1209,26 +1224,45 @@ fn ws_idle_error(idle_for: Duration) -> Option<String> {
 /// "stream is gone" and "redial".
 const SSH_EXIT_GRACE: Duration = Duration::from_secs(5);
 
+/// A local task handle that aborts its task on drop, so tearing down an
+/// ssh link (cancellation, redial, connection drop before stdout EOF)
+/// stops the background stderr drainer instead of leaking it past the
+/// child's death.
+#[derive(Debug)]
+pub(crate) struct AbortOnDrop(tokio::task::JoinHandle<Vec<u8>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Compose the loss reason for an ssh link whose bridged stdout hit EOF:
 /// the child's exit status plus a bounded tail of its stderr.
 ///
-/// stderr is drained alongside the wait — a blocked stderr pipe must not
-/// deadlock the exit — into a bounded tail ([`SSH_STDERR_TAIL_MAX`]; the
-/// pipe carries the *remote command's* stderr for the life of the link,
-/// so an uncapped read would let one chatty or hostile satellite grow
-/// hub memory without bound). Both are bounded by [`SSH_EXIT_GRACE`]; a
-/// child that will not exit is killed (the redial loop owns recovery,
-/// and the pipes are dropped with the connection either way).
+/// stderr has been drained the whole time by the `stderr_reader` task
+/// (so a chatty fd 2 never back-pressured the shared ssh channel); that
+/// task's `read_tail` returns the bounded tail ([`SSH_STDERR_TAIL_MAX`])
+/// once the pipe hits EOF at the child's death, and joining it here folds
+/// that tail into the reason. Both the wait and the join are bounded by
+/// [`SSH_EXIT_GRACE`]; a child that will not exit is killed (the redial
+/// loop owns recovery, and the pipes are dropped with the connection
+/// either way).
 async fn ssh_exit_reason(
     child: &mut tokio::process::Child,
-    stderr: &mut tokio::process::ChildStderr,
+    stderr_reader: &mut AbortOnDrop,
 ) -> String {
     let gathered = tokio::time::timeout(SSH_EXIT_GRACE, async {
-        tokio::join!(child.wait(), read_tail(stderr, SSH_STDERR_TAIL_MAX))
+        // The child's exit is the authoritative loss signal; the drainer
+        // finishes as fd 2 hits EOF at process death, so joining it yields
+        // the complete bounded tail — not just what was drained before
+        // stdout closed. `Pin::new` is sound: `JoinHandle` is `Unpin`.
+        tokio::join!(child.wait(), std::pin::Pin::new(&mut stderr_reader.0))
     })
     .await;
     match gathered {
         Ok((status, diagnostics)) => {
+            let diagnostics = diagnostics.unwrap_or_default();
             let tail = String::from_utf8_lossy(&diagnostics);
             let tail = tail.trim();
             match status {
@@ -2228,6 +2262,61 @@ mod tests {
                     recorded.lines().collect::<Vec<_>>(),
                     expected.iter().map(String::as_str).collect::<Vec<_>>()
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_drains_stderr_past_the_pipe_buffer_without_stalling() {
+        // Regression (phux-v45.9): a remote that emits more than the OS
+        // pipe buffer (~64KiB) to fd 2 must not wedge the link. If the hub
+        // only drained stderr at stdout EOF, this child would block on its
+        // stderr write at ~64KiB and never exit — stdout would never close,
+        // recv_frame would block forever, and the link would sit
+        // `Connected` with no loss signal. The background drainer keeps fd 2
+        // flowing, so the child runs to completion and the bounded tail
+        // still keeps the *end* of the stream (the marker + exit code).
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                // ~200KiB of fd-2 chatter (well past one pipe buffer), then
+                // a marker and a nonzero exit. No stdout: it closes on exit.
+                let stub = write_stub(
+                    dir.path(),
+                    "i=0\n\
+                     while [ \"$i\" -lt 200 ]; do printf '%01024d' 0 >&2; i=$((i + 1)); done\n\
+                     echo 'DRAINED-TO-EOF' >&2\n\
+                     exit 3",
+                );
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                // Reaching Backoff at all proves no stall; the tail keeping
+                // the end proves stderr was drained the whole way to EOF.
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error.contains("DRAINED-TO-EOF")
+                                && last_error.contains('3')
+                    )
+                })
+                .await;
+                cancel.cancel();
             })
             .await;
     }
