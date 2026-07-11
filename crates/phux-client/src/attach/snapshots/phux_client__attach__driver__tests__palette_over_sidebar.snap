@@ -2,9 +2,9 @@
 source: crates/phux-client/src/attach/driver.rs
 expression: "rows.iter().map(|r| r.trim_end()).collect::<Vec<_>>().join(\"\\n\")"
 ---
-▸ w1-agent         │PANE-BASE
-    foz10-br       │
-                   │
+spaces             │PANE-BASE
+● w1-agent         │
+  foz10-br         │
                    │
                    │
                 ┌────────────── command palette ───────────────┐
@@ -25,4 +25,4 @@ expression: "rows.iter().map(|r| r.trim_end()).collect::<Vec<_>>().join(\"\\n\")
                    │
                    │
   + new            │
-  = menu           │
+  = menu           ‹
