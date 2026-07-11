@@ -119,7 +119,7 @@ impl CopyModeOverlay {
     /// ways: directly by the in-overlay `Tab` key (the overlay captures every
     /// keystroke while it is up, so the cycle key must live here — see
     /// [`RenderOverlay::handle_key`]), and via the
-    /// [`OverlayState::cycle_copy_mode`] accessor for callers that reach the
+    /// [`super::OverlayState::cycle_copy_mode`] accessor for callers that reach the
     /// active overlay through the boxed trait object. No wire traffic — the
     /// mode is a consumer-side projection detail (ADR-0030).
     pub const fn cycle_mode(&mut self) {
@@ -269,7 +269,7 @@ impl RenderOverlay for CopyModeOverlay {
     ///
     /// Client-local UI state (ADR-0045): the mode is a projection knob on the
     /// consumer's own engine, never a wire concern. The dispatcher's
-    /// copy-mode-active toggle calls this via [`OverlayState::cycle_copy_mode`].
+    /// copy-mode-active toggle calls this via [`super::OverlayState::cycle_copy_mode`].
     fn cycle_selection_mode(&mut self) -> Option<SelectionMode> {
         self.cycle_mode();
         Some(self.mode)
