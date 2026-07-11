@@ -112,6 +112,25 @@
 //! as normal; only the local echo is skipped. Follow-up tickets widen
 //! the safe set further once the reconcile path has miles on it.
 //!
+//! ## Full-screen-app gate (client-side, phux-51n6.1)
+//!
+//! This state machine is terminal-agnostic: it decides *what* is safe to
+//! predict from the keystroke alone, but has no view of the pane's terminal
+//! modes. The attach driver adds a **proactive app-mode gate** in front of
+//! it: when the focused pane is on the alternate screen (`?1049h`/`?1047h`,
+//! as vim/nvim, pagers, and agent TUIs use), the driver does not call
+//! [`PredictionState::predict_key`] at all — a keystroke there is a command
+//! the shell never echoes, so a speculative insert would only paint a ghost
+//! the server contradicts. Predictive echo is a shell-prompt phenomenon; it
+//! does nothing for app mode, so gating there is pure upside. The gate lives
+//! in `phux_client::attach` (`terminal_in_alt_screen`), reading the same
+//! libghostty `terminal.mode()` query the mouse-tracking and
+//! synchronized-output gates use. This is a stronger, cheaper signal than
+//! waiting for the reactive auto-back-off below to notice the mispredict
+//! storm — the two compose: the gate silences full-screen apps up front, and
+//! the back-off still catches main-screen mispredict modes (readline
+//! vi command-mode) the gate cannot see.
+//!
 //! # Off by default
 //!
 //! Predictive echo is gated behind [`PredictiveConfig::enabled`], wired
