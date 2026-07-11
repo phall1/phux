@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-10
+last-reviewed: 2026-07-11
 ---
 
 # The phux reference TUI
@@ -107,13 +107,28 @@ phux attach --ws ws://127.0.0.1:8787
 phux attach --ws wss://HOST:PORT --cert-fingerprint FP --token HEX
                               # attach over TLS WebSocket when UDP/QUIC is blocked
 phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
-                              # run server in foreground (incl. for SSH; no --stdio yet)
+                              # run server in foreground
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
                               # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
                               # --hub validates [[satellites]] into the runtime
-                              # satellite table at startup (no dialing/routing yet)
+                              # satellite table at startup, dials each enabled
+                              # satellite (quic/wss per ADR-0038; ssh:// over
+                              # `ssh HOST phux stdio-bridge`), and relays
+                              # satellite-tagged frames over the links (§4.2)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
+phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
+                              # spawn a terminal without attaching; --satellite
+                              # routes the spawn to a federation satellite via
+                              # a --hub server and prints the routed id
+phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
+                              # spawn a pane running an agent integration's
+                              # [launch] command (ADR-0042); resolves the named
+                              # template from an enabled plugin and routes the
+                              # agent through its identity wrapper, so the pane
+                              # self-declares its phux.agent/v1 identity with no
+                              # alias. --list enumerates; --print is a
+                              # server-free dry run of the resolved argv
 phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
 phux rename SESSION NEW-NAME  # rename a session
@@ -130,6 +145,8 @@ phux config agents [--json]   # inspect configured plugin agent states
 phux config run PLUGIN ACTION # execute a configured plugin action
 phux plugin <COMMAND>         # install/update/link/list/toggle/unlink/validate plugins
 phux satellite <COMMAND>      # add/list/remove federation satellites
+phux stdio-bridge             # splice stdin/stdout to the local server socket
+                              # (the remote end of the SSH-stdio transport)
 phux --version                # print version
 phux help [COMMAND]
 ```
@@ -190,8 +207,8 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `config show`, `config plugins`, `config agents`, `config run`,
-`plugin`, and `satellite`. Their
+`run`, `new`, `spawn`, `config show`, `config plugins`, `config agents`,
+`config run`, `plugin`, and `satellite`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -523,6 +540,31 @@ trigger adaptive auto-backoff. Leave it unset or set it to `false` to keep
 echo strictly authoritative; set it to `true` to opt in. Anything under
 `[experimental]` may be renamed or removed without a SemVer bump.
 
+**What it helps, and what it does not.** Predictive echo hides latency for
+**shell-prompt typing** over a slow link — the characters you type appear
+immediately instead of waiting a round trip for the server to echo them.
+It is **inert in full-screen app mode**: vim/nvim, pagers (`less`), and
+agent TUIs (Claude Code, codex) switch to the alternate screen, where a
+keystroke is a command the program interprets rather than text the shell
+echoes. The client detects the alternate screen and **predicts nothing
+there**, so enabling the knob costs full-screen apps nothing (and gains
+them nothing — their redraw is server-authoritative regardless). The win
+also shrinks toward zero as the round trip shrinks: over the local UDS
+transport the server echo is already near-instant, so the benefit is most
+visible on the higher-latency remote transport
+([ADR-0007](../../ADR/0007-mosh-class-transport-and-satellites.md)).
+
+**Why it is still off by default.** Beyond the alternate-screen gate, two
+main-screen cases the client cannot detect keep the default conservative:
+readline **vi command-mode** at the prompt (`set -o vi`), where normal-mode
+keys are mispredicted as inserts until the auto-backoff suspends (a brief
+underlined flicker), and **no-echo prompts** (`sudo`/`ssh` passwords), where
+echo is suppressed by the server PTY's termios — invisible to the client —
+so a predicted insert would momentarily render the typed characters. Making
+it safe on-by-default needs the mosh mechanisms not yet ported (an
+RTT-adaptive gate and a display-timeout that expires unconfirmed ghosts);
+until then it is a deliberate opt-in.
+
 ```toml
 [experimental]
 predictive-echo = false
@@ -715,28 +757,51 @@ agent-tools demo launches and drives an `agent-bench` profile through
 `phux config run`.
 
 **Federation satellites** live under `[[satellites]]`. This is the
-hub-side registry for remote phux servers; routing is a later federation
-slice, but the registry name is already the host token that will appear in
-`TerminalId::Satellite.host`. `endpoint` is an opaque URI string in the
+hub-side registry for remote phux servers; the registry name is the host
+token that appears in `TerminalId::Satellite.host` — the address every
+satellite-routed frame carries. `endpoint` is an opaque URI string in the
 registry CRUD so `ssh://devbox`, `quic://host:8788`, and `wss://host:8787`
 can share one control-plane shape; `enabled` defaults to `true`.
 
 A server started with `phux server --hub` consumes this registry: at
 startup it validates every enabled entry's endpoint by scheme (`quic://`
-requires an explicit `host:port`; `ssh://` is accepted but its transport
-is deferred) into a runtime satellite table keyed by the registry name,
-and refuses to start on a malformed enabled endpoint or a duplicate name.
-Disabled entries are skipped. Dialing and routing are later federation
-slices; without `--hub` the server ignores the registry entirely.
+requires an explicit `host:port`; `ssh://` takes `[user@]host[:port]`
+with a strict charset — the parts become `ssh` argv, so anything that
+could read as an option or smuggle arguments is rejected) into a runtime
+satellite table keyed by the registry name, and refuses to start on a
+malformed enabled endpoint or a duplicate name. Disabled entries are
+skipped. The hub then dials each table entry with capped exponential
+backoff reconnect and routes satellite-tagged traffic over the
+established links (SPEC L1 §9.1): per-terminal commands, input, and
+subscribed streams relay both directions with ids re-tagged at the hub;
+`phux ls` / `GET_STATE` on the hub aggregates every satellite's terminals
+next to the local ones (an unreachable satellite degrades to an
+un-correlated typed error, never a failed list); and
+`phux spawn --satellite NAME` creates a terminal *on* the satellite,
+returning a satellite-tagged id that routes through the hub immediately.
+Without `--hub` the server ignores the registry entirely and refuses
+satellite-tagged traffic with the typed `UnsupportedSatelliteRoute`.
 
-The hub authenticates to a satellite as an ordinary remote consumer
-(ADR-0038): a pairing bearer token plus a TLS certificate-fingerprint pin,
-both produced by running `phux pair` on the satellite host. The token is
-stored **by reference** — `token-file` is an absolute path to an owner-only
-file holding the hex token (the same shape as the server's token store); the
-secret never appears in `config.toml` and is never printed by the lifecycle
-verbs. `cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
-digits, optionally colon-separated; not a secret, stored inline).
+For `quic://` and `wss://` endpoints the hub authenticates to a satellite
+as an ordinary remote consumer (ADR-0038): a pairing bearer token plus a
+TLS certificate-fingerprint pin, both produced by running `phux pair` on
+the satellite host. The token is stored **by reference** — `token-file` is
+an absolute path to an owner-only file holding the hex token (the same
+shape as the server's token store); the secret never appears in
+`config.toml` and is never printed by the lifecycle verbs.
+`cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
+digits, optionally colon-separated; not a secret, stored inline). Routable
+endpoints without both are refused, fail closed, without dialing.
+
+`ssh://` endpoints take neither (ADR-0038 addendum): the hub spawns the
+system `ssh` binary (override with `$PHUX_SSH`) running
+`phux stdio-bridge` on the satellite host, which splices the connection
+into the satellite server's local Unix socket. SSH authenticates and
+encrypts the channel — use `BatchMode`-compatible key material (the hub
+never answers a prompt) — and the bridge inherits the satellite UDS's
+owner-only local trust, so `token-file` / `cert-fingerprint` on an
+`ssh://` entry are ignored. The satellite host needs `phux` on the
+non-interactive `PATH` of the SSH login.
 
 ```toml
 [[satellites]]
@@ -811,8 +876,8 @@ Recognized slots:
 | `accent`         | `#bef264`   | Modal titles (help / prompt border title) |
 | `chord`          | `#86efac`   | Keybinding chords in the help table       |
 | `action`         | terminal fg | Action labels                             |
-| `dim`            | dark gray   | Footer hints, the "no bindings" notice    |
-| `border`         | `#52525b`   | Modal borders                             |
+| `dim`            | `#64748b`   | Footer hints, "no bindings" notice, sidebar branch/affordance/empty-state text |
+| `border`         | `#334155`   | Modal borders + the sidebar separator rule |
 | `title`          | `#bef264`   | Titles that diverge from `accent`         |
 | `section_header` | yellow      | Section headings inside the help modal    |
 | `error`          | red         | Error / alarm text                        |
@@ -820,13 +885,29 @@ Recognized slots:
 | `shadow`         | `#1c1c26`   | Modal drop shadow                         |
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
-| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint) |
+| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint, fleet-dashboard hot rows) |
+| `sidebar_section`| `#64748b`   | Sidebar `spaces` / `agents` section headers + affordance action glyphs |
+| `agent_idle`     | `#94a3b8`   | Sidebar agent row in the `idle` state      |
+| `agent_working`  | `#86efac`   | Sidebar agent row in the `working` state   |
+| `agent_blocked`  | `#fbbf24`   | Sidebar agent row in the `blocked` state   |
+| `agent_done`     | `#60a5fa`   | Sidebar agent row in the `done` state      |
+
+The default palette is deliberately **muted-chrome / bright-content**: the
+always-on chrome (sidebar headers, branch sub-lines, affordances, the
+separator rule, empty-state placeholders) sits in one cohesive recessive
+slate scale (`#334155` → `#64748b`), so pane content and the `accent`
+lime/active markers carry the eye. Every value is a slot, so a theme or
+distro retints the whole chrome by overriding a handful of keys — the
+bundled `herdr` distro maps this scale onto tokyonight (see
+`distros/herdr/herdr.toml`).
 
 ```toml
 [theme]
 accent = "#bef264"
 chord = "#86efac"
-border = "#52525b"
+border = "#334155"
+dim = "#64748b"
+sidebar_section = "#64748b"
 shadow = "#1c1c26"
 ```
 
@@ -893,6 +974,7 @@ line of config. The shipped prefix-table bindings:
 | `C-a 0`–`9` | `select-window` by index                                |
 | `C-a w`     | `window-picker` (grouped: sessions, windows nested)      |
 | `C-a s`     | `session-picker` (`C-a a` is a kept alias)               |
+| `C-a A`     | `agent-fleet` (fleet dashboard — §5.6)                   |
 | `C-a C`     | `new-session`                                            |
 | `C-a ,`     | `rename-window` (interactive prompt)                     |
 | `C-a $`     | `rename-session` (interactive prompt)                    |
@@ -929,8 +1011,10 @@ test, so this table cannot silently drift):
 | `command-palette` | (opens the palette — §5.5)                  |
 | `window-picker`   | (opens the grouped window picker — §5.5)    |
 | `session-picker`  | (opens the session picker — §5.5)           |
+| `agent-fleet`     | (opens the fleet dashboard — §5.6)          |
+| `focus-pane`      | `window`, `pane` — focus a pane by window index + DFS leaf ordinal (committed by fleet rows, §5.6) |
 | `new-session`     | `name?` (bare opens an interactive prompt)  |
-| `switch-session`  | `name`, `window?` (re-attaches this client; `window` selects that window index after the switch — §5.5) |
+| `switch-session`  | `name`, `window?`, `pane?` (re-attaches this client; `window` selects that window index after the switch — §5.5; `pane` then focuses that DFS leaf ordinal — the one-step cross-session pane pick the fleet's foreign rows commit, §5.6) |
 | `detach`          |                                             |
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
@@ -1009,7 +1093,53 @@ foreign layouts are an attach-time snapshot: if a peer rearranged its
 windows since, the jump still switches sessions and the stale window
 index degrades to the session's own remembered focus (logged, no bell).
 
-### 5.6 Which-key popup
+### 5.6 Agent-fleet dashboard
+
+The **agent-fleet dashboard** (`agent-fleet`, `C-a A`) is the one-view
+answer to "which of my agents needs me?": a filterable overlay listing
+every pane of the attached session, grouped under session headers, each
+row carrying
+
+- the agent's **name and kind** from its structured `phux.agent/v1`
+  record (ADR-0040) when one is declared, falling back to the pane's OSC
+  title otherwise (the record outranks the title);
+- a one-character **state glyph**: `!` blocked, `*` working, `-` idle,
+  `.` done, `?` unknown (also used when no record is declared);
+- an **attention highlight** — the row's label paints in the theme's
+  `attention` slot (§4.4, the same amber as the sidebar marker and the
+  status-bar asked hint) when the pane has a pending ADR-0035 question or
+  its record declares/derives high attention;
+- the pane's **branch or cwd** in the dimmed right column, next to the
+  state word (`working - main`), from the same client-local `.git/HEAD`
+  read as the sidebar branch line.
+
+Enter focuses the chosen pane: current-session rows commit
+`focus-pane { window, pane }` through the single dispatch path (switching
+the window and moving its client-local focus in one step). Rows under
+**other** sessions are **one-step cross-session pane focus** (phux-jpqd):
+each pane of a peer session with a cached persisted layout commits
+`switch-session { name, window, pane }`, so a single Enter re-attaches to
+that session, selects the window, and focuses that pane — with the peer's
+agent glyph and state already shown on the row (blocked, working, idle,
+done, or `?`). A peer session with nothing persisted yet (or created after
+this client attached) falls back to a single "switch to this session" row
+as before. The dashboard grows no wire surface for this (ADR-0030): it
+reuses the same lazy per-pane L3 reads the window picker uses (phux-foz.8,
+ADR-0018) — the peer's persisted `phux.tui.layout/v1` workspace for the
+pane tree, plus a one-shot `GET_METADATA` on each foreign pane's
+`phux.agent/v1` record for its identity. Foreign rows therefore carry no
+asked flag or branch/cwd — those need a live per-pane subscription, so the
+record's declared state is the honest maximum until you attach there. The
+`phux agent list` CLI remains the exhaustive cross-session projection.
+
+The dashboard is **live**: while it is open, agent-record changes, asked
+events, pane spawns/closes, and layout changes rebuild its rows in place
+(push, not poll) without disturbing your query or selection. It shares
+the palette's fuzzy filter, `j`/`k` / arrows / `C-n`/`C-p` navigation,
+and Esc dismissal. No new theme slots: headers use `section_header`,
+secondaries `dim`, hot rows `attention`.
+
+### 5.7 Which-key popup
 
 Press the prefix and hesitate, and a small floating panel lists every
 prefix-table continuation — key on the left, action on the right — built
@@ -1117,22 +1247,60 @@ The new layout broadcasts to other attached clients via `SET_METADATA`
 ### 6.4 Window sidebar
 
 > **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`;
-> interactive per `phux-fce4`).
+> interactive per `phux-fce4`; sectioned + agent-aware per `phux-foz.9`).
 
-`[sidebar]` docks a vertical window strip on the left (default) or
-right edge; `toggle-sidebar` (`C-a b`) flips it at runtime. Panes tile
-into the remaining content rect, so the strip never overlaps content.
+`[sidebar]` docks a vertical strip on the left (default) or right edge;
+`toggle-sidebar` (`C-a b`) flips it at runtime, and so does clicking the
+collapse chevron in the strip's bottom corner. Panes tile into the
+remaining content rect, so the strip never overlaps content.
 
-Each window occupies a fixed **two-row block**, top to bottom in
+The strip is laid out herdr-style in two labelled sections, headed by
+muted lowercase headers (the `sidebar_section` theme slot):
+
+**`spaces`** — one fixed **two-row block** per window, top to bottom in
 `select-window` index order:
 
-- **Name row.** The window's display label (agent record, OSC title, or
-  stored name — same resolution as the status-bar tab strip), with the
-  active-window marker and the §8.6 attention `!`.
+- **Name row.** A status dot (filled + `accent` for the active window,
+  hollow + `dim` otherwise, `attention` amber when a pane in the window
+  is waiting on a human) followed by the window's bold display label
+  (agent record, OSC title, or stored name — same resolution as the
+  status-bar tab strip), plus the §8.6 attention `!`.
 - **Branch row.** The VCS branch of the window's focused pane, dim and
   nested under the label (`main`, a `wave2/...` branch, or a short
   commit hash for a detached HEAD). Blank when the pane's working
   directory is not inside a git repository.
+
+**`agents`** — one row per agent-running pane: a lifecycle glyph, the
+window's stored name, and `state - agent-name` (e.g. `idle - claude`,
+`working - merge-queue-w5`), colored by the `agent_idle` /
+`agent_working` / `agent_blocked` / `agent_done` theme slots (an
+undeclared state renders in `dim`). Per pane, in preference order:
+
+1. **The structured `phux.agent/v1` record** (ADR-0040), when the pane
+   declares one — name and state come straight from the record, exactly
+   as `phux agent set` wrote them.
+2. **The OSC-title identity heuristic** — the compatibility path for
+   plain `claude` / `codex` CLI panes, which never write a record. The
+   name comes from the title token; the state is `blocked` while the
+   pane's §8.6 asked flag is up, else `idle`. Screen text is never
+   scanned on the render path. Title changes refresh the chrome
+   directly: the client diffs each pane's title as content frames
+   apply, so the row appears when the agent sets its title and
+   disappears when the shell resets it on exit — no unrelated chrome
+   event needed.
+
+Panes matching neither source produce no row — the section lists
+agents, not shells. When no pane matches, the section still renders its
+header with a quiet `no agents` empty-state line (dim + italic) rather
+than vanishing, so the strip reads as two composed sections; the `spaces`
+section shows an equivalent `no spaces` placeholder when there are no
+windows. The empty-state lines are inert — never click targets. (A short
+strip that cannot fit the gap + header + one row drops the whole agents
+section as before.) Getting first-class rows for CLI agents without the heuristic
+means something has to write the record: an agent-tools integration (a
+wrapper or hook that runs `phux agent set` when the agent starts and
+updates state as it works) upgrades the same pane from the fallback row
+to declared name + live lifecycle with no sidebar change.
 
 Branch inference is **client-local and read-only**: the pane's working
 directory (carried by the `ATTACHED` snapshot) is walked up to the
@@ -1142,21 +1310,24 @@ subprocess, and nothing added to the wire. The cache re-validates on a
 short TTL keyed by `HEAD`'s mtime, so a `git switch` shows up on the
 next chrome refresh without stat storms.
 
-The strip's last two rows are **interactive affordances** (`phux-fce4`),
-and the window blocks are click targets. Every sidebar click commits the
-same `ResolvedAction` a keybinding or palette row would — one `run_action`
-dispatch path, no bespoke click semantics:
+The strip's last two rows are the bottom-anchored **interactive
+affordances** (`phux-fce4`), with the collapse chevron in the bottom
+corner cell; window blocks and agent rows are click targets too. Every
+sidebar click commits the same `ResolvedAction` a keybinding or palette
+row would — one `run_action` dispatch path, no bespoke click semantics:
 
 | Target                      | Committed action                       |
 |-----------------------------|----------------------------------------|
 | A window block (either row) | `select-window { index }`              |
+| An agent row                | `select-window { index }` for the window holding the agent's pane |
 | `+ new`                     | `new-window`                           |
 | `= menu`                    | `command-palette` (the session/plugin menu; `new-session` lives in its Session group) |
+| The collapse chevron        | `toggle-sidebar`                       |
 
 Pointer events over the strip never leak into pane routing: presses on
-blank rows or the separator column are consumed and dropped. The same
-targets stay keyboard-reachable through their actions (`C-a c`,
-`C-a :`, `C-a 0`–`9`).
+section headers, blank rows, or the separator column are consumed and
+dropped. The same targets stay keyboard-reachable through their actions
+(`C-a c`, `C-a :`, `C-a b`, `C-a 0`–`9`).
 
 ---
 
@@ -1186,9 +1357,14 @@ the pointer over a divider whenever the inner program has no mouse mode.
 |                          | copy-mode it scrolls the focused      |
 |                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
-| Click on status bar slot | Slot-defined; default no-op           |
-| Click on a sidebar row   | Select that window; `+ new` / `= menu`|
-|                          | run their actions (§6.4)              |
+| Click on status bar row  | A `windows`-widget tab selects that   |
+|                          | window (`select-window { index }`,    |
+|                          | phux-foz.12); every other cell on the |
+|                          | row is consumed as chrome (no-op)     |
+| Click on a sidebar row   | Select that window (window blocks and |
+|                          | agent rows); `+ new` / `= menu` / the |
+|                          | collapse chevron run their actions    |
+|                          | (§6.4)                                |
 
 Only divider cells change meaning. Every event inside a pane's rectangle
 is forwarded to that pane with pane-local coordinates, so an inner TUI
@@ -1290,7 +1466,7 @@ architectural revision to grow a status bar plugin story.
 |-----------------|--------------------------------------------------------------|
 | `session-name`  | `format?` (default: `"{name}"`) — **implemented**           |
 | `time`          | `format` (strftime) — **implemented**                       |
-| `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented** |
+| `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented**; tabs are click targets (`select-window`, phux-foz.12) wherever the widget sits (any slot, top or bottom bar) |
 | `help-hints`    | prefix-aware help / palette / copy affordances — **implemented** |
 | `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |
@@ -1564,7 +1740,7 @@ Beyond that, two client-rendered overlays teach the bindings themselves
 - Press `C-a` and *hesitate*, and the **which-key popup** appears after
   `which-key-delay-ms` (default 600 ms), listing the available prefix
   continuations. Any key dismisses it and executes normally; Esc cancels
-  the prefix. See §5.6.
+  the prefix. See §5.7.
 
 ---
 

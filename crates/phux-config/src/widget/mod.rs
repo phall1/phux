@@ -74,6 +74,21 @@ impl CellStyle {
     }
 }
 
+/// phux-foz.12: the interactive target a composed cell carries.
+///
+/// Lets a host that routes mouse input (the TUI client) hit-test a click
+/// against the exact strip it painted. Widgets stamp this on their cells
+/// at render time; the composer copies it through slot placement and
+/// truncation untouched. Paint and hit targets therefore derive from one
+/// model and cannot drift — the same discipline as the sidebar's
+/// `row_model`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellHit {
+    /// Clicking this cell selects window `i` (the `select-window` index).
+    /// Stamped by the `windows` widget on tab cells (separators excluded).
+    Window(usize),
+}
+
 /// A single status-bar cell.
 ///
 /// Local to phux-config — see the module-level doc for rationale. Grapheme
@@ -88,6 +103,9 @@ pub struct Cell {
     /// Optional per-cell style. `None` ⇒ inherit the terminal default
     /// (plain). The render layer (phux-client) translates this to SGR.
     pub style: Option<CellStyle>,
+    /// phux-foz.12: optional interactive hit target. `None` ⇒ the cell is
+    /// inert (clicks over it are consumed as chrome, committing nothing).
+    pub hit: Option<CellHit>,
 }
 
 /// A window as the `windows` widget sees it: a display name and whether
@@ -202,6 +220,7 @@ impl WidgetCells {
             .map(|c| Cell {
                 text: smallvec::smallvec![c],
                 style: style.clone(),
+                hit: None,
             })
             .collect();
         Self { cells }

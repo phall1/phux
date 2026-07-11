@@ -109,6 +109,41 @@ pub fn adaptive_tick_interval(srtt: std::time::Duration) -> std::time::Duration 
     (srtt / 2).clamp(MIN_TICK_INTERVAL, MAX_TICK_INTERVAL)
 }
 
+/// Lower clamp on the loss-tolerant retransmit timeout (phux-v45.8).
+///
+/// A state-sync consumer on a lossy/forwarded leg (ADR-0042) advances its
+/// reference on `FRAME_ACK`, not on emit, so an un-acked frame is retransmitted
+/// (re-diffed against the last-acked reference) if no ack lands within a
+/// retransmit window. This floors that window so a near-zero-RTT link does not
+/// retransmit faster than roughly one idle tick.
+pub const RETRANSMIT_MIN: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Upper clamp on the loss-tolerant retransmit timeout (phux-v45.8).
+///
+/// Past this a high-RTT link is retransmitting state slower than useful; the
+/// ceiling bounds how long a lost transition can sit unhealed on an otherwise
+/// idle terminal.
+pub const RETRANSMIT_MAX: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Cold-start retransmit timeout before any RTT sample exists (phux-v45.8).
+pub const RETRANSMIT_DEFAULT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Retransmit-timeout (RTO) for a loss-tolerant consumer given its smoothed
+/// RTT: `clamp(3·srtt, RETRANSMIT_MIN, RETRANSMIT_MAX)`, or
+/// [`RETRANSMIT_DEFAULT`] while no sample exists (phux-v45.8, ADR-0042).
+///
+/// The `3·srtt` factor (vs the tick cadence's `srtt/2`) is deliberately
+/// conservative: a retransmit is only for a *suspected loss*, so it waits
+/// several RTTs to let a delayed ack land before re-spending bandwidth on a
+/// re-diff. This is the "adjust slowly" discipline (Mosh §3) applied to the
+/// loss path rather than the emission cadence.
+#[must_use]
+pub fn retransmit_timeout(srtt: Option<std::time::Duration>) -> std::time::Duration {
+    srtt.map_or(RETRANSMIT_DEFAULT, |s| {
+        (s * 3).clamp(RETRANSMIT_MIN, RETRANSMIT_MAX)
+    })
+}
+
 /// Debounce window for the post-resize client resync (phux-8v1).
 ///
 /// Dragging a terminal window fires a SIGWINCH storm — one

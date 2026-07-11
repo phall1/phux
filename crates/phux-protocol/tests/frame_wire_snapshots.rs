@@ -751,6 +751,7 @@ fn snap_spawn_terminal_minimal() {
         cwd: None,
         env: None,
         term: None,
+        satellite: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -769,6 +770,7 @@ fn snap_spawn_terminal_full() {
             ("LANG".to_owned(), "en_US.UTF-8".to_owned()),
         ]),
         term: None,
+        satellite: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -785,6 +787,7 @@ fn snap_spawn_terminal_term_field() {
         cwd: None,
         env: None,
         term: Some("ghostty".to_owned()),
+        satellite: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

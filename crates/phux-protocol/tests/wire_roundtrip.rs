@@ -356,6 +356,7 @@ fn arb_error_code() -> impl Strategy<Value = ErrorCode> {
         Just(ErrorCode::TerminalNotFound),
         Just(ErrorCode::ClientNotFound),
         Just(ErrorCode::UnsupportedSatelliteRoute),
+        Just(ErrorCode::SatelliteUnreachable),
         Just(ErrorCode::InvalidCommand),
         Just(ErrorCode::PermissionDenied),
         Just(ErrorCode::ResourceExhausted),
@@ -1192,6 +1193,7 @@ fn error_code_wire_values_match_spec() {
     assert_eq!(ErrorCode::TerminalNotFound.as_wire(), 104);
     assert_eq!(ErrorCode::ClientNotFound.as_wire(), 105);
     assert_eq!(ErrorCode::UnsupportedSatelliteRoute.as_wire(), 106);
+    assert_eq!(ErrorCode::SatelliteUnreachable.as_wire(), 107);
     assert_eq!(ErrorCode::InvalidCommand.as_wire(), 200);
     assert_eq!(ErrorCode::PermissionDenied.as_wire(), 201);
     assert_eq!(ErrorCode::ResourceExhausted.as_wire(), 202);
@@ -1579,6 +1581,8 @@ fn arb_spawn_error() -> impl Strategy<Value = SpawnError> {
     prop_oneof![
         Just(SpawnError::GroupNotFound),
         ".{0,128}".prop_map(SpawnError::SpawnFailed),
+        Just(SpawnError::UnsupportedSatelliteRoute),
+        ".{0,128}".prop_map(SpawnError::SatelliteUnreachable),
     ]
 }
 
@@ -1598,6 +1602,7 @@ proptest! {
         cwd in proptest::option::of(".{0,32}"),
         env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
         term in proptest::option::of(".{0,16}"),
+        satellite in proptest::option::of(".{0,16}"),
     ) {
         let frame = FrameKind::SpawnTerminal {
             request_id,
@@ -1606,6 +1611,7 @@ proptest! {
             cwd,
             env,
             term,
+            satellite: satellite.map(phux_protocol::ids::SatelliteHost::new),
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -1702,6 +1708,36 @@ fn command_get_state_round_trips() {
     let (decoded, tail) = FrameKind::decode(&buf).unwrap();
     assert_eq!(decoded, frame);
     assert!(tail.is_empty());
+}
+
+#[test]
+fn command_attach_detach_terminal_round_trip() {
+    // phux-v45.7: the per-Terminal subscription verbs (SPEC §5.1 tags
+    // 0x01/0x02) round-trip with both Local and Satellite ids — the
+    // Satellite form is what a hub consumer sends for two-hop attach.
+    for terminal_id in [
+        phux_protocol::ids::TerminalId::local(7),
+        phux_protocol::ids::TerminalId::satellite("devbox", 7),
+    ] {
+        for command in [
+            Command::AttachTerminal {
+                terminal_id: terminal_id.clone(),
+            },
+            Command::DetachTerminal {
+                terminal_id: terminal_id.clone(),
+            },
+        ] {
+            let frame = FrameKind::Command {
+                request_id: 21,
+                command,
+            };
+            let mut buf = BytesMut::new();
+            frame.encode(&mut buf);
+            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+            assert_eq!(decoded, frame);
+            assert!(tail.is_empty());
+        }
+    }
 }
 
 #[test]
@@ -2065,6 +2101,7 @@ fn spawn_terminal_empty_command_vec_round_trips() {
         cwd: None,
         env: None,
         term: None,
+        satellite: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -2085,6 +2122,7 @@ fn spawn_terminal_empty_env_vec_round_trips() {
         cwd: None,
         env: Some(Vec::new()),
         term: None,
+        satellite: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -2106,6 +2144,7 @@ fn spawn_terminal_term_field_round_trips() {
             cwd: None,
             env: None,
             term,
+            satellite: None,
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);

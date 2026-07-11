@@ -3,8 +3,8 @@
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind, InputMode,
-    StateScope, TerminalSignal, ViewportInfo,
+    AgentEvent, Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind,
+    InputMode, StateScope, TerminalLifecycle, TerminalSignal, ViewportInfo,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -80,7 +80,7 @@ pub fn seed_session_with_pty(
 pub fn seed_session_with_pty_and_colors(
     state: &SharedState,
     name: &str,
-    cmd: portable_pty::CommandBuilder,
+    mut cmd: portable_pty::CommandBuilder,
     history_limit: u32,
     root_token: &CancellationToken,
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
@@ -93,6 +93,12 @@ pub fn seed_session_with_pty_and_colors(
     let terminal: TerminalId = state.with_mut(|s| {
         let terminal = s.seed_session(name).2;
         stamp_spawn_cwd(s, terminal, spawn_cwd);
+        // phux-w7mj: intern the pane's wire id pre-spawn and inject it into
+        // the child's environment as PHUX_TERMINAL_ID so an in-pane process
+        // (e.g. the agent-record wrapper) self-targets with zero config.
+        // Interning is idempotent — `spawn_terminal_actor` below returns the
+        // same id.
+        crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
         terminal
     });
     let terminal_token = root_token.child_token();
@@ -158,7 +164,7 @@ pub fn spawn_pane_with_pty(
 pub fn spawn_pane_with_pty_and_colors(
     state: &SharedState,
     session: phux_core::ids::SessionId,
-    cmd: portable_pty::CommandBuilder,
+    mut cmd: portable_pty::CommandBuilder,
     history_limit: u32,
     root_token: &CancellationToken,
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
@@ -169,6 +175,10 @@ pub fn spawn_pane_with_pty_and_colors(
     let Some(terminal): Option<TerminalId> = state.with_mut(|s| {
         let terminal = s.add_pane_to_session(session)?;
         stamp_spawn_cwd(s, terminal, spawn_cwd);
+        // phux-w7mj: inject the pane's own local wire id as PHUX_TERMINAL_ID
+        // (see `seed_session_with_pty_and_colors`). Idempotent interning —
+        // `spawn_terminal_actor` below returns the same id.
+        crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
         Some(terminal)
     }) else {
         return Ok(None);
@@ -259,13 +269,28 @@ pub(crate) fn handle_terminal_resize(
     rows: u16,
 ) {
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            cols,
-            rows,
-            "TERMINAL_RESIZE: SATELLITE-routed pane id rejected on non-federation-hub server",
-        );
+        // Federation relay (phux-v45.4): forward the frame verbatim with
+        // the id rewritten to the satellite's Local space. Off-hub (or
+        // for an unknown host) it stays a warn-drop.
+        if !relay_satellite_frame(
+            state,
+            client_id,
+            wire_terminal_id,
+            "TERMINAL_RESIZE",
+            |id| FrameKind::TerminalResize {
+                terminal_id: id,
+                cols,
+                rows,
+            },
+        ) {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                cols,
+                rows,
+                "TERMINAL_RESIZE: SATELLITE-routed pane id rejected on non-federation-hub server",
+            );
+        }
         return;
     }
     state.with_mut(|s| {
@@ -376,6 +401,8 @@ pub(crate) fn prepare_attach(
 /// variant logs as `"other"` until an arm is added here.
 pub(crate) const fn command_kind(command: &Command) -> &'static str {
     match command {
+        Command::AttachTerminal { .. } => "attach_terminal",
+        Command::DetachTerminal { .. } => "detach_terminal",
         Command::KillTerminal { .. } => "kill_terminal",
         Command::KillTerminals { .. } => "kill_terminals",
         Command::GetState { .. } => "get_state",
@@ -413,8 +440,30 @@ pub(crate) async fn handle_command(
         return;
     }
 
+    // Federation relay (phux-v45.4, ADR-0007 §4): a command targeting a
+    // satellite-owned terminal never touches local dispatch — see
+    // `handle_satellite_command`.
+    if let Some((sat_host, local_command)) = crate::hub::relay::route_to_satellite(&command) {
+        handle_satellite_command(
+            state,
+            client_id,
+            request_id,
+            &sat_host,
+            local_command,
+            out_tx,
+        )
+        .await;
+        return;
+    }
+
     let result = match command {
-        Command::GetState { scope } => handle_get_state(state, &scope),
+        Command::AttachTerminal { terminal_id } => {
+            handle_attach_terminal(state, client_id, &terminal_id, out_tx).await
+        }
+        Command::DetachTerminal { terminal_id } => {
+            handle_detach_terminal(state, client_id, &terminal_id)
+        }
+        Command::GetState { scope } => handle_get_state_federated(state, &scope, out_tx).await,
         Command::GetScreen {
             terminal_id,
             request_scrollback,
@@ -424,28 +473,7 @@ pub(crate) async fn handle_command(
             handle_route_input(state, client_id, &terminal_id, event)
         }
         Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
-        Command::KillTerminal { terminal_id } => {
-            // Resolve the wire id to the core pane, then cancel its actor.
-            // Cancellation drops the actor's `exit_notify`, which the
-            // per-pane EOF watcher (phux-it8) treats identically to PTY
-            // EOF: it broadcasts `TERMINAL_CLOSED` and reaps the pane
-            // (phux-60s), cascading to session removal + server self-exit
-            // when the last session empties. So KILL_TERMINAL reuses the
-            // exact teardown a natural shell exit takes — no separate
-            // kill plumbing, and the async `TERMINAL_CLOSED` still fires.
-            state
-                .with(|s| s.terminal_from_wire(&terminal_id))
-                .map_or_else(
-                    || CommandResult::Error {
-                        code: ErrorCode::TerminalNotFound,
-                        message: format!("no such terminal: {terminal_id:?}"),
-                    },
-                    |core_id| {
-                        state.with_mut(|s| s.detach_terminal_actor(core_id));
-                        CommandResult::Ok
-                    },
-                )
-        }
+        Command::KillTerminal { terminal_id } => handle_kill_terminal(state, &terminal_id),
         Command::GetTerminalState {
             terminal_id,
             include_scrollback,
@@ -510,6 +538,288 @@ pub(crate) async fn handle_command(
         .await;
 }
 
+/// Build the reply for `KILL_TERMINAL`: resolve the wire id to the core
+/// pane, then cancel its actor. Cancellation drops the actor's
+/// `exit_notify`, which the per-pane EOF watcher (phux-it8) treats
+/// identically to PTY EOF: it broadcasts `TERMINAL_CLOSED` and reaps the
+/// pane (phux-60s), cascading to session removal + server self-exit when
+/// the last session empties. So `KILL_TERMINAL` reuses the exact teardown
+/// a natural shell exit takes — no separate kill plumbing, and the async
+/// `TERMINAL_CLOSED` still fires.
+fn handle_kill_terminal(
+    state: &SharedState,
+    terminal_id: &phux_protocol::ids::TerminalId,
+) -> CommandResult {
+    state
+        .with(|s| s.terminal_from_wire(terminal_id))
+        .map_or_else(
+            || CommandResult::Error {
+                code: ErrorCode::TerminalNotFound,
+                message: format!("no such terminal: {terminal_id:?}"),
+            },
+            |core_id| {
+                state.with_mut(|s| s.detach_terminal_actor(core_id));
+                CommandResult::Ok
+            },
+        )
+}
+
+/// Handle `ATTACH_TERMINAL` (SPEC §5.1 tag 0x01, phux-v45.7): subscribe the
+/// caller to one Terminal's content stream without a session-scoped
+/// `ATTACH`. Registers the caller as an output subscriber (which also opens
+/// the `INPUT_*` / `FRAME_ACK` gates for it — see `handle_terminal_input`),
+/// registers the per-consumer state-sync entry so `FRAME_ACK` eviction
+/// works (ADR-0018), spawns a cancellable output pump, and primes the
+/// caller with an authoritative `TERMINAL_SNAPSHOT` before any
+/// `TERMINAL_OUTPUT` delta (the same snapshot-first gate `handle_attach`
+/// enforces — ADR-0007 §4's snapshot-on-attach invariant rides on it
+/// across the federation hop).
+///
+/// Idempotent: a re-attach re-sends a fresh snapshot without spawning a
+/// second pump — this is what a federation hub relays when a second
+/// consumer attaches to a terminal the link already streams; the
+/// duplicate snapshot is a convergent repaint for existing observers.
+///
+/// Deliberately does NOT resize the Terminal (no viewport rides the
+/// command); interactive callers follow with `TERMINAL_RESIZE`.
+#[allow(
+    clippy::too_many_lines,
+    reason = "linear per-terminal attach orchestration: resolve -> subscribe -> register consumer -> pump -> snapshot; mirrors handle_attach's shape for one pane"
+)]
+async fn handle_attach_terminal(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) -> CommandResult {
+    use crate::terminal_actor::{ConsumerAttachRequest, PaneOutput, SnapshotRequest};
+
+    // Resolve, register the subscription, and snapshot the client's caps in
+    // one critical section. A client that never attached a session (the
+    // agent / hub-link shape) has no stored caps and gets the pass-through
+    // default — for the hub link that is exactly right: the hub relays
+    // satellite bytes verbatim (ADR-0007 opaque relay).
+    let resolved = state.with_mut(|s| {
+        let core = s.terminal_from_wire(terminal_id)?;
+        let handle = s.terminal_handle(core).cloned()?;
+        let caps = s
+            .attached
+            .get(&client_id)
+            .map(|c| c.client_caps)
+            .unwrap_or_default();
+        let subs = s.terminal_subscribers.entry(core).or_default();
+        if !subs.contains(&client_id) {
+            subs.push(client_id);
+        }
+        Some((core, handle, caps))
+    });
+    let Some((core, handle, client_caps)) = resolved else {
+        return CommandResult::Error {
+            code: ErrorCode::TerminalNotFound,
+            message: format!("no such terminal: {terminal_id:?}"),
+        };
+    };
+
+    // Register the per-consumer state-sync entry (ADR-0018) so FRAME_ACK
+    // from this consumer drives the actor's eviction loop. Mirrors the
+    // handle_attach registration; a failure degrades to the broadcast
+    // path, never fails the attach.
+    let mut tick_managed = false;
+    if let Some(wire_id) = terminal_id.local_id() {
+        let (attach_reply_tx, attach_reply_rx) = oneshot::channel();
+        if handle
+            .consumer_attach
+            .send(ConsumerAttachRequest {
+                client_id: wire_client_id(client_id),
+                outbound: out_tx.clone(),
+                wire_terminal_id: wire_id,
+                wants_state_sync: matches!(
+                    client_caps.output_mode,
+                    phux_protocol::caps::OutputMode::StateSync
+                ),
+                // phux-v45.8: `ATTACH_TERMINAL` over a reliable transport; the
+                // emit-once model is correct. Forwarded-leg loss-tolerance is
+                // the deferred activation (ADR-0042).
+                loss_tolerant: false,
+                reply: attach_reply_tx,
+            })
+            .await
+            .is_ok()
+            && let Ok(Ok(outcome)) = attach_reply_rx.await
+        {
+            tick_managed = outcome.tick_managed;
+        }
+    }
+
+    // Spawn the output pump — unless one is already live for this
+    // (client, terminal) pair (idempotent re-attach) or the actor's tick
+    // is this consumer's emitter (state-sync consumers, phux-3uv).
+    // Subscribing to the broadcast BEFORE the snapshot request and gating
+    // the pump's first forward on the snapshot send preserves the
+    // snapshot-then-deltas order (phux-7w1j).
+    let pump_token = state.with_mut(|s| s.register_attach_terminal_pump(client_id, core));
+    let mut snapshot_gate: Option<oneshot::Sender<()>> = None;
+    // When the actor's tick manages this consumer (state-sync mode) no
+    // pump is spawned, but the token stays registered so DETACH_TERMINAL
+    // bookkeeping is uniform (cancelling a pump-less token is a no-op).
+    if let Some(token) = pump_token
+        && !tick_managed
+    {
+        let mut output_rx = handle.output.subscribe();
+        let pump_out_tx = out_tx.clone();
+        let pump_wire_terminal_id = terminal_id.clone();
+        let pump_resize = handle.resize.clone();
+        let (gate_tx, gate_rx) = oneshot::channel::<()>();
+        snapshot_gate = Some(gate_tx);
+        tokio::task::spawn_local(async move {
+            // A dropped gate (snapshot failed) falls through to live
+            // forwarding rather than going silent.
+            let _ = gate_rx.await;
+            let mut seq: u64 = 0;
+            loop {
+                let msg = tokio::select! {
+                    () = token.cancelled() => break,
+                    msg = output_rx.recv() => msg,
+                };
+                match msg {
+                    Ok(msg) => {
+                        // Same Live -> OUTPUT / Resync -> SNAPSHOT
+                        // mapping as the session-attach pump.
+                        let frame = match msg {
+                            PaneOutput::Live(bytes) => {
+                                seq = seq.wrapping_add(1);
+                                FrameKind::TerminalOutput {
+                                    terminal_id: pump_wire_terminal_id.clone(),
+                                    seq,
+                                    bytes: crate::runtime::attach::downsample_for_caps(
+                                        &bytes,
+                                        client_caps,
+                                    ),
+                                }
+                            }
+                            PaneOutput::Resync { cols, rows, bytes } => {
+                                FrameKind::TerminalSnapshot {
+                                    terminal_id: pump_wire_terminal_id.clone(),
+                                    cols,
+                                    rows,
+                                    vt_replay_bytes: crate::runtime::attach::downsample_for_caps(
+                                        &bytes,
+                                        client_caps,
+                                    )
+                                    .into(),
+                                    scrollback_bytes: None,
+                                }
+                            }
+                        };
+                        if pump_out_tx.send(Outbound::Frame(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        // Ask the actor for an in-band resync so the
+                        // consumer reconverges (phux-y8v6).
+                        warn!(
+                            terminal_id = ?pump_wire_terminal_id,
+                            dropped = n,
+                            "ATTACH_TERMINAL output pump lagged; requesting in-band resync",
+                        );
+                        let _ = pump_resize.try_send(ResizeRequest {
+                            cols: 0,
+                            rows: 0,
+                            cell_px: None,
+                            resync_clients: true,
+                            resync_only: true,
+                        });
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+
+    // Authoritative snapshot, sent before the pump's first delta (the
+    // gate below releases it) and before the Ok reply.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if handle
+        .snapshot
+        .send(SnapshotRequest {
+            scrollback: None,
+            reply: reply_tx,
+        })
+        .await
+        .is_err()
+    {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for ATTACH_TERMINAL".to_owned(),
+        };
+    }
+    let Ok(snap) = reply_rx.await else {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor dropped the ATTACH_TERMINAL snapshot".to_owned(),
+        };
+    };
+    let replay =
+        crate::runtime::attach::downsample_for_caps(&bytes::Bytes::from(snap.bytes), client_caps)
+            .into();
+    if out_tx
+        .send(Outbound::Frame(FrameKind::TerminalSnapshot {
+            terminal_id: terminal_id.clone(),
+            cols: snap.cols,
+            rows: snap.rows,
+            vt_replay_bytes: replay,
+            scrollback_bytes: None,
+        }))
+        .await
+        .is_err()
+    {
+        return CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "consumer went away during ATTACH_TERMINAL".to_owned(),
+        };
+    }
+    if let Some(gate) = snapshot_gate {
+        let _ = gate.send(());
+    }
+    debug!(?client_id, ?terminal_id, "ATTACH_TERMINAL subscribed");
+    CommandResult::Ok
+}
+
+/// Handle `DETACH_TERMINAL` (SPEC §5.1 tag 0x02, phux-v45.7): drop the
+/// caller's per-terminal subscriptions — the `ATTACH_TERMINAL` output
+/// stream (pump cancelled, subscriber entry removed, per-consumer
+/// state-sync entry released) and the per-terminal agent-event
+/// subscription. Idempotent: unknown terminals and never-attached callers
+/// reply `Ok`, so a detach can never race a natural close into an error.
+fn handle_detach_terminal(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+) -> CommandResult {
+    use crate::terminal_actor::ConsumerDetachRequest;
+
+    let handle = state.with_mut(|s| {
+        s.unsubscribe_terminal_events(client_id, terminal_id);
+        let core = s.terminal_from_wire(terminal_id)?;
+        s.cancel_attach_terminal_pump(client_id, core);
+        s.unsubscribe_terminal(client_id, core);
+        s.terminal_handle(core).cloned()
+    });
+    if let Some(handle) = handle {
+        // Release the per-consumer RenderState cache (ADR-0018). Best
+        // effort, same discipline as detach_and_release_consumer_state:
+        // a full mailbox self-heals via the actor's closed-mailbox reap.
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = handle.consumer_detach.try_send(ConsumerDetachRequest {
+            client_id: wire_client_id(client_id),
+            reply: reply_tx,
+        });
+    }
+    debug!(?client_id, ?terminal_id, "DETACH_TERMINAL unsubscribed");
+    CommandResult::Ok
+}
+
 /// Handle `UPGRADE` (ADR-0032): prepare the graceful re-exec, ack the client,
 /// then replace the process. Acks itself (rather than returning a
 /// `CommandResult`) because on success it never returns.
@@ -552,6 +862,276 @@ async fn handle_upgrade(
         .await;
 }
 
+/// Relay one satellite-targeted command over the owning hub link and send
+/// the correlated `COMMAND_RESULT` (phux-v45.4, ADR-0007 §4): the command
+/// arrives here already rewritten to the satellite's `Local` id space by
+/// [`crate::hub::relay::route_to_satellite`], and the reply correlates
+/// through the link's own request-id remap. On a non-hub server (or for a
+/// host absent from the hub table) this resolves to a typed
+/// `UnsupportedSatelliteRoute` error, and an unreachable satellite fails
+/// fast with `SatelliteUnreachable` — never a hang.
+///
+/// **Stream-establishing commands** (`SUBSCRIBE_TERMINAL_EVENTS`,
+/// `ATTACH_TERMINAL`) register the caller's outbound mailbox as a hub-side
+/// proxy subscriber *atomically with* the relayed command
+/// ([`crate::hub::relay::RelayHandle::command_subscribing`], phux-v45.11):
+/// the return-leg frames the satellite pushes on the link are re-tagged
+/// `Local -> Satellite { host, .. }` and fanned out to this consumer, and
+/// a satellite error rolls the registration back. `DETACH_TERMINAL` is
+/// resolved hub-side: the consumer's proxy subscription is withdrawn and
+/// the link session itself relays a satellite-side `DETACH_TERMINAL` only
+/// when the **last** proxy subscriber for that terminal is gone —
+/// relaying every consumer's detach verbatim would tear down the link's
+/// single shared stream under the other consumers still watching it.
+///
+/// **Input-lease aliasing** (phux-v45.7, L1 §9.1): every hub consumer
+/// shares the link's one client identity on the satellite, so the
+/// satellite's lease map cannot distinguish them. The hub therefore owns
+/// lease exclusion *between its own consumers* via
+/// `ServerState::satellite_leases`: a cooperative `ACQUIRE_INPUT` against
+/// a terminal another hub consumer holds is refused here without touching
+/// the link; `RELEASE_INPUT` from a non-holder is the idempotent no-op
+/// `Ok` (never forwarded — forwarding would release the real holder's
+/// satellite-side lease); `ROUTE_INPUT` from a non-holder is refused with
+/// `InputLeaseHeld`. The relayed lease (held by the link identity) still
+/// excludes the satellite's own local clients.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear relay dispatch: route -> lease gate -> atomic subscribe -> relay -> ledger update; splitting scatters the two-hop contract"
+)]
+async fn handle_satellite_command(
+    state: &SharedState,
+    client_id: ClientId,
+    request_id: u32,
+    host: &phux_protocol::ids::SatelliteHost,
+    command: Command,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) {
+    let result = match state.with(|s| s.hub_relay(host)) {
+        None => CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!(
+                "no satellite route to {host:?}: this server is not a federation hub \
+                 for that host (check `phux server --hub` and the [[satellites]] registry)"
+            ),
+        },
+        Some(relay) => match &command {
+            Command::SubscribeTerminalEvents { terminal_id, .. }
+            | Command::AttachTerminal { terminal_id } => match terminal_id.local_id() {
+                Some(id) => {
+                    relay
+                        .command_subscribing(
+                            command.clone(),
+                            crate::hub::relay::ProxySubscription {
+                                terminal: id,
+                                client: client_id,
+                                out_tx: out_tx.clone(),
+                                // Stamped with the issue-order token by
+                                // `command_subscribing` at enqueue.
+                                seq: 0,
+                                // Only ATTACH_TERMINAL opens a content stream
+                                // with a return-leg TERMINAL_SNAPSHOT, so only
+                                // it gates deltas until that snapshot lands
+                                // (phux-v45.14). SUBSCRIBE_TERMINAL_EVENTS
+                                // carries no snapshot; gating it would strand
+                                // its EVENT stream.
+                                awaits_snapshot: matches!(command, Command::AttachTerminal { .. }),
+                            },
+                        )
+                        .await
+                }
+                None => relay.command(command.clone()).await,
+            },
+            Command::DetachTerminal { terminal_id } => {
+                // Hub-side resolution: withdraw this consumer's proxy
+                // subscription; the link session emits the satellite-side
+                // DETACH_TERMINAL iff nobody else still observes the
+                // terminal. Idempotent Ok, matching the local semantics.
+                if let Some(id) = terminal_id.local_id() {
+                    relay.unsubscribe_terminal(client_id, id);
+                }
+                CommandResult::Ok
+            }
+            Command::AcquireInput {
+                terminal_id, mode, ..
+            } => {
+                let id = terminal_id.local_id().unwrap_or(0);
+                let holder = state.with(|s| s.satellite_lease_holder(host, id));
+                if *mode == InputMode::Cooperative
+                    && let Some(holder) = holder
+                    && holder != client_id
+                {
+                    CommandResult::Error {
+                        code: ErrorCode::InputLeaseHeld,
+                        message: format!("input lease held by client {}", holder.0),
+                    }
+                } else {
+                    // Cooperative-over-free/self OR a SEIZE takeover. Relay
+                    // to the satellite (the link identity's lease keeps
+                    // excluding the satellite's own local clients), then
+                    // record the new hub-side holder. A SEIZE that preempts
+                    // a *different* hub consumer returns the evicted lease:
+                    // notify that holder it lost the wheel — mirroring the
+                    // local `TerminalControl(Seized)` broadcast (phux-v45.13,
+                    // L1 §9.1). Without it the prior holder keeps believing
+                    // it holds the wheel while its relayed INPUT_* is silently
+                    // dropped at the hub lease gate.
+                    let result = relay.command(command.clone()).await;
+                    if !matches!(result, CommandResult::Error { .. }) {
+                        let evicted = state.with_mut(|s| {
+                            s.set_satellite_lease(host.clone(), id, client_id, out_tx.clone())
+                        });
+                        if let Some(evicted) = evicted {
+                            notify_satellite_lease_seized(host, id, client_id, &evicted);
+                        }
+                    }
+                    result
+                }
+            }
+            Command::ReleaseInput { terminal_id } => {
+                let id = terminal_id.local_id().unwrap_or(0);
+                match state.with(|s| s.satellite_lease_holder(host, id)) {
+                    Some(holder) if holder != client_id => {
+                        // Idempotent no-op per ADR-0033 — and deliberately
+                        // NOT forwarded: on the satellite this consumer is
+                        // indistinguishable from the holder, so forwarding
+                        // would release the holder's lease (L1 §9.1).
+                        CommandResult::Ok
+                    }
+                    _ => {
+                        let result = relay.command(command.clone()).await;
+                        if !matches!(result, CommandResult::Error { .. }) {
+                            state.with_mut(|s| s.release_satellite_lease(host, id, client_id));
+                        }
+                        result
+                    }
+                }
+            }
+            Command::RouteInput { terminal_id, .. } => {
+                let id = terminal_id.local_id().unwrap_or(0);
+                let holder = state.with(|s| s.satellite_lease_holder(host, id));
+                match holder {
+                    Some(holder) if holder != client_id => CommandResult::Error {
+                        code: ErrorCode::InputLeaseHeld,
+                        message: "input lease held by another client".to_owned(),
+                    },
+                    _ => relay.command(command.clone()).await,
+                }
+            }
+            _ => relay.command(command.clone()).await,
+        },
+    };
+    debug!(
+        ?client_id,
+        request_id,
+        satellite = %host,
+        "satellite-routed COMMAND relayed; sending COMMAND_RESULT"
+    );
+    let _ = out_tx
+        .send(Outbound::Frame(FrameKind::CommandResult {
+            request_id,
+            result,
+        }))
+        .await;
+}
+
+/// Notify the hub consumer evicted by a SEIZE takeover over a satellite
+/// terminal that it no longer holds the input lease (phux-v45.13, L1
+/// §9.1).
+///
+/// The hub synthesizes the same `TerminalControl(Seized)` event the local
+/// takeover path broadcasts to every subscriber. The satellite cannot: all
+/// hub consumers reach it through the link's single client identity, so a
+/// relayed SEIZE reads there as a same-identity re-acquire and its
+/// broadcast names the shared link identity, not the evicted hub consumer.
+/// Best-effort (`try_send`, the fire-and-forget event discipline): the
+/// evicted holder re-renders the locked state from this event exactly as a
+/// local viewer does, and stops sending input the hub would now drop at the
+/// lease gate.
+fn notify_satellite_lease_seized(
+    host: &phux_protocol::ids::SatelliteHost,
+    id: u32,
+    new_holder: ClientId,
+    evicted: &crate::state::SatelliteLease,
+) {
+    let frame = FrameKind::Event {
+        terminal: Some(phux_protocol::ids::TerminalId::satellite(host.clone(), id)),
+        event: AgentEvent::TerminalControl {
+            // phux-v45.14 sub-finding (b): a Frozen satellite pane would be
+            // mis-reported as Running here. The hub keeps no cheaply-readable
+            // per-satellite-pane lifecycle at this SEIZE path — `SatelliteLease`
+            // carries only the holder and its mailbox, and the aggregate view
+            // is a round-trip away — so `Running` is the pragmatic default.
+            // The event's load-bearing field for the evicted holder is the
+            // `Seized` action + `input_holder` handoff, not the lifecycle;
+            // the holder re-renders locked state either way, and a Frozen pane
+            // reconciles on its next TERMINAL_CONTROL. Revisit if the hub
+            // starts tracking satellite pane lifecycle locally.
+            lifecycle: TerminalLifecycle::Running,
+            exit_status: None,
+            input_holder: Some(wire_client_id(new_holder)),
+            action: ControlAction::Seized,
+            actor: Some(wire_client_id(new_holder)),
+        },
+    };
+    if evicted.out_tx.try_send(Outbound::Frame(frame)).is_err() {
+        debug!(
+            satellite = %host,
+            terminal = id,
+            prior = ?evicted.holder,
+            "evicted hub lease holder unreachable for the SEIZE notification; dropping",
+        );
+    } else {
+        debug!(
+            satellite = %host,
+            terminal = id,
+            prior = ?evicted.holder,
+            ?new_holder,
+            "notified the evicted hub lease holder of a satellite SEIZE takeover",
+        );
+    }
+}
+
+/// Forward one fire-and-forget frame (`INPUT_*`, `FRAME_ACK`, `TERMINAL_RESIZE`)
+/// targeting a satellite terminal over the hub link (phux-v45.4): `build`
+/// receives the id rewritten to the satellite's `Local` space and produces
+/// the frame to relay verbatim.
+///
+/// Returns `true` when a relay route existed (the frame was queued, or
+/// dropped under the same bounded-mailbox backpressure contract these
+/// frames have locally); `false` when this server has no route to the
+/// host — the caller keeps its non-hub warn-drop.
+///
+/// Scope honesty (phux-v45.7): the satellite applies its own attach /
+/// subscription / lease gates to what arrives on the link under the
+/// link's single client identity. `ATTACH_TERMINAL` relayed over the link
+/// opens those gates for the link consumer, so `INPUT_*` / `FRAME_ACK` from a
+/// hub consumer that attached the terminal through the hub flow end to
+/// end; `ROUTE_INPUT` remains the attach-free input path.
+fn relay_satellite_frame(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    frame_label: &'static str,
+    build: impl FnOnce(phux_protocol::ids::TerminalId) -> FrameKind,
+) -> bool {
+    let Some((host, id)) = crate::hub::relay::satellite_route(wire_terminal_id) else {
+        return false;
+    };
+    let Some(relay) = state.with(|s| s.hub_relay(&host)) else {
+        return false;
+    };
+    trace!(
+        ?client_id,
+        ?wire_terminal_id,
+        frame_label,
+        satellite = %host,
+        "relaying satellite-routed frame"
+    );
+    relay.forward(build(phux_protocol::ids::TerminalId::local(id)));
+    true
+}
+
 /// Build the `Ok` reply for `KILL_TERMINALS` — the atomic multi-terminal
 /// teardown the v0.3.0 "Option B" re-tier left in place of the dissolved
 /// L2 `KILL_COLLECTION` verb (ADR-0019 / ADR-0027).
@@ -568,23 +1148,64 @@ async fn handle_upgrade(
 /// `KILL_TERMINAL` (or a natural shell exit) takes, but resolves the whole
 /// group in one pass.
 ///
-/// Idempotent: an `id` that is unknown, satellite-routed, or already-dead is
-/// skipped silently rather than failing the batch, so a caller racing a
-/// natural pane exit still succeeds. The reply is `Ok` the moment the actors
-/// are cancelled; the `TERMINAL_CLOSED` frames follow asynchronously as the
-/// panes reap (SPEC §5). The op is structurally infallible — an empty `ids`
-/// list is a no-op that still acks `Ok`.
+/// Idempotent: an `id` that is unknown or already-dead is skipped silently
+/// rather than failing the batch, so a caller racing a natural pane exit
+/// still succeeds. Satellite-routed ids (phux-v45.4) are partitioned by
+/// host and forwarded as per-satellite `KILL_TERMINALS` batches over the
+/// hub links, detached — the satellite applies the same idempotent
+/// semantics, and a down link degrades to the silent skip the contract
+/// already allows. The reply is `Ok` the moment the local actors are
+/// cancelled and the relays are queued; the `TERMINAL_CLOSED` frames follow
+/// asynchronously as the panes reap (SPEC §5). The op is structurally
+/// infallible — an empty `ids` list is a no-op that still acks `Ok`.
 pub(crate) fn handle_kill_terminals(
     state: &SharedState,
     ids: &[phux_protocol::ids::TerminalId],
 ) -> CommandResult {
+    // Satellite partition first (phux-v45.4): group `Satellite { host, id }`
+    // entries per host and forward each group as one satellite-local
+    // KILL_TERMINALS over the hub link. Detached relay: the batch op is
+    // idempotent and tolerates skips, so the hub does not await or merge
+    // per-satellite results. Non-hub servers (no relay) keep the silent
+    // skip these ids always had here.
+    let mut by_host: std::collections::BTreeMap<
+        phux_protocol::ids::SatelliteHost,
+        Vec<phux_protocol::ids::TerminalId>,
+    > = std::collections::BTreeMap::new();
+    for wire_id in ids {
+        if let Some((host, id)) = crate::hub::relay::satellite_route(wire_id) {
+            by_host
+                .entry(host)
+                .or_default()
+                .push(phux_protocol::ids::TerminalId::local(id));
+        }
+    }
+    for (host, local_ids) in by_host {
+        match state.with(|s| s.hub_relay(&host)) {
+            Some(relay) => {
+                debug!(
+                    satellite = %host,
+                    count = local_ids.len(),
+                    "KILL_TERMINALS: relaying satellite partition"
+                );
+                relay.command_detached(Command::KillTerminals { ids: local_ids });
+            }
+            None => {
+                debug!(
+                    satellite = %host,
+                    "KILL_TERMINALS: no route to satellite; skipping its ids"
+                );
+            }
+        }
+    }
+
     // Single lock scope: resolve every wire id to its core pane and cancel
     // its actor before releasing the lock. All-or-nothing for a local
     // server — no other command interleaves between the first and last
     // removal. `detach_terminal_actor` is idempotent (cancelling an
-    // already-cancelled token is a no-op), so an id racing a natural exit,
-    // an unknown id, and a satellite-routed id (no local pane) all collapse
-    // to a silent skip.
+    // already-cancelled token is a no-op), so an id racing a natural exit
+    // and an unknown id both collapse to a silent skip (satellite ids were
+    // partitioned above and resolve to no local pane here).
     let killed = state.with_mut(|s| {
         let mut killed = 0u32;
         for wire_id in ids {
@@ -650,19 +1271,18 @@ pub(crate) fn create_named_session(
                 for arg in head {
                     builder.arg(arg);
                 }
-                if let Some(path) = cwd {
-                    builder.cwd(path);
-                }
                 builder
             }
-            _ => {
-                let mut builder = crate::terminal_actor::default_shell_command();
-                if let Some(path) = cwd {
-                    builder.cwd(path);
-                }
-                builder
-            }
+            _ => crate::terminal_actor::default_shell_command(),
         });
+        // phux-0v1l: apply the wire cwd through the shared validate-and-fall-
+        // back helper, uniform with the attach CreateIfMissing seed path.
+        // Previously this passed the wire cwd through UNVALIDATED (a stale
+        // path failed the seed) and only applied it when there was no
+        // override command; now it is validated (existence + enterability),
+        // applied over a cwd-less builder, and dropped with a warn on an
+        // invalid path so a bad cwd never fails the create.
+        crate::terminal_actor::apply_spawn_cwd(&mut seed_cmd, cwd, name);
         crate::terminal_actor::apply_term(&mut seed_cmd, &term);
         seed_session_with_pty(state, name, seed_cmd, history_limit, root_token)
     } else {
@@ -715,6 +1335,114 @@ pub(crate) fn handle_get_state(state: &SharedState, scope: &StateScope) -> Comma
             message: "unsupported GET_STATE scope".to_owned(),
         },
     }
+}
+
+/// `GET_STATE` with federation aggregation (phux-v45.5, L1 §9.1): on a
+/// hub, the local snapshot from [`handle_get_state`] is merged with every
+/// dialed satellite's terminal inventory. Off-hub (no relays) this is
+/// exactly the local path.
+///
+/// Per satellite the hub relays `GET_STATE { scope: SERVER }` over the
+/// link (all links queried concurrently, each bounded by the relay's
+/// per-command deadline — see `crate::hub::relay::RELAY_COMMAND_TIMEOUT`)
+/// and appends the returned `panes` re-tagged
+/// `Local { id }` -> `Satellite { host, id }`.
+///
+/// **Result-shape honesty.** Only *terminals* aggregate. Session and
+/// window identities are not federation-routable (ADR-0016 makes
+/// `TerminalId` the wire primary), so the satellite's `sessions` /
+/// `windows` lists and focus fields are discarded — their `u32` ids
+/// would collide with the hub's own. A satellite pane's `window_id` is
+/// passed through **verbatim**: it is satellite-local, resolvable only on
+/// the satellite, and has no entry in the merged snapshot's `windows`
+/// list. `cols` / `rows` / `title` / `cwd` are likewise relayed verbatim
+/// from the satellite's snapshot; the hub synthesizes nothing.
+///
+/// **Degradation.** A satellite that is unreachable, saturated, or
+/// answers with an error contributes an empty set and NEVER fails the
+/// aggregate. The indication is the spec's observable-teardown shape: one
+/// un-correlated `ERROR` frame (typically `SatelliteUnreachable`), naming
+/// the host, pushed to the requesting consumer before the
+/// `COMMAND_RESULT`.
+pub(crate) async fn handle_get_state_federated(
+    state: &SharedState,
+    scope: &StateScope,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) -> CommandResult {
+    let local = handle_get_state(state, scope);
+    if !matches!(scope, StateScope::Server) {
+        return local;
+    }
+    let relays = state.with(crate::state::ServerState::hub_relays_all);
+    if relays.is_empty() {
+        // Non-hub server (or hub with an empty table): the local snapshot
+        // is the whole truth.
+        return local;
+    }
+    let CommandResult::OkWith(CommandValue::State(mut snapshot)) = local else {
+        return local;
+    };
+    // Query every satellite concurrently: the aggregate's latency bound
+    // is one relay deadline, not one per satellite.
+    let queries = relays.into_iter().map(|relay| async move {
+        let result = relay
+            .command(Command::GetState {
+                scope: StateScope::Server,
+            })
+            .await;
+        (relay.host().clone(), result)
+    });
+    for (host, result) in futures_util::future::join_all(queries).await {
+        match result {
+            CommandResult::OkWith(CommandValue::State(sat)) => {
+                for mut pane in sat.panes {
+                    match pane.id {
+                        phux_protocol::ids::TerminalId::Local { id } => {
+                            pane.id = phux_protocol::ids::TerminalId::satellite(host.clone(), id);
+                            snapshot.panes.push(pane);
+                        }
+                        // Hub-and-spoke does not chain (L1 §9.1): a
+                        // satellite must never report Satellite-tagged
+                        // terminals of its own.
+                        phux_protocol::ids::TerminalId::Satellite { .. } => {
+                            warn!(
+                                satellite = %host,
+                                pane = %pane.id,
+                                "satellite listed a Satellite-tagged terminal; dropping (no chaining)"
+                            );
+                        }
+                    }
+                }
+            }
+            CommandResult::Error { code, message } => {
+                debug!(
+                    satellite = %host,
+                    ?code,
+                    %message,
+                    "GET_STATE aggregation: satellite contributes nothing"
+                );
+                // Observable degradation, not silence: the same
+                // un-correlated typed ERROR shape the relay uses for
+                // teardown notification (L1 §9.1). Sent before the
+                // COMMAND_RESULT the caller emits on return.
+                let _ = out_tx
+                    .send(Outbound::Frame(FrameKind::Error {
+                        request_id: None,
+                        code,
+                        message,
+                    }))
+                    .await;
+            }
+            other => {
+                warn!(
+                    satellite = %host,
+                    ?other,
+                    "GET_STATE aggregation: unexpected satellite result shape; skipping"
+                );
+            }
+        }
+    }
+    CommandResult::OkWith(CommandValue::State(snapshot))
 }
 
 /// Build the `OK_WITH(JSON(..))` reply for `GET_SCREEN`.
@@ -1118,12 +1846,11 @@ pub(crate) async fn handle_acquire_input(
     mode: InputMode,
     _ttl_ms: u32,
 ) -> CommandResult {
-    if !terminal_id.is_local() {
-        return CommandResult::Error {
-            code: ErrorCode::UnsupportedSatelliteRoute,
-            message: format!("ACQUIRE_INPUT on satellite route unsupported: {terminal_id:?}"),
-        };
-    }
+    // No satellite guard here (phux-v45.11 finding 5): `route_to_satellite`
+    // intercepts every satellite-tagged ACQUIRE_INPUT in `handle_command`
+    // before local dispatch — on a hub it relays, elsewhere it resolves to
+    // the typed UnsupportedSatelliteRoute reply. A satellite id can never
+    // reach this function.
     let outcome = state.with_mut(|s| {
         let Some(core) = s.terminal_from_wire(terminal_id) else {
             return AcquireOutcome::NotFound;
@@ -1180,12 +1907,8 @@ pub(crate) async fn handle_release_input(
     client_id: ClientId,
     terminal_id: &phux_protocol::ids::TerminalId,
 ) -> CommandResult {
-    if !terminal_id.is_local() {
-        return CommandResult::Error {
-            code: ErrorCode::UnsupportedSatelliteRoute,
-            message: format!("RELEASE_INPUT on satellite route unsupported: {terminal_id:?}"),
-        };
-    }
+    // No satellite guard here (phux-v45.11 finding 5): same rationale as
+    // `handle_acquire_input` — `route_to_satellite` owns that dispatch.
     let released = state.with_mut(|s| {
         let core = s.terminal_from_wire(terminal_id)?;
         let handle = s.terminal_handle(core).cloned()?;
@@ -1553,12 +2276,13 @@ pub(crate) fn handle_viewport_resize(
 /// Validation: we drop with `warn!` (not `debug!`, this is observable
 /// misbehavior worth surfacing) on:
 ///   * Unknown wire pane id (no [`phux_core::ids::TerminalId`] mapping).
-///   * Client not attached (the per-client task should not be reading
-///     frames from a detached identity, but we re-check defensively).
-///   * Client attached but not subscribed to this pane — prevents one
-///     client from steering another's pane (SPEC §9 leaves multi-client
-///     subscription rules to per-pane policy; for now subscription is
-///     the gate).
+///   * Client not subscribed to this pane — prevents one client from
+///     steering another's pane (SPEC §9 leaves multi-client subscription
+///     rules to per-pane policy; subscription is the gate). Subscription
+///     is established by the session-scoped `ATTACH` or the per-terminal
+///     `ATTACH_TERMINAL` (phux-v45.7) — a session attachment is NOT
+///     required, because the federation hub's link consumer drives
+///     satellite panes with `ATTACH_TERMINAL` alone.
 ///   * Pane has no registered [`TerminalHandle`] (actor never spawned, or
 ///     spawned but evicted).
 ///
@@ -1567,6 +2291,71 @@ pub(crate) fn handle_viewport_resize(
 /// runtime, and an unbounded queue would let a slow PTY producer push
 /// memory through the roof. `Full` is treated as a backpressure event
 /// (warn-drop); `Closed` is logged at debug and dropped (actor gone).
+/// The satellite branch of [`handle_terminal_input`] (phux-v45.4):
+/// rebuild the wire `INPUT_*` frame with the id rewritten satellite-local
+/// and forward it verbatim over the owning hub link; warn-drop when this
+/// server has no route (the non-hub contract).
+fn relay_satellite_input(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    input: TerminalInput,
+    frame_label: &'static str,
+) {
+    // Hub-side lease gate (phux-v45.7, L1 §9.1): the satellite cannot
+    // distinguish hub consumers (they share the link identity), so the
+    // ADR-0033 "another client holds the wheel" drop must happen here.
+    // Dropped, not errored — the fire-and-forget input invariant holds,
+    // exactly like the local gate in `handle_terminal_input`.
+    if let Some((host, id)) = crate::hub::relay::satellite_route(wire_terminal_id)
+        && state.with(|s| {
+            s.satellite_lease_holder(&host, id)
+                .is_some_and(|holder| holder != client_id)
+        })
+    {
+        trace!(
+            ?client_id,
+            ?wire_terminal_id,
+            frame_label,
+            "satellite-routed input dropped: another hub consumer holds the input lease",
+        );
+        return;
+    }
+    let relayed =
+        relay_satellite_frame(
+            state,
+            client_id,
+            wire_terminal_id,
+            frame_label,
+            |id| match input {
+                TerminalInput::Key(event) => FrameKind::InputKey {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Mouse(event) => FrameKind::InputMouse {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Focus(event) => FrameKind::InputFocus {
+                    terminal_id: id,
+                    event,
+                },
+                TerminalInput::Paste(event) => FrameKind::InputPaste {
+                    terminal_id: id,
+                    event,
+                },
+            },
+        );
+    if !relayed {
+        warn!(
+            ?client_id,
+            ?wire_terminal_id,
+            frame_label,
+            "input frame carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+        );
+    }
+}
+
 pub(crate) fn handle_terminal_input(
     state: &SharedState,
     client_id: ClientId,
@@ -1574,18 +2363,16 @@ pub(crate) fn handle_terminal_input(
     input: TerminalInput,
     frame_label: &'static str,
 ) {
-    // v0.1 non-federation-hub servers reject SATELLITE-routed input frames
-    // (per ADR-0016 / SPEC §10.1). The protocol-level response is `ERROR
-    // { UnsupportedSatelliteRoute }`; this dispatch helper just drops the
-    // frame with a warn — the surrounding read loop will surface the
-    // error response in a follow-up tied to phux-byc.9.
+    // Satellite-routed input (phux-v45.4): on a hub, forward the frame
+    // verbatim over the owning link with the id rewritten to the
+    // satellite's Local space — the satellite applies its own routing
+    // gates (see `relay_satellite_frame`'s scope note). Non-hub servers
+    // keep the ADR-0016 / SPEC §10.1 behavior: drop with a warn (the
+    // protocol-level response is `ERROR { UnsupportedSatelliteRoute }`;
+    // surfacing it from this fire-and-forget helper is still a follow-up
+    // tied to phux-byc.9).
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            frame_label,
-            "input frame carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
-        );
+        relay_satellite_input(state, client_id, wire_terminal_id, input, frame_label);
         return;
     }
     // docs/consumers/tui.md §9 (phux-r82.1): an INPUT_FOCUS gained event
@@ -1607,29 +2394,20 @@ pub(crate) fn handle_terminal_input(
             );
             return false;
         };
-        let Some(attached) = s.attached.get(&client_id) else {
-            warn!(
-                ?client_id,
-                ?wire_terminal_id,
-                frame_label,
-                "input frame from non-attached client; dropping",
-            );
-            return false;
-        };
         // Subscription gate: the pane must be one the client is observing.
-        // For byc.8's "active pane only" subscription model this is the
-        // same as "is the pane in the client's attached session"; a
-        // richer SUBSCRIBE story (SPEC §7.4) will refine this without
-        // changing the dispatch shape.
-        let session = attached.session;
+        // Both subscription paths register here — the session-scoped
+        // ATTACH (byc.8's "panes of the attached session") and the
+        // per-terminal ATTACH_TERMINAL (phux-v45.7), which has no session
+        // attachment at all: the federation hub's link consumer drives
+        // satellite panes through exactly that shape, so requiring an
+        // `attached` entry would gate every relayed two-hop keystroke.
         let is_subscribed = s.subscribers_for_terminal(pane).contains(&client_id);
         if !is_subscribed {
             warn!(
                 ?client_id,
                 ?wire_terminal_id,
-                ?session,
                 frame_label,
-                "client not subscribed to pane; dropping input",
+                "client not subscribed to pane (no ATTACH or ATTACH_TERMINAL); dropping input",
             );
             return false;
         }
@@ -1646,7 +2424,12 @@ pub(crate) fn handle_terminal_input(
             );
             return false;
         }
-        s.touch_session(session);
+        // Session activity is only meaningful for session-attached
+        // clients; an ATTACH_TERMINAL consumer has no session to touch.
+        if let Some(attached) = s.attached.get(&client_id) {
+            let session = attached.session;
+            s.touch_session(session);
+        }
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
             warn!(
                 ?client_id,
@@ -1702,11 +2485,10 @@ pub(crate) fn handle_terminal_input(
 ///   * Unknown wire pane id → drop (warn). The client is acking a
 ///     terminal the server has no mapping for; this is observable
 ///     misbehavior worth surfacing.
-///   * Client not attached → drop (warn). Acks make no sense without
-///     an attachment.
 ///   * Client not subscribed to this pane → drop (warn). Same gate as
 ///     `handle_terminal_input`: a client cannot ack a pane it does not
-///     observe.
+///     observe. Subscription comes from `ATTACH` or `ATTACH_TERMINAL`
+///     (phux-v45.7); no session attachment is required.
 ///   * No `TerminalHandle` (actor evicted) → drop (debug — race against
 ///     teardown).
 ///
@@ -1722,15 +2504,25 @@ pub(crate) fn handle_frame_ack(
     wire_terminal_id: &phux_protocol::ids::TerminalId,
     seq: u64,
 ) {
-    // v0.1 servers reject SATELLITE-routed acks for the same reason input
-    // frames are dropped above: this server is not a federation hub.
+    // Satellite-routed acks relay like input frames (phux-v45.4): forward
+    // verbatim on a hub, warn-drop off one. FRAME_ACK is hint-shaped
+    // (ADR-0018), so the bounded-relay drop contract is safe here too.
     if !wire_terminal_id.is_local() {
-        warn!(
-            ?client_id,
-            ?wire_terminal_id,
-            seq,
-            "FRAME_ACK carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
-        );
+        let relayed =
+            relay_satellite_frame(state, client_id, wire_terminal_id, "FRAME_ACK", |id| {
+                FrameKind::FrameAck {
+                    terminal_id: id,
+                    seq,
+                }
+            });
+        if !relayed {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                seq,
+                "FRAME_ACK carried a SATELLITE TerminalId on a non-federation-hub server; dropping",
+            );
+        }
         return;
     }
     state.with_mut(|s| {
@@ -1743,22 +2535,15 @@ pub(crate) fn handle_frame_ack(
             );
             return;
         };
-        let Some(attached) = s.attached.get(&client_id) else {
-            warn!(
-                ?client_id,
-                ?wire_terminal_id,
-                seq,
-                "FRAME_ACK from non-attached client; dropping",
-            );
-            return;
-        };
-        let session = attached.session;
+        // Same gate as `handle_terminal_input` (phux-v45.7): subscription
+        // — established by ATTACH or ATTACH_TERMINAL — is the ack gate; a
+        // session attachment is not required (the federation hub's link
+        // consumer acks relayed frames without one).
         let is_subscribed = s.subscribers_for_terminal(pane).contains(&client_id);
         if !is_subscribed {
             warn!(
                 ?client_id,
                 ?wire_terminal_id,
-                ?session,
                 seq,
                 "FRAME_ACK from client not subscribed to pane; dropping",
             );

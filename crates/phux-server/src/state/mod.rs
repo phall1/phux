@@ -70,6 +70,24 @@ pub use upgrade_blob::RebuildError;
 /// persistence to a Group scope and the TUI needs a Group to write into.
 pub const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
+/// One hub-side satellite input lease (phux-v45.7, phux-v45.13).
+///
+/// Records which hub consumer holds the relayed ADR-0033 lease over a
+/// satellite terminal **and** that consumer's outbound mailbox. The
+/// mailbox is what lets a SEIZE takeover by a *different* hub consumer
+/// notify the evicted prior holder directly (a hub-synthesized
+/// `TerminalControl(Seized)` event, mirroring the local takeover
+/// broadcast) — the satellite cannot do it, because every hub consumer
+/// reaches it through the link's single client identity, so its own lease
+/// change reads as a same-identity re-acquire.
+#[derive(Debug, Clone)]
+pub(crate) struct SatelliteLease {
+    /// The hub consumer that holds the lease.
+    pub(crate) holder: ClientId,
+    /// The holder's outbound mailbox, for the eviction notification.
+    pub(crate) out_tx: tokio::sync::mpsc::Sender<Outbound>,
+}
+
 /// Single owner of all server-side state.
 ///
 /// See the module-level doc for the concurrency model. Wrap this in
@@ -90,6 +108,32 @@ pub struct ServerState {
     /// input passes (the back-compat default). Released automatically when the
     /// holder detaches or its connection drops.
     input_leases: HashMap<TerminalId, ClientId>,
+    /// Hub-side ledger of which **hub consumer** owns the input lease over
+    /// a satellite terminal (phux-v45.7). All hub consumers share the
+    /// link's single client identity on the satellite, so the satellite's
+    /// own lease map cannot tell them apart: without this ledger, consumer
+    /// A's `ACQUIRE_INPUT` over a satellite terminal would not exclude
+    /// consumer B's relayed input, and B's `RELEASE_INPUT` would release
+    /// A's lease. The hub therefore gates relayed `ACQUIRE_INPUT` /
+    /// `RELEASE_INPUT` / `ROUTE_INPUT` / `INPUT_*` on this map *before*
+    /// forwarding, and the satellite-side lease (held by the link
+    /// identity) keeps excluding the satellite's own local clients.
+    /// Entries are keyed `(host, satellite-local id)` and cleared when the
+    /// holder detaches (with a detached `RELEASE_INPUT` relayed so the
+    /// satellite-side lease follows). Each entry carries the holder's
+    /// outbound mailbox so a SEIZE takeover by another hub consumer can
+    /// notify the evicted prior holder directly (phux-v45.13) — the
+    /// satellite cannot, since it sees only the shared link identity. See
+    /// L1 §9.1.
+    satellite_leases:
+        std::collections::BTreeMap<(phux_protocol::ids::SatelliteHost, u32), SatelliteLease>,
+    /// Per-`(client, terminal)` cancellation for `ATTACH_TERMINAL` output
+    /// pumps (phux-v45.7). `DETACH_TERMINAL` cancels one entry; client
+    /// detach / disconnect cancels all of the client's entries; pane reap
+    /// cancels the pane's entries. Without the token the pump task (which
+    /// holds the client's outbound sender) would keep streaming until the
+    /// connection died.
+    attach_terminal_pumps: HashMap<(ClientId, TerminalId), tokio_util::sync::CancellationToken>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
@@ -292,8 +336,14 @@ pub struct ServerState {
     /// supervisors (phux-v45.3). `None` on every non-hub server. Set once
     /// at startup via [`Self::set_hub_link_statuses`] alongside the link
     /// spawn; the handle is the read surface a future `LIST` aggregation
-    /// (phux-v45.4+) consumes.
+    /// (phux-v45.5) consumes.
     hub_link_statuses: Option<crate::hub::link::HubLinkStatuses>,
+    /// Per-satellite frame-relay handles (phux-v45.4, ADR-0007 §4).
+    /// `None` on every non-hub server. Set once at hub startup via
+    /// [`Self::set_hub_relays`] alongside the link spawn; command and
+    /// input dispatch resolve `TerminalId::Satellite { host, .. }`
+    /// through it to the owning link's relay mailbox.
+    hub_relays: Option<crate::hub::relay::HubRelays>,
     /// Server-side event-hook dispatcher handle (`docs/consumers/tui.md`
     /// §9, phux-r82.1). `None` until the runtime spawns the dispatcher
     /// (it does so only when the hook catalog is non-empty), which is

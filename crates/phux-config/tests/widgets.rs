@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use phux_config::WidgetSpec;
 use phux_config::widget::{
-    CellStyle, SessionNameWidget, StatusWidget, TimeWidget, WidgetCells, WidgetContext,
+    CellHit, CellStyle, SessionNameWidget, StatusWidget, TimeWidget, WidgetCells, WidgetContext,
     WidgetError, WidgetRegistry, WindowInfo,
 };
 
@@ -354,6 +354,66 @@ fn windows_widget_appends_attention_marker() {
     // gets a ` !` suffix on its tab; unmarked windows stay plain.
     let cells = render_windows(&[], &[win("a", true), win_attention("b", false)]);
     assert_eq!(text_of(&cells), "0:a 1:b !");
+}
+
+#[test]
+fn windows_widget_stamps_hit_targets_on_tab_cells() {
+    // phux-foz.12: every cell of a tab segment carries its window's hit
+    // target (markers included); separator cells are inert. Cell-for-cell
+    // against the default format "0:a 1:b Z" (window 1 zoomed... use the
+    // attention marker on 1 to cover marker cells too).
+    let cells = render_windows(&[], &[win("a", true), win_attention("bee", false)]);
+    // "0:a 1:bee !" — columns 0..3 → window 0, column 3 separator, 4..11 → window 1.
+    assert_eq!(text_of(&cells), "0:a 1:bee !");
+    for (i, cell) in cells.cells.iter().enumerate() {
+        let expected = match i {
+            0..=2 => Some(CellHit::Window(0)),
+            3 => None, // separator
+            _ => Some(CellHit::Window(1)),
+        };
+        assert_eq!(cell.hit, expected, "cell {i} ({:?})", cell.text);
+    }
+}
+
+#[test]
+fn windows_widget_stamps_hits_with_custom_format_and_separator() {
+    // phux-foz.12: hit stamping follows the rendered segments, not the
+    // default template — a custom format/separator keeps targets aligned.
+    let cells = render_windows(
+        &[
+            ("format", toml::Value::String("{name}".to_owned())),
+            ("separator", toml::Value::String(" | ".to_owned())),
+        ],
+        &[win("edit", true), win("logs", false)],
+    );
+    assert_eq!(text_of(&cells), "edit | logs");
+    let hits: Vec<Option<CellHit>> = cells.cells.iter().map(|c| c.hit).collect();
+    let w = |i: usize| Some(CellHit::Window(i));
+    assert_eq!(
+        hits,
+        vec![
+            w(0),
+            w(0),
+            w(0),
+            w(0), // "edit"
+            None,
+            None,
+            None, // " | "
+            w(1),
+            w(1),
+            w(1),
+            w(1), // "logs"
+        ]
+    );
+}
+
+#[test]
+fn non_windows_widgets_produce_inert_cells() {
+    // phux-foz.12: only the windows widget stamps hit targets — a click on
+    // any other widget's cells must be a no-op.
+    let w = SessionNameWidget::new(None, None);
+    let cells = w.render(&WidgetContext::new(fixed_time(), "main", "C-a", &[]));
+    assert!(cells.cells.iter().all(|c| c.hit.is_none()));
 }
 
 #[test]

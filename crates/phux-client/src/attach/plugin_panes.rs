@@ -145,6 +145,7 @@ impl PluginPaneEntry {
             cwd: Some(self.plugin_root.display().to_string()),
             env: Some(self.spawn_env()),
             term: None,
+            satellite: None,
         }
     }
 }
@@ -292,11 +293,13 @@ mod tests {
             cwd,
             env,
             term,
+            satellite,
         } = entry.spawn_frame(7)
         else {
             panic!("expected SpawnTerminal");
         };
         assert_eq!(request_id, 7);
+        assert_eq!(satellite, None, "plugin panes spawn locally");
         assert_eq!(group, DEFAULT_GROUP_ID);
         assert_eq!(
             command,

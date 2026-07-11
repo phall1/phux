@@ -364,6 +364,10 @@ pub(crate) const SPAWN_RESULT_ERR: u8 = 1;
 pub(crate) const SPAWN_ERROR_TAG_GROUP_NOT_FOUND: u8 = 0;
 /// Wire tag for [`SpawnError::SpawnFailed`].
 pub(crate) const SPAWN_ERROR_TAG_SPAWN_FAILED: u8 = 1;
+/// Wire tag for [`SpawnError::UnsupportedSatelliteRoute`] (phux-v45.6).
+pub(crate) const SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE: u8 = 2;
+/// Wire tag for [`SpawnError::SatelliteUnreachable`] (phux-v45.6).
+pub(crate) const SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE: u8 = 3;
 
 // Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
 /// Wire tag for [`Scope::Terminal`].
@@ -459,6 +463,22 @@ pub(crate) const EVENT_TAG_CWD_CHANGED: u8 = 0x0a;
 // RESIZE_TERMINAL=0x04, GET_STATE=0x05, RUN_HOOK=0x06. v0.1 implements only
 // KILL_TERMINAL and GET_STATE (ADR-0021 §3); the rest are reserved and
 // decode as `UnknownEnumValue` until wired.
+/// Wire tag for [`Command::AttachTerminal`], taking the `0x01` slot the
+/// SPEC §5.1 catalog reserved for `ATTACH_TERMINAL` (phux-v45.7). The
+/// per-Terminal output-subscription verb: it wires the caller to receive
+/// `TERMINAL_SNAPSHOT` + `TERMINAL_OUTPUT` for one Terminal without a
+/// session-scoped `ATTACH`. The catalog's `role_policy` field is not yet
+/// encoded — an absent policy decodes as
+/// `RolePolicy { requested_role: PRIMARY, takeover: NEVER }` per SPEC §8.1,
+/// which is exactly what this body-less-policy encoding means; the field
+/// lands additively behind its own wire bump.
+pub(crate) const COMMAND_TAG_ATTACH_TERMINAL: u8 = 0x01;
+/// Wire tag for [`Command::DetachTerminal`], taking the `0x02` slot the
+/// SPEC §5.1 catalog reserved for `DETACH_TERMINAL` (phux-v45.7). Drops the
+/// caller's per-Terminal output subscription (the `ATTACH_TERMINAL`
+/// counterpart) and its per-Terminal event-stream subscription; the
+/// Terminal itself is unaffected.
+pub(crate) const COMMAND_TAG_DETACH_TERMINAL: u8 = 0x02;
 /// Wire tag for [`Command::KillTerminal`].
 pub(crate) const COMMAND_TAG_KILL_TERMINAL: u8 = 0x03;
 /// Wire tag for [`Command::GetState`].
@@ -603,9 +623,18 @@ pub enum ErrorCode {
     /// The requested client id does not exist.
     ClientNotFound = 105,
     /// SPEC §10.1 / ADR-0016: the frame carried a `TerminalId::Satellite`
-    /// but this server is not configured as a federation hub. v0.1 servers
+    /// but this server is not configured as a federation hub, or names a
+    /// satellite host absent from the hub's registry. Non-hub servers
     /// always respond with this code when handed a `Satellite` id.
     UnsupportedSatelliteRoute = 106,
+    /// ADR-0007 / SPEC §14: the frame's `TerminalId::Satellite` names a
+    /// satellite this hub knows but cannot reach right now — the outbound
+    /// link is down, still dialing, refused fail-closed, or dropped before
+    /// the relayed reply arrived. Distinct from
+    /// [`Self::UnsupportedSatelliteRoute`] (a routing/configuration
+    /// refusal): this one is transient and a retry may succeed once the
+    /// link supervisor reconnects.
+    SatelliteUnreachable = 107,
 
     /// SPEC §11: the requested COMMAND payload was structurally invalid.
     InvalidCommand = 200,
@@ -649,6 +678,7 @@ impl ErrorCode {
             104 => Self::TerminalNotFound,
             105 => Self::ClientNotFound,
             106 => Self::UnsupportedSatelliteRoute,
+            107 => Self::SatelliteUnreachable,
             200 => Self::InvalidCommand,
             201 => Self::PermissionDenied,
             202 => Self::ResourceExhausted,
@@ -810,6 +840,18 @@ pub enum SpawnError {
     /// enough to log inline; the SPEC does not constrain its contents
     /// beyond UTF-8.
     SpawnFailed(String),
+    /// The spawn named a satellite (`SPAWN_TERMINAL.satellite`) but this
+    /// server cannot route to it: it is not a federation hub, or the host
+    /// is absent from its satellite registry (phux-v45.6). The spawn-reply
+    /// mirror of `ErrorCode::UnsupportedSatelliteRoute` — a configuration
+    /// refusal, fixed by `phux server --hub` / `phux satellite add`.
+    UnsupportedSatelliteRoute,
+    /// The spawn named a satellite this hub dials, but the link is down,
+    /// dialing, refused fail-closed, or did not answer within the relay
+    /// deadline (phux-v45.6). The spawn-reply mirror of
+    /// `ErrorCode::SatelliteUnreachable`; carries the same human-readable
+    /// diagnostic. Retryable — the hub redials with backoff.
+    SatelliteUnreachable(String),
 }
 
 /// Tagged union carried by [`FrameKind::TerminalSpawned`], SPEC §7.2 / §10.1.
@@ -1067,6 +1109,36 @@ impl ControlAction {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Command {
+    /// Subscribe the calling client to one Terminal's content stream
+    /// (SPEC §5.1 `ATTACH_TERMINAL`, phux-v45.7): the server registers the
+    /// caller as an output subscriber, primes it with an authoritative
+    /// `TERMINAL_SNAPSHOT`, and streams `TERMINAL_OUTPUT` deltas from then
+    /// on — the per-Terminal interactive attach, without the session-scoped
+    /// `ATTACH` handshake. Idempotent: re-attaching re-sends a fresh
+    /// snapshot without duplicating the stream. Unlike session `ATTACH`
+    /// this does NOT resize the Terminal (no viewport rides the command);
+    /// callers that want their geometry applied follow with
+    /// `TERMINAL_RESIZE`. The catalog's `role_policy` field is not yet
+    /// encoded; absence means `{ PRIMARY, takeover: NEVER }` (SPEC §8.1).
+    /// Reply: `COMMAND_RESULT { Ok }` (the snapshot MAY precede it, per
+    /// SPEC §5 command/stream interleaving), or
+    /// `Error { TerminalNotFound }`. This is the verb a federation hub
+    /// relays for two-hop attach (ADR-0007 §4, L1 §9.1).
+    AttachTerminal {
+        /// The Terminal whose content stream to subscribe to.
+        terminal_id: TerminalId,
+    },
+    /// Drop the caller's per-Terminal subscriptions on `terminal_id`
+    /// (SPEC §5.1 `DETACH_TERMINAL`, phux-v45.7): the output stream wired
+    /// by [`Command::AttachTerminal`] and any per-Terminal event-stream
+    /// subscription. The Terminal itself is unaffected. Idempotent — a
+    /// no-op (still `Ok`) when the caller holds no subscription or the
+    /// Terminal is already gone, so detach can never race a natural close
+    /// into an error.
+    DetachTerminal {
+        /// The Terminal whose subscriptions to drop.
+        terminal_id: TerminalId,
+    },
     /// Terminate the underlying PTY of `terminal_id`. Asynchronously emits
     /// `TERMINAL_CLOSED`. Backs `phux kill` (one command per resolved
     /// Terminal — see ADR-0021).
@@ -1903,6 +1975,19 @@ pub enum FrameKind {
         /// still wins over this field on the server, but this gives
         /// consumers a typed knob without hand-rolling the env pair.
         term: Option<String>,
+        /// Satellite host to spawn on (phux-v45.6, ADR-0007 / L1 §9.1),
+        /// or `None` to spawn on the receiving server — the only shape a
+        /// non-federated consumer ever sends. A federation hub routes a
+        /// `Some(host)` spawn over its outbound link to that satellite
+        /// and replies with the new Terminal re-tagged
+        /// `Satellite { host, id }`; a non-hub server (or a hub whose
+        /// registry lacks `host`) replies
+        /// [`SpawnError::UnsupportedSatelliteRoute`], and a hub whose
+        /// link to `host` is down replies
+        /// [`SpawnError::SatelliteUnreachable`]. Encoded as optional
+        /// field id 7 (absent = `None`), so the field is wire-additive:
+        /// a pre-phux-v45.6 body decodes as `None`.
+        satellite: Option<SatelliteHost>,
     },
 
     /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
@@ -2354,6 +2439,7 @@ impl FrameKind {
                 cwd,
                 env,
                 term,
+                satellite,
             } => {
                 enc.write_field_with(field::spawn_terminal::REQUEST_ID, |e| {
                     e.write_u32_be(*request_id);
@@ -2377,6 +2463,9 @@ impl FrameKind {
                 }
                 if let Some(t) = term.as_deref() {
                     enc.write_field(field::spawn_terminal::TERM, t.as_bytes());
+                }
+                if let Some(host) = satellite.as_ref() {
+                    enc.write_field(field::spawn_terminal::SATELLITE, host.as_str().as_bytes());
                 }
             }
             Self::TerminalSpawned { request_id, result } => {
@@ -2971,8 +3060,10 @@ pub(super) fn decode_metadata_scope_key(
 // Layout (outer SpawnResult, the body of `TERMINAL_SPAWNED.result`):
 //   tag 0x00 Ok  → tagged TerminalId
 //   tag 0x01 Err → SpawnError body:
-//                    tag 0x00 GroupNotFound → no further bytes
-//                    tag 0x01 SpawnFailed        → length-prefixed UTF-8
+//                    tag 0x00 GroupNotFound             → no further bytes
+//                    tag 0x01 SpawnFailed               → length-prefixed UTF-8
+//                    tag 0x02 UnsupportedSatelliteRoute → no further bytes
+//                    tag 0x03 SatelliteUnreachable      → length-prefixed UTF-8
 //
 // The `Ok = 0x00 / Err = 0x01` convention deliberately mirrors the
 // `Option` tag convention (`None = 0x00 / Some = 0x01`) so hex-dump
@@ -3013,6 +3104,13 @@ fn encode_spawn_error(err: &SpawnError, enc: &mut Encoder<'_>) {
             enc.write_u8(SPAWN_ERROR_TAG_SPAWN_FAILED);
             enc.write_str(msg);
         }
+        SpawnError::UnsupportedSatelliteRoute => {
+            enc.write_u8(SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE);
+        }
+        SpawnError::SatelliteUnreachable(msg) => {
+            enc.write_u8(SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE);
+            enc.write_str(msg);
+        }
     }
 }
 
@@ -3021,6 +3119,10 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
     match tag {
         SPAWN_ERROR_TAG_GROUP_NOT_FOUND => Ok(SpawnError::GroupNotFound),
         SPAWN_ERROR_TAG_SPAWN_FAILED => Ok(SpawnError::SpawnFailed(dec.read_str()?.to_owned())),
+        SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE => Ok(SpawnError::UnsupportedSatelliteRoute),
+        SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE => {
+            Ok(SpawnError::SatelliteUnreachable(dec.read_str()?.to_owned()))
+        }
         other => Err(DecodeError::UnknownEnumValue {
             field: "SpawnError",
             value: u32::from(other),
@@ -3044,6 +3146,14 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
     match command {
+        Command::AttachTerminal { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_ATTACH_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
+        Command::DetachTerminal { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_DETACH_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
         Command::KillTerminal { terminal_id } => {
             enc.write_u8(COMMAND_TAG_KILL_TERMINAL);
             encode_terminal_id(terminal_id, enc);
@@ -3176,6 +3286,12 @@ fn decode_input_event(dec: &mut Decoder<'_>) -> Result<InputEvent, DecodeError> 
 pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
+        COMMAND_TAG_ATTACH_TERMINAL => Ok(Command::AttachTerminal {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
+        COMMAND_TAG_DETACH_TERMINAL => Ok(Command::DetachTerminal {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
         COMMAND_TAG_KILL_TERMINAL => Ok(Command::KillTerminal {
             terminal_id: decode_terminal_id(dec)?,
         }),

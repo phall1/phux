@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
-    MetadataStore, Outbound, RenameOutcome, ServerState,
+    MetadataStore, Outbound, RenameOutcome, SatelliteLease, ServerState,
 };
 use crate::agent_asked::{AskedPayload, AskedSource, AskedTransition};
 use crate::id_bridge::IdBridge;
@@ -44,6 +44,8 @@ impl ServerState {
             viewport_clock: 0,
             terminal_subscribers: HashMap::new(),
             input_leases: HashMap::new(),
+            satellite_leases: std::collections::BTreeMap::new(),
+            attach_terminal_pumps: HashMap::new(),
             session_id_bridge: IdBridge::new(),
             terminals: HashMap::new(),
             terminal_tokens: HashMap::new(),
@@ -75,6 +77,7 @@ impl ServerState {
             upgrade_ctx: None,
             hub_table: None,
             hub_link_statuses: None,
+            hub_relays: None,
             hook_dispatcher: None,
         }
     }
@@ -105,6 +108,33 @@ impl ServerState {
     #[must_use]
     pub const fn hub_link_statuses(&self) -> Option<&crate::hub::link::HubLinkStatuses> {
         self.hub_link_statuses.as_ref()
+    }
+
+    /// Install the shared per-satellite frame-relay registry
+    /// (phux-v45.4). Called once at hub startup, alongside spawning the
+    /// link supervisors that drain its mailboxes.
+    pub(crate) fn set_hub_relays(&mut self, relays: crate::hub::relay::HubRelays) {
+        self.hub_relays = Some(relays);
+    }
+
+    /// The relay handle for satellite `host`, or `None` when this server
+    /// is not a hub or `host` is not in its table — the caller's
+    /// `UnsupportedSatelliteRoute` signal.
+    #[must_use]
+    pub(crate) fn hub_relay(
+        &self,
+        host: &phux_protocol::ids::SatelliteHost,
+    ) -> Option<crate::hub::relay::RelayHandle> {
+        self.hub_relays.as_ref().and_then(|relays| relays.get(host))
+    }
+
+    /// Every satellite relay handle (detach fan-out); empty off-hub.
+    #[must_use]
+    pub(crate) fn hub_relays_all(&self) -> Vec<crate::hub::relay::RelayHandle> {
+        self.hub_relays
+            .as_ref()
+            .map(crate::hub::relay::HubRelays::all)
+            .unwrap_or_default()
     }
 
     /// Install the event-hook dispatcher handle (phux-r82.1). Called once
@@ -653,6 +683,21 @@ impl ServerState {
         // `Released` events (via `leases_held_by`) before calling detach;
         // this clears the state regardless of that path running.
         self.input_leases.retain(|_, holder| *holder != client_id);
+        // Hub-side satellite leases follow the same rule (phux-v45.7): the
+        // runtime relays the detached RELEASE_INPUT before calling detach;
+        // this clears the ledger regardless of that path running.
+        self.satellite_leases
+            .retain(|_, lease| lease.holder != client_id);
+        // Cancel every ATTACH_TERMINAL output pump this client owns
+        // (phux-v45.7) so no task keeps streaming into a dead mailbox.
+        self.attach_terminal_pumps.retain(|(owner, _), token| {
+            if *owner == client_id {
+                token.cancel();
+                false
+            } else {
+                true
+            }
+        });
         for subs in self.terminal_subscribers.values_mut() {
             subs.retain(|c| *c != client_id);
         }
@@ -804,6 +849,17 @@ impl ServerState {
             token.cancel();
         }
         self.terminal_subscribers.remove(&pane);
+        // Cancel the pane's ATTACH_TERMINAL pumps (phux-v45.7): the
+        // broadcast channel is closing anyway, but the cancel keeps the
+        // token map bounded and the teardown prompt.
+        self.attach_terminal_pumps.retain(|(_, terminal), token| {
+            if *terminal == pane {
+                token.cancel();
+                false
+            } else {
+                true
+            }
+        });
         self.agent_asked.clear_terminal(pane);
         if let Some(wire) = self.terminal_wire_forward.remove(&pane) {
             self.terminal_wire_reverse.remove(&wire);
@@ -1072,6 +1128,130 @@ impl ServerState {
             .iter()
             .filter_map(|(pane, holder)| (*holder == client).then_some(*pane))
             .collect()
+    }
+
+    /// The hub consumer currently holding the input lease over satellite
+    /// terminal `(host, id)` (phux-v45.7, L1 §9.1), or `None` when free.
+    /// See the `satellite_leases` field doc for why this ledger exists.
+    #[must_use]
+    pub fn satellite_lease_holder(
+        &self,
+        host: &phux_protocol::ids::SatelliteHost,
+        terminal: u32,
+    ) -> Option<ClientId> {
+        self.satellite_leases
+            .get(&(host.clone(), terminal))
+            .map(|lease| lease.holder)
+    }
+
+    /// Record `client` (with its outbound mailbox `out_tx`) as the
+    /// hub-side holder of the satellite lease, after the satellite acked
+    /// the relayed `ACQUIRE_INPUT`.
+    ///
+    /// Returns the **evicted** prior lease when this acquire preempted a
+    /// *different* hub consumer (a SEIZE takeover, phux-v45.13): the caller
+    /// notifies that holder it lost the wheel. A re-acquire by the same
+    /// holder (idempotent cooperative acquire) or a grant over a free lease
+    /// returns `None` — nobody was evicted.
+    pub(crate) fn set_satellite_lease(
+        &mut self,
+        host: phux_protocol::ids::SatelliteHost,
+        terminal: u32,
+        client: ClientId,
+        out_tx: mpsc::Sender<Outbound>,
+    ) -> Option<SatelliteLease> {
+        let prior = self.satellite_leases.insert(
+            (host, terminal),
+            SatelliteLease {
+                holder: client,
+                out_tx,
+            },
+        );
+        prior.filter(|lease| lease.holder != client)
+    }
+
+    /// Release the hub-side satellite lease over `(host, terminal)` if
+    /// `client` holds it. Returns `true` when an entry was removed.
+    pub fn release_satellite_lease(
+        &mut self,
+        host: &phux_protocol::ids::SatelliteHost,
+        terminal: u32,
+        client: ClientId,
+    ) -> bool {
+        let key = (host.clone(), terminal);
+        if self.satellite_leases.get(&key).map(|lease| lease.holder) == Some(client) {
+            self.satellite_leases.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Every satellite lease `client` currently holds. Read at disconnect
+    /// time so the runtime can relay a detached `RELEASE_INPUT` per entry
+    /// before [`Self::detach`] clears the ledger.
+    #[must_use]
+    pub fn satellite_leases_held_by(
+        &self,
+        client: ClientId,
+    ) -> Vec<(phux_protocol::ids::SatelliteHost, u32)> {
+        self.satellite_leases
+            .iter()
+            .filter(|(_, lease)| lease.holder == client)
+            .map(|(key, _)| key.clone())
+            .collect()
+    }
+
+    /// Register (and return the token for) an `ATTACH_TERMINAL` output
+    /// pump for `(client, terminal)` (phux-v45.7). Returns `None` when a
+    /// pump is already live for the pair — the idempotent re-attach must
+    /// not double-stream.
+    pub fn register_attach_terminal_pump(
+        &mut self,
+        client: ClientId,
+        terminal: TerminalId,
+    ) -> Option<tokio_util::sync::CancellationToken> {
+        use std::collections::hash_map::Entry;
+        match self.attach_terminal_pumps.entry((client, terminal)) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(slot) => {
+                let token = tokio_util::sync::CancellationToken::new();
+                slot.insert(token.clone());
+                Some(token)
+            }
+        }
+    }
+
+    /// Cancel and forget the `ATTACH_TERMINAL` pump for `(client,
+    /// terminal)`, if one is live. Idempotent.
+    pub fn cancel_attach_terminal_pump(&mut self, client: ClientId, terminal: TerminalId) {
+        if let Some(token) = self.attach_terminal_pumps.remove(&(client, terminal)) {
+            token.cancel();
+        }
+    }
+
+    /// Remove `client` from `terminal`'s subscriber list (the
+    /// `DETACH_TERMINAL` counterpart of the attach-time registration).
+    pub fn unsubscribe_terminal(&mut self, client: ClientId, terminal: TerminalId) {
+        if let Some(subs) = self.terminal_subscribers.get_mut(&terminal) {
+            subs.retain(|c| *c != client);
+            if subs.is_empty() {
+                self.terminal_subscribers.remove(&terminal);
+            }
+        }
+    }
+
+    /// Drop `client`'s per-terminal agent-event subscription for `wire`
+    /// (`DETACH_TERMINAL`, phux-v45.7). Server-wide subscriptions and
+    /// other terminals' scopes are untouched; an empty scope set drops
+    /// the whole entry so the map stays bounded.
+    pub fn unsubscribe_terminal_events(&mut self, client: ClientId, wire: &WireTerminalId) {
+        if let Some(sub) = self.event_subscriptions.get_mut(&client) {
+            sub.scopes.remove(&EventScope::Terminal(wire.clone()));
+            if sub.scopes.is_empty() {
+                self.event_subscriptions.remove(&client);
+            }
+        }
     }
 
     /// Wire pane id for `pane`, allocating one if needed.

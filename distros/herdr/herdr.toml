@@ -53,14 +53,32 @@ center = [{ kind = "help-hints" }]
 right = ["session-name", { kind = "time", format = " %a %H:%M" }]
 
 [theme]
-# Chrome + overlay palette (docs/consumers/tui.md section 4.4): a cool
-# blue accent matching the tab colors above, warm amber for attention.
+# Chrome + overlay palette (docs/consumers/tui.md section 4.4), tuned so
+# the chrome recedes into a calm tokyonight muted register and pane
+# content carries the brightness: a cool blue accent matching the tab
+# colors above, warm amber for attention.
 accent = "#7aa2f7"
 title = "#7aa2f7"
 chord = "#9ece6a"
+# A thin, unobtrusive divider + quiet modal borders.
 border = "#3b4261"
 section_header = "#e0af68"
 attention = "#ff9e64"
+
+# Sidebar chrome (phux-foz.13): the muted `spaces` / `agents` headers,
+# branch sub-lines, affordances, and empty-state placeholders all sit on
+# tokyonight's comment blue — the same tone as the inactive window tabs
+# above, so the whole chrome reads as one deliberate surface.
+sidebar_section = "#565f89"
+dim = "#565f89"
+
+# Agent lifecycle colors, on-palette: idle recedes into the comment tone
+# ("nothing needs you"), working rides the green accent, blocked the amber
+# attention tone, done a calm tokyonight cyan.
+agent_idle = "#565f89"
+agent_working = "#9ece6a"
+agent_blocked = "#ff9e64"
+agent_done = "#7dcfff"
 
 # The herdr plugin set: workspace autosave/restore (continuum) and the
 # agent bench helpers (agent-tools). `-append` contributes entries to

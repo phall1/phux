@@ -56,10 +56,13 @@ use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
 use super::plugin_panes;
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::{AgentMetaIndex, handle_server_frame};
-use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
+use crate::agent_meta::{
+    AgentAttention, AgentMetaState, AgentRecord, TERMINAL_AGENT_KEY, agent_name_from_title,
+    parse_agent_record,
+};
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
-use crate::render::chrome::sidebar::SidebarPainter;
+use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter};
 use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
@@ -112,6 +115,16 @@ pub(super) struct PaneSlot {
     /// before the first command finishes or when the shell reported no
     /// code. Projected into the status-bar `exit` widget when focused.
     pub last_exit: Option<i32>,
+    /// phux-foz.9: the OSC 0/2 title as of the last chrome-relevant VT
+    /// apply, mirrored out of [`Self::terminal`] so
+    /// [`Self::title_changed`] can detect a title transition. The title
+    /// is the ONLY identity signal a plain `claude`/`codex` pane emits
+    /// (no `phux.agent/v1` record, no ADR-0035 events), and it arrives
+    /// as ordinary `TERMINAL_OUTPUT` bytes — without this diff the
+    /// sidebar's agents section (and the window-tab labels, phux-efj7)
+    /// would only refresh on an unrelated chrome event. Empty ⇒ no
+    /// title set, matching libghostty's `title()` contract.
+    pub last_title: String,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -154,6 +167,7 @@ impl PaneSlot {
             sync_output_dirty: false,
             cwd: None,
             last_exit: None,
+            last_title: String::new(),
         })
     }
 
@@ -162,6 +176,27 @@ impl PaneSlot {
     /// viewport, or layout already tells us the pane's real dimensions.
     pub(super) fn new() -> Result<Self, AttachError> {
         Self::new_with_size(80, 24)
+    }
+
+    /// phux-foz.9: whether the pane's OSC 0/2 title moved since the last
+    /// call, updating the [`Self::last_title`] mirror. Called after every
+    /// `vt_write` on the content-frame paths (`TERMINAL_OUTPUT` /
+    /// `TERMINAL_SNAPSHOT`), whose outcome sets `chrome_dirty` on `true`:
+    /// window-tab labels and the sidebar's agents section both derive
+    /// from the title (see `window_infos` / `agent_entries`), and title
+    /// bytes flow in ordinary output frames that otherwise never trigger
+    /// a chrome refresh — a plain `claude` pane's row would only appear
+    /// (and, after exit, disappear) on an unrelated event. The compare is
+    /// a length-bounded `str` equality against the mirror, so the
+    /// steady-state per-frame cost is negligible next to the `vt_write`
+    /// that precedes it.
+    pub(super) fn title_changed(&mut self) -> bool {
+        let current = self.terminal.title().unwrap_or_default();
+        if self.last_title == current {
+            return false;
+        }
+        self.last_title = current.to_owned();
+        true
     }
 
     /// Refresh synchronized-output bookkeeping after a VT write. Returns
@@ -271,6 +306,15 @@ impl VcsIndex {
         let cwd = self.cwds.get(pane)?.clone();
         self.cache.branch_for(&cwd)
     }
+
+    /// phux-foz.7: the VCS branch label for an explicit `cwd` (the fleet
+    /// dashboard resolves against the pane's *live* cwd — snapshot-seeded
+    /// and refined by `cwd_changed` events — rather than this index's
+    /// snapshot-only map). Same memoized `.git/HEAD` read, never a
+    /// subprocess.
+    pub(super) fn branch_for_cwd(&mut self, cwd: &str) -> Option<String> {
+        self.cache.branch_for(std::path::Path::new(cwd))
+    }
 }
 
 /// Refresh the window strip AND the supervisory badge together (ADR-0033),
@@ -321,6 +365,9 @@ fn refresh_window_chrome(
         changed |= sb.set_last_exit(focused.and_then(|slot| slot.last_exit));
     }
     changed |= sidebar_painter.set_windows(windows);
+    // phux-foz.9: the sidebar's agents section — one row per agent-running
+    // pane, sourced from the ADR-0040 records with the OSC-title fallback.
+    changed |= sidebar_painter.set_agents(agent_entries(workspace, panes, agent_meta));
     changed
 }
 
@@ -462,15 +509,30 @@ fn paint_active_overlay<W: super::RenderSink>(
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
     // phux-4h5a: the sidebar reservation, so base-frame repaints under an
-    // overlay keep panes inset (no reflow flicker when a modal opens). The
-    // strip painter isn't threaded here — overlays are transient and the
-    // driver re-invalidates + repaints the strip on dismiss — so the base
-    // repaint passes `None` for the painter; the reservation alone keeps the
-    // tiling consistent. `None` reservation (default) is byte-identical.
+    // overlay keep panes inset (no reflow flicker when a modal opens).
+    // `None` reservation (default) is byte-identical.
     sidebar: Option<SidebarReservation>,
+    // phux-foz.10: the sidebar strip painter. The base-frame repaint under a
+    // floating overlay starts with ED2 (full clear), so without the painter
+    // the reserved columns stay blank and the sidebar vanishes for as long
+    // as the palette / help / prompt / which-key overlay is open. Chrome
+    // persists under overlays: overlays float above content, not above
+    // chrome.
+    sidebar_painter: Option<&mut crate::render::chrome::sidebar::SidebarPainter>,
     session_name: &str,
     theme: &crate::render::Theme,
 ) {
+    // phux-foz.14: floating modals center inside the pane content rect (the
+    // viewport minus the sidebar strip and status-bar row), NOT the raw
+    // viewport, so a centered box never lands on the sidebar columns and
+    // occludes the chrome the base-frame repaint (phux-foz.10) preserves. The
+    // borrow of `status_bar` ends here (position is `Copy`), so it stays
+    // available to move into `paint_full_frame` below.
+    let overlay_content = {
+        let bar_pos = status_bar.as_deref().map(StatusBarPainter::position);
+        let cr = content_rect(viewport_dims, bar_pos, sidebar);
+        ratatui::layout::Rect::new(cr.x, cr.y, cr.w, cr.h)
+    };
     if let Some(sel) = overlays.copy_selection() {
         let (Some(ls), Some(fid)) = (workspace.active_window(), focused) else {
             return;
@@ -494,7 +556,7 @@ fn paint_active_overlay<W: super::RenderSink>(
                 viewport_dims,
                 status_bar,
                 sidebar,
-                None,
+                sidebar_painter,
                 session_name,
             );
         }
@@ -502,11 +564,14 @@ fn paint_active_overlay<W: super::RenderSink>(
             slot.renderer.set_selection(None);
         }
         let _ = paint_copy_mode_status(out, sel, viewport_dims, theme);
-    } else if let Some(clip) = overlays.active_bounds(viewport_dims) {
+    } else if let Some(clip) = overlays.active_bounds(overlay_content) {
         // Floating modal (help / prompt / command palette / pickers): keep
         // the live panes visible by repainting the base frame, then emit
         // only the modal's bounded region on top. No `\x1b[2J` — the panes
         // surround the box instead of vanishing behind a full-screen clear.
+        // The base frame includes the sidebar strip (phux-foz.10): the
+        // repaint's own ED2 cleared it, and chrome must persist under a
+        // floating overlay.
         if let Some(ls) = workspace.render_window(zoomed).as_deref() {
             paint_full_frame(
                 out,
@@ -516,11 +581,11 @@ fn paint_active_overlay<W: super::RenderSink>(
                 viewport_dims,
                 status_bar,
                 sidebar,
-                None,
+                sidebar_painter,
                 session_name,
             );
         }
-        let _ = overlays.paint_clipped(out, viewport_dims, clip, theme.shadow);
+        let _ = overlays.paint_clipped(out, viewport_dims, overlay_content, clip, theme.shadow);
     } else {
         // Full-screen overlay (no bounded region): clear + paint.
         let _ = out.write_all(b"\x1b[2J\x1b[H");
@@ -973,6 +1038,9 @@ pub async fn run_headless_rendered(
     // composited frame shows the sidebar tabs when `[sidebar]` is enabled.
     let mut sidebar_painter = SidebarPainter::new(sidebar_theme);
     sidebar_painter.set_windows(windows);
+    // phux-foz.9: and the agents section, from the same record index +
+    // title fallback a live attach renders.
+    sidebar_painter.set_agents(agent_entries(&workspace, &panes, &agent_meta.records));
 
     // Compose the assembled frame against the render layout (honoring zoom).
     let layout_state = workspace.render_window(zoomed.as_ref()).map_or_else(
@@ -1091,8 +1159,10 @@ async fn attach_session<W: super::RenderSink>(
     // window pick (`switch-session { name, window }`) re-attaches. `None`
     // on the first attach and after plain switches; set per-iteration by
     // the SwitchTo arm below, consumed by `main_loop` once the target's
-    // persisted layout loads.
+    // persisted layout loads. phux-jpqd: `pending_pane` is the pane half
+    // of a one-step cross-session pane pick (`switch-session { .., pane }`).
     let mut pending_window: Option<usize> = None;
+    let mut pending_pane: Option<usize> = None;
     loop {
         let show_onboarding_hint = std::mem::take(&mut show_onboarding);
         let exit = match main_loop(
@@ -1104,6 +1174,7 @@ async fn attach_session<W: super::RenderSink>(
             wants_state_sync,
             show_onboarding_hint,
             pending_window.take(),
+            pending_pane.take(),
         )
         .await
         {
@@ -1156,10 +1227,13 @@ async fn attach_session<W: super::RenderSink>(
                 // the name is already taken) via CreateIfMissing.
                 // phux-foz.8: a one-step window pick carries the target
                 // window; stash it for the next `main_loop` entry, which
-                // resolves it once the new session's layout loads.
+                // resolves it once the new session's layout loads. phux-jpqd:
+                // a foreign fleet row also carries the target pane, resolved
+                // after the window select.
                 let attach_target = match target {
-                    ReattachTarget::Existing { name, window } => {
+                    ReattachTarget::Existing { name, window, pane } => {
                         pending_window = window;
+                        pending_pane = pane;
                         AttachTarget::ByName(name)
                     }
                     ReattachTarget::Create(name) => AttachTarget::CreateIfMissing {
@@ -1368,7 +1442,7 @@ enum LoopExit {
 )]
 #[allow(
     clippy::too_many_arguments,
-    reason = "per-entry knobs from attach_session's outer loop; foz-6 onboarding + foz-8 window pick made it 8"
+    reason = "per-entry knobs from attach_session's outer loop; foz-6 onboarding + foz-8 window pick + jpqd cross-session pane pick"
 )]
 async fn main_loop<W: super::RenderSink>(
     conn: &mut Connection,
@@ -1397,6 +1471,13 @@ async fn main_loop<W: super::RenderSink>(
     // first layout reconcile; out-of-range degrades to the session's own
     // restored focus with a warning.
     initial_window: Option<usize>,
+    // phux-jpqd: DFS leaf ordinal to focus (within `initial_window`) once
+    // this session's layout loads — the pane half of a one-step
+    // cross-session PANE pick (`switch-session { name, window, pane }`,
+    // the agent-fleet foreign rows). `None` on a plain switch or a
+    // window-only pick; resolved alongside `initial_window` and, like it,
+    // degrades to a logged no-op if out of range.
+    initial_pane: Option<usize>,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -1588,9 +1669,23 @@ async fn main_loop<W: super::RenderSink>(
     // we do not subscribe to peers' layout keys.
     let mut foreign_layouts: HashMap<phux_protocol::ids::SessionId, Workspace> = HashMap::new();
     let mut foreign_layout_pending: HashMap<u32, phux_protocol::ids::SessionId> = HashMap::new();
+    // phux-jpqd: the `phux.agent/v1` records of FOREIGN panes, so the
+    // agent-fleet dashboard shows a peer session's agent glyph/state without
+    // attaching there. Populated lazily: when a peer's layout lands
+    // (`apply_foreign_layout_reply`), the driver fires one GET_METADATA per
+    // `TerminalId` in that workspace on the pane's agent key, correlated
+    // through `foreign_agent_pending`. Keyed by foreign terminal id; pruned
+    // to the union of all cached foreign layouts' leaves on each fold so it
+    // stays bounded. No subscription — a one-shot read, same lazy-query
+    // shape as the foreign layouts above (ADR-0018 / ADR-0030).
+    let mut foreign_agents: HashMap<TerminalId, AgentRecord> = HashMap::new();
+    let mut foreign_agent_pending: HashMap<u32, TerminalId> = HashMap::new();
     // phux-foz.8: the deferred window select of a one-step cross-session
-    // pick, consumed on the first layout reconcile below.
+    // pick, consumed on the first layout reconcile below. phux-jpqd:
+    // `pending_pane` is the DFS leaf ordinal focused after the window
+    // select resolves — the pane half of a one-step cross-session pick.
     let mut pending_window = initial_window;
+    let mut pending_pane = initial_pane;
     let mut parser = StdinParser::new();
     // Predictive local echo (phux-9gw.1). State is updated alongside
     // every keystroke and drained on every TERMINAL_OUTPUT; when
@@ -1792,6 +1887,7 @@ async fn main_loop<W: super::RenderSink>(
             viewport_dims,
             status_bar.as_mut(),
             sidebar,
+            Some(&mut sidebar_painter),
             &session_name,
             &theme,
         );
@@ -1840,6 +1936,7 @@ async fn main_loop<W: super::RenderSink>(
                     viewport_dims,
                     status_bar.as_mut(),
                     sidebar,
+                    Some(&mut sidebar_painter),
                     &session_name,
                     &theme,
                 );
@@ -1955,6 +2052,10 @@ async fn main_loop<W: super::RenderSink>(
                     ),
                     viewport_dims,
                 );
+                // phux-foz.9: the agents-section row -> window mapping,
+                // snapshotted from the strip painter so a click on an
+                // agent row hit-tests against exactly what was painted.
+                let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -1967,19 +2068,24 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     foreign_layouts: &foreign_layouts,
+                    foreign_agents: &foreign_agents,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    sidebar_agents: &sidebar_agent_rows,
                     bar: status_bar.as_ref().map(StatusBarPainter::position),
+                    status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
+                    agent_meta: &agent_meta.records,
+                    vcs: &mut vcs,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2079,6 +2185,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2149,9 +2256,13 @@ async fn main_loop<W: super::RenderSink>(
                         let defer_flags = coalesce_defer_flags(&paint_targets);
                         for (frame_idx, f) in batch.into_iter().enumerate() {
                         // phux-foz.8: a peer session's persisted-layout GET
-                        // reply. Picker display data only — decode into the
-                        // cache and skip the general frame handler (whose
+                        // reply. Picker/fleet display data only — decode into
+                        // the cache and skip the general frame handler (whose
                         // MetadataValue arm would drop the unmatched id).
+                        // phux-jpqd: once a peer's pane tree is known, fetch
+                        // each pane's agent record (prune stale first) so the
+                        // fleet dashboard's foreign rows carry agent state,
+                        // then refresh a live fleet in place.
                         let f = match f {
                             FrameKind::MetadataValue { request_id, value }
                                 if foreign_layout_pending.contains_key(&request_id) =>
@@ -2161,6 +2272,72 @@ async fn main_loop<W: super::RenderSink>(
                                         &mut foreign_layouts,
                                         session,
                                         value.as_deref(),
+                                    );
+                                    prune_foreign_agents(&mut foreign_agents, &foreign_layouts);
+                                    if let Some(ws) = foreign_layouts.get(&session) {
+                                        request_foreign_agents(
+                                            conn,
+                                            ws,
+                                            &mut next_request_id,
+                                            &mut foreign_agent_pending,
+                                        )
+                                        .await?;
+                                    }
+                                    refresh_fleet_if_open(
+                                        out,
+                                        &mut overlays,
+                                        &workspace,
+                                        &mut panes,
+                                        focused_pane.as_ref(),
+                                        zoomed.as_ref(),
+                                        viewport_dims,
+                                        status_bar.as_mut(),
+                                        sidebar,
+                                        &mut sidebar_painter,
+                                        &session_name,
+                                        &theme,
+                                        &sessions,
+                                        focused_session,
+                                        &agent_meta.records,
+                                        &mut vcs,
+                                        &foreign_layouts,
+                                        &foreign_agents,
+                                    );
+                                }
+                                continue;
+                            }
+                            // phux-jpqd: a foreign pane's agent-record GET
+                            // reply. Fold into the fleet cache and refresh a
+                            // live fleet; same intercept shape as the layout
+                            // reply (the general handler would drop it).
+                            FrameKind::MetadataValue { request_id, value }
+                                if foreign_agent_pending.contains_key(&request_id) =>
+                            {
+                                if let Some(id) = foreign_agent_pending.remove(&request_id) {
+                                    apply_foreign_agent_reply(
+                                        &mut foreign_agents,
+                                        id,
+                                        value.as_deref(),
+                                    );
+                                    refresh_fleet_if_open(
+                                        out,
+                                        &mut overlays,
+                                        &workspace,
+                                        &mut panes,
+                                        focused_pane.as_ref(),
+                                        zoomed.as_ref(),
+                                        viewport_dims,
+                                        status_bar.as_mut(),
+                                        sidebar,
+                                        &mut sidebar_painter,
+                                        &session_name,
+                                        &theme,
+                                        &sessions,
+                                        focused_session,
+                                        &agent_meta.records,
+                                        &mut vcs,
+                                        &foreign_layouts,
+                                        &foreign_agents,
                                     );
                                 }
                                 continue;
@@ -2218,6 +2395,17 @@ async fn main_loop<W: super::RenderSink>(
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
                         }
+                        // phux-foz.7: did this frame change anything the
+                        // agent-fleet dashboard projects (agent records,
+                        // asked/lease state, layout/pane set, session
+                        // graph)? Captured before the move-y outcome
+                        // fields are consumed below; acted on after the
+                        // per-frame handling (the fleet refresh block).
+                        let fleet_dirty = outcome.chrome_dirty
+                            || outcome.agent_meta_changed
+                            || outcome.layout_replaced
+                            || outcome.reflow_panes
+                            || outcome.sessions.is_some();
                         // ADR-0040: the frame may have added panes
                         // (TerminalSpawned, a peer's layout broadcast) or
                         // removed them (TerminalClosed). Re-sweep so every
@@ -2377,6 +2565,32 @@ async fn main_loop<W: super::RenderSink>(
                                     focused_pane = workspace
                                         .active_window()
                                         .and_then(|ls| ls.focus.clone());
+                                    // phux-jpqd: the pane half of a
+                                    // one-step cross-session pane pick — move
+                                    // focus onto the target DFS leaf of the
+                                    // just-selected window. Out-of-range
+                                    // (peer mutated the layout) keeps the
+                                    // window's restored focus, logged.
+                                    if let Some(ord) = pending_pane.take() {
+                                        if let Some(leaf) = workspace
+                                            .active_window()
+                                            .and_then(|ls| ls.tree.as_ref())
+                                            .map(crate::layout::leaves)
+                                            .and_then(|leaves| leaves.get(ord).cloned())
+                                        {
+                                            if let Some(ls) = workspace.active_window_mut()
+                                            {
+                                                ls.focus = Some(leaf.clone());
+                                            }
+                                            focused_pane = Some(leaf);
+                                        } else {
+                                            tracing::warn!(
+                                                window = idx,
+                                                pane = ord,
+                                                "cross-session pane pick out of range; keeping window focus",
+                                            );
+                                        }
+                                    }
                                     if let Some(fid) = focused_pane.as_ref() {
                                         reanchor_predict_to_pane(&mut predict, &panes, fid);
                                     }
@@ -2493,6 +2707,37 @@ async fn main_loop<W: super::RenderSink>(
                                 &session_name,
                             );
                         }
+                        // phux-foz.7: the agent-fleet dashboard is a live
+                        // projection — while it is open, a frame that
+                        // changed fleet-projected state (an agent record,
+                        // an ADR-0035 Asked, a pane spawn/close, a layout
+                        // or session-graph change) rebuilds its rows in
+                        // place and repaints the overlay layer. Push, not
+                        // poll: nothing runs when no such frame lands, and
+                        // `refresh_items` is a no-op unless a live fleet
+                        // list is actually in the overlay stack.
+                        if fleet_dirty {
+                            refresh_fleet_if_open(
+                                out,
+                                &mut overlays,
+                                &workspace,
+                                &mut panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                viewport_dims,
+                                status_bar.as_mut(),
+                                sidebar,
+                                &mut sidebar_painter,
+                                &session_name,
+                                &theme,
+                                &sessions,
+                                focused_session,
+                                &agent_meta.records,
+                                &mut vcs,
+                                &foreign_layouts,
+                                &foreign_agents,
+                            );
+                        }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -2560,6 +2805,8 @@ async fn main_loop<W: super::RenderSink>(
                     ),
                     viewport_dims,
                 );
+                // phux-foz.9: same agents-row snapshot as the stdin arm.
+                let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -2572,19 +2819,24 @@ async fn main_loop<W: super::RenderSink>(
                     theme: &theme,
                     sessions: &sessions,
                     foreign_layouts: &foreign_layouts,
+                    foreign_agents: &foreign_agents,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    sidebar_agents: &sidebar_agent_rows,
                     bar: status_bar.as_ref().map(StatusBarPainter::position),
+                    status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
                     reload_request: &mut reload_request,
+                    agent_meta: &agent_meta.records,
+                    vcs: &mut vcs,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -2674,6 +2926,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2734,6 +2987,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2824,6 +3078,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2917,6 +3172,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -3028,6 +3284,149 @@ fn apply_foreign_layout_reply(
         None => {
             cache.remove(&session);
         }
+    }
+}
+
+/// phux-jpqd: fetch the `phux.agent/v1` record of every pane in one peer
+/// session's just-loaded `workspace` — one `GET_METADATA` per `TerminalId`
+/// leaf on the pane's agent key — so the agent-fleet dashboard's foreign
+/// rows show its agent glyph/state without attaching there. Correlated
+/// through `pending` (request id -> terminal id); replies fold via
+/// [`apply_foreign_agent_reply`]. Skips leaves with a GET already in flight
+/// so a re-fold (session-graph refresh re-requests the layout) does not
+/// duplicate traffic. One-shot reads, no subscription — the same lazy-query
+/// shape as [`request_foreign_layouts`] (ADR-0018 / ADR-0030).
+async fn request_foreign_agents(
+    conn: &mut Connection,
+    workspace: &Workspace,
+    next_request_id: &mut u32,
+    pending: &mut HashMap<u32, TerminalId>,
+) -> Result<(), AttachError> {
+    // Collect the leaf ids first so the immutable borrow of `pending` (for
+    // the in-flight check) is released before we mutate it in the send loop.
+    let targets: Vec<TerminalId> = {
+        let in_flight: std::collections::HashSet<&TerminalId> = pending.values().collect();
+        let mut targets: Vec<TerminalId> = Vec::new();
+        for window in &workspace.windows {
+            if let Some(tree) = window.state.tree.as_ref() {
+                for id in crate::layout::leaves(tree) {
+                    if !in_flight.contains(&id) && !targets.contains(&id) {
+                        targets.push(id);
+                    }
+                }
+            }
+        }
+        targets
+    };
+    for id in targets {
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.wrapping_add(1);
+        pending.insert(request_id, id.clone());
+        conn.send(&FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Terminal(id),
+            key: TERMINAL_AGENT_KEY.to_owned(),
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// phux-jpqd: fold one foreign-pane agent-record GET reply into the fleet's
+/// cache. `value: None` (no record) or an unparseable record clears the
+/// entry, so the fleet row falls back to `?` / "no agent" rather than
+/// showing stale identity — the same clear-on-empty policy as
+/// [`apply_foreign_layout_reply`].
+fn apply_foreign_agent_reply(
+    cache: &mut HashMap<TerminalId, AgentRecord>,
+    id: TerminalId,
+    value: Option<&[u8]>,
+) {
+    match value.and_then(parse_agent_record) {
+        Some(record) => {
+            cache.insert(id, record);
+        }
+        None => {
+            cache.remove(&id);
+        }
+    }
+}
+
+/// phux-jpqd: drop foreign agent records for panes no longer present in any
+/// cached foreign layout (a peer closed a pane, or a session left the
+/// graph), keeping the cache bounded to the live foreign pane set. Called
+/// on each foreign-layout fold, before re-requesting the surviving panes.
+fn prune_foreign_agents(
+    cache: &mut HashMap<TerminalId, AgentRecord>,
+    foreign_layouts: &HashMap<phux_protocol::ids::SessionId, Workspace>,
+) {
+    let live: std::collections::HashSet<TerminalId> = foreign_layouts
+        .values()
+        .flat_map(|ws| ws.windows.iter())
+        .filter_map(|w| w.state.tree.as_ref())
+        .flat_map(crate::layout::leaves)
+        .collect();
+    cache.retain(|id, _| live.contains(id));
+}
+
+/// phux-jpqd: rebuild and repaint the agent-fleet dashboard in place when it
+/// is the active live overlay. Extracted from `main_loop`'s per-frame fleet
+/// refresh so the foreign-topology intercepts (layout + agent-record GET
+/// replies, which `continue` past the general frame handler) can trigger the
+/// same push refresh. A no-op unless a live fleet list is on the overlay
+/// stack ([`OverlayState::refresh_items`] returns `false`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fleet projection reads workspace/session/agent state and the overlay repaint context — all main_loop locals threaded by reference, same shape as the paint helpers"
+)]
+fn refresh_fleet_if_open<W: super::RenderSink>(
+    out: &mut W,
+    overlays: &mut OverlayState,
+    workspace: &Workspace,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    zoomed: Option<&TerminalId>,
+    viewport_dims: (u16, u16),
+    status_bar: Option<&mut StatusBarPainter>,
+    sidebar: Option<SidebarReservation>,
+    sidebar_painter: &mut crate::render::chrome::sidebar::SidebarPainter,
+    session_name: &str,
+    theme: &crate::render::Theme,
+    sessions: &[phux_protocol::wire::info::SessionInfo],
+    focused_session: Option<phux_protocol::ids::SessionId>,
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
+    vcs: &mut VcsIndex,
+    foreign_layouts: &HashMap<phux_protocol::ids::SessionId, Workspace>,
+    foreign_agents: &HashMap<TerminalId, AgentRecord>,
+) {
+    if !overlays.is_active() {
+        return;
+    }
+    let meta = super::fleet::collect_pane_meta(panes, vcs);
+    let items = super::fleet::fleet_items(
+        workspace,
+        sessions,
+        focused_session,
+        agent_meta,
+        &meta,
+        foreign_layouts,
+        foreign_agents,
+    );
+    if overlays.refresh_items(super::fleet::FLEET_LIVE_KEY, &items) {
+        paint_active_overlay(
+            out,
+            overlays,
+            workspace,
+            panes,
+            focused_pane,
+            zoomed,
+            viewport_dims,
+            status_bar,
+            sidebar,
+            Some(sidebar_painter),
+            session_name,
+            theme,
+        );
     }
 }
 
@@ -3192,6 +3591,73 @@ fn window_infos(
             }
         })
         .collect()
+}
+
+/// phux-foz.9: build the sidebar's agents-section entries — one per
+/// agent-running pane, every window's leaves in display order.
+///
+/// Identity + state per pane, in preference order:
+///
+/// 1. **The structured `phux.agent/v1` record** (ADR-0040), when the pane
+///    declares one: name and state come straight from the record, and the
+///    row carries attention when the record's effective attention is high
+///    or the pane's ADR-0035 asked flag is up.
+/// 2. **The OSC-title identity heuristic**
+///    ([`agent_name_from_title`]) — the compatibility path for plain
+///    `claude` / `codex` CLI panes, which never call `phux agent set` and
+///    so never write a record. State is inferred from the only structured
+///    signal the client tracks per pane: the ADR-0035 asked flag maps to
+///    `blocked` (the agent is waiting on a human), otherwise `idle` — the
+///    same "no blocking cue found" default `phux agent`'s detector uses
+///    for a quiet screen, without scanning screen text on the render path.
+///
+/// A pane matching neither produces no row: the agents section lists
+/// agents, not shells.
+fn agent_entries(
+    workspace: &Workspace,
+    panes: &HashMap<TerminalId, PaneSlot>,
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
+) -> Vec<AgentEntry> {
+    let mut entries = Vec::new();
+    for (i, w) in workspace.windows.iter().enumerate() {
+        let leaves = w
+            .state
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        for id in &leaves {
+            let asked = panes.get(id).is_some_and(|slot| slot.attention);
+            if let Some(record) = agent_meta.get(id) {
+                entries.push(AgentEntry {
+                    window: i,
+                    window_name: w.name.clone(),
+                    name: record.name.clone(),
+                    state: record.state,
+                    attention: asked || record.effective_attention() == AgentAttention::High,
+                });
+                continue;
+            }
+            let title_name = panes
+                .get(id)
+                .and_then(|slot| slot.terminal.title().ok())
+                .and_then(agent_name_from_title);
+            if let Some(name) = title_name {
+                entries.push(AgentEntry {
+                    window: i,
+                    window_name: w.name.clone(),
+                    name: name.to_owned(),
+                    state: if asked {
+                        AgentMetaState::Blocked
+                    } else {
+                        AgentMetaState::Idle
+                    },
+                    attention: asked,
+                });
+            }
+        }
+    }
+    entries
 }
 
 /// phux-foz.1: clear a pane's asked-attention flag because the user sent it
@@ -3437,6 +3903,7 @@ fn handle_config_reload<W: super::RenderSink>(
             viewport_dims,
             status_bar.as_mut(),
             sidebar,
+            Some(&mut *sidebar_painter),
             session_name,
             theme,
         );
@@ -4246,6 +4713,67 @@ mod tests {
         assert!(!cache.contains_key(&sid), "tombstone clears");
     }
 
+    /// phux-jpqd: a foreign pane's agent-record GET reply round-trips into
+    /// the fleet cache; a tombstone (`None`) or an unparseable record
+    /// clears the entry so the fleet row falls back to `?`/"no agent".
+    #[test]
+    fn apply_foreign_agent_reply_caches_clears_and_survives_garbage() {
+        let id = TerminalId::local(3);
+        let mut cache: HashMap<TerminalId, AgentRecord> = HashMap::new();
+
+        // A well-formed record lands with its identity intact.
+        let record = AgentRecord {
+            name: "packer".to_owned(),
+            kind: Some("codex".to_owned()),
+            state: AgentMetaState::Working,
+            ..AgentRecord::default()
+        };
+        apply_foreign_agent_reply(&mut cache, id.clone(), Some(&record.encode()));
+        assert_eq!(cache.get(&id).map(|r| r.name.as_str()), Some("packer"));
+
+        // Garbage (no non-empty `name`) clears the stale entry.
+        apply_foreign_agent_reply(&mut cache, id.clone(), Some(b"not json"));
+        assert!(!cache.contains_key(&id), "unparseable record clears");
+
+        // Re-cache, then a tombstone (no record) clears again.
+        apply_foreign_agent_reply(&mut cache, id.clone(), Some(&record.encode()));
+        assert!(cache.contains_key(&id));
+        apply_foreign_agent_reply(&mut cache, id.clone(), None);
+        assert!(!cache.contains_key(&id), "tombstone clears");
+    }
+
+    /// phux-jpqd: pruning keeps only the agent records whose panes still
+    /// appear in some cached foreign layout — a peer closing a pane (or a
+    /// session leaving the graph) evicts its record so the cache stays
+    /// bounded to the live foreign pane set.
+    #[test]
+    fn prune_foreign_agents_retains_only_live_foreign_panes() {
+        use phux_protocol::ids::SessionId;
+        let live = TerminalId::local(1);
+        let stale = TerminalId::local(2);
+        let mut cache: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        cache.insert(live.clone(), AgentRecord::default());
+        cache.insert(stale.clone(), AgentRecord::default());
+
+        // One foreign layout holds only `live`.
+        let mut foreign_layouts: HashMap<SessionId, Workspace> = HashMap::new();
+        foreign_layouts.insert(SessionId::new(9), Workspace::single(live.clone()));
+
+        prune_foreign_agents(&mut cache, &foreign_layouts);
+        assert!(
+            cache.contains_key(&live),
+            "a pane still in a layout survives"
+        );
+        assert!(
+            !cache.contains_key(&stale),
+            "a pane in no layout is evicted"
+        );
+
+        // No cached layouts at all evicts everything.
+        prune_foreign_agents(&mut cache, &HashMap::new());
+        assert!(cache.is_empty(), "no foreign layouts => no foreign agents");
+    }
+
     #[test]
     fn is_layout_key_string_matches_the_family_only() {
         // Bare legacy key + any session-suffixed key are layout keys.
@@ -4437,6 +4965,96 @@ mod tests {
             &mut VcsIndex::default(),
         );
         assert_eq!(infos[0].name, "claude task");
+    }
+
+    /// phux-foz.9: a declared `phux.agent/v1` record produces an agents-row
+    /// entry with the record's name + state; the pane's OSC title (set to a
+    /// conflicting agent name here) is never consulted when a record exists.
+    #[test]
+    fn agent_entries_prefer_the_declared_record() {
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;codex resume\x07");
+        panes.insert(id.clone(), slot);
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "merge-queue-w5".to_owned(),
+                state: AgentMetaState::Working,
+                ..AgentRecord::default()
+            },
+        );
+
+        let entries = agent_entries(&workspace, &panes, &records);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].window, 0);
+        assert_eq!(
+            entries[0].window_name, "1",
+            "stored window name, herdr's workspace column"
+        );
+        assert_eq!(entries[0].name, "merge-queue-w5");
+        assert_eq!(entries[0].state, AgentMetaState::Working);
+        assert!(!entries[0].attention);
+    }
+
+    /// phux-foz.9: no record => the OSC-title heuristic identifies plain
+    /// `claude` / `codex` CLI panes; state is `idle` until the pane's
+    /// ADR-0035 asked flag flips it to `blocked`. A pane matching neither
+    /// source produces no row.
+    #[test]
+    fn agent_entries_fall_back_to_the_title_heuristic() {
+        let claude = TerminalId::local(1);
+        let shell = TerminalId::local(2);
+        let mut workspace = Workspace::single(claude.clone());
+        workspace.add_window("scratch".to_owned(), shell.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut claude_slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        claude_slot
+            .terminal
+            .vt_write(b"\x1b]2;Claude Code - ~/src/phux\x07");
+        panes.insert(claude.clone(), claude_slot);
+        let mut shell_slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        shell_slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
+        panes.insert(shell, shell_slot);
+
+        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        assert_eq!(entries.len(), 1, "the plain shell pane must not list");
+        assert_eq!(entries[0].name, "claude");
+        assert_eq!(entries[0].state, AgentMetaState::Idle);
+        assert!(!entries[0].attention);
+
+        // The asked flag (ADR-0035) is the one structured state signal the
+        // fallback trusts: it flips the row to blocked + attention.
+        panes.get_mut(&claude).expect("slot").attention = true;
+        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        assert_eq!(entries[0].state, AgentMetaState::Blocked);
+        assert!(entries[0].attention);
+    }
+
+    /// phux-foz.9: a record declaring (or deriving) high attention marks
+    /// the entry even without the asked flag.
+    #[test]
+    fn agent_entries_carry_record_attention() {
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), PaneSlot::new_with_size(80, 24).expect("slot"));
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "reviewer".to_owned(),
+                // Blocked derives high attention when none is declared.
+                state: AgentMetaState::Blocked,
+                ..AgentRecord::default()
+            },
+        );
+
+        let entries = agent_entries(&workspace, &panes, &records);
+        assert!(entries[0].attention);
     }
 
     #[test]
@@ -4818,5 +5436,281 @@ mod tests {
         // 4. `stty -a` again; ALL flags should match step (1). Before
         //    phux-2r7, only ICANON|ECHO|ISIG round-tripped and custom
         //    flags like `iutf8` were lost.
+    }
+
+    // -----------------------------------------------------------------
+    // phux-foz.10: chrome persists while overlays are open.
+    // -----------------------------------------------------------------
+
+    use crate::render::overlay::{RenderOverlay, SelectItem, SelectList};
+    use phux_config::KeybindingsCfg;
+    use phux_config::keybind::ResolvedAction;
+    use phux_config::widget::WindowInfo;
+
+    /// The probe viewport for the overlay-chrome tests.
+    const PROBE_VIEW: (u16, u16) = (80, 24);
+    /// Sidebar strip width for the overlay-chrome tests.
+    const PROBE_SIDEBAR_W: u16 = 20;
+    /// Window label shown on the sidebar's name row. Distinctive: appears
+    /// nowhere in any pane content or overlay body, so finding it in the
+    /// replayed frame proves the strip painted.
+    const PROBE_WINDOW: &str = "w1-agent";
+    /// Branch shown on the sidebar's branch row (herdr-style, phux-p4vp).
+    const PROBE_BRANCH: &str = "foz10-br";
+    /// Content written into the pane mirror, to prove the base frame
+    /// repainted around the floating modal.
+    const PROBE_PANE_TEXT: &str = "PANE-BASE";
+
+    /// Replay `bytes` (a full frame of VT output) into a fresh libghostty
+    /// terminal — the house PTY-probe oracle — and project the resulting
+    /// grid to row-major plain text via the same `render_at_cells` surface
+    /// the production compositor uses.
+    fn replay_rows(bytes: &[u8]) -> Vec<String> {
+        let (cols, rows) = PROBE_VIEW;
+        let mut probe = PaneSlot::new_with_size(cols, rows).expect("probe slot");
+        probe.terminal.vt_write(bytes);
+        let mut frame = phux_core::screen::RenderedFrame::blank(cols, rows);
+        probe
+            .renderer
+            .render_at_cells(&probe.terminal, &mut frame, (0, 0), (cols, rows))
+            .expect("project probe cells");
+        (0..rows)
+            .map(|r| {
+                let base = usize::from(r) * usize::from(cols);
+                frame.cells[base..base + usize::from(cols)]
+                    .iter()
+                    .map(|c| c.grapheme.as_str())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The sidebar strip columns (left dock) of every replayed row, joined
+    /// as one string per row.
+    fn strip_columns(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|r| r.chars().take(usize::from(PROBE_SIDEBAR_W)).collect())
+            .collect()
+    }
+
+    /// One `paint_active_overlay` frame for `overlay`, with the sidebar
+    /// enabled (left, width 20) and its painter threaded when
+    /// `with_painter`. Returns the emitted VT bytes.
+    fn paint_overlay_frame(overlay: Box<dyn RenderOverlay>, with_painter: bool) -> Vec<u8> {
+        let theme = crate::render::Theme::default();
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let sidebar = Some(SidebarReservation {
+            edge: SidebarEdge::Left,
+            width: PROBE_SIDEBAR_W,
+        });
+        // Pane mirror sized to the content rect (80 - 20 sidebar cols, no
+        // status bar) so the letterboxed paint fills its rect exactly.
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(PROBE_VIEW.0 - PROBE_SIDEBAR_W, PROBE_VIEW.1)
+            .expect("pane slot");
+        slot.terminal.vt_write(PROBE_PANE_TEXT.as_bytes());
+        panes.insert(id.clone(), slot);
+
+        let mut sidebar_painter = SidebarPainter::new(theme);
+        sidebar_painter.set_windows(vec![WindowInfo {
+            name: PROBE_WINDOW.to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: Some(PROBE_BRANCH.to_owned()),
+        }]);
+
+        let mut overlays = OverlayState::new();
+        overlays.push(overlay);
+
+        let mut out: Vec<u8> = Vec::new();
+        paint_active_overlay(
+            &mut out,
+            &overlays,
+            &workspace,
+            &mut panes,
+            Some(&id),
+            None,
+            PROBE_VIEW,
+            None,
+            sidebar,
+            with_painter.then_some(&mut sidebar_painter),
+            "probe",
+            &theme,
+        );
+        out
+    }
+
+    /// The command palette, as the dispatcher builds it (`SelectList`).
+    fn palette_overlay() -> Box<dyn RenderOverlay> {
+        let theme = crate::render::Theme::default();
+        let items = vec![
+            SelectItem::new(
+                "detach",
+                ResolvedAction {
+                    action: "detach".to_owned(),
+                    args: std::collections::BTreeMap::new(),
+                },
+            ),
+            SelectItem::new(
+                "new-window",
+                ResolvedAction {
+                    action: "new-window".to_owned(),
+                    args: std::collections::BTreeMap::new(),
+                },
+            ),
+        ];
+        Box::new(SelectList::new("command palette", items, &theme))
+    }
+
+    /// The agent-fleet dashboard, as the dispatcher builds it (phux-foz.7):
+    /// a `SelectList` carrying the fleet live key, with rows from
+    /// [`crate::attach::fleet::fleet_items`]. It rides the same bounded
+    /// floating-modal path as the palette, and the driver's fleet-dirty
+    /// live-refresh repaints it through `paint_active_overlay` — so it must
+    /// keep the sidebar visible on every refresh frame too.
+    fn fleet_overlay() -> Box<dyn RenderOverlay> {
+        let theme = crate::render::Theme::default();
+        let workspace = Workspace::single(TerminalId::local(1));
+        let items = crate::attach::fleet::fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            !items.iter().all(SelectItem::is_header),
+            "probe fleet dashboard must have selectable rows"
+        );
+        Box::new(
+            SelectList::new("agent fleet", items, &theme)
+                .with_live_key(crate::attach::fleet::FLEET_LIVE_KEY),
+        )
+    }
+
+    /// phux-foz.10 mechanism guard: this pins the DEFECT shape so the
+    /// regression tests below cannot false-pass. A floating-modal repaint
+    /// whose base frame omits the sidebar painter leaves the reserved strip
+    /// columns blank — the "sidebar vanishes while the palette is open" bug.
+    #[test]
+    fn overlay_base_frame_without_painter_blanks_the_sidebar() {
+        let rows = replay_rows(&paint_overlay_frame(palette_overlay(), false));
+        let strip = strip_columns(&rows).join("\n");
+        assert!(
+            !strip.contains(PROBE_WINDOW) && !strip.contains(PROBE_BRANCH),
+            "probe must detect the blank strip when the painter is absent;\n{strip}"
+        );
+    }
+
+    /// phux-foz.10: opening the command palette must NOT blank the sidebar.
+    /// The floating-modal base frame repaints the strip (window label +
+    /// branch line) and the panes, then paints the modal on top.
+    #[test]
+    fn command_palette_keeps_sidebar_visible() {
+        let rows = replay_rows(&paint_overlay_frame(palette_overlay(), true));
+        let all = rows.join("\n");
+        let strip = strip_columns(&rows).join("\n");
+        assert!(
+            strip.contains(PROBE_WINDOW),
+            "sidebar window label must survive the palette;\n{all}"
+        );
+        assert!(
+            strip.contains(PROBE_BRANCH),
+            "sidebar branch line must survive the palette;\n{all}"
+        );
+        assert!(
+            all.contains("command palette"),
+            "the palette itself must be painted on top;\n{all}"
+        );
+        assert!(
+            all.contains(PROBE_PANE_TEXT),
+            "pane content must stay visible around the floating modal;\n{all}"
+        );
+        // phux-foz.14: the modal centers inside the pane content rect, so its
+        // box corners land right of the sidebar divider — never inside the
+        // reserved strip columns (the sidebar draws no corner glyphs itself).
+        assert!(
+            !strip.contains('┌') && !strip.contains('└'),
+            "modal box corners must not intrude into the sidebar columns;\n{strip}"
+        );
+        // Pin the exact composition: sidebar strip + pane + centered modal.
+        insta::assert_snapshot!(
+            "palette_over_sidebar",
+            rows.iter()
+                .map(|r| r.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// phux-foz.10: every bounded (floating) overlay kind shares the same
+    /// base-frame path, so which-key, help, prompts, pickers, and toasts
+    /// must all keep the sidebar visible too.
+    #[test]
+    fn all_floating_overlays_keep_sidebar_visible() {
+        let theme = crate::render::Theme::default();
+        let wk_cfg = KeybindingsCfg {
+            prefix_table: std::iter::once((
+                "d".to_owned(),
+                phux_config::Action::Bare("detach".to_owned()),
+            ))
+            .collect(),
+            ..KeybindingsCfg::default()
+        };
+        let overlays: Vec<(&str, Box<dyn RenderOverlay>)> = vec![
+            ("palette", palette_overlay()),
+            // phux-foz.7 fleet dashboard: same floating-modal path, and the
+            // driver's fleet-dirty live refresh repaints it while it is
+            // open — the sidebar must survive every refresh frame.
+            ("agent-fleet", fleet_overlay()),
+            (
+                "which-key",
+                Box::new(crate::render::overlay::WhichKeyOverlay::from_config(
+                    &wk_cfg, &theme,
+                )),
+            ),
+            (
+                "help",
+                Box::new(crate::render::overlay::HelpOverlay::from_config(
+                    &wk_cfg, &theme,
+                )),
+            ),
+            (
+                "prompt",
+                Box::new(crate::render::overlay::PromptOverlay::new(
+                    "rename window",
+                    "rename-window",
+                    "name",
+                    "1",
+                    &theme,
+                )),
+            ),
+            (
+                "toast",
+                Box::new(crate::render::overlay::ToastOverlay::new(
+                    "notice",
+                    vec!["a line".to_owned()],
+                    &theme,
+                )),
+            ),
+        ];
+        for (label, overlay) in overlays {
+            let rows = replay_rows(&paint_overlay_frame(overlay, true));
+            let strip = strip_columns(&rows).join("\n");
+            assert!(
+                strip.contains(PROBE_WINDOW),
+                "{label}: sidebar window label must survive the overlay;\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                strip.contains(PROBE_BRANCH),
+                "{label}: sidebar branch line must survive the overlay;\n{}",
+                rows.join("\n")
+            );
+        }
     }
 }

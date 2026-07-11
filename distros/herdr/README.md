@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors
 stability: evolving
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-11
 ---
 
 # herdr — the phux starter distribution
@@ -52,7 +52,12 @@ anywhere.
   palette (`prefix Space` or `prefix :`) as `plugin:` rows.
 - **Status lineup.** Window tabs on the left with a blue active tab,
   contextual help hints center, session name and clock right.
-- **Theme.** A cool blue accent with warm amber attention chrome — the
+- **Theme.** A cool blue accent with warm amber attention chrome, over a
+  calm tokyonight muted-chrome register: the sidebar's `spaces` / `agents`
+  headers, branch sub-lines, affordances, and empty-state placeholders
+  ride the same comment blue (`#565f89`) as the inactive window tabs, and
+  the agent lifecycle colors (`idle` / `working` / `blocked` / `done`) are
+  mapped on-palette so the whole chrome recedes behind pane content. The
   slot names are documented in docs/consumers/tui.md section 4.4.
 - **Session naming.** Auto-created sessions take the launch directory's
   basename instead of `default`.
@@ -61,6 +66,21 @@ anywhere.
   without erasing plugin entries from your own config or another layer.
   To drop them, assign a plain `plugins = [...]` in your config —
   replacement wins over inherited appends.
+- **Agent identity.** herdr bundles `agent-tools`, whose integration
+  templates declare a `[launch]` command that runs `claude`/`codex`/`gemini`
+  through `scripts/phux-agent-wrap.sh`. The wrapper writes a `phux.agent/v1`
+  L3 record (ADR-0040) — a first-class name + kind the sidebar's `agents`
+  section and `phux agent list` prefer over the OSC-title substring
+  heuristic that false-positives on titles like `vim CLAUDE.md` — and clears
+  it on exit, pinned to the wrapper's own pane. Because herdr enables
+  `agent-tools`, `phux launch claude-code` (or `codex` / `gemini-cli`) opens
+  a self-identifying pane end-to-end: the launch executor (ADR-0042) runs
+  the template `[launch]` command and the server injects `PHUX_TERMINAL_ID`
+  so the wrapper self-targets with no alias. `phux launch --list` shows the
+  bundled integrations. See `examples/plugins/agent-tools/README.md` section
+  "Automatic agent identity" for the manual-activation fallback, the required
+  pane-targeting, and why live working/blocked state still needs a separate
+  signal feed.
 
 ## Overriding herdr
 

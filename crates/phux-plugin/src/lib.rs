@@ -1,5 +1,7 @@
 //! Shared plugin runtime surface for CLI and agent consumers.
 
+mod launch;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -7,6 +9,10 @@ use phux_config::loader as config_loader;
 use phux_config::plugin::{self, PluginManifestAction};
 use serde::Serialize;
 use tokio::process::Command;
+
+pub use launch::{
+    LaunchError, LaunchableIntegration, ResolvedLaunch, list_launchable, resolve_launch,
+};
 
 /// One child-process execution request: argv plus cwd, extra environment,
 /// and an optional timeout.

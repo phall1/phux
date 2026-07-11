@@ -13,6 +13,7 @@
 
 pub mod distro;
 mod error;
+pub mod integration; // phux-ark7 (ADR-0042): agent integration templates + launch
 mod layer;
 pub mod plugin;
 pub mod satellite;

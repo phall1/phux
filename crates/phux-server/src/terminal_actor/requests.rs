@@ -82,6 +82,17 @@ pub struct ConsumerAttachRequest {
     /// suppresses its broadcast pump for it; when `false` the consumer
     /// stays on the raw PTY broadcast (the human-TUI default).
     pub wants_state_sync: bool,
+    /// Whether this consumer is on a lossy/forwarded leg and should use the
+    /// advance-on-ack loss-tolerant emission model (phux-v45.8, ADR-0042).
+    ///
+    /// Only meaningful together with `wants_state_sync` (a raw broadcast-pump
+    /// consumer has no per-consumer reference to make loss-tolerant). When
+    /// `true` the actor enables loss-tolerance right after registration: the
+    /// per-consumer reference then advances on `FRAME_ACK` rather than on emit,
+    /// so a frame the forwarded leg drops re-diffs against the last-acked
+    /// reference and self-heals. `false` (the default for a direct,
+    /// reliable-transport consumer) keeps the emit-once model.
+    pub loss_tolerant: bool,
     /// Channel the actor uses to acknowledge the lifecycle insertion.
     /// `Ok(outcome)` on success (the outcome reports whether this actor
     /// is tick-managing the consumer); `Err(...)` if the per-consumer
@@ -483,6 +494,15 @@ pub struct SubscribeToEventsRequest {
 /// Request to unsubscribe from semantic terminal events.
 #[derive(Debug)]
 pub struct UnsubscribeFromEventsRequest {
-    /// Pointer to the subscriber's outbound mailbox (used for identification).
-    pub outbound_ptr: *const tokio::sync::mpsc::Sender<Outbound>,
+    /// Address of the subscriber's outbound mailbox, used for identity
+    /// comparison against the actor's registered subscribers.
+    ///
+    /// A `usize` address rather than a `*const Sender<Outbound>`: a raw
+    /// pointer is `!Send`, which would make [`TerminalHandle`] — and through
+    /// it the entire [`ServerState`](crate::state::ServerState) — `!Send`,
+    /// blocking the dedicated input lane (phux-51n6.2, ADR-0044) that routes
+    /// input from a separate thread. The identity semantics are unchanged: the
+    /// actor compares this against `&raw const sub.outbound as usize`, exactly
+    /// as the prior pointer equality did.
+    pub outbound_addr: usize,
 }

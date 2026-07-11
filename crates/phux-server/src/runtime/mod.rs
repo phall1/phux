@@ -45,6 +45,7 @@ use crate::state::{Outbound, SharedState};
 pub mod attach;
 pub mod client;
 pub mod commands;
+pub mod input_lane;
 mod resume;
 mod upgrade;
 
@@ -571,6 +572,15 @@ impl ServerRuntime {
         // Event-hook catalog (phux-r82.1): moved into the LocalSet block
         // below, where the dispatcher task can `spawn_local`.
         let hook_catalog = self.cfg.hook_catalog.clone();
+        // Dedicated input lane (phux-51n6.2, ADR-0044): a separate OS thread
+        // that runs the input routing stage off the main runtime, so a
+        // keystroke's lease/subscription gating and mailbox delivery preempt a
+        // large output-broadcast tick instead of waiting for the current-thread
+        // runtime to yield. `input_lane` is held here for the server's
+        // lifetime; its `Drop` joins the thread on the way out. Its handle is
+        // moved into the accept loops below and cloned per client.
+        let input_lane = input_lane::spawn_input_lane(state.clone())?;
+        let input_lane_handle = input_lane.handle();
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -612,11 +622,18 @@ impl ServerRuntime {
                 // connection with capped exponential backoff; fail-closed
                 // refusals (routable endpoint without token/pin) surface as
                 // a `Refused` status without dialing. The status handle is
-                // mirrored into shared state for future LIST aggregation.
+                // mirrored into shared state for future LIST aggregation,
+                // and the frame-relay registry (phux-v45.4) alongside it so
+                // command/input dispatch can route satellite-tagged
+                // terminal ids over the established links.
                 if let Some(table) = &hub_table {
                     let statuses = crate::hub::link::HubLinkStatuses::default();
-                    state.with_mut(|s| s.set_hub_link_statuses(statuses.clone()));
-                    crate::hub::link::spawn_links(table, &statuses, &root_token);
+                    let relays = crate::hub::relay::HubRelays::default();
+                    state.with_mut(|s| {
+                        s.set_hub_link_statuses(statuses.clone());
+                        s.set_hub_relays(relays.clone());
+                    });
+                    crate::hub::link::spawn_links(table, &statuses, &relays, &root_token);
                 }
 
                 // Graceful-upgrade resume (ADR-0032): rebuild the whole
@@ -696,25 +713,52 @@ impl ServerRuntime {
                     &listener,
                     state.clone(),
                     root_token.clone(),
+                    Some(input_lane_handle.clone()),
                 ))];
                 if let Some(ws) = &ws_listener {
-                    accepts.push(Box::pin(accept_loop(ws, state.clone(), root_token.clone())));
+                    accepts.push(Box::pin(accept_loop(
+                        ws,
+                        state.clone(),
+                        root_token.clone(),
+                        Some(input_lane_handle.clone()),
+                    )));
                 }
                 if let Some(quic) = &quic_listener {
                     accepts.push(Box::pin(accept_loop(
                         quic,
                         state.clone(),
                         root_token.clone(),
+                        Some(input_lane_handle.clone()),
                     )));
                 }
                 #[cfg(feature = "webtransport")]
                 if let Some(wt) = &webtransport_listener {
-                    accepts.push(Box::pin(accept_loop(wt, state.clone(), root_token.clone())));
+                    accepts.push(Box::pin(accept_loop(
+                        wt,
+                        state.clone(),
+                        root_token.clone(),
+                        Some(input_lane_handle.clone()),
+                    )));
                 }
                 let (result, _index, _remaining) = futures_util::future::select_all(accepts).await;
                 result
             })
             .await;
+
+        // `run_until` returns the instant the accept-loop future is ready — on
+        // shutdown that is the tick where `accept_loop` observed the cancelled
+        // root token and dropped its per-client `JoinSet`. Dropping that
+        // `JoinSet` only *aborts* the client tasks; their futures still live on
+        // this `LocalSet` and are not dropped until the set advances or is
+        // itself dropped. Each such future holds a cloned `InputLaneHandle`
+        // (`task_input_lane`) that keeps the lane channel open. So we must drop
+        // the `LocalSet` FIRST — that destroys every remaining client-task
+        // future and releases its handle clone — and only then drop the lane
+        // owner. Reversing this order deadlocks: `InputLane::drop` joins the
+        // lane thread, whose `blocking_recv` never returns `None` while a
+        // client-task clone keeps the channel open (ADR-0044).
+        drop(local);
+        drop(input_lane);
 
         // Always try to unlink the socket on the way out; ignore NotFound.
         if let Err(err) = std::fs::remove_file(&socket_path)

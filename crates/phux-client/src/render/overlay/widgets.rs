@@ -409,4 +409,35 @@ mod tests {
         assert!(inner.x + inner.width <= outer.x + outer.width);
         assert!(inner.y + inner.height <= outer.y + outer.height);
     }
+
+    /// phux-foz.14: when the outer rect is the pane content rect (viewport
+    /// inset by a left sidebar strip), the centered modal must stay fully
+    /// inside it — its left edge lands right of the sidebar divider, never on
+    /// the strip columns. This is the exact geometry the floating-modal path
+    /// now feeds `centered`.
+    #[test]
+    fn centered_against_inset_rect_clears_the_sidebar() {
+        // 80-col viewport, a 20-col left sidebar ⇒ content rect x∈[20, 80).
+        let sidebar_w = 20;
+        let content = Rect::new(sidebar_w, 0, 80 - sidebar_w, 24);
+        let modal = centered(content, 6, 30, 10);
+        // Fully within the content rect on every edge.
+        assert!(
+            modal.x >= content.x,
+            "modal left edge {} must not enter the sidebar (divider at {})",
+            modal.x,
+            content.x
+        );
+        assert!(modal.x + modal.width <= content.x + content.width);
+        assert!(modal.y >= content.y);
+        assert!(modal.y + modal.height <= content.y + content.height);
+        // And horizontally centered *within the content rect*, not the raw
+        // viewport: the left and right margins inside the content match.
+        let left_margin = modal.x - content.x;
+        let right_margin = (content.x + content.width) - (modal.x + modal.width);
+        assert!(
+            left_margin.abs_diff(right_margin) <= 1,
+            "modal must be centered in the content rect: L={left_margin} R={right_margin}"
+        );
+    }
 }

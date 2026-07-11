@@ -276,7 +276,7 @@ const MAX_PTY_COALESCE: usize = 64;
 /// with `MAX_INPUT_COALESCE`, this is the load-bearing bound on the output
 /// arm: the two consts together keep either direction from monopolizing
 /// the single-thread actor loop.
-const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
+pub(crate) const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
 
 /// Upper bound on input events drained in a single `input_rx` wakeup
 /// before returning to the `select!`. Input events are tiny (one encode +
@@ -1091,9 +1091,57 @@ impl TerminalActor {
                 rtt: RttEstimator::default(),
                 emit_instants: std::collections::BTreeMap::new(),
                 wants_state_sync,
+                // Loss-tolerance is opt-in and off by default (phux-v45.8):
+                // the reliable-transport emit-once model is the norm. The
+                // runtime flips it on via `enable_loss_tolerance` for a
+                // forwarded/lossy leg right after registration.
+                loss_tolerant: false,
+                acked_reference: ConsumerReference::new(),
+                pending_refs: std::collections::BTreeMap::new(),
             },
         );
         Ok(())
+    }
+
+    /// Switch an already-registered consumer to the advance-on-ack
+    /// loss-tolerant emission model (phux-v45.8, ADR-0042).
+    ///
+    /// Idempotent-ish: sets [`ConsumerSyncState::loss_tolerant`] and primes
+    /// [`ConsumerSyncState::acked_reference`] to the live grid so the first
+    /// post-enable tick emits only deltas from *now* (the consumer's
+    /// `TERMINAL_SNAPSHOT` brought its mirror to this same point). Silent no-op
+    /// if the consumer is not registered (raced against detach). A failure to
+    /// prime the reference leaves the consumer on the emit-once path (the
+    /// reference stays empty, so the first tick would repaint everything — safe,
+    /// just not yet loss-tolerant); logged, not fatal.
+    fn enable_loss_tolerance(&mut self, client_id: ClientId) {
+        // Disjoint field borrows: `self.terminal` / `self.synth` (RefCell
+        // interior) vs `self.consumer_states` (via `get_mut`).
+        let terminal = self.terminal.borrow();
+        let synth = &self.synth;
+        let Some(state) = self.consumer_states.get_mut(&client_id) else {
+            trace!(
+                ?client_id,
+                "enable_loss_tolerance for unregistered consumer; dropping"
+            );
+            return;
+        };
+        match synth
+            .borrow_mut()
+            .prime_reference(&terminal, &mut state.acked_reference)
+        {
+            Ok(()) => {
+                state.loss_tolerant = true;
+                trace!(?client_id, "loss-tolerant state-sync enabled for consumer");
+            }
+            Err(err) => {
+                warn!(
+                    ?client_id,
+                    error = %err,
+                    "enable_loss_tolerance: priming acked reference failed; staying emit-once",
+                );
+            }
+        }
     }
 
     /// Drop the per-consumer state for `client_id` if present
@@ -1175,6 +1223,24 @@ impl TerminalActor {
             return false;
         }
         consumer.last_acked_seq = seq;
+
+        // Loss-tolerant reference advance (phux-v45.8, ADR-0042). A cumulative
+        // ack for `seq` acknowledges every emission up to and including it, so
+        // the consumer's acked reference advances to the grid snapshot of the
+        // highest emitted `seq` this ack covers, and every pending snapshot at
+        // or below `seq` is dropped. This is the eviction the emit-once path
+        // (below, comment retained for contrast) deliberately does NOT do: on a
+        // lossy leg the reference must trail the ack so a dropped frame re-diffs
+        // against the last state the consumer provably has.
+        if consumer.loss_tolerant {
+            if let Some((&covered, _)) = consumer.pending_refs.range(..=seq).next_back()
+                && let Some(snapshot) = consumer.pending_refs.remove(&covered)
+            {
+                consumer.acked_reference = snapshot;
+            }
+            // Keep only strictly-newer pending snapshots (still in flight).
+            consumer.pending_refs = consumer.pending_refs.split_off(&seq.saturating_add(1));
+        }
 
         // RTT sample (phux-q0e.5). Acks are cumulative, so `seq` acknowledges
         // every emission up to and including it. Find the emit instant for
@@ -1462,7 +1528,7 @@ impl TerminalActor {
     /// Silent no-op if the subscriber is not found.
     fn unsubscribe_from_events(&self, request: &UnsubscribeFromEventsRequest) {
         let mut subs = self.event_subscribers.borrow_mut();
-        subs.retain(|sub| !std::ptr::eq(&raw const sub.outbound, request.outbound_ptr));
+        subs.retain(|sub| (&raw const sub.outbound) as usize != request.outbound_addr);
     }
 
     /// Broadcast an `AgentEvent` to all interested subscribers based on the
@@ -1628,6 +1694,33 @@ impl TerminalActor {
     #[cfg(test)]
     pub const fn disable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = false;
+    }
+
+    /// Test-only: flip an already-registered state-sync consumer to the
+    /// advance-on-ack loss-tolerant model (phux-v45.8), mirroring what the
+    /// runtime does for a forwarded/lossy-leg consumer right after attach.
+    #[cfg(test)]
+    pub fn enable_loss_tolerance_for_test(&mut self, client_id: ClientId) {
+        self.enable_loss_tolerance(client_id);
+    }
+
+    /// Test-only: backdate this consumer's emit instants by `by` so the
+    /// loss-tolerant retransmit timer reads as elapsed on the next tick
+    /// (phux-v45.8), letting a retransmit be exercised without sleeping real
+    /// time. Saturates at the process epoch rather than underflowing.
+    #[cfg(test)]
+    pub fn backdate_emit_instants_for_test(
+        &mut self,
+        client_id: ClientId,
+        by: std::time::Duration,
+    ) {
+        if let Some(state) = self.consumer_states.get_mut(&client_id) {
+            let now = tokio::time::Instant::now();
+            let past = now.checked_sub(by).unwrap_or(now);
+            for instant in state.emit_instants.values_mut() {
+                *instant = past;
+            }
+        }
     }
 
     /// Test-only: write `bytes` into the actor's `Terminal` and mark the
@@ -2398,6 +2491,7 @@ impl TerminalActor {
                         outbound,
                         wire_terminal_id,
                         wants_state_sync,
+                        loss_tolerant,
                         reply,
                     } = req;
                     // phux-3uv / phux-fseo: map register success to an outcome
@@ -2411,6 +2505,13 @@ impl TerminalActor {
                     let result = self
                         .register_consumer(client_id, outbound, wire_terminal_id, wants_state_sync)
                         .map(|()| ConsumerAttachOutcome { tick_managed });
+                    // phux-v45.8: a forwarded/lossy-leg state-sync consumer
+                    // opts into the advance-on-ack loss-tolerant model right
+                    // after a successful registration. No-op for a direct
+                    // reliable-transport consumer (`loss_tolerant == false`).
+                    if result.is_ok() && loss_tolerant && tick_managed {
+                        self.enable_loss_tolerance(client_id);
+                    }
                     if let Err(err) = &result {
                         warn!(
                             ?client_id,
@@ -2589,10 +2690,14 @@ impl TerminalActor {
         let mutated = self.terminal_dirty_since_tick;
         self.terminal_dirty_since_tick = false;
         if !mutated
-            && !self
-                .consumer_states
-                .values()
-                .any(|s| s.needs_initial_emit || s.behind)
+            && !self.consumer_states.values().any(|s| {
+                // phux-v45.8: a loss-tolerant consumer with un-acked frames in
+                // flight must keep being walked even on a Clean terminal, so its
+                // retransmit timer can fire and re-diff a suspected-lost frame
+                // against the acked reference. `pending_refs` is empty for the
+                // reliable emit-once path, so this adds nothing there.
+                s.needs_initial_emit || s.behind || !s.pending_refs.is_empty()
+            })
         {
             return;
         }
@@ -2631,6 +2736,11 @@ impl TerminalActor {
             if !force_all_consumers && !state.wants_state_sync {
                 continue;
             }
+            // Captured before the `behind` reset below: whether a prior tick
+            // held this consumer's delta back for a full mailbox. The
+            // loss-tolerant emit gate treats a drained-after-backpressure
+            // consumer as "has new content to ship" (phux-v45.8).
+            let was_behind = state.behind;
             // This consumer is being serviced this tick; it no longer needs
             // a forced first pass.
             state.needs_initial_emit = false;
@@ -2701,15 +2811,44 @@ impl TerminalActor {
             .entered();
             // diff_consumer is infallible (the fallible render happened once in
             // `prepare_tick` above); it returns this consumer's delta bytes.
-            let bytes = synth
-                .diff_consumer(tick_cols, tick_rows, tick_live_cm, &mut state.reference)
-                .bytes;
+            // phux-v45.8: a loss-tolerant consumer re-diffs against its
+            // last-ACKED reference (which does NOT advance on emit), so a
+            // dropped/un-acked frame self-heals — its rows still differ from the
+            // acked reference on the next emission. The reliable-transport
+            // default stays on the emit-once `diff_consumer` path (reference
+            // advances on emit), byte-for-byte unchanged.
+            let bytes = if state.loss_tolerant {
+                synth.diff_against_base(tick_cols, tick_rows, tick_live_cm, &state.acked_reference)
+            } else {
+                synth
+                    .diff_consumer(tick_cols, tick_rows, tick_live_cm, &mut state.reference)
+                    .bytes
+            };
             if bytes.is_empty() {
                 // Byte-identical to this consumer's reference; nothing to
                 // send this tick. The reserved permit drops unused. A closed
                 // mailbox was already reaped by the `try_reserve` arm above,
                 // so no extra liveness probe is needed here.
                 continue;
+            }
+            // phux-v45.8 loss-tolerant emit gate. Because a loss-tolerant diff
+            // is against the last-acked (not last-emitted) reference, it stays
+            // non-empty every tick while a frame is un-acked. Only actually
+            // (re)ship when there is genuinely new content this tick
+            // (`mutated`), a drained-after-backpressure delta to flush
+            // (`was_behind`), or a retransmit is due for a still-un-acked frame
+            // (suspected loss). Otherwise hold: re-shipping the same cumulative
+            // delta every tick would flood the leg. The reserved permit drops.
+            if state.loss_tolerant {
+                let now = tokio::time::Instant::now();
+                let retransmit_due = !state.pending_refs.is_empty()
+                    && state.emit_instants.values().next_back().is_none_or(|last| {
+                        now.saturating_duration_since(*last)
+                            >= tick::retransmit_timeout(state.rtt.smoothed())
+                    });
+                if !mutated && !was_behind && !retransmit_due {
+                    continue;
+                }
             }
             let seq = state.next_seq;
             let out_bytes = bytes.len();
@@ -2743,6 +2882,19 @@ impl TerminalActor {
             // map to a few KB per consumer. See `MAX_EMIT_INSTANTS`.
             while state.emit_instants.len() > MAX_EMIT_INSTANTS {
                 state.emit_instants.pop_first();
+            }
+            // phux-v45.8: for a loss-tolerant consumer, snapshot the grid state
+            // this `seq` shipped so a later cumulative `FRAME_ACK` can advance
+            // the acked reference to exactly it. Bounded the same way as
+            // `emit_instants` (oldest-evicted past the cap) so a wedged leg
+            // cannot grow it without bound. Empty/untouched on the emit-once
+            // path.
+            if state.loss_tolerant {
+                let snapshot = synth.snapshot_tick_reference(tick_cols, tick_rows, tick_live_cm);
+                state.pending_refs.insert(seq, snapshot);
+                while state.pending_refs.len() > MAX_EMIT_INSTANTS {
+                    state.pending_refs.pop_first();
+                }
             }
             emitted += 1;
             total_out_bytes += out_bytes;
@@ -3654,6 +3806,7 @@ mod tests {
                         outbound: out_tx,
                         wire_terminal_id: 99,
                         wants_state_sync: false,
+                        loss_tolerant: false,
                         reply: tx_a,
                     })
                     .await
@@ -3929,6 +4082,295 @@ mod tests {
         assert!(
             raw_rx.try_recv().is_err(),
             "raw consumer must stay on the broadcast pump — tick must not double-paint it",
+        );
+    }
+
+    // ---- phux-v45.8 / ADR-0042: loss-tolerant (advance-on-ack) state sync ----
+
+    /// Render a `Terminal`'s viewport into right-trimmed rows, skipping
+    /// wide-cell tails — enough to assert grid equivalence between a
+    /// state-sync mirror and the canonical after applying deltas.
+    fn render_viewport(t: &GhosttyTerminal<'_, '_>) -> Vec<String> {
+        use libghostty_vt::render::{CellIterator, RowIterator};
+        use libghostty_vt::screen::CellWide;
+        let mut rs = RenderState::new().expect("RenderState::new");
+        let snap = rs.update(t).expect("update");
+        let rows_n = snap.rows().expect("rows");
+        let mut rows = RowIterator::new().expect("RowIterator::new");
+        let mut cells = CellIterator::new().expect("CellIterator::new");
+        let mut row_iter = rows.update(&snap).expect("row update");
+        let mut out: Vec<String> = Vec::with_capacity(usize::from(rows_n));
+        let mut i: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if i >= rows_n {
+                break;
+            }
+            let mut line = String::new();
+            let mut cell_iter = cells.update(row).expect("cell update");
+            while let Some(cell) = cell_iter.next() {
+                if matches!(
+                    cell.raw_cell().expect("rc").wide().expect("wide"),
+                    CellWide::SpacerTail
+                ) {
+                    continue;
+                }
+                let g = cell.graphemes().expect("graphemes");
+                if g.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.extend(g);
+                }
+            }
+            out.push(line.trim_end().to_owned());
+            i += 1;
+        }
+        out
+    }
+
+    /// Drain every currently-queued `TERMINAL_OUTPUT` body from a consumer's
+    /// mailbox (its `seq` and bytes).
+    fn drain_outputs(rx: &mut mpsc::Receiver<Outbound>) -> Vec<(u64, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while let Ok(Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. })) = rx.try_recv()
+        {
+            frames.push((seq, bytes.to_vec()));
+        }
+        frames
+    }
+
+    /// A loss-tolerant consumer's reference advances on `FRAME_ACK`, not on
+    /// emit: after emitting a delta the acked reference is unchanged and the
+    /// frame is retained in `pending_refs`; the matching ack advances the
+    /// reference and prunes the pending snapshot.
+    #[test]
+    fn loss_tolerant_reference_advances_only_on_ack() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+
+        actor.vt_write_for_test(b"hello");
+        actor.tick_emit();
+
+        let frames = drain_outputs(&mut rx);
+        assert_eq!(frames.len(), 1, "one delta shipped for the new content");
+        let seq = frames[0].0;
+        {
+            let state = actor.consumer_state(client).expect("state");
+            assert!(
+                state.pending_refs.contains_key(&seq),
+                "the emitted frame's grid snapshot is retained until acked",
+            );
+            assert_eq!(
+                state.last_acked_seq, 0,
+                "no ack yet: the acked reference has not advanced",
+            );
+        }
+
+        // Idle tick with no new content and no elapsed time: the loss-tolerant
+        // gate must NOT re-ship the same cumulative delta (no flood).
+        actor.tick_emit();
+        assert!(
+            drain_outputs(&mut rx).is_empty(),
+            "an un-acked delta must not re-ship every idle tick",
+        );
+
+        // Ack it: the reference advances and the pending snapshot is pruned.
+        actor.on_frame_ack(client, seq);
+        {
+            let state = actor.consumer_state(client).expect("state");
+            assert!(
+                state.pending_refs.is_empty(),
+                "ack prunes the covered pending snapshot",
+            );
+            assert_eq!(state.last_acked_seq, seq);
+        }
+        // Post-ack idle tick: nothing to send (acked == live).
+        actor.tick_emit();
+        assert!(
+            drain_outputs(&mut rx).is_empty(),
+            "post-ack idle tick is silent"
+        );
+    }
+
+    /// The core v45.8 property: a dropped/un-acked frame self-heals. Emit
+    /// delta 1 (simulated dropped — never applied to the mirror, never acked),
+    /// then emit delta 2 for later content. Because delta 2 is re-diffed
+    /// against the last-ACKED reference (still empty), it re-includes delta 1's
+    /// rows, so applying ONLY delta 2 to the mirror converges it to canonical.
+    #[test]
+    fn loss_tolerant_dropped_frame_rediffs_against_acked_and_converges() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+
+        // Mirror starts at the same point the acked reference was primed to
+        // (an empty grid) — what the consumer's TERMINAL_SNAPSHOT establishes.
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Content A → delta 1. SIMULATE A DROP: do not apply it, do not ack.
+        actor.vt_write_for_test(b"AAAA");
+        actor.tick_emit();
+        let dropped = drain_outputs(&mut rx);
+        assert_eq!(dropped.len(), 1, "delta 1 emitted");
+
+        // Content B (a second row) → delta 2. Re-diffed against acked (empty).
+        actor.vt_write_for_test(b"\r\nBBBB");
+        actor.tick_emit();
+        let delivered = drain_outputs(&mut rx);
+        assert_eq!(delivered.len(), 1, "delta 2 emitted");
+
+        // Apply ONLY delta 2 (delta 1 was lost).
+        mirror.vt_write(&delivered[0].1);
+
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "applying only the post-drop cumulative delta must converge the \
+             mirror to canonical (self-heal);\ncanonical = {canonical_grid:?}\n\
+             mirror    = {mirror_grid:?}",
+        );
+        assert_eq!(mirror_grid[0], "AAAA");
+        assert_eq!(mirror_grid[1], "BBBB");
+    }
+
+    /// After a `FRAME_ACK`, subsequent deltas are diffed against the newly
+    /// advanced acked reference (incremental, not cumulative-from-empty), and
+    /// the mirror — brought current by the acked frames then the new one —
+    /// still converges. Exercises the steady-state ack loop.
+    #[test]
+    fn loss_tolerant_incremental_after_ack_converges() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Round 1: content, deliver + ack.
+        actor.vt_write_for_test(b"row-one");
+        actor.tick_emit();
+        let f1 = drain_outputs(&mut rx);
+        assert_eq!(f1.len(), 1);
+        mirror.vt_write(&f1[0].1);
+        actor.on_frame_ack(client, f1[0].0);
+
+        // Round 2: more content, delivered + acked; diffed against the acked
+        // reference from round 1.
+        actor.vt_write_for_test(b"\r\nrow-two");
+        actor.tick_emit();
+        let f2 = drain_outputs(&mut rx);
+        assert_eq!(f2.len(), 1);
+        mirror.vt_write(&f2[0].1);
+        actor.on_frame_ack(client, f2[0].0);
+
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "steady-state ack loop converges"
+        );
+        assert_eq!(mirror_grid[0], "row-one");
+        assert_eq!(mirror_grid[1], "row-two");
+    }
+
+    /// A retransmit heals a lost final frame on an otherwise idle terminal.
+    /// Emit content (dropped, un-acked), backdate the emit clock past the
+    /// retransmit timeout, then run an idle tick: the consumer retransmits a
+    /// cumulative delta (re-diffed against the acked reference) that converges
+    /// the mirror even though no new content arrived.
+    #[test]
+    fn loss_tolerant_retransmits_lost_frame_when_idle() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Content → delta. Simulate a drop: discard it, never ack.
+        actor.vt_write_for_test(b"lonely");
+        actor.tick_emit();
+        let dropped = drain_outputs(&mut rx);
+        assert_eq!(dropped.len(), 1, "initial delta emitted");
+
+        // No new content. Backdate the emit instant past the retransmit RTO
+        // so the next idle tick re-ships (suspected loss).
+        actor.backdate_emit_instants_for_test(client, std::time::Duration::from_secs(2));
+        actor.tick_emit();
+        let retransmit = drain_outputs(&mut rx);
+        assert_eq!(
+            retransmit.len(),
+            1,
+            "an idle terminal with an un-acked frame must retransmit after the RTO",
+        );
+
+        // The retransmit (re-diffed against the acked reference) converges the
+        // mirror that never saw the original frame.
+        mirror.vt_write(&retransmit[0].1);
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "retransmit heals the lost frame on an idle terminal",
+        );
+        assert_eq!(mirror_grid[0], "lonely");
+    }
+
+    /// The emit-once (non-loss-tolerant) default is untouched: a state-sync
+    /// consumer that did NOT opt into loss-tolerance keeps no `pending_refs`
+    /// and advances its reference on emit (`on_frame_ack` does not evict a
+    /// pending snapshot because there is none).
+    #[test]
+    fn emit_once_default_keeps_no_pending_refs() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        // NB: loss-tolerance NOT enabled.
+        actor.vt_write_for_test(b"content");
+        actor.tick_emit();
+        let frames = drain_outputs(&mut rx);
+        assert_eq!(frames.len(), 1);
+        let state = actor.consumer_state(client).expect("state");
+        assert!(!state.loss_tolerant, "default consumer is emit-once");
+        assert!(
+            state.pending_refs.is_empty(),
+            "emit-once path allocates no pending reference snapshots",
         );
     }
 

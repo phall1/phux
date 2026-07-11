@@ -1,4 +1,4 @@
-//! Hub outbound link supervisor (phux-v45.3, ADR-0007/ADR-0038).
+//! Hub outbound link supervisor (phux-v45.3/v45.9, ADR-0007/ADR-0038).
 //!
 //! Under `phux server --hub`, each enabled [`HubEntry`] gets one link
 //! supervisor task (`run_link`, crate-internal) that dials the satellite through the
@@ -9,19 +9,67 @@
 //! header on WebSocket. The token is re-read from its file on every
 //! attempt, so rotating it never needs a hub restart.
 //!
+//! **SSH-stdio** (`ssh://`, phux-v45.9) is the third dial path: the hub
+//! spawns the system `ssh` binary (override with `$PHUX_SSH`) running
+//! the remote `phux stdio-bridge` verb, which splices its stdin/stdout
+//! to the satellite server's local Unix socket. SSH itself
+//! authenticates and encrypts the channel, and the remote bridge
+//! inherits the satellite UDS's local (owner-only) trust, so **no
+//! bearer preamble is sent** and a registry `token-file` /
+//! `cert-fingerprint` on an `ssh://` entry is ignored (there is no TLS
+//! channel to pin) — see the ADR-0038 addendum. The child is spawned
+//! with `BatchMode=yes` (never an interactive prompt) and argv built
+//! from charset-validated parts (no shell, `--` before the host);
+//! "connected" means the ssh child is running, and the bridged stream
+//! carries the same length-prefixed frames as every other link — the
+//! relay session pumps it exactly like QUIC/WS. The authoritative
+//! liveness signal is the child's exit (surfaced as a `recv_frame`
+//! EOF), which redials like a dropped connection; the child's stderr
+//! is drained into a bounded tail for the failure reason (never
+//! buffered without limit).
+//!
 //! **Fail closed.** [`plan_link`] refuses to dial a routable endpoint
 //! whose entry lacks a token file or fingerprint pin (and refuses
 //! plaintext `ws://` to routable hosts outright), mirroring
 //! `phux attach --quic/--ws`. Loopback endpoints keep the loopback dev
 //! carve-out. A refused link is never dialed and never retried — the
 //! refusal is a configuration error, surfaced as
-//! [`LinkStatus::Refused`] and fixed by `phux satellite add`.
+//! [`LinkStatus::Refused`] and fixed by `phux satellite add`. Malformed
+//! `ssh://` endpoints fail earlier still, at hub-table validation.
 //!
-//! A lost or failed link is re-dialed with capped exponential backoff;
-//! per-satellite state is published to [`HubLinkStatuses`], the shared
-//! handle a future `LIST` aggregation (phux-v45.4+) reads. No frames are
-//! routed over the link yet — the supervisor holds the authenticated
-//! connection open and watches for it to drop.
+//! A lost or failed link is re-dialed with capped exponential backoff.
+//! The failure streak resets only after a connection has stayed up for
+//! `LINK_STABLE_AFTER` — a connection that dies young (an ssh child
+//! whose spawn succeeded but whose auth was refused) keeps growing the
+//! backoff exactly like a dial that never connected. Per-satellite
+//! state is published to [`HubLinkStatuses`], the shared handle a
+//! future `LIST` aggregation (phux-v45.5) reads.
+//!
+//! While a link is up, the supervisor drives that satellite's
+//! `super::relay::RelaySession` (phux-v45.4): consumer requests arrive
+//! on the per-satellite relay mailbox and are framed onto the connection;
+//! inbound frames resolve relayed replies and fan re-tagged streams out
+//! to proxy-subscribed consumers. While the link is *down* (dialing,
+//! backoff, fail-closed refusal) the supervisor keeps draining the
+//! mailbox, failing every request fast with a typed
+//! `SatelliteUnreachable` — a consumer never hangs on a dead satellite.
+//!
+//! A dead satellite that *looks* up is handled too: every link enforces a
+//! keepalive / idle contract. QUIC gets it from the transport (`phux-dial`
+//! sets `keep_alive_interval` + `max_idle_timeout`; expiry surfaces as a
+//! read error). SSH-stdio gets it from the SSH layer: the hub dials with
+//! `ServerAliveInterval`/`ServerAliveCountMax` derived from the same two
+//! constants (see [`ssh_argv`]), so a partitioned peer makes the ssh
+//! child exit — the ordinary drop signal — and nothing rides the bridged
+//! stream. WebSocket has no transport-level idle detection, so the
+//! supervisor originates pings on `LINK_KEEPALIVE_INTERVAL` and tears
+//! the link down when nothing (not even a pong) has arrived within
+//! `LINK_IDLE_TIMEOUT` — a silent partition becomes an ordinary
+//! disconnect: session teardown, typed errors, redial. Wire writes are
+//! bounded by `LINK_SEND_TIMEOUT` so a peer with full socket buffers
+//! cannot wedge the supervisor loop (for ssh links the bound applies to
+//! the child's stdin pipe), and the keepalive tick doubles as the sweep
+//! that prunes relayed commands whose consumer stopped waiting.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +88,40 @@ const BACKOFF_BASE: Duration = Duration::from_millis(500);
 
 /// Ceiling for the exponential redial delay.
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
+/// Period of the relay session's housekeeping tick: drive the transport
+/// keepalive ([`LinkConn::keepalive`]) and prune abandoned pending
+/// commands. Mirrors the QUIC dialer's `keep_alive_interval`
+/// (`phux-dial`), so both transports probe on the same cadence.
+const LINK_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Hub-side inbound-idle limit for WS links, mirroring the QUIC dialer's
+/// `max_idle_timeout` (`phux-dial`). A healthy but quiet link stays under
+/// it because every keepalive ping solicits a pong; only a partitioned or
+/// wedged satellite goes silent this long.
+const LINK_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stall bound on any single wire write toward the satellite (frames and
+/// keepalive pings). Against a partitioned peer with full socket buffers
+/// an unbounded write would pend forever and wedge the whole supervisor
+/// loop — inbound dispatch and the keepalive tick included.
+const LINK_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a connection must stay up before the failure streak is
+/// forgotten. SSH auth/connect failures surface *after* the spawn
+/// succeeds (the child exits in well under a second), so resetting the
+/// backoff on mere establishment would redial a persistently failing
+/// `ssh://` satellite at the base delay forever — hammering the remote
+/// sshd — instead of backing off toward the cap like a QUIC/WS dial
+/// that fails in `connect`.
+const LINK_STABLE_AFTER: Duration = Duration::from_secs(30);
+
+/// Retained tail of the ssh child's stderr, in bytes. ssh forwards the
+/// *remote command's* stderr into this pipe for the life of the link,
+/// so the hub must drain it into a bounded buffer — an uncapped
+/// `read_to_end` would let one chatty (or hostile) satellite grow hub
+/// memory without bound.
+const SSH_STDERR_TAIL_MAX: usize = 8 * 1024;
 
 /// What the planner decided to dial for one satellite, auth material
 /// resolved into the shared `phux-dial` vocabulary.
@@ -68,14 +150,28 @@ pub enum DialSpec {
         /// Pairing-token file, read per attempt.
         token_file: Option<PathBuf>,
     },
+    /// Spawn the system `ssh` binary bridging to the satellite's UDS via
+    /// the remote `phux stdio-bridge` verb (phux-v45.9). Carries no auth
+    /// material: SSH authenticates the channel, and the bridge inherits
+    /// the satellite UDS's local trust (ADR-0038 addendum).
+    Ssh {
+        /// Login user (`-l`), if configured.
+        user: Option<String>,
+        /// Destination host (bare — IPv6 without brackets).
+        host: String,
+        /// SSH port (`-p`), if configured.
+        port: Option<u16>,
+    },
 }
 
 impl DialSpec {
-    /// The token file this spec dials with, if any.
+    /// The token file this spec dials with, if any. Always `None` for
+    /// SSH-stdio: the channel is SSH-authenticated, not token-bearing.
     #[must_use]
     pub fn token_file(&self) -> Option<&Path> {
         match self {
             Self::Quic { token_file, .. } | Self::Ws { token_file, .. } => token_file.as_deref(),
+            Self::Ssh { .. } => None,
         }
     }
 }
@@ -85,8 +181,78 @@ impl core::fmt::Display for DialSpec {
         match self {
             Self::Quic { host, port, .. } => write!(f, "quic://{host}:{port}"),
             Self::Ws { url, .. } => f.write_str(url),
+            Self::Ssh { user, host, port } => {
+                f.write_str("ssh://")?;
+                if let Some(user) = user {
+                    write!(f, "{user}@")?;
+                }
+                if host.contains(':') {
+                    write!(f, "[{host}]")?;
+                } else {
+                    f.write_str(host)?;
+                }
+                if let Some(port) = port {
+                    write!(f, ":{port}")?;
+                }
+                Ok(())
+            }
         }
     }
+}
+
+/// Build the argv (excluding the program itself) for one SSH-stdio dial.
+///
+/// Pure and shell-free: the returned vector is handed to
+/// `tokio::process::Command::args`, never a shell, and the host/user
+/// parts were charset-allowlisted at endpoint parse time (no leading
+/// `-`, no whitespace or metacharacters). `--` still precedes the host
+/// as defense in depth against option injection. `BatchMode=yes` makes
+/// a missing/failed key a fast, non-interactive error; `-T` refuses a
+/// remote PTY (a PTY would translate the byte stream);
+/// `ClearAllForwardings=yes` keeps `ssh_config` forwardings from
+/// piggybacking on hub links.
+///
+/// **Keepalive / idle contract** (`docs/architecture/transport.md`): the
+/// link-level liveness the relay demands of every transport lives at the
+/// SSH layer for ssh links, mirroring how QUIC gets it from quinn rather
+/// than from hub pings. `ServerAliveInterval` probes on the
+/// `LINK_KEEPALIVE_INTERVAL` cadence and `ServerAliveCountMax` sizes
+/// the window to `LINK_IDLE_TIMEOUT`, so a silent partition makes ssh
+/// exit — and a child exit is the ordinary link-drop signal
+/// (`LinkConn::recv_frame` EOF). Nothing rides the bridged phux
+/// stream: the bridge stays byte-transparent, and
+/// `LinkConn::keepalive` is a no-op for ssh exactly as for QUIC.
+#[must_use]
+pub fn ssh_argv(user: Option<&str>, host: &str, port: Option<u16>) -> Vec<String> {
+    // Derived, not hardcoded, so the SSH-layer contract cannot drift
+    // from the WS/QUIC one: probe every LINK_KEEPALIVE_INTERVAL, declare
+    // the peer dead after LINK_IDLE_TIMEOUT of silence.
+    let alive_interval = LINK_KEEPALIVE_INTERVAL.as_secs().max(1);
+    let alive_count = (LINK_IDLE_TIMEOUT.as_secs() / alive_interval).max(1);
+    let mut argv = vec![
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+        "-o".to_owned(),
+        "ClearAllForwardings=yes".to_owned(),
+        "-o".to_owned(),
+        format!("ServerAliveInterval={alive_interval}"),
+        "-o".to_owned(),
+        format!("ServerAliveCountMax={alive_count}"),
+        "-T".to_owned(),
+    ];
+    if let Some(port) = port {
+        argv.push("-p".to_owned());
+        argv.push(port.to_string());
+    }
+    if let Some(user) = user {
+        argv.push("-l".to_owned());
+        argv.push(user.to_owned());
+    }
+    argv.push("--".to_owned());
+    argv.push(host.to_owned());
+    argv.push("phux".to_owned());
+    argv.push("stdio-bridge".to_owned());
+    argv
 }
 
 /// Why the planner refused to dial a satellite (fail closed, ADR-0038).
@@ -96,12 +262,6 @@ impl core::fmt::Display for DialSpec {
 /// missing credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkRefusal {
-    /// `ssh://` endpoints are registry-valid but have no dialer yet
-    /// (ADR-0007 "still deferred"; ADR-0038 defers SSH-derived identity).
-    SshUnsupported {
-        /// The configured endpoint.
-        endpoint: String,
-    },
     /// Plaintext `ws://` to a routable host: no TLS means no fingerprint
     /// pin is even possible. Mirrors the attach CLI's refusal.
     PlaintextRoutable {
@@ -131,11 +291,6 @@ pub enum LinkRefusal {
 impl core::fmt::Display for LinkRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::SshUnsupported { endpoint } => write!(
-                f,
-                "{endpoint}: ssh transport is not supported yet (ADR-0007 defers the ssh dialer); \
-                 use quic:// or wss:// with `phux pair` credentials"
-            ),
             Self::PlaintextRoutable { url } => write!(
                 f,
                 "{url}: refusing plaintext ws:// to a routable host; use wss:// with `phux pair` \
@@ -285,27 +440,48 @@ impl Backoff {
         delay
     }
 
-    /// Forget the failure streak after a successful connection.
+    /// Forget the failure streak after a connection that proved stable
+    /// (see `LINK_STABLE_AFTER`).
     pub const fn reset(&mut self) {
         self.failures = 0;
+    }
+
+    /// Settle the streak after a lost connection and return the 1-based
+    /// attempt number to report the loss as. Only a connection that
+    /// stayed up at least `LINK_STABLE_AFTER` clears the failure
+    /// streak; one that died young counts like a dial that never
+    /// connected (an ssh child whose spawn succeeded but whose auth was
+    /// refused exits fast — resetting on mere establishment would
+    /// redial it at the base delay forever, hammering the remote sshd).
+    pub fn settle_after_loss(&mut self, up_for: Duration) -> u32 {
+        if up_for >= LINK_STABLE_AFTER {
+            self.reset();
+        }
+        self.failures.saturating_add(1)
     }
 }
 
 /// Decide how (or whether) to dial one hub-table entry. Pure — no I/O.
 ///
 /// This is the fail-closed gate (ADR-0038): routable endpoints without
-/// both a token file and a fingerprint pin are refused, plaintext `ws://`
-/// is loopback-only, and `ssh://` is a clear "not supported yet".
-/// Loopback endpoints keep the dev carve-out (skip-verify TLS, optional
-/// token), matching `phux attach --quic/--ws`.
+/// both a token file and a fingerprint pin are refused, and plaintext
+/// `ws://` is loopback-only. Loopback endpoints keep the dev carve-out
+/// (skip-verify TLS, optional token), matching `phux attach --quic/--ws`.
+/// `ssh://` endpoints need no credential material — SSH authenticates
+/// the channel and the remote bridge inherits the satellite UDS's local
+/// trust (ADR-0038 addendum) — so any configured `token-file` /
+/// `cert-fingerprint` on such an entry is deliberately not carried into
+/// the spec.
 ///
 /// # Errors
 ///
 /// A [`LinkRefusal`] naming the configuration gap.
 pub fn plan_link(entry: &HubEntry) -> Result<DialSpec, LinkRefusal> {
     match &entry.target {
-        SatelliteTarget::SshDeferred { endpoint } => Err(LinkRefusal::SshUnsupported {
-            endpoint: endpoint.clone(),
+        SatelliteTarget::Ssh { user, host, port } => Ok(DialSpec::Ssh {
+            user: user.clone(),
+            host: host.clone(),
+            port: *port,
         }),
         SatelliteTarget::Quic { host, port } => {
             let trust = plan_trust(host_is_loopback(host), host, entry)?;
@@ -428,28 +604,58 @@ pub(crate) trait LinkTransport {
     async fn connect(&self, spec: &DialSpec, token: Option<String>) -> Result<Self::Conn, String>;
 }
 
-/// An established hub link: the only thing the supervisor can do with it
-/// (until phux-v45.4 routes frames) is wait for it to drop.
+/// An established hub link: a duplex of complete encoded phux frames
+/// (length prefix included, the `FrameKind::encode`/`decode` unit) the
+/// relay session (phux-v45.4) pumps in both directions.
 pub(crate) trait LinkConn {
-    /// Resolve when the connection is gone, with a human-readable reason.
-    async fn closed(self) -> String;
+    /// Put one complete encoded frame on the wire.
+    async fn send_frame(&mut self, frame: &[u8]) -> Result<(), String>;
+
+    /// Receive the next complete frame. `Ok(None)` is a clean close by
+    /// the satellite; `Err` carries a human-readable loss reason.
+    ///
+    /// Must be cancel-safe: the supervisor polls it inside a `select!`
+    /// against the relay mailbox and the cancellation token, recreating
+    /// the future each iteration.
+    async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String>;
+
+    /// Transport-level liveness probe, driven by the supervisor's
+    /// [`LINK_KEEPALIVE_INTERVAL`] tick while the link is up. WS links
+    /// originate a ping and enforce the hub-side inbound-idle limit
+    /// ([`LINK_IDLE_TIMEOUT`]), mirroring the idle contract the QUIC
+    /// dialer configures at the transport layer; QUIC links are a no-op
+    /// (quinn surfaces idle expiry as a [`Self::recv_frame`] error).
+    /// `Err` carries the reason the link must be torn down.
+    async fn keepalive(&mut self) -> Result<(), String>;
 }
 
-/// Supervise one satellite link: plan, dial, hold, redial.
+/// Supervise one satellite link: plan, dial, relay, redial.
 ///
-/// Runs until `cancel` fires. Fail-closed refusals publish
-/// [`LinkStatus::Refused`] and return immediately — no dial, no retry.
+/// Runs until `cancel` fires or every [`super::relay::RelayHandle`] for
+/// this satellite is dropped. Fail-closed refusals publish
+/// [`LinkStatus::Refused`] and never dial, but keep draining the relay
+/// mailbox so consumers get typed fail-fast errors instead of silence.
 #[allow(
     clippy::future_not_send,
     reason = "ADR-0014: hub link supervisors run on the server's LocalSet; the transport seam is generic so tests can inject !Send scripted transports"
+)]
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "one linear supervisor loop: plan -> dial (drain) -> relay -> backoff (drain); every drain arm repeats the same three-way select and splitting them scatters the lifecycle"
 )]
 pub(crate) async fn run_link<T: LinkTransport>(
     host: SatelliteHost,
     entry: HubEntry,
     transport: T,
     statuses: HubLinkStatuses,
+    mailbox: super::relay::RelayMailbox,
     cancel: CancellationToken,
 ) {
+    let super::relay::RelayMailbox {
+        requests: mut relay_rx,
+        unsubscribes: mut unsub_rx,
+    } = mailbox;
     let spec = match plan_link(&entry) {
         Ok(spec) => spec,
         Err(refusal) => {
@@ -464,7 +670,24 @@ pub(crate) async fn run_link<T: LinkTransport>(
                     reason: refusal.to_string(),
                 },
             );
-            return;
+            // Never dialed, never will be until the registry changes:
+            // fail every relay request fast until shutdown. Unsubscribes
+            // are drained and discarded — no session exists, so there is
+            // no registry to withdraw from.
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    request = relay_rx.recv() => match request {
+                        Some(request) => super::relay::fail_fast(
+                            request,
+                            &host,
+                            "link refused (fail closed); fix the registry entry",
+                        ),
+                        None => return,
+                    },
+                    unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
+                }
+            }
         }
     };
 
@@ -480,26 +703,39 @@ pub(crate) async fn run_link<T: LinkTransport>(
             let token = read_link_token(spec.token_file())?;
             transport.connect(&spec, token).await
         };
-        let outcome = tokio::select! {
-            () = cancel.cancelled() => return,
-            outcome = connect => outcome,
+        tokio::pin!(connect);
+        // Drain relay requests while the dial is in flight: a consumer
+        // targeting a not-yet-connected satellite fails fast, not late.
+        let outcome = loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                request = relay_rx.recv() => match request {
+                    Some(request) => super::relay::fail_fast(request, &host, "link is connecting"),
+                    None => return,
+                },
+                unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
+                outcome = &mut connect => break outcome,
+            }
         };
 
         let (failed_attempt, last_error) = match outcome {
             Ok(conn) => {
                 info!(satellite = %host, target = %spec, "hub link established");
-                backoff.reset();
                 statuses.set(&host, LinkStatus::Connected);
-                let reason = tokio::select! {
-                    () = cancel.cancelled() => return,
-                    reason = conn.closed() => reason,
-                };
-                warn!(
-                    satellite = %host,
-                    reason = %reason,
-                    "hub link lost; scheduling redial"
-                );
-                (1, reason)
+                let connected_at = tokio::time::Instant::now();
+                match run_relay_session(&host, conn, &mut relay_rx, &mut unsub_rx, &cancel).await {
+                    Some(reason) => {
+                        warn!(
+                            satellite = %host,
+                            reason = %reason,
+                            "hub link lost; scheduling redial"
+                        );
+                        // A fast death is a failed attempt (`settle_after_loss`).
+                        (backoff.settle_after_loss(connected_at.elapsed()), reason)
+                    }
+                    // Cancelled or every handle dropped: supervisor done.
+                    None => return,
+                }
             }
             Err(error) => {
                 warn!(
@@ -522,58 +758,228 @@ pub(crate) async fn run_link<T: LinkTransport>(
                 last_error,
             },
         );
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            () = tokio::time::sleep(retry_in) => {}
+        let sleep = tokio::time::sleep(retry_in);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return,
+                request = relay_rx.recv() => match request {
+                    Some(request) => super::relay::fail_fast(request, &host, "link is backing off before redial"),
+                    None => return,
+                },
+                unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
+                () = &mut sleep => break,
+            }
         }
     }
 }
 
-/// Spawn one [`run_link`] supervisor per hub-table entry onto the current
-/// `LocalSet`, all children of `cancel`.
+/// Drive one established connection's relay session (phux-v45.4): pump
+/// consumer requests onto the wire and inbound frames back to consumers.
 ///
-/// Called from the server runtime's hub bring-up; `statuses` is the same
-/// handle mirrored into shared state for future `LIST` aggregation.
+/// Returns `Some(reason)` when the connection was lost (redial), `None`
+/// when the supervisor should exit (cancellation, or every relay handle
+/// dropped). Session teardown — failing in-flight commands and notifying
+/// proxy subscribers with a typed error — runs on every exit path.
+#[allow(
+    clippy::future_not_send,
+    reason = "ADR-0014: runs on the server's LocalSet inside run_link"
+)]
+async fn run_relay_session<C: LinkConn>(
+    host: &SatelliteHost,
+    mut conn: C,
+    relay_rx: &mut tokio::sync::mpsc::Receiver<super::relay::RelayRequest>,
+    unsub_rx: &mut tokio::sync::mpsc::UnboundedReceiver<super::relay::Unsubscribe>,
+    cancel: &CancellationToken,
+) -> Option<String> {
+    let mut session = super::relay::RelaySession::new(host.clone());
+    // Housekeeping tick: transport keepalive + pending-map pruning. First
+    // tick one interval out — the connection was live zero seconds ago.
+    let mut keepalive = tokio::time::interval_at(
+        tokio::time::Instant::now() + LINK_KEEPALIVE_INTERVAL,
+        LINK_KEEPALIVE_INTERVAL,
+    );
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let (lost, reason) = loop {
+        tokio::select! {
+            () = cancel.cancelled() => break (false, "hub is shutting down".to_owned()),
+            request = relay_rx.recv() => {
+                let Some(request) = request else {
+                    break (false, "relay handles dropped".to_owned());
+                };
+                let frame = session.handle_request(request);
+                if let Err(error) = send_bounded(&mut conn, &frame).await {
+                    break (true, error);
+                }
+            }
+            unsubscribe = unsub_rx.recv() => {
+                // Undroppable subscription teardown (phux-v45.11): apply
+                // the withdrawal and tell the satellite to stop streaming
+                // any terminal whose last proxy subscriber just left.
+                let Some(unsubscribe) = unsubscribe else {
+                    break (false, "relay handles dropped".to_owned());
+                };
+                let mut lost_reason = None;
+                for frame in session.handle_unsubscribe(unsubscribe) {
+                    if let Err(error) = send_bounded(&mut conn, &frame).await {
+                        lost_reason = Some(error);
+                        break;
+                    }
+                }
+                if let Some(error) = lost_reason {
+                    break (true, error);
+                }
+            }
+            inbound = conn.recv_frame() => match inbound {
+                Ok(Some(frame)) => session.handle_inbound(&frame),
+                Ok(None) => break (true, "connection closed by satellite".to_owned()),
+                Err(error) => break (true, error),
+            },
+            _ = keepalive.tick() => {
+                session.prune_abandoned();
+                // Retry any attach snapshot a briefly-full consumer refused,
+                // so it converges even with no further inbound frame for its
+                // terminal to trigger the inline retry (phux-v45.12).
+                session.flush_pending_snapshots();
+                match tokio::time::timeout(LINK_SEND_TIMEOUT, conn.keepalive()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => break (true, error),
+                    Err(_) => break (true, format!(
+                        "keepalive write to satellite stalled for {}s",
+                        LINK_SEND_TIMEOUT.as_secs()
+                    )),
+                }
+            }
+        }
+    };
+    session.teardown(&reason);
+    lost.then_some(reason)
+}
+
+/// Put one frame on the wire with [`LINK_SEND_TIMEOUT`] as the stall
+/// bound: a partitioned peer whose socket buffers filled up would
+/// otherwise pend the write forever and wedge the supervisor loop.
+#[allow(
+    clippy::future_not_send,
+    reason = "ADR-0014: runs on the server's LocalSet inside run_relay_session"
+)]
+async fn send_bounded<C: LinkConn>(conn: &mut C, frame: &[u8]) -> Result<(), String> {
+    tokio::time::timeout(LINK_SEND_TIMEOUT, conn.send_frame(frame))
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(format!(
+                "write to satellite stalled for {}s",
+                LINK_SEND_TIMEOUT.as_secs()
+            ))
+        })
+}
+
+/// Spawn one [`run_link`] supervisor per hub-table entry onto the current
+/// `LocalSet`, all children of `cancel`, registering each satellite's
+/// [`super::relay::RelayHandle`] in `relays`.
+///
+/// Called from the server runtime's hub bring-up; `statuses` and `relays`
+/// are the same handles mirrored into shared state for command routing
+/// and future `LIST` aggregation.
 pub(crate) fn spawn_links(
     table: &HubTable,
     statuses: &HubLinkStatuses,
+    relays: &super::relay::HubRelays,
     cancel: &CancellationToken,
 ) {
+    let transport = NetLinkTransport::from_env();
     for (host, entry) in table.iter() {
+        let (handle, mailbox) = super::relay::RelayHandle::new(host.clone());
+        relays.insert(handle);
         tokio::task::spawn_local(run_link(
             host.clone(),
             entry.clone(),
-            NetLinkTransport,
+            transport.clone(),
             statuses.clone(),
+            mailbox,
             cancel.child_token(),
         ));
     }
 }
 
-/// The production [`LinkTransport`]: the shared `phux-dial` QUIC/WS stack,
-/// authenticating exactly like a remote consumer (ADR-0038).
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct NetLinkTransport;
+/// The production [`LinkTransport`]: the shared `phux-dial` QUIC/WS stack
+/// authenticating exactly like a remote consumer (ADR-0038), plus the
+/// SSH-stdio child-process path for `ssh://` endpoints (phux-v45.9).
+#[derive(Debug, Clone)]
+pub(crate) struct NetLinkTransport {
+    /// Program spawned for [`DialSpec::Ssh`] dials. `ssh` on `$PATH` by
+    /// default; `$PHUX_SSH` overrides it (an OpenSSH-compatible wrapper,
+    /// or a stub in tests).
+    ssh_program: std::ffi::OsString,
+}
 
-/// An established production link, held open until the peer (or the
-/// network) drops it.
+impl NetLinkTransport {
+    /// Build the production transport, honoring `$PHUX_SSH`.
+    pub(crate) fn from_env() -> Self {
+        Self {
+            ssh_program: std::env::var_os("PHUX_SSH").unwrap_or_else(|| "ssh".into()),
+        }
+    }
+}
+
+/// An established production link, framed in both directions for the
+/// relay session (phux-v45.4).
 #[derive(Debug)]
 pub(crate) enum NetLinkConn {
     /// QUIC connection with its endpoint driver and the opened bidi
-    /// stream halves — kept alive so the satellite sees one consumer,
-    /// ready for phux-v45.4 to frame over.
+    /// stream halves. Frames are length-prefixed on the byte stream,
+    /// byte-for-byte the framing the UDS path uses (`docs/spec/proto.md` §5).
     Quic {
         /// Owns the UDP socket + I/O driver; must outlive the connection.
         _endpoint: quinn::Endpoint,
-        /// The established connection, watched for closure.
-        connection: quinn::Connection,
+        /// The established connection, kept for a clean close.
+        _connection: quinn::Connection,
         /// Opened bidi send half (auth preamble already written).
-        _send: quinn::SendStream,
+        send: quinn::SendStream,
         /// Opened bidi recv half.
-        _recv: quinn::RecvStream,
+        recv: quinn::RecvStream,
+        /// Reassembly buffer: reads land here (cancel-safely) and complete
+        /// length-prefixed frames are peeled off the front.
+        buf: bytes::BytesMut,
     },
-    /// WebSocket connection, drained (and ping-answered) until it closes.
-    Ws(Box<phux_dial::ws::Ws>),
+    /// WebSocket connection: one binary message is one complete frame.
+    Ws {
+        /// The established stream.
+        ws: Box<phux_dial::ws::Ws>,
+        /// When the satellite last sent *anything* — data or control
+        /// frames. WS has no transport-level idle detection (unlike the
+        /// QUIC path), so this feeds the hub-side idle limit in
+        /// [`LinkConn::keepalive`]; without it a silent partition would
+        /// leave the link `Connected` forever.
+        last_inbound: std::time::Instant,
+    },
+    /// SSH-stdio child (phux-v45.9): the running `ssh` process whose
+    /// stdin/stdout carry the bridged, length-prefixed frame stream —
+    /// byte-for-byte the UDS framing, because the remote
+    /// `phux stdio-bridge` is byte-transparent. The child is
+    /// `kill_on_drop`, so tearing down the link (cancellation, redial)
+    /// reaps the ssh process instead of orphaning it.
+    Ssh {
+        /// The spawned ssh process; its exit is the link-loss signal.
+        child: tokio::process::Child,
+        /// Bridged write half — frames land on the remote server's UDS.
+        stdin: tokio::process::ChildStdin,
+        /// Bridged read half — the satellite's frames, length-prefixed.
+        stdout: tokio::process::ChildStdout,
+        /// Background drainer of ssh's own diagnostics plus the remote
+        /// command's stderr. It reads fd 2 *continuously* for the life of
+        /// the link (not just at EOF): a stderr pipe left unread fills its
+        /// ~64KiB OS buffer, blocks the remote's writes, and — because
+        /// stdout rides the same ssh channel window — stalls inbound frame
+        /// delivery with no loss signal (phux-v45.9). The task retains only
+        /// a bounded tail (`SSH_STDERR_TAIL_MAX`) and yields it at EOF so
+        /// `ssh_exit_reason` can compose the failure reason; it is aborted
+        /// on drop when the link is torn down before EOF.
+        stderr_reader: AbortOnDrop,
+        /// Reassembly buffer: same cancel-safe frame peeling as the
+        /// QUIC path.
+        buf: bytes::BytesMut,
+    },
 }
 
 impl LinkTransport for NetLinkTransport {
@@ -606,9 +1012,10 @@ impl LinkTransport for NetLinkTransport {
                     .map_err(|err| err.to_string())?;
                 Ok(NetLinkConn::Quic {
                     _endpoint: endpoint,
-                    connection,
-                    _send: send,
-                    _recv: recv,
+                    _connection: connection,
+                    send,
+                    recv,
+                    buf: bytes::BytesMut::with_capacity(8192),
                 })
             }
             DialSpec::Ws { url, trust, .. } => {
@@ -621,29 +1028,308 @@ impl LinkTransport for NetLinkTransport {
                 let ws = phux_dial::ws::dial(&dial)
                     .await
                     .map_err(|err| err.to_string())?;
-                Ok(NetLinkConn::Ws(Box::new(ws)))
+                Ok(NetLinkConn::Ws {
+                    ws: Box::new(ws),
+                    last_inbound: std::time::Instant::now(),
+                })
+            }
+            DialSpec::Ssh { user, host, port } => {
+                // No token: SSH authenticates the channel and the remote
+                // bridge inherits the satellite UDS's local trust
+                // (ADR-0038 addendum). `token` is None here by
+                // construction (plan_link never carries a token file into
+                // an Ssh spec).
+                debug_assert!(token.is_none(), "ssh dials carry no bearer token");
+                let mut child = tokio::process::Command::new(&self.ssh_program)
+                    .args(ssh_argv(user.as_deref(), host, *port))
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    // Reap the ssh process when the link is torn down
+                    // (cancellation, redial) rather than orphaning it.
+                    .kill_on_drop(true)
+                    .spawn()
+                    .map_err(|err| {
+                        format!("spawn {}: {err}", self.ssh_program.to_string_lossy())
+                    })?;
+                // The three pipes exist because we just asked for them;
+                // treat their absence as a failed dial, not a panic.
+                let stdin = child.stdin.take().ok_or("ssh child has no stdin pipe")?;
+                let stdout = child.stdout.take().ok_or("ssh child has no stdout pipe")?;
+                let mut stderr = child.stderr.take().ok_or("ssh child has no stderr pipe")?;
+                // Drain fd 2 for the whole life of the link so it can never
+                // fill its pipe buffer and back-pressure the shared ssh
+                // channel (phux-v45.9). `read_tail` keeps only the bounded
+                // tail and returns it at EOF; `ssh_exit_reason` joins this
+                // task to fold that tail into the loss reason. Spawned on
+                // the supervisor's LocalSet (see `run_link`).
+                let stderr_reader = AbortOnDrop(tokio::task::spawn_local(async move {
+                    read_tail(&mut stderr, SSH_STDERR_TAIL_MAX).await
+                }));
+                Ok(NetLinkConn::Ssh {
+                    child,
+                    stdin,
+                    stdout,
+                    stderr_reader,
+                    buf: bytes::BytesMut::with_capacity(8192),
+                })
             }
         }
     }
 }
 
 impl LinkConn for NetLinkConn {
-    async fn closed(self) -> String {
+    async fn send_frame(&mut self, frame: &[u8]) -> Result<(), String> {
         match self {
-            Self::Quic { connection, .. } => {
-                let reason = connection.closed().await;
-                reason.to_string()
-            }
-            Self::Ws(mut ws) => {
-                // Drain the stream: reading is what answers pings and
-                // observes the close. Frames are ignored until phux-v45.4
-                // routes them.
+            Self::Quic { send, .. } => send
+                .write_all(frame)
+                .await
+                .map_err(|err| format!("write to satellite: {err}")),
+            Self::Ws { ws, .. } => futures_util::SinkExt::send(
+                ws.as_mut(),
+                tokio_tungstenite::tungstenite::Message::Binary(frame.to_vec()),
+            )
+            .await
+            .map_err(|err| format!("write to satellite: {err}")),
+            // The child stdin pipe is the wire: the caller's
+            // `LINK_SEND_TIMEOUT` bound (send_bounded) applies here like
+            // any other transport, so a wedged ssh child with a full pipe
+            // cannot pend the supervisor forever.
+            Self::Ssh { stdin, .. } => tokio::io::AsyncWriteExt::write_all(stdin, frame)
+                .await
+                .map_err(|err| format!("write to ssh transport: {err}")),
+        }
+    }
+
+    async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String> {
+        match self {
+            Self::Quic { recv, buf, .. } => {
+                // Cancel-safe reassembly: `read_buf` lands bytes in the
+                // persistent buffer even if this future is dropped between
+                // polls; complete frames are peeled off the front.
                 loop {
-                    match futures_util::StreamExt::next(ws.as_mut()).await {
-                        None => return "connection closed by satellite".to_owned(),
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => return format!("connection error: {err}"),
+                    if let Some(frame) = split_buffered_frame(buf)? {
+                        return Ok(Some(frame));
                     }
+                    let n = tokio::io::AsyncReadExt::read_buf(recv, buf)
+                        .await
+                        .map_err(|err| format!("read from satellite: {err}"))?;
+                    if n == 0 {
+                        if buf.is_empty() {
+                            return Ok(None);
+                        }
+                        return Err("satellite closed the stream mid-frame".to_owned());
+                    }
+                }
+            }
+            Self::Ws { ws, last_inbound } => loop {
+                match futures_util::StreamExt::next(ws.as_mut()).await {
+                    None => return Ok(None),
+                    Some(Ok(message)) => {
+                        // Anything the satellite sends — data or control —
+                        // is liveness for the idle limit.
+                        *last_inbound = std::time::Instant::now();
+                        match message {
+                            tokio_tungstenite::tungstenite::Message::Close(_) => {
+                                return Ok(None);
+                            }
+                            tokio_tungstenite::tungstenite::Message::Binary(data) => {
+                                return Ok(Some(data));
+                            }
+                            // Control frames (ping/pong): reading them is
+                            // what answers pings; skip and keep reading.
+                            _ => {}
+                        }
+                    }
+                    Some(Err(err)) => return Err(format!("connection error: {err}")),
+                }
+            },
+            Self::Ssh {
+                child,
+                stdout,
+                stderr_reader,
+                buf,
+                ..
+            } => {
+                // Same cancel-safe reassembly as the QUIC path: the
+                // bridged stream carries the identical length-prefixed
+                // framing (the remote bridge splices the satellite's UDS
+                // byte-for-byte). stdout EOF means the link is gone —
+                // remote bridge ended, satellite server closed the UDS,
+                // network died, or the key was refused — and the child's
+                // exit status plus a bounded tail of its stderr become
+                // the loss reason.
+                loop {
+                    if let Some(frame) = split_buffered_frame(buf)? {
+                        return Ok(Some(frame));
+                    }
+                    let n = tokio::io::AsyncReadExt::read_buf(stdout, buf)
+                        .await
+                        .map_err(|err| format!("read from ssh transport: {err}"))?;
+                    if n == 0 {
+                        let mut reason = ssh_exit_reason(child, stderr_reader).await;
+                        if !buf.is_empty() {
+                            reason = format!("{reason} (stream ended mid-frame)");
+                        }
+                        return Err(reason);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn keepalive(&mut self) -> Result<(), String> {
+        match self {
+            // quinn already originates keepalives and enforces the idle
+            // timeout at the transport layer (`phux-dial` sets
+            // `keep_alive_interval` + `max_idle_timeout`); expiry surfaces
+            // as a `recv_frame` error, so there is nothing to drive here.
+            // The ssh child likewise *is* the transport: the dial argv
+            // carries ServerAliveInterval/ServerAliveCountMax (see
+            // `ssh_argv`), so SSH itself probes the peer and a silent
+            // partition makes the child exit — surfaced as a
+            // `recv_frame` EOF with the exit status and stderr as the
+            // reason. The bridged stream stays byte-transparent — there
+            // is no in-band phux ping to originate on either.
+            Self::Quic { .. } | Self::Ssh { .. } => Ok(()),
+            Self::Ws { ws, last_inbound } => {
+                if let Some(reason) = ws_idle_error(last_inbound.elapsed()) {
+                    return Err(reason);
+                }
+                // Solicit a pong so a healthy quiet satellite keeps
+                // resetting `last_inbound`; a partitioned one cannot.
+                futures_util::SinkExt::send(
+                    ws.as_mut(),
+                    tokio_tungstenite::tungstenite::Message::Ping(Vec::new()),
+                )
+                .await
+                .map_err(|err| format!("keepalive ping to satellite: {err}"))
+            }
+        }
+    }
+}
+
+/// The teardown reason once a WS link has been inbound-idle for
+/// [`LINK_IDLE_TIMEOUT`] or longer, or `None` while it is live.
+fn ws_idle_error(idle_for: Duration) -> Option<String> {
+    (idle_for >= LINK_IDLE_TIMEOUT).then(|| {
+        format!(
+            "satellite sent nothing for {}s (idle limit {}s); link presumed dead",
+            idle_for.as_secs(),
+            LINK_IDLE_TIMEOUT.as_secs()
+        )
+    })
+}
+
+/// How long an ssh child gets to exit after closing its bridged stdout
+/// before the hub kills it. ssh normally exits immediately once the
+/// remote command ends; a child that lingers past this (a wrapper
+/// holding the process open) would otherwise pin the supervisor between
+/// "stream is gone" and "redial".
+const SSH_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// A local task handle that aborts its task on drop, so tearing down an
+/// ssh link (cancellation, redial, connection drop before stdout EOF)
+/// stops the background stderr drainer instead of leaking it past the
+/// child's death.
+#[derive(Debug)]
+pub(crate) struct AbortOnDrop(tokio::task::JoinHandle<Vec<u8>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Compose the loss reason for an ssh link whose bridged stdout hit EOF:
+/// the child's exit status plus a bounded tail of its stderr.
+///
+/// stderr has been drained the whole time by the `stderr_reader` task
+/// (so a chatty fd 2 never back-pressured the shared ssh channel); that
+/// task's `read_tail` returns the bounded tail ([`SSH_STDERR_TAIL_MAX`])
+/// once the pipe hits EOF at the child's death, and joining it here folds
+/// that tail into the reason. Both the wait and the join are bounded by
+/// [`SSH_EXIT_GRACE`]; a child that will not exit is killed (the redial
+/// loop owns recovery, and the pipes are dropped with the connection
+/// either way).
+async fn ssh_exit_reason(
+    child: &mut tokio::process::Child,
+    stderr_reader: &mut AbortOnDrop,
+) -> String {
+    let gathered = tokio::time::timeout(SSH_EXIT_GRACE, async {
+        // The child's exit is the authoritative loss signal; the drainer
+        // finishes as fd 2 hits EOF at process death, so joining it yields
+        // the complete bounded tail — not just what was drained before
+        // stdout closed. `Pin::new` is sound: `JoinHandle` is `Unpin`.
+        tokio::join!(child.wait(), std::pin::Pin::new(&mut stderr_reader.0))
+    })
+    .await;
+    match gathered {
+        Ok((status, diagnostics)) => {
+            let diagnostics = diagnostics.unwrap_or_default();
+            let tail = String::from_utf8_lossy(&diagnostics);
+            let tail = tail.trim();
+            match status {
+                Ok(status) if tail.is_empty() => format!("ssh transport ended: {status}"),
+                Ok(status) => format!("ssh transport ended: {status}: {tail}"),
+                Err(err) => format!("wait for ssh transport: {err}"),
+            }
+        }
+        Err(_elapsed) => {
+            let _ = child.start_kill();
+            format!(
+                "ssh transport closed its stream but the child did not exit within {}s; killed",
+                SSH_EXIT_GRACE.as_secs()
+            )
+        }
+    }
+}
+
+/// Peel one complete length-prefixed frame (prefix included, the unit
+/// `FrameKind::decode` expects) off the front of `buf`, or `None` when
+/// the buffer holds only a partial frame.
+fn split_buffered_frame(buf: &mut bytes::BytesMut) -> Result<Option<Vec<u8>>, String> {
+    use phux_protocol::wire::frame::MAX_FRAME_LEN;
+    const LENGTH_PREFIX: usize = 4;
+    if buf.len() < LENGTH_PREFIX {
+        return Ok(None);
+    }
+    let body_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if !(1..=MAX_FRAME_LEN).contains(&body_len) {
+        return Err(format!(
+            "satellite sent frame with out-of-range length {body_len}"
+        ));
+    }
+    let total = LENGTH_PREFIX + body_len as usize;
+    if buf.len() < total {
+        return Ok(None);
+    }
+    Ok(Some(buf.split_to(total).to_vec()))
+}
+
+/// Drain `reader` to EOF (or error), retaining only the last `max`
+/// bytes.
+///
+/// The bounded sibling of `read_to_end` for pipes that may carry an
+/// unbounded stream (an ssh child's stderr forwards the remote
+/// command's fd 2 for the whole life of the link). A read error ends
+/// the drain and returns whatever tail was collected — the caller only
+/// wants diagnostics, and the authoritative exit signal is
+/// `child.wait()`, joined alongside.
+async fn read_tail<R>(reader: &mut R, max: usize) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => return tail,
+            Ok(n) => {
+                tail.extend_from_slice(&chunk[..n]);
+                if tail.len() > max {
+                    tail.drain(..tail.len() - max);
                 }
             }
         }
@@ -718,6 +1404,7 @@ mod tests {
             let spec = plan_link(&entry(endpoint, None, None)).expect("loopback carve-out");
             let trust = match spec {
                 DialSpec::Quic { trust, .. } | DialSpec::Ws { trust, .. } => trust,
+                DialSpec::Ssh { .. } => unreachable!("no ssh endpoints in this matrix"),
             };
             assert_eq!(trust, CertTrust::SkipVerify, "{endpoint}");
         }
@@ -765,15 +1452,85 @@ mod tests {
         assert!(matches!(refusal, LinkRefusal::PlaintextRoutable { .. }));
     }
 
+    // --- ssh-stdio planning and argv (phux-v45.9) ------------------------
+
     #[test]
-    fn ssh_is_a_clear_unsupported_refusal() {
-        let refusal =
-            plan_link(&entry("ssh://devbox", Some("/t"), Some("AB"))).expect_err("ssh deferred");
-        assert!(matches!(refusal, LinkRefusal::SshUnsupported { .. }));
-        assert!(
-            refusal.to_string().contains("not supported yet"),
-            "{refusal}"
+    fn ssh_plan_needs_no_credentials_and_carries_none() {
+        // Bare entry: dialable with zero auth material (SSH authenticates
+        // the channel; ADR-0038 addendum).
+        let spec = plan_link(&entry("ssh://me@devbox:2222", None, None)).expect("dialable");
+        assert_eq!(
+            spec,
+            DialSpec::Ssh {
+                user: Some("me".to_owned()),
+                host: "devbox".to_owned(),
+                port: Some(2222),
+            }
         );
+        assert_eq!(spec.token_file(), None);
+
+        // Configured token/pin on an ssh entry is ignored, not carried:
+        // there is no TLS channel to pin and no preamble to send.
+        let spec =
+            plan_link(&entry("ssh://devbox", Some("/t"), Some("AB"))).expect("still dialable");
+        assert_eq!(spec.token_file(), None, "{spec:?}");
+    }
+
+    #[test]
+    fn ssh_argv_matrix_is_shell_free_and_option_injection_proof() {
+        assert_eq!(
+            ssh_argv(None, "devbox", None),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-T",
+                "--",
+                "devbox",
+                "phux",
+                "stdio-bridge",
+            ]
+        );
+        assert_eq!(
+            ssh_argv(Some("me"), "devbox", Some(2222)),
+            vec![
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ClearAllForwardings=yes",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-T",
+                "-p",
+                "2222",
+                "-l",
+                "me",
+                "--",
+                "devbox",
+                "phux",
+                "stdio-bridge",
+            ]
+        );
+        // The SSH-layer liveness window mirrors the WS idle contract:
+        // interval * count == LINK_IDLE_TIMEOUT (see ssh_argv).
+        assert_eq!(
+            LINK_KEEPALIVE_INTERVAL * 3,
+            LINK_IDLE_TIMEOUT,
+            "keepalive constants drifted; re-derive ServerAlive* expectations"
+        );
+        // The host always sits after `--`, so even a hostile host token
+        // (which endpoint parsing already rejects) could not be read as
+        // an option — defense in depth.
+        let argv = ssh_argv(Some("me"), "devbox", Some(22));
+        let dashdash = argv.iter().position(|a| a == "--").expect("has --");
+        assert_eq!(argv[dashdash + 1], "devbox");
     }
 
     #[test]
@@ -818,6 +1575,27 @@ mod tests {
         assert!(err.contains("read token file"), "{err}");
 
         assert_eq!(read_link_token(None).expect("no file configured"), None);
+    }
+
+    // --- stderr tail ------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_tail_is_bounded_and_keeps_the_end() {
+        // A megabyte of remote stderr chatter must not accumulate on the
+        // hub: only the final `max` bytes survive.
+        let mut input = vec![b'x'; 1024 * 1024];
+        input.extend_from_slice(b"END-MARKER");
+        let mut reader = input.as_slice();
+        let tail = read_tail(&mut reader, SSH_STDERR_TAIL_MAX).await;
+        assert_eq!(tail.len(), SSH_STDERR_TAIL_MAX);
+        assert!(tail.ends_with(b"END-MARKER"));
+
+        // Short input passes through untouched.
+        let mut reader = &b"auth refused\n"[..];
+        assert_eq!(
+            read_tail(&mut reader, SSH_STDERR_TAIL_MAX).await,
+            b"auth refused\n"
+        );
     }
 
     // --- backoff ----------------------------------------------------------
@@ -883,9 +1661,42 @@ mod tests {
         }
     }
 
-    /// A scripted connection: closes when the oneshot fires, or never.
+    /// A scripted connection: drops with the reason sent on `closed`
+    /// (an mpsc so `recv_frame` stays cancel-safe), or never.
     struct ScriptConn {
-        closed: Option<tokio::sync::oneshot::Receiver<String>>,
+        closed: Option<tokio::sync::mpsc::Receiver<String>>,
+        keepalive_error: Option<String>,
+    }
+
+    impl ScriptConn {
+        /// A connection that stays up for the whole test.
+        const fn open_forever() -> Self {
+            Self {
+                closed: None,
+                keepalive_error: None,
+            }
+        }
+
+        /// A connection the test can drop by sending a reason.
+        fn closable() -> (tokio::sync::mpsc::Sender<String>, Self) {
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            (
+                tx,
+                Self {
+                    closed: Some(rx),
+                    keepalive_error: None,
+                },
+            )
+        }
+
+        /// A connection that never closes on its own but whose keepalive
+        /// probe reports the link dead (the WS idle-limit shape).
+        fn keepalive_fails(reason: &str) -> Self {
+            Self {
+                closed: None,
+                keepalive_error: Some(reason.to_owned()),
+            }
+        }
     }
 
     impl LinkTransport for ScriptTransport {
@@ -910,12 +1721,32 @@ mod tests {
     }
 
     impl LinkConn for ScriptConn {
-        async fn closed(self) -> String {
-            match self.closed {
-                Some(rx) => rx.await.unwrap_or_else(|_| "closed".to_owned()),
+        async fn send_frame(&mut self, _frame: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn recv_frame(&mut self) -> Result<Option<Vec<u8>>, String> {
+            match &mut self.closed {
+                Some(rx) => rx.recv().await.map_or(Ok(None), Err),
                 None => std::future::pending().await,
             }
         }
+
+        async fn keepalive(&mut self) -> Result<(), String> {
+            self.keepalive_error.clone().map_or(Ok(()), Err)
+        }
+    }
+
+    /// A live relay handle + mailbox pair for driving [`run_link`]; the
+    /// handle must stay alive or the supervisor treats the relay as
+    /// abandoned and exits.
+    fn relay_pair(
+        host: &SatelliteHost,
+    ) -> (
+        super::super::relay::RelayHandle,
+        super::super::relay::RelayMailbox,
+    ) {
+        super::super::relay::RelayHandle::new(host.clone())
     }
 
     fn loopback_entry() -> HubEntry {
@@ -926,13 +1757,15 @@ mod tests {
         SatelliteHost::new("devbox")
     }
 
-    /// Poll `statuses` (under paused time) until `want` matches.
+    /// Poll `statuses` (under paused time) until `want` matches. The
+    /// window is 60s of virtual time — comfortably past the keepalive
+    /// interval and idle limit, which paused-time tests must outlast.
     async fn wait_for_status(
         statuses: &HubLinkStatuses,
         host: &SatelliteHost,
         want: impl Fn(&LinkStatus) -> bool,
     ) {
-        for _ in 0..10_000 {
+        for _ in 0..60_000 {
             if statuses.get(host).as_ref().is_some_and(&want) {
                 return;
             }
@@ -949,16 +1782,18 @@ mod tests {
                 let transport = ScriptTransport::new(vec![
                     Err("boom-1".to_owned()),
                     Err("boom-2".to_owned()),
-                    Ok(ScriptConn { closed: None }),
+                    Ok(ScriptConn::open_forever()),
                 ]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -991,32 +1826,36 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+                let (close_tx, closable) = ScriptConn::closable();
                 let transport = ScriptTransport::new(vec![
                     // Fail once so the backoff has a streak to reset.
                     Err("boom-1".to_owned()),
-                    Ok(ScriptConn {
-                        closed: Some(close_rx),
-                    }),
-                    Ok(ScriptConn { closed: None }),
+                    Ok(closable),
+                    Ok(ScriptConn::open_forever()),
                 ]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
                 wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
 
-                // Drop the link: the redial must start from the base delay
-                // again (the success reset the failure streak).
+                // Let the connection prove stability (paused time makes
+                // this instant), then drop the link: the redial must
+                // start from the base delay again (the stable connection
+                // reset the failure streak).
+                tokio::time::sleep(LINK_STABLE_AFTER).await;
                 close_tx
                     .send("satellite went away".to_owned())
+                    .await
                     .expect("send");
                 wait_for_status(&statuses, &host, |s| {
                     *s == LinkStatus::Backoff {
@@ -1035,19 +1874,84 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn supervisor_keeps_backing_off_when_connections_die_young() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // Models an ssh dial whose spawn succeeds but whose auth
+                // is refused: the "connection" is established, then dies
+                // immediately (dropped sender => recv_frame resolves at
+                // once with a clean close). The failure streak must keep
+                // growing — a fast death is a failed attempt, not a
+                // success that resets the backoff to its base.
+                let dead = || {
+                    let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+                    drop(tx);
+                    Ok(ScriptConn {
+                        closed: Some(rx),
+                        keepalive_error: None,
+                    })
+                };
+                let transport = ScriptTransport::new(vec![
+                    dead(),
+                    dead(),
+                    dead(),
+                    Ok(ScriptConn::open_forever()),
+                ]);
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    loopback_entry(),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                for (attempt, retry_in) in [
+                    (1, Duration::from_millis(500)),
+                    (2, Duration::from_secs(1)),
+                    (3, Duration::from_secs(2)),
+                ] {
+                    wait_for_status(&statuses, &host, |s| {
+                        *s == LinkStatus::Backoff {
+                            attempt,
+                            retry_in,
+                            last_error: "connection closed by satellite".to_owned(),
+                        }
+                    })
+                    .await;
+                }
+                wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                assert_eq!(transport.calls.get(), 4);
+
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn supervisor_fails_closed_without_dialing() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let transport = ScriptTransport::new(vec![Ok(ScriptConn { closed: None })]);
+                let transport = ScriptTransport::new(vec![Ok(ScriptConn::open_forever())]);
                 let statuses = HubLinkStatuses::default();
                 let host = host();
                 // Routable QUIC endpoint with no auth material: refused.
+                // Dropping the relay handle up front lets the supervisor's
+                // fail-fast drain loop observe an abandoned relay and exit.
+                let (relay, relay_rx) = relay_pair(&host);
+                drop(relay);
                 run_link(
                     host.clone(),
                     entry("quic://devbox:8788", None, None),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     CancellationToken::new(),
                 )
                 .await;
@@ -1061,6 +1965,46 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn refused_link_fails_relay_commands_fast() {
+        use phux_protocol::wire::frame::{Command, CommandResult, ErrorCode};
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let transport = ScriptTransport::new(vec![]);
+                let statuses = HubLinkStatuses::default();
+                let host = host();
+                let (relay, relay_rx) = relay_pair(&host);
+                let cancel = CancellationToken::new();
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    entry("quic://devbox:8788", None, None),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                // A command through the refused link resolves with a typed
+                // error — no dial, no hang.
+                let result =
+                    tokio::time::timeout(Duration::from_secs(5), relay.command(Command::Upgrade))
+                        .await
+                        .expect("fail fast, not hang");
+                assert!(matches!(
+                    result,
+                    CommandResult::Error {
+                        code: ErrorCode::SatelliteUnreachable,
+                        ..
+                    }
+                ));
+                assert_eq!(transport.calls.get(), 0, "refused link never dials");
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn supervisor_rereads_the_token_file_every_attempt() {
         let local = tokio::task::LocalSet::new();
         local
@@ -1069,16 +2013,13 @@ mod tests {
                 let token_path = dir.path().join("sat.token");
                 std::fs::write(&token_path, "deadbeef\n").expect("write");
 
-                let (close_tx, close_rx) = tokio::sync::oneshot::channel();
-                let transport = ScriptTransport::new(vec![
-                    Ok(ScriptConn {
-                        closed: Some(close_rx),
-                    }),
-                    Ok(ScriptConn { closed: None }),
-                ]);
+                let (close_tx, closable) = ScriptConn::closable();
+                let transport =
+                    ScriptTransport::new(vec![Ok(closable), Ok(ScriptConn::open_forever())]);
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     entry(
@@ -1088,6 +2029,7 @@ mod tests {
                     ),
                     transport.clone(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -1098,7 +2040,7 @@ mod tests {
                 // the drop to be observed (Backoff) before waiting for the
                 // reconnect, or the first Connected status matches again.
                 std::fs::write(&token_path, "c0ffee\n").expect("rotate");
-                close_tx.send("rotated".to_owned()).expect("send");
+                close_tx.send("rotated".to_owned()).await.expect("send");
                 wait_for_status(&statuses, &host, |s| {
                     matches!(s, LinkStatus::Backoff { last_error, .. } if last_error == "rotated")
                 })
@@ -1116,6 +2058,58 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn supervisor_tears_down_a_link_whose_keepalive_fails() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // First connection stays readable forever but its liveness
+                // probe reports the link dead (a silent partition on a WS
+                // link: no FIN/RST, no inbound traffic, idle limit trips).
+                // The supervisor must tear it down and redial rather than
+                // trust `Connected` forever.
+                let transport = ScriptTransport::new(vec![
+                    Ok(ScriptConn::keepalive_fails("satellite sent nothing")),
+                    Ok(ScriptConn::open_forever()),
+                ]);
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    loopback_entry(),
+                    transport.clone(),
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error == "satellite sent nothing"
+                    )
+                })
+                .await;
+                wait_for_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                assert_eq!(transport.calls.get(), 2);
+
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[test]
+    fn ws_idle_error_trips_only_at_the_limit() {
+        assert!(ws_idle_error(Duration::ZERO).is_none());
+        assert!(ws_idle_error(LINK_IDLE_TIMEOUT - Duration::from_secs(1)).is_none());
+        let reason = ws_idle_error(LINK_IDLE_TIMEOUT).expect("at the limit");
+        assert!(reason.contains("idle limit 30s"), "{reason}");
+        assert!(ws_idle_error(LINK_IDLE_TIMEOUT * 2).is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn supervisor_stops_on_cancellation() {
         let local = tokio::task::LocalSet::new();
         local
@@ -1124,11 +2118,13 @@ mod tests {
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 let task = tokio::task::spawn_local(run_link(
                     host.clone(),
                     loopback_entry(),
                     transport,
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
                 wait_for_status(&statuses, &host, |s| {
@@ -1171,11 +2167,13 @@ mod tests {
                 let statuses = HubLinkStatuses::default();
                 let cancel = CancellationToken::new();
                 let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
                 tokio::task::spawn_local(run_link(
                     host.clone(),
                     entry(&format!("ws://127.0.0.1:{}", addr.port()), None, None),
-                    NetLinkTransport,
+                    NetLinkTransport::from_env(),
                     statuses.clone(),
+                    relay_rx,
                     cancel.child_token(),
                 ));
 
@@ -1189,6 +2187,209 @@ mod tests {
 
                 cancel.cancel();
                 server.await.expect("server task");
+            })
+            .await;
+    }
+
+    // --- ssh-stdio integration: the real transport over a stub program ---
+    //
+    // The environment cannot be assumed to have non-interactive `ssh
+    // localhost` (keys, host trust, sshd), so these tests exercise the
+    // REAL `NetLinkTransport` ssh path against a stub program — the same
+    // `$PHUX_SSH` seam an operator uses for an OpenSSH wrapper. The stub
+    // records the argv it was spawned with (proving the shell-free,
+    // `--`-guarded command line end to end) and its exit is the drop
+    // signal, exactly as an exiting ssh would be. The stdio *bridge* half
+    // (bytes actually splicing to a UDS) is exercised in
+    // `crates/phux/tests/stdio_bridge_e2e.rs` against the real binary.
+
+    /// Write an executable stub script and return its path.
+    fn write_stub(dir: &std::path::Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("fake-ssh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+        path
+    }
+
+    fn ssh_entry() -> HubEntry {
+        entry("ssh://me@devbox:2222", None, None)
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_spawns_the_planned_argv_and_treats_exit_as_a_drop() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let argv_file = dir.path().join("argv.txt");
+                let stub = write_stub(
+                    dir.path(),
+                    &format!(
+                        "printf '%s\\n' \"$@\" > {}\necho 'stub bridge refused' >&2\nexit 7",
+                        argv_file.display()
+                    ),
+                );
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error.contains("stub bridge refused")
+                                && last_error.contains('7')
+                    )
+                })
+                .await;
+                cancel.cancel();
+
+                // The stub saw exactly the argv the planner built — one
+                // argument per line, host after `--`, no shell expansion.
+                let recorded = std::fs::read_to_string(&argv_file).expect("argv recorded");
+                let expected: Vec<String> = ssh_argv(Some("me"), "devbox", Some(2222));
+                assert_eq!(
+                    recorded.lines().collect::<Vec<_>>(),
+                    expected.iter().map(String::as_str).collect::<Vec<_>>()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_drains_stderr_past_the_pipe_buffer_without_stalling() {
+        // Regression (phux-v45.9): a remote that emits more than the OS
+        // pipe buffer (~64KiB) to fd 2 must not wedge the link. If the hub
+        // only drained stderr at stdout EOF, this child would block on its
+        // stderr write at ~64KiB and never exit — stdout would never close,
+        // recv_frame would block forever, and the link would sit
+        // `Connected` with no loss signal. The background drainer keeps fd 2
+        // flowing, so the child runs to completion and the bounded tail
+        // still keeps the *end* of the stream (the marker + exit code).
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                // ~200KiB of fd-2 chatter (well past one pipe buffer), then
+                // a marker and a nonzero exit. No stdout: it closes on exit.
+                let stub = write_stub(
+                    dir.path(),
+                    "i=0\n\
+                     while [ \"$i\" -lt 200 ]; do printf '%01024d' 0 >&2; i=$((i + 1)); done\n\
+                     echo 'DRAINED-TO-EOF' >&2\n\
+                     exit 3",
+                );
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                // Reaching Backoff at all proves no stall; the tail keeping
+                // the end proves stderr was drained the whole way to EOF.
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. }
+                            if last_error.contains("DRAINED-TO-EOF")
+                                && last_error.contains('3')
+                    )
+                })
+                .await;
+                cancel.cancel();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_holds_a_live_child_as_connected() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                // The stub bridges nothing but honestly models a live ssh:
+                // it stays up reading stdin (which the hub holds open) and
+                // exits only when the pipe closes or it is killed
+                // (kill_on_drop at cancellation).
+                let stub = write_stub(dir.path(), "exec cat > /dev/null");
+                let transport = NetLinkTransport {
+                    ssh_program: stub.into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                let task = tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+
+                wait_for_real_status(&statuses, &host, |s| *s == LinkStatus::Connected).await;
+                cancel.cancel();
+                tokio::time::timeout(Duration::from_secs(10), task)
+                    .await
+                    .expect("supervisor exits on cancel")
+                    .expect("no panic");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn ssh_transport_missing_program_is_a_failed_attempt_not_a_panic() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let transport = NetLinkTransport {
+                    ssh_program: "/nonexistent/phux-test-no-such-ssh".into(),
+                };
+                let statuses = HubLinkStatuses::default();
+                let cancel = CancellationToken::new();
+                let host = host();
+                let (_relay, relay_rx) = relay_pair(&host);
+                tokio::task::spawn_local(run_link(
+                    host.clone(),
+                    ssh_entry(),
+                    transport,
+                    statuses.clone(),
+                    relay_rx,
+                    cancel.child_token(),
+                ));
+                wait_for_real_status(&statuses, &host, |s| {
+                    matches!(
+                        s,
+                        LinkStatus::Backoff { last_error, .. } if last_error.contains("spawn")
+                    )
+                })
+                .await;
+                cancel.cancel();
             })
             .await;
     }

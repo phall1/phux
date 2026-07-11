@@ -115,7 +115,12 @@ pub(super) struct FrameOutcome {
     /// lifecycle, input-lease holder (`TerminalControl`), or asked-attention
     /// flag (ADR-0035 `Asked`), so the driver must repaint the chrome
     /// (supervisory badge, attention hint, window-tab markers) even though no
-    /// grid content changed. Set ONLY by the `Event` arms.
+    /// grid content changed. Set by the `Event` arms, and (phux-foz.9) by the
+    /// `TerminalOutput` / `TerminalSnapshot` arms when the applied bytes moved
+    /// the pane's OSC 0/2 title — the title feeds the window-tab labels and
+    /// the sidebar's agents section (the only identity signal a plain
+    /// `claude`/`codex` pane emits), and title bytes arrive on the ordinary
+    /// content path that otherwise never refreshes the chrome.
     pub(super) chrome_dirty: bool,
     /// ADR-0040: `true` ⇒ a `phux.agent/v1` record changed for some pane
     /// (a `GET_METADATA` reply or a `METADATA_CHANGED` broadcast). Window
@@ -378,7 +383,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // apply-vs-paint split as the `TerminalOutput` hot path. The
             // `bytes` field counts the replay payload (the dominant term;
             // scrollback is rarely present in the live attach path).
-            let sync_output_active = {
+            let (sync_output_active, title_changed) = {
                 let _apply =
                     tracing::debug_span!("vt_apply", bytes = vt_replay_bytes.len()).entered();
                 // Apply scrollback first (if any), then the visible-state
@@ -387,6 +392,11 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     slot.terminal.vt_write(&sb);
                 }
                 slot.terminal.vt_write(&vt_replay_bytes);
+                // phux-foz.9: a resync snapshot replays the pane's OSC 0/2
+                // title too; diff it so the outcome raises `chrome_dirty`
+                // exactly like the `TerminalOutput` hot path — the window
+                // labels and the sidebar's agents section derive from it.
+                let title_changed = slot.title_changed();
                 let active = slot.update_sync_output(tokio::time::Instant::now());
                 if let Some(since) = prior_sync_output {
                     // A resync snapshot may reset DEC modes in its preamble,
@@ -395,9 +405,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // the publication barrier.
                     slot.sync_output_since = Some(since);
                     slot.sync_output_dirty = true;
-                    true
+                    (true, title_changed)
                 } else {
-                    active
+                    (active, title_changed)
                 }
             };
             if is_focused {
@@ -428,9 +438,25 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // transitions), and a plain `render_at` would skip them,
                     // leaving stale/garbage cells — the attach/reattach/resize
                     // "mangled screen" bug.
-                    let _ =
-                        slot.renderer
-                            .render_at_full(&slot.terminal, out, origin, (rect.w, rect.h));
+                    //
+                    // phux-foz.11: letterbox with the mirror dims, exactly as
+                    // `paint_full_frame` / `paint_focused_pane` do. The
+                    // `safe_resize` above may have left the mirror SMALLER
+                    // than the rect (a resize handshake in flight); painting
+                    // it pinned at the rect origin while every other paint
+                    // path centres it puts the same content at two origins —
+                    // the rapid-switch/control-spam text doubling. When the
+                    // mirror fills or exceeds the rect this is byte-identical
+                    // to the prior `render_at_full`.
+                    let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                    let _ = slot.renderer.render_at_letterboxed(
+                        &slot.terminal,
+                        out,
+                        origin,
+                        (rect.w, rect.h),
+                        mirror,
+                        true,
+                    );
                     // Re-anchor the predict layer in PANE-LOCAL coordinates
                     // (predictions are pane-local; the overlay re-adds the
                     // origin). Feeding the outer-absolute `last_cursor` here
@@ -486,12 +512,18 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
                         // Authoritative snapshot → force a full redraw of the
-                        // pane rect (see the focused branch above).
-                        let _ = slot.renderer.render_at_full(
+                        // pane rect (see the focused branch above), letterboxed
+                        // with the mirror dims so an undersized mirror lands at
+                        // the same centred origin `paint_full_frame` uses
+                        // (phux-foz.11 — see the focused branch).
+                        let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                        let _ = slot.renderer.render_at_letterboxed(
                             &slot.terminal,
                             out,
                             (rect.x, rect.y),
                             (rect.w, rect.h),
+                            mirror,
+                            true,
                         );
                     }
                     // The render above left the host cursor inside the
@@ -528,7 +560,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     }
                 }
             }
-            Ok(FrameOutcome::default())
+            Ok(FrameOutcome {
+                chrome_dirty: title_changed,
+                ..FrameOutcome::default()
+            })
         }
         FrameKind::TerminalOutput {
             terminal_id,
@@ -572,7 +607,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // (`paint_full_frame`, opened inside `paint_focused_pane`)
             // separately. Debug-level + a lazy `bytes` field ⇒ free at the
             // default `phux=info` filter.
-            let sync_output_active = {
+            let (sync_output_active, title_changed) = {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
                 let bar = status_bar.as_ref().map(|p| p.position());
                 let content = content_rect(viewport_dims, bar, sidebar);
@@ -601,7 +636,17 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     }
                 };
                 slot.terminal.vt_write(&bytes);
-                slot.update_sync_output(tokio::time::Instant::now())
+                // phux-foz.9: an OSC 0/2 title rides in these ordinary
+                // output bytes and is the only identity signal a plain
+                // `claude`/`codex` pane emits. Diff it here so the outcome
+                // below can raise `chrome_dirty` — otherwise the sidebar's
+                // agents section (and the window-tab label, phux-efj7)
+                // would go stale until an unrelated chrome event.
+                let title_changed = slot.title_changed();
+                (
+                    slot.update_sync_output(tokio::time::Instant::now()),
+                    title_changed,
+                )
             };
             // The libghostty mirror is now warm even for panes in a
             // non-active window (off-screen invariant). Rendering only
@@ -613,6 +658,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             let Some(active_ls) = workspace.render_window(zoomed.as_ref()) else {
                 return Ok(FrameOutcome {
                     ack,
+                    chrome_dirty: title_changed,
                     ..FrameOutcome::default()
                 });
             };
@@ -723,11 +769,21 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ = slot.renderer.render_at(
+                        // phux-foz.11: letterbox like every other paint path.
+                        // An undersized mirror (resize handshake in flight)
+                        // painted incrementally at the rect origin here, while
+                        // `paint_full_frame` centres the same mirror — dirty
+                        // rows then land offset from the full-frame rows and
+                        // the pane shows doubled text until a full repaint.
+                        // Mirror >= rect degrades to the prior `render_at`.
+                        let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                        let _ = slot.renderer.render_at_letterboxed(
                             &slot.terminal,
                             out,
                             (rect.x, rect.y),
                             (rect.w, rect.h),
+                            mirror,
+                            false,
                         );
                     }
                     // Restore the focused pane's cursor: the render above
@@ -767,6 +823,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             }
             Ok(FrameOutcome {
                 ack,
+                chrome_dirty: title_changed,
                 ..FrameOutcome::default()
             })
         }
@@ -1705,6 +1762,123 @@ mod tests {
         assert!(panes[&pane].sync_output_since.is_none());
         let printable = strip_csi(&String::from_utf8_lossy(&out));
         assert!(printable.contains("half-drawn frame"));
+    }
+
+    /// phux-foz.9: an OSC 0/2 title riding in ordinary `TERMINAL_OUTPUT`
+    /// bytes is the only identity signal a plain `claude`/`codex` pane
+    /// emits — the frame must raise `chrome_dirty` when the title moves so
+    /// the driver refreshes the window labels and the sidebar's agents
+    /// section (the live repro: run `claude` in a pane, the agent row must
+    /// appear without waiting for an unrelated chrome event; after exit,
+    /// the shell's title reset must remove it the same way).
+    #[test]
+    fn output_title_change_marks_chrome_dirty() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out: Vec<u8> = Vec::new();
+
+        let plain = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"just glyphs, no title",
+            1,
+        );
+        assert!(
+            !plain.chrome_dirty,
+            "output that never touches the title must not repaint the chrome"
+        );
+
+        let set = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b]2;\xe2\x9c\xb3 claude\x07",
+            2,
+        );
+        assert!(
+            set.chrome_dirty,
+            "a new OSC 2 title must mark the chrome dirty"
+        );
+
+        let unchanged = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b]2;\xe2\x9c\xb3 claude\x07more glyphs",
+            3,
+        );
+        assert!(
+            !unchanged.chrome_dirty,
+            "re-asserting the same title must not repaint the chrome"
+        );
+
+        let cleared = drive_output_seq(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b]2;\x07",
+            4,
+        );
+        assert!(
+            cleared.chrome_dirty,
+            "clearing the title (the agent exited; the shell reset it) must repaint the chrome"
+        );
+    }
+
+    /// phux-foz.9: the symmetric snapshot path — a resync
+    /// `TERMINAL_SNAPSHOT` replays the pane's title too, so a title the
+    /// client has not seen yet must raise `chrome_dirty` exactly like the
+    /// output hot path, and an unchanged replay must not.
+    #[test]
+    fn snapshot_title_change_marks_chrome_dirty() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out: Vec<u8> = Vec::new();
+
+        let first = drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            80,
+            24,
+            b"\x1b]2;codex\x07resynced",
+            (80, 24),
+        );
+        assert!(
+            first.chrome_dirty,
+            "a snapshot carrying a new title must mark the chrome dirty"
+        );
+
+        let repeat = drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            80,
+            24,
+            b"\x1b]2;codex\x07resynced again",
+            (80, 24),
+        );
+        assert!(
+            !repeat.chrome_dirty,
+            "an unchanged title replay must not repaint the chrome"
+        );
     }
 
     #[test]

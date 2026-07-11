@@ -50,9 +50,7 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
-    #[command(
-        about = "Declare a pane's agent identity (writes the phux.agent/v1 L3 record, ADR-0040)"
-    )]
+    #[command(about = "Declare a pane's agent identity (writes the phux.agent/v1 L3 record)")]
     Set {
         target: Option<String>,
         /// Human-facing agent name (required, non-empty).
