@@ -107,6 +107,16 @@ pub(super) struct PaneSlot {
     /// before the first command finishes or when the shell reported no
     /// code. Projected into the status-bar `exit` widget when focused.
     pub last_exit: Option<i32>,
+    /// phux-foz.9: the OSC 0/2 title as of the last chrome-relevant VT
+    /// apply, mirrored out of [`Self::terminal`] so
+    /// [`Self::title_changed`] can detect a title transition. The title
+    /// is the ONLY identity signal a plain `claude`/`codex` pane emits
+    /// (no `phux.agent/v1` record, no ADR-0035 events), and it arrives
+    /// as ordinary `TERMINAL_OUTPUT` bytes — without this diff the
+    /// sidebar's agents section (and the window-tab labels, phux-efj7)
+    /// would only refresh on an unrelated chrome event. Empty ⇒ no
+    /// title set, matching libghostty's `title()` contract.
+    pub last_title: String,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -148,6 +158,7 @@ impl PaneSlot {
             sync_output_dirty: false,
             cwd: None,
             last_exit: None,
+            last_title: String::new(),
         })
     }
 
@@ -156,6 +167,27 @@ impl PaneSlot {
     /// viewport, or layout already tells us the pane's real dimensions.
     pub(super) fn new() -> Result<Self, AttachError> {
         Self::new_with_size(80, 24)
+    }
+
+    /// phux-foz.9: whether the pane's OSC 0/2 title moved since the last
+    /// call, updating the [`Self::last_title`] mirror. Called after every
+    /// `vt_write` on the content-frame paths (`TERMINAL_OUTPUT` /
+    /// `TERMINAL_SNAPSHOT`), whose outcome sets `chrome_dirty` on `true`:
+    /// window-tab labels and the sidebar's agents section both derive
+    /// from the title (see `window_infos` / `agent_entries`), and title
+    /// bytes flow in ordinary output frames that otherwise never trigger
+    /// a chrome refresh — a plain `claude` pane's row would only appear
+    /// (and, after exit, disappear) on an unrelated event. The compare is
+    /// a length-bounded `str` equality against the mirror, so the
+    /// steady-state per-frame cost is negligible next to the `vt_write`
+    /// that precedes it.
+    pub(super) fn title_changed(&mut self) -> bool {
+        let current = self.terminal.title().unwrap_or_default();
+        if self.last_title == current {
+            return false;
+        }
+        self.last_title = current.to_owned();
+        true
     }
 
     /// Refresh synchronized-output bookkeeping after a VT write. Returns

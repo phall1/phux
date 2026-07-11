@@ -1199,7 +1199,11 @@ undeclared state renders in `dim`). Per pane, in preference order:
    plain `claude` / `codex` CLI panes, which never write a record. The
    name comes from the title token; the state is `blocked` while the
    pane's §8.6 asked flag is up, else `idle`. Screen text is never
-   scanned on the render path.
+   scanned on the render path. Title changes refresh the chrome
+   directly: the client diffs each pane's title as content frames
+   apply, so the row appears when the agent sets its title and
+   disappears when the shell resets it on exit — no unrelated chrome
+   event needed.
 
 Panes matching neither source produce no row — the section lists
 agents, not shells. When no pane matches, the section is omitted
