@@ -575,7 +575,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         && let Some(resolved) = bar_click_action(ctx.status_bar, cell_x)
                     {
                         tracing::debug!(action = %resolved.action, "status bar: tab click dispatched");
-                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
                         if apply_action_effects(
                             effects,
                             out,
@@ -4922,6 +4922,8 @@ mod tests {
         let mut mouse_optout: std::collections::HashSet<TerminalId> =
             std::collections::HashSet::new();
         let mut reload_request = false;
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
@@ -4941,6 +4943,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                sidebar_agents: &[],
                 bar: Some(position),
                 status_bar: with_painter.then_some(&painter),
                 drag: &mut drag,
@@ -4949,6 +4952,8 @@ mod tests {
                 plugin_panes: &[],
                 plugin_tx: None,
                 reload_request: &mut reload_request,
+                agent_meta: &fleet_agent_meta,
+                vcs: &mut fleet_vcs,
             };
             dispatch_input_events(
                 &mut out,
