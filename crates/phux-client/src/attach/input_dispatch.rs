@@ -5576,7 +5576,7 @@ mod tests {
 
     // ---- phux-51n6.1: predictive-echo full-screen-app (alt-screen) gate ----
 
-    use crate::predict::{PredictionOutcome, PredictionState, PredictiveConfig};
+    use crate::predict::{PredictionState, PredictiveConfig};
 
     /// A fresh shell-prompt pane (main screen) is not in app mode: the gate
     /// must let prediction through.
@@ -5614,43 +5614,133 @@ mod tests {
         );
     }
 
-    /// The load-bearing wiring: reproduce the dispatch-site gate condition
-    /// (`predict.is_enabled() && !terminal_in_alt_screen(slot)`) and prove a
-    /// keystroke is predicted at a shell prompt but skipped in a full-screen
-    /// app — no ghost queued in app mode, no reliance on the reactive
-    /// auto-back-off.
-    #[test]
-    fn key_predicted_at_prompt_but_gated_in_app_mode() {
-        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
-        let key = KeyEvent {
-            action: KeyAction::Press,
-            key: PhysicalKey::A,
-            mods: ModSet::empty(),
-            consumed_mods: ModSet::empty(),
-            composing: false,
-            text: Some("a".to_owned()),
-            unshifted_codepoint: Some(u32::from('a')),
+    /// Drive the REAL [`dispatch_input_events`] with one printable keystroke
+    /// against a focused pane, returning how many predictions were queued
+    /// afterward. When `alt_screen` is set, the pane's mirror is switched to
+    /// the alternate screen (`?1049h`) before dispatch, so the phux-51n6.1
+    /// app-mode gate must suppress the prediction.
+    ///
+    /// This exercises the true dispatch-site condition
+    /// (`predict.is_enabled() && ... && !terminal_in_alt_screen(slot)`) end to
+    /// end rather than re-stating it inline — so a refactor that silently drops
+    /// the `&& !terminal_in_alt_screen(slot)` clause turns the alt-screen case
+    /// red instead of passing on a private copy of the predicate.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn predictions_after_key_dispatch(alt_screen: bool) -> usize {
+        use phux_protocol::input::key::PhysicalKey;
+
+        let theme = Theme::default();
+        let mut overlays = OverlayState::new();
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        // Enabled predictor, fresh (un-suspended) — a printable insert at the
+        // origin cursor is predictable, so the only thing standing between the
+        // keystroke and a queued ghost is the app-mode gate under test.
+        let mut predict = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        // The focused pane's mirror carries the alt-screen signal the gate
+        // reads via `terminal.mode()`. A fresh pane sits on the main screen
+        // (cooked shell prompt); `?1049h` puts it in a full-screen app.
+        let mut slot = PaneSlot::new().expect("slot");
+        if alt_screen {
+            slot.terminal.vt_write(b"\x1b[?1049h");
+        }
+        panes.insert(tid(1), slot);
+
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
+        let fleet_agent_meta = HashMap::new();
+        let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
+        let mut ctx = DispatchCtx {
+            // No resolver: every key forwards straight through to the pane,
+            // past the predict layer — no keybinding interception to muddy
+            // the gate assertion.
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
+            bar: None,
+            status_bar: None,
+            drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+            agent_meta: &fleet_agent_meta,
+            vcs: &mut fleet_vcs,
         };
 
-        // Shell prompt (main screen): the gate is open, so the enabled
-        // predictor queues a ghost.
-        let prompt = PaneSlot::new().expect("slot");
-        let mut predict = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
-        let gated = predict.is_enabled() && !terminal_in_alt_screen(&prompt);
-        assert!(gated, "prompt: gate open");
-        let outcome = predict.predict_key(&key);
-        assert_eq!(outcome, PredictionOutcome::Predicted);
-        assert_eq!(predict.pending_len(), 1, "prompt: one ghost queued");
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            vec![press(PhysicalKey::A, Some("a"))],
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
 
-        // Full-screen app (alt screen): the gate closes before predict_key is
-        // ever reached, so nothing is queued — no ghost to reconcile away.
-        let mut app = PaneSlot::new().expect("slot");
-        app.terminal.vt_write(b"\x1b[?1049h");
-        let predict2 = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
-        let gated2 = predict2.is_enabled() && !terminal_in_alt_screen(&app);
-        assert!(!gated2, "app mode: gate closed — predict_key not called");
-        // The dispatch site only calls predict_key when the gate is open, so
-        // in app mode the queue stays empty.
-        assert_eq!(predict2.pending_len(), 0, "app mode: no ghost queued");
+        predict.pending_len()
+    }
+
+    /// Cooked shell prompt (main screen): driving the real dispatch path with
+    /// a printable key queues exactly one speculative ghost.
+    #[tokio::test]
+    async fn dispatch_predicts_key_at_cooked_prompt() {
+        assert_eq!(
+            predictions_after_key_dispatch(false).await,
+            1,
+            "main-screen prompt: the keystroke echoes speculatively"
+        );
+    }
+
+    /// Full-screen app (alt screen via `?1049h`, as vim/nvim/less/an agent TUI
+    /// do): the same real dispatch path queues nothing — the app-mode gate
+    /// suppresses the prediction before `predict_key_with_grid` is reached.
+    /// Dropping the `!terminal_in_alt_screen(slot)` clause fails this.
+    #[tokio::test]
+    async fn dispatch_gates_prediction_in_alt_screen_app() {
+        assert_eq!(
+            predictions_after_key_dispatch(true).await,
+            0,
+            "alt-screen app: the gate suppresses the ghost, no back-off needed"
+        );
     }
 }
