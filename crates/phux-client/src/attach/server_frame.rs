@@ -428,9 +428,25 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // transitions), and a plain `render_at` would skip them,
                     // leaving stale/garbage cells — the attach/reattach/resize
                     // "mangled screen" bug.
-                    let _ =
-                        slot.renderer
-                            .render_at_full(&slot.terminal, out, origin, (rect.w, rect.h));
+                    //
+                    // phux-foz.11: letterbox with the mirror dims, exactly as
+                    // `paint_full_frame` / `paint_focused_pane` do. The
+                    // `safe_resize` above may have left the mirror SMALLER
+                    // than the rect (a resize handshake in flight); painting
+                    // it pinned at the rect origin while every other paint
+                    // path centres it puts the same content at two origins —
+                    // the rapid-switch/control-spam text doubling. When the
+                    // mirror fills or exceeds the rect this is byte-identical
+                    // to the prior `render_at_full`.
+                    let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                    let _ = slot.renderer.render_at_letterboxed(
+                        &slot.terminal,
+                        out,
+                        origin,
+                        (rect.w, rect.h),
+                        mirror,
+                        true,
+                    );
                     // Re-anchor the predict layer in PANE-LOCAL coordinates
                     // (predictions are pane-local; the overlay re-adds the
                     // origin). Feeding the outer-absolute `last_cursor` here
@@ -486,12 +502,18 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
                         // Authoritative snapshot → force a full redraw of the
-                        // pane rect (see the focused branch above).
-                        let _ = slot.renderer.render_at_full(
+                        // pane rect (see the focused branch above), letterboxed
+                        // with the mirror dims so an undersized mirror lands at
+                        // the same centred origin `paint_full_frame` uses
+                        // (phux-foz.11 — see the focused branch).
+                        let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                        let _ = slot.renderer.render_at_letterboxed(
                             &slot.terminal,
                             out,
                             (rect.x, rect.y),
                             (rect.w, rect.h),
+                            mirror,
+                            true,
                         );
                     }
                     // The render above left the host cursor inside the
@@ -723,11 +745,21 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
                     if let Some(slot) = panes.get_mut(&terminal_id) {
-                        let _ = slot.renderer.render_at(
+                        // phux-foz.11: letterbox like every other paint path.
+                        // An undersized mirror (resize handshake in flight)
+                        // painted incrementally at the rect origin here, while
+                        // `paint_full_frame` centres the same mirror — dirty
+                        // rows then land offset from the full-frame rows and
+                        // the pane shows doubled text until a full repaint.
+                        // Mirror >= rect degrades to the prior `render_at`.
+                        let mirror = super::paint::mirror_dims(&slot.terminal, rect);
+                        let _ = slot.renderer.render_at_letterboxed(
                             &slot.terminal,
                             out,
                             (rect.x, rect.y),
                             (rect.w, rect.h),
+                            mirror,
+                            false,
                         );
                     }
                     // Restore the focused pane's cursor: the render above
