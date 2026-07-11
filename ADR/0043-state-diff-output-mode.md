@@ -4,7 +4,7 @@ stability: stable
 last-reviewed: 2026-07-11
 ---
 
-# 0042 — State-diff output mode and loss-tolerant reference advance
+# 0043 — State-diff output mode and loss-tolerant reference advance
 
 **TL;DR.** The negotiated `OutputMode::StateSync` emitter (ADR-0018 made
 concrete) synthesizes the minimum-VT transition per consumer per tick,

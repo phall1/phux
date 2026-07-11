@@ -355,7 +355,7 @@ the consumer's reference grid to the live grid, synthesized once per tick and
 RTT-paced, so a runaway producer bounds the consumer's re-parse *rate* rather
 than streaming every intermediate frame; the resulting grid is equivalent to
 what the `Raw` byte stream would produce (ADR-0018,
-[ADR-0042](../../ADR/0042-state-diff-output-mode.md)). Whether the server
+[ADR-0043](../../ADR/0043-state-diff-output-mode.md)). Whether the server
 advances a consumer's reference **on emit** (the emit-once model, correct on a
 reliable ordered transport) or **on `FRAME_ACK`** (the loss-tolerant model,
 which re-diffs a dropped/un-acked frame against the last-acked reference so it
