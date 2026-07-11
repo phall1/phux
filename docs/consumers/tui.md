@@ -821,6 +821,11 @@ Recognized slots:
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
 | `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint, fleet-dashboard hot rows) |
+| `sidebar_section`| dark gray   | Sidebar `spaces` / `agents` section headers |
+| `agent_idle`     | `#94a3b8`   | Sidebar agent row in the `idle` state      |
+| `agent_working`  | `#86efac`   | Sidebar agent row in the `working` state   |
+| `agent_blocked`  | `#fbbf24`   | Sidebar agent row in the `blocked` state   |
+| `agent_done`     | `#60a5fa`   | Sidebar agent row in the `done` state      |
 
 ```toml
 [theme]
@@ -1158,22 +1163,51 @@ The new layout broadcasts to other attached clients via `SET_METADATA`
 ### 6.4 Window sidebar
 
 > **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`;
-> interactive per `phux-fce4`).
+> interactive per `phux-fce4`; sectioned + agent-aware per `phux-foz.9`).
 
-`[sidebar]` docks a vertical window strip on the left (default) or
-right edge; `toggle-sidebar` (`C-a b`) flips it at runtime. Panes tile
-into the remaining content rect, so the strip never overlaps content.
+`[sidebar]` docks a vertical strip on the left (default) or right edge;
+`toggle-sidebar` (`C-a b`) flips it at runtime, and so does clicking the
+collapse chevron in the strip's bottom corner. Panes tile into the
+remaining content rect, so the strip never overlaps content.
 
-Each window occupies a fixed **two-row block**, top to bottom in
+The strip is laid out herdr-style in two labelled sections, headed by
+muted lowercase headers (the `sidebar_section` theme slot):
+
+**`spaces`** — one fixed **two-row block** per window, top to bottom in
 `select-window` index order:
 
-- **Name row.** The window's display label (agent record, OSC title, or
-  stored name — same resolution as the status-bar tab strip), with the
-  active-window marker and the §8.6 attention `!`.
+- **Name row.** A status dot (filled + `accent` for the active window,
+  hollow + `dim` otherwise, `attention` amber when a pane in the window
+  is waiting on a human) followed by the window's bold display label
+  (agent record, OSC title, or stored name — same resolution as the
+  status-bar tab strip), plus the §8.6 attention `!`.
 - **Branch row.** The VCS branch of the window's focused pane, dim and
   nested under the label (`main`, a `wave2/...` branch, or a short
   commit hash for a detached HEAD). Blank when the pane's working
   directory is not inside a git repository.
+
+**`agents`** — one row per agent-running pane: a lifecycle glyph, the
+window's stored name, and `state - agent-name` (e.g. `idle - claude`,
+`working - merge-queue-w5`), colored by the `agent_idle` /
+`agent_working` / `agent_blocked` / `agent_done` theme slots (an
+undeclared state renders in `dim`). Per pane, in preference order:
+
+1. **The structured `phux.agent/v1` record** (ADR-0040), when the pane
+   declares one — name and state come straight from the record, exactly
+   as `phux agent set` wrote them.
+2. **The OSC-title identity heuristic** — the compatibility path for
+   plain `claude` / `codex` CLI panes, which never write a record. The
+   name comes from the title token; the state is `blocked` while the
+   pane's §8.6 asked flag is up, else `idle`. Screen text is never
+   scanned on the render path.
+
+Panes matching neither source produce no row — the section lists
+agents, not shells. When no pane matches, the section is omitted
+entirely. Getting first-class rows for CLI agents without the heuristic
+means something has to write the record: an agent-tools integration (a
+wrapper or hook that runs `phux agent set` when the agent starts and
+updates state as it works) upgrades the same pane from the fallback row
+to declared name + live lifecycle with no sidebar change.
 
 Branch inference is **client-local and read-only**: the pane's working
 directory (carried by the `ATTACHED` snapshot) is walked up to the
@@ -1183,21 +1217,24 @@ subprocess, and nothing added to the wire. The cache re-validates on a
 short TTL keyed by `HEAD`'s mtime, so a `git switch` shows up on the
 next chrome refresh without stat storms.
 
-The strip's last two rows are **interactive affordances** (`phux-fce4`),
-and the window blocks are click targets. Every sidebar click commits the
-same `ResolvedAction` a keybinding or palette row would — one `run_action`
-dispatch path, no bespoke click semantics:
+The strip's last two rows are the bottom-anchored **interactive
+affordances** (`phux-fce4`), with the collapse chevron in the bottom
+corner cell; window blocks and agent rows are click targets too. Every
+sidebar click commits the same `ResolvedAction` a keybinding or palette
+row would — one `run_action` dispatch path, no bespoke click semantics:
 
 | Target                      | Committed action                       |
 |-----------------------------|----------------------------------------|
 | A window block (either row) | `select-window { index }`              |
+| An agent row                | `select-window { index }` for the window holding the agent's pane |
 | `+ new`                     | `new-window`                           |
 | `= menu`                    | `command-palette` (the session/plugin menu; `new-session` lives in its Session group) |
+| The collapse chevron        | `toggle-sidebar`                       |
 
 Pointer events over the strip never leak into pane routing: presses on
-blank rows or the separator column are consumed and dropped. The same
-targets stay keyboard-reachable through their actions (`C-a c`,
-`C-a :`, `C-a 0`–`9`).
+section headers, blank rows, or the separator column are consumed and
+dropped. The same targets stay keyboard-reachable through their actions
+(`C-a c`, `C-a :`, `C-a b`, `C-a 0`–`9`).
 
 ---
 
@@ -1228,8 +1265,10 @@ the pointer over a divider whenever the inner program has no mouse mode.
 |                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar slot | Slot-defined; default no-op           |
-| Click on a sidebar row   | Select that window; `+ new` / `= menu`|
-|                          | run their actions (§6.4)              |
+| Click on a sidebar row   | Select that window (window blocks and |
+|                          | agent rows); `+ new` / `= menu` / the |
+|                          | collapse chevron run their actions    |
+|                          | (§6.4)                                |
 
 Only divider cells change meaning. Every event inside a pane's rectangle
 is forwarded to that pane with pane-local coordinates, so an inner TUI

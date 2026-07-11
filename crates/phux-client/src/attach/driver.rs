@@ -56,10 +56,12 @@ use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
 use super::plugin_panes;
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
 use super::server_frame::{AgentMetaIndex, handle_server_frame};
-use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
+use crate::agent_meta::{
+    AgentAttention, AgentMetaState, AgentRecord, TERMINAL_AGENT_KEY, agent_name_from_title,
+};
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
-use crate::render::chrome::sidebar::SidebarPainter;
+use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter};
 use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
@@ -322,6 +324,9 @@ fn refresh_window_chrome(
         changed |= sb.set_last_exit(focused.and_then(|slot| slot.last_exit));
     }
     changed |= sidebar_painter.set_windows(windows);
+    // phux-foz.9: the sidebar's agents section — one row per agent-running
+    // pane, sourced from the ADR-0040 records with the OSC-title fallback.
+    changed |= sidebar_painter.set_agents(agent_entries(workspace, panes, agent_meta));
     changed
 }
 
@@ -981,6 +986,9 @@ pub async fn run_headless_rendered(
     // composited frame shows the sidebar tabs when `[sidebar]` is enabled.
     let mut sidebar_painter = SidebarPainter::new(sidebar_theme);
     sidebar_painter.set_windows(windows);
+    // phux-foz.9: and the agents section, from the same record index +
+    // title fallback a live attach renders.
+    sidebar_painter.set_agents(agent_entries(&workspace, &panes, &agent_meta.records));
 
     // Compose the assembled frame against the render layout (honoring zoom).
     let layout_state = workspace.render_window(zoomed.as_ref()).map_or_else(
@@ -1965,6 +1973,10 @@ async fn main_loop<W: super::RenderSink>(
                     ),
                     viewport_dims,
                 );
+                // phux-foz.9: the agents-section row -> window mapping,
+                // snapshotted from the strip painter so a click on an
+                // agent row hit-tests against exactly what was painted.
+                let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -1983,6 +1995,7 @@ async fn main_loop<W: super::RenderSink>(
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    sidebar_agents: &sidebar_agent_rows,
                     bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
@@ -2621,6 +2634,8 @@ async fn main_loop<W: super::RenderSink>(
                     ),
                     viewport_dims,
                 );
+                // phux-foz.9: same agents-row snapshot as the stdin arm.
+                let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
@@ -2639,6 +2654,7 @@ async fn main_loop<W: super::RenderSink>(
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
+                    sidebar_agents: &sidebar_agent_rows,
                     bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
@@ -3259,6 +3275,73 @@ fn window_infos(
             }
         })
         .collect()
+}
+
+/// phux-foz.9: build the sidebar's agents-section entries — one per
+/// agent-running pane, every window's leaves in display order.
+///
+/// Identity + state per pane, in preference order:
+///
+/// 1. **The structured `phux.agent/v1` record** (ADR-0040), when the pane
+///    declares one: name and state come straight from the record, and the
+///    row carries attention when the record's effective attention is high
+///    or the pane's ADR-0035 asked flag is up.
+/// 2. **The OSC-title identity heuristic**
+///    ([`agent_name_from_title`]) — the compatibility path for plain
+///    `claude` / `codex` CLI panes, which never call `phux agent set` and
+///    so never write a record. State is inferred from the only structured
+///    signal the client tracks per pane: the ADR-0035 asked flag maps to
+///    `blocked` (the agent is waiting on a human), otherwise `idle` — the
+///    same "no blocking cue found" default `phux agent`'s detector uses
+///    for a quiet screen, without scanning screen text on the render path.
+///
+/// A pane matching neither produces no row: the agents section lists
+/// agents, not shells.
+fn agent_entries(
+    workspace: &Workspace,
+    panes: &HashMap<TerminalId, PaneSlot>,
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
+) -> Vec<AgentEntry> {
+    let mut entries = Vec::new();
+    for (i, w) in workspace.windows.iter().enumerate() {
+        let leaves = w
+            .state
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        for id in &leaves {
+            let asked = panes.get(id).is_some_and(|slot| slot.attention);
+            if let Some(record) = agent_meta.get(id) {
+                entries.push(AgentEntry {
+                    window: i,
+                    window_name: w.name.clone(),
+                    name: record.name.clone(),
+                    state: record.state,
+                    attention: asked || record.effective_attention() == AgentAttention::High,
+                });
+                continue;
+            }
+            let title_name = panes
+                .get(id)
+                .and_then(|slot| slot.terminal.title().ok())
+                .and_then(agent_name_from_title);
+            if let Some(name) = title_name {
+                entries.push(AgentEntry {
+                    window: i,
+                    window_name: w.name.clone(),
+                    name: name.to_owned(),
+                    state: if asked {
+                        AgentMetaState::Blocked
+                    } else {
+                        AgentMetaState::Idle
+                    },
+                    attention: asked,
+                });
+            }
+        }
+    }
+    entries
 }
 
 /// phux-foz.1: clear a pane's asked-attention flag because the user sent it
@@ -4505,6 +4588,96 @@ mod tests {
             &mut VcsIndex::default(),
         );
         assert_eq!(infos[0].name, "claude task");
+    }
+
+    /// phux-foz.9: a declared `phux.agent/v1` record produces an agents-row
+    /// entry with the record's name + state; the pane's OSC title (set to a
+    /// conflicting agent name here) is never consulted when a record exists.
+    #[test]
+    fn agent_entries_prefer_the_declared_record() {
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;codex resume\x07");
+        panes.insert(id.clone(), slot);
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "merge-queue-w5".to_owned(),
+                state: AgentMetaState::Working,
+                ..AgentRecord::default()
+            },
+        );
+
+        let entries = agent_entries(&workspace, &panes, &records);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].window, 0);
+        assert_eq!(
+            entries[0].window_name, "1",
+            "stored window name, herdr's workspace column"
+        );
+        assert_eq!(entries[0].name, "merge-queue-w5");
+        assert_eq!(entries[0].state, AgentMetaState::Working);
+        assert!(!entries[0].attention);
+    }
+
+    /// phux-foz.9: no record => the OSC-title heuristic identifies plain
+    /// `claude` / `codex` CLI panes; state is `idle` until the pane's
+    /// ADR-0035 asked flag flips it to `blocked`. A pane matching neither
+    /// source produces no row.
+    #[test]
+    fn agent_entries_fall_back_to_the_title_heuristic() {
+        let claude = TerminalId::local(1);
+        let shell = TerminalId::local(2);
+        let mut workspace = Workspace::single(claude.clone());
+        workspace.add_window("scratch".to_owned(), shell.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut claude_slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        claude_slot
+            .terminal
+            .vt_write(b"\x1b]2;Claude Code - ~/src/phux\x07");
+        panes.insert(claude.clone(), claude_slot);
+        let mut shell_slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        shell_slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
+        panes.insert(shell, shell_slot);
+
+        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        assert_eq!(entries.len(), 1, "the plain shell pane must not list");
+        assert_eq!(entries[0].name, "claude");
+        assert_eq!(entries[0].state, AgentMetaState::Idle);
+        assert!(!entries[0].attention);
+
+        // The asked flag (ADR-0035) is the one structured state signal the
+        // fallback trusts: it flips the row to blocked + attention.
+        panes.get_mut(&claude).expect("slot").attention = true;
+        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        assert_eq!(entries[0].state, AgentMetaState::Blocked);
+        assert!(entries[0].attention);
+    }
+
+    /// phux-foz.9: a record declaring (or deriving) high attention marks
+    /// the entry even without the asked flag.
+    #[test]
+    fn agent_entries_carry_record_attention() {
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), PaneSlot::new_with_size(80, 24).expect("slot"));
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "reviewer".to_owned(),
+                // Blocked derives high attention when none is declared.
+                state: AgentMetaState::Blocked,
+                ..AgentRecord::default()
+            },
+        );
+
+        let entries = agent_entries(&workspace, &panes, &records);
+        assert!(entries[0].attention);
     }
 
     #[test]

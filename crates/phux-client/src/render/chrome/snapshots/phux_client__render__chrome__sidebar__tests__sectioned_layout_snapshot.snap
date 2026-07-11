@@ -1,0 +1,21 @@
+---
+source: crates/phux-client/src/render/chrome/sidebar.rs
+assertion_line: 860
+expression: out
+---
+spaces                 │
+● phux                 │
+  main                 │
+○ scratch              │
+                       │
+                       │
+agents                 │
+○ phux idle - claude   │
+● scra… blocked - codex│
+                       │
+                       │
+                       │
+                       │
+                       │
+  + new                │
+  = menu               ‹

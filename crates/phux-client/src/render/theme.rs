@@ -22,6 +22,11 @@
 //!   `accent` when a theme wants them to diverge.
 //! - [`section_header`] — section headings inside the help modal.
 //! - [`error`] — error / alarm text.
+//! - [`sidebar_section`] — the sidebar's muted `spaces` / `agents`
+//!   section headers (phux-foz.9).
+//! - [`agent_idle`] / [`agent_working`] / [`agent_blocked`] /
+//!   [`agent_done`] — agent lifecycle state colors in the sidebar's
+//!   agents section (phux-foz.9).
 //!
 //! [`accent`]: Theme::accent
 //! [`chord`]: Theme::chord
@@ -31,6 +36,11 @@
 //! [`title`]: Theme::title
 //! [`section_header`]: Theme::section_header
 //! [`error`]: Theme::error
+//! [`sidebar_section`]: Theme::sidebar_section
+//! [`agent_idle`]: Theme::agent_idle
+//! [`agent_working`]: Theme::agent_working
+//! [`agent_blocked`]: Theme::agent_blocked
+//! [`agent_done`]: Theme::agent_done
 //!
 //! ## Overrides
 //!
@@ -90,6 +100,19 @@ pub struct Theme {
     /// status-bar hint painted when an agent in a pane is waiting on a
     /// human answer (ADR-0035 `AgentEvent::Asked`).
     pub attention: Color,
+    /// Sidebar section headers (phux-foz.9): the muted lowercase
+    /// `spaces` / `agents` headings of the herdr-shaped sidebar.
+    pub sidebar_section: Color,
+    /// Agent lifecycle coloring (phux-foz.9): an `idle` agent row's
+    /// glyph + state text in the sidebar's agents section.
+    pub agent_idle: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `working` agent row.
+    pub agent_working: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `blocked` agent row
+    /// (waiting on a human).
+    pub agent_blocked: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `done` agent row.
+    pub agent_done: Color,
 }
 
 impl Default for Theme {
@@ -117,6 +140,16 @@ impl Default for Theme {
             // Amber: reads as "needs you" without colliding with `error`
             // red or the lime `accent`.
             attention: Color::Rgb(251, 191, 36),
+            // phux-foz.9: sidebar section headers read as muted chrome,
+            // same register as `dim`.
+            sidebar_section: Color::DarkGray,
+            // phux-foz.9: agent lifecycle colors. Idle is a muted slate
+            // ("nothing needs you"), working the green of live progress,
+            // blocked the attention amber, done a settled blue.
+            agent_idle: Color::Rgb(148, 163, 184),
+            agent_working: Color::Rgb(134, 239, 172),
+            agent_blocked: Color::Rgb(251, 191, 36),
+            agent_done: Color::Rgb(96, 165, 250),
         }
     }
 }
@@ -170,6 +203,11 @@ impl Theme {
             "selection_fg" => Some(&mut self.selection_fg),
             "selection_bg" => Some(&mut self.selection_bg),
             "attention" => Some(&mut self.attention),
+            "sidebar_section" => Some(&mut self.sidebar_section),
+            "agent_idle" => Some(&mut self.agent_idle),
+            "agent_working" => Some(&mut self.agent_working),
+            "agent_blocked" => Some(&mut self.agent_blocked),
+            "agent_done" => Some(&mut self.agent_done),
             _ => None,
         }
     }
@@ -213,6 +251,31 @@ mod tests {
         assert_eq!(t.selection_bg, Color::Indexed(240));
         // phux-foz.1: attention chrome for the agent-asked (ADR-0035) badge.
         assert_eq!(t.attention, Color::Rgb(251, 191, 36));
+        // phux-foz.9: sidebar section headers + agent lifecycle colors.
+        assert_eq!(t.sidebar_section, Color::DarkGray);
+        assert_eq!(t.agent_idle, Color::Rgb(148, 163, 184));
+        assert_eq!(t.agent_working, Color::Rgb(134, 239, 172));
+        assert_eq!(t.agent_blocked, Color::Rgb(251, 191, 36));
+        assert_eq!(t.agent_done, Color::Rgb(96, 165, 250));
+    }
+
+    /// phux-foz.9: every sidebar/agent slot is config-overridable like the
+    /// rest — unknown-slot warnings would otherwise silently eat them.
+    #[test]
+    fn sidebar_and_agent_slots_are_overridable() {
+        let t = Theme::from_cfg(&cfg(&[
+            ("sidebar_section", "#6c7086"),
+            ("agent_idle", "white"),
+            ("agent_working", "green"),
+            ("agent_blocked", "red"),
+            ("agent_done", "blue"),
+        ]));
+        assert_eq!(t.sidebar_section, Color::Rgb(0x6c, 0x70, 0x86));
+        assert_eq!(t.agent_idle, Color::White);
+        assert_eq!(t.agent_working, Color::Green);
+        assert_eq!(t.agent_blocked, Color::Red);
+        assert_eq!(t.agent_done, Color::Blue);
+        assert_eq!(t.accent, Theme::default().accent);
     }
 
     #[test]

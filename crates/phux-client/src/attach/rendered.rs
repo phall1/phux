@@ -376,11 +376,20 @@ mod tests {
             sep.contains('│'),
             "sidebar separator must sit at the strip's last column (19); got {sep:?}"
         );
-        let strip_text: String = (0..19)
+        // Row 0 carries the `spaces` section header (phux-foz.9); the
+        // first window's name row is row 1.
+        let header_text: String = (0..19)
             .filter_map(|c| enabled.cell(0, c).map(|cell| cell.grapheme.clone()))
             .collect();
         assert!(
-            strip_text.contains('e') && strip_text.contains('r'),
+            header_text.contains("spaces"),
+            "the spaces header must top the strip; got {header_text:?}"
+        );
+        let strip_text: String = (0..19)
+            .filter_map(|c| enabled.cell(1, c).map(|cell| cell.grapheme.clone()))
+            .collect();
+        assert!(
+            strip_text.contains("editor"),
             "active window label 'editor' must paint into the strip's text columns; got {strip_text:?}"
         );
 
