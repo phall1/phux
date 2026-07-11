@@ -925,6 +925,13 @@ async fn handle_satellite_command(
                                 // Stamped with the issue-order token by
                                 // `command_subscribing` at enqueue.
                                 seq: 0,
+                                // Only ATTACH_TERMINAL opens a content stream
+                                // with a return-leg TERMINAL_SNAPSHOT, so only
+                                // it gates deltas until that snapshot lands
+                                // (phux-v45.14). SUBSCRIBE_TERMINAL_EVENTS
+                                // carries no snapshot; gating it would strand
+                                // its EVENT stream.
+                                awaits_snapshot: matches!(command, Command::AttachTerminal { .. }),
                             },
                         )
                         .await
@@ -1046,6 +1053,16 @@ fn notify_satellite_lease_seized(
     let frame = FrameKind::Event {
         terminal: Some(phux_protocol::ids::TerminalId::satellite(host.clone(), id)),
         event: AgentEvent::TerminalControl {
+            // phux-v45.14 sub-finding (b): a Frozen satellite pane would be
+            // mis-reported as Running here. The hub keeps no cheaply-readable
+            // per-satellite-pane lifecycle at this SEIZE path — `SatelliteLease`
+            // carries only the holder and its mailbox, and the aggregate view
+            // is a round-trip away — so `Running` is the pragmatic default.
+            // The event's load-bearing field for the evicted holder is the
+            // `Seized` action + `input_holder` handoff, not the lifecycle;
+            // the holder re-renders locked state either way, and a Frozen pane
+            // reconciles on its next TERMINAL_CONTROL. Revisit if the hub
+            // starts tracking satellite pane lifecycle locally.
             lifecycle: TerminalLifecycle::Running,
             exit_status: None,
             input_holder: Some(wire_client_id(new_holder)),
