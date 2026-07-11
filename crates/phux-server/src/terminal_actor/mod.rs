@@ -2221,9 +2221,14 @@ impl TerminalActor {
         }
 
         // Poll every snapshotted group, not just the shell child: the shell can
-        // exit while a foreground job remains alive.
+        // exit while a foreground job remains alive. Reap the shell as it exits
+        // so its zombie does not keep the shell process group looking alive for
+        // the entire grace period.
         let deadline = tokio::time::Instant::now() + PANE_KILL_GRACE;
         while tokio::time::Instant::now() < deadline {
+            if let Err(err) = pty.child.try_wait() {
+                debug!(?err, "try_wait during pane-kill grace failed");
+            }
             if groups
                 .iter()
                 .all(|&group| matches!(killpg(group, None), Err(Errno::ESRCH)))
