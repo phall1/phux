@@ -87,6 +87,13 @@ pub(super) struct PaneSlot {
     /// "the wheel"), or `None` when the pane is `Open`. Compared against the
     /// driver's own `ClientId` to render "you" vs another client.
     pub input_holder: Option<ClientId>,
+    /// `true` while the client-local viewport is (possibly) scrolled up into
+    /// scrollback — set by wheel / copy-mode scrolls, cleared when a key press
+    /// headed for the pane snaps the viewport back to the live screen (tmux
+    /// behavior). Without the snap, a scrolled viewport stays pinned in
+    /// scrollback forever and the pane looks frozen: new output (e.g. the
+    /// shell prompt after a TUI app exits) lands below the visible rows.
+    pub viewport_scrolled: bool,
     /// phux-foz.1: `true` when an agent in this pane is waiting on a human
     /// answer. Set by an inbound ADR-0035 `AgentEvent::Asked`; cleared when
     /// the user sends key/paste input to the pane (see
@@ -154,6 +161,7 @@ impl PaneSlot {
             // these — a pane that exists before its control state is benign.
             lifecycle: TerminalLifecycle::Running,
             input_holder: None,
+            viewport_scrolled: false,
             attention: false,
             sync_output_since: None,
             sync_output_dirty: false,

@@ -2,14 +2,17 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": "bd prime --hook-json",
-            "type": "command"
+            "type": "command",
+            "command": "bd prime --hook-json"
           }
-        ],
-        "matcher": ""
+        ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "ponytail@ponytail": true
   }
 }
