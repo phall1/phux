@@ -9,21 +9,29 @@
 //! dispatch path. Zero new wire surface (ADR-0030): this module is a pure
 //! client-side projection of state the client already receives.
 //!
-//! ## Honest scope: what the attach stream carries
+//! ## Foreign sessions: lazy per-pane query, no new wire (phux-jpqd)
 //!
-//! Detailed pane rows exist only for the **attached** session. The
-//! `ATTACHED` snapshot's session graph
+//! The `ATTACHED` snapshot's session graph
 //! ([`phux_protocol::wire::info::SessionInfo`]) describes *other* sessions
-//! only as name + window/client counts — their pane topology, agent
-//! records, and asked flags are not in the attach stream (the ADR-0040
-//! subscriptions are per-attached-pane). Each foreign session therefore
-//! renders a single "switch to this session" row committing
-//! `switch-session { name }` (the same cross-session hop the window picker
-//! uses); after the in-process re-attach, the fleet dashboard over the new
-//! session shows its panes in full. The `phux agent list` CLI projection
-//! can enumerate every terminal because it queries the server per
-//! terminal — an attach-stream equivalent would need new wire surface, so
-//! it is out of scope here.
+//! only as name + window/client counts, and the ADR-0040 agent
+//! subscriptions are per-attached-pane — so a foreign session's pane
+//! topology and agent records are not in the attach stream. Rather than
+//! grow the stream (ADR-0030 forbids new structured wire surface), the
+//! driver reuses two **existing** L3 reads, the same lazy-query shape
+//! phux-foz.8 established for the window picker (ADR-0018): the peer's
+//! persisted `phux.tui.layout/v1` workspace (its pane tree) and, for each
+//! `TerminalId` in that tree, a one-shot `GET_METADATA` on the pane's
+//! `phux.agent/v1` record. Both land in [`fleet_items`] as
+//! `foreign_layouts` + `foreign_agents`, so a peer session renders one
+//! selectable row per pane committing a one-step
+//! `switch-session { name, window, pane }` — the re-attach lands directly
+//! on that pane with its agent glyph/state already shown. A peer with no
+//! cached layout yet (nothing persisted, reply not landed, or created
+//! after attach) still falls back to the single "switch to this session"
+//! row. Foreign rows carry no asked flag or branch/cwd — those need a live
+//! per-pane subscription, so the record's declared state is the honest
+//! maximum until the client attaches there. The `phux agent list` CLI
+//! remains the exhaustive projection (it queries the server per terminal).
 //!
 //! ## Row anatomy
 //!
@@ -33,7 +41,8 @@
 //!   * 0:main.1 builder            working - main
 //!   ? 1:logs.0 tail -f                       logs
 //! scratch                              <- foreign session header
-//!   switch to this session            2 windows
+//!   * 0:main.0 packer [codex]     working         <- foreign pane row
+//!   ? 1:logs.0 no agent
 //! ```
 //!
 //! The state glyph is `!` blocked, `*` working, `-` idle, `.` done,
@@ -124,10 +133,16 @@ pub(super) fn collect_pane_meta(
 /// Sessions are section headers ordered current-first then by name (the
 /// window-picker convention). Under the current session, one selectable
 /// row per pane in every window (windows in display order, panes in DFS
-/// leaf order), committing `focus-pane { window, pane }`. Foreign sessions
-/// carry a single `switch-session { name }` row — see the module docs for
-/// why. With no cached session graph yet (pre-snapshot) the local panes
-/// list flat, so the dashboard is still useful.
+/// leaf order), committing `focus-pane { window, pane }`. A **foreign**
+/// session with a cached persisted layout (`foreign_layouts`, phux-jpqd)
+/// lists one row per pane committing a one-step
+/// `switch-session { name, window, pane }`, its agent glyph/state drawn
+/// from `foreign_agents` — the per-pane `phux.agent/v1` records the driver
+/// fetched for the peer's panes when its layout landed. A foreign session
+/// with no cached layout falls back to a single `switch-session { name }`
+/// row (see the module docs). With no cached session graph yet
+/// (pre-snapshot) the local panes list flat, so the dashboard is still
+/// useful.
 ///
 /// Pure: everything comes in as plain data, so tests drive it with fully
 /// synthetic state.
@@ -137,6 +152,8 @@ pub(super) fn fleet_items(
     focused_session: Option<SessionId>,
     agent_meta: &HashMap<TerminalId, AgentRecord>,
     pane_meta: &HashMap<TerminalId, FleetPaneMeta>,
+    foreign_layouts: &HashMap<SessionId, Workspace>,
+    foreign_agents: &HashMap<TerminalId, AgentRecord>,
 ) -> Vec<SelectItem> {
     let mut ordered: Vec<&SessionInfo> = sessions.iter().collect();
     ordered.sort_by(|a, b| {
@@ -155,7 +172,17 @@ pub(super) fn fleet_items(
             pushed_current = true;
         } else {
             items.push(SelectItem::header(session.name.clone()));
-            items.push(foreign_session_row(session));
+            match foreign_layouts
+                .get(&session.id)
+                .filter(|ws| !ws.windows.is_empty())
+            {
+                Some(foreign) => items.extend(foreign_session_pane_rows(
+                    &session.name,
+                    foreign,
+                    foreign_agents,
+                )),
+                None => items.push(foreign_session_row(session)),
+            }
         }
     }
     // Pre-snapshot fallback: no session graph cached yet — list the local
@@ -285,6 +312,98 @@ fn foreign_session_row(session: &SessionInfo) -> SelectItem {
     .indented()
 }
 
+/// phux-jpqd: the selectable pane rows for a **foreign** session, drawn
+/// from its cached persisted [`Workspace`] (`foreign_layouts`). Same DFS
+/// leaf enumeration as [`current_session_pane_rows`], but each row commits
+/// a one-step `switch-session { name, window, pane }` — the re-attach lands
+/// directly on that pane — and its agent identity/state comes from
+/// `foreign_agents`, the per-pane `phux.agent/v1` records the driver
+/// fetched for the peer's leaves (no live subscription, so no asked flag or
+/// branch/cwd).
+fn foreign_session_pane_rows(
+    session_name: &str,
+    workspace: &Workspace,
+    foreign_agents: &HashMap<TerminalId, AgentRecord>,
+) -> Vec<SelectItem> {
+    let mut rows = Vec::new();
+    for (w, window) in workspace.windows.iter().enumerate() {
+        let leaves = window
+            .state
+            .tree
+            .as_ref()
+            .map(crate::layout::leaves)
+            .unwrap_or_default();
+        for (p, id) in leaves.iter().enumerate() {
+            rows.push(foreign_pane_row(
+                session_name,
+                w,
+                &window.name,
+                p,
+                foreign_agents.get(id),
+            ));
+        }
+    }
+    rows
+}
+
+/// One foreign pane's fleet row (phux-jpqd): `{glyph} {w}:{name}.{p} {who}`
+/// with the declared state word as its dimmed secondary, committing
+/// `switch-session { name, window = w, pane = p }`. The `phux.agent/v1`
+/// record supplies the name (`name [kind]`) and glyph/state; absent, the
+/// row is `?` "no agent" (a foreign pane has no local mirror, so there is
+/// no OSC-title fallback the way the attached session has). High effective
+/// attention highlights the row.
+fn foreign_pane_row(
+    session_name: &str,
+    w: usize,
+    window_name: &str,
+    p: usize,
+    record: Option<&AgentRecord>,
+) -> SelectItem {
+    let (glyph, who, state_word) = record.map_or_else(
+        || ('?', "no agent".to_owned(), None),
+        |r| {
+            let who = r
+                .kind
+                .as_ref()
+                .map_or_else(|| r.name.clone(), |kind| format!("{} [{kind}]", r.name));
+            (state_glyph(r.state), who, Some(r.state.as_str()))
+        },
+    );
+    let attention = record.is_some_and(|r| r.effective_attention() == AgentAttention::High);
+    let label = format!("{glyph} {w}:{window_name}.{p} {who}");
+    let mut args = BTreeMap::new();
+    args.insert(
+        "name".to_owned(),
+        toml::Value::String(session_name.to_owned()),
+    );
+    // Window/pane ordinals never approach i64::MAX; the lossless path is
+    // the only one that can fire in practice.
+    args.insert(
+        "window".to_owned(),
+        toml::Value::Integer(i64::try_from(w).unwrap_or(i64::MAX)),
+    );
+    args.insert(
+        "pane".to_owned(),
+        toml::Value::Integer(i64::try_from(p).unwrap_or(i64::MAX)),
+    );
+    let mut item = SelectItem::new(
+        label,
+        phux_config::keybind::ResolvedAction {
+            action: "switch-session".to_owned(),
+            args,
+        },
+    )
+    .indented();
+    if let Some(state) = state_word {
+        item = item.secondary(state.to_owned());
+    }
+    if attention {
+        item = item.attention();
+    }
+    item
+}
+
 /// The one-character lifecycle glyph for a declared agent state:
 /// `!` blocked, `*` working, `-` idle, `.` done, `?` unknown.
 const fn state_glyph(state: AgentMetaState) -> char {
@@ -331,12 +450,13 @@ mod tests {
         }
     }
 
-    /// Two windows: window 0 split into panes 1|2, window 1 a single pane 3.
-    fn two_window_workspace() -> Workspace {
+    /// Two windows: window 0 (`main`) split into panes `a`|`b`, window 1
+    /// (`logs`) a single pane `c`.
+    fn two_window_workspace_ids(a: u32, b: u32, c: u32) -> Workspace {
         let tree = split_at(
-            &LayoutNode::Leaf(tid(1)),
-            &tid(1),
-            &tid(2),
+            &LayoutNode::Leaf(tid(a)),
+            &tid(a),
+            &tid(b),
             SplitDir::Horizontal,
             0.5,
         )
@@ -347,26 +467,36 @@ mod tests {
                     name: "main".to_owned(),
                     state: LayoutState {
                         tree: Some(tree),
-                        focus: Some(tid(1)),
+                        focus: Some(tid(a)),
                     },
                 },
                 WindowState {
                     name: "logs".to_owned(),
-                    state: LayoutState::single(tid(3)),
+                    state: LayoutState::single(tid(c)),
                 },
             ],
             active: 0,
         }
     }
 
+    /// Two windows: window 0 split into panes 1|2, window 1 a single pane 3.
+    fn two_window_workspace() -> Workspace {
+        two_window_workspace_ids(1, 2, 3)
+    }
+
     #[test]
     fn groups_current_session_panes_under_header_and_foreign_as_switch_rows() {
         let workspace = two_window_workspace();
         let sessions = [sinfo(1, "work", 2), sinfo(2, "scratch", 3)];
+        // No cached foreign layout for scratch, so it falls back to the
+        // single switch row (the pane-row path is covered by
+        // `foreign_session_with_cached_layout_lists_one_step_pane_rows`).
         let items = fleet_items(
             &workspace,
             &sessions,
             Some(SessionId::new(1)),
+            &HashMap::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
@@ -393,7 +523,15 @@ mod tests {
     #[test]
     fn pane_rows_carry_window_and_leaf_ordinals() {
         let workspace = two_window_workspace();
-        let items = fleet_items(&workspace, &[], None, &HashMap::new(), &HashMap::new());
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         // Pre-snapshot fallback: flat pane rows, no headers.
         assert_eq!(items.len(), 3);
         assert_eq!(
@@ -430,7 +568,15 @@ mod tests {
             record("reviewer", Some("claude"), AgentMetaState::Working),
         );
         agents.insert(tid(2), record("builder", None, AgentMetaState::Blocked));
-        let items = fleet_items(&workspace, &[], None, &agents, &HashMap::new());
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &agents,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(items[0].label, "* 0:main.0 reviewer [claude]");
         assert_eq!(items[0].secondary.as_deref(), Some("working"));
         assert!(!items[0].attention, "working is not high attention");
@@ -463,11 +609,27 @@ mod tests {
                 ..FleetPaneMeta::default()
             },
         );
-        let items = fleet_items(&workspace, &[], None, &HashMap::new(), &meta);
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &meta,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(items[0].label, "? 0:1.0 vim src/main.rs");
         assert_eq!(items[0].secondary, None, "no record => no state word");
         // Without a title: the placeholder.
-        let items = fleet_items(&workspace, &[], None, &HashMap::new(), &HashMap::new());
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(items[0].label, "? 0:1.0 no agent");
     }
 
@@ -482,7 +644,15 @@ mod tests {
                 ..FleetPaneMeta::default()
             },
         );
-        let items = fleet_items(&workspace, &[], None, &HashMap::new(), &meta);
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &meta,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert!(
             items[0].attention,
             "the ADR-0035 asked flag must highlight the row"
@@ -502,7 +672,15 @@ mod tests {
                 ..FleetPaneMeta::default()
             },
         );
-        let items = fleet_items(&workspace, &[], None, &agents, &meta);
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &agents,
+            &meta,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(
             items[0].label, "- 0:1.0 reviewer",
             "ADR-0040 decision 3: the record must outrank the OSC title"
@@ -531,7 +709,15 @@ mod tests {
                 ..FleetPaneMeta::default()
             },
         );
-        let items = fleet_items(&workspace, &[], None, &agents, &meta);
+        let items = fleet_items(
+            &workspace,
+            &[],
+            None,
+            &agents,
+            &meta,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(items[0].secondary.as_deref(), Some("working - main"));
         assert_eq!(items[1].secondary.as_deref(), Some("idle - dir"));
     }
@@ -550,6 +736,8 @@ mod tests {
             Some(SessionId::new(2)),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
         );
         let headers: Vec<&str> = items
             .iter()
@@ -557,6 +745,110 @@ mod tests {
             .map(|i| i.label.as_str())
             .collect();
         assert_eq!(headers, vec!["work (current)", "alpha", "zeta"]);
+    }
+
+    /// phux-jpqd: a foreign session WITH a cached persisted layout lists one
+    /// selectable row per pane committing a one-step
+    /// `switch-session { name, window, pane }`, with agent glyph/state from
+    /// the fetched foreign records — not the old single switch-session hop.
+    #[test]
+    fn foreign_session_with_cached_layout_lists_one_step_pane_rows() {
+        let workspace = Workspace::single(tid(10));
+        let sessions = [sinfo(1, "work", 1), sinfo(2, "scratch", 2)];
+        // scratch's persisted layout: window 0 splits panes 20|21, window 1
+        // is a single pane 22.
+        let scratch = two_window_workspace_ids(20, 21, 22);
+        let mut foreign_layouts = HashMap::new();
+        foreign_layouts.insert(SessionId::new(2), scratch);
+        // Agent records for two of scratch's panes.
+        let mut foreign_agents = HashMap::new();
+        foreign_agents.insert(
+            tid(20),
+            record("packer", Some("codex"), AgentMetaState::Working),
+        );
+        foreign_agents.insert(tid(21), record("linter", None, AgentMetaState::Blocked));
+
+        let items = fleet_items(
+            &workspace,
+            &sessions,
+            Some(SessionId::new(1)),
+            &HashMap::new(),
+            &HashMap::new(),
+            &foreign_layouts,
+            &foreign_agents,
+        );
+        // work (current) header + its 1 pane, then scratch header + 3 pane
+        // rows (no switch-session-only fallback).
+        let scratch_hdr = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        let rows = &items[scratch_hdr + 1..scratch_hdr + 4];
+        assert!(
+            rows.iter().all(|i| !i.is_header() && i.indented),
+            "foreign session lists indented pane rows"
+        );
+        // Every foreign row commits a one-step switch-session carrying the
+        // target session name, window, and pane.
+        for r in rows {
+            assert_eq!(r.action.action, "switch-session");
+            assert_eq!(
+                r.action.args.get("name"),
+                Some(&toml::Value::String("scratch".to_owned()))
+            );
+            assert!(r.action.args.contains_key("window"));
+            assert!(r.action.args.contains_key("pane"));
+        }
+        // First row addresses window 0 pane 0 and shows the codex agent.
+        assert_eq!(rows[0].label, "* 0:main.0 packer [codex]");
+        assert_eq!(rows[0].secondary.as_deref(), Some("working"));
+        assert_eq!(
+            rows[0].action.args.get("window"),
+            Some(&toml::Value::Integer(0))
+        );
+        assert_eq!(
+            rows[0].action.args.get("pane"),
+            Some(&toml::Value::Integer(0))
+        );
+        // Blocked pane highlights (effective high attention).
+        assert_eq!(rows[1].label, "! 0:main.1 linter");
+        assert!(rows[1].attention, "blocked foreign pane must highlight");
+        // Window 1 pane 0 has no record: `?` + placeholder, no state word.
+        assert_eq!(rows[2].label, "? 1:logs.0 no agent");
+        assert_eq!(rows[2].secondary, None);
+        assert_eq!(
+            rows[2].action.args.get("window"),
+            Some(&toml::Value::Integer(1))
+        );
+    }
+
+    /// phux-jpqd: a foreign session with an EMPTY cached layout still falls
+    /// back to the single switch-session hop.
+    #[test]
+    fn foreign_session_with_empty_cached_layout_falls_back_to_switch_row() {
+        let workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work", 1), sinfo(2, "scratch", 4)];
+        let mut foreign_layouts = HashMap::new();
+        foreign_layouts.insert(SessionId::new(2), Workspace::default());
+        let items = fleet_items(
+            &workspace,
+            &sessions,
+            Some(SessionId::new(1)),
+            &HashMap::new(),
+            &HashMap::new(),
+            &foreign_layouts,
+            &HashMap::new(),
+        );
+        let scratch_hdr = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        assert_eq!(items[scratch_hdr + 1].action.action, "switch-session");
+        assert!(!items[scratch_hdr + 1].action.args.contains_key("window"));
+        assert_eq!(
+            items[scratch_hdr + 1].secondary.as_deref(),
+            Some("4 windows")
+        );
     }
 
     #[test]

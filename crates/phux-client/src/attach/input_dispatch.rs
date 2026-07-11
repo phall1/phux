@@ -88,6 +88,15 @@ pub(super) struct DispatchCtx<'a> {
     /// snapshot — peers' later mutations are not tracked (the post-switch
     /// select degrades to a logged no-op if the index went stale).
     pub foreign_layouts: &'a HashMap<phux_protocol::ids::SessionId, Workspace>,
+    /// phux-jpqd: the `phux.agent/v1` records the driver fetched for
+    /// **foreign** panes — one one-shot `GET_METADATA` per `TerminalId` in a
+    /// peer session's cached [`Self::foreign_layouts`] workspace, keyed by
+    /// that terminal id. The `agent-fleet` dashboard reads this so a foreign
+    /// session's pane rows show agent glyph/state without attaching there.
+    /// Empty until a peer's layout lands and its per-pane replies arrive; a
+    /// pane with no entry renders `?`/"no agent" (no live subscription, so
+    /// no asked flag or cwd/branch).
+    pub foreign_agents: &'a HashMap<TerminalId, crate::agent_meta::AgentRecord>,
     /// phux-4li.20: id of the session this client is attached to. The
     /// picker marks this row and excludes it from selection (switching
     /// to the current session is a no-op). `None` before the first
@@ -1183,9 +1192,9 @@ async fn apply_action_effects<W: super::RenderSink>(
                 tracing::debug!(target_session = %name, "switch-session to current session; no-op");
                 let _ = actions::write_bell(out);
             }
-            ReattachTarget::Existing { name, window } => {
-                tracing::info!(target_session = %name, target_window = ?window, "switch-session requested");
-                *ctx.switch_request = Some(ReattachTarget::Existing { name, window });
+            ReattachTarget::Existing { name, window, pane } => {
+                tracing::info!(target_session = %name, target_window = ?window, target_pane = ?pane, "switch-session requested");
+                *ctx.switch_request = Some(ReattachTarget::Existing { name, window, pane });
             }
             ReattachTarget::Create(name) => {
                 tracing::info!(session = %name, "new-session requested");
@@ -1385,6 +1394,13 @@ pub enum ReattachTarget {
         /// the index is out of range, the switch still lands and the
         /// select is a logged no-op.
         window: Option<usize>,
+        /// phux-jpqd: DFS leaf ordinal within `window` to focus once the
+        /// target's layout loads — the one-step cross-session **pane**
+        /// pick the agent-fleet dashboard's foreign rows carry. `None`
+        /// keeps the window's own restored focus. Applied only after
+        /// `window` resolves in range; an out-of-range ordinal degrades to
+        /// a logged no-op, same as `window`.
+        pane: Option<usize>,
     },
     /// Create — or attach to, if it already exists — a session by name
     /// (`new-session`).
@@ -1880,12 +1896,19 @@ fn run_action(
             // phux-foz.7: push the agent-fleet dashboard — every pane of
             // the attached session grouped under session headers, with its
             // ADR-0040 agent record (name/kind + state glyph), ADR-0035
-            // asked/attention highlight, and branch/cwd. Rows commit
-            // `focus-pane { window, pane }` (current session) or
-            // `switch-session { name }` (foreign sessions) through the
-            // single dispatch path. Constructed with the fleet live key so
-            // the driver can refresh the rows in place as agent events
-            // land while it is open. With nothing to list it bells.
+            // asked/attention highlight, and branch/cwd. Current-session
+            // rows commit `focus-pane { window, pane }` through the single
+            // dispatch path.
+            //
+            // phux-jpqd: a FOREIGN session with a cached persisted layout
+            // (`foreign_layouts`) lists one row per pane committing a
+            // one-step `switch-session { name, window, pane }`, its agent
+            // glyph/state drawn from `foreign_agents` — no attach hop to see
+            // a peer's panes. A foreign session with no cached layout still
+            // falls back to a single `switch-session { name }` row.
+            // Constructed with the fleet live key so the driver refreshes
+            // the rows in place as agent events land while it is open. With
+            // nothing to list it bells.
             let meta = super::fleet::collect_pane_meta(panes, ctx.vcs);
             let items = super::fleet::fleet_items(
                 ctx.workspace,
@@ -1893,6 +1916,8 @@ fn run_action(
                 ctx.focused_session,
                 ctx.agent_meta,
                 &meta,
+                ctx.foreign_layouts,
+                ctx.foreign_agents,
             );
             if items.iter().all(SelectItem::is_header) {
                 effects.bell = true;
@@ -1958,13 +1983,15 @@ fn run_action(
             // loads the target's persisted layout, the driver selects
             // window `N`. The grouped window picker's foreign-session
             // rows commit this form.
+            //
+            // phux-jpqd: an additional optional `pane = P` arg extends it
+            // to a one-step cross-session PANE pick — after selecting the
+            // window, the driver focuses its DFS leaf ordinal `P`. The
+            // agent-fleet dashboard's foreign pane rows commit this form.
             if let Some(name) = name_arg(resolved) {
-                let window = resolved
-                    .args
-                    .get("window")
-                    .and_then(toml::Value::as_integer)
-                    .and_then(|v| usize::try_from(v).ok());
-                effects.reattach = Some(ReattachTarget::Existing { name, window });
+                let window = usize_arg(resolved, "window");
+                let pane = usize_arg(resolved, "pane");
+                effects.reattach = Some(ReattachTarget::Existing { name, window, pane });
             } else {
                 tracing::warn!(
                     args = ?resolved.args,
@@ -2765,6 +2792,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -3090,6 +3118,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -3152,6 +3181,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -3249,6 +3279,7 @@ mod tests {
                 theme: &theme,
                 sessions,
                 foreign_layouts: &HashMap::new(),
+                foreign_agents: &HashMap::new(),
                 focused_session,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
@@ -3409,6 +3440,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -3714,6 +3746,7 @@ mod tests {
             Some(ReattachTarget::Existing {
                 name: "scratch".to_owned(),
                 window: Some(1),
+                pane: None,
             }),
             "the one-step row carries the target window through dispatch"
         );
@@ -3740,9 +3773,38 @@ mod tests {
             Some(ReattachTarget::Existing {
                 name: "scratch".to_owned(),
                 window: None,
+                pane: None,
             }),
         );
         assert!(!effects.bell);
+    }
+
+    /// phux-jpqd: a `switch-session { name, window, pane }` — the commit the
+    /// agent-fleet dashboard's foreign pane rows carry — parses into the
+    /// combined one-step cross-session pane target.
+    #[test]
+    fn switch_session_with_pane_arg_carries_one_step_pane_target() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut args = BTreeMap::new();
+        args.insert("name".to_owned(), toml::Value::String("scratch".to_owned()));
+        args.insert("window".to_owned(), toml::Value::Integer(1));
+        args.insert("pane".to_owned(), toml::Value::Integer(2));
+        let action = phux_config::keybind::ResolvedAction {
+            action: "switch-session".to_owned(),
+            args,
+        };
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: Some(1),
+                pane: Some(2),
+            }),
+        );
+        assert!(!effects.bell);
+        // The switch is a re-attach, not a local change.
+        assert_eq!(workspace.active, 0);
     }
 
     #[test]
@@ -3796,6 +3858,8 @@ mod tests {
             &workspace,
             &[],
             None,
+            &HashMap::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
         );
@@ -3925,6 +3989,8 @@ mod tests {
             None,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
         );
         // Row 1 is window 0's second pane (tid 2).
         let effects = run(&items[1].action.clone(), &mut workspace);
@@ -4013,6 +4079,7 @@ mod tests {
             Some(ReattachTarget::Existing {
                 name: "scratch".to_owned(),
                 window: None,
+                pane: None,
             }),
             "committing the picker row requests a switch to that session"
         );
@@ -4087,6 +4154,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4170,6 +4238,7 @@ mod tests {
                 theme: &theme,
                 sessions: &[],
                 foreign_layouts: &HashMap::new(),
+                foreign_agents: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
@@ -4341,6 +4410,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4450,6 +4520,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4606,6 +4677,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4787,6 +4859,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
@@ -4973,6 +5046,7 @@ mod tests {
                 theme: &theme,
                 sessions: &[],
                 foreign_layouts: &HashMap::new(),
+                foreign_agents: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
@@ -5207,6 +5281,7 @@ mod tests {
                 theme: &theme,
                 sessions: &[],
                 foreign_layouts: &HashMap::new(),
+                foreign_agents: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
@@ -5391,6 +5466,7 @@ mod tests {
             theme: &theme,
             sessions: &[],
             foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
