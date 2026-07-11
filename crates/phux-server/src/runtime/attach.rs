@@ -148,12 +148,6 @@ pub(crate) async fn resolve_attach_target(
 /// [`crate::state::ServerState::attach_create_seed_command`] preempts
 /// it: an explicit per-server seed command always wins (it's how the
 /// `phux server` binary pins `default_shell_command()` for the user).
-/// The PTY path honors `cwd` (phux-0db): the seed pane is spawned in the
-/// client's working directory, so a `claude` session's transcript is
-/// keyed under the right path hash and `claude --resume` works. `cwd` is
-/// orthogonal to the command, so it applies even under a server-seed or
-/// wire command override. The no-PTY path ignores both, matching the
-/// existing `seed_session_with_actor` shape.
 /// `cwd` from the wire frame (phux-3mtf) seeds the PTY child's working
 /// directory when it names an existing directory on the server host; a
 /// missing or non-directory path falls back to the pre-existing
@@ -177,7 +171,6 @@ pub(crate) async fn resolve_create_if_missing(
     state: &SharedState,
     name: String,
     command: Option<Vec<String>>,
-    seed_cwd: Option<String>,
     cwd: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
@@ -239,21 +232,11 @@ pub(crate) async fn resolve_create_if_missing(
         crate::terminal_actor::apply_spawn_cwd(&mut seed_cmd, cwd.as_deref(), &name);
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
-
         crate::terminal_actor::apply_term(&mut seed_cmd, &term);
-        // phux-0db: honor the client's wire `cwd` so the seed pane lands in
-        // the user's project dir, not the daemon's CWD. Without this, a
-        // `claude` session's transcript is keyed under the wrong path hash and
-        // `claude --resume` can't find it. Orthogonal to the command above, so
-        // it applies even when an override command is in force.
-        if let Some(dir) = seed_cwd {
-            cmd.cwd(dir);
-        }
-        
         seed_session_with_pty_and_colors(
             state,
             &name,
-            cmd,
+            seed_cmd,
             history_limit,
             root_token,
             default_colors,
