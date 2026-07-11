@@ -127,6 +127,13 @@ pub(super) struct DispatchCtx<'a> {
     /// the per-frame `sidebar` reservation after dispatch so the toggle repaint
     /// reflects the new state. Owned by the driver like `zoomed`.
     pub sidebar_enabled: &'a mut bool,
+    /// phux-foz.9: the window index of each sidebar agents-section row, in
+    /// display order — the same list the strip painter rendered from
+    /// ([`crate::render::chrome::sidebar::SidebarPainter::agent_windows`]).
+    /// `hit_test` needs it to resolve a click on an agent row to the
+    /// window holding that agent's pane. Empty when the section is empty
+    /// (or in fixtures that don't exercise the sidebar).
+    pub sidebar_agents: &'a [usize],
     /// The status bar's row reservation this frame (`None` when no bar;
     /// the painter's `Position` otherwise — phux-foz.8). Mouse routing
     /// folds this into the same `content_rect(viewport, bar, sidebar)` the
@@ -490,20 +497,28 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // not pane content. A left press resolves against the strip's
             // row model (`sidebar::hit_test`) and dispatches the mapped
             // action through the same `run_action` path a keybinding or
-            // palette row uses: a window block commits `select-window`, the
-            // `+ new` affordance `new-window`, and `= menu` the command
-            // palette (the session/plugin menu). Everything else over the
-            // strip (motion, non-left presses, blank rows, the separator
-            // column) is consumed and dropped so it can never leak into a
-            // pane whose rect does not contain it anyway.
+            // palette row uses: a window block commits `select-window`, an
+            // agents-section row (phux-foz.9) `select-window` for the
+            // window holding that agent's pane, the `+ new` affordance
+            // `new-window`, `= menu` the command palette (the
+            // session/plugin menu), and the bottom-corner collapse chevron
+            // `toggle-sidebar`. Everything else over the strip (motion,
+            // non-left presses, headers, blank rows, the separator column)
+            // is consumed and dropped so it can never leak into a pane
+            // whose rect does not contain it anyway.
             if let Some(res) = ctx.sidebar {
                 let strip = super::paint::sidebar_rect(ctx.viewport, ctx.bar, res);
                 let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
                 if strip_contains(strip, cell_x, cell_y) {
                     if matches!(mouse.action, MouseAction::Press)
                         && mouse.button == MouseButton::Left
-                        && let Some(resolved) =
-                            sidebar_click_action(strip, ctx.workspace.windows.len(), cell_x, cell_y)
+                        && let Some(resolved) = sidebar_click_action(
+                            strip,
+                            ctx.workspace.windows.len(),
+                            ctx.sidebar_agents,
+                            cell_x,
+                            cell_y,
+                        )
                     {
                         tracing::debug!(action = %resolved.action, "sidebar: click dispatched");
                         let effects = run_action(&resolved, ctx, focused_pane.as_ref(), panes);
@@ -840,26 +855,33 @@ const fn strip_contains(rect: crate::layout::Rect, x: u16, y: u16) -> bool {
 }
 
 /// phux-fce4: map a left press on the sidebar strip to the action it
-/// commits, or `None` when it lands on a blank row or the separator.
+/// commits, or `None` when it lands on a header, blank row, or the
+/// separator.
 ///
 /// The mapping goes through [`ResolvedAction`] so a sidebar click runs
 /// exactly what a keybinding, palette row, or overlay commit would — one
 /// dispatch path, no bespoke click semantics:
 ///
 /// * a window block (name or branch row) commits `select-window { index }`;
+/// * an agents-section row (phux-foz.9) commits `select-window` for the
+///   window holding that agent's pane (`agent_windows` carries the
+///   row-to-window mapping);
 /// * `+ new` commits `new-window` (the strip lists windows, so its create
 ///   affordance creates one);
 /// * `= menu` commits `command-palette` — the menu covering window,
 ///   session (`new-session` included), and plugin actions via the action
-///   registry.
+///   registry;
+/// * the collapse chevron in the bottom corner (phux-foz.9) commits
+///   `toggle-sidebar`.
 fn sidebar_click_action(
     strip: crate::layout::Rect,
     window_count: usize,
+    agent_windows: &[usize],
     x: u16,
     y: u16,
 ) -> Option<phux_config::keybind::ResolvedAction> {
     use crate::render::chrome::sidebar::{SidebarHit, hit_test};
-    let (action, args) = match hit_test(strip, window_count, x, y)? {
+    let (action, args) = match hit_test(strip, window_count, agent_windows, x, y)? {
         SidebarHit::Window(i) => {
             let mut args = std::collections::BTreeMap::new();
             args.insert(
@@ -870,6 +892,7 @@ fn sidebar_click_action(
         }
         SidebarHit::NewWindow => ("new-window", std::collections::BTreeMap::new()),
         SidebarHit::Menu => ("command-palette", std::collections::BTreeMap::new()),
+        SidebarHit::Collapse => ("toggle-sidebar", std::collections::BTreeMap::new()),
     };
     Some(phux_config::keybind::ResolvedAction {
         action: action.to_owned(),
@@ -2631,6 +2654,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -2954,6 +2978,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -3014,6 +3039,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -3109,6 +3135,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                sidebar_agents: &[],
                 bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
@@ -3267,6 +3294,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -3943,6 +3971,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -4024,6 +4053,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                sidebar_agents: &[],
                 bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
@@ -4193,6 +4223,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -4300,6 +4331,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -4383,6 +4415,10 @@ mod tests {
         reason = "full copy-mode page-up/page-down round trip needs a complete dispatch context"
     )]
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "full DispatchCtx fixture; each new ctx field (phux-foz.9 sidebar_agents) grows it by one line"
+    )]
     async fn copy_mode_page_scroll_mutates_focused_terminal_viewport() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 
@@ -4454,6 +4490,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -4498,33 +4535,51 @@ mod tests {
 
     // ---------- phux-fce4: sidebar hit targets ----------
 
-    /// The pure click→action mapping: window blocks commit
+    /// The pure click→action mapping: window blocks and agent rows commit
     /// `select-window { index }`, the footer rows `new-window` and
-    /// `command-palette`, and blank/separator cells nothing.
+    /// `command-palette`, the collapse corner `toggle-sidebar`, and
+    /// header/blank/separator cells nothing.
     #[test]
     fn sidebar_click_action_maps_rows_to_registry_actions() {
         // Left-docked 20-column strip over a 24-row viewport with a status
-        // bar: rows 0..=22, footer on rows 21 (new) and 22 (menu).
+        // bar: rows 0..=22, footer on rows 21 (new) and 22 (menu). Row 0 is
+        // the `spaces` header (phux-foz.9), so window 1's block sits on
+        // rows 3-4.
         let strip = crate::layout::Rect {
             x: 0,
             y: 0,
             w: 20,
             h: 23,
         };
-        // Window 1's name row (y = 2) and branch row (y = 3) both select it.
-        for y in [2, 3] {
-            let resolved = sidebar_click_action(strip, 2, 4, y).expect("window row hits");
+        // Window 1's name row (y = 3) and branch row (y = 4) both select it.
+        for y in [3, 4] {
+            let resolved = sidebar_click_action(strip, 2, &[], 4, y).expect("window row hits");
             assert_eq!(resolved.action, "select-window");
             assert_eq!(index_arg(&resolved), Some(1));
         }
-        let new = sidebar_click_action(strip, 2, 4, 21).expect("new row hits");
+        // phux-foz.9: an agents-section row (gap y=5, header y=6, first
+        // entry y=7) selects the window holding the agent's pane.
+        let agent = sidebar_click_action(strip, 2, &[1], 4, 7).expect("agent row hits");
+        assert_eq!(agent.action, "select-window");
+        assert_eq!(index_arg(&agent), Some(1));
+        assert!(
+            sidebar_click_action(strip, 2, &[1], 4, 6).is_none(),
+            "the agents header is inert"
+        );
+        let new = sidebar_click_action(strip, 2, &[], 4, 21).expect("new row hits");
         assert_eq!(new.action, "new-window");
         assert!(new.args.is_empty());
-        let menu = sidebar_click_action(strip, 2, 4, 22).expect("menu row hits");
+        let menu = sidebar_click_action(strip, 2, &[], 4, 22).expect("menu row hits");
         assert_eq!(menu.action, "command-palette");
-        // Blank padding row and the separator column commit nothing.
-        assert!(sidebar_click_action(strip, 2, 4, 10).is_none());
-        assert!(sidebar_click_action(strip, 2, 19, 0).is_none());
+        // phux-foz.9: the collapse chevron in the bottom corner.
+        let collapse = sidebar_click_action(strip, 2, &[], 19, 22).expect("collapse corner hits");
+        assert_eq!(collapse.action, "toggle-sidebar");
+        assert!(collapse.args.is_empty());
+        // Header row, blank padding row, and the separator column (outside
+        // the chevron corner) commit nothing.
+        assert!(sidebar_click_action(strip, 2, &[], 4, 0).is_none());
+        assert!(sidebar_click_action(strip, 2, &[], 4, 10).is_none());
+        assert!(sidebar_click_action(strip, 2, &[], 19, 0).is_none());
     }
 
     /// Every action a sidebar click can commit must be a dispatched action
@@ -4538,12 +4593,14 @@ mod tests {
             h: 23,
         };
         for y in 0..strip.h {
-            if let Some(resolved) = sidebar_click_action(strip, 3, 2, y) {
-                assert!(
-                    ACTION_NAMES.contains(&resolved.action.as_str()),
-                    "sidebar committed `{}`, which run_action does not dispatch",
-                    resolved.action,
-                );
+            for x in [2u16, 19] {
+                if let Some(resolved) = sidebar_click_action(strip, 3, &[0, 2], x, y) {
+                    assert!(
+                        ACTION_NAMES.contains(&resolved.action.as_str()),
+                        "sidebar committed `{}`, which run_action does not dispatch",
+                        resolved.action,
+                    );
+                }
             }
         }
     }
@@ -4616,6 +4673,7 @@ mod tests {
                 width: 20,
             }),
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: Some(crate::render::chrome::status_bar::Position::Bottom),
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
@@ -4650,8 +4708,9 @@ mod tests {
     /// mouse route runs the same `select-window` a keybinding would.
     #[tokio::test]
     async fn sidebar_click_on_window_block_selects_it() {
-        // Strip rows with a status bar: h = 23; window 1's name row is y=2.
-        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 2)).await;
+        // Strip rows with a status bar: h = 23; row 0 is the spaces header
+        // (phux-foz.9), so window 1's name row is y=3.
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 3)).await;
         assert_eq!(active, 1, "clicking window 1's block must select it");
         assert!(!overlay_active);
         assert_eq!(pending, 0);
@@ -4788,6 +4847,7 @@ mod tests {
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
+                sidebar_agents: &[],
                 bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
@@ -4970,6 +5030,7 @@ mod tests {
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
             bar: None,
             drag: &mut drag,
             mouse_optout,
