@@ -955,6 +955,102 @@ impl<'alloc> SnapshotSynthesizer<'alloc> {
         }
     }
 
+    /// phux-v45.8 / ADR-0042: diff the current tick's rendered rows against
+    /// `base` **without advancing `base`**, emitting every row that differs
+    /// from it (an absolute, cumulative delta). This is the loss-tolerant
+    /// emission primitive: `base` is the consumer's last-*acked* reference, so
+    /// each tick re-diffs from the last state the consumer provably has, and a
+    /// dropped/un-acked frame self-heals because the next emission re-includes
+    /// its rows (they still differ from `base`).
+    ///
+    /// Requires a preceding [`Self::prepare_tick`] this tick (the shared
+    /// `tick_rows` / `tick_epilogue` / `tick_screen_toggle` buffers hold the
+    /// rendered grid). Unlike [`Self::diff_consumer`] it does not mutate the
+    /// reference — the caller advances the acked reference only when a
+    /// `FRAME_ACK` lands (via [`Self::snapshot_tick_reference`]). Each emitted
+    /// row is repainted in full (`CUP` + SGR reset + row body), so applying the
+    /// delta is idempotent regardless of which intermediate deltas the consumer
+    /// did or did not receive: the only requirement is that the consumer's
+    /// mirror is at some grid on the `base`→live path (guaranteed on the
+    /// reliable-delivery-with-drops model — the relay drops whole frames but
+    /// never reorders delivered ones; see ADR-0042 for the residual bound).
+    ///
+    /// Returns the delta bytes; empty when live is byte-identical to `base`.
+    pub(crate) fn diff_against_base(
+        &self,
+        cols: u16,
+        rows_n: u16,
+        live_cm: ReferenceCursorMode,
+        base: &ConsumerReference,
+    ) -> Vec<u8> {
+        let span = tracing::debug_span!(
+            "diff_against_base",
+            changed_row_count = tracing::field::Empty,
+            out_bytes = tracing::field::Empty,
+        )
+        .entered();
+        let geometry_mismatch = base.cols != cols || base.rows != rows_n;
+        let screen_changed = base.cursor_mode.alt_screen_set() != live_cm.alt_screen_set();
+        let cursor_mode_changed = base.cursor_mode != live_cm;
+
+        // Absolute changed-row set: any row whose freshly rendered body differs
+        // from the acked reference (or every row on a geometry mismatch — the
+        // acked reference is a different size, so the whole viewport repaints).
+        let mut changed: Vec<u16> = Vec::new();
+        for (idx, rendered) in self.tick_rows.iter().enumerate() {
+            let differs = geometry_mismatch
+                || base
+                    .rows_body
+                    .get(idx)
+                    .is_none_or(|stored| stored != rendered);
+            if differs {
+                changed.push(u16::try_from(idx).unwrap_or(u16::MAX));
+            }
+        }
+
+        if changed.is_empty() && !cursor_mode_changed {
+            span.record("changed_row_count", 0_usize);
+            span.record("out_bytes", 0_usize);
+            return Vec::new();
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        if screen_changed {
+            out.extend_from_slice(&self.tick_screen_toggle);
+        }
+        for &ri in &changed {
+            write_cup(&mut out, ri, 0);
+            out.extend_from_slice(b"\x1b[0m");
+            out.extend_from_slice(&self.tick_rows[usize::from(ri)]);
+        }
+        out.extend_from_slice(&self.tick_epilogue);
+        span.record("changed_row_count", changed.len());
+        span.record("out_bytes", out.len());
+        out
+    }
+
+    /// phux-v45.8 / ADR-0042: snapshot the current tick's rendered grid into a
+    /// standalone [`ConsumerReference`] so a loss-tolerant consumer can advance
+    /// its *acked* reference to exactly the grid state a later `FRAME_ACK`
+    /// covers. Requires a preceding [`Self::prepare_tick`] this tick.
+    ///
+    /// The returned reference holds a clone of the rendered row bodies plus the
+    /// cursor/mode capture; it is the diff base a subsequent
+    /// [`Self::diff_against_base`] uses once the matching ack lands.
+    pub(crate) fn snapshot_tick_reference(
+        &self,
+        cols: u16,
+        rows_n: u16,
+        live_cm: ReferenceCursorMode,
+    ) -> ConsumerReference {
+        let mut reference = ConsumerReference::new();
+        reference.cols = cols;
+        reference.rows = rows_n;
+        reference.rows_body.clone_from(&self.tick_rows);
+        reference.cursor_mode = live_cm;
+        reference
+    }
+
     /// Prime `reference` to the current `terminal` state without emitting
     /// any bytes (phux-ia4). Used at consumer registration so the first
     /// `synthesize_against_reference` only reports deltas that occur

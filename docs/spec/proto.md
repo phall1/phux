@@ -350,6 +350,20 @@ suppresses the raw broadcast for a `StateSync` consumer so exactly one
 emitter serves it. Raw stays the human default because synthesized ticks
 add a visible local-typing latency floor and can lose byte-exact styling.
 
+Under `StateSync`, `TERMINAL_OUTPUT.bytes` is the minimum-VT transition from
+the consumer's reference grid to the live grid, synthesized once per tick and
+RTT-paced, so a runaway producer bounds the consumer's re-parse *rate* rather
+than streaming every intermediate frame; the resulting grid is equivalent to
+what the `Raw` byte stream would produce (ADR-0018,
+[ADR-0042](../../ADR/0042-state-diff-output-mode.md)). Whether the server
+advances a consumer's reference **on emit** (the emit-once model, correct on a
+reliable ordered transport) or **on `FRAME_ACK`** (the loss-tolerant model,
+which re-diffs a dropped/un-acked frame against the last-acked reference so it
+self-heals) is a **server-side emission strategy** chosen per consumer from the
+transport/topology — it needs no `ClientCapabilities` field and changes no wire
+bytes (`FRAME_ACK` and `seq` already round-trip). A consumer MUST NOT assume
+which strategy serves it; both converge to the same grid.
+
 The `CC_FRONTEND` bit on `features` is **reclaimed** per
 [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md). Earlier drafts
 reserved it for a server that could "speak tmux control mode as an

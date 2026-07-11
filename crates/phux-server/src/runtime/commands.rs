@@ -637,6 +637,10 @@ async fn handle_attach_terminal(
                     client_caps.output_mode,
                     phux_protocol::caps::OutputMode::StateSync
                 ),
+                // phux-v45.8: `ATTACH_TERMINAL` over a reliable transport; the
+                // emit-once model is correct. Forwarded-leg loss-tolerance is
+                // the deferred activation (ADR-0042).
+                loss_tolerant: false,
                 reply: attach_reply_tx,
             })
             .await
