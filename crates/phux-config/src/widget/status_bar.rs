@@ -336,6 +336,126 @@ mod tests {
         assert_eq!(s.len(), 10);
     }
 
+    /// phux-foz.12: window-tab hit targets survive slot placement — a
+    /// left-slot tab strip keeps its per-column `CellHit::Window` stamps at
+    /// the columns the tabs occupy, other columns stay inert, and the same
+    /// holds when the strip rides the right slot (offset by the flush).
+    #[test]
+    fn window_tab_hits_survive_slot_placement() {
+        use crate::widget::{CellHit, WindowInfo};
+        let windows = [
+            WindowInfo {
+                name: "a".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "b".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ];
+        let ctx = WidgetContext::new(UNIX_EPOCH, "", "C-a", &windows);
+        let reg = WidgetRegistry::with_builtins();
+        let hits_of = |cfg: &StatusCfg, width: u16| -> Vec<Option<usize>> {
+            let bar = StatusBar::build(cfg, &reg).unwrap();
+            bar.render(&ctx, width)
+                .iter()
+                .map(|c| c.hit.map(|CellHit::Window(i)| i))
+                .collect()
+        };
+        // Left slot: "0:a 1:b" flush at column 0 in a 10-wide row.
+        let left = StatusCfg {
+            left: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            hits_of(&left, 10),
+            vec![
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(1),
+                None,
+                None,
+                None
+            ]
+        );
+        // Right slot: same strip flush against the last column.
+        let right = StatusCfg {
+            right: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            hits_of(&right, 10),
+            vec![
+                None,
+                None,
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(1)
+            ]
+        );
+    }
+
+    /// phux-foz.12: truncation drops trailing tabs' hits with their cells —
+    /// the surviving columns still map to the right windows, and no stale
+    /// target outlives its glyphs.
+    #[test]
+    fn window_tab_hits_track_truncation() {
+        use crate::widget::{CellHit, WindowInfo};
+        let mk = |name: &str, active: bool| WindowInfo {
+            name: name.to_owned(),
+            active,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        };
+        let windows = [mk("alpha", true), mk("beta", false), mk("gamma", false)];
+        let ctx = WidgetContext::new(UNIX_EPOCH, "", "C-a", &windows);
+        let reg = WidgetRegistry::with_builtins();
+        let cfg = StatusCfg {
+            left: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        let bar = StatusBar::build(&cfg, &reg).unwrap();
+        // Full strip "0:alpha 1:beta 2:gamma" is 22 cells; width 10 keeps
+        // "0:alpha 1:" — window 0's tab plus the head of window 1's.
+        let row = bar.render(&ctx, 10);
+        let hits: Vec<Option<usize>> = row
+            .iter()
+            .map(|c| c.hit.map(|CellHit::Window(i)| i))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1)
+            ]
+        );
+        assert_eq!(row_to_string(&row), "0:alpha 1:");
+    }
+
     #[test]
     fn zero_width_returns_empty() {
         let cfg = StatusCfg::default();

@@ -140,6 +140,14 @@ pub(super) struct DispatchCtx<'a> {
     /// paint path uses so a click hit-tests against the rects actually on
     /// screen, including the one-row downshift under a top-docked bar.
     pub bar: Option<crate::render::chrome::status_bar::Position>,
+    /// phux-foz.12: the driver's status-bar painter, lent read-only so a
+    /// click on the bar row can hit-test the window tabs against the
+    /// exact strip the painter last painted
+    /// ([`StatusBarPainter::window_hit_at`]). `None` when no bar is
+    /// configured — `bar` is then `None` too and the row is not claimed —
+    /// or in fixtures that don't exercise bar clicks (the row is still
+    /// claimed as chrome; every click on it is a no-op).
+    pub status_bar: Option<&'a crate::render::chrome::status_bar::StatusBarPainter>,
     /// ADR-0035: the in-flight divider drag, or `None` when no divider is
     /// grabbed. A press on a divider cell records the grabbed split here;
     /// subsequent button-motion events re-tune that split's ratio from the
@@ -540,6 +548,52 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     continue;
                 }
             }
+            // phux-foz.12: the status-bar row is chrome, not pane content —
+            // `content_rect` already excludes it, so every pointer event
+            // here used to fall through to a Miss and get dropped. Claim
+            // the row explicitly instead: a left press on a window tab
+            // (resolved against the painter's cached strip, so the hit
+            // targets are exactly the cells on screen) dispatches
+            // `select-window { index }` through the same `run_action`
+            // path the sidebar affordances and keybindings use. The
+            // sidebar strip never overlaps this row (its rect stops above
+            // a bottom bar and starts below a top one), and pane content
+            // is untouched — everything else on the row (non-tab cells,
+            // motion, wheel, non-left buttons) is consumed and dropped,
+            // matching the pre-claim behavior bit for bit.
+            if let Some(pos) = ctx.bar {
+                let bar_row = match pos {
+                    crate::render::chrome::status_bar::Position::Bottom => {
+                        ctx.viewport.1.saturating_sub(1)
+                    }
+                    crate::render::chrome::status_bar::Position::Top => 0,
+                };
+                let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
+                if ctx.viewport.1 > 0 && cell_y == bar_row {
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                        && let Some(resolved) = bar_click_action(ctx.status_bar, cell_x)
+                    {
+                        tracing::debug!(action = %resolved.action, "status bar: tab click dispatched");
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        if apply_action_effects(
+                            effects,
+                            out,
+                            conn,
+                            ctx,
+                            focused_pane,
+                            detach_pending,
+                            predict,
+                            panes,
+                        )
+                        .await?
+                        {
+                            layout_changed = true;
+                        }
+                    }
+                    continue;
+                }
+            }
             // Hit-test against the SAME inset content rect the renderer tiles
             // into — status-bar row and sidebar columns folded off the outer
             // viewport. Routing against the full viewport instead disagrees with
@@ -896,6 +950,33 @@ fn sidebar_click_action(
     };
     Some(phux_config::keybind::ResolvedAction {
         action: action.to_owned(),
+        args,
+    })
+}
+
+/// phux-foz.12: map a left press on the status-bar row to the action it
+/// commits, or `None` when it lands on a non-tab cell (separator, another
+/// widget, blank padding) or no painter/strip is available.
+///
+/// Same shape as [`sidebar_click_action`]: the mapping goes through
+/// [`phux_config::keybind::ResolvedAction`] so a tab click runs exactly
+/// what a keybinding, palette row, or sidebar click would — one dispatch
+/// path, no bespoke click semantics. A window tab commits
+/// `select-window { index }`; the hit test itself lives with the painter
+/// ([`crate::render::chrome::status_bar::StatusBarPainter::window_hit_at`])
+/// so paint and click targets derive from the same composed strip.
+fn bar_click_action(
+    painter: Option<&crate::render::chrome::status_bar::StatusBarPainter>,
+    x: u16,
+) -> Option<phux_config::keybind::ResolvedAction> {
+    let index = painter?.window_hit_at(x)?;
+    let mut args = std::collections::BTreeMap::new();
+    args.insert(
+        "index".to_owned(),
+        toml::Value::Integer(i64::try_from(index).ok()?),
+    );
+    Some(phux_config::keybind::ResolvedAction {
+        action: "select-window".to_owned(),
         args,
     })
 }
@@ -2656,6 +2737,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -2980,6 +3062,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3041,6 +3124,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3137,6 +3221,7 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 sidebar_agents: &[],
                 bar: None,
+                status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -3296,6 +3381,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -3973,6 +4059,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -4055,6 +4142,7 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 sidebar_agents: &[],
                 bar: None,
+                status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -4225,6 +4313,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -4333,6 +4422,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -4412,13 +4502,9 @@ mod tests {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "full copy-mode page-up/page-down round trip needs a complete dispatch context"
+        reason = "full copy-mode page-up/page-down round trip needs a complete DispatchCtx fixture, which grows a line per composed feature (phux-foz.9 sidebar_agents, phux-foz.12 status-bar lend)"
     )]
     #[tokio::test]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "full DispatchCtx fixture; each new ctx field (phux-foz.9 sidebar_agents) grows it by one line"
-    )]
     async fn copy_mode_page_scroll_mutates_focused_terminal_viewport() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 
@@ -4492,6 +4578,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -4675,6 +4762,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: Some(crate::render::chrome::status_bar::Position::Bottom),
+            status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             plugin_actions: &[],
@@ -4744,6 +4832,243 @@ mod tests {
         assert_eq!(active, 0);
         assert!(!overlay_active);
         assert_eq!(pending, 0);
+    }
+
+    // ---------- phux-foz.12: status-bar window-tab hit targets ----------
+
+    /// Build a status-bar painter with the `windows` widget in the left
+    /// slot (the default config's layout), fed `bash`/`vim` tabs and
+    /// painted once at `cols x rows` so its cached strip — the click
+    /// hit-test source — is populated. The strip reads "0:bash 1:vim":
+    /// window 0 on columns 0..=5, the separator on 6, window 1 on 7..=11.
+    fn painted_windows_bar(
+        position: crate::render::chrome::status_bar::Position,
+        cols: u16,
+        rows: u16,
+    ) -> crate::render::chrome::status_bar::StatusBarPainter {
+        use crate::render::chrome::status_bar::{StatusBarPainter, make_context};
+        use phux_config::widget::{StatusBar, WidgetRegistry, WindowInfo};
+        let cfg = phux_config::StatusCfg {
+            left: vec![phux_config::Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        let bar = StatusBar::build(&cfg, &WidgetRegistry::with_builtins()).expect("bar builds");
+        let mut painter = StatusBarPainter::new(bar, position);
+        painter.set_windows(vec![
+            WindowInfo {
+                name: "bash".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "vim".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        let mut sink = Vec::new();
+        painter
+            .paint(
+                &mut sink,
+                cols,
+                rows,
+                &make_context("", std::time::SystemTime::UNIX_EPOCH),
+            )
+            .expect("paint");
+        painter
+    }
+
+    /// Drive `dispatch_input_events` with a two-window workspace, no
+    /// sidebar, and a painted status bar at `position`; returns
+    /// `(active_window, frames_the_peer_received)` so callers can assert
+    /// both the select effect and that nothing leaked to a pane.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_bar_click(
+        ev: InputEvent,
+        position: crate::render::chrome::status_bar::Position,
+        with_painter: bool,
+    ) -> (usize, Vec<FrameKind>) {
+        let painter = painted_windows_bar(position, 80, 24);
+        let (a, b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut peer = Connection::from_stream(b);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("two".to_owned(), tid(2));
+        workspace.select(0);
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
+        let mut reload_request = false;
+        {
+            let mut ctx = DispatchCtx {
+                resolver: None,
+                workspace: &mut workspace,
+                viewport: (80, 24),
+                next_request_id: &mut next_request_id,
+                pending_splits: &mut pending_splits,
+                pending_windows: &mut pending_windows,
+                overlays: &mut overlays,
+                keybindings: None,
+                theme: &theme,
+                sessions: &[],
+                foreign_layouts: &HashMap::new(),
+                focused_session: None,
+                session_name: &mut session_name,
+                switch_request: &mut switch_request,
+                zoomed: &mut zoomed,
+                sidebar: None,
+                sidebar_enabled: &mut sidebar_enabled,
+                bar: Some(position),
+                status_bar: with_painter.then_some(&painter),
+                drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
+                plugin_actions: &[],
+                plugin_panes: &[],
+                plugin_tx: None,
+                reload_request: &mut reload_request,
+            };
+            dispatch_input_events(
+                &mut out,
+                &mut conn,
+                vec![ev],
+                &mut focused_pane,
+                &mut detach_pending,
+                &mut predict,
+                &overlay,
+                &mut panes,
+                &mut ctx,
+            )
+            .await
+            .expect("dispatch");
+        }
+        // Same drain discipline as `dispatch_mouse_two_pane`: close the
+        // writer so the peer's recv loop terminates on EOF.
+        drop(conn);
+        let mut received = Vec::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
+                .await
+                .expect("timed out draining the peer connection");
+            match next {
+                Ok(frame) => received.push(frame),
+                Err(_) => break,
+            }
+        }
+        (workspace.active, received)
+    }
+
+    /// A left press on window 1's tab in the BOTTOM bar (the user-reported
+    /// dogfood case) selects it — the same `select-window` a keybinding or
+    /// sidebar click runs — and forwards nothing to a pane.
+    #[tokio::test]
+    async fn bar_click_on_window_tab_selects_it() {
+        use crate::render::chrome::status_bar::Position;
+        // "0:bash 1:vim" — column 8 is inside window 1's tab; bottom bar
+        // row of a 24-row viewport is y = 23.
+        let (active, received) =
+            dispatch_bar_click(left_press_at(8, 23), Position::Bottom, true).await;
+        assert_eq!(active, 1, "clicking window 1's tab must select it");
+        assert!(
+            received.is_empty(),
+            "a bar-row click must not reach a pane; got {received:?}"
+        );
+    }
+
+    /// The same tab click works with the bar docked at the TOP (phux-foz.8):
+    /// the claimed row is y = 0 and the pane content below is untouched.
+    #[tokio::test]
+    async fn bar_click_honors_top_placement() {
+        use crate::render::chrome::status_bar::Position;
+        let (active, received) = dispatch_bar_click(left_press_at(8, 0), Position::Top, true).await;
+        assert_eq!(active, 1, "top-docked tab click must select window 1");
+        assert!(received.is_empty());
+    }
+
+    /// A click on the bar row that misses every tab (separator, blank
+    /// padding, another widget's cells) is consumed as chrome: no select,
+    /// no forward, exactly the pre-claim no-op.
+    #[tokio::test]
+    async fn bar_click_on_non_tab_cell_is_a_noop() {
+        use crate::render::chrome::status_bar::Position;
+        // Column 6 is the tab separator; column 40 is blank padding.
+        for x in [6, 40] {
+            let (active, received) =
+                dispatch_bar_click(left_press_at(x, 23), Position::Bottom, true).await;
+            assert_eq!(active, 0, "col {x} must not select");
+            assert!(
+                received.is_empty(),
+                "col {x} must not forward; got {received:?}"
+            );
+        }
+    }
+
+    /// With a TOP bar, a click on the bottom row is pane content — the bar
+    /// claim must not intercept it (it forwards to the pane under it).
+    #[tokio::test]
+    async fn bar_claim_leaves_pane_content_alone() {
+        use crate::render::chrome::status_bar::Position;
+        let (active, received) =
+            dispatch_bar_click(left_press_at(8, 23), Position::Top, true).await;
+        assert_eq!(active, 0, "a pane click must not select a window");
+        match received.as_slice() {
+            [FrameKind::InputMouse { terminal_id, .. }] => assert_eq!(*terminal_id, tid(1)),
+            other => panic!("expected the click to forward to the pane, got {other:?}"),
+        }
+    }
+
+    /// A bar reservation without a lent painter (headless paths, stale
+    /// fixtures) still claims the row safely: consumed, no panic, no select.
+    #[tokio::test]
+    async fn bar_click_without_painter_is_consumed() {
+        use crate::render::chrome::status_bar::Position;
+        let (active, received) =
+            dispatch_bar_click(left_press_at(8, 23), Position::Bottom, false).await;
+        assert_eq!(active, 0);
+        assert!(received.is_empty());
+    }
+
+    /// The pure click->action mapping mirrors `sidebar_click_action`: a tab
+    /// column commits `select-window { index }`; non-tab columns and a
+    /// missing painter commit nothing — and the committed name must be a
+    /// dispatched action (the palette-registry lockstep).
+    #[test]
+    fn bar_click_action_maps_tab_columns_to_select_window() {
+        use crate::render::chrome::status_bar::Position;
+        let painter = painted_windows_bar(Position::Bottom, 80, 24);
+        let resolved = bar_click_action(Some(&painter), 8).expect("tab column hits");
+        assert_eq!(resolved.action, "select-window");
+        assert_eq!(index_arg(&resolved), Some(1));
+        assert!(
+            ACTION_NAMES.contains(&resolved.action.as_str()),
+            "bar committed `{}`, which run_action does not dispatch",
+            resolved.action,
+        );
+        assert!(bar_click_action(Some(&painter), 6).is_none(), "separator");
+        assert!(bar_click_action(Some(&painter), 40).is_none(), "padding");
+        assert!(bar_click_action(None, 8).is_none(), "no painter");
     }
 
     // -- phux-npb3: per-pane mouse opt-out + drag double-press hardening ---
@@ -4849,6 +5174,7 @@ mod tests {
                 sidebar_enabled: &mut sidebar_enabled,
                 sidebar_agents: &[],
                 bar: None,
+                status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
                 plugin_actions: &[],
@@ -5032,6 +5358,7 @@ mod tests {
             sidebar_enabled: &mut sidebar_enabled,
             sidebar_agents: &[],
             bar: None,
+            status_bar: None,
             drag: &mut drag,
             mouse_optout,
             plugin_actions: &[],
