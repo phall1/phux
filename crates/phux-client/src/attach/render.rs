@@ -46,42 +46,19 @@ pub enum RenderError {
     KittyReplay(#[from] kitty_replay::KittyReplayError),
 }
 
-/// A copy-mode selection in pane-local viewport cells (inclusive), for the
-/// renderer to reverse-video while painting (phux copy-mode).
+/// The copy-mode selection rectangle the renderer reverse-videos while painting.
 ///
-/// Linear (text-flow) selection, matching the copy-mode overlay: full interior
-/// rows, partial first/last rows. Carrying the highlight here — in the same
-/// per-cell render that emits the pane's real styles — is what lets copy-mode
-/// leave the screen untouched except for inverting the selected cells, instead
-/// of clearing and repainting a separate overlay surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionRect {
-    /// First selected row (inclusive).
-    pub start_row: u16,
-    /// First selected column, on `start_row` (inclusive).
-    pub start_col: u16,
-    /// Last selected row (inclusive).
-    pub end_row: u16,
-    /// Last selected column, on `end_row` (inclusive).
-    pub end_col: u16,
-}
-
-impl SelectionRect {
-    /// Whether the pane-local cell `(row, col)` falls inside the selection.
-    #[must_use]
-    pub const fn contains(self, row: u16, col: u16) -> bool {
-        if row < self.start_row || row > self.end_row {
-            return false;
-        }
-        if row == self.start_row && col < self.start_col {
-            return false;
-        }
-        if row == self.end_row && col > self.end_col {
-            return false;
-        }
-        true
-    }
-}
+/// Relocated to the shared contract module by
+/// [ADR-0045](../../../../ADR/0045-client-side-copy-mode.md): the renderer and
+/// the selection UX (`render::overlay::copy_mode`) must agree byte-for-byte on
+/// what a selection covers — including block vs linear geometry
+/// ([`SelectionRect::contains`]) — so the type and its geometry live in one
+/// leaf ([`crate::render::overlay::selection`]) both consumers import. Carrying
+/// the highlight through this per-cell render — the same one that emits the
+/// pane's real styles — is what lets copy-mode leave the screen untouched
+/// except for inverting the selected cells, instead of clearing and repainting
+/// a separate overlay surface.
+pub use crate::render::overlay::selection::SelectionRect;
 
 /// Per-pane render scaffolding.
 ///
@@ -955,6 +932,7 @@ mod tests {
             start_col: 0,
             end_row: 0,
             end_col: 1,
+            rectangle: false,
         }));
         let mut out: Vec<u8> = Vec::new();
         let _ = r.render_at_full(&t, &mut out, (0, 0), (10, 2));
@@ -979,22 +957,74 @@ mod tests {
         assert!(!String::from_utf8_lossy(&plain).contains("\x1b[7"));
     }
 
+    // `SelectionRect::contains` (linear + block geometry) is owned and tested
+    // by the shared contract module, `render::overlay::selection`, after
+    // ADR-0045 relocated the type there. The render-layer test below
+    // (`block_and_linear_selection_invert_different_cells`) instead exercises
+    // the *paint* path — that the two geometries emit different VT.
+
+    /// Block and linear inversion visibly differ in the emitted VT. Three rows
+    /// so row 1 is a *true interior* row; select corners (0,2)..(2,5). Linear
+    /// reverse-videos the full interior row (including its leading `ab`); block
+    /// reverse-videos only the [2,5] band on every row, so the interior row's
+    /// leading `ab` stays plain. The renders MUST differ on exactly that.
     #[test]
-    fn selection_rect_contains_is_linear() {
-        // Linear/text selection: full interior rows, partial first/last rows.
-        let sel = SelectionRect {
-            start_row: 1,
-            start_col: 1,
-            end_row: 3,
+    fn block_and_linear_selection_invert_different_cells() {
+        let mut t = fresh(8, 3);
+        // Distinct glyphs per row; the interior row's leading pair "ab" is
+        // unique to row 1, so a substring match pins the interior row.
+        t.vt_write(b"ABCDEFGH\r\nabcdefgh\r\n01234567");
+        let sel_corners = |rectangle| SelectionRect {
+            start_row: 0,
+            start_col: 2,
+            end_row: 2,
             end_col: 5,
+            rectangle,
         };
-        assert!(sel.contains(1, 1)); // start corner
-        assert!(sel.contains(2, 0)); // interior row, any col
-        assert!(sel.contains(3, 5)); // end corner
-        assert!(!sel.contains(0, 1)); // above
-        assert!(!sel.contains(1, 0)); // before start on start row
-        assert!(!sel.contains(3, 6)); // after end on end row
-        assert!(!sel.contains(4, 1)); // below
+
+        let mut r = TerminalRenderer::new().expect("renderer");
+
+        r.set_selection(Some(sel_corners(false)));
+        let mut linear_out: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut linear_out, (0, 0), (8, 3));
+        let linear = String::from_utf8_lossy(&linear_out);
+
+        r.set_selection(Some(sel_corners(true)));
+        let mut block_out: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut block_out, (0, 0), (8, 3));
+        let block = String::from_utf8_lossy(&block_out);
+
+        // Both invert *something*, and the two geometries produce different VT.
+        assert!(linear.contains("\x1b[7"), "linear must invert something");
+        assert!(block.contains("\x1b[7"), "block must invert something");
+        assert_ne!(
+            linear, block,
+            "block and linear geometries must paint differently"
+        );
+
+        // The load-bearing contrast, robust to SGR coalescing: each row starts
+        // with a `\x1b[0m` reset (emitted = default). In BLOCK, the interior
+        // row's leading `ab` (cols 0,1 — outside the [2,5] band) is plain, so
+        // the glyphs follow the row-start reset directly: `\x1b[0mab`. In
+        // LINEAR the whole interior row is selected, so an inverse SGR sits
+        // between the reset and `ab`, and `\x1b[0mab` never appears. "ab" is
+        // unique to the interior row, so this isolates that row.
+        assert!(
+            block.contains("\x1b[0mab"),
+            "block: interior row's leading `ab` (outside the band) stays plain \
+             right after the row reset, got {block:?}"
+        );
+        assert!(
+            !linear.contains("\x1b[0mab"),
+            "linear: interior row is fully selected, so `ab` is inverted (an \
+             SGR intervenes after the reset), got {linear:?}"
+        );
+        // And the shared band glyphs c,d,e,f (cols 2..=5) render in both.
+        assert!(block.contains("cdef"), "block band glyphs, got {block:?}");
+        assert!(
+            linear.contains("cdef"),
+            "linear band glyphs, got {linear:?}"
+        );
     }
 
     fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {

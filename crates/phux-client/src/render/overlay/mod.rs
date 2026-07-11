@@ -30,12 +30,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use crate::attach::render::SelectionRect;
-
 pub mod copy_mode;
 pub mod help;
 pub mod prompt;
 pub mod select_list;
+pub mod selection;
 pub mod toast;
 pub mod which_key;
 pub mod widgets;
@@ -44,6 +43,11 @@ pub use copy_mode::CopyModeOverlay;
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};
+// The shared copy-mode selection contract (ADR-0045). This module is the single
+// owner; both the selection UX (`copy_mode`) and the renderer (`attach::render`)
+// import these types from here, so the highlight geometry and the copy path
+// cannot disagree about what a selection covers.
+pub use selection::{CopyRequest, SelectionGrab, SelectionMode, SelectionRect};
 pub use toast::ToastOverlay;
 pub use which_key::WhichKeyOverlay;
 
@@ -124,6 +128,18 @@ pub trait RenderOverlay {
         None
     }
 
+    /// Advance this overlay's selection mode, returning the new mode.
+    ///
+    /// `None` for every overlay but copy-mode (the default): only copy-mode
+    /// carries a [`SelectionMode`]. Copy-mode overrides it to cycle
+    /// `Char -> Line -> Rect -> Char` and report the result. The dispatcher's
+    /// copy-mode-active mode toggle calls it through
+    /// [`OverlayState::cycle_copy_mode`]; the mode is client-local overlay
+    /// state (ADR-0045), never a wire concern.
+    fn cycle_selection_mode(&mut self) -> Option<SelectionMode> {
+        None
+    }
+
     /// `true` for a display-only overlay that must never capture input
     /// (phux-foz.2: the which-key popup). The dispatcher checks this
     /// BEFORE overlay routing: instead of feeding keys to the overlay it
@@ -170,74 +186,6 @@ pub enum OverlayCommand {
     /// Keep the overlay active and scroll the focused pane's client-local
     /// viewport by `delta` rows (negative means up into scrollback).
     ScrollViewport(isize),
-}
-
-/// How the dispatcher should derive the selection from a [`CopyRequest`]
-/// (phux-7143, [ADR-0030]).
-///
-/// `Rect` is the two-corner path: the overlay's `start`/`end` rectangle is
-/// turned into a linear-or-block `Selection::new` directly. The remaining
-/// variants are *engine-derived*: the dispatcher hands the overlay cursor
-/// (`cursor_row`/`cursor_col`) to libghostty's `select_*` helpers, which
-/// return a snapshot selection the dispatcher then formats. Keeping the
-/// derivation as a tag here (not a `libghostty_vt` call) preserves the
-/// render-layer boundary — `render/overlay/` never imports the engine; the
-/// dispatcher in `attach/copy.rs` does the resolution.
-///
-/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionGrab {
-    /// Two-corner rectangle: `start`/`end` corners, block when
-    /// [`CopyRequest::rectangle`] is set, else linear. The legacy default.
-    #[default]
-    Rect,
-    /// Word under the cursor (`select_word`).
-    Word,
-    /// Whole line under the cursor (`select_line`).
-    Line,
-    /// Whole line under the cursor, bounded by semantic-prompt state changes
-    /// (`select_line` with `with_semantic_prompt_boundary(true)`).
-    LineSemantic,
-    /// All selectable terminal content (`select_all`).
-    All,
-    /// The command-output span under the cursor (`select_output`). Degrades
-    /// to an empty no-op when the pane has no OSC-133 semantic zones.
-    Output,
-}
-
-/// A client-local copy request (phux-v6jw, [ADR-0030]).
-///
-/// The overlay's normalized, inclusive viewport selection rectangle, handed to
-/// the dispatcher to resolve against the focused pane's own libghostty engine.
-/// Coordinates are pane-local viewport cells (`row`/`col`, zero-based,
-/// `start <= end`). `rectangle` selects block (vs linear) extraction.
-///
-/// `grab` tags how the dispatcher derives the selection. For
-/// [`SelectionGrab::Rect`] (the default) the `start`/`end` corners drive a
-/// two-corner `Selection`; the engine-derived grabs instead resolve at the
-/// overlay cursor (`cursor_row`/`cursor_col`).
-///
-/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CopyRequest {
-    /// Top row of the selection (inclusive).
-    pub start_row: u16,
-    /// Left column of the selection (inclusive).
-    pub start_col: u16,
-    /// Bottom row of the selection (inclusive).
-    pub end_row: u16,
-    /// Right column of the selection (inclusive).
-    pub end_col: u16,
-    /// Block (rectangular) selection when `true`; linear when `false`. Only
-    /// consulted for [`SelectionGrab::Rect`].
-    pub rectangle: bool,
-    /// The overlay cursor row (pane-local viewport cell). Engine-derived
-    /// grabs (`Word`/`Line`/`LineSemantic`/`Output`) resolve here.
-    pub cursor_row: u16,
-    /// The overlay cursor column (pane-local viewport cell).
-    pub cursor_col: u16,
-    /// How the dispatcher derives the selection from this request.
-    pub grab: SelectionGrab,
 }
 
 /// What [`OverlayState::handle_key`] hands back to the dispatcher.
@@ -306,6 +254,18 @@ impl OverlayState {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.stack.len()
+    }
+
+    /// If the top overlay is copy-mode, advance its selection mode and return
+    /// the new [`SelectionMode`]; `None` if the top overlay is not copy-mode
+    /// (or the stack is empty).
+    ///
+    /// This is the accessor the dispatcher's copy-mode-active mode toggle uses
+    /// to reach [`CopyModeOverlay::cycle_mode`] without naming the concrete
+    /// overlay type through the boxed trait object. Client-local (ADR-0045):
+    /// the mode never crosses the wire.
+    pub fn cycle_copy_mode(&mut self) -> Option<SelectionMode> {
+        self.stack.last_mut().and_then(|o| o.cycle_selection_mode())
     }
 
     /// `true` when the top overlay is input-passthrough (phux-foz.2:

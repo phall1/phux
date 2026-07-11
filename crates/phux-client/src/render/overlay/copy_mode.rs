@@ -14,8 +14,9 @@ use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::{CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab};
-use crate::attach::render::SelectionRect;
+use super::{
+    CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab, SelectionMode, SelectionRect,
+};
 
 const WHEEL_SCROLL_LINES: isize = 3;
 
@@ -26,25 +27,6 @@ fn quantize_mouse_cell(value: f64, max: u16) -> u16 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let cell = value.floor().max(0.0) as u16;
     cell.min(max.saturating_sub(1))
-}
-
-/// How copy-mode interprets the selection rectangle.
-///
-/// Client-local UI state (phux-q1ni, [ADR-0030]): selection is a consumer-side
-/// projection, so the mode lives with the overlay rather than on the wire.
-/// `Char` is the default linear selection; `Rect` is Mosh-style block
-/// selection; `Line` selects whole lines.
-///
-/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionMode {
-    /// Character-wise (linear) selection — the default.
-    #[default]
-    Char,
-    /// Line-wise selection (whole lines).
-    Line,
-    /// Rectangular (block) selection.
-    Rect,
 }
 
 /// Rectangular selection state: (row, col) coordinates for start and end.
@@ -120,6 +102,34 @@ impl CopyModeOverlay {
         }
     }
 
+    /// The current selection mode.
+    ///
+    /// The lockstep read side of the mode state machine: a global mode-cycle
+    /// keybind flips the mode via [`Self::cycle_mode`], the renderer and the
+    /// copy path read it back through here. Mode is client-local UI state, so
+    /// nothing about it touches the wire (ADR-0030).
+    #[must_use]
+    pub const fn mode(&self) -> SelectionMode {
+        self.mode
+    }
+
+    /// Advance the selection mode `Char -> Line -> Rect -> Char`.
+    ///
+    /// The lockstep write side of the mode state machine. It is driven two
+    /// ways: directly by the in-overlay `Tab` key (the overlay captures every
+    /// keystroke while it is up, so the cycle key must live here — see
+    /// [`RenderOverlay::handle_key`]), and via the
+    /// [`super::OverlayState::cycle_copy_mode`] accessor for callers that reach the
+    /// active overlay through the boxed trait object. No wire traffic — the
+    /// mode is a consumer-side projection detail (ADR-0030).
+    pub const fn cycle_mode(&mut self) {
+        self.mode = match self.mode {
+            SelectionMode::Char => SelectionMode::Line,
+            SelectionMode::Line => SelectionMode::Rect,
+            SelectionMode::Rect => SelectionMode::Char,
+        };
+    }
+
     fn set_cursor_from_mouse(&mut self, mouse: &MouseEvent) {
         self.cursor_row = quantize_mouse_cell(mouse.y, self.pane_rows);
         self.cursor_col = quantize_mouse_cell(mouse.x, self.pane_cols);
@@ -133,6 +143,32 @@ impl CopyModeOverlay {
             self.cursor_row,
             self.cursor_col,
         )
+    }
+
+    /// The selection range adjusted for the active [`SelectionMode`].
+    ///
+    /// `Char` and `Rect` use the raw two-corner range as-is (the linear-vs-block
+    /// distinction is carried by the `rectangle` flag downstream). `Line`
+    /// expands the range to whole visible lines — column `0` through the last
+    /// pane column — so a line selection covers the full rows it spans instead
+    /// of collapsing to the same geometry as `Char` (ADR-0045). Both the
+    /// highlight ([`copy_selection`]) and the copy request
+    /// ([`copy_request_with`]) resolve through here, so what the renderer
+    /// inverts and what the bridge extracts stay in lockstep.
+    ///
+    /// [`copy_selection`]: RenderOverlay::copy_selection
+    fn effective_range(&self) -> CellRange {
+        let range = self.selection_range();
+        if self.mode == SelectionMode::Line {
+            CellRange {
+                start_row: range.start_row,
+                start_col: 0,
+                end_row: range.end_row,
+                end_col: self.pane_cols.saturating_sub(1),
+            }
+        } else {
+            range
+        }
     }
 
     /// Move cursor by a delta, clamping to pane bounds.
@@ -190,7 +226,7 @@ impl CopyModeOverlay {
     /// rectangle is still carried (so the highlight stays coherent) but the
     /// dispatcher resolves against `cursor_row`/`cursor_col` instead.
     fn copy_request_with(&self, grab: SelectionGrab) -> CopyRequest {
-        let range = self.selection_range();
+        let range = self.effective_range();
         CopyRequest {
             start_row: range.start_row,
             start_col: range.start_col,
@@ -215,13 +251,28 @@ impl RenderOverlay for CopyModeOverlay {
     fn render(&self, _area: Rect, _buf: &mut Buffer) {}
 
     fn copy_selection(&self) -> Option<SelectionRect> {
-        let range = self.selection_range();
-        Some(SelectionRect {
-            start_row: range.start_row,
-            start_col: range.start_col,
-            end_row: range.end_row,
-            end_col: range.end_col,
-        })
+        // `effective_range` applies the Line-mode whole-line expansion, and
+        // `from_range` sets the block/linear flag from the mode, so the renderer
+        // highlights exactly what a copy of the current mode would extract
+        // (ADR-0045).
+        let range = self.effective_range();
+        Some(SelectionRect::from_range(
+            range.start_row,
+            range.start_col,
+            range.end_row,
+            range.end_col,
+            self.mode,
+        ))
+    }
+
+    /// Advance the selection mode `Char -> Line -> Rect -> Char`.
+    ///
+    /// Client-local UI state (ADR-0045): the mode is a projection knob on the
+    /// consumer's own engine, never a wire concern. The dispatcher's
+    /// copy-mode-active toggle calls this via [`super::OverlayState::cycle_copy_mode`].
+    fn cycle_selection_mode(&mut self) -> Option<SelectionMode> {
+        self.cycle_mode();
+        Some(self.mode)
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -259,6 +310,16 @@ impl RenderOverlay for CopyModeOverlay {
             }
             PhysicalKey::ArrowRight => {
                 self.move_cursor_key(0, 1, shift);
+                OverlayCommand::Stay
+            }
+            // Tab cycles the selection geometry `Char -> Line -> Rect -> Char`
+            // (ADR-0045). The overlay captures every keystroke while it is up,
+            // so the mode-cycle must be an in-overlay key rather than a global
+            // keybind resolved past the capture; `Stay` triggers the driver's
+            // per-key overlay repaint, so the new geometry's highlight shows
+            // immediately. Client-local UI state — no wire traffic (ADR-0030).
+            PhysicalKey::Tab => {
+                self.cycle_mode();
                 OverlayCommand::Stay
             }
             PhysicalKey::PageUp | PhysicalKey::NumpadPageUp => {
@@ -433,6 +494,105 @@ mod tests {
     fn enter_grabs_rect() {
         let cmd = dispatch(PhysicalKey::Enter, ModSet::empty());
         assert_eq!(grab_of(&cmd), SelectionGrab::Rect);
+    }
+
+    #[test]
+    fn cycle_mode_advances_char_line_rect_char() {
+        let mut overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        assert_eq!(overlay.mode(), SelectionMode::Char, "default is Char");
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Rect);
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Char, "wraps back to Char");
+    }
+
+    #[test]
+    fn rect_mode_copy_request_is_block() {
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        overlay.cycle_mode(); // Char -> Line
+        overlay.cycle_mode(); // Line -> Rect
+        assert_eq!(overlay.mode(), SelectionMode::Rect);
+        let req = overlay.copy_request();
+        assert!(
+            req.rectangle,
+            "Rect mode must request block (rectangular) extraction"
+        );
+        assert_eq!(
+            req.grab,
+            SelectionGrab::Rect,
+            "the two-corner Enter path always tags SelectionGrab::Rect"
+        );
+    }
+
+    #[test]
+    fn char_and_line_mode_copy_request_is_linear() {
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        assert_eq!(overlay.mode(), SelectionMode::Char);
+        assert!(
+            !overlay.copy_request().rectangle,
+            "Char mode is linear, not block"
+        );
+        overlay.cycle_mode(); // Char -> Line
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        assert!(
+            !overlay.copy_request().rectangle,
+            "Line mode is linear over the two-corner range, not block"
+        );
+    }
+
+    #[test]
+    fn tab_key_cycles_selection_mode() {
+        // The overlay captures every keystroke while up, so the mode-cycle is
+        // an in-overlay key (ADR-0045). Tab advances Char -> Line -> Rect ->
+        // Char and stays in copy-mode (the driver repaints on `Stay`).
+        let mut overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        assert_eq!(overlay.mode(), SelectionMode::Char);
+        assert_eq!(
+            overlay.handle_key(&press(PhysicalKey::Tab, ModSet::empty())),
+            OverlayCommand::Stay
+        );
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        overlay.handle_key(&press(PhysicalKey::Tab, ModSet::empty()));
+        assert_eq!(overlay.mode(), SelectionMode::Rect);
+        overlay.handle_key(&press(PhysicalKey::Tab, ModSet::empty()));
+        assert_eq!(overlay.mode(), SelectionMode::Char, "wraps back to Char");
+    }
+
+    #[test]
+    fn line_mode_expands_selection_to_whole_lines() {
+        // Anchor (1,3), cursor dragged to (2,5) on an 80-col pane. Char mode
+        // keeps the two-corner range; Line mode expands the columns to the full
+        // line width (0 .. cols-1) on both the highlight and the copy request,
+        // so a line selection covers whole rows instead of collapsing to Char.
+        let mut overlay = CopyModeOverlay::new(1, 3, 80, 24);
+        overlay.move_cursor(1, 2); // cursor -> (2, 5)
+
+        // Char mode: the raw two-corner range.
+        let sel = overlay.copy_selection().expect("selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (1, 3, 2, 5)
+        );
+        assert!(!sel.rectangle, "Char mode is linear");
+
+        overlay.cycle_mode(); // Char -> Line
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        let sel = overlay.copy_selection().expect("selection");
+        assert_eq!(
+            (sel.start_row, sel.start_col, sel.end_row, sel.end_col),
+            (1, 0, 2, 79),
+            "Line mode spans whole visible lines (col 0 .. cols-1)"
+        );
+        assert!(!sel.rectangle, "Line mode is linear, not block");
+        // The copy request carries the same expanded corners.
+        let req = overlay.copy_request();
+        assert_eq!(
+            (req.start_row, req.start_col, req.end_row, req.end_col),
+            (1, 0, 2, 79)
+        );
+        assert!(!req.rectangle);
     }
 
     #[test]
