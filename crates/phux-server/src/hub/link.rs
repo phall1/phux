@@ -837,6 +837,10 @@ async fn run_relay_session<C: LinkConn>(
             },
             _ = keepalive.tick() => {
                 session.prune_abandoned();
+                // Retry any attach snapshot a briefly-full consumer refused,
+                // so it converges even with no further inbound frame for its
+                // terminal to trigger the inline retry (phux-v45.12).
+                session.flush_pending_snapshots();
                 match tokio::time::timeout(LINK_SEND_TIMEOUT, conn.keepalive()).await {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => break (true, error),

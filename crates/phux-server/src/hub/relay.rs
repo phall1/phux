@@ -45,6 +45,14 @@
 //! consumers uses `try_send` into each consumer's bounded outbound
 //! mailbox (the same discipline as `crate::runtime::client::broadcast_event`),
 //! so one slow consumer never stalls the link or the hub's other work.
+//! The one exception is the attach ordering anchor (phux-v45.12, L1 §9.1):
+//! a return-leg `TERMINAL_SNAPSHOT` a briefly-full consumer refuses is
+//! *retained* per subscriber and that consumer's later deltas are
+//! suppressed until it lands, so a `TERMINAL_OUTPUT` can never overtake the
+//! snapshot across the two-hop attach — the non-blocking mirror of the
+//! local attach's snapshot gate (`RelaySession::fan_out` /
+//! `flush_pending_snapshots`). Still no head-of-line stall: the retry is
+//! per-consumer, not a link-wide await.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -587,6 +595,19 @@ struct ProxySubscriber {
     /// against a terminal withdrawal's token so a stale detach cannot
     /// tear down a newer re-attach.
     seq: u64,
+    /// A return-leg `TERMINAL_SNAPSHOT` whose fan-out this consumer's
+    /// briefly-full mailbox refused, retained to retry before any later
+    /// delta reaches it (phux-v45.12, L1 §9.1 "the snapshot MUST precede
+    /// the first delta"). While `Some`, `TERMINAL_OUTPUT` / event deltas to
+    /// this subscriber are suppressed so a delta can never overtake the
+    /// dropped snapshot across the two-hop attach; the retained frame is
+    /// retried on the next inbound frame for the terminal and on the link
+    /// keepalive tick ([`RelaySession::flush_pending_snapshots`]), and a
+    /// newer snapshot (a satellite resync) replaces it — full-grid, the
+    /// freshest wins. This is the non-blocking mirror of the local attach's
+    /// snapshot gate: it holds the ordering guarantee without stalling the
+    /// link for one slow consumer.
+    pending_snapshot: Option<FrameKind>,
 }
 
 /// One in-flight relayed command: the waiting consumer plus, when the
@@ -729,6 +750,7 @@ impl RelaySession {
                 client,
                 out_tx,
                 seq,
+                pending_snapshot: None,
             });
             true
         }
@@ -1093,13 +1115,81 @@ impl RelaySession {
     /// Push `frame` to every proxy subscriber of satellite-local terminal
     /// `id`. `try_send` per consumer: a slow consumer drops its copy, the
     /// link and its siblings keep flowing.
-    fn fan_out(&self, id: u32, frame: &FrameKind) {
-        let Some(subs) = self.subscribers.get(&id) else {
-            trace!(satellite = %self.host, terminal = id, "inbound stream frame with no proxy subscribers");
+    ///
+    /// A `TERMINAL_SNAPSHOT` is the ordering anchor (phux-v45.12, L1 §9.1):
+    /// if a consumer's briefly-full mailbox refuses it, it is **retained**
+    /// (not dropped) and the consumer's later deltas are suppressed until it
+    /// lands, so a `TERMINAL_OUTPUT` can never overtake the snapshot across
+    /// the two-hop attach. This mirrors the local attach's snapshot gate
+    /// without blocking the link: the retained frame is retried here on the
+    /// next delta and on the keepalive tick, and a newer snapshot replaces
+    /// it. A sustained-saturation consumer may still lag on *content* (the
+    /// pre-existing slow-consumer condition) but never sees a delta before a
+    /// snapshot.
+    fn fan_out(&mut self, id: u32, frame: &FrameKind) {
+        let host = &self.host;
+        let Some(subs) = self.subscribers.get_mut(&id) else {
+            trace!(satellite = %host, terminal = id, "inbound stream frame with no proxy subscribers");
             return;
         };
-        for sub in subs {
-            let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
+        let is_snapshot = matches!(frame, FrameKind::TerminalSnapshot { .. });
+        for sub in subs.iter_mut() {
+            if is_snapshot {
+                match sub.out_tx.try_send(Outbound::Frame(frame.clone())) {
+                    Ok(()) => sub.pending_snapshot = None,
+                    // Retain it: a later delta must not overtake it.
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        sub.pending_snapshot = Some(frame.clone());
+                    }
+                    // Dead consumer; teardown / disconnect reaps it.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {}
+                }
+            } else if sub.pending_snapshot.is_some() {
+                // A delta while this consumer's snapshot is still undelivered:
+                // flush the retained snapshot first; only if it lands may the
+                // delta ride after it. Otherwise the delta is dropped now —
+                // delivering it would precede the snapshot.
+                if Self::flush_pending_snapshot(sub) {
+                    let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
+                }
+            } else {
+                let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
+            }
+        }
+    }
+
+    /// Retry one subscriber's retained attach snapshot (phux-v45.12).
+    /// Returns `true` when nothing is pending or it was delivered (the
+    /// subscriber may resume deltas), `false` while it stays stuck behind a
+    /// full mailbox. A closed mailbox clears the entry (the dead consumer is
+    /// reaped elsewhere) and reads as delivered so callers do not loop.
+    fn flush_pending_snapshot(sub: &mut ProxySubscriber) -> bool {
+        let Some(snapshot) = sub.pending_snapshot.as_ref() else {
+            return true;
+        };
+        match sub.out_tx.try_send(Outbound::Frame(snapshot.clone())) {
+            // Delivered, or the consumer is gone (reaped elsewhere): either
+            // way nothing stays pending and deltas may resume.
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                sub.pending_snapshot = None;
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => false,
+        }
+    }
+
+    /// Retry every subscriber's retained attach snapshot (phux-v45.12).
+    /// Driven from the link supervisor's keepalive tick so a consumer whose
+    /// mailbox was briefly full at attach still converges even if no further
+    /// return-leg frame arrives for its terminal to trigger the inline retry
+    /// in [`Self::fan_out`].
+    pub(crate) fn flush_pending_snapshots(&mut self) {
+        for subs in self.subscribers.values_mut() {
+            for sub in subs.iter_mut() {
+                if sub.pending_snapshot.is_some() {
+                    let _ = Self::flush_pending_snapshot(sub);
+                }
+            }
         }
     }
 
@@ -1705,6 +1795,162 @@ mod tests {
             event: AgentEvent::CommandStarted,
         }));
         assert!(out_rx.try_recv().is_err());
+    }
+
+    // --- attach snapshot ordering under backpressure (phux-v45.12) --------
+
+    fn snapshot_frame(id: u32) -> FrameKind {
+        FrameKind::TerminalSnapshot {
+            terminal_id: TerminalId::local(id),
+            cols: 80,
+            rows: 24,
+            vt_replay_bytes: b"grid".to_vec(),
+            scrollback_bytes: None,
+        }
+    }
+
+    fn output_frame(id: u32, seq: u64, bytes: &'static [u8]) -> FrameKind {
+        FrameKind::TerminalOutput {
+            terminal_id: TerminalId::local(id),
+            seq,
+            bytes: bytes::Bytes::from_static(bytes),
+        }
+    }
+
+    #[tokio::test]
+    async fn full_mailbox_retains_the_snapshot_so_a_delta_never_overtakes_it() {
+        // L1 §9.1: the snapshot MUST precede the first delta. When the
+        // consumer's mailbox is briefly full at attach the return-leg
+        // snapshot cannot be delivered; it must be retained (not dropped)
+        // so a later TERMINAL_OUTPUT does not reach the consumer first.
+        let mut session = RelaySession::new(host());
+        // Capacity two so both the retried snapshot and the delta can land
+        // in order once the fillers drain.
+        let (out_tx, mut out_rx) = mpsc::channel(2);
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        // Saturate the mailbox: the snapshot's fan-out will be refused.
+        out_tx
+            .try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("filler one");
+        out_tx
+            .try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("filler two");
+
+        // Snapshot arrives while saturated -> retained, nothing delivered.
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        // Free the mailbox.
+        assert!(matches!(
+            out_rx.try_recv().expect("filler one drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+        assert!(matches!(
+            out_rx.try_recv().expect("filler two drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+
+        // A later OUTPUT delta must flush the retained snapshot FIRST and
+        // only then ride after it.
+        session.handle_inbound(&encode(&output_frame(9, 1, b"delta")));
+
+        let Outbound::Frame(first) = out_rx.try_recv().expect("snapshot delivered");
+        assert!(
+            matches!(first, FrameKind::TerminalSnapshot { .. }),
+            "the snapshot must reach the consumer before any delta, got {first:?}"
+        );
+        let Outbound::Frame(second) = out_rx.try_recv().expect("delta delivered");
+        assert!(
+            matches!(
+                second,
+                FrameKind::TerminalOutput { ref terminal_id, seq: 1, .. }
+                    if *terminal_id == TerminalId::satellite("devbox", 9)
+            ),
+            "the delta must ride after the snapshot, re-tagged, got {second:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deltas_are_suppressed_until_the_retained_snapshot_flushes_on_the_tick() {
+        // While the snapshot stays stuck behind a full mailbox, deltas are
+        // suppressed (never delivered ahead of it); the keepalive-tick flush
+        // converges the consumer once the mailbox drains.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        out_tx
+            .try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("filler");
+
+        // Snapshot refused (retained), then a delta while still full.
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        session.handle_inbound(&encode(&output_frame(9, 1, b"delta")));
+
+        // Only the filler is queued: neither the snapshot nor the delta
+        // reached the consumer (the delta was suppressed, not reordered).
+        assert!(matches!(
+            out_rx.try_recv().expect("filler drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no frame may reach the consumer while the snapshot is stuck"
+        );
+
+        // The keepalive tick retries the retained snapshot; the mailbox now
+        // has room, so it lands — and it was never preceded by the delta.
+        session.flush_pending_snapshots();
+        let Outbound::Frame(frame) = out_rx.try_recv().expect("snapshot flushed on tick");
+        assert!(
+            matches!(frame, FrameKind::TerminalSnapshot { .. }),
+            "the tick flush delivers the retained snapshot, got {frame:?}"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "the suppressed delta was dropped, not delivered before the snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresher_snapshot_replaces_a_retained_one() {
+        // A satellite resync sends a newer snapshot while an older one is
+        // still retained: the freshest full-grid must win.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        out_tx
+            .try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("filler");
+
+        // First snapshot refused and retained.
+        session.handle_inbound(&encode(&FrameKind::TerminalSnapshot {
+            terminal_id: TerminalId::local(9),
+            cols: 80,
+            rows: 24,
+            vt_replay_bytes: b"stale".to_vec(),
+            scrollback_bytes: None,
+        }));
+        // A fresher snapshot arrives (still full) and must replace it.
+        session.handle_inbound(&encode(&FrameKind::TerminalSnapshot {
+            terminal_id: TerminalId::local(9),
+            cols: 80,
+            rows: 24,
+            vt_replay_bytes: b"fresh".to_vec(),
+            scrollback_bytes: None,
+        }));
+        assert!(matches!(
+            out_rx.try_recv().expect("filler drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+        session.flush_pending_snapshots();
+        let Outbound::Frame(FrameKind::TerminalSnapshot {
+            vt_replay_bytes, ..
+        }) = out_rx.try_recv().expect("snapshot flushed")
+        else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(
+            vt_replay_bytes, b"fresh",
+            "the freshest retained snapshot must win"
+        );
     }
 
     // --- session: lifecycle teardown --------------------------------------
