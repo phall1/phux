@@ -122,13 +122,20 @@ pub fn osc52_set_clipboard(text: &str) -> Vec<u8> {
     out
 }
 
-/// Extract `req`'s selection from `terminal` and, if non-empty, write an
-/// OSC 52 clipboard sequence to `out` (the host terminal). Best-effort: an
-/// empty/unselectable range writes nothing.
-pub fn copy_to_host_clipboard<W: Write>(
-    out: &mut W,
-    terminal: &GhosttyTerminal<'_, '_>,
+/// The copy-mode extraction bridge (ADR-0045).
+///
+/// Resolves `req` against the focused pane's own libghostty `terminal` and, if
+/// the selection is non-empty, emits an OSC 52 clipboard sequence to `out` (the
+/// host terminal). This is the single seam where copy-mode touches the engine —
+/// the overlay layer stays engine-free and hands the dispatcher a plain-data
+/// [`CopyRequest`], which arrives here. `format_selection_alloc` (block when
+/// `req.rectangle`) or a `select_*` grab does the work; nothing goes on the
+/// wire ([ADR-0030](../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)).
+/// Best-effort: an empty/unselectable range writes nothing.
+pub fn resolve_and_copy(
     req: CopyRequest,
+    terminal: &GhosttyTerminal<'_, '_>,
+    out: &mut impl Write,
 ) -> io::Result<()> {
     let Some(text) = extract_selection_text(terminal, req) else {
         return Ok(());
@@ -138,6 +145,18 @@ pub fn copy_to_host_clipboard<W: Write>(
     }
     out.write_all(&osc52_set_clipboard(&text))?;
     out.flush()
+}
+
+/// Argument-order alias for [`resolve_and_copy`].
+///
+/// Kept for the existing dispatcher call sites, which pass `out` first;
+/// best-effort, so an empty/unselectable range writes nothing.
+pub fn copy_to_host_clipboard<W: Write>(
+    out: &mut W,
+    terminal: &GhosttyTerminal<'_, '_>,
+    req: CopyRequest,
+) -> io::Result<()> {
+    resolve_and_copy(req, terminal, out)
 }
 
 /// Encode `input` as standard base64 (RFC 4648), padded with `=`.
@@ -254,6 +273,65 @@ mod tests {
         // "hello" occupies viewport row 0, cols 0..=4 (inclusive).
         let req = rect_req(0, 0, 0, 4);
         assert_eq!(extract_selection_text(&t, req).as_deref(), Some("hello"));
+    }
+
+    /// A two-corner request that is rectangular (block) rather than linear.
+    fn block_req(start_row: u16, start_col: u16, end_row: u16, end_col: u16) -> CopyRequest {
+        CopyRequest {
+            rectangle: true,
+            ..rect_req(start_row, start_col, end_row, end_col)
+        }
+    }
+
+    #[test]
+    fn extract_block_vs_linear_disagree_on_the_column_band() {
+        let mut t = fresh(20, 3);
+        // Row 0: "abcd", row 1: "efgh".
+        t.vt_write(b"abcd\r\nefgh");
+        // Corners (0,1)-(1,2). Block keeps only columns 1..=2 on every row
+        // ("bc"/"fg"); linear runs from (0,1) to the row end, wraps, and picks
+        // up (1,0) ("bcd"/"efg"). The wrap cells 'd' (row 0 col 3) and 'e'
+        // (row 1 col 0) are exactly what block excludes and linear includes.
+        let block = extract_selection_text(&t, block_req(0, 1, 1, 2)).expect("block text");
+        assert!(block.contains('b') && block.contains('c'), "got {block:?}");
+        assert!(block.contains('f') && block.contains('g'), "got {block:?}");
+        assert!(
+            !block.contains('d'),
+            "block excludes the wrap col: {block:?}"
+        );
+        assert!(
+            !block.contains('e'),
+            "block excludes the wrap col: {block:?}"
+        );
+        assert!(
+            !block.contains('a') && !block.contains('h'),
+            "got {block:?}"
+        );
+
+        let linear = extract_selection_text(&t, rect_req(0, 1, 1, 2)).expect("linear text");
+        assert!(
+            linear.contains('d'),
+            "linear spans to the row end: {linear:?}"
+        );
+        assert!(linear.contains('e'), "linear wraps onto row 1: {linear:?}");
+    }
+
+    #[test]
+    fn resolve_and_copy_emits_osc52_for_a_selection() {
+        let mut t = fresh(20, 3);
+        t.vt_write(b"hi");
+        let mut out: Vec<u8> = Vec::new();
+        resolve_and_copy(rect_req(0, 0, 0, 1), &t, &mut out).expect("write");
+        // "hi" -> base64 "aGk=" wrapped in OSC 52.
+        assert_eq!(out, b"\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn resolve_and_copy_blank_span_writes_nothing() {
+        let t = fresh(20, 3); // no output: viewport is all blanks
+        let mut out: Vec<u8> = Vec::new();
+        resolve_and_copy(rect_req(1, 0, 1, 5), &t, &mut out).expect("write");
+        assert!(out.is_empty(), "blank selection emits nothing, got {out:?}");
     }
 
     #[test]

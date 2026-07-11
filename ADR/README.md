@@ -76,6 +76,7 @@ amends / extends) are hand-curated from each ADR's body.
 | [0042](./0042-launch-executor.md) | Launch executor: a CLI verb that spawns an integration template | Accepted |
 | [0043](./0043-state-diff-output-mode.md) | State-diff output mode and loss-tolerant reference advance | Accepted |
 | [0044](./0044-dedicated-input-lane.md) | Dedicated input lane: route input off the single runtime thread | Accepted |
+| [0045](./0045-client-side-copy-mode.md) | Client-side copy-mode over the consumer's own engine | Accepted (builds on [0030](./0030-engine-delegated-wire-and-projection-consumers.md), supersedes the abi epic's server-side selection frames) |
 
 ## When to write an ADR
 
