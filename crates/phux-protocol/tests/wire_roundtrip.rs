@@ -1707,6 +1707,36 @@ fn command_get_state_round_trips() {
 }
 
 #[test]
+fn command_attach_detach_terminal_round_trip() {
+    // phux-v45.7: the per-Terminal subscription verbs (SPEC §5.1 tags
+    // 0x01/0x02) round-trip with both Local and Satellite ids — the
+    // Satellite form is what a hub consumer sends for two-hop attach.
+    for terminal_id in [
+        phux_protocol::ids::TerminalId::local(7),
+        phux_protocol::ids::TerminalId::satellite("devbox", 7),
+    ] {
+        for command in [
+            Command::AttachTerminal {
+                terminal_id: terminal_id.clone(),
+            },
+            Command::DetachTerminal {
+                terminal_id: terminal_id.clone(),
+            },
+        ] {
+            let frame = FrameKind::Command {
+                request_id: 21,
+                command,
+            };
+            let mut buf = BytesMut::new();
+            frame.encode(&mut buf);
+            let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+            assert_eq!(decoded, frame);
+            assert!(tail.is_empty());
+        }
+    }
+}
+
+#[test]
 fn command_upgrade_round_trips() {
     let frame = FrameKind::Command {
         request_id: 9,
