@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors
 stability: evolving
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-11
 ---
 
 # herdr — the phux starter distribution
@@ -52,7 +52,12 @@ anywhere.
   palette (`prefix Space` or `prefix :`) as `plugin:` rows.
 - **Status lineup.** Window tabs on the left with a blue active tab,
   contextual help hints center, session name and clock right.
-- **Theme.** A cool blue accent with warm amber attention chrome — the
+- **Theme.** A cool blue accent with warm amber attention chrome, over a
+  calm tokyonight muted-chrome register: the sidebar's `spaces` / `agents`
+  headers, branch sub-lines, affordances, and empty-state placeholders
+  ride the same comment blue (`#565f89`) as the inactive window tabs, and
+  the agent lifecycle colors (`idle` / `working` / `blocked` / `done`) are
+  mapped on-palette so the whole chrome recedes behind pane content. The
   slot names are documented in docs/consumers/tui.md section 4.4.
 - **Session naming.** Auto-created sessions take the launch directory's
   basename instead of `default`.

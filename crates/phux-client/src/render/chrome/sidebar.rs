@@ -13,7 +13,10 @@
 //!   declared (ADR-0040) or inferred state. The driver builds these entries
 //!   ([`AgentEntry`]) preferring the structured `phux.agent/v1` record and
 //!   falling back to the OSC-title identity heuristic for plain
-//!   `claude`/`codex` CLI panes that never declare one.
+//!   `claude`/`codex` CLI panes that never declare one. When no pane is
+//!   running an agent the section still renders its header with a quiet
+//!   `no agents` empty-state line (phux-foz.13) so the strip reads as two
+//!   composed sections rather than a bare window list.
 //!
 //! The strip's last two rows are the `+ new` / `= menu` affordances
 //! (phux-fce4), bottom-anchored, with a collapse chevron in the bottom
@@ -55,6 +58,15 @@ pub const MENU_LABEL: &str = "= menu";
 pub const SPACES_HEADER: &str = "spaces";
 /// The `agents` section header (phux-foz.9).
 pub const AGENTS_HEADER: &str = "agents";
+/// Empty-state placeholder for the `spaces` section (phux-foz.13) — shown
+/// in place of window blocks when there are no windows to list.
+pub const SPACES_EMPTY: &str = "no spaces";
+/// Empty-state placeholder for the `agents` section (phux-foz.13).
+///
+/// Shown under the `agents` header when no pane is running a declared or
+/// heuristically-identified agent, so the section reads as composed rather
+/// than vanishing.
+pub const AGENTS_EMPTY: &str = "no agents";
 /// The collapse chevron painted in the strip's bottom corner
 /// (phux-foz.9). Clicking it runs `toggle-sidebar`.
 pub const COLLAPSE_GLYPH: &str = "‹";
@@ -100,6 +112,13 @@ pub enum SidebarRow {
     AgentsHeader,
     /// Agent entry `j`'s row (glyph + window name + `state - name`).
     Agent(usize),
+    /// The `spaces` section's empty-state placeholder (phux-foz.13): a
+    /// quiet `no spaces` line when there are no windows to list.
+    SpacesEmpty,
+    /// The `agents` section's empty-state placeholder (phux-foz.13): a
+    /// quiet `no agents` line so the section reads as deliberately present
+    /// rather than silently omitted.
+    AgentsEmpty,
     /// Unused padding (section gap, or fill above the footer).
     Blank,
     /// The `+ new` affordance (create a window).
@@ -127,10 +146,13 @@ pub enum SidebarHit {
 /// The strip's row model for `window_count` windows and `agent_count`
 /// agent entries in an `h`-row rect.
 ///
-/// Top to bottom: the `spaces` header, then a fixed two-row block (name +
-/// branch) per window; when there are agent entries and room for the
-/// header plus at least one row, a blank gap, the `agents` header, and one
-/// row per entry. When `h >= MIN_FOOTER_HEIGHT` the bottom two rows are
+/// Top to bottom: the `spaces` header (with a `no spaces` placeholder when
+/// there are no windows), then a fixed two-row block (name + branch) per
+/// window; when there is room for a blank gap, the `agents` header, and at
+/// least one row, the agents section follows — one row per entry, or a
+/// single `no agents` empty-state row when there are none (phux-foz.13), so
+/// the section is deliberately present rather than silently dropped. When
+/// `h >= MIN_FOOTER_HEIGHT` the bottom two rows are
 /// reserved for the `+ new` / `= menu` affordances and body rows that
 /// would collide are truncated. Fixed-size blocks keep the model derivable
 /// from the *counts* alone, which is what lets the input dispatcher
@@ -148,6 +170,12 @@ pub fn row_model(window_count: usize, agent_count: usize, h: u16) -> Vec<Sidebar
     if body > 0 {
         rows.push(SidebarRow::SpacesHeader);
     }
+    // phux-foz.13: an empty `spaces` section shows a quiet placeholder
+    // rather than jumping straight to the agents header — the sidebar
+    // reads as two composed sections, not a bare label.
+    if window_count == 0 && rows.len() < body {
+        rows.push(SidebarRow::SpacesEmpty);
+    }
     'blocks: for i in 0..window_count {
         for row in [SidebarRow::WindowName(i), SidebarRow::WindowBranch(i)] {
             if rows.len() >= body {
@@ -158,16 +186,22 @@ pub fn row_model(window_count: usize, agent_count: usize, h: u16) -> Vec<Sidebar
             rows.push(row);
         }
     }
-    // The agents section renders only when its gap + header + at least
-    // one entry row all fit — a bare header with no rows is noise.
-    if agent_count > 0 && rows.len() + 3 <= body {
+    // The agents section renders whenever its gap + header + one row all
+    // fit — a bare header with no rows is noise, but phux-foz.13 fills that
+    // row with a `no agents` placeholder when there are no entries so the
+    // section is deliberately present rather than silently omitted.
+    if rows.len() + 3 <= body {
         rows.push(SidebarRow::Blank);
         rows.push(SidebarRow::AgentsHeader);
-        for j in 0..agent_count {
-            if rows.len() >= body {
-                break;
+        if agent_count == 0 {
+            rows.push(SidebarRow::AgentsEmpty);
+        } else {
+            for j in 0..agent_count {
+                if rows.len() >= body {
+                    break;
+                }
+                rows.push(SidebarRow::Agent(j));
             }
-            rows.push(SidebarRow::Agent(j));
         }
     }
     while rows.len() < body {
@@ -222,7 +256,11 @@ pub fn hit_test(
         SidebarRow::Agent(j) => agent_windows.get(*j).map(|w| SidebarHit::Window(*w)),
         SidebarRow::NewWindow => Some(SidebarHit::NewWindow),
         SidebarRow::Menu => Some(SidebarHit::Menu),
-        SidebarRow::SpacesHeader | SidebarRow::AgentsHeader | SidebarRow::Blank => None,
+        SidebarRow::SpacesHeader
+        | SidebarRow::AgentsHeader
+        | SidebarRow::SpacesEmpty
+        | SidebarRow::AgentsEmpty
+        | SidebarRow::Blank => None,
     }
 }
 
@@ -335,6 +373,19 @@ impl SidebarPainter {
         ))
     }
 
+    /// Render a section's empty-state placeholder (phux-foz.13): the label
+    /// nested one indent under the header, dim + italic so it reads as a
+    /// quiet "nothing here yet" rather than a real, selectable row.
+    fn empty_line(&self, label: &str, text_w: u16) -> Line<'static> {
+        let label = truncate(label, usize::from(text_w).saturating_sub(2));
+        Line::from(Span::styled(
+            format!("  {label}"),
+            Style::default()
+                .fg(self.theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        ))
+    }
+
     /// Render one window's name row: a status dot + the bold label.
     fn name_line(&self, w: &WindowInfo, text_w: u16) -> Line<'static> {
         // The dot carries status: filled + accent for the active window,
@@ -427,13 +478,21 @@ impl SidebarPainter {
     }
 
     /// Render an affordance row (phux-fce4), muted like the rest of the
-    /// footer chrome.
+    /// footer chrome. phux-foz.13: the leading action glyph (`+` / `=`)
+    /// rides the slightly-brighter `sidebar_section` register — the same
+    /// muted anchor color the section headers use — so the affordances read
+    /// as deliberate, tappable chrome rather than an afterthought, while the
+    /// word stays in the recessive `dim` tone.
     fn affordance_line(&self, label: &str, text_w: u16) -> Line<'static> {
         let label = truncate(label, usize::from(text_w).saturating_sub(2));
-        Line::from(Span::styled(
-            format!("  {label}"),
-            Style::default().fg(self.theme.dim),
-        ))
+        let mut chars = label.chars();
+        let glyph = chars.next().map(String::from).unwrap_or_default();
+        let rest = chars.as_str().to_owned();
+        Line::from(vec![
+            Span::styled("  ", Style::default().fg(self.theme.dim)),
+            Span::styled(glyph, Style::default().fg(self.theme.sidebar_section)),
+            Span::styled(rest, Style::default().fg(self.theme.dim)),
+        ])
     }
 
     /// Render the sections + affordances + separator into a fresh
@@ -462,6 +521,8 @@ impl SidebarPainter {
                         .agents
                         .get(*j)
                         .map_or_else(|| Line::from(""), |e| self.agent_line(e, text_w)),
+                    SidebarRow::SpacesEmpty => self.empty_line(SPACES_EMPTY, text_w),
+                    SidebarRow::AgentsEmpty => self.empty_line(AGENTS_EMPTY, text_w),
                     SidebarRow::Blank => Line::from(""),
                     SidebarRow::NewWindow => self.affordance_line(NEW_LABEL, text_w),
                     SidebarRow::Menu => self.affordance_line(MENU_LABEL, text_w),
@@ -831,6 +892,65 @@ mod tests {
         );
     }
 
+    /// phux-foz.13: with windows but no agent-running panes, the agents
+    /// section still renders its header plus a quiet `no agents` empty-state
+    /// line (dim + italic), instead of vanishing — the strip reads as two
+    /// deliberate sections. The placeholder is inert (not a click target).
+    #[test]
+    fn empty_agents_section_shows_a_placeholder() {
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(vec![win_branch("phux", true, "main")]);
+        // No agents set.
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 24,
+            h: 12,
+        };
+        let buf = p.compose_buffer(rect);
+        // Rows: 0 spaces header, 1 name, 2 branch, 3 gap, 4 agents header,
+        // 5 `no agents` placeholder.
+        assert!(
+            row_text(&buf, rect, 4).contains(AGENTS_HEADER),
+            "agents header present even with no agents: {:?}",
+            row_text(&buf, rect, 4)
+        );
+        assert!(
+            row_text(&buf, rect, 5).contains(AGENTS_EMPTY),
+            "empty agents section shows a placeholder: {:?}",
+            row_text(&buf, rect, 5)
+        );
+        // The placeholder row is not a click target.
+        assert_eq!(hit_test(rect, 1, &[], 3, 5), None);
+    }
+
+    /// phux-foz.13: an empty `spaces` section (no windows at all) shows its
+    /// own `no spaces` placeholder rather than leaping straight to the
+    /// agents header.
+    #[test]
+    fn empty_spaces_section_shows_a_placeholder() {
+        let p = SidebarPainter::new(Theme::default());
+        // No windows, no agents.
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 24,
+            h: 12,
+        };
+        let buf = p.compose_buffer(rect);
+        assert!(
+            row_text(&buf, rect, 0).contains(SPACES_HEADER),
+            "spaces header tops the strip: {:?}",
+            row_text(&buf, rect, 0)
+        );
+        assert!(
+            row_text(&buf, rect, 1).contains(SPACES_EMPTY),
+            "empty spaces section shows a placeholder: {:?}",
+            row_text(&buf, rect, 1)
+        );
+        assert_eq!(hit_test(rect, 0, &[], 3, 1), None, "placeholder is inert");
+    }
+
     /// phux-foz.9: the full sectioned layout, pinned as a snapshot — the
     /// herdr-parity shape (spaces header, dotted window blocks with branch
     /// sub-lines, agents section, bottom-anchored affordances + collapse
@@ -1133,7 +1253,9 @@ mod tests {
                     assert!(row_text(&buf, rect, y16).contains(&agents[*j].name));
                     assert_eq!(hit, Some(SidebarHit::Window(agents[*j].window)));
                 }
-                SidebarRow::Blank => assert_eq!(hit, None),
+                SidebarRow::Blank | SidebarRow::SpacesEmpty | SidebarRow::AgentsEmpty => {
+                    assert_eq!(hit, None);
+                }
                 SidebarRow::NewWindow => {
                     assert!(row_text(&buf, rect, y16).contains(NEW_LABEL));
                     assert_eq!(hit, Some(SidebarHit::NewWindow));

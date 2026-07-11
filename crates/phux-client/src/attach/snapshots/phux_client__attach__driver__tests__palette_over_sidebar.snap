@@ -6,8 +6,8 @@ spaces             │PANE-BASE
 ● w1-agent         │
   foz10-br         │
                    │
-                   │
-                   │            ┌──────── command palette ─────────┐
+agents             │
+  no agents        │            ┌──────── command palette ─────────┐
                    │            │>                                 │
                    │            │                                  │
                    │            │detach                            │

@@ -123,8 +123,17 @@ impl Default for Theme {
             // `Reset` = terminal default foreground; the action column
             // was unstyled (plain `Span::raw`) before this module.
             action: Color::Reset,
-            dim: Color::DarkGray,
-            border: Color::Rgb(82, 82, 91),
+            // phux-foz.13: an explicit muted slate rather than the
+            // terminal-dependent ANSI `DarkGray`. Chrome (branch sub-lines,
+            // footer hints, affordances, empty-state placeholders) reads as
+            // one deliberate recessive register instead of "whatever the
+            // palette maps bright-black to". slate-500.
+            dim: Color::Rgb(100, 116, 139),
+            // phux-foz.13: the sidebar separator + modal borders drop to a
+            // cooler, quieter slate so the divider reads as a thin
+            // unobtrusive rule and the chrome recedes behind content.
+            // slate-700.
+            border: Color::Rgb(51, 65, 85),
             title: Color::Rgb(190, 242, 100),
             section_header: Color::Yellow,
             error: Color::Red,
@@ -140,9 +149,11 @@ impl Default for Theme {
             // Amber: reads as "needs you" without colliding with `error`
             // red or the lime `accent`.
             attention: Color::Rgb(251, 191, 36),
-            // phux-foz.9: sidebar section headers read as muted chrome,
-            // same register as `dim`.
-            sidebar_section: Color::DarkGray,
+            // phux-foz.9 / phux-foz.13: sidebar section headers sit in the
+            // same muted slate register as `dim` — a quiet lowercase label
+            // that recedes, not the terminal-dependent ANSI `DarkGray` it
+            // used to inherit. slate-500.
+            sidebar_section: Color::Rgb(100, 116, 139),
             // phux-foz.9: agent lifecycle colors. Idle is a muted slate
             // ("nothing needs you"), working the green of live progress,
             // blocked the attention amber, done a settled blue.
@@ -239,8 +250,9 @@ mod tests {
         assert_eq!(t.accent, Color::Rgb(190, 242, 100));
         assert_eq!(t.chord, Color::Rgb(134, 239, 172));
         assert_eq!(t.action, Color::Reset);
-        assert_eq!(t.dim, Color::DarkGray);
-        assert_eq!(t.border, Color::Rgb(82, 82, 91));
+        // phux-foz.13: chrome recedes into a cohesive muted slate scale.
+        assert_eq!(t.dim, Color::Rgb(100, 116, 139));
+        assert_eq!(t.border, Color::Rgb(51, 65, 85));
         assert_eq!(t.title, Color::Rgb(190, 242, 100));
         assert_eq!(t.section_header, Color::Yellow);
         assert_eq!(t.error, Color::Red);
@@ -251,8 +263,9 @@ mod tests {
         assert_eq!(t.selection_bg, Color::Indexed(240));
         // phux-foz.1: attention chrome for the agent-asked (ADR-0035) badge.
         assert_eq!(t.attention, Color::Rgb(251, 191, 36));
-        // phux-foz.9: sidebar section headers + agent lifecycle colors.
-        assert_eq!(t.sidebar_section, Color::DarkGray);
+        // phux-foz.9 / phux-foz.13: sidebar section headers + agent
+        // lifecycle colors. Headers share the muted slate `dim` register.
+        assert_eq!(t.sidebar_section, Color::Rgb(100, 116, 139));
         assert_eq!(t.agent_idle, Color::Rgb(148, 163, 184));
         assert_eq!(t.agent_working, Color::Rgb(134, 239, 172));
         assert_eq!(t.agent_blocked, Color::Rgb(251, 191, 36));
