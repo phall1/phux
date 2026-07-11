@@ -31,6 +31,11 @@
 //!   over a satellite terminal excludes consumer B's `ACQUIRE_INPUT` /
 //!   `ROUTE_INPUT`, and B's `RELEASE_INPUT` cannot release A's lease —
 //!   even though both share the link's identity on the satellite.
+//! * `satellite_seize_takeover_notifies_evicted_hub_consumer`
+//!   (phux-v45.13) — a SEIZE takeover over a satellite terminal preempts
+//!   the prior hub holder AND notifies it (a re-tagged
+//!   `TerminalControl(Seized)` event), then the evicted holder's input is
+//!   lease-gated; the satellite cannot notify (shared link identity).
 //! * `acquire_and_release_input_off_hub_are_unsupported_routes`
 //!   (phux-v45.11 finding 5) — satellite-tagged supervisory verbs on a
 //!   non-hub server resolve through the shared routing path, not dead
@@ -1260,6 +1265,126 @@ fn satellite_input_lease_excludes_other_hub_consumers() {
         assert_eq!(result, CommandResult::Ok, "holder release succeeds");
         let (result, _) = command_via_hub(&mut b, 204, acquire(sat_id)).await;
         assert_eq!(result, CommandResult::Ok, "freed lease grants to B");
+
+        drop(sat_shutdown);
+        drop(hub_shutdown);
+        let _ = sat_task.await.unwrap();
+        hub_task.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear takeover scenario: boot the topology once, acquire, seize, observe the eviction notification and the lost wheel; splitting re-boots both servers"
+)]
+fn satellite_seize_takeover_notifies_evicted_hub_consumer() {
+    // phux-v45.13, L1 §9.1: a SEIZE takeover over a satellite terminal must
+    // notify the evicted hub consumer — the satellite cannot, because every
+    // hub consumer shares its link identity, so the lease change reads there
+    // as a same-identity re-acquire. Mirrors the local takeover broadcast.
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let ws_port = free_port();
+        let (sat_shutdown, sat_task) = spawn_satellite(tmp.path().join("sat.sock"), ws_port);
+        let (hub_shutdown, hub_task) = spawn_hub(
+            tmp.path().join("hub.sock"),
+            vec![satellite_entry("sat", ws_port)],
+        );
+        let sat_pane = discover_satellite_pane(ws_port).await;
+        let sat_id = TerminalId::satellite("sat", sat_pane);
+        let mut a = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+        let mut b = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // Wait for the link (any relayed command succeeding proves it).
+        let _ = get_screen_until_ok(&mut a, sat_pane).await;
+
+        // A takes the wheel cooperatively over the satellite pane.
+        let (result, _) = command_via_hub(
+            &mut a,
+            100,
+            Command::AcquireInput {
+                terminal_id: sat_id.clone(),
+                mode: phux_protocol::wire::frame::InputMode::Cooperative,
+                ttl_ms: 0,
+            },
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok, "A's cooperative acquire wins");
+
+        // B — a different hub consumer sharing the link identity — SEIZES
+        // it. A takeover preempts (unlike a cooperative acquire, which would
+        // refuse), so the hub records B as holder AND notifies the evicted A.
+        let (result, _) = command_via_hub(
+            &mut b,
+            200,
+            Command::AcquireInput {
+                terminal_id: sat_id.clone(),
+                mode: phux_protocol::wire::frame::InputMode::Seize,
+                ttl_ms: 0,
+            },
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok, "B's SEIZE takeover preempts A");
+
+        // A receives the hub-synthesized TerminalControl(Seized) eviction
+        // event, re-tagged with the satellite id.
+        let deadline = Instant::now() + STEP_DEADLINE;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "evicted holder A never received a SEIZE eviction notification"
+            );
+            let (_, frame) = recv_typed(&mut a).await;
+            if let FrameKind::Event { terminal, event } = frame {
+                assert_eq!(
+                    terminal.as_ref(),
+                    Some(&sat_id),
+                    "the eviction event must be re-tagged Satellite {{ host, id }}"
+                );
+                if let AgentEvent::TerminalControl {
+                    action,
+                    input_holder,
+                    ..
+                } = event
+                {
+                    assert_eq!(
+                        action,
+                        phux_protocol::wire::frame::ControlAction::Seized,
+                        "the eviction event names the takeover action"
+                    );
+                    assert!(
+                        input_holder.is_some(),
+                        "the eviction event names the new holder"
+                    );
+                    break;
+                }
+            }
+        }
+
+        // And A has genuinely lost the wheel: its ROUTE_INPUT now refuses at
+        // the hub lease gate (it was silently dropped before this fix).
+        let (result, _) = command_via_hub(
+            &mut a,
+            101,
+            Command::RouteInput {
+                terminal_id: sat_id.clone(),
+                event: phux_protocol::input::InputEvent::Focus(
+                    phux_protocol::input::focus::FocusEvent::Gained,
+                ),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                CommandResult::Error {
+                    code: ErrorCode::InputLeaseHeld,
+                    ..
+                }
+            ),
+            "the evicted holder's input must now be lease-gated, got {result:?}"
+        );
 
         drop(sat_shutdown);
         drop(hub_shutdown);

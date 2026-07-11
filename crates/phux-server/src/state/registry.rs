@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     AttachError, AttachSnapshotPane, AttachedClient, ClientId, EventScope, EventSubscription,
-    MetadataStore, Outbound, RenameOutcome, ServerState,
+    MetadataStore, Outbound, RenameOutcome, SatelliteLease, ServerState,
 };
 use crate::agent_asked::{AskedPayload, AskedSource, AskedTransition};
 use crate::id_bridge::IdBridge;
@@ -687,7 +687,7 @@ impl ServerState {
         // runtime relays the detached RELEASE_INPUT before calling detach;
         // this clears the ledger regardless of that path running.
         self.satellite_leases
-            .retain(|_, holder| *holder != client_id);
+            .retain(|_, lease| lease.holder != client_id);
         // Cancel every ATTACH_TERMINAL output pump this client owns
         // (phux-v45.7) so no task keeps streaming into a dead mailbox.
         self.attach_terminal_pumps.retain(|(owner, _), token| {
@@ -1141,18 +1141,33 @@ impl ServerState {
     ) -> Option<ClientId> {
         self.satellite_leases
             .get(&(host.clone(), terminal))
-            .copied()
+            .map(|lease| lease.holder)
     }
 
-    /// Record `client` as the hub-side holder of the satellite lease
-    /// (after the satellite acked the relayed `ACQUIRE_INPUT`).
-    pub fn set_satellite_lease(
+    /// Record `client` (with its outbound mailbox `out_tx`) as the
+    /// hub-side holder of the satellite lease, after the satellite acked
+    /// the relayed `ACQUIRE_INPUT`.
+    ///
+    /// Returns the **evicted** prior lease when this acquire preempted a
+    /// *different* hub consumer (a SEIZE takeover, phux-v45.13): the caller
+    /// notifies that holder it lost the wheel. A re-acquire by the same
+    /// holder (idempotent cooperative acquire) or a grant over a free lease
+    /// returns `None` — nobody was evicted.
+    pub(crate) fn set_satellite_lease(
         &mut self,
         host: phux_protocol::ids::SatelliteHost,
         terminal: u32,
         client: ClientId,
-    ) {
-        self.satellite_leases.insert((host, terminal), client);
+        out_tx: mpsc::Sender<Outbound>,
+    ) -> Option<SatelliteLease> {
+        let prior = self.satellite_leases.insert(
+            (host, terminal),
+            SatelliteLease {
+                holder: client,
+                out_tx,
+            },
+        );
+        prior.filter(|lease| lease.holder != client)
     }
 
     /// Release the hub-side satellite lease over `(host, terminal)` if
@@ -1164,7 +1179,7 @@ impl ServerState {
         client: ClientId,
     ) -> bool {
         let key = (host.clone(), terminal);
-        if self.satellite_leases.get(&key) == Some(&client) {
+        if self.satellite_leases.get(&key).map(|lease| lease.holder) == Some(client) {
             self.satellite_leases.remove(&key);
             true
         } else {
@@ -1182,7 +1197,7 @@ impl ServerState {
     ) -> Vec<(phux_protocol::ids::SatelliteHost, u32)> {
         self.satellite_leases
             .iter()
-            .filter(|(_, holder)| **holder == client)
+            .filter(|(_, lease)| lease.holder == client)
             .map(|(key, _)| key.clone())
             .collect()
     }

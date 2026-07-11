@@ -3,8 +3,8 @@
 use phux_protocol::caps::ClientCapabilities;
 use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{
-    Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind, InputMode,
-    StateScope, TerminalSignal, ViewportInfo,
+    AgentEvent, Command, CommandResult, CommandValue, ControlAction, ErrorCode, FrameKind,
+    InputMode, StateScope, TerminalLifecycle, TerminalSignal, ViewportInfo,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -955,9 +955,24 @@ async fn handle_satellite_command(
                         message: format!("input lease held by client {}", holder.0),
                     }
                 } else {
+                    // Cooperative-over-free/self OR a SEIZE takeover. Relay
+                    // to the satellite (the link identity's lease keeps
+                    // excluding the satellite's own local clients), then
+                    // record the new hub-side holder. A SEIZE that preempts
+                    // a *different* hub consumer returns the evicted lease:
+                    // notify that holder it lost the wheel — mirroring the
+                    // local `TerminalControl(Seized)` broadcast (phux-v45.13,
+                    // L1 §9.1). Without it the prior holder keeps believing
+                    // it holds the wheel while its relayed INPUT_* is silently
+                    // dropped at the hub lease gate.
                     let result = relay.command(command.clone()).await;
                     if !matches!(result, CommandResult::Error { .. }) {
-                        state.with_mut(|s| s.set_satellite_lease(host.clone(), id, client_id));
+                        let evicted = state.with_mut(|s| {
+                            s.set_satellite_lease(host.clone(), id, client_id, out_tx.clone())
+                        });
+                        if let Some(evicted) = evicted {
+                            notify_satellite_lease_seized(host, id, client_id, &evicted);
+                        }
                     }
                     result
                 }
@@ -1007,6 +1022,53 @@ async fn handle_satellite_command(
             result,
         }))
         .await;
+}
+
+/// Notify the hub consumer evicted by a SEIZE takeover over a satellite
+/// terminal that it no longer holds the input lease (phux-v45.13, L1
+/// §9.1).
+///
+/// The hub synthesizes the same `TerminalControl(Seized)` event the local
+/// takeover path broadcasts to every subscriber. The satellite cannot: all
+/// hub consumers reach it through the link's single client identity, so a
+/// relayed SEIZE reads there as a same-identity re-acquire and its
+/// broadcast names the shared link identity, not the evicted hub consumer.
+/// Best-effort (`try_send`, the fire-and-forget event discipline): the
+/// evicted holder re-renders the locked state from this event exactly as a
+/// local viewer does, and stops sending input the hub would now drop at the
+/// lease gate.
+fn notify_satellite_lease_seized(
+    host: &phux_protocol::ids::SatelliteHost,
+    id: u32,
+    new_holder: ClientId,
+    evicted: &crate::state::SatelliteLease,
+) {
+    let frame = FrameKind::Event {
+        terminal: Some(phux_protocol::ids::TerminalId::satellite(host.clone(), id)),
+        event: AgentEvent::TerminalControl {
+            lifecycle: TerminalLifecycle::Running,
+            exit_status: None,
+            input_holder: Some(wire_client_id(new_holder)),
+            action: ControlAction::Seized,
+            actor: Some(wire_client_id(new_holder)),
+        },
+    };
+    if evicted.out_tx.try_send(Outbound::Frame(frame)).is_err() {
+        debug!(
+            satellite = %host,
+            terminal = id,
+            prior = ?evicted.holder,
+            "evicted hub lease holder unreachable for the SEIZE notification; dropping",
+        );
+    } else {
+        debug!(
+            satellite = %host,
+            terminal = id,
+            prior = ?evicted.holder,
+            ?new_holder,
+            "notified the evicted hub lease holder of a satellite SEIZE takeover",
+        );
+    }
 }
 
 /// Forward one fire-and-forget frame (`INPUT_*`, `FRAME_ACK`, `TERMINAL_RESIZE`)

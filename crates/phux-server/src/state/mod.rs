@@ -70,6 +70,24 @@ pub use upgrade_blob::RebuildError;
 /// persistence to a Group scope and the TUI needs a Group to write into.
 pub const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
+/// One hub-side satellite input lease (phux-v45.7, phux-v45.13).
+///
+/// Records which hub consumer holds the relayed ADR-0033 lease over a
+/// satellite terminal **and** that consumer's outbound mailbox. The
+/// mailbox is what lets a SEIZE takeover by a *different* hub consumer
+/// notify the evicted prior holder directly (a hub-synthesized
+/// `TerminalControl(Seized)` event, mirroring the local takeover
+/// broadcast) — the satellite cannot do it, because every hub consumer
+/// reaches it through the link's single client identity, so its own lease
+/// change reads as a same-identity re-acquire.
+#[derive(Debug, Clone)]
+pub(crate) struct SatelliteLease {
+    /// The hub consumer that holds the lease.
+    pub(crate) holder: ClientId,
+    /// The holder's outbound mailbox, for the eviction notification.
+    pub(crate) out_tx: tokio::sync::mpsc::Sender<Outbound>,
+}
+
 /// Single owner of all server-side state.
 ///
 /// See the module-level doc for the concurrency model. Wrap this in
@@ -102,9 +120,13 @@ pub struct ServerState {
     /// identity) keeps excluding the satellite's own local clients.
     /// Entries are keyed `(host, satellite-local id)` and cleared when the
     /// holder detaches (with a detached `RELEASE_INPUT` relayed so the
-    /// satellite-side lease follows). See L1 §9.1.
+    /// satellite-side lease follows). Each entry carries the holder's
+    /// outbound mailbox so a SEIZE takeover by another hub consumer can
+    /// notify the evicted prior holder directly (phux-v45.13) — the
+    /// satellite cannot, since it sees only the shared link identity. See
+    /// L1 §9.1.
     satellite_leases:
-        std::collections::BTreeMap<(phux_protocol::ids::SatelliteHost, u32), ClientId>,
+        std::collections::BTreeMap<(phux_protocol::ids::SatelliteHost, u32), SatelliteLease>,
     /// Per-`(client, terminal)` cancellation for `ATTACH_TERMINAL` output
     /// pumps (phux-v45.7). `DETACH_TERMINAL` cancels one entry; client
     /// detach / disconnect cancels all of the client's entries; pane reap
