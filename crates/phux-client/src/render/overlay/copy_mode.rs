@@ -14,8 +14,9 @@ use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::{CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab};
-use crate::attach::render::SelectionRect;
+use super::{
+    CopyRequest, OverlayCommand, RenderOverlay, SelectionGrab, SelectionMode, SelectionRect,
+};
 
 const WHEEL_SCROLL_LINES: isize = 3;
 
@@ -26,25 +27,6 @@ fn quantize_mouse_cell(value: f64, max: u16) -> u16 {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let cell = value.floor().max(0.0) as u16;
     cell.min(max.saturating_sub(1))
-}
-
-/// How copy-mode interprets the selection rectangle.
-///
-/// Client-local UI state (phux-q1ni, [ADR-0030]): selection is a consumer-side
-/// projection, so the mode lives with the overlay rather than on the wire.
-/// `Char` is the default linear selection; `Rect` is Mosh-style block
-/// selection; `Line` selects whole lines.
-///
-/// [ADR-0030]: ../../../../ADR/0030-engine-delegated-wire-and-projection-consumers.md
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionMode {
-    /// Character-wise (linear) selection — the default.
-    #[default]
-    Char,
-    /// Line-wise selection (whole lines).
-    Line,
-    /// Rectangular (block) selection.
-    Rect,
 }
 
 /// Rectangular selection state: (row, col) coordinates for start and end.
@@ -216,12 +198,15 @@ impl RenderOverlay for CopyModeOverlay {
 
     fn copy_selection(&self) -> Option<SelectionRect> {
         let range = self.selection_range();
-        Some(SelectionRect {
-            start_row: range.start_row,
-            start_col: range.start_col,
-            end_row: range.end_row,
-            end_col: range.end_col,
-        })
+        // `from_range` sets the block/linear flag from the mode, so the renderer
+        // highlights exactly what a `Rect`-mode copy would extract (ADR-0045).
+        Some(SelectionRect::from_range(
+            range.start_row,
+            range.start_col,
+            range.end_row,
+            range.end_col,
+            self.mode,
+        ))
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {

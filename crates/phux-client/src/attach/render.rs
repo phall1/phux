@@ -46,42 +46,19 @@ pub enum RenderError {
     KittyReplay(#[from] kitty_replay::KittyReplayError),
 }
 
-/// A copy-mode selection in pane-local viewport cells (inclusive), for the
-/// renderer to reverse-video while painting (phux copy-mode).
+/// The copy-mode selection rectangle the renderer reverse-videos while painting.
 ///
-/// Linear (text-flow) selection, matching the copy-mode overlay: full interior
-/// rows, partial first/last rows. Carrying the highlight here — in the same
-/// per-cell render that emits the pane's real styles — is what lets copy-mode
-/// leave the screen untouched except for inverting the selected cells, instead
-/// of clearing and repainting a separate overlay surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SelectionRect {
-    /// First selected row (inclusive).
-    pub start_row: u16,
-    /// First selected column, on `start_row` (inclusive).
-    pub start_col: u16,
-    /// Last selected row (inclusive).
-    pub end_row: u16,
-    /// Last selected column, on `end_row` (inclusive).
-    pub end_col: u16,
-}
-
-impl SelectionRect {
-    /// Whether the pane-local cell `(row, col)` falls inside the selection.
-    #[must_use]
-    pub const fn contains(self, row: u16, col: u16) -> bool {
-        if row < self.start_row || row > self.end_row {
-            return false;
-        }
-        if row == self.start_row && col < self.start_col {
-            return false;
-        }
-        if row == self.end_row && col > self.end_col {
-            return false;
-        }
-        true
-    }
-}
+/// Relocated to the shared contract module by
+/// [ADR-0045](../../../../ADR/0045-client-side-copy-mode.md): the renderer and
+/// the selection UX (`render::overlay::copy_mode`) must agree byte-for-byte on
+/// what a selection covers — including block vs linear geometry
+/// ([`SelectionRect::contains`]) — so the type and its geometry live in one
+/// leaf ([`crate::render::overlay::selection`]) both consumers import. Carrying
+/// the highlight through this per-cell render — the same one that emits the
+/// pane's real styles — is what lets copy-mode leave the screen untouched
+/// except for inverting the selected cells, instead of clearing and repainting
+/// a separate overlay surface.
+pub use crate::render::overlay::selection::SelectionRect;
 
 /// Per-pane render scaffolding.
 ///
@@ -955,6 +932,7 @@ mod tests {
             start_col: 0,
             end_row: 0,
             end_col: 1,
+            rectangle: false,
         }));
         let mut out: Vec<u8> = Vec::new();
         let _ = r.render_at_full(&t, &mut out, (0, 0), (10, 2));
@@ -979,23 +957,9 @@ mod tests {
         assert!(!String::from_utf8_lossy(&plain).contains("\x1b[7"));
     }
 
-    #[test]
-    fn selection_rect_contains_is_linear() {
-        // Linear/text selection: full interior rows, partial first/last rows.
-        let sel = SelectionRect {
-            start_row: 1,
-            start_col: 1,
-            end_row: 3,
-            end_col: 5,
-        };
-        assert!(sel.contains(1, 1)); // start corner
-        assert!(sel.contains(2, 0)); // interior row, any col
-        assert!(sel.contains(3, 5)); // end corner
-        assert!(!sel.contains(0, 1)); // above
-        assert!(!sel.contains(1, 0)); // before start on start row
-        assert!(!sel.contains(3, 6)); // after end on end row
-        assert!(!sel.contains(4, 1)); // below
-    }
+    // `SelectionRect::contains` (linear + block geometry) is owned and tested
+    // by the shared contract module, `render::overlay::selection`, after
+    // ADR-0045 relocated the type there.
 
     fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
         GhosttyTerminal::new(TerminalOptions {

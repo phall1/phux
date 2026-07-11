@@ -1164,6 +1164,57 @@ which-key = true          # default; false disables the popup
 which-key-delay-ms = 600  # hesitation before it appears
 ```
 
+### 5.8 Copy-mode
+
+`C-a [` enters copy-mode on the focused pane. Copy-mode is **client-local**:
+it is a projection over the pane's own libghostty engine, and nothing about a
+selection touches the wire — the client extracts the selected text from its own
+`Terminal` and writes it to the *host* clipboard via OSC 52. This is
+[ADR-0045](../../ADR/0045-client-side-copy-mode.md) applied on top of
+[ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md);
+there is no server round-trip, no selection frame, and no clipboard verb on the
+protocol.
+
+Movement and viewport:
+
+- **Arrow keys** move the selection cursor; hold **Shift** to extend the
+  selection from its anchor instead of moving both ends.
+- An arrow past the top or bottom edge, and **PageUp** / **PageDown**, scroll
+  the pane's client-local viewport into mirrored scrollback. Selection is
+  bounded by the scrollback the client already holds, not the server's full
+  history.
+
+Selection modes — a two-corner rectangle interpreted as one of:
+
+- **Char** (default): linear, text-flow selection — full interior rows, partial
+  first and last rows.
+- **Line**: whole lines.
+- **Rect**: rectangular (block/columnar) selection — the column band on every
+  row in the span. The mode-cycle keybind rotates Char → Line → Rect. The
+  on-screen highlight and the extracted text are computed from the same
+  `SelectionRect`, so a block selection copies exactly the band it highlights.
+
+One-shot grabs resolve against the engine at the cursor and copy-and-exit
+immediately (tmux-style):
+
+| Key | Grab                                                              |
+|-----|-------------------------------------------------------------------|
+| `w` | word under the cursor (`select_word`)                             |
+| `v` | whole line under the cursor (`select_line`)                       |
+| `V` | line bounded by semantic-prompt (OSC-133) state changes           |
+| `A` | all selectable content (`select_all`)                             |
+| `]` | the command-output span under the cursor (`select_output`); a no-op when the pane has no OSC-133 zones |
+
+- **Enter** copies the current two-corner selection to the host clipboard and
+  exits.
+- **Esc** exits copy-mode without copying.
+
+Mouse: a left-button drag inside the pane selects and, on release, copies and
+exits; the wheel scrolls the client-local viewport. A click with no drag simply
+exits, so a mouse-initiated entry can never trap the keyboard. See §11 for the
+scope boundary — phux does not reimplement selection boundaries or a clipboard
+format path; it delegates both to libghostty and the host terminal.
+
 ---
 
 ## 6. Layout
