@@ -56,8 +56,17 @@ pub(super) fn safe_resize(
 /// degrade to the prior rect-clamp paint (zero pad, no margins) rather than
 /// mis-centring on a bogus size.
 ///
+/// `pub(super)` since phux-foz.11: the `handle_server_frame` snapshot and
+/// non-focused-output paints must letterbox with the SAME mirror dims as
+/// `paint_full_frame` / `paint_focused_pane`, or an undersized mirror gets
+/// painted at two different origins (rect origin vs centred) and the screen
+/// shows doubled text until a full repaint.
+///
 /// [`render_at_letterboxed`]: super::render::TerminalRenderer::render_at_letterboxed
-fn mirror_dims(terminal: &GhosttyTerminal<'_, '_>, rect: crate::layout::Rect) -> (u16, u16) {
+pub(super) fn mirror_dims(
+    terminal: &GhosttyTerminal<'_, '_>,
+    rect: crate::layout::Rect,
+) -> (u16, u16) {
     let cols = terminal.cols().unwrap_or(rect.w);
     let rows = terminal.rows().unwrap_or(rect.h);
     (cols, rows)

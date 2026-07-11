@@ -36,6 +36,11 @@ pub mod copy;
 pub mod driver;
 mod exec_widgets;
 mod fleet;
+// phux-foz.11: glass-diff regression + stress tests for the compose
+// invariant (no doubled text under rapid window switching / control spam).
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
+mod ghost_stress_tests;
 pub mod input;
 pub mod input_dispatch;
 mod onboarding;
