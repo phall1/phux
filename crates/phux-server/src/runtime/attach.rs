@@ -220,33 +220,16 @@ pub(crate) async fn resolve_create_if_missing(
             }
             _ => crate::terminal_actor::default_shell_command(),
         });
-        // phux-3mtf: honor the wire `cwd` when it names an existing
-        // directory on this host. Validated up front (rather than passed
-        // through blindly) because portable_pty's spawn fails outright on
-        // a nonexistent cwd, which would turn a stale client-supplied path
-        // into a failed attach; an invalid path instead falls back to the
-        // pre-existing behavior (the builder's cwd stays unset).
-        // Skipped when the builder already carries an explicit cwd —
-        // only possible via the server-wide override command, whose
-        // configuration wins wholesale (same precedence as `command`).
-        // The stamp in `seed_session_with_pty_and_colors` reads the
+        // phux-3mtf / phux-0v1l: honor the wire `cwd` through the shared
+        // validate-and-fall-back helper, uniform with the
+        // `SESSION_CREATE_KEY` create-without-attach path. The wire cwd is
+        // applied only over a cwd-less builder (a server-wide override's cwd
+        // wins wholesale), honored only when it names an existing, enterable
+        // directory, and dropped with a warn otherwise — never failing the
+        // attach. The stamp in `seed_session_with_pty_and_colors` reads the
         // builder's cwd back (`spawn_cwd_of`), so the honored value also
-        // lands on the pane's registry descriptor for the ATTACHED
-        // snapshot.
-        if seed_cmd.get_cwd().is_none()
-            && let Some(path) = cwd
-        {
-            if std::path::Path::new(&path).is_dir() {
-                seed_cmd.cwd(path);
-            } else {
-                warn!(
-                    session = %name,
-                    cwd = %path,
-                    "CreateIfMissing: wire cwd is not an existing directory; \
-                     falling back to the default spawn directory",
-                );
-            }
-        }
+        // lands on the pane's registry descriptor for the ATTACHED snapshot.
+        crate::terminal_actor::apply_spawn_cwd(&mut seed_cmd, cwd.as_deref(), &name);
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
         crate::terminal_actor::apply_term(&mut seed_cmd, &term);

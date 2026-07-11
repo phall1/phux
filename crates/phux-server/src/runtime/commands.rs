@@ -1188,19 +1188,18 @@ pub(crate) fn create_named_session(
                 for arg in head {
                     builder.arg(arg);
                 }
-                if let Some(path) = cwd {
-                    builder.cwd(path);
-                }
                 builder
             }
-            _ => {
-                let mut builder = crate::terminal_actor::default_shell_command();
-                if let Some(path) = cwd {
-                    builder.cwd(path);
-                }
-                builder
-            }
+            _ => crate::terminal_actor::default_shell_command(),
         });
+        // phux-0v1l: apply the wire cwd through the shared validate-and-fall-
+        // back helper, uniform with the attach CreateIfMissing seed path.
+        // Previously this passed the wire cwd through UNVALIDATED (a stale
+        // path failed the seed) and only applied it when there was no
+        // override command; now it is validated (existence + enterability),
+        // applied over a cwd-less builder, and dropped with a warn on an
+        // invalid path so a bad cwd never fails the create.
+        crate::terminal_actor::apply_spawn_cwd(&mut seed_cmd, cwd, name);
         crate::terminal_actor::apply_term(&mut seed_cmd, &term);
         seed_session_with_pty(state, name, seed_cmd, history_limit, root_token)
     } else {
