@@ -745,9 +745,19 @@ impl ServerRuntime {
             })
             .await;
 
-        // The LocalSet has finished: every per-client task (and its cloned
-        // input-lane handle) is gone. Drop the lane owner to close the channel
-        // and join its thread (ADR-0044) before we unlink the socket.
+        // `run_until` returns the instant the accept-loop future is ready — on
+        // shutdown that is the tick where `accept_loop` observed the cancelled
+        // root token and dropped its per-client `JoinSet`. Dropping that
+        // `JoinSet` only *aborts* the client tasks; their futures still live on
+        // this `LocalSet` and are not dropped until the set advances or is
+        // itself dropped. Each such future holds a cloned `InputLaneHandle`
+        // (`task_input_lane`) that keeps the lane channel open. So we must drop
+        // the `LocalSet` FIRST — that destroys every remaining client-task
+        // future and releases its handle clone — and only then drop the lane
+        // owner. Reversing this order deadlocks: `InputLane::drop` joins the
+        // lane thread, whose `blocking_recv` never returns `None` while a
+        // client-task clone keeps the channel open (ADR-0044).
+        drop(local);
         drop(input_lane);
 
         // Always try to unlink the socket on the way out; ignore NotFound.

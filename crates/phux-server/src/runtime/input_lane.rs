@@ -134,8 +134,11 @@ impl Drop for InputLane {
     fn drop(&mut self) {
         // Replace our retained sender with a fresh closed one so the lane sees
         // the channel close once every client-held clone is also dropped, then
-        // join. Client tasks are aborted before `run_async` drops the lane
-        // (the accept loop's `JoinSet` drops first), so no clone lingers.
+        // join. `run_async` drops the `LocalSet` before dropping the lane, which
+        // *destroys* (not merely aborts) every per-client task future and so
+        // releases every `InputLaneHandle` clone; only then does this join
+        // observe the channel close. Dropping the lane while an aborted-but-not-
+        // yet-dropped client future still holds a clone would hang the join.
         let (dead_tx, _dead_rx) = mpsc::channel(1);
         self.handle.tx = dead_tx;
         if let Some(join) = self.join.take()
