@@ -170,9 +170,9 @@ pub(crate) enum Command {
         /// registry from `config.toml` at startup, validating every enabled
         /// entry's endpoint (`quic://`, `ws://`, `wss://`, or `ssh://`) into
         /// the runtime satellite table, then dial and maintain one outbound
-        /// link per satellite (QUIC/WebSocket authenticate per ADR-0038;
-        /// `ssh://` bridges over `ssh HOST phux stdio-bridge`, phux-v45.9),
-        /// relaying satellite-tagged frames over the links (phux-v45.4).
+        /// link per satellite (QUIC and WebSocket links authenticate with a
+        /// bearer token; `ssh://` bridges over `ssh HOST phux stdio-bridge`),
+        /// relaying satellite-tagged frames over the links.
         /// A malformed enabled endpoint or a duplicate satellite name fails
         /// startup. Without this flag the registry is ignored.
         #[arg(long)]
@@ -697,12 +697,12 @@ pub(crate) enum Command {
         action: TagAction,
     },
 
-    /// Bridge stdin/stdout to the local server socket (SSH-stdio, ADR-0007).
+    /// Bridge stdin/stdout to the local server socket for SSH-stdio transport.
     ///
     /// The remote end of the SSH-stdio transport: `ssh HOST phux
     /// stdio-bridge` gives the dialing side a byte-transparent pipe to the
     /// phux server's Unix socket on HOST — the federation hub dials
-    /// `ssh://` satellites through it (phux-v45.9). The bridge neither
+    /// `ssh://` satellites through it. The bridge neither
     /// parses nor injects bytes; stdout is protocol-only and diagnostics
     /// go to stderr. Exits when either side closes.
     #[command(name = "stdio-bridge")]
