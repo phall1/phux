@@ -399,21 +399,26 @@ impl OverlayState {
     /// The bounding `Rect` to float the active overlay stack within, or
     /// `None` if any stacked overlay paints the whole viewport.
     ///
-    /// Returns the union of every stacked overlay's [`RenderOverlay::bounds`].
+    /// Returns the union of every stacked overlay's [`RenderOverlay::bounds`],
+    /// each centered inside `content` — the pane content rect (the viewport
+    /// minus the sidebar strip and status-bar row), NOT the raw viewport
+    /// (phux-foz.14). Centering against `content` keeps a modal's box off the
+    /// sidebar columns, so it never occludes the chrome the floating-modal
+    /// base-frame repaint (phux-foz.10) works to preserve.
+    ///
     /// When `Some`, the driver paints the live panes as a base frame and
     /// emits only this region on top (a true floating modal); when `None`,
     /// it falls back to the full-screen clear+paint. Copy-mode is handled
     /// earlier (via [`Self::copy_selection`]) and never reaches here.
     #[must_use]
-    pub fn active_bounds(&self, viewport_dims: (u16, u16)) -> Option<Rect> {
+    pub fn active_bounds(&self, content: Rect) -> Option<Rect> {
         if self.stack.is_empty() {
             return None;
         }
-        let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
         let mut union: Option<Rect> = None;
         for overlay in &self.stack {
             // Any full-screen overlay forces the whole-viewport path.
-            let b = overlay.bounds(area)?;
+            let b = overlay.bounds(content)?;
             union = Some(union.map_or(b, |u| u.union(b)));
         }
         union
@@ -448,10 +453,17 @@ impl OverlayState {
     /// the shadow) are never written, so nothing erases the panes. The
     /// `shadow` color gives the box depth over the panes; pass `Color::Reset`
     /// to disable it. No-op when inactive.
+    ///
+    /// Overlays render against `content` — the pane content rect (viewport
+    /// minus the sidebar strip and status-bar row), so a centered modal lands
+    /// inside the pane region rather than over the chrome (phux-foz.14). The
+    /// buffer stays full-viewport sized (`viewport_dims`) so `clip` and the
+    /// drop shadow keep absolute screen coordinates.
     pub fn paint_clipped(
         &self,
         out: &mut impl Write,
         viewport_dims: (u16, u16),
+        content: Rect,
         clip: Rect,
         shadow: Color,
     ) -> io::Result<()> {
@@ -461,7 +473,7 @@ impl OverlayState {
         let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
         let mut buf = Buffer::empty(area);
         for overlay in &self.stack {
-            overlay.render(area, &mut buf);
+            overlay.render(content, &mut buf);
         }
         emit_buffer_clipped(out, &mut buf, clip.intersection(area), shadow)
     }
@@ -826,7 +838,7 @@ mod tests {
         // EscDismiss uses the default `bounds` (None) ⇒ full-screen path.
         let mut s = OverlayState::new();
         s.push(Box::new(EscDismiss));
-        assert_eq!(s.active_bounds((80, 24)), None);
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 80, 24)), None);
     }
 
     #[test]
@@ -834,7 +846,7 @@ mod tests {
         let mut s = OverlayState::new();
         let rect = Rect::new(5, 3, 10, 4);
         s.push(Box::new(Bounded { rect }));
-        assert_eq!(s.active_bounds((40, 12)), Some(rect));
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 40, 12)), Some(rect));
     }
 
     #[test]
@@ -847,7 +859,10 @@ mod tests {
             rect: Rect::new(10, 8, 4, 4),
         }));
         // Union bounding box spans x∈[2,14), y∈[2,12).
-        assert_eq!(s.active_bounds((40, 20)), Some(Rect::new(2, 2, 12, 10)));
+        assert_eq!(
+            s.active_bounds(Rect::new(0, 0, 40, 20)),
+            Some(Rect::new(2, 2, 12, 10))
+        );
     }
 
     #[test]
@@ -857,7 +872,7 @@ mod tests {
             rect: Rect::new(2, 2, 4, 4),
         }));
         s.push(Box::new(EscDismiss)); // default bounds = None
-        assert_eq!(s.active_bounds((40, 20)), None);
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 40, 20)), None);
     }
 
     #[test]
@@ -867,8 +882,14 @@ mod tests {
         s.push(Box::new(Bounded { rect }));
         let mut out = Vec::new();
         // Color::Reset disables the drop shadow ⇒ only the box rows emit.
-        s.paint_clipped(&mut out, (40, 12), rect, Color::Reset)
-            .expect("paint");
+        s.paint_clipped(
+            &mut out,
+            (40, 12),
+            Rect::new(0, 0, 40, 12),
+            rect,
+            Color::Reset,
+        )
+        .expect("paint");
         let txt = String::from_utf8_lossy(&out);
         // Content inside the clip is emitted...
         assert!(txt.contains("INSIDE"), "modal content must paint: {txt:?}");
@@ -897,8 +918,14 @@ mod tests {
         let rect = Rect::new(5, 3, 10, 4);
         s.push(Box::new(Bounded { rect }));
         let mut out = Vec::new();
-        s.paint_clipped(&mut out, (40, 12), rect, Color::Rgb(20, 20, 30))
-            .expect("paint");
+        s.paint_clipped(
+            &mut out,
+            (40, 12),
+            Rect::new(0, 0, 40, 12),
+            rect,
+            Color::Rgb(20, 20, 30),
+        )
+        .expect("paint");
         let txt = String::from_utf8_lossy(&out);
         // A shadow row emits just below the box: box bottom row is 6 (0-based)
         // so the shadow row is 7 ⇒ 1-based CUP row 8, started one cell in
