@@ -43,6 +43,9 @@ use commands::Command;
 mod commands;
 mod selector;
 
+#[cfg(test)]
+mod help_inventory;
+
 /// phux — a libghostty-backed terminal multiplexer and control plane.
 #[derive(Debug, Parser)]
 #[command(
@@ -54,10 +57,13 @@ mod selector;
         TTY, and most accept `--json` for clean, scriptable output.\n\n\
         ATTACH / SERVE\n  \
           attach     Attach to a session (interactive)\n  \
-          server     Run a server in the foreground\n\n\
+          server     Run a server in the foreground\n  \
+          upgrade    Hot-swap the running server binary, keeping sessions alive\n\n\
         INSPECT\n  \
           ls         List sessions\n  \
-          snapshot   Capture a pane's screen as JSON or a boxed view\n\n\
+          snapshot   Capture a pane's screen as JSON or a boxed view\n  \
+          watch      Stream a pane's live events (bell, title, output, lifecycle)\n  \
+          agent      List, show, explain, set, or clear per-pane agent state\n\n\
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
@@ -66,15 +72,18 @@ mod selector;
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n  \
           ask        Report an agent ask event for a pane\n\n\
-          agent      List, show, or explain inferred public agent state\n\n\
-        CONFIG\n  \
-          config     Inspect config and run configured plugin actions\n\n\
-        PLUGINS\n  \
-          plugin     Manage local plugin manifests in config\n\n\
-        WORKSPACES\n  \
+        SUPERVISE\n  \
+          take       Seize exclusive input authority over a pane\n  \
+          give       Release the input authority taken with `take`\n  \
+          signal     Send a POSIX signal to a pane's process group\n\n\
+        ORGANIZE\n  \
+          tag        Read and write a pane's tags (address them with #tag)\n  \
+          config     Inspect config and run configured plugin actions\n  \
+          plugin     Manage local plugin manifests in config\n  \
           workspace  Inspect worktrees and save/restore session archives\n\n\
         FEDERATION\n  \
-          satellite  Manage configured federation satellites\n\n\
+          satellite  Manage configured federation satellites\n  \
+          pair       Mint a pairing token for a remote consumer\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
         grammar works across kill/snapshot/send-keys/run/wait/ask.",
@@ -91,6 +100,8 @@ mod selector;
         PHUX_WS_TOKENS     Pairing-token store the server reads and `phux pair` writes.\n  \
         PHUX_QUIC_ADDR     Also accept QUIC clients on HOST:PORT. Equivalent to\n  \
         \x20                 `phux server --quic`, which overrides it.\n  \
+        PHUX_WT_ADDR       Also accept WebTransport (HTTP/3 over QUIC) clients on\n  \
+        \x20                 HOST:PORT. Equivalent to `phux server --webtransport`.\n  \
         PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
         PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
         RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\
