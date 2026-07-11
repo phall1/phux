@@ -88,16 +88,30 @@ impl SelectionRect {
     /// - **linear** (`false`): full interior rows; the first row is clipped to
     ///   `>= start_col` and the last row to `<= end_col`.
     /// - **columnar** (`true`): every row in the span is clipped to the
-    ///   `[start_col, end_col]` column band, so an interior-row cell outside
-    ///   that band is excluded even though a linear selection would include it.
+    ///   `[min(start_col, end_col), max(start_col, end_col)]` column band, so an
+    ///   interior-row cell outside that band is excluded even though a linear
+    ///   selection would include it. The band is min/max-normalized because the
+    ///   corners are ordered lexicographically by `(row, col)` upstream, which
+    ///   can leave `start_col > end_col` for a down-and-left block drag.
     #[must_use]
     pub const fn contains(self, row: u16, col: u16) -> bool {
         if row < self.start_row || row > self.end_row {
             return false;
         }
         if self.rectangle {
-            // Columnar: the same column band on every row in the span.
-            return col >= self.start_col && col <= self.end_col;
+            // Columnar: the same column band on every row in the span. The two
+            // corners are normalized lexicographically by (row, col) upstream
+            // (`copy_mode::CellRange::from_points`), so a block whose lower row
+            // carries the smaller column arrives with `start_col > end_col`.
+            // Clamp to the `[min, max]` band on the column axis — matching how
+            // libghostty normalizes block corners per-axis in `Selection::new`,
+            // so the highlight covers exactly the cells the copy path extracts.
+            let (lo, hi) = if self.start_col <= self.end_col {
+                (self.start_col, self.end_col)
+            } else {
+                (self.end_col, self.start_col)
+            };
+            return col >= lo && col <= hi;
         }
         // Linear: partial first/last rows, full interior rows.
         if row == self.start_row && col < self.start_col {
@@ -245,6 +259,32 @@ mod tests {
         // Row 0, col 3 sits after `start` but outside the band.
         assert!(linear.contains(0, 3), "linear spans to the row end");
         assert!(!block.contains(0, 3), "block clips to the column band");
+    }
+
+    #[test]
+    fn contains_block_normalizes_inverted_column_corners() {
+        // Down-and-left block drag: anchor (row 0, col 5) to cursor (row 3,
+        // col 2). `CellRange::from_points` orders corners lexicographically by
+        // (row, col), so (0,5) <= (3,2) leaves start_col=5 > end_col=2. The
+        // band must still be [2, 5] on every row — matching the cells
+        // libghostty extracts — not the empty `col >= 5 && col <= 2`.
+        let sel = SelectionRect {
+            start_row: 0,
+            start_col: 5,
+            end_row: 3,
+            end_col: 2,
+            rectangle: true,
+        };
+        // Every row in the span carries the normalized [2, 5] band.
+        for row in 0..=3 {
+            assert!(sel.contains(row, 2), "row {row}: band left edge");
+            assert!(sel.contains(row, 5), "row {row}: band right edge");
+            assert!(sel.contains(row, 3), "row {row}: inside band");
+            assert!(!sel.contains(row, 1), "row {row}: left of band");
+            assert!(!sel.contains(row, 6), "row {row}: right of band");
+        }
+        // Outside the row span stays excluded.
+        assert!(!sel.contains(4, 3));
     }
 
     #[test]
