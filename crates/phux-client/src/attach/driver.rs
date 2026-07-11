@@ -463,12 +463,16 @@ fn paint_active_overlay<W: super::RenderSink>(
     viewport_dims: (u16, u16),
     status_bar: Option<&mut StatusBarPainter>,
     // phux-4h5a: the sidebar reservation, so base-frame repaints under an
-    // overlay keep panes inset (no reflow flicker when a modal opens). The
-    // strip painter isn't threaded here — overlays are transient and the
-    // driver re-invalidates + repaints the strip on dismiss — so the base
-    // repaint passes `None` for the painter; the reservation alone keeps the
-    // tiling consistent. `None` reservation (default) is byte-identical.
+    // overlay keep panes inset (no reflow flicker when a modal opens).
+    // `None` reservation (default) is byte-identical.
     sidebar: Option<SidebarReservation>,
+    // phux-foz.10: the sidebar strip painter. The base-frame repaint under a
+    // floating overlay starts with ED2 (full clear), so without the painter
+    // the reserved columns stay blank and the sidebar vanishes for as long
+    // as the palette / help / prompt / which-key overlay is open. Chrome
+    // persists under overlays: overlays float above content, not above
+    // chrome.
+    sidebar_painter: Option<&mut crate::render::chrome::sidebar::SidebarPainter>,
     session_name: &str,
     theme: &crate::render::Theme,
 ) {
@@ -495,7 +499,7 @@ fn paint_active_overlay<W: super::RenderSink>(
                 viewport_dims,
                 status_bar,
                 sidebar,
-                None,
+                sidebar_painter,
                 session_name,
             );
         }
@@ -508,6 +512,9 @@ fn paint_active_overlay<W: super::RenderSink>(
         // the live panes visible by repainting the base frame, then emit
         // only the modal's bounded region on top. No `\x1b[2J` — the panes
         // surround the box instead of vanishing behind a full-screen clear.
+        // The base frame includes the sidebar strip (phux-foz.10): the
+        // repaint's own ED2 cleared it, and chrome must persist under a
+        // floating overlay.
         if let Some(ls) = workspace.render_window(zoomed).as_deref() {
             paint_full_frame(
                 out,
@@ -517,7 +524,7 @@ fn paint_active_overlay<W: super::RenderSink>(
                 viewport_dims,
                 status_bar,
                 sidebar,
-                None,
+                sidebar_painter,
                 session_name,
             );
         }
@@ -1793,6 +1800,7 @@ async fn main_loop<W: super::RenderSink>(
             viewport_dims,
             status_bar.as_mut(),
             sidebar,
+            Some(&mut sidebar_painter),
             &session_name,
             &theme,
         );
@@ -1841,6 +1849,7 @@ async fn main_loop<W: super::RenderSink>(
                     viewport_dims,
                     status_bar.as_mut(),
                     sidebar,
+                    Some(&mut sidebar_painter),
                     &session_name,
                     &theme,
                 );
@@ -2082,6 +2091,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2538,6 +2548,7 @@ async fn main_loop<W: super::RenderSink>(
                                     viewport_dims,
                                     status_bar.as_mut(),
                                     sidebar,
+                                    Some(&mut sidebar_painter),
                                     &session_name,
                                     &theme,
                                 );
@@ -2726,6 +2737,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2786,6 +2798,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2876,6 +2889,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -2969,6 +2983,7 @@ async fn main_loop<W: super::RenderSink>(
                         viewport_dims,
                         status_bar.as_mut(),
                         sidebar,
+                        Some(&mut sidebar_painter),
                         &session_name,
                         &theme,
                     );
@@ -3489,6 +3504,7 @@ fn handle_config_reload<W: super::RenderSink>(
             viewport_dims,
             status_bar.as_mut(),
             sidebar,
+            Some(&mut *sidebar_painter),
             session_name,
             theme,
         );
@@ -4870,5 +4886,272 @@ mod tests {
         // 4. `stty -a` again; ALL flags should match step (1). Before
         //    phux-2r7, only ICANON|ECHO|ISIG round-tripped and custom
         //    flags like `iutf8` were lost.
+    }
+
+    // -----------------------------------------------------------------
+    // phux-foz.10: chrome persists while overlays are open.
+    // -----------------------------------------------------------------
+
+    use crate::render::overlay::{RenderOverlay, SelectItem, SelectList};
+    use phux_config::KeybindingsCfg;
+    use phux_config::keybind::ResolvedAction;
+    use phux_config::widget::WindowInfo;
+
+    /// The probe viewport for the overlay-chrome tests.
+    const PROBE_VIEW: (u16, u16) = (80, 24);
+    /// Sidebar strip width for the overlay-chrome tests.
+    const PROBE_SIDEBAR_W: u16 = 20;
+    /// Window label shown on the sidebar's name row. Distinctive: appears
+    /// nowhere in any pane content or overlay body, so finding it in the
+    /// replayed frame proves the strip painted.
+    const PROBE_WINDOW: &str = "w1-agent";
+    /// Branch shown on the sidebar's branch row (herdr-style, phux-p4vp).
+    const PROBE_BRANCH: &str = "foz10-br";
+    /// Content written into the pane mirror, to prove the base frame
+    /// repainted around the floating modal.
+    const PROBE_PANE_TEXT: &str = "PANE-BASE";
+
+    /// Replay `bytes` (a full frame of VT output) into a fresh libghostty
+    /// terminal — the house PTY-probe oracle — and project the resulting
+    /// grid to row-major plain text via the same `render_at_cells` surface
+    /// the production compositor uses.
+    fn replay_rows(bytes: &[u8]) -> Vec<String> {
+        let (cols, rows) = PROBE_VIEW;
+        let mut probe = PaneSlot::new_with_size(cols, rows).expect("probe slot");
+        probe.terminal.vt_write(bytes);
+        let mut frame = phux_core::screen::RenderedFrame::blank(cols, rows);
+        probe
+            .renderer
+            .render_at_cells(&probe.terminal, &mut frame, (0, 0), (cols, rows))
+            .expect("project probe cells");
+        (0..rows)
+            .map(|r| {
+                let base = usize::from(r) * usize::from(cols);
+                frame.cells[base..base + usize::from(cols)]
+                    .iter()
+                    .map(|c| c.grapheme.as_str())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The sidebar strip columns (left dock) of every replayed row, joined
+    /// as one string per row.
+    fn strip_columns(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .map(|r| r.chars().take(usize::from(PROBE_SIDEBAR_W)).collect())
+            .collect()
+    }
+
+    /// One `paint_active_overlay` frame for `overlay`, with the sidebar
+    /// enabled (left, width 20) and its painter threaded when
+    /// `with_painter`. Returns the emitted VT bytes.
+    fn paint_overlay_frame(overlay: Box<dyn RenderOverlay>, with_painter: bool) -> Vec<u8> {
+        let theme = crate::render::Theme::default();
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let sidebar = Some(SidebarReservation {
+            edge: SidebarEdge::Left,
+            width: PROBE_SIDEBAR_W,
+        });
+        // Pane mirror sized to the content rect (80 - 20 sidebar cols, no
+        // status bar) so the letterboxed paint fills its rect exactly.
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(PROBE_VIEW.0 - PROBE_SIDEBAR_W, PROBE_VIEW.1)
+            .expect("pane slot");
+        slot.terminal.vt_write(PROBE_PANE_TEXT.as_bytes());
+        panes.insert(id.clone(), slot);
+
+        let mut sidebar_painter = SidebarPainter::new(theme);
+        sidebar_painter.set_windows(vec![WindowInfo {
+            name: PROBE_WINDOW.to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: Some(PROBE_BRANCH.to_owned()),
+        }]);
+
+        let mut overlays = OverlayState::new();
+        overlays.push(overlay);
+
+        let mut out: Vec<u8> = Vec::new();
+        paint_active_overlay(
+            &mut out,
+            &overlays,
+            &workspace,
+            &mut panes,
+            Some(&id),
+            None,
+            PROBE_VIEW,
+            None,
+            sidebar,
+            with_painter.then_some(&mut sidebar_painter),
+            "probe",
+            &theme,
+        );
+        out
+    }
+
+    /// The command palette, as the dispatcher builds it (`SelectList`).
+    fn palette_overlay() -> Box<dyn RenderOverlay> {
+        let theme = crate::render::Theme::default();
+        let items = vec![
+            SelectItem::new(
+                "detach",
+                ResolvedAction {
+                    action: "detach".to_owned(),
+                    args: std::collections::BTreeMap::new(),
+                },
+            ),
+            SelectItem::new(
+                "new-window",
+                ResolvedAction {
+                    action: "new-window".to_owned(),
+                    args: std::collections::BTreeMap::new(),
+                },
+            ),
+        ];
+        Box::new(SelectList::new("command palette", items, &theme))
+    }
+
+    /// The agent-fleet dashboard, as the dispatcher builds it (phux-foz.7):
+    /// a `SelectList` carrying the fleet live key, with rows from
+    /// [`crate::attach::fleet::fleet_items`]. It rides the same bounded
+    /// floating-modal path as the palette, and the driver's fleet-dirty
+    /// live-refresh repaints it through `paint_active_overlay` — so it must
+    /// keep the sidebar visible on every refresh frame too.
+    fn fleet_overlay() -> Box<dyn RenderOverlay> {
+        let theme = crate::render::Theme::default();
+        let workspace = Workspace::single(TerminalId::local(1));
+        let items = crate::attach::fleet::fleet_items(
+            &workspace,
+            &[],
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+        assert!(
+            !items.iter().all(SelectItem::is_header),
+            "probe fleet dashboard must have selectable rows"
+        );
+        Box::new(
+            SelectList::new("agent fleet", items, &theme)
+                .with_live_key(crate::attach::fleet::FLEET_LIVE_KEY),
+        )
+    }
+
+    /// phux-foz.10 mechanism guard: this pins the DEFECT shape so the
+    /// regression tests below cannot false-pass. A floating-modal repaint
+    /// whose base frame omits the sidebar painter leaves the reserved strip
+    /// columns blank — the "sidebar vanishes while the palette is open" bug.
+    #[test]
+    fn overlay_base_frame_without_painter_blanks_the_sidebar() {
+        let rows = replay_rows(&paint_overlay_frame(palette_overlay(), false));
+        let strip = strip_columns(&rows).join("\n");
+        assert!(
+            !strip.contains(PROBE_WINDOW) && !strip.contains(PROBE_BRANCH),
+            "probe must detect the blank strip when the painter is absent;\n{strip}"
+        );
+    }
+
+    /// phux-foz.10: opening the command palette must NOT blank the sidebar.
+    /// The floating-modal base frame repaints the strip (window label +
+    /// branch line) and the panes, then paints the modal on top.
+    #[test]
+    fn command_palette_keeps_sidebar_visible() {
+        let rows = replay_rows(&paint_overlay_frame(palette_overlay(), true));
+        let all = rows.join("\n");
+        let strip = strip_columns(&rows).join("\n");
+        assert!(
+            strip.contains(PROBE_WINDOW),
+            "sidebar window label must survive the palette;\n{all}"
+        );
+        assert!(
+            strip.contains(PROBE_BRANCH),
+            "sidebar branch line must survive the palette;\n{all}"
+        );
+        assert!(
+            all.contains("command palette"),
+            "the palette itself must be painted on top;\n{all}"
+        );
+        assert!(
+            all.contains(PROBE_PANE_TEXT),
+            "pane content must stay visible around the floating modal;\n{all}"
+        );
+        // Pin the exact composition: sidebar strip + pane + centered modal.
+        insta::assert_snapshot!(
+            "palette_over_sidebar",
+            rows.iter()
+                .map(|r| r.trim_end())
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// phux-foz.10: every bounded (floating) overlay kind shares the same
+    /// base-frame path, so which-key, help, prompts, pickers, and toasts
+    /// must all keep the sidebar visible too.
+    #[test]
+    fn all_floating_overlays_keep_sidebar_visible() {
+        let theme = crate::render::Theme::default();
+        let wk_cfg = KeybindingsCfg {
+            prefix_table: std::iter::once((
+                "d".to_owned(),
+                phux_config::Action::Bare("detach".to_owned()),
+            ))
+            .collect(),
+            ..KeybindingsCfg::default()
+        };
+        let overlays: Vec<(&str, Box<dyn RenderOverlay>)> = vec![
+            ("palette", palette_overlay()),
+            // phux-foz.7 fleet dashboard: same floating-modal path, and the
+            // driver's fleet-dirty live refresh repaints it while it is
+            // open — the sidebar must survive every refresh frame.
+            ("agent-fleet", fleet_overlay()),
+            (
+                "which-key",
+                Box::new(crate::render::overlay::WhichKeyOverlay::from_config(
+                    &wk_cfg, &theme,
+                )),
+            ),
+            (
+                "help",
+                Box::new(crate::render::overlay::HelpOverlay::from_config(
+                    &wk_cfg, &theme,
+                )),
+            ),
+            (
+                "prompt",
+                Box::new(crate::render::overlay::PromptOverlay::new(
+                    "rename window",
+                    "rename-window",
+                    "name",
+                    "1",
+                    &theme,
+                )),
+            ),
+            (
+                "toast",
+                Box::new(crate::render::overlay::ToastOverlay::new(
+                    "notice",
+                    vec!["a line".to_owned()],
+                    &theme,
+                )),
+            ),
+        ];
+        for (label, overlay) in overlays {
+            let rows = replay_rows(&paint_overlay_frame(overlay, true));
+            let strip = strip_columns(&rows).join("\n");
+            assert!(
+                strip.contains(PROBE_WINDOW),
+                "{label}: sidebar window label must survive the overlay;\n{}",
+                rows.join("\n")
+            );
+            assert!(
+                strip.contains(PROBE_BRANCH),
+                "{label}: sidebar branch line must survive the overlay;\n{}",
+                rows.join("\n")
+            );
+        }
     }
 }
