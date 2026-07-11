@@ -124,6 +124,38 @@ pub fn spawn_server_with_seed_cmd(
     (tx, handle)
 }
 
+/// Like [`spawn_server_with_seed_cmd`] but also sets the server-wide
+/// `defaults.term` (phux-ign). The runtime applies `ServerConfig::term`
+/// over the seed command's baseline via `terminal_actor::apply_term`, so
+/// setting `TERM` on `cmd` directly would be silently overwritten — this
+/// helper is the honest way to spawn a seed pane under a specific `TERM`
+/// (e.g. `ghostty` for the phux-0o8 kitty-keyboard round-trip harness).
+pub fn spawn_server_with_seed_cmd_and_term(
+    socket_path: PathBuf,
+    pre_seeded: &str,
+    cmd: portable_pty::CommandBuilder,
+    term: &str,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    let (tx, rx) = oneshot::channel::<()>();
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: Some(pre_seeded.to_owned()),
+        seed_with_pty: true,
+        seed_command: Some(cmd),
+        term: term.to_owned(),
+        ..ServerConfig::with_default_socket()
+    };
+    let handle = tokio::task::spawn_local(async move {
+        let server = ServerRuntime::new(cfg);
+        server
+            .run_async(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (tx, handle)
+}
+
 /// Like [`spawn_server_with_seed_cmd`] but also sets the
 /// `defaults.cwd-inheritance` policy. Used by the phux-nyx tests to
 /// exercise the `session-root` and `last-cwd-per-window` modes against a

@@ -8,8 +8,9 @@
 //!
 //! * [`init`] — the **server / foreground** path. Keeps the long-standing
 //!   human-text fmt layer writing to **stderr** (the binary's stdout is
-//!   reserved for protocol/PTY traffic on the `--stdio` future path; never
-//!   pollute it with log lines). Optionally *also* tees to a file when
+//!   reserved for protocol/PTY traffic — `phux stdio-bridge` splices it
+//!   into the wire; never pollute it with log lines). Optionally *also*
+//!   tees to a file when
 //!   `PHUX_LOG` is set, and installs the `tokio-console` layer when built
 //!   for it.
 //! * [`init_client`] — the **client / TUI** path. NEVER writes to stderr:

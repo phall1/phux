@@ -237,6 +237,7 @@ fn spawn_terminal_in_default_group_round_trips_input() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -334,6 +335,7 @@ fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -415,6 +417,7 @@ fn spawn_terminal_env_term_overrides_default() {
                 cwd: None,
                 env: Some(vec![("TERM".to_owned(), "phux-spawn-override".to_owned())]),
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -468,6 +471,7 @@ fn spawn_terminal_default_term_is_xterm_256color() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -520,6 +524,7 @@ fn spawn_terminal_term_field_overrides_default() {
                 cwd: None,
                 env: None,
                 term: Some("phux-term-field".to_owned()),
+                satellite: None,
             },
         )
         .await;
@@ -570,6 +575,7 @@ fn spawn_terminal_env_term_beats_term_field() {
                 cwd: None,
                 env: Some(vec![("TERM".to_owned(), "phux-env-wins".to_owned())]),
                 term: Some("phux-term-field".to_owned()),
+                satellite: None,
             },
         )
         .await;
@@ -615,6 +621,7 @@ fn spawn_terminal_unknown_group_returns_group_not_found() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -661,6 +668,7 @@ fn spawn_terminal_emits_terminal_closed_on_pty_exit() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -725,6 +733,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -847,6 +856,168 @@ async fn await_output_contains(
     acc
 }
 
+/// Drain until the accumulated bytes for `pane` contain `needle`, scanning
+/// BOTH `TERMINAL_OUTPUT` (live deltas) and `TERMINAL_SNAPSHOT`
+/// (`vt_replay_bytes` — the rendered grid). A seed pane that printed before
+/// the client attached surfaces its output in the snapshot replay rather
+/// than a live delta, so a test observing a pre-attach print must read both.
+async fn await_snapshot_or_output_contains(
+    stream: &mut UnixStream,
+    pane: &phux_protocol::ids::TerminalId,
+    needle: &[u8],
+) -> Vec<u8> {
+    let mut acc: Vec<u8> = Vec::new();
+    let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        let Ok((_type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
+            break;
+        };
+        match frame {
+            FrameKind::TerminalOutput {
+                terminal_id, bytes, ..
+            } if &terminal_id == pane => acc.extend_from_slice(&bytes),
+            FrameKind::TerminalSnapshot {
+                terminal_id,
+                vt_replay_bytes,
+                ..
+            } if &terminal_id == pane => acc.extend_from_slice(&vt_replay_bytes),
+            _ => continue,
+        }
+        if acc.windows(needle.len()).any(|w| w == needle) {
+            return acc;
+        }
+    }
+    acc
+}
+
+/// phux-w7mj: the server injects `PHUX_TERMINAL_ID` (the pane's own local
+/// wire id) into every SPAWN_TERMINAL child, so an in-pane process — e.g.
+/// the agent-record wrapper — self-targets on the wire with zero config.
+/// A child that echoes `$PHUX_TERMINAL_ID` MUST report exactly the local id
+/// the `TERMINAL_SPAWNED` reply carried. This is the split-into-session
+/// (`spawn_pane_with_pty`) path.
+#[test]
+fn spawn_terminal_injects_matching_terminal_id_env() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 55,
+                group: DEFAULT_GROUP_ID,
+                command: Some(vec![
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    // Trailing `.` so `PTID=1.` can't match a prefix of a
+                    // longer id (`PTID=12`). `read _` blocks so the pane
+                    // stays alive after printing.
+                    "printf 'PTID=%s.\\n' \"$PHUX_TERMINAL_ID\"; read _".to_owned(),
+                ]),
+                cwd: None,
+                env: None,
+                term: None,
+                satellite: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 55).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+        let local = new_id
+            .local_id()
+            .expect("a freshly spawned id must be LOCAL");
+        let needle = format!("PTID={local}.");
+        let acc = await_output_contains(&mut stream, &new_id, needle.as_bytes()).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "spawned child must see PHUX_TERMINAL_ID={local} matching its wire id; \
+             got output: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-w7mj: the same `PHUX_TERMINAL_ID` injection covers the seed /
+/// attach-create path (`seed_session_with_pty`). A `CreateIfMissing` whose
+/// wire `command` echoes `$PHUX_TERMINAL_ID` MUST report the seed pane's own
+/// wire id — the id the ATTACHED snapshot advertises for that pane.
+#[test]
+fn attach_create_seed_pane_injects_matching_terminal_id_env() {
+    use phux_protocol::wire::frame::{AttachTarget, TYPE_ATTACHED, ViewportInfo};
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // Seed attach-create panes with a real PTY and NO server-wide
+        // override command, so the wire `command` below runs in the
+        // freshly-created seed pane.
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(
+            &mut stream,
+            &FrameKind::Attach {
+                target: AttachTarget::CreateIfMissing {
+                    name: "seed-id".to_owned(),
+                    command: Some(vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "printf 'PTID=%s.\\n' \"$PHUX_TERMINAL_ID\"; read _".to_owned(),
+                    ]),
+                    cwd: None,
+                },
+                viewport: ViewportInfo::new(80, 24),
+                request_scrollback: false,
+                scrollback_limit_lines: 0,
+            },
+        )
+        .await;
+
+        // ATTACHED carries the seed pane's wire id.
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        let seed_id = match attached {
+            FrameKind::Attached { snapshot, .. } => {
+                assert_eq!(snapshot.panes.len(), 1, "attach-create seeds one pane");
+                snapshot.panes[0].id.clone()
+            }
+            other => panic!("expected Attached, got {other:?}"),
+        };
+        let local = seed_id.local_id().expect("the seed pane id must be LOCAL");
+        let needle = format!("PTID={local}.");
+        // The seed child may print before or after the snapshot arrives, so
+        // scan both the snapshot replay and any live output.
+        let acc = await_snapshot_or_output_contains(&mut stream, &seed_id, needle.as_bytes()).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "attach-create seed pane must see PHUX_TERMINAL_ID={local} matching its wire id; \
+             got: {body:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
 /// phux-cs6 acceptance: with `defaults.cwd-inheritance = inherit-focused`
 /// (the schema default the test server runs with), a `SPAWN_TERMINAL`
 /// that leaves `cwd` unset opens the new pane in the *focused* pane's
@@ -913,6 +1084,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -1082,6 +1254,7 @@ fn spawn_terminal_session_root_inherits_seed_pane_dir() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -1165,6 +1338,7 @@ fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;

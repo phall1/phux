@@ -32,8 +32,10 @@
 //!
 //! ### Placement
 //!
-//! Defaults to [`Position::Bottom`] per `docs/consumers/tui.md` §8.5. `Position::Top`
-//! is reserved for a future config knob — no TOML key surfaces it today.
+//! Defaults to [`Position::Bottom`] per `docs/consumers/tui.md` §8.5.
+//! `Position::Top` is surfaced by the `[status] position = "top"` config
+//! key (phux-foz.8); the pane content rect shifts down one row to match
+//! (see `crate::attach::paint::content_rect`).
 
 use std::io::{self, Write};
 use std::time::{Duration, SystemTime};
@@ -52,9 +54,21 @@ pub enum Position {
     /// One row at the very bottom of the outer terminal.
     #[default]
     Bottom,
-    /// One row at the very top of the outer terminal. Reserved for a
-    /// future config knob; no TOML key surfaces it today.
+    /// One row at the very top of the outer terminal. Surfaced by the
+    /// `[status] position = "top"` config key (phux-foz.8).
     Top,
+}
+
+impl From<phux_config::StatusPosition> for Position {
+    /// Map the `[status] position` config value onto the render enum
+    /// (phux-foz.8). The mapping lives at this boundary so `phux-config`
+    /// stays free of render types (ADR-0020).
+    fn from(pos: phux_config::StatusPosition) -> Self {
+        match pos {
+            phux_config::StatusPosition::Bottom => Self::Bottom,
+            phux_config::StatusPosition::Top => Self::Top,
+        }
+    }
 }
 
 /// Inputs the chrome composer needs to paint one frame of the bar.
@@ -75,6 +89,13 @@ pub struct StatusBarContext<'a> {
     /// by the `windows` widget. Empty ⇒ no window bar. TUI-side data fed
     /// into the widget pipeline via [`Self::as_widget`].
     pub windows: &'a [WindowInfo],
+    /// phux-foz.4: the focused pane's live working directory (`""` when
+    /// unknown), consumed by the `cwd` widget. Injected by the painter
+    /// from driver-fed state, like `windows`.
+    pub cwd: &'a str,
+    /// phux-foz.4: the focused pane's last known command exit code
+    /// (OSC-133 `command_finished`), consumed by the `exit` widget.
+    pub last_exit: Option<i32>,
 }
 
 impl<'a> StatusBarContext<'a> {
@@ -87,6 +108,8 @@ impl<'a> StatusBarContext<'a> {
             session_name: self.session_name,
             prefix: self.prefix,
             windows: self.windows,
+            cwd: self.cwd,
+            last_exit: self.last_exit,
         }
     }
 }
@@ -96,7 +119,8 @@ impl<'a> StatusBarContext<'a> {
 /// Kept so callers in `attach/` can construct one without depending on
 /// `phux-config`'s internals directly. Window data is injected by the
 /// painter (see [`StatusBarPainter::paint`]); standalone callers pass an
-/// empty slice.
+/// empty slice. The focused-pane data feeds (`cwd`, `last_exit`) are
+/// painter-owned too and injected the same way.
 #[must_use]
 pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarContext<'_> {
     StatusBarContext {
@@ -104,6 +128,8 @@ pub const fn make_context(session_name: &str, now: SystemTime) -> StatusBarConte
         session_name,
         prefix: "C-a",
         windows: &[],
+        cwd: "",
+        last_exit: None,
     }
 }
 
@@ -283,21 +309,55 @@ fn paint_supervisory_overlay<W: Write>(
     out.flush()
 }
 
-/// ADR-0033: overlay the badge into a composed bar buffer (the
-/// `phux snapshot --rendered` path), right-aligned with reverse-video + bold so
-/// the dense-cell snapshot matches the live VT paint.
-fn overlay_badge_into_buffer(buffer: &mut Buffer, badge: &str, cols: u16) {
-    if cols == 0 || badge.is_empty() {
+/// phux-foz.1: emit the agent-attention hint as a chip immediately left of
+/// the supervisory badge (`right_offset` cells in from the right edge; `0`
+/// when no badge is present). Same reverse+bold treatment as the ADR-0033
+/// badge, but the foreground rides the theme's `attention` slot — under
+/// reverse video it reads as the chip's fill color.
+fn paint_attention_overlay<W: Write>(
+    out: &mut W,
+    hint: &str,
+    row_index: u16,
+    cols: u16,
+    right_offset: u16,
+    color: Color,
+) -> io::Result<()> {
+    let avail = cols.saturating_sub(right_offset);
+    if avail == 0 || hint.is_empty() {
+        return Ok(());
+    }
+    let visible: String = hint.chars().take(avail as usize).collect();
+    let width = u16::try_from(visible.chars().count()).unwrap_or(avail);
+    let start_col = avail.saturating_sub(width);
+    let one_based_row = row_index.saturating_add(1);
+    let one_based_col = start_col.saturating_add(1);
+    write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[7;1m")?;
+    crate::render::sgr::write_sgr_color(out, color, true)?;
+    write!(out, "{visible}\x1b[0m")?;
+    out.flush()
+}
+
+/// ADR-0033 / phux-foz.1: overlay a badge into a composed bar buffer (the
+/// `phux snapshot --rendered` path), right-aligned `right_offset` cells in
+/// from the right edge, so the dense-cell snapshot matches the live VT paint.
+fn overlay_badge_into_buffer(
+    buffer: &mut Buffer,
+    badge: &str,
+    cols: u16,
+    right_offset: u16,
+    style: Style,
+) {
+    let avail = cols.saturating_sub(right_offset);
+    if avail == 0 || badge.is_empty() {
         return;
     }
-    let visible: Vec<char> = badge.chars().take(cols as usize).collect();
-    let width = u16::try_from(visible.len()).unwrap_or(cols);
-    let start = cols.saturating_sub(width);
-    let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let visible: Vec<char> = badge.chars().take(avail as usize).collect();
+    let width = u16::try_from(visible.len()).unwrap_or(avail);
+    let start = avail.saturating_sub(width);
     let mut tmp = [0u8; 4];
     for (i, ch) in visible.iter().enumerate() {
         let x = start.saturating_add(u16::try_from(i).unwrap_or(0));
-        if x >= cols {
+        if x >= avail {
             break;
         }
         let cell = &mut buffer[(x, 0)];
@@ -338,7 +398,24 @@ pub struct StatusBarPainter {
     /// change invalidates the cache so the row repaints (and erases a cleared
     /// badge). Painted over the composed widget row, not replacing it.
     supervisory: Option<String>,
+    /// phux-foz.1: when `Some`, the agent-attention hint (e.g. `[ ASK ]`)
+    /// is overlaid immediately left of the supervisory badge. Set by the
+    /// driver whenever a pane's ADR-0035 asked flag flips; same cache
+    /// semantics as `supervisory`.
+    attention: Option<String>,
+    /// phux-foz.1: chip foreground for the attention hint, from the theme's
+    /// `attention` slot (the painter never hardcodes it). Under the chip's
+    /// reverse video the foreground reads as the fill color.
+    attention_fg: Color,
     prefix: String,
+    /// phux-foz.4: the focused pane's live working directory, fed by the
+    /// driver from `cwd_changed` events (via the pane slots) and injected
+    /// into the render context like `windows`. `None` ⇒ unknown (the
+    /// `cwd` widget renders nothing).
+    focused_cwd: Option<String>,
+    /// phux-foz.4: the focused pane's last known command exit code, fed
+    /// by the driver from `command_finished` events. `None` ⇒ unknown.
+    last_exit: Option<i32>,
 }
 
 impl std::fmt::Debug for StatusBarPainter {
@@ -354,7 +431,11 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("windows.len", &self.windows.len())
             .field("error", &self.error)
             .field("supervisory", &self.supervisory)
+            .field("attention", &self.attention)
+            .field("attention_fg", &self.attention_fg)
             .field("prefix", &self.prefix)
+            .field("focused_cwd", &self.focused_cwd)
+            .field("last_exit", &self.last_exit)
             .finish()
     }
 }
@@ -371,7 +452,11 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: None,
             supervisory: None,
+            attention: None,
+            attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
+            focused_cwd: None,
+            last_exit: None,
         }
     }
 
@@ -395,8 +480,20 @@ impl StatusBarPainter {
             windows: Vec::new(),
             error: Some(message.into()),
             supervisory: None,
+            attention: None,
+            attention_fg: Color::Reset,
             prefix: "C-a".to_owned(),
+            focused_cwd: None,
+            last_exit: None,
         }
+    }
+
+    /// Which row this painter reserves ([`Position::Bottom`] or
+    /// [`Position::Top`]). The paint/layout helpers read this so the pane
+    /// content rect and the bar row agree on the reservation (phux-foz.8).
+    #[must_use]
+    pub const fn position(&self) -> Position {
+        self.position
     }
 
     /// Set the configured prefix chord exposed to prefix-aware widgets.
@@ -411,11 +508,39 @@ impl StatusBarPainter {
     /// Update the window list rendered by the `windows` widget. A change
     /// forces the next paint to redraw (the list isn't part of the
     /// widget-row cache key — the widget reads it from the context).
-    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) {
-        if self.windows != windows {
-            self.windows = windows;
-            self.invalidate();
+    /// Returns `true` if the list actually changed (so a caller with no
+    /// other paint trigger can gate a repaint on it).
+    pub fn set_windows(&mut self, windows: Vec<WindowInfo>) -> bool {
+        if self.windows == windows {
+            return false;
         }
+        self.windows = windows;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.4: set (or clear, with `None`) the focused pane's live
+    /// working directory rendered by the `cwd` widget. Returns `true` if
+    /// the value actually changed; a change invalidates the row cache.
+    pub fn set_focused_cwd(&mut self, cwd: Option<String>) -> bool {
+        if self.focused_cwd == cwd {
+            return false;
+        }
+        self.focused_cwd = cwd;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.4: set (or clear, with `None`) the focused pane's last
+    /// command exit code rendered by the `exit` widget. Returns `true` if
+    /// the value actually changed; a change invalidates the row cache.
+    pub fn set_last_exit(&mut self, last_exit: Option<i32>) -> bool {
+        if self.last_exit == last_exit {
+            return false;
+        }
+        self.last_exit = last_exit;
+        self.invalidate();
+        true
     }
 
     /// ADR-0033: set (or clear, with `None`) the supervisory badge overlaid on
@@ -434,6 +559,41 @@ impl StatusBarPainter {
         self.supervisory = badge;
         self.invalidate();
         true
+    }
+
+    /// phux-foz.1: set (or clear, with `None`) the agent-attention hint
+    /// overlaid left of the supervisory badge. Returns `true` if the hint
+    /// actually changed; same error-line suppression and cache semantics as
+    /// [`Self::set_supervisory`].
+    pub fn set_attention(&mut self, hint: Option<String>) -> bool {
+        if self.error.is_some() || self.attention == hint {
+            return false;
+        }
+        self.attention = hint;
+        self.invalidate();
+        true
+    }
+
+    /// phux-foz.1: set the attention chip's foreground from the theme's
+    /// `attention` slot. The driver calls this once at attach; the painter
+    /// itself never hardcodes the color.
+    pub fn set_attention_color(&mut self, color: Color) {
+        if self.attention_fg != color {
+            self.attention_fg = color;
+            self.invalidate();
+        }
+    }
+
+    /// Cells the attention chip is shifted in from the right edge: the
+    /// supervisory badge's width plus a 1-cell gap, or `0` when no badge is
+    /// showing. Shared by the live paint and the snapshot compose so both
+    /// place the chip identically.
+    fn attention_offset(&self) -> u16 {
+        self.supervisory.as_ref().map_or(0, |badge| {
+            u16::try_from(badge.chars().count())
+                .unwrap_or(u16::MAX)
+                .saturating_add(1)
+        })
     }
 
     /// True if the underlying bar has no widgets configured.
@@ -495,6 +655,19 @@ impl StatusBarPainter {
         if self.bar.is_empty() && self.windows.is_empty() {
             return Ok(());
         }
+        // The window list is owned by the painter (the driver sets it
+        // from the Workspace); inject it into the render context so
+        // callers don't have to thread it through every paint path.
+        // Injected BEFORE the cache compose (phux-foz.12) so `last_row`
+        // holds the strip actually painted — window tabs included — and
+        // [`Self::window_hit_at`] hit-tests against what is on screen.
+        let ctx = StatusBarContext {
+            prefix: &self.prefix,
+            windows: &self.windows,
+            cwd: self.focused_cwd.as_deref().unwrap_or(""),
+            last_exit: self.last_exit,
+            ..*ctx
+        };
         let new_row = self.bar.render(&ctx.as_widget(), cols);
         let viewport_changed = self.last_viewport != Some((cols, rows));
         let row_changed = match &self.last_row {
@@ -508,14 +681,6 @@ impl StatusBarPainter {
             Position::Bottom => rows.saturating_sub(1),
             Position::Top => 0,
         };
-        // The window list is owned by the painter (the driver sets it
-        // from the Workspace); inject it into the render context so
-        // callers don't have to thread it through every paint path.
-        let ctx = StatusBarContext {
-            prefix: &self.prefix,
-            windows: &self.windows,
-            ..*ctx
-        };
         // Delegate to the ratatui-backed renderer. We pre-composed
         // `new_row` for cache-keying; the renderer recomposes — cheap
         // (same inputs, deterministic) and keeps `render_status_bar`
@@ -526,6 +691,19 @@ impl StatusBarPainter {
         // full-row repaint above erases any stale/cleared badge first.
         if let Some(badge) = &self.supervisory {
             paint_supervisory_overlay(out, badge, row_index, cols)?;
+        }
+        // phux-foz.1: the attention hint chips in immediately left of the
+        // badge (or at the right edge when no badge is up). Same repaint
+        // discipline: the full-row repaint erased any cleared hint.
+        if let Some(hint) = &self.attention {
+            paint_attention_overlay(
+                out,
+                hint,
+                row_index,
+                cols,
+                self.attention_offset(),
+                self.attention_fg,
+            )?;
         }
         self.last_row = Some((cols, new_row));
         self.last_viewport = Some((cols, rows));
@@ -585,6 +763,8 @@ impl StatusBarPainter {
         let ctx = StatusBarContext {
             prefix: &self.prefix,
             windows: &self.windows,
+            cwd: self.focused_cwd.as_deref().unwrap_or(""),
+            last_exit: self.last_exit,
             ..*ctx
         };
         let row = self.bar.render(&ctx.as_widget(), cols);
@@ -593,7 +773,26 @@ impl StatusBarPainter {
         // ADR-0033: overlay the supervisory badge into the snapshot buffer so
         // `phux snapshot --rendered` shows the same chip the live paint draws.
         if let Some(badge) = &self.supervisory {
-            overlay_badge_into_buffer(&mut buffer, badge, cols);
+            overlay_badge_into_buffer(
+                &mut buffer,
+                badge,
+                cols,
+                0,
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            );
+        }
+        // phux-foz.1: the attention hint composes left of the badge, themed
+        // like the live paint.
+        if let Some(hint) = &self.attention {
+            overlay_badge_into_buffer(
+                &mut buffer,
+                hint,
+                cols,
+                self.attention_offset(),
+                Style::default()
+                    .fg(self.attention_fg)
+                    .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            );
         }
         Some((buffer, row_index))
     }
@@ -649,12 +848,37 @@ impl StatusBarPainter {
         Ok(())
     }
 
+    /// phux-r82.6: the async data feeds behind the bar's `exec` widgets.
+    /// The driver spawns one bounded interval runner per feed; an
+    /// error-line painter (empty bar) has none.
+    #[must_use]
+    pub fn exec_feeds(&self) -> Vec<phux_config::widget::ExecFeed> {
+        self.bar.exec_feeds()
+    }
+
     /// Force the next [`Self::paint`] to redraw unconditionally —
     /// e.g. after a SIGWINCH or after the pane renderer wrote the
     /// bottom row.
     pub fn invalidate(&mut self) {
         self.last_row = None;
         self.last_viewport = None;
+    }
+
+    /// phux-foz.12: resolve a click column on the bar row to the window
+    /// tab painted there, reading the strip cached by the last
+    /// [`Self::paint`] — so hit targets derive from exactly what is on
+    /// screen and cannot drift from the composed layout (slot placement,
+    /// separators, truncation, `Z`/`!` markers all included).
+    ///
+    /// `None` when the bar has never painted, `x` is off the strip, or
+    /// the cell under `x` is not a window tab (a separator, another
+    /// widget, blank padding, or the error line — whose cached row is
+    /// empty).
+    #[must_use]
+    pub fn window_hit_at(&self, x: u16) -> Option<usize> {
+        let (_, row) = self.last_row.as_ref()?;
+        let phux_config::widget::CellHit::Window(i) = row.get(usize::from(x))?.hit?;
+        Some(i)
     }
 }
 
@@ -667,12 +891,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     fn ctx_default(session: &str) -> StatusBarContext<'_> {
-        StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: session,
-            prefix: "C-a",
-            windows: &[],
-        }
+        make_context(session, UNIX_EPOCH)
     }
 
     fn spec(kind: &str, opts: &[(&str, toml::Value)]) -> Widget {
@@ -726,6 +945,27 @@ mod tests {
         p.paint(&mut buf, 10, 24, &ctx_default("hi")).unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("\x1b[1;1H"), "no CUP-to-row-1: {s:?}");
+    }
+
+    /// phux-foz.8: the `[status] position` config value maps 1:1 onto the
+    /// render enum, and the painter reports it back through `position()`
+    /// (the layout helpers key the content-rect shift off that getter).
+    #[test]
+    fn config_position_maps_onto_render_position() {
+        assert_eq!(
+            Position::from(phux_config::StatusPosition::Bottom),
+            Position::Bottom
+        );
+        assert_eq!(
+            Position::from(phux_config::StatusPosition::Top),
+            Position::Top
+        );
+        let cfg = StatusCfg {
+            left: vec![Widget::Bare("session-name".into())],
+            ..Default::default()
+        };
+        let p = StatusBarPainter::new(build_bar(&cfg), Position::Top);
+        assert_eq!(p.position(), Position::Top);
     }
 
     #[test]
@@ -939,18 +1179,20 @@ mod tests {
                 name: "bash".to_owned(),
                 active: true,
                 zoomed: false,
+                attention: false,
+                branch: None,
             },
             WindowInfo {
                 name: "vim".to_owned(),
                 active: false,
                 zoomed: false,
+                attention: false,
+                branch: None,
             },
         ];
         let ctx = StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: "",
-            prefix: "C-a",
             windows: &windows,
+            ..make_context("", UNIX_EPOCH)
         };
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
@@ -970,12 +1212,7 @@ mod tests {
     #[test]
     fn empty_bar_and_no_windows_is_noop() {
         let bar = build_bar(&StatusCfg::default());
-        let ctx = StatusBarContext {
-            now: UNIX_EPOCH,
-            session_name: "",
-            prefix: "C-a",
-            windows: &[],
-        };
+        let ctx = make_context("", UNIX_EPOCH);
         let mut buf = Vec::new();
         render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
         assert!(buf.is_empty(), "empty bar + no windows must not paint");
@@ -990,6 +1227,8 @@ mod tests {
             name: "a".to_owned(),
             active: true,
             zoomed: false,
+            attention: false,
+            branch: None,
         }]);
         let mut buf = Vec::new();
         p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
@@ -998,6 +1237,281 @@ mod tests {
             s.contains("0:a"),
             "painter should render the strip; got {s:?}"
         );
+    }
+
+    /// phux-foz.1: the attention hint paints as a right-aligned chip on the
+    /// bar row, colored by the theme-fed `attention_fg` (reverse video makes
+    /// the fg the chip fill).
+    #[test]
+    fn painter_paints_attention_hint_right_aligned() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        p.set_attention_color(Color::Rgb(251, 191, 36));
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Right-aligned: "[ ASK ]" is 7 cells wide in a 40-col bar on the
+        // bottom row (row 10) => CUP col 34.
+        assert!(
+            s.contains("\x1b[10;34H"),
+            "attention chip must right-align; got {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[38;2;251;191;36m"),
+            "chip must carry the themed attention color; got {s:?}"
+        );
+        assert!(strip_csi(&s).contains("[ ASK ]"), "chip text; got {s:?}");
+    }
+
+    /// phux-foz.1: with a supervisory badge up, the attention chip shifts
+    /// left of it (badge width + 1-cell gap) instead of overpainting it.
+    #[test]
+    fn attention_hint_sits_left_of_the_supervisory_badge() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        assert!(p.set_supervisory(Some("[ FROZEN ]".to_owned())));
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        // Badge: 10 cells at cols 31..40. Chip: offset 11 from the right
+        // edge => right-aligned at col 40-11-7+1 = 23.
+        assert!(
+            s.contains("\x1b[10;31H"),
+            "badge keeps the right edge; got {s:?}"
+        );
+        assert!(
+            s.contains("\x1b[10;23H"),
+            "chip must shift left of the badge; got {s:?}"
+        );
+        let visible = strip_csi(&s);
+        assert!(visible.contains("[ ASK ]") && visible.contains("[ FROZEN ]"));
+    }
+
+    /// phux-foz.1: clearing the hint reports the change and the repainted
+    /// row no longer carries it.
+    #[test]
+    fn cleared_attention_hint_stops_painting() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        assert!(p.set_attention(Some("[ ASK ]".to_owned())));
+        assert!(
+            !p.set_attention(Some("[ ASK ]".to_owned())),
+            "unchanged hint must report no change"
+        );
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert!(p.set_attention(None), "clearing must report a change");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8(buf).unwrap());
+        assert!(
+            !visible.contains("ASK"),
+            "cleared hint must not repaint; got {visible:?}"
+        );
+    }
+
+    /// phux-foz.4: the painter-owned focused-pane cwd feeds the `cwd`
+    /// widget; setting it invalidates the cache and the widget renders
+    /// the (home-uncollapsed here) directory.
+    #[test]
+    fn painter_renders_focused_cwd_through_cwd_widget() {
+        let cfg = StatusCfg {
+            left: vec![spec("cwd", &[])],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert!(
+            !strip_csi(&String::from_utf8_lossy(&buf)).contains("/tmp"),
+            "unknown cwd renders nothing"
+        );
+        assert!(p.set_focused_cwd(Some("/tmp/project".to_owned())));
+        assert!(
+            !p.set_focused_cwd(Some("/tmp/project".to_owned())),
+            "unchanged cwd reports no change"
+        );
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("/tmp/project"),
+            "cwd must render; got {visible:?}"
+        );
+    }
+
+    /// phux-foz.4: the painter-owned last-exit feeds the `exit` widget.
+    /// Clearing it (a code-less `command_finished`) blanks the widget again.
+    #[test]
+    fn painter_renders_last_exit_through_exit_widget() {
+        let cfg = StatusCfg {
+            right: vec![spec(
+                "exit",
+                &[("format", toml::Value::String("rc={code}".into()))],
+            )],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        assert!(p.set_last_exit(Some(127)));
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("rc=127"),
+            "exit code must render; got {visible:?}"
+        );
+        assert!(p.set_last_exit(None), "clearing reports a change");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            !visible.contains("rc="),
+            "cleared exit must blank the widget; got {visible:?}"
+        );
+    }
+
+    /// phux-r82.6: the painter exposes its bar's exec feeds so the driver
+    /// can spawn runners; pushing output through a feed shows up on the
+    /// next paint (the async-refresh-into-cached-state contract).
+    #[test]
+    fn painter_exec_feed_output_lands_on_the_bar() {
+        let cfg = StatusCfg {
+            left: vec![spec(
+                "exec",
+                &[("command", toml::Value::String("battery.sh".into()))],
+            )],
+            ..Default::default()
+        };
+        let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
+        let feeds = p.exec_feeds();
+        assert_eq!(feeds.len(), 1, "one exec widget => one feed");
+
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        assert!(
+            !strip_csi(&String::from_utf8_lossy(&buf)).contains("BAT"),
+            "no output before the first run"
+        );
+
+        feeds[0].apply_output("BAT 87%\n");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        let visible = strip_csi(&String::from_utf8_lossy(&buf));
+        assert!(
+            visible.contains("BAT 87%"),
+            "cached exec output must render; got {visible:?}"
+        );
+    }
+
+    /// phux-foz.12: after a paint, the painter resolves click columns to
+    /// the window tabs of the strip it painted: "0:bash 1:vim" in the left
+    /// slot puts window 0 on columns 0..6, the separator on 6, window 1 on
+    /// 7..12, and blank padding after — hit, miss, hit, miss.
+    #[test]
+    fn window_hit_at_maps_painted_tab_columns() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![
+            WindowInfo {
+                name: "bash".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "vim".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        // Before the first paint there is no strip to hit.
+        assert_eq!(p.window_hit_at(0), None);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        // "0:bash 1:vim": tabs at 0..=5 and 7..=11.
+        for x in 0..=5 {
+            assert_eq!(p.window_hit_at(x), Some(0), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(6), None, "separator is inert");
+        for x in 7..=11 {
+            assert_eq!(p.window_hit_at(x), Some(1), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(12), None, "padding is inert");
+        assert_eq!(p.window_hit_at(39), None, "right edge is inert");
+        assert_eq!(p.window_hit_at(40), None, "off-strip is inert");
+    }
+
+    /// phux-foz.12: the hit map tracks the strip across a window-list
+    /// change + repaint — after a select the active marker moves but the
+    /// columns keep resolving against the fresh paint.
+    #[test]
+    fn window_hit_at_follows_repaints() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert_eq!(p.window_hit_at(0), Some(0));
+        assert_eq!(p.window_hit_at(4), None, "only one 3-cell tab");
+        // Grow the list; the next paint extends the hit map.
+        p.set_windows(vec![
+            WindowInfo {
+                name: "a".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "b".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert_eq!(p.window_hit_at(4), Some(1), "new tab is hittable");
+    }
+
+    /// phux-foz.12: the error-line painter paints a diagnostic strip, not
+    /// tabs — every column is inert.
+    #[test]
+    fn window_hit_at_is_inert_on_the_error_line() {
+        let mut p = StatusBarPainter::error_line("config error: boom");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        for x in 0..40 {
+            assert_eq!(p.window_hit_at(x), None);
+        }
     }
 
     #[test]

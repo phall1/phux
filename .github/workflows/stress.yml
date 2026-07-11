@@ -51,11 +51,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.label.name == 'stress' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}

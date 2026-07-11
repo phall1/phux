@@ -1,7 +1,7 @@
-//! Shared TLS trust policy for remote attach transports.
+//! Shared TLS trust policy for remote dial transports.
 //!
 //! QUIC and secure WebSocket both use the same operator flow: `phux pair`
-//! prints a self-signed certificate fingerprint, and the client pins that
+//! prints a self-signed certificate fingerprint, and the dialer pins that
 //! fingerprint for routable hosts. Loopback dev may skip certificate
 //! verification while still exercising the encrypted transport.
 
@@ -10,14 +10,14 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
-use super::driver::AttachError;
+use crate::DialError;
 
 /// How a remote dialer decides to trust the server's TLS certificate.
 ///
 /// TLS still provides encryption in both modes. The choice here is whether the
 /// server's self-signed certificate is pinned out-of-band, or accepted blindly
 /// for loopback-only development.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertTrust {
     /// Accept the server's certificate without verification. **Loopback dev
     /// only**.
@@ -31,10 +31,10 @@ pub enum CertTrust {
 ///
 /// `alpn` is transport-specific: QUIC needs `phux-quic/1`; WebSocket leaves it
 /// unset because the RFC 6455 upgrade happens at HTTP level.
-pub(super) fn client_config(
+pub(crate) fn client_config(
     trust: &CertTrust,
     alpn: Option<&[u8]>,
-) -> Result<rustls::ClientConfig, AttachError> {
+) -> Result<rustls::ClientConfig, DialError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match trust {
         CertTrust::SkipVerify => Arc::new(SkipServerVerification(provider.clone())),
@@ -46,7 +46,7 @@ pub(super) fn client_config(
 
     let mut crypto = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|err| AttachError::Connect(format!("build TLS client config: {err}")))?
+        .map_err(|err| DialError::Connect(format!("build TLS client config: {err}")))?
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();

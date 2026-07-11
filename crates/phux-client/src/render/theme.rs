@@ -22,6 +22,11 @@
 //!   `accent` when a theme wants them to diverge.
 //! - [`section_header`] — section headings inside the help modal.
 //! - [`error`] — error / alarm text.
+//! - [`sidebar_section`] — the sidebar's muted `spaces` / `agents`
+//!   section headers (phux-foz.9).
+//! - [`agent_idle`] / [`agent_working`] / [`agent_blocked`] /
+//!   [`agent_done`] — agent lifecycle state colors in the sidebar's
+//!   agents section (phux-foz.9).
 //!
 //! [`accent`]: Theme::accent
 //! [`chord`]: Theme::chord
@@ -31,6 +36,11 @@
 //! [`title`]: Theme::title
 //! [`section_header`]: Theme::section_header
 //! [`error`]: Theme::error
+//! [`sidebar_section`]: Theme::sidebar_section
+//! [`agent_idle`]: Theme::agent_idle
+//! [`agent_working`]: Theme::agent_working
+//! [`agent_blocked`]: Theme::agent_blocked
+//! [`agent_done`]: Theme::agent_done
 //!
 //! ## Overrides
 //!
@@ -86,6 +96,23 @@ pub struct Theme {
     /// Background of selection chrome: the copy-mode status strip (and
     /// future selected list rows).
     pub selection_bg: Color,
+    /// Attention chrome (phux-foz.1): the sidebar tab marker and the
+    /// status-bar hint painted when an agent in a pane is waiting on a
+    /// human answer (ADR-0035 `AgentEvent::Asked`).
+    pub attention: Color,
+    /// Sidebar section headers (phux-foz.9): the muted lowercase
+    /// `spaces` / `agents` headings of the herdr-shaped sidebar.
+    pub sidebar_section: Color,
+    /// Agent lifecycle coloring (phux-foz.9): an `idle` agent row's
+    /// glyph + state text in the sidebar's agents section.
+    pub agent_idle: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `working` agent row.
+    pub agent_working: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `blocked` agent row
+    /// (waiting on a human).
+    pub agent_blocked: Color,
+    /// Agent lifecycle coloring (phux-foz.9): a `done` agent row.
+    pub agent_done: Color,
 }
 
 impl Default for Theme {
@@ -96,8 +123,17 @@ impl Default for Theme {
             // `Reset` = terminal default foreground; the action column
             // was unstyled (plain `Span::raw`) before this module.
             action: Color::Reset,
-            dim: Color::DarkGray,
-            border: Color::Rgb(82, 82, 91),
+            // phux-foz.13: an explicit muted slate rather than the
+            // terminal-dependent ANSI `DarkGray`. Chrome (branch sub-lines,
+            // footer hints, affordances, empty-state placeholders) reads as
+            // one deliberate recessive register instead of "whatever the
+            // palette maps bright-black to". slate-500.
+            dim: Color::Rgb(100, 116, 139),
+            // phux-foz.13: the sidebar separator + modal borders drop to a
+            // cooler, quieter slate so the divider reads as a thin
+            // unobtrusive rule and the chrome recedes behind content.
+            // slate-700.
+            border: Color::Rgb(51, 65, 85),
             title: Color::Rgb(190, 242, 100),
             section_header: Color::Yellow,
             error: Color::Red,
@@ -110,6 +146,21 @@ impl Default for Theme {
             // dark gray) now that it routes through the theme.
             selection_fg: Color::White,
             selection_bg: Color::Indexed(240),
+            // Amber: reads as "needs you" without colliding with `error`
+            // red or the lime `accent`.
+            attention: Color::Rgb(251, 191, 36),
+            // phux-foz.9 / phux-foz.13: sidebar section headers sit in the
+            // same muted slate register as `dim` — a quiet lowercase label
+            // that recedes, not the terminal-dependent ANSI `DarkGray` it
+            // used to inherit. slate-500.
+            sidebar_section: Color::Rgb(100, 116, 139),
+            // phux-foz.9: agent lifecycle colors. Idle is a muted slate
+            // ("nothing needs you"), working the green of live progress,
+            // blocked the attention amber, done a settled blue.
+            agent_idle: Color::Rgb(148, 163, 184),
+            agent_working: Color::Rgb(134, 239, 172),
+            agent_blocked: Color::Rgb(251, 191, 36),
+            agent_done: Color::Rgb(96, 165, 250),
         }
     }
 }
@@ -162,6 +213,12 @@ impl Theme {
             "shadow" => Some(&mut self.shadow),
             "selection_fg" => Some(&mut self.selection_fg),
             "selection_bg" => Some(&mut self.selection_bg),
+            "attention" => Some(&mut self.attention),
+            "sidebar_section" => Some(&mut self.sidebar_section),
+            "agent_idle" => Some(&mut self.agent_idle),
+            "agent_working" => Some(&mut self.agent_working),
+            "agent_blocked" => Some(&mut self.agent_blocked),
+            "agent_done" => Some(&mut self.agent_done),
             _ => None,
         }
     }
@@ -193,8 +250,9 @@ mod tests {
         assert_eq!(t.accent, Color::Rgb(190, 242, 100));
         assert_eq!(t.chord, Color::Rgb(134, 239, 172));
         assert_eq!(t.action, Color::Reset);
-        assert_eq!(t.dim, Color::DarkGray);
-        assert_eq!(t.border, Color::Rgb(82, 82, 91));
+        // phux-foz.13: chrome recedes into a cohesive muted slate scale.
+        assert_eq!(t.dim, Color::Rgb(100, 116, 139));
+        assert_eq!(t.border, Color::Rgb(51, 65, 85));
         assert_eq!(t.title, Color::Rgb(190, 242, 100));
         assert_eq!(t.section_header, Color::Yellow);
         assert_eq!(t.error, Color::Red);
@@ -203,6 +261,41 @@ mod tests {
         assert_eq!(t.shadow, Color::Rgb(28, 28, 38));
         assert_eq!(t.selection_fg, Color::White);
         assert_eq!(t.selection_bg, Color::Indexed(240));
+        // phux-foz.1: attention chrome for the agent-asked (ADR-0035) badge.
+        assert_eq!(t.attention, Color::Rgb(251, 191, 36));
+        // phux-foz.9 / phux-foz.13: sidebar section headers + agent
+        // lifecycle colors. Headers share the muted slate `dim` register.
+        assert_eq!(t.sidebar_section, Color::Rgb(100, 116, 139));
+        assert_eq!(t.agent_idle, Color::Rgb(148, 163, 184));
+        assert_eq!(t.agent_working, Color::Rgb(134, 239, 172));
+        assert_eq!(t.agent_blocked, Color::Rgb(251, 191, 36));
+        assert_eq!(t.agent_done, Color::Rgb(96, 165, 250));
+    }
+
+    /// phux-foz.9: every sidebar/agent slot is config-overridable like the
+    /// rest — unknown-slot warnings would otherwise silently eat them.
+    #[test]
+    fn sidebar_and_agent_slots_are_overridable() {
+        let t = Theme::from_cfg(&cfg(&[
+            ("sidebar_section", "#6c7086"),
+            ("agent_idle", "white"),
+            ("agent_working", "green"),
+            ("agent_blocked", "red"),
+            ("agent_done", "blue"),
+        ]));
+        assert_eq!(t.sidebar_section, Color::Rgb(0x6c, 0x70, 0x86));
+        assert_eq!(t.agent_idle, Color::White);
+        assert_eq!(t.agent_working, Color::Green);
+        assert_eq!(t.agent_blocked, Color::Red);
+        assert_eq!(t.agent_done, Color::Blue);
+        assert_eq!(t.accent, Theme::default().accent);
+    }
+
+    #[test]
+    fn attention_slot_is_overridable() {
+        let t = Theme::from_cfg(&cfg(&[("attention", "#f38ba8")]));
+        assert_eq!(t.attention, Color::Rgb(0xf3, 0x8b, 0xa8));
+        assert_eq!(t.accent, Theme::default().accent);
     }
 
     #[test]

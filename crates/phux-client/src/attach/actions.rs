@@ -47,7 +47,7 @@ use super::paint::{SidebarReservation, content_rect};
 use crate::layout::{
     self, Direction, LayoutError, LayoutNode, LayoutState, NodePath, Rect, SplitDir,
 };
-use crate::multi_pane::{pane_rects_in, split_content_span_at};
+use crate::multi_pane::{pane_rects_proportional_in, split_content_span_at};
 
 /// Errors returned by the pure action helpers.
 ///
@@ -358,10 +358,16 @@ fn clamp_ratio(r: f32) -> f32 {
 ///
 /// phux-4h5a: tiles into the inset content rect so the underflow check sees
 /// the same width panes paint into when a `sidebar` is docked. The status-bar
-/// row is intentionally NOT reserved here (`has_bar = false`): this gate has
+/// row is intentionally NOT reserved here (`bar = None`): this gate has
 /// always measured against the full pane-row budget, and the
-/// `content_rect(.., false, None)` form reproduces the prior
+/// `content_rect(.., None, None)` form reproduces the prior
 /// `pane_rects(tree, viewport)` byte-for-byte on the disabled path.
+///
+/// phux-foz.3: measures the *proportional* tiling
+/// ([`pane_rects_proportional_in`]), not the frozen tiling paint uses.
+/// The §6.2 viewport-reflow floor would otherwise pin every rect at
+/// minimum and this gate would never trip, letting `resize-pane` bank
+/// unbounded ratio behind a frozen divider.
 fn violates_min_cell(
     state: &LayoutState,
     viewport: (u16, u16),
@@ -370,7 +376,7 @@ fn violates_min_cell(
     let Some(tree) = state.tree.as_ref() else {
         return false;
     };
-    let rects = pane_rects_in(tree, content_rect(viewport, false, sidebar));
+    let rects = pane_rects_proportional_in(tree, content_rect(viewport, None, sidebar));
     rects
         .values()
         .any(|r: &Rect| r.w < MIN_PANE_CELL || r.h < MIN_PANE_CELL)
@@ -408,18 +414,18 @@ pub(super) fn apply_divider_resize(
     axis: SplitDir,
     pointer: (u16, u16),
     viewport: (u16, u16),
-    has_bar: bool,
+    bar: Option<crate::render::chrome::status_bar::Position>,
     sidebar: Option<SidebarReservation>,
 ) -> Result<Option<LayoutState>, ActionError> {
     let tree = state.tree.as_ref().ok_or(ActionError::EmptyTree)?;
     // The content rect mouse routing tiled into. This MUST match the
-    // hit-test's `content_rect(viewport, has_bar, sidebar)`: the pointer
+    // hit-test's `content_rect(viewport, bar, sidebar)`: the pointer
     // arrives in that same inset cell space, so the divider span and the
     // pointer share an origin and the divider tracks the cursor exactly. A
     // status bar shortens the content on its axis, so for a Vertical split
-    // (horizontal divider, y-driven) `has_bar` shifts the budget; an
+    // (horizontal divider, y-driven) `bar` shifts the budget; an
     // absolute drag that ignored it would mis-track when a bar is docked.
-    let content = content_rect(viewport, has_bar, sidebar);
+    let content = content_rect(viewport, bar, sidebar);
     let (start, content_len) =
         split_content_span_at(tree, content, node_path).ok_or(ActionError::NoResizableBoundary)?;
     // Position along the split's axis. The divider should land under the
@@ -519,6 +525,11 @@ pub(super) struct PendingSplit {
     pub focused_at_request: TerminalId,
     /// Axis along which to split.
     pub dir: SplitDir,
+    /// phux-r82.7: `true` ⇒ after the split applies, zoom the freshly
+    /// spawned pane to fill the window instead of the default un-zoom
+    /// (`placement = "zoomed"` plugin panes). Built-in `split-pane`
+    /// always parks `false` (a split un-zooms, tmux parity).
+    pub zoom_on_spawn: bool,
 }
 
 /// A `new-window` action that emitted a `SPAWN_TERMINAL` and is awaiting
@@ -823,7 +834,7 @@ mod tests {
             SplitDir::Horizontal,
             (32, 10),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap()
@@ -845,7 +856,7 @@ mod tests {
             SplitDir::Horizontal,
             (60, 5),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap()
@@ -856,7 +867,7 @@ mod tests {
             SplitDir::Horizontal,
             (20, 5),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap()
@@ -883,7 +894,7 @@ mod tests {
             SplitDir::Horizontal,
             (0, 5),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap();
@@ -902,7 +913,7 @@ mod tests {
             SplitDir::Horizontal,
             (40, 5),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap_err();
@@ -924,7 +935,7 @@ mod tests {
             SplitDir::Vertical,
             (5, 11),
             (80, 24),
-            true,
+            Some(crate::render::chrome::status_bar::Position::Bottom),
             None,
         )
         .unwrap()
@@ -935,7 +946,7 @@ mod tests {
             SplitDir::Vertical,
             (5, 11),
             (80, 24),
-            false,
+            None,
             None,
         )
         .unwrap()
@@ -1022,6 +1033,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(1),
             dir: SplitDir::Horizontal,
+            zoom_on_spawn: false,
         };
         let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
         // apply_split sets focus to the freshly added pane.
@@ -1051,6 +1063,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(2),
             dir: SplitDir::Horizontal,
+            zoom_on_spawn: false,
         };
         let new_state =
             apply_spawned_ok(&state, t(99), &pending).expect("split applies against request");
@@ -1071,6 +1084,7 @@ mod tests {
         let pending = PendingSplit {
             focused_at_request: t(42),
             dir: SplitDir::Vertical,
+            zoom_on_spawn: false,
         };
         let new_state = apply_spawned_ok(&state, t(2), &pending).expect("split applies");
         let leaves = crate::layout::leaves(new_state.tree.as_ref().expect("tree"));
@@ -1142,6 +1156,7 @@ mod tests {
             let pending = PendingSplit {
                 focused_at_request: state.focus.clone().expect("focus"),
                 dir,
+                zoom_on_spawn: false,
             };
             state = apply_spawned_ok(&state, t(next_id), &pending).expect("split");
             splits += 1;

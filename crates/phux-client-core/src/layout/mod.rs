@@ -77,7 +77,7 @@ pub enum Direction {
 
 /// An axis-aligned rectangle in cell coordinates.
 ///
-/// Mirrors `phux_core::window::Rect`. Origin is the outer viewport's
+/// Origin is the outer viewport's
 /// top-left. Border-divider accounting (per ADR-0019 decision 4) happens
 /// *inside* [`crate::multi_pane::pane_rects`]: it carves one cell per
 /// split node out of the bounds for the divider, so leaf rects and

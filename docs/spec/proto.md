@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: stable
-last-reviewed: 2026-06-07
+last-reviewed: 2026-07-10
 ---
 
 # proto — connection lifecycle, framing, and protocol meta
@@ -147,9 +147,15 @@ The protocol runs over any reliable, ordered, bidirectional, octet-
 oriented byte stream. This version defines these concrete transports:
 
 - **Unix domain socket** of type `SOCK_STREAM`, for local clients.
-- **Standard I/O of an SSH command**, for remote attaches. The client
-  invokes `ssh host phux serve --stdio`; the protocol flows over the
-  remote process's stdin/stdout.
+- **Standard I/O of an SSH command**, for remote attaches and for
+  federation hubs dialing `ssh://` satellites ([ADR-0007]). The dialing
+  side invokes `ssh host phux stdio-bridge`; the remote bridge process
+  splices its stdin/stdout to the server's Unix domain socket on `host`,
+  byte-transparently, so the identical framing flows over the SSH
+  channel. Authentication and confidentiality are SSH's (the
+  transport-responsibility rule below): the bridge holds an ordinary
+  local UDS connection under the socket's owner-only permissions, and no
+  bearer token is carried on this transport.
 - **QUIC** (`quic://host:port`), for remote clients ([ADR-0007]). A
   single bidirectional QUIC stream carries the identical framing — a
   reliable, ordered octet stream, satisfying the property above. TLS 1.3
@@ -289,6 +295,10 @@ ClientCapabilities {
     rendering: RenderingMode,      // Diff | VtReplay (deprecated; see prose below)
     layers: bitset<Layer>,         // tiers the client speaks (§11; ADR-0015)
     output_mode: OutputMode,       // emitter the consumer wants
+    default_colors: optional<{     // outer terminal OSC 10/11 defaults
+        foreground: rgb24,
+        background: rgb24,
+    }>,
 }
 
 ServerCapabilities {
@@ -313,12 +323,23 @@ triple, and the `ClientCapabilities` blob each ride as a separate tagged
 field. `ClientCapabilities` itself is a nested positional, big-endian,
 length-prefixed sub-record carried inside its field's value, with the field
 order `color`, `layers`, `images`, `kbd_protocols`, `hyperlinks`,
-`output_mode`. A decoder MUST accept every prefix of that caps sub-record and
+`output_mode`, then `default_colors` as a presence byte followed by foreground
+and background `R,G,B` bytes when present. A decoder MUST accept every prefix
+of that caps sub-record and
 apply defaults for missing trailing bytes — a value that stops before
 `output_mode` decodes as `OutputMode::Raw`, and an unknown `output_mode` tag
 also decodes as `Raw` — and an absent `ClientCapabilities` *field* decodes to
 the default capabilities. New capability bytes append after `output_mode`
 inside the same field.
+
+`default_colors` lets an interactive client report the effective foreground
+and background returned by OSC 10/11 on its outer terminal. The server SHOULD
+install them as the canonical Terminal's default colors before parsing child
+output, so OSC 10/11 queries from programs inside phux receive the same answer
+as they do outside it. This affects theme derivation, not SGR downsampling.
+When several clients share a Terminal, the most recently attached client that
+advertises `default_colors` is authoritative; an attach that omits the field
+MUST NOT erase an established palette. Non-TTY and legacy clients omit it.
 
 `output_mode` lets a consumer choose, per connection, which server emitter
 serves its attached Terminals: `Raw` (the default) keeps the byte-faithful
@@ -328,6 +349,20 @@ low-latency PTY broadcast that interactive shells and TUIs rely on, while
 suppresses the raw broadcast for a `StateSync` consumer so exactly one
 emitter serves it. Raw stays the human default because synthesized ticks
 add a visible local-typing latency floor and can lose byte-exact styling.
+
+Under `StateSync`, `TERMINAL_OUTPUT.bytes` is the minimum-VT transition from
+the consumer's reference grid to the live grid, synthesized once per tick and
+RTT-paced, so a runaway producer bounds the consumer's re-parse *rate* rather
+than streaming every intermediate frame; the resulting grid is equivalent to
+what the `Raw` byte stream would produce (ADR-0018,
+[ADR-0043](../../ADR/0043-state-diff-output-mode.md)). Whether the server
+advances a consumer's reference **on emit** (the emit-once model, correct on a
+reliable ordered transport) or **on `FRAME_ACK`** (the loss-tolerant model,
+which re-diffs a dropped/un-acked frame against the last-acked reference so it
+self-heals) is a **server-side emission strategy** chosen per consumer from the
+transport/topology — it needs no `ClientCapabilities` field and changes no wire
+bytes (`FRAME_ACK` and `seq` already round-trip). A consumer MUST NOT assume
+which strategy serves it; both converge to the same grid.
 
 The `CC_FRONTEND` bit on `features` is **reclaimed** per
 [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md). Earlier drafts
@@ -608,7 +643,16 @@ ErrorCode = enum {
                                  //   (a TUI L3 convention) does not exist
     TERMINAL_NOT_FOUND   = 104,  // renamed from PANE_NOT_FOUND per ADR-0016
     CLIENT_NOT_FOUND     = 105,
-    UNSUPPORTED_SATELLITE_ROUTE = 106,
+    UNSUPPORTED_SATELLITE_ROUTE = 106,  // no route for a SATELLITE-tagged id:
+                                 //   the server is not a federation hub, or
+                                 //   the host is absent from its satellite
+                                 //   registry (a configuration refusal)
+    SATELLITE_UNREACHABLE = 107, // ADR-0007: the hub knows the satellite but
+                                 //   its outbound link is down, dialing,
+                                 //   refused fail-closed (ADR-0038), or was
+                                 //   lost before the relayed reply arrived.
+                                 //   Transient — a retry may succeed once the
+                                 //   hub's link supervisor reconnects.
 
     INVALID_COMMAND      = 200,
     PERMISSION_DENIED    = 201,

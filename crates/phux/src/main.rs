@@ -2,7 +2,7 @@
 //!
 //! Single executable, multiple subcommands. By convention:
 //!   phux           → attach to (or auto-spawn) the user's server
-//!   phux server    → run a server in the foreground (for `--stdio`, supervisord, etc.)
+//!   phux server    → run a server in the foreground (supervisord etc.)
 //!   phux attach    → attach to a session by name (phux-9gw.3)
 //!   phux new       → create a new session
 //!   phux ls        → list sessions
@@ -43,6 +43,9 @@ use commands::Command;
 mod commands;
 mod selector;
 
+#[cfg(test)]
+mod help_inventory;
+
 /// phux — a libghostty-backed terminal multiplexer and control plane.
 #[derive(Debug, Parser)]
 #[command(
@@ -54,10 +57,13 @@ mod selector;
         TTY, and most accept `--json` for clean, scriptable output.\n\n\
         ATTACH / SERVE\n  \
           attach     Attach to a session (interactive)\n  \
-          server     Run a server in the foreground\n\n\
+          server     Run a server in the foreground\n  \
+          upgrade    Hot-swap the running server binary, keeping sessions alive\n\n\
         INSPECT\n  \
           ls         List sessions\n  \
-          snapshot   Capture a pane's screen as JSON or a boxed view\n\n\
+          snapshot   Capture a pane's screen as JSON or a boxed view\n  \
+          watch      Stream a pane's live events (bell, title, output, lifecycle)\n  \
+          agent      List, show, explain, set, or clear per-pane agent state\n\n\
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
@@ -66,15 +72,19 @@ mod selector;
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n  \
           ask        Report an agent ask event for a pane\n\n\
-          agent      List, show, or explain inferred public agent state\n\n\
-        CONFIG\n  \
-          config     Inspect config and run configured plugin actions\n\n\
-        PLUGINS\n  \
-          plugin     Manage local plugin manifests in config\n\n\
-        WORKSPACES\n  \
+        SUPERVISE\n  \
+          take       Seize exclusive input authority over a pane\n  \
+          give       Release the input authority taken with `take`\n  \
+          signal     Send a POSIX signal to a pane's process group\n\n\
+        ORGANIZE\n  \
+          tag        Read and write a pane's tags (address them with #tag)\n  \
+          config     Inspect config and run configured plugin actions\n  \
+          plugin     Manage local plugin manifests in config\n  \
           workspace  Inspect worktrees and save/restore session archives\n\n\
         FEDERATION\n  \
-          satellite  Manage configured federation satellites\n\n\
+          satellite  Manage configured federation satellites\n  \
+          pair       Mint a pairing token for a remote consumer\n  \
+          stdio-bridge  Bridge stdio to the local server socket (SSH-stdio)\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
         `name:window.pane`, `@id`, `.` (focused), or `=` (last-focused). The same\n\
         grammar works across kill/snapshot/send-keys/run/wait/ask.",
@@ -91,6 +101,10 @@ mod selector;
         PHUX_WS_TOKENS     Pairing-token store the server reads and `phux pair` writes.\n  \
         PHUX_QUIC_ADDR     Also accept QUIC clients on HOST:PORT. Equivalent to\n  \
         \x20                 `phux server --quic`, which overrides it.\n  \
+        PHUX_WT_ADDR       Also accept WebTransport (HTTP/3 over QUIC) clients on\n  \
+        \x20                 HOST:PORT. Equivalent to `phux server --webtransport`.\n  \
+        PHUX_SSH           OpenSSH-compatible program a federation hub spawns to\n  \
+        \x20                 dial ssh:// satellites (default: `ssh` on PATH).\n  \
         PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
         PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
         RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\
@@ -217,6 +231,8 @@ fn main() -> ExitCode {
             socket,
             listen,
             quic,
+            webtransport,
+            hub,
             daemonize,
             seed_command,
             resume,
@@ -225,6 +241,8 @@ fn main() -> ExitCode {
             socket,
             listen,
             quic,
+            webtransport,
+            hub,
             daemonize,
             seed_command.as_deref(),
             resume,
@@ -238,6 +256,22 @@ fn main() -> ExitCode {
             json,
             command,
         }) => commands::new::run_new(name, session, cwd, socket, json, command),
+        Some(Command::Spawn {
+            satellite,
+            cwd,
+            json,
+            socket,
+            command,
+        }) => commands::spawn::run_spawn(satellite, cwd, json, socket, command),
+        Some(Command::Launch {
+            integration,
+            list,
+            print,
+            json,
+            cwd,
+            socket,
+            extra,
+        }) => commands::launch::run_launch(integration, list, print, json, cwd, socket, &extra),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
         Some(Command::Take { target, socket }) => commands::supervise::run_take(&target, socket),
         Some(Command::Give { target, socket }) => commands::supervise::run_give(&target, socket),
@@ -321,6 +355,7 @@ fn main() -> ExitCode {
         Some(Command::Workspace { action }) => commands::workspace::run_workspace(&action),
         Some(Command::Satellite { action }) => commands::satellite::run_satellite(&action),
         Some(Command::Tag { socket, action }) => commands::tag::run_tag(&action, socket),
+        Some(Command::StdioBridge { socket }) => commands::stdio_bridge::run_stdio_bridge(socket),
         Some(Command::Pair { tokens, cert }) => commands::pair::run_pair(tokens, cert),
         None => commands::attach::run_naked(),
     }
@@ -386,5 +421,35 @@ mod tests {
         };
         assert_eq!(name, None);
         assert_eq!(session.as_deref(), Some("flagged"));
+    }
+
+    /// phux-foz.5: `phux config reload` parses, with and without an
+    /// explicit `--socket`.
+    #[test]
+    fn config_reload_parses_with_optional_socket() {
+        use crate::commands::config_action::ConfigAction;
+
+        let cli =
+            Cli::try_parse_from(["phux", "config", "reload"]).expect("`config reload` parses");
+        let Some(Command::Config {
+            action: ConfigAction::Reload { socket },
+        }) = cli.command
+        else {
+            panic!("expected Config Reload");
+        };
+        assert_eq!(socket, None);
+
+        let cli = Cli::try_parse_from(["phux", "config", "reload", "--socket", "/tmp/phux.sock"])
+            .expect("`config reload --socket` parses");
+        let Some(Command::Config {
+            action: ConfigAction::Reload { socket },
+        }) = cli.command
+        else {
+            panic!("expected Config Reload");
+        };
+        assert_eq!(
+            socket.as_deref(),
+            Some(std::path::Path::new("/tmp/phux.sock"))
+        );
     }
 }

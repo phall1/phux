@@ -40,7 +40,7 @@ async fn renders_engine_grid_to_canvas() {
     render(&ctx, &grid, &m, false);
 
     // Sample a pixel inside cell (0,0): it should be the red background.
-    let pixel = ctx.get_image_data(3.0, 3.0, 1.0, 1.0).unwrap();
+    let pixel = ctx.get_image_data(3, 3, 1, 1).unwrap();
     let d = pixel.data();
     assert!(
         d[0] > 200 && d[1] < 60 && d[2] < 60,

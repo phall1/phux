@@ -173,7 +173,7 @@ pub(super) fn reject_symlinked_config(path: &Path) -> Result<(), String> {
     }
 }
 
-fn temp_nonce() -> u128 {
+pub(super) fn temp_nonce() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos())

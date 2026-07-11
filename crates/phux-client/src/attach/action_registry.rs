@@ -30,6 +30,8 @@ use std::collections::BTreeMap;
 use phux_config::keybind::ResolvedAction;
 use phux_config::{Action, KeybindingsCfg};
 
+use super::plugin_actions::PluginActionEntry;
+use super::plugin_panes::PluginPaneEntry;
 use crate::render::overlay::select_list::SelectItem;
 
 /// The category a palette action groups under. Drives the dim section
@@ -239,6 +241,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "agent-fleet",
+        category: Category::View,
+        description: "Agent fleet: every pane's agent, state, and attention",
+        args: &[],
+    },
+    ActionSpec {
         name: "show-help",
         category: Category::View,
         description: "Show the keybindings help overlay",
@@ -248,6 +256,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         name: "detach",
         category: Category::View,
         description: "Detach this client from the session",
+        args: &[],
+    },
+    ActionSpec {
+        name: "reload-config",
+        category: Category::View,
+        description: "Reload the config file (keybindings, theme, status bar)",
         args: &[],
     },
     ActionSpec {
@@ -268,6 +282,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         description: "Signal the focused pane's process group (freeze/resume/kill, ADR-0033)",
         args: &[("signal", ArgValue::Str("freeze"))],
     },
+    ActionSpec {
+        name: "set-pane",
+        category: Category::Pane,
+        description: "Toggle per-pane mouse opt-out for the focused pane (ADR-0035)",
+        args: &[("mouse", ArgValue::Str("toggle"))],
+    },
 ];
 
 /// Build the palette's [`SelectItem`] rows from the [`REGISTRY`],
@@ -285,8 +305,31 @@ pub const REGISTRY: &[ActionSpec] = &[
 /// load) yields every row as `"unbound"`. The committed action is the
 /// registry's [`ActionSpec::resolved_action`], so choosing a palette row
 /// runs exactly what a keybinding would.
+///
+/// phux-r82.5: `plugin_actions` is the driver's snapshot of enabled
+/// plugins' manifest `[[actions]]`. When non-empty, the rows follow the
+/// static categories under a trailing **Plugin** header, labelled
+/// `plugin: <plugin-name>: <action title>` and committing the shared
+/// `plugin-action` dispatcher action (args `plugin`/`action`). These rows
+/// are dynamic — they come from manifests, not [`REGISTRY`] — so they are
+/// exempt from the registry↔dispatcher lockstep test (which pins the
+/// `plugin-action` *name* instead; see `PALETTE_EXEMPT`). The bound-chord
+/// annotation works unchanged because merged plugin keybindings carry the
+/// same action + args shape (see
+/// [`super::plugin_actions::merge_plugin_bindings`]).
+///
+/// phux-r82.7: `plugin_panes` is the driver's snapshot of enabled
+/// plugins' hostable manifest `[[panes]]` (placement `split`/`tab`/
+/// `zoomed`; overlay entries are dropped at snapshot time). Their rows
+/// share the same trailing **Plugin** header, labelled
+/// `plugin pane: <plugin-name>: <pane title>` and committing the
+/// `plugin-pane` dispatcher action (args `plugin`/`pane`).
 #[must_use]
-pub fn palette_items(keybindings: Option<&KeybindingsCfg>) -> Vec<SelectItem> {
+pub fn palette_items(
+    keybindings: Option<&KeybindingsCfg>,
+    plugin_actions: &[PluginActionEntry],
+    plugin_panes: &[PluginPaneEntry],
+) -> Vec<SelectItem> {
     let mut items = Vec::new();
     for &category in Category::ORDER {
         let mut header_pushed = false;
@@ -296,18 +339,43 @@ pub fn palette_items(keybindings: Option<&KeybindingsCfg>) -> Vec<SelectItem> {
                 header_pushed = true;
             }
             let resolved = spec.resolved_action();
-            let chord = keybindings.map_or_else(
-                || "unbound".to_owned(),
-                |kb| bound_chord(kb, &resolved).unwrap_or_else(|| "unbound".to_owned()),
-            );
             items.push(
-                SelectItem::new(spec.description, resolved)
-                    .secondary(chord)
+                SelectItem::new(spec.description, resolved.clone())
+                    .secondary(chord_annotation(keybindings, &resolved))
                     .indented(),
             );
         }
     }
+    let mut header_pushed = false;
+    let plugin_rows = plugin_actions
+        .iter()
+        .map(|entry| (entry.palette_label(), entry.resolved_action()))
+        .chain(
+            plugin_panes
+                .iter()
+                .map(|entry| (entry.palette_label(), entry.resolved_action())),
+        );
+    for (label, resolved) in plugin_rows {
+        if !header_pushed {
+            items.push(SelectItem::header("Plugin"));
+            header_pushed = true;
+        }
+        items.push(
+            SelectItem::new(label, resolved.clone())
+                .secondary(chord_annotation(keybindings, &resolved))
+                .indented(),
+        );
+    }
     items
+}
+
+/// The chord annotation for a palette row: the bound chord's literal
+/// keystrokes, or `"unbound"` (also when the config failed to load).
+fn chord_annotation(keybindings: Option<&KeybindingsCfg>, resolved: &ResolvedAction) -> String {
+    keybindings.map_or_else(
+        || "unbound".to_owned(),
+        |kb| bound_chord(kb, resolved).unwrap_or_else(|| "unbound".to_owned()),
+    )
 }
 
 /// Find the chord a user has bound to `target`, formatted as the literal
@@ -369,11 +437,25 @@ mod tests {
         // `switch-session` is likewise dispatched-only: it requires a
         // `name` arg supplied by the session picker, so a bare palette
         // row would have no target to act on.
+        // `plugin-action` (phux-r82.5) is dispatched but has no static
+        // registry row: its palette rows are built dynamically from the
+        // enabled plugins' manifests (`palette_items`'s `plugin_actions`
+        // parameter), one per manifest action, carrying `plugin`/`action`
+        // args a bare registry row could not supply.
+        // `plugin-pane` (phux-r82.7) is the same shape for manifest
+        // `[[panes]]`: dynamic rows from `palette_items`'s `plugin_panes`
+        // parameter, carrying `plugin`/`pane` args.
+        // `focus-pane` (phux-foz.7) is parameterized by `window`/`pane`
+        // coordinates only the agent-fleet dashboard's rows can supply —
+        // the select-window precedent.
         const PALETTE_EXEMPT: &[&str] = &[
             "command-palette",
             "select-window",
             "switch-session",
             "copy-mode",
+            "plugin-action",
+            "plugin-pane",
+            "focus-pane",
         ];
 
         // The two source-of-truth sets must be identical: the registry's
@@ -438,7 +520,7 @@ mod tests {
 
     #[test]
     fn palette_items_show_unbound_when_no_config() {
-        let items = palette_items(None);
+        let items = palette_items(None, &[], &[]);
         assert!(
             items
                 .iter()
@@ -450,7 +532,7 @@ mod tests {
 
     #[test]
     fn palette_items_group_under_category_headers() {
-        let items = palette_items(None);
+        let items = palette_items(None, &[], &[]);
         // Every category with members contributes exactly one header, in
         // ORDER, each immediately followed by indented action rows.
         let headers: Vec<&str> = items
@@ -472,6 +554,126 @@ mod tests {
 
         // The first row is a header (Pane), not a bare action.
         assert!(items[0].is_header(), "palette opens with a category header");
+    }
+
+    // ---------- phux-r82.5: dynamic plugin rows ----------
+
+    fn plugin_entry(keys: Option<&str>) -> super::super::plugin_actions::PluginActionEntry {
+        super::super::plugin_actions::PluginActionEntry {
+            plugin_id: "com.example.tools".to_owned(),
+            plugin_name: "Agent Tools".to_owned(),
+            action_id: "summarize".to_owned(),
+            title: "Summarize pane".to_owned(),
+            keys: keys.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn plugin_actions_inject_namespaced_rows_under_plugin_header() {
+        let items = palette_items(None, &[plugin_entry(None)], &[]);
+        // The static categories are unchanged and the Plugin header trails.
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|i| i.is_header())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(headers, vec!["Pane", "Window", "Session", "View", "Plugin"]);
+
+        let row = items
+            .iter()
+            .find(|i| !i.is_header() && i.label.starts_with("plugin: "))
+            .expect("plugin row present");
+        assert_eq!(row.label, "plugin: Agent Tools: Summarize pane");
+        assert!(row.indented, "plugin rows nest under their header");
+        // The committed action is the shared dispatcher action with the
+        // plugin/action args — same shape a merged keybinding produces.
+        assert_eq!(row.action.action, "plugin-action");
+        assert_eq!(
+            row.action.args.get("plugin"),
+            Some(&toml::Value::String("com.example.tools".to_owned()))
+        );
+        assert_eq!(
+            row.action.args.get("action"),
+            Some(&toml::Value::String("summarize".to_owned()))
+        );
+    }
+
+    #[test]
+    fn no_plugin_actions_means_no_plugin_header() {
+        let items = palette_items(None, &[], &[]);
+        assert!(
+            items.iter().all(|i| i.label != "Plugin"),
+            "empty plugin snapshot must not add a Plugin section",
+        );
+    }
+
+    #[test]
+    fn plugin_row_shows_merged_binding_chord() {
+        // Merge the plugin's `keys` into the prefix table the same way the
+        // driver does, then confirm the palette annotates the row with the
+        // literal keystrokes (prefix + chord).
+        let entry = plugin_entry(Some("g"));
+        let mut kb = KeybindingsCfg::default();
+        super::super::plugin_actions::merge_plugin_bindings(&mut kb, std::slice::from_ref(&entry));
+        let items = palette_items(Some(&kb), &[entry], &[]);
+        let row = items
+            .iter()
+            .find(|i| i.label.starts_with("plugin: "))
+            .expect("plugin row present");
+        assert_eq!(row.secondary.as_deref(), Some("C-a g"));
+    }
+
+    // ---------- phux-r82.7: dynamic plugin pane rows ----------
+
+    fn pane_entry() -> PluginPaneEntry {
+        PluginPaneEntry {
+            plugin_id: "com.example.tools".to_owned(),
+            plugin_name: "Agent Tools".to_owned(),
+            pane_id: "board".to_owned(),
+            title: "Agent Board".to_owned(),
+            placement: super::super::plugin_panes::HostedPlacement::Split,
+            command: vec!["agent-board".to_owned()],
+            plugin_root: std::path::PathBuf::from("/x"),
+        }
+    }
+
+    #[test]
+    fn plugin_panes_inject_namespaced_rows_under_shared_plugin_header() {
+        let items = palette_items(None, &[plugin_entry(None)], &[pane_entry()]);
+        // One shared Plugin header for actions and panes together.
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|i| i.is_header())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(headers, vec!["Pane", "Window", "Session", "View", "Plugin"]);
+
+        let row = items
+            .iter()
+            .find(|i| !i.is_header() && i.label.starts_with("plugin pane: "))
+            .expect("plugin pane row present");
+        assert_eq!(row.label, "plugin pane: Agent Tools: Agent Board");
+        assert!(row.indented, "plugin pane rows nest under their header");
+        assert_eq!(row.action.action, "plugin-pane");
+        assert_eq!(
+            row.action.args.get("plugin"),
+            Some(&toml::Value::String("com.example.tools".to_owned()))
+        );
+        assert_eq!(
+            row.action.args.get("pane"),
+            Some(&toml::Value::String("board".to_owned()))
+        );
+    }
+
+    #[test]
+    fn plugin_panes_alone_still_get_the_plugin_header() {
+        let items = palette_items(None, &[], &[pane_entry()]);
+        let headers: Vec<&str> = items
+            .iter()
+            .filter(|i| i.is_header())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(headers, vec!["Pane", "Window", "Session", "View", "Plugin"]);
     }
 
     #[test]

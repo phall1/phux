@@ -1,18 +1,19 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-10
 ---
 
 # The phux web client
 
 **TL;DR.** phux-web is the reference projection consumer: a browser client,
 written in Rust to WASM, that carries its own terminal engine. It loads
-ghostty-vt.wasm, speaks the exact phux-protocol wire codec over a WebSocket,
-and computes its rendered view from engine state it owns rather than reading
-structured state off the wire. It paints one terminal to a canvas and routes
-keystrokes back as input atoms. Single-terminal today; splits and layout are
-out of scope.
+ghostty-vt.wasm, speaks the exact phux-protocol wire codec over WebTransport
+(HTTP/3 over QUIC — tried first when a `?wt=` URL is given, falling back to
+WebSocket) or a WebSocket, and computes its rendered view from engine state
+it owns rather than reading structured state off the wire. It paints one
+terminal to a canvas and routes keystrokes back as input atoms.
+Single-terminal today; splits and layout are out of scope.
 
 ---
 
@@ -85,8 +86,18 @@ the one documented in [`../spec/appendix-encoding.md`](../spec/appendix-encoding
 
 1. Browser loads `phux_web.js` (glue) and `phux_web_bg.wasm` (the Rust client).
 2. The client boots and instantiates the embedded `ghostty-vt.wasm` (the engine).
-3. Open a WebSocket to the server (`PHUX_WS_ADDR`); one binary message carries
-   one encoded frame — the same wire the Unix-socket transport uses.
+3. Connect to the server. Two paths, same wire:
+   - **WebTransport** (`phux server --webtransport` / `PHUX_WT_ADDR`): an
+     HTTP/3-over-QUIC session whose single bidirectional stream carries
+     length-prefixed frames, exactly the Unix-socket framing; chunks are
+     reassembled client-side. Tried first when a `?wt=<https-url>` query
+     parameter (or the `start_webtransport` entry point) supplies the
+     session URL; on a token-authenticated listener the pairing token rides
+     the URL as `?token=<hex>` because the JS `WebTransport` API cannot set
+     request headers.
+   - **WebSocket** (`PHUX_WS_ADDR`): one binary message carries one encoded
+     frame. The fallback (and the default when no WebTransport URL is
+     given).
 4. Send `HELLO`, then `ATTACH` (`CreateIfMissing` the `default` session).
 5. On `TERMINAL_SNAPSHOT` / `TERMINAL_OUTPUT`, write the bytes into the engine
    and repaint the grid; ack output with `FRAME_ACK`. A 530 ms interval toggles
@@ -141,13 +152,33 @@ Then serve the `pkg/` output and call `start("ws://127.0.0.1:47654/", canvasId,
 cols, rows)`. The phux-site repo wires this into a `<PhuxTerminal>` island; see
 its `scripts/build-client.sh` for the copy-the-artifact step.
 
+For the WebTransport path, run a real server with a WebTransport listener and
+hand the client both URLs (it tries WebTransport, then falls back):
+
+```sh
+phux server --webtransport 127.0.0.1:4433 --listen 127.0.0.1:8787
+# then: start_webtransport("https://127.0.0.1:4433/session",
+#                          "ws://127.0.0.1:8787/", canvasId, cols, rows)
+# or load the Trunk page with ?wt=https%3A%2F%2F127.0.0.1%3A4433%2Fsession
+```
+
+Browsers require a certificate they trust for WebTransport (a plain
+self-signed cert is rejected unless registered via
+`serverCertificateHashes`, a follow-up for the pairing flow); local Chrome
+can be launched with `--origin-to-force-quic-on` +
+`--ignore-certificate-errors-spki-list` for development.
+
 ## Scope and limits
 
 - **Single terminal.** No splits, windows, or layout chrome — that is the TUI's
   job. The web client mirrors one terminal.
 - **Text, color, cursor.** The canvas renderer paints grapheme cells with fg/bg
   and a blinking block cursor. Images and sixel (which the engine does parse)
-  are a future renderer pass.
+  are a future renderer pass. Accordingly, the client's `HELLO` advertises **no
+  image protocols** (`Session::client_caps`), so the server strips kitty
+  graphics, sixel, and iTerm2 image escapes before forwarding (SPEC 6.2,
+  ADR-0034) instead of shipping payloads the canvas would drop. When the
+  renderer pass lands, the advertisement widens with it.
 - **Engine boundary copies.** Bytes cross two wasm linear memories (the Rust
   client and `ghostty-vt.wasm`), which is fine for terminal traffic.
 
@@ -163,3 +194,10 @@ its `scripts/build-client.sh` for the copy-the-artifact step.
 - Server side — `phux-server` `ws_attach` test: a real client does
   `HELLO`-then-`ATTACH` over WebSocket and receives `ATTACHED` plus
   `TERMINAL_SNAPSHOT`.
+- WebTransport listener — `phux-server` `transport::webtransport` tests: a
+  native WebTransport client (wtransport) performs the full HTTP/3 session
+  handshake against the listener, exercises the bearer-token gate (header
+  and `?token=` carriers accepted; missing/invalid refused before the
+  session exists), and round-trips frames both directions over the bidi
+  stream. The client-side frame reassembly (`framing::FrameBuffer`) is
+  covered by `wasm-pack test --node`.

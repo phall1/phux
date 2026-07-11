@@ -35,7 +35,8 @@ pub mod mouse;
 pub mod rasterize;
 
 pub use layout::{
-    PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in, split_content_span_at,
+    PaneLayout, compute_layout, compute_layout_in, pane_rects, pane_rects_in,
+    pane_rects_proportional_in, split_content_span_at,
 };
 pub use mouse::{RouteDecision, route_mouse_event};
 pub use rasterize::{DividerCell, DividerHit};
@@ -124,6 +125,57 @@ mod tests {
         for cell in &out.dividers {
             assert_eq!(cell.x, ra.w);
         }
+    }
+
+    /// Ported from phux-core's deleted server-side tiling tests (bead
+    /// phux-nnjx): a stacked (Vertical) half split tiles the height
+    /// exactly — two pane heights plus the one divider row.
+    #[test]
+    fn two_pane_stacked_split_half_tiles_exactly() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.5).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (80, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        // Both panes span the full width; no horizontal splits.
+        assert_eq!(ra.w, 80);
+        assert_eq!(rb.w, 80);
+        assert_eq!(ra.x, 0);
+        assert_eq!(rb.x, 0);
+        // Top pane starts at the origin; bottom pane starts past the divider.
+        assert_eq!(ra.y, 0);
+        assert_eq!(rb.y, ra.h + 1);
+        // The combined heights plus one divider row equal the viewport.
+        assert_eq!(ra.h + rb.h + 1, 24);
+        // 80 divider cells, all on row ra.h.
+        assert_eq!(out.dividers.len(), 80);
+        for cell in &out.dividers {
+            assert_eq!(cell.y, ra.h);
+        }
+    }
+
+    /// Ported from phux-core's deleted server-side tiling tests (bead
+    /// phux-nnjx): an awkward ratio still tiles exactly — the rounding in
+    /// `split_dim` leaves no slop and no overlap. Ratio 0.33 over a
+    /// 100-col viewport: content is 99 cols after the divider,
+    /// `(99 * 0.33).round() == 33`, so 33 + 66 + 1 divider == 100.
+    #[test]
+    fn awkward_ratio_split_tiles_exactly() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.33).unwrap();
+        let state = LayoutState {
+            tree: Some(tree),
+            focus: Some(t(1)),
+        };
+        let out = compute_layout(&state, (100, 24));
+        let ra = out.rects.get(&t(1)).unwrap();
+        let rb = out.rects.get(&t(2)).unwrap();
+        assert_eq!(ra.w, 33);
+        assert_eq!(rb.w, 66);
+        assert_eq!(rb.x, ra.w + 1);
+        assert_eq!(u32::from(ra.w) + u32::from(rb.w) + 1, 100);
     }
 
     #[test]
@@ -377,6 +429,132 @@ mod tests {
             }
             TerminalId::Satellite { .. } => '?',
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Min-size freezing on viewport reflow — phux-foz.3 (TUI doc §6.2)
+    // -------------------------------------------------------------------------
+
+    /// A ratio that would squeeze the right pane below its 2-col floor
+    /// freezes it there; the deficit goes back to the left pane. The
+    /// proportional view (what the ratio asks for; the ADR-0019 resize
+    /// gate's input) still reports the sub-minimum width.
+    #[test]
+    fn freeze_holds_squeezed_pane_at_min_cols_and_redistributes() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.9).unwrap();
+        // Viewport 12 wide: content = 11, proportional cut = 10/1.
+        let frozen = pane_rects(&tree, (12, 24));
+        assert_eq!(
+            frozen.get(&t(2)).unwrap().w,
+            2,
+            "right pane frozen at floor"
+        );
+        assert_eq!(
+            frozen.get(&t(1)).unwrap().w,
+            9,
+            "left pane absorbs the deficit"
+        );
+
+        let proportional = pane_rects_proportional_in(
+            &tree,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 12,
+                h: 24,
+            },
+        );
+        assert_eq!(
+            proportional.get(&t(2)).unwrap().w,
+            1,
+            "the raw ratio still asks for a sub-minimum pane"
+        );
+    }
+
+    /// Nested splits: the root clamp reserves the right subtree's
+    /// aggregate minimum (two 2-col leaves + one divider = 5), then the
+    /// inner split holds both grandchildren at their floor. Every leaf
+    /// keeps >= 2 cols; the leftover cell lands on the lone left leaf.
+    #[test]
+    fn freeze_reserves_aggregate_minimums_through_nested_splits() {
+        // (1 | (2 | 3)), both ratios 0.5.
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let tree = split_at(&tree, &t(2), &t(3), SplitDir::Horizontal, 0.5).unwrap();
+        // Aggregate minimum width: 2 + 1 + (2 + 1 + 2) = 8; viewport 9.
+        let rects = pane_rects(&tree, (9, 24));
+        assert_eq!(rects.get(&t(1)).unwrap().w, 3, "spare cell goes left");
+        assert_eq!(rects.get(&t(2)).unwrap().w, 2);
+        assert_eq!(rects.get(&t(3)).unwrap().w, 2);
+        // Exact tiling: 3 + divider + 2 + divider + 2 = 9.
+        let total: u16 = rects.values().map(|r| r.w).sum();
+        assert_eq!(total, 7);
+    }
+
+    /// The row floor is 1 (not 2): a vertical squeeze freezes the bottom
+    /// pane at one row.
+    #[test]
+    fn freeze_holds_squeezed_pane_at_min_one_row() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Vertical, 0.9).unwrap();
+        // Viewport 5 tall: content = 4, proportional cut = 4/0.
+        let rects = pane_rects(&tree, (80, 5));
+        assert_eq!(
+            rects.get(&t(2)).unwrap().h,
+            1,
+            "bottom pane frozen at 1 row"
+        );
+        assert_eq!(rects.get(&t(1)).unwrap().h, 3);
+    }
+
+    /// Below the aggregate minimums the clamp disengages: frozen and
+    /// proportional tilings agree, sub-viable rects appear, and the
+    /// exact-tiling invariant still holds (no panic, no hole).
+    #[test]
+    fn freeze_disengages_below_aggregate_minimum_viewport() {
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        // Aggregate minimum width is 5; viewport 4 cannot fit it.
+        let content = Rect {
+            x: 0,
+            y: 0,
+            w: 4,
+            h: 24,
+        };
+        let frozen = pane_rects_in(&tree, content);
+        let proportional = pane_rects_proportional_in(&tree, content);
+        assert_eq!(frozen, proportional, "degenerate fallback is proportional");
+        assert!(
+            frozen.values().any(|r| r.w < 2),
+            "some pane is sub-viable in the degenerate regime"
+        );
+        let total: u16 = frozen.values().map(|r| r.w).sum();
+        assert_eq!(total + 1, 4, "leaves + divider still tile exactly");
+    }
+
+    /// The drag-span geometry ([`split_content_span_at`]) descends with
+    /// the same freeze clamp the paint walk uses, so a grabbed inner
+    /// divider's span matches the frozen tiling — not the proportional
+    /// child bounds the unclamped math would produce.
+    #[test]
+    fn freeze_drag_span_matches_frozen_tiling() {
+        use crate::layout::{NodePath, NodeStep};
+        // (1 | (2 | 3)) in a 9-wide viewport: the root clamp gives the
+        // right subtree x = 4..9 (width 5), not the proportional x = 5..9.
+        let tree = split_at(&leaf(1), &t(1), &t(2), SplitDir::Horizontal, 0.5).unwrap();
+        let tree = split_at(&tree, &t(2), &t(3), SplitDir::Horizontal, 0.5).unwrap();
+        let content = Rect {
+            x: 0,
+            y: 0,
+            w: 9,
+            h: 24,
+        };
+        let inner = NodePath(vec![NodeStep::Right]);
+        let (start, len) = split_content_span_at(&tree, content, &inner).unwrap();
+        // Frozen tiling: pane 2 paints at x = 4 (see the frozen rects), so
+        // the inner split's span starts there with a 4-cell budget
+        // (5 minus its own divider).
+        let rects = pane_rects_in(&tree, content);
+        assert_eq!(rects.get(&t(2)).unwrap().x, start);
+        assert_eq!(start, 4);
+        assert_eq!(len, 4);
     }
 
     // -------------------------------------------------------------------------
@@ -688,13 +866,17 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     enum Op {
-        AddPane,
+        /// Split the most recent pane at this ratio. Ranging over
+        /// awkward ratios (not just 0.5) pins the `split_dim` rounding:
+        /// exact tiling must hold for *any* ratio (ported from the
+        /// deleted phux-core tiling tests, bead phux-nnjx).
+        AddPane(f32),
         KillPaneAt(usize),
     }
 
     fn arb_op() -> impl Strategy<Value = Op> {
         prop_oneof![
-            4 => Just(Op::AddPane),
+            4 => (0.05_f32..0.95).prop_map(Op::AddPane),
             1 => (0_usize..16).prop_map(Op::KillPaneAt),
         ]
     }
@@ -711,7 +893,7 @@ mod tests {
         let mut alive = vec![first];
         for op in ops {
             match op {
-                Op::AddPane => {
+                Op::AddPane(ratio) => {
                     let new_pane = TerminalId::local(next_id);
                     next_id += 1;
                     let Some(target) = alive.last().cloned() else {
@@ -722,7 +904,7 @@ mod tests {
                     } else {
                         SplitDir::Vertical
                     };
-                    if let Ok(t) = split_at(&tree, &target, &new_pane, dir, 0.5) {
+                    if let Ok(t) = split_at(&tree, &target, &new_pane, dir, ratio) {
                         tree = t;
                         alive.push(new_pane);
                     }

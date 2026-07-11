@@ -1,12 +1,16 @@
 //! Graceful-upgrade orchestration (ADR-0032): build the handoff blob, clear
 //! `FD_CLOEXEC` on the descriptors the new image must inherit, validate the
-//! on-disk binary, and re-exec it as `server --resume <fd>`.
+//! on-disk binary, and re-exec it as `server --resume <fd>` plus the server's
+//! effective runtime flags (`--listen` / `--quic` / `--webtransport` /
+//! `--hub`, phux-v45.10) so the resumed image serves the same surface the old
+//! one did.
 //!
 //! Split into [`prepare_upgrade`] (everything reversible — if it fails the old
 //! image keeps serving and no child is stranded) and [`UpgradePlan::exec`]
 //! (the irreversible re-exec). The caller acks the client between the two.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -15,6 +19,7 @@ use std::process::Command;
 
 use tokio::sync::oneshot;
 
+use super::RuntimeFlags;
 use crate::state::SharedState;
 use crate::terminal_actor::UpgradeHandleRequest;
 
@@ -43,6 +48,11 @@ pub(super) struct UpgradePlan {
     current_exe: PathBuf,
     blob_fd: RawFd,
     socket_path: PathBuf,
+    /// The server's effective runtime flags (phux-v45.10), read back from the
+    /// upgrade context the runtime captured at startup. Re-emitted on the
+    /// resume argv so `--listen` / `--quic` / `--webtransport` / `--hub`
+    /// survive the re-exec.
+    flags: RuntimeFlags,
     _blob_file: std::fs::File,
 }
 
@@ -51,10 +61,10 @@ pub(super) struct UpgradePlan {
 /// pane master, and validate the on-disk binary. Returns a [`UpgradePlan`] the
 /// caller execs *after* acking the client.
 pub(super) async fn prepare_upgrade(state: &SharedState) -> Result<UpgradePlan, UpgradeError> {
-    let (listener_fd, socket_path) = state
+    let (listener_fd, socket_path, flags) = state
         .with(|s| {
             s.upgrade_context()
-                .map(|(fd, path)| (fd, path.to_path_buf()))
+                .map(|(fd, path, flags)| (fd, path.to_path_buf(), flags))
         })
         .ok_or(UpgradeError::NoContext)?;
 
@@ -101,24 +111,53 @@ pub(super) async fn prepare_upgrade(state: &SharedState) -> Result<UpgradePlan, 
         current_exe,
         blob_fd,
         socket_path,
+        flags,
         _blob_file: blob_file,
     })
 }
 
 impl UpgradePlan {
-    /// Re-exec the new binary as `server --resume <blob_fd> --socket <path>`,
-    /// replacing this process in place. Returns only on failure — and a
-    /// failure is harmless: nothing was closed, so the old image keeps serving
-    /// and the children stay attached.
+    /// Re-exec the new binary as `server --resume <blob_fd> --socket <path>`
+    /// plus the effective runtime flags (`--listen` / `--quic` /
+    /// `--webtransport` / `--hub`, phux-v45.10), replacing this process in
+    /// place. Returns only on failure — and a failure is harmless: nothing
+    /// was closed, so the old image keeps serving and the children stay
+    /// attached.
     pub(super) fn exec(self) -> std::io::Error {
         Command::new(&self.current_exe)
-            .arg("server")
-            .arg("--resume")
-            .arg(self.blob_fd.to_string())
-            .arg("--socket")
-            .arg(&self.socket_path)
+            .args(resume_args(self.blob_fd, &self.socket_path, self.flags))
             .exec()
     }
+}
+
+/// Build the full argv (after argv0) for the graceful-upgrade re-exec:
+/// `server --resume <blob_fd> --socket <path>` plus one entry per effective
+/// runtime flag (phux-v45.10). Pure, so the reconstruction is testable
+/// without exec'ing anything.
+fn resume_args(blob_fd: RawFd, socket_path: &Path, flags: RuntimeFlags) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        OsString::from("server"),
+        OsString::from("--resume"),
+        OsString::from(blob_fd.to_string()),
+        OsString::from("--socket"),
+        socket_path.into(),
+    ];
+    if let Some(addr) = flags.ws_addr {
+        args.push(OsString::from("--listen"));
+        args.push(OsString::from(addr.to_string()));
+    }
+    if let Some(addr) = flags.quic_addr {
+        args.push(OsString::from("--quic"));
+        args.push(OsString::from(addr.to_string()));
+    }
+    if let Some(addr) = flags.wt_addr {
+        args.push(OsString::from("--webtransport"));
+        args.push(OsString::from(addr.to_string()));
+    }
+    if flags.hub {
+        args.push(OsString::from("--hub"));
+    }
+    args
 }
 
 /// Clear `FD_CLOEXEC` so `fd` survives the `execve`.
@@ -143,5 +182,168 @@ fn validate_binary(exe: &Path) -> Result<(), UpgradeError> {
             exe.display(),
             output.status
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests")]
+
+    use std::net::SocketAddr;
+
+    use super::*;
+
+    const WS: &str = "127.0.0.1:8787";
+    const QUIC: &str = "0.0.0.0:4433";
+    const WT: &str = "0.0.0.0:4434";
+
+    fn flags(ws: Option<&str>, quic: Option<&str>, wt: Option<&str>, hub: bool) -> RuntimeFlags {
+        let addr = |s: &str| s.parse::<SocketAddr>().unwrap();
+        RuntimeFlags {
+            ws_addr: ws.map(addr),
+            quic_addr: quic.map(addr),
+            wt_addr: wt.map(addr),
+            hub,
+        }
+    }
+
+    fn args_as_strings(flags: RuntimeFlags) -> Vec<String> {
+        resume_args(7, Path::new("/run/phux/phux.sock"), flags)
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    /// The base of the resume argv is invariant: subcommand, blob fd, socket.
+    const BASE: [&str; 5] = ["server", "--resume", "7", "--socket", "/run/phux/phux.sock"];
+
+    /// phux-v45.10 regression matrix: every combination of the opt-in runtime
+    /// flags must be reconstructed on the re-exec argv — the original bug was
+    /// an argv of only `server --resume <fd> --socket <path>`, silently
+    /// dropping `--listen`, `--quic`, and `--hub` across `phux server
+    /// upgrade` (and later, in the same class, `--webtransport` — phux-0wmf).
+    #[test]
+    fn resume_args_reconstructs_every_flag_combination() {
+        type Case<'a> = (
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<&'a str>,
+            bool,
+            &'a [&'a str],
+        );
+        let cases: [Case<'_>; 16] = [
+            (None, None, None, false, &[]),
+            (Some(WS), None, None, false, &["--listen", WS]),
+            (None, Some(QUIC), None, false, &["--quic", QUIC]),
+            (None, None, Some(WT), false, &["--webtransport", WT]),
+            (None, None, None, true, &["--hub"]),
+            (
+                Some(WS),
+                Some(QUIC),
+                None,
+                false,
+                &["--listen", WS, "--quic", QUIC],
+            ),
+            (
+                Some(WS),
+                None,
+                Some(WT),
+                false,
+                &["--listen", WS, "--webtransport", WT],
+            ),
+            (Some(WS), None, None, true, &["--listen", WS, "--hub"]),
+            (
+                None,
+                Some(QUIC),
+                Some(WT),
+                false,
+                &["--quic", QUIC, "--webtransport", WT],
+            ),
+            (None, Some(QUIC), None, true, &["--quic", QUIC, "--hub"]),
+            (None, None, Some(WT), true, &["--webtransport", WT, "--hub"]),
+            (
+                Some(WS),
+                Some(QUIC),
+                Some(WT),
+                false,
+                &["--listen", WS, "--quic", QUIC, "--webtransport", WT],
+            ),
+            (
+                Some(WS),
+                Some(QUIC),
+                None,
+                true,
+                &["--listen", WS, "--quic", QUIC, "--hub"],
+            ),
+            (
+                Some(WS),
+                None,
+                Some(WT),
+                true,
+                &["--listen", WS, "--webtransport", WT, "--hub"],
+            ),
+            (
+                None,
+                Some(QUIC),
+                Some(WT),
+                true,
+                &["--quic", QUIC, "--webtransport", WT, "--hub"],
+            ),
+            (
+                Some(WS),
+                Some(QUIC),
+                Some(WT),
+                true,
+                &[
+                    "--listen",
+                    WS,
+                    "--quic",
+                    QUIC,
+                    "--webtransport",
+                    WT,
+                    "--hub",
+                ],
+            ),
+        ];
+        for (ws, quic, wt, hub, extra) in cases {
+            let mut expected: Vec<String> = BASE.iter().map(ToString::to_string).collect();
+            expected.extend(extra.iter().map(ToString::to_string));
+            assert_eq!(
+                args_as_strings(flags(ws, quic, wt, hub)),
+                expected,
+                "argv mismatch for ws={ws:?} quic={quic:?} wt={wt:?} hub={hub}",
+            );
+        }
+    }
+
+    /// The default (UDS-only, non-hub) server re-execs with the bare argv —
+    /// no spurious flags invented for surfaces it never served.
+    #[test]
+    fn resume_args_default_flags_add_nothing() {
+        assert_eq!(args_as_strings(RuntimeFlags::default()), BASE);
+    }
+
+    /// The flags land in the plan from the shared-state upgrade context —
+    /// the same channel `prepare_upgrade` reads — not from anywhere argv-ish.
+    #[test]
+    fn upgrade_context_round_trips_runtime_flags() {
+        let state = SharedState::new();
+        assert!(
+            state.with(|s| s.upgrade_context().is_none()),
+            "no context before serving"
+        );
+        let captured = flags(Some(WS), Some(QUIC), Some(WT), true);
+        state.with_mut(|s| {
+            s.set_upgrade_context(3, PathBuf::from("/tmp/phux.sock"), captured);
+        });
+        let (fd, path, roundtripped) = state
+            .with(|s| {
+                s.upgrade_context()
+                    .map(|(fd, path, flags)| (fd, path.to_path_buf(), flags))
+            })
+            .expect("context set");
+        assert_eq!(fd, 3);
+        assert_eq!(path, PathBuf::from("/tmp/phux.sock"));
+        assert_eq!(roundtripped, captured);
     }
 }

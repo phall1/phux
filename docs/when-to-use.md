@@ -1,7 +1,7 @@
 ---
 audience: humans, agents
 stability: evolving
-last-reviewed: 2026-06-07
+last-reviewed: 2026-07-09
 ---
 
 # When to use phux (and when not to)
@@ -28,13 +28,14 @@ do not need it yet. Find your row below.
 ## The honest gaps
 
 phux is pre-1.0. The wire, the reference TUI's attach/detach/multi-pane, and
-the full modern-protocol passthrough are solid and won't move under you. The
+modern-protocol passthrough are real and tested, but remain pre-1.0. The
 headless verbs, `phux agent`, `phux-mcp`, plugin actions, and workspace
 save/restore are real and tested, but JSON/API details may still wiggle before
-1.0. Cross-machine routing, a native GUI consumer, a typed Rust SDK crate, and
-predictive local echo are designed and addressed-for but **not wired yet**. If
-a capability is not in the [README status list](../README.md#status), treat it
-as a promise, not a feature.
+1.0. Cross-machine routing, a native GUI consumer, and a typed public SDK crate
+are designed and addressed-for but **not wired yet**. Predictive local echo is
+implemented behind the opt-in `[experimental]` config and remains off by
+default. If a capability is not in the [README status list](../README.md#status),
+treat it as a promise, not a feature.
 
 ## Go deeper
 

@@ -90,23 +90,53 @@ fn unknown_variant() -> ! {
 /// gap and zero overlap. Every leaf in the tree receives a rect — a
 /// sub-viable split yields zero-size leaf rects rather than dropping
 /// leaves, so the rect a pane is painted into always equals the rect
-/// [`crate::multi_pane::pane_rects`] tells the server to size the PTY to
-/// (ADR-0019 decision 5 punts min-size freezing; sub-viable panes render
-/// as garbage, never as a tiling hole). The divider column/row is only
-/// reserved when the split axis has at least one cell to spare; at zero
-/// width/height the subtree is invisible and emits no divider.
+/// [`crate::multi_pane::pane_rects`] tells the server to size the PTY to.
+/// The divider column/row is only reserved when the split axis has at
+/// least one cell to spare; at zero width/height the subtree is invisible
+/// and emits no divider.
+///
+/// Min-size freezing (phux-foz.3, TUI doc §6.2): each split's ratio cut
+/// is clamped so both subtrees keep their aggregate minimums
+/// ([`MIN_LEAF_COLS`] x [`MIN_LEAF_ROWS`] per leaf plus interior
+/// dividers). A leaf squeezed to its floor freezes there and the deficit
+/// redistributes to the other side — tmux's shrink behavior. When
+/// `bounds` cannot fit even the aggregate minimums, the clamp disengages
+/// for that split and pure proportional tiling resumes (zero-size
+/// sub-viable rects, never a tiling hole), so the exact-tiling invariant
+/// holds at every viewport.
 pub(super) fn walk_layout(
     node: &LayoutNode,
     bounds: Rect,
     segments: &mut Vec<DividerSegment>,
     rects: &mut HashMap<TerminalId, Rect>,
 ) {
-    walk_layout_at(node, bounds, &mut NodePath::root(), segments, rects);
+    walk_layout_at(node, bounds, &mut NodePath::root(), segments, rects, true);
+}
+
+/// [`walk_layout`] without min-size freezing: the raw proportional
+/// tiling of the tree's ratios.
+///
+/// This is what the ratios *ask for*, before §6.2 freezing redistributes
+/// space. The ADR-0019 decision 5 resize gate
+/// (`phux_client::attach::actions`) checks candidate ratios against this
+/// view — gating on the frozen rects would never trip on the frozen axis
+/// (the floor holds the rect at minimum while the ratio drifts
+/// unboundedly past it), so a `resize-pane` could silently bank
+/// arbitrary ratio the pane would snap to on the next viewport grow.
+pub(super) fn walk_layout_proportional(
+    node: &LayoutNode,
+    bounds: Rect,
+    segments: &mut Vec<DividerSegment>,
+    rects: &mut HashMap<TerminalId, Rect>,
+) {
+    walk_layout_at(node, bounds, &mut NodePath::root(), segments, rects, false);
 }
 
 /// [`walk_layout`] with an explicit `path` accumulator (the steps from
 /// the root to `node`). `path` is pushed before recursing into each child
 /// and popped after, so it always names the node currently under `bounds`.
+/// `freeze` selects §6.2 min-size freezing ([`walk_layout`]) or raw
+/// proportional tiling ([`walk_layout_proportional`]).
 #[allow(
     clippy::too_many_lines,
     reason = "the Horizontal and Vertical arms are near-mirror child-bounds math; splitting them loses the side-by-side readability that makes the divider-reservation symmetry auditable."
@@ -117,6 +147,7 @@ fn walk_layout_at(
     path: &mut NodePath,
     segments: &mut Vec<DividerSegment>,
     rects: &mut HashMap<TerminalId, Rect>,
+    freeze: bool,
 ) {
     match node {
         LayoutNode::Leaf(p) => {
@@ -134,7 +165,11 @@ fn walk_layout_at(
                 // invisible: no divider, both children get zero width.
                 let has_divider = bounds.w >= 1;
                 let content_w = bounds.w.saturating_sub(1);
-                let left_w = split_dim(content_w, *ratio);
+                let left_w = if freeze {
+                    freeze_split_dim(content_w, *ratio, min_dims(left).0, min_dims(right).0)
+                } else {
+                    split_dim(content_w, *ratio)
+                };
                 let right_w = content_w - left_w;
                 let divider_x = bounds.x + left_w;
                 if has_divider {
@@ -160,6 +195,7 @@ fn walk_layout_at(
                     path,
                     segments,
                     rects,
+                    freeze,
                 );
                 path.pop();
                 path.push(NodeStep::Right);
@@ -174,13 +210,18 @@ fn walk_layout_at(
                     path,
                     segments,
                     rects,
+                    freeze,
                 );
                 path.pop();
             }
             SplitDir::Vertical => {
                 let has_divider = bounds.h >= 1;
                 let content_h = bounds.h.saturating_sub(1);
-                let top_h = split_dim(content_h, *ratio);
+                let top_h = if freeze {
+                    freeze_split_dim(content_h, *ratio, min_dims(left).1, min_dims(right).1)
+                } else {
+                    split_dim(content_h, *ratio)
+                };
                 let bot_h = content_h - top_h;
                 let divider_y = bounds.y + top_h;
                 if has_divider {
@@ -206,6 +247,7 @@ fn walk_layout_at(
                     path,
                     segments,
                     rects,
+                    freeze,
                 );
                 path.pop();
                 path.push(NodeStep::Right);
@@ -220,6 +262,7 @@ fn walk_layout_at(
                     path,
                     segments,
                     rects,
+                    freeze,
                 );
                 path.pop();
             }
@@ -573,6 +616,52 @@ pub(super) fn split_dim(total: u16, ratio: f32) -> u16 {
         total
     } else {
         raw as u16
+    }
+}
+
+/// Minimum inner-content width of a leaf pane, in cells (TUI doc §6.2).
+pub(super) const MIN_LEAF_COLS: u16 = 2;
+
+/// Minimum inner-content height of a leaf pane, in cells (TUI doc §6.2).
+pub(super) const MIN_LEAF_ROWS: u16 = 1;
+
+/// The smallest `(cols, rows)` bounds under which every leaf of `node`
+/// keeps its §6.2 floor ([`MIN_LEAF_COLS`] x [`MIN_LEAF_ROWS`]).
+///
+/// A split adds its one-cell divider along its own axis and takes the
+/// max across the perpendicular axis, so the aggregate is exactly what
+/// the divider-reservation walk needs to hand every leaf its minimum.
+pub(super) fn min_dims(node: &LayoutNode) -> (u16, u16) {
+    match node {
+        LayoutNode::Leaf(_) => (MIN_LEAF_COLS, MIN_LEAF_ROWS),
+        LayoutNode::Split {
+            dir, left, right, ..
+        } => {
+            let (lw, lh) = min_dims(left);
+            let (rw, rh) = min_dims(right);
+            match dir {
+                SplitDir::Horizontal => (lw.saturating_add(rw).saturating_add(1), lh.max(rh)),
+                SplitDir::Vertical => (lw.max(rw), lh.saturating_add(rh).saturating_add(1)),
+                _ => unknown_variant(),
+            }
+        }
+        _ => unknown_variant(),
+    }
+}
+
+/// [`split_dim`] with §6.2 min-size freezing: the low side's share of
+/// `content`, clamped so the low subtree keeps `min_low` cells and the
+/// high subtree keeps `min_high` (their [`min_dims`] aggregates along
+/// the split axis).
+///
+/// When `content` cannot cover both minimums the clamp disengages and
+/// the raw proportional cut is returned — the degenerate-viewport
+/// fallback that preserves exact tiling (see [`walk_layout`]).
+pub(super) fn freeze_split_dim(content: u16, ratio: f32, min_low: u16, min_high: u16) -> u16 {
+    let low = split_dim(content, ratio);
+    match min_low.checked_add(min_high) {
+        Some(needed) if content >= needed => low.clamp(min_low, content - min_high),
+        _ => low,
     }
 }
 

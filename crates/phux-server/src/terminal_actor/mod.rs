@@ -55,6 +55,7 @@ use crate::input::{
 };
 use crate::state::{Outbound, TerminalInput};
 
+mod osc133;
 pub mod requests;
 pub mod spawn;
 pub mod sync;
@@ -82,6 +83,97 @@ const DEFAULT_MAX_SCROLLBACK: u32 = 10_000;
 /// size via [`ResizeRequest::cell_px`]. Cells (cols/rows) stay authoritative;
 /// pixels are always derived as `cells x cell size`.
 const DEFAULT_CELL_PX: (u16, u16) = (8, 16);
+
+/// Streaming recognizer for the OSC 10/11 query form used by terminal-aware
+/// applications (`OSC 10 ; ? ST` / `OSC 11 ; ? ST`). libghostty tracks the
+/// effective colors but the pinned engine does not currently emit replies for
+/// these two OSC queries, so the actor answers them from that canonical state.
+#[derive(Debug, Default)]
+struct ColorQueryScanner {
+    state: ColorQueryState,
+    payload: [u8; 4],
+    len: usize,
+    valid: bool,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum ColorQueryState {
+    #[default]
+    Ground,
+    Escape,
+    Osc,
+    OscEscape,
+}
+
+impl ColorQueryScanner {
+    fn feed(&mut self, bytes: &[u8], mut on_query: impl FnMut(u8)) {
+        for byte in bytes {
+            match self.state {
+                ColorQueryState::Ground => match *byte {
+                    b'\x1b' => self.state = ColorQueryState::Escape,
+                    0x9d => self.start_osc(),
+                    _ => {}
+                },
+                ColorQueryState::Escape => match *byte {
+                    b']' => self.start_osc(),
+                    b'\x1b' => {}
+                    _ => self.state = ColorQueryState::Ground,
+                },
+                ColorQueryState::Osc => match *byte {
+                    b'\x07' | 0x9c => self.finish_osc(&mut on_query),
+                    b'\x1b' => self.state = ColorQueryState::OscEscape,
+                    value => self.push_payload(value),
+                },
+                ColorQueryState::OscEscape => {
+                    if *byte == b'\\' {
+                        self.finish_osc(&mut on_query);
+                    } else {
+                        // An ESC not followed by `\\` is part of an OSC we do
+                        // not recognize. Keep scanning for its terminator but
+                        // never mistake its suffix for a query.
+                        self.valid = false;
+                        self.state = ColorQueryState::Osc;
+                    }
+                }
+            }
+        }
+    }
+
+    const fn start_osc(&mut self) {
+        self.state = ColorQueryState::Osc;
+        self.len = 0;
+        self.valid = true;
+    }
+
+    const fn push_payload(&mut self, byte: u8) {
+        if self.len < self.payload.len() {
+            self.payload[self.len] = byte;
+            self.len += 1;
+        } else {
+            self.valid = false;
+        }
+    }
+
+    fn finish_osc(&mut self, on_query: &mut impl FnMut(u8)) {
+        if self.valid && self.len == self.payload.len() {
+            match &self.payload {
+                b"10;?" => on_query(10),
+                b"11;?" => on_query(11),
+                _ => {}
+            }
+        }
+        self.state = ColorQueryState::Ground;
+        self.len = 0;
+        self.valid = false;
+    }
+}
+
+fn color_query_reply(selector: u8, color: libghostty_vt::style::RgbColor) -> Vec<u8> {
+    let r = u16::from(color.r) * 0x101;
+    let g = u16::from(color.g) * 0x101;
+    let b = u16::from(color.b) * 0x101;
+    format!("\x1b]{selector};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\").into_bytes()
+}
 
 /// Sentinel prefix an in-pane agent writes into the terminal title (OSC 0 /
 /// OSC 2) to signal a pending human-answerable question (phux-2sl6).
@@ -184,7 +276,7 @@ const MAX_PTY_COALESCE: usize = 64;
 /// with `MAX_INPUT_COALESCE`, this is the load-bearing bound on the output
 /// arm: the two consts together keep either direction from monopolizing
 /// the single-thread actor loop.
-const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
+pub(crate) const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
 
 /// Upper bound on input events drained in a single `input_rx` wakeup
 /// before returning to the `select!`. Input events are tiny (one encode +
@@ -244,12 +336,14 @@ pub struct TerminalActor {
     /// so probing them here could miss a write a sibling handler already
     /// consumed. A self-owned flag cannot be clobbered that way.
     terminal_dirty_since_tick: bool,
+    color_query_scanner: ColorQueryScanner,
     key_enc: RefCell<PerTerminalKeyEncoder>,
     mouse_enc: RefCell<PerTerminalMouseEncoder>,
     focus_enc: RefCell<PerTerminalFocusEncoder>,
     paste_enc: RefCell<PerTerminalPasteEncoder>,
     input_rx: mpsc::Receiver<TerminalInput>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
+    set_default_colors_rx: mpsc::Receiver<SetDefaultColorsRequest>,
     screen_rx: mpsc::Receiver<ScreenRequest>,
     upgrade_rx: mpsc::Receiver<UpgradeHandleRequest>,
     pwd_rx: mpsc::Receiver<PwdRequest>,
@@ -393,10 +487,16 @@ pub struct TerminalActor {
     /// implicitly on detach.
     event_subscribers: RefCell<Vec<TerminalEventSubscriber>>,
     /// Last known working directory for this pane. Used to detect CWD
-    /// changes and emit `CwdChanged` events. Queried lazily on prompt via
-    /// `process_cwd` (kernel fcntl `F_GETPATH` on macOS, /proc/PID/cwd on Linux).
-    #[allow(dead_code, reason = "reserved for future CwdChanged event emission")]
+    /// changes and emit `CwdChanged` events (phux-foz.4). Queried lazily at
+    /// OSC-133 prompt boundaries and on output-idle via `process_cwd`
+    /// (`proc_pidinfo` on macOS, `/proc/PID/cwd` on Linux).
     last_known_cwd: RefCell<String>,
+    /// phux-foz.4: incremental OSC-133 prompt-mark scanner over the raw PTY
+    /// byte stream. Sources `command_started` / `command_finished` (with the
+    /// `D`-mark exit code libghostty's grid projection does not retain) and
+    /// triggers the prompt-boundary cwd re-query. Stateful so a mark split
+    /// across two PTY read chunks is still recognised.
+    osc133: osc133::Osc133Scanner,
     /// Whether we've already emitted a Dirty event in the current output
     /// burst. Coalesces multiple grid mutations into one event per burst
     /// (matching the `in_output_burst` coalescing for `AgentEvent`).
@@ -547,6 +647,7 @@ impl TerminalActor {
             PtySource::None,
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
+            None,
         )
     }
 
@@ -567,6 +668,7 @@ impl TerminalActor {
             PtySource::Spawn(cmd),
             DEFAULT_MAX_SCROLLBACK,
             CancellationToken::new(),
+            None,
         )
     }
 
@@ -600,6 +702,27 @@ impl TerminalActor {
             cmd.map_or(PtySource::None, PtySource::Spawn),
             max_scrollback,
             token,
+            None,
+        )
+    }
+
+    /// Runtime constructor that seeds host default colors before the PTY is
+    /// spawned and any child output can be parsed.
+    pub fn build_with_token_and_colors(
+        cols: u16,
+        rows: u16,
+        cmd: Option<CommandBuilder>,
+        max_scrollback: u32,
+        token: CancellationToken,
+        default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+    ) -> Result<TerminalActorBundle, TerminalActorError> {
+        Self::build(
+            cols,
+            rows,
+            cmd.map_or(PtySource::None, PtySource::Spawn),
+            max_scrollback,
+            token,
+            default_colors,
         )
     }
 
@@ -628,6 +751,7 @@ impl TerminalActor {
             },
             max_scrollback,
             token,
+            None,
         )?;
         bundle.actor.terminal.borrow_mut().vt_write(seed);
         Ok(bundle)
@@ -643,6 +767,7 @@ impl TerminalActor {
         pty_source: PtySource,
         max_scrollback: u32,
         token: CancellationToken,
+        default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
     ) -> Result<TerminalActorBundle, TerminalActorError> {
         let mut terminal = GhosttyTerminal::new(TerminalOptions {
             cols,
@@ -653,6 +778,9 @@ impl TerminalActor {
             max_scrollback: max_scrollback as usize,
         })?;
         phux_protocol::kitty_replay::configure_terminal_for_kitty_graphics(&mut terminal)?;
+        if let Some(colors) = default_colors {
+            Self::install_default_colors(&mut terminal, colors)?;
+        }
         let size_report = Rc::new(Cell::new(SizeReportSize {
             rows,
             columns: cols,
@@ -664,6 +792,7 @@ impl TerminalActor {
         let mouse_enc = PerTerminalMouseEncoder::new()?;
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (set_default_colors_tx, set_default_colors_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (upgrade_tx, upgrade_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (pwd_tx, pwd_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
@@ -705,12 +834,14 @@ impl TerminalActor {
             // A pane may carry initial content (PTY banner, restored
             // scrollback); start dirty so the first tick always emits.
             terminal_dirty_since_tick: true,
+            color_query_scanner: ColorQueryScanner::default(),
             key_enc: RefCell::new(key_enc),
             mouse_enc: RefCell::new(mouse_enc),
             focus_enc: RefCell::new(PerTerminalFocusEncoder::new()),
             paste_enc: RefCell::new(PerTerminalPasteEncoder::new()),
             input_rx,
             snapshot_rx,
+            set_default_colors_rx,
             screen_rx,
             upgrade_rx,
             pwd_rx,
@@ -740,6 +871,7 @@ impl TerminalActor {
             in_output_burst: false,
             event_subscribers: RefCell::new(Vec::new()),
             last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
+            osc133: osc133::Osc133Scanner::new(),
             dirty_event_emitted_this_burst: false,
             subscribe_to_events_rx,
             unsubscribe_from_events_rx,
@@ -754,6 +886,7 @@ impl TerminalActor {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: set_default_colors_tx,
             screen: screen_tx,
             upgrade: upgrade_tx,
             pwd: pwd_tx,
@@ -774,6 +907,60 @@ impl TerminalActor {
             token: bundle_token,
             exit_notify: Some(exit_rx),
         })
+    }
+
+    fn install_default_colors(
+        terminal: &mut GhosttyTerminal<'static, 'static>,
+        colors: phux_protocol::caps::TerminalDefaultColors,
+    ) -> Result<(), TerminalActorError> {
+        use libghostty_vt::style::RgbColor;
+
+        terminal.set_default_fg_color(Some(RgbColor {
+            r: colors.foreground.r,
+            g: colors.foreground.g,
+            b: colors.foreground.b,
+        }))?;
+        terminal.set_default_bg_color(Some(RgbColor {
+            r: colors.background.r,
+            g: colors.background.g,
+            b: colors.background.b,
+        }))?;
+        Ok(())
+    }
+
+    /// Answer OSC 10/11 queries found in a just-parsed PTY chunk from the
+    /// canonical terminal's effective colors. The scanner persists across PTY
+    /// reads, so an escape sequence split at any byte boundary still works.
+    fn answer_color_queries(&mut self, bytes: &[u8]) {
+        let mut queries = 0_u8;
+        self.color_query_scanner.feed(bytes, |selector| {
+            queries |= match selector {
+                10 => 1,
+                11 => 2,
+                _ => 0,
+            };
+        });
+        if queries == 0 {
+            return;
+        }
+        let terminal = self.terminal.borrow();
+        let foreground = (queries & 1 != 0)
+            .then(|| terminal.fg_color().ok().flatten())
+            .flatten();
+        let background = (queries & 2 != 0)
+            .then(|| terminal.bg_color().ok().flatten())
+            .flatten();
+        drop(terminal);
+
+        let Some(pty_tx) = &self.pty_tx else {
+            return;
+        };
+        if let Some(color) = foreground {
+            let _ = pty_tx.send(color_query_reply(10, color));
+        }
+        if let Some(color) = background {
+            let _ = pty_tx.send(color_query_reply(11, color));
+        }
     }
 
     /// Install the libghostty effect handlers the actor relies on.
@@ -914,9 +1101,57 @@ impl TerminalActor {
                 rtt: RttEstimator::default(),
                 emit_instants: std::collections::BTreeMap::new(),
                 wants_state_sync,
+                // Loss-tolerance is opt-in and off by default (phux-v45.8):
+                // the reliable-transport emit-once model is the norm. The
+                // runtime flips it on via `enable_loss_tolerance` for a
+                // forwarded/lossy leg right after registration.
+                loss_tolerant: false,
+                acked_reference: ConsumerReference::new(),
+                pending_refs: std::collections::BTreeMap::new(),
             },
         );
         Ok(())
+    }
+
+    /// Switch an already-registered consumer to the advance-on-ack
+    /// loss-tolerant emission model (phux-v45.8, ADR-0042).
+    ///
+    /// Idempotent-ish: sets [`ConsumerSyncState::loss_tolerant`] and primes
+    /// [`ConsumerSyncState::acked_reference`] to the live grid so the first
+    /// post-enable tick emits only deltas from *now* (the consumer's
+    /// `TERMINAL_SNAPSHOT` brought its mirror to this same point). Silent no-op
+    /// if the consumer is not registered (raced against detach). A failure to
+    /// prime the reference leaves the consumer on the emit-once path (the
+    /// reference stays empty, so the first tick would repaint everything — safe,
+    /// just not yet loss-tolerant); logged, not fatal.
+    fn enable_loss_tolerance(&mut self, client_id: ClientId) {
+        // Disjoint field borrows: `self.terminal` / `self.synth` (RefCell
+        // interior) vs `self.consumer_states` (via `get_mut`).
+        let terminal = self.terminal.borrow();
+        let synth = &self.synth;
+        let Some(state) = self.consumer_states.get_mut(&client_id) else {
+            trace!(
+                ?client_id,
+                "enable_loss_tolerance for unregistered consumer; dropping"
+            );
+            return;
+        };
+        match synth
+            .borrow_mut()
+            .prime_reference(&terminal, &mut state.acked_reference)
+        {
+            Ok(()) => {
+                state.loss_tolerant = true;
+                trace!(?client_id, "loss-tolerant state-sync enabled for consumer");
+            }
+            Err(err) => {
+                warn!(
+                    ?client_id,
+                    error = %err,
+                    "enable_loss_tolerance: priming acked reference failed; staying emit-once",
+                );
+            }
+        }
     }
 
     /// Drop the per-consumer state for `client_id` if present
@@ -998,6 +1233,24 @@ impl TerminalActor {
             return false;
         }
         consumer.last_acked_seq = seq;
+
+        // Loss-tolerant reference advance (phux-v45.8, ADR-0042). A cumulative
+        // ack for `seq` acknowledges every emission up to and including it, so
+        // the consumer's acked reference advances to the grid snapshot of the
+        // highest emitted `seq` this ack covers, and every pending snapshot at
+        // or below `seq` is dropped. This is the eviction the emit-once path
+        // (below, comment retained for contrast) deliberately does NOT do: on a
+        // lossy leg the reference must trail the ack so a dropped frame re-diffs
+        // against the last state the consumer provably has.
+        if consumer.loss_tolerant {
+            if let Some((&covered, _)) = consumer.pending_refs.range(..=seq).next_back()
+                && let Some(snapshot) = consumer.pending_refs.remove(&covered)
+            {
+                consumer.acked_reference = snapshot;
+            }
+            // Keep only strictly-newer pending snapshots (still in flight).
+            consumer.pending_refs = consumer.pending_refs.split_off(&seq.saturating_add(1));
+        }
 
         // RTT sample (phux-q0e.5). Acks are cumulative, so `seq` acknowledges
         // every emission up to and including it. Find the emit instant for
@@ -1154,15 +1407,35 @@ impl TerminalActor {
     /// - `OutputReceived` — broadcast to semantic event subscribers.
     /// - `GridChanged` — broadcast to semantic event subscribers.
     ///
-    /// `command_started` / `command_finished` are NOT sourced here — see
-    /// the wire spec (SPEC §7.5.1) and the bead for the deferral: the
-    /// OSC-133 command boundary is not cleanly observable from the actor
-    /// without disturbing the per-consumer state-sync synthesizer's
-    /// dirty-consumption model. The wire tags are allocated so a future
-    /// server can emit them without a wire change.
+    /// `command_started` / `command_finished` (phux-foz.4) — sourced from a
+    /// direct OSC-133 scan of the raw chunk (see [`osc133`]): `C` emits
+    /// `command_started`, `D` emits `command_finished` with the shell's
+    /// exit code when reported. The grid projection cannot yield the
+    /// `D`-mark exit code, so the byte stream is the honest source. Each
+    /// `D` mark is also a prompt boundary: the pane's kernel cwd is
+    /// re-queried there and a change emits `cwd_changed`.
     fn source_events_from_chunk(&mut self, chunk: &[u8]) {
-        if self.event_sink.is_none() {
+        if self.event_sink.is_none() && self.event_subscribers.borrow().is_empty() {
             return;
+        }
+        // OSC-133 prompt marks (phux-foz.4). Scanned before the coalesced
+        // dirty/title sources below so a command boundary and its dirty
+        // burst arrive in stream order.
+        for mark in self.osc133.feed(chunk) {
+            match mark {
+                osc133::PromptMark::CommandStart => {
+                    self.emit_event(AgentEvent::CommandStarted);
+                    self.broadcast_agent_event(&AgentEvent::CommandStarted);
+                }
+                osc133::PromptMark::CommandEnd { exit_code } => {
+                    self.emit_event(AgentEvent::CommandFinished { exit_code });
+                    self.broadcast_agent_event(&AgentEvent::CommandFinished { exit_code });
+                    // The command just finished: the shell is back at a
+                    // prompt and any `cd` has landed. Re-query the kernel
+                    // cwd and announce a change.
+                    self.check_cwd_changed();
+                }
+            }
         }
         if chunk.contains(&0x07) {
             self.emit_event(AgentEvent::Bell);
@@ -1221,7 +1494,35 @@ impl TerminalActor {
             self.dirty_event_emitted_this_burst = false;
             self.emit_event(AgentEvent::Idle);
             self.broadcast_agent_event(&AgentEvent::Idle);
+            // phux-foz.4: an output burst settling is the fallback prompt
+            // boundary for shells without OSC-133 integration — a `cd`
+            // echoes a prompt (burst), settles (idle), and the kernel cwd
+            // re-query below announces the change. One best-effort syscall
+            // per settled burst.
+            self.check_cwd_changed();
         }
+    }
+
+    /// phux-foz.4: re-query the PTY child's kernel cwd and emit
+    /// [`AgentEvent::CwdChanged`] when it differs from the last
+    /// observation. Best-effort and coalesced: no PTY / dead child /
+    /// denied query all yield silence, and an unchanged directory emits
+    /// nothing. Called at OSC-133 `D` prompt boundaries and on output
+    /// settle.
+    fn check_cwd_changed(&self) {
+        let Some(pid) = self.pty.as_ref().and_then(|p| p.child.process_id()) else {
+            return;
+        };
+        let Some(cwd) = crate::cwd_query::process_cwd(pid) else {
+            return;
+        };
+        let cwd = cwd.to_string_lossy().into_owned();
+        if *self.last_known_cwd.borrow() == cwd {
+            return;
+        }
+        self.last_known_cwd.borrow_mut().clone_from(&cwd);
+        self.emit_event(AgentEvent::CwdChanged { cwd: cwd.clone() });
+        self.broadcast_agent_event(&AgentEvent::CwdChanged { cwd });
     }
 
     /// Register a new event subscriber to receive semantic terminal events.
@@ -1237,7 +1538,7 @@ impl TerminalActor {
     /// Silent no-op if the subscriber is not found.
     fn unsubscribe_from_events(&self, request: &UnsubscribeFromEventsRequest) {
         let mut subs = self.event_subscribers.borrow_mut();
-        subs.retain(|sub| !std::ptr::eq(&raw const sub.outbound, request.outbound_ptr));
+        subs.retain(|sub| (&raw const sub.outbound) as usize != request.outbound_addr);
     }
 
     /// Broadcast an `AgentEvent` to all interested subscribers based on the
@@ -1250,6 +1551,7 @@ impl TerminalActor {
             let event_type = match event {
                 AgentEvent::CommandStarted => Some(TerminalEventType::CommandStarted),
                 AgentEvent::CommandFinished { .. } => Some(TerminalEventType::CommandEnded),
+                AgentEvent::CwdChanged { .. } => Some(TerminalEventType::CwdChanged),
                 AgentEvent::Dirty => Some(TerminalEventType::GridChanged),
                 AgentEvent::Idle => Some(TerminalEventType::OutputReceived),
                 // Other event types don't map to semantic filters yet
@@ -1402,6 +1704,33 @@ impl TerminalActor {
     #[cfg(test)]
     pub const fn disable_tick_emit_for_test(&mut self) {
         self.consumer_tick_emits = false;
+    }
+
+    /// Test-only: flip an already-registered state-sync consumer to the
+    /// advance-on-ack loss-tolerant model (phux-v45.8), mirroring what the
+    /// runtime does for a forwarded/lossy-leg consumer right after attach.
+    #[cfg(test)]
+    pub fn enable_loss_tolerance_for_test(&mut self, client_id: ClientId) {
+        self.enable_loss_tolerance(client_id);
+    }
+
+    /// Test-only: backdate this consumer's emit instants by `by` so the
+    /// loss-tolerant retransmit timer reads as elapsed on the next tick
+    /// (phux-v45.8), letting a retransmit be exercised without sleeping real
+    /// time. Saturates at the process epoch rather than underflowing.
+    #[cfg(test)]
+    pub fn backdate_emit_instants_for_test(
+        &mut self,
+        client_id: ClientId,
+        by: std::time::Duration,
+    ) {
+        if let Some(state) = self.consumer_states.get_mut(&client_id) {
+            let now = tokio::time::Instant::now();
+            let past = now.checked_sub(by).unwrap_or(now);
+            for instant in state.emit_instants.values_mut() {
+                *instant = past;
+            }
+        }
     }
 
     /// Test-only: write `bytes` into the actor's `Terminal` and mark the
@@ -2064,6 +2393,7 @@ impl TerminalActor {
                             // byte.
                             debug!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
                             self.terminal.borrow_mut().vt_write(&payload);
+                            self.answer_color_queries(&payload);
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit).
                             self.terminal_dirty_since_tick = true;
@@ -2108,6 +2438,16 @@ impl TerminalActor {
                         }
                     };
                     let _ = req.reply.send(snap);
+                }
+
+                Some(req) = self.set_default_colors_rx.recv() => {
+                    if let Err(err) = Self::install_default_colors(
+                        &mut self.terminal.borrow_mut(),
+                        req.colors,
+                    ) {
+                        warn!(error = %err, "failed to install client default colors");
+                    }
+                    let _ = req.reply.send(());
                 }
 
                 Some(req) = self.screen_rx.recv() => {
@@ -2227,6 +2567,7 @@ impl TerminalActor {
                         outbound,
                         wire_terminal_id,
                         wants_state_sync,
+                        loss_tolerant,
                         reply,
                     } = req;
                     // phux-3uv / phux-fseo: map register success to an outcome
@@ -2240,6 +2581,13 @@ impl TerminalActor {
                     let result = self
                         .register_consumer(client_id, outbound, wire_terminal_id, wants_state_sync)
                         .map(|()| ConsumerAttachOutcome { tick_managed });
+                    // phux-v45.8: a forwarded/lossy-leg state-sync consumer
+                    // opts into the advance-on-ack loss-tolerant model right
+                    // after a successful registration. No-op for a direct
+                    // reliable-transport consumer (`loss_tolerant == false`).
+                    if result.is_ok() && loss_tolerant && tick_managed {
+                        self.enable_loss_tolerance(client_id);
+                    }
                     if let Err(err) = &result {
                         warn!(
                             ?client_id,
@@ -2418,10 +2766,14 @@ impl TerminalActor {
         let mutated = self.terminal_dirty_since_tick;
         self.terminal_dirty_since_tick = false;
         if !mutated
-            && !self
-                .consumer_states
-                .values()
-                .any(|s| s.needs_initial_emit || s.behind)
+            && !self.consumer_states.values().any(|s| {
+                // phux-v45.8: a loss-tolerant consumer with un-acked frames in
+                // flight must keep being walked even on a Clean terminal, so its
+                // retransmit timer can fire and re-diff a suspected-lost frame
+                // against the acked reference. `pending_refs` is empty for the
+                // reliable emit-once path, so this adds nothing there.
+                s.needs_initial_emit || s.behind || !s.pending_refs.is_empty()
+            })
         {
             return;
         }
@@ -2460,6 +2812,11 @@ impl TerminalActor {
             if !force_all_consumers && !state.wants_state_sync {
                 continue;
             }
+            // Captured before the `behind` reset below: whether a prior tick
+            // held this consumer's delta back for a full mailbox. The
+            // loss-tolerant emit gate treats a drained-after-backpressure
+            // consumer as "has new content to ship" (phux-v45.8).
+            let was_behind = state.behind;
             // This consumer is being serviced this tick; it no longer needs
             // a forced first pass.
             state.needs_initial_emit = false;
@@ -2530,15 +2887,44 @@ impl TerminalActor {
             .entered();
             // diff_consumer is infallible (the fallible render happened once in
             // `prepare_tick` above); it returns this consumer's delta bytes.
-            let bytes = synth
-                .diff_consumer(tick_cols, tick_rows, tick_live_cm, &mut state.reference)
-                .bytes;
+            // phux-v45.8: a loss-tolerant consumer re-diffs against its
+            // last-ACKED reference (which does NOT advance on emit), so a
+            // dropped/un-acked frame self-heals — its rows still differ from the
+            // acked reference on the next emission. The reliable-transport
+            // default stays on the emit-once `diff_consumer` path (reference
+            // advances on emit), byte-for-byte unchanged.
+            let bytes = if state.loss_tolerant {
+                synth.diff_against_base(tick_cols, tick_rows, tick_live_cm, &state.acked_reference)
+            } else {
+                synth
+                    .diff_consumer(tick_cols, tick_rows, tick_live_cm, &mut state.reference)
+                    .bytes
+            };
             if bytes.is_empty() {
                 // Byte-identical to this consumer's reference; nothing to
                 // send this tick. The reserved permit drops unused. A closed
                 // mailbox was already reaped by the `try_reserve` arm above,
                 // so no extra liveness probe is needed here.
                 continue;
+            }
+            // phux-v45.8 loss-tolerant emit gate. Because a loss-tolerant diff
+            // is against the last-acked (not last-emitted) reference, it stays
+            // non-empty every tick while a frame is un-acked. Only actually
+            // (re)ship when there is genuinely new content this tick
+            // (`mutated`), a drained-after-backpressure delta to flush
+            // (`was_behind`), or a retransmit is due for a still-un-acked frame
+            // (suspected loss). Otherwise hold: re-shipping the same cumulative
+            // delta every tick would flood the leg. The reserved permit drops.
+            if state.loss_tolerant {
+                let now = tokio::time::Instant::now();
+                let retransmit_due = !state.pending_refs.is_empty()
+                    && state.emit_instants.values().next_back().is_none_or(|last| {
+                        now.saturating_duration_since(*last)
+                            >= tick::retransmit_timeout(state.rtt.smoothed())
+                    });
+                if !mutated && !was_behind && !retransmit_due {
+                    continue;
+                }
             }
             let seq = state.next_seq;
             let out_bytes = bytes.len();
@@ -2573,6 +2959,19 @@ impl TerminalActor {
             while state.emit_instants.len() > MAX_EMIT_INSTANTS {
                 state.emit_instants.pop_first();
             }
+            // phux-v45.8: for a loss-tolerant consumer, snapshot the grid state
+            // this `seq` shipped so a later cumulative `FRAME_ACK` can advance
+            // the acked reference to exactly it. Bounded the same way as
+            // `emit_instants` (oldest-evicted past the cap) so a wedged leg
+            // cannot grow it without bound. Empty/untouched on the emit-once
+            // path.
+            if state.loss_tolerant {
+                let snapshot = synth.snapshot_tick_reference(tick_cols, tick_rows, tick_live_cm);
+                state.pending_refs.insert(seq, snapshot);
+                while state.pending_refs.len() > MAX_EMIT_INSTANTS {
+                    state.pending_refs.pop_first();
+                }
+            }
             emitted += 1;
             total_out_bytes += out_bytes;
             trace!(
@@ -2599,6 +2998,69 @@ impl TerminalActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_default_colors_are_installed_before_actor_run() {
+        use phux_protocol::caps::{TerminalColor, TerminalDefaultColors};
+
+        let colors = TerminalDefaultColors {
+            foreground: TerminalColor {
+                r: 208,
+                g: 208,
+                b: 208,
+            },
+            background: TerminalColor {
+                r: 18,
+                g: 24,
+                b: 27,
+            },
+        };
+        let bundle = TerminalActor::build_with_token_and_colors(
+            80,
+            24,
+            None,
+            100,
+            CancellationToken::new(),
+            Some(colors),
+        )
+        .expect("actor");
+        let mut actor = bundle.actor;
+        {
+            let terminal = actor.terminal.borrow();
+            assert_eq!(
+                terminal.default_fg_color().expect("foreground"),
+                Some(libghostty_vt::style::RgbColor {
+                    r: 208,
+                    g: 208,
+                    b: 208,
+                })
+            );
+            assert_eq!(
+                terminal.default_bg_color().expect("background"),
+                Some(libghostty_vt::style::RgbColor {
+                    r: 18,
+                    g: 24,
+                    b: 27,
+                })
+            );
+        }
+
+        let (_pty_output, mut pty_input) = actor.install_test_pty_channels();
+        let first = b"\x1b]10;?\x1b";
+        let second = b"\\\x1b]11;?\x1b\\";
+        actor.terminal.borrow_mut().vt_write(first);
+        actor.answer_color_queries(first);
+        actor.terminal.borrow_mut().vt_write(second);
+        actor.answer_color_queries(second);
+        assert_eq!(
+            pty_input.try_recv().expect("OSC 10 reply"),
+            b"\x1b]10;rgb:d0d0/d0d0/d0d0\x1b\\"
+        );
+        assert_eq!(
+            pty_input.try_recv().expect("OSC 11 reply"),
+            b"\x1b]11;rgb:1212/1818/1b1b\x1b\\"
+        );
+    }
 
     /// phux-07y: `shell_command` runs the user's command via
     /// `$SHELL -c <command>` so quoting / args work and the pane closes
@@ -3470,6 +3932,7 @@ mod tests {
                         outbound: out_tx,
                         wire_terminal_id: 99,
                         wants_state_sync: false,
+                        loss_tolerant: false,
                         reply: tx_a,
                     })
                     .await
@@ -3745,6 +4208,295 @@ mod tests {
         assert!(
             raw_rx.try_recv().is_err(),
             "raw consumer must stay on the broadcast pump — tick must not double-paint it",
+        );
+    }
+
+    // ---- phux-v45.8 / ADR-0042: loss-tolerant (advance-on-ack) state sync ----
+
+    /// Render a `Terminal`'s viewport into right-trimmed rows, skipping
+    /// wide-cell tails — enough to assert grid equivalence between a
+    /// state-sync mirror and the canonical after applying deltas.
+    fn render_viewport(t: &GhosttyTerminal<'_, '_>) -> Vec<String> {
+        use libghostty_vt::render::{CellIterator, RowIterator};
+        use libghostty_vt::screen::CellWide;
+        let mut rs = RenderState::new().expect("RenderState::new");
+        let snap = rs.update(t).expect("update");
+        let rows_n = snap.rows().expect("rows");
+        let mut rows = RowIterator::new().expect("RowIterator::new");
+        let mut cells = CellIterator::new().expect("CellIterator::new");
+        let mut row_iter = rows.update(&snap).expect("row update");
+        let mut out: Vec<String> = Vec::with_capacity(usize::from(rows_n));
+        let mut i: u16 = 0;
+        while let Some(row) = row_iter.next() {
+            if i >= rows_n {
+                break;
+            }
+            let mut line = String::new();
+            let mut cell_iter = cells.update(row).expect("cell update");
+            while let Some(cell) = cell_iter.next() {
+                if matches!(
+                    cell.raw_cell().expect("rc").wide().expect("wide"),
+                    CellWide::SpacerTail
+                ) {
+                    continue;
+                }
+                let g = cell.graphemes().expect("graphemes");
+                if g.is_empty() {
+                    line.push(' ');
+                } else {
+                    line.extend(g);
+                }
+            }
+            out.push(line.trim_end().to_owned());
+            i += 1;
+        }
+        out
+    }
+
+    /// Drain every currently-queued `TERMINAL_OUTPUT` body from a consumer's
+    /// mailbox (its `seq` and bytes).
+    fn drain_outputs(rx: &mut mpsc::Receiver<Outbound>) -> Vec<(u64, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while let Ok(Outbound::Frame(FrameKind::TerminalOutput { seq, bytes, .. })) = rx.try_recv()
+        {
+            frames.push((seq, bytes.to_vec()));
+        }
+        frames
+    }
+
+    /// A loss-tolerant consumer's reference advances on `FRAME_ACK`, not on
+    /// emit: after emitting a delta the acked reference is unchanged and the
+    /// frame is retained in `pending_refs`; the matching ack advances the
+    /// reference and prunes the pending snapshot.
+    #[test]
+    fn loss_tolerant_reference_advances_only_on_ack() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+
+        actor.vt_write_for_test(b"hello");
+        actor.tick_emit();
+
+        let frames = drain_outputs(&mut rx);
+        assert_eq!(frames.len(), 1, "one delta shipped for the new content");
+        let seq = frames[0].0;
+        {
+            let state = actor.consumer_state(client).expect("state");
+            assert!(
+                state.pending_refs.contains_key(&seq),
+                "the emitted frame's grid snapshot is retained until acked",
+            );
+            assert_eq!(
+                state.last_acked_seq, 0,
+                "no ack yet: the acked reference has not advanced",
+            );
+        }
+
+        // Idle tick with no new content and no elapsed time: the loss-tolerant
+        // gate must NOT re-ship the same cumulative delta (no flood).
+        actor.tick_emit();
+        assert!(
+            drain_outputs(&mut rx).is_empty(),
+            "an un-acked delta must not re-ship every idle tick",
+        );
+
+        // Ack it: the reference advances and the pending snapshot is pruned.
+        actor.on_frame_ack(client, seq);
+        {
+            let state = actor.consumer_state(client).expect("state");
+            assert!(
+                state.pending_refs.is_empty(),
+                "ack prunes the covered pending snapshot",
+            );
+            assert_eq!(state.last_acked_seq, seq);
+        }
+        // Post-ack idle tick: nothing to send (acked == live).
+        actor.tick_emit();
+        assert!(
+            drain_outputs(&mut rx).is_empty(),
+            "post-ack idle tick is silent"
+        );
+    }
+
+    /// The core v45.8 property: a dropped/un-acked frame self-heals. Emit
+    /// delta 1 (simulated dropped — never applied to the mirror, never acked),
+    /// then emit delta 2 for later content. Because delta 2 is re-diffed
+    /// against the last-ACKED reference (still empty), it re-includes delta 1's
+    /// rows, so applying ONLY delta 2 to the mirror converges it to canonical.
+    #[test]
+    fn loss_tolerant_dropped_frame_rediffs_against_acked_and_converges() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+
+        // Mirror starts at the same point the acked reference was primed to
+        // (an empty grid) — what the consumer's TERMINAL_SNAPSHOT establishes.
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Content A → delta 1. SIMULATE A DROP: do not apply it, do not ack.
+        actor.vt_write_for_test(b"AAAA");
+        actor.tick_emit();
+        let dropped = drain_outputs(&mut rx);
+        assert_eq!(dropped.len(), 1, "delta 1 emitted");
+
+        // Content B (a second row) → delta 2. Re-diffed against acked (empty).
+        actor.vt_write_for_test(b"\r\nBBBB");
+        actor.tick_emit();
+        let delivered = drain_outputs(&mut rx);
+        assert_eq!(delivered.len(), 1, "delta 2 emitted");
+
+        // Apply ONLY delta 2 (delta 1 was lost).
+        mirror.vt_write(&delivered[0].1);
+
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "applying only the post-drop cumulative delta must converge the \
+             mirror to canonical (self-heal);\ncanonical = {canonical_grid:?}\n\
+             mirror    = {mirror_grid:?}",
+        );
+        assert_eq!(mirror_grid[0], "AAAA");
+        assert_eq!(mirror_grid[1], "BBBB");
+    }
+
+    /// After a `FRAME_ACK`, subsequent deltas are diffed against the newly
+    /// advanced acked reference (incremental, not cumulative-from-empty), and
+    /// the mirror — brought current by the acked frames then the new one —
+    /// still converges. Exercises the steady-state ack loop.
+    #[test]
+    fn loss_tolerant_incremental_after_ack_converges() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Round 1: content, deliver + ack.
+        actor.vt_write_for_test(b"row-one");
+        actor.tick_emit();
+        let f1 = drain_outputs(&mut rx);
+        assert_eq!(f1.len(), 1);
+        mirror.vt_write(&f1[0].1);
+        actor.on_frame_ack(client, f1[0].0);
+
+        // Round 2: more content, delivered + acked; diffed against the acked
+        // reference from round 1.
+        actor.vt_write_for_test(b"\r\nrow-two");
+        actor.tick_emit();
+        let f2 = drain_outputs(&mut rx);
+        assert_eq!(f2.len(), 1);
+        mirror.vt_write(&f2[0].1);
+        actor.on_frame_ack(client, f2[0].0);
+
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "steady-state ack loop converges"
+        );
+        assert_eq!(mirror_grid[0], "row-one");
+        assert_eq!(mirror_grid[1], "row-two");
+    }
+
+    /// A retransmit heals a lost final frame on an otherwise idle terminal.
+    /// Emit content (dropped, un-acked), backdate the emit clock past the
+    /// retransmit timeout, then run an idle tick: the consumer retransmits a
+    /// cumulative delta (re-diffed against the acked reference) that converges
+    /// the mirror even though no new content arrived.
+    #[test]
+    fn loss_tolerant_retransmits_lost_frame_when_idle() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        actor.enable_loss_tolerance_for_test(client);
+        let mut mirror = GhosttyTerminal::new(TerminalOptions {
+            cols: 20,
+            rows: 5,
+            max_scrollback: 100,
+        })
+        .expect("mirror");
+
+        // Content → delta. Simulate a drop: discard it, never ack.
+        actor.vt_write_for_test(b"lonely");
+        actor.tick_emit();
+        let dropped = drain_outputs(&mut rx);
+        assert_eq!(dropped.len(), 1, "initial delta emitted");
+
+        // No new content. Backdate the emit instant past the retransmit RTO
+        // so the next idle tick re-ships (suspected loss).
+        actor.backdate_emit_instants_for_test(client, std::time::Duration::from_secs(2));
+        actor.tick_emit();
+        let retransmit = drain_outputs(&mut rx);
+        assert_eq!(
+            retransmit.len(),
+            1,
+            "an idle terminal with an un-acked frame must retransmit after the RTO",
+        );
+
+        // The retransmit (re-diffed against the acked reference) converges the
+        // mirror that never saw the original frame.
+        mirror.vt_write(&retransmit[0].1);
+        let canonical_grid = render_viewport(&actor.terminal.borrow());
+        let mirror_grid = render_viewport(&mirror);
+        assert_eq!(
+            canonical_grid, mirror_grid,
+            "retransmit heals the lost frame on an idle terminal",
+        );
+        assert_eq!(mirror_grid[0], "lonely");
+    }
+
+    /// The emit-once (non-loss-tolerant) default is untouched: a state-sync
+    /// consumer that did NOT opt into loss-tolerance keeps no `pending_refs`
+    /// and advances its reference on emit (`on_frame_ack` does not evict a
+    /// pending snapshot because there is none).
+    #[test]
+    fn emit_once_default_keeps_no_pending_refs() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let client = ClientId(1);
+        let (tx, mut rx) = dummy_outbound();
+        actor
+            .register_consumer(client, tx, 11, true)
+            .expect("register");
+        // NB: loss-tolerance NOT enabled.
+        actor.vt_write_for_test(b"content");
+        actor.tick_emit();
+        let frames = drain_outputs(&mut rx);
+        assert_eq!(frames.len(), 1);
+        let state = actor.consumer_state(client).expect("state");
+        assert!(!state.loss_tolerant, "default consumer is emit-once");
+        assert!(
+            state.pending_refs.is_empty(),
+            "emit-once path allocates no pending reference snapshots",
         );
     }
 

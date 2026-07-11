@@ -396,6 +396,7 @@ fn kill_terminals_tears_down_a_multi_terminal_group_atomically() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -603,6 +604,264 @@ fn session_create_via_metadata_seeds_session_and_publishes_id() {
                 .is_some(),
             "result must carry a terminal_id; got {json:?}",
         );
+    });
+}
+
+/// Read the `terminal_id` (the seed pane's local wire id) that a
+/// `SESSION_CREATE_KEY` write publishes under `SESSION_CREATE_RESULT_KEY`.
+/// `None` when the key is absent — the shape a *failed* create leaves,
+/// since the server only publishes the result on success.
+async fn read_session_create_terminal_id(stream: &mut UnixStream, request_id: u32) -> Option<u64> {
+    use phux_protocol::wire::frame::{SESSION_CREATE_RESULT_KEY, Scope};
+    send_frame(
+        stream,
+        &FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Global,
+            key: SESSION_CREATE_RESULT_KEY.to_owned(),
+        },
+    )
+    .await;
+    let value = loop {
+        let (_t, frame) = recv_typed(stream).await;
+        if let FrameKind::MetadataValue {
+            request_id: got,
+            value,
+        } = frame
+            && got == request_id
+        {
+            break value;
+        }
+    };
+    let bytes = value?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("terminal_id").and_then(serde_json::Value::as_u64)
+}
+
+/// Fetch the whole-server `GET_STATE` snapshot.
+async fn get_server_snapshot(
+    stream: &mut UnixStream,
+    request_id: u32,
+) -> phux_protocol::wire::info::SessionSnapshot {
+    send_frame(
+        stream,
+        &FrameKind::Command {
+            request_id,
+            command: Command::GetState {
+                scope: StateScope::Server,
+            },
+        },
+    )
+    .await;
+    match await_command_result(stream, request_id).await {
+        CommandResult::OkWith(CommandValue::State(snapshot)) => snapshot,
+        other => panic!("expected Ok_With(State(..)), got {other:?}"),
+    }
+}
+
+/// The `cwd` (canonicalized) of the snapshot pane whose local wire id is
+/// `local_id`, or `None` if the pane is absent or carries no cwd.
+fn pane_cwd_by_local_id(
+    snapshot: &phux_protocol::wire::info::SessionSnapshot,
+    local_id: u64,
+) -> Option<std::path::PathBuf> {
+    let target = u32::try_from(local_id).ok()?;
+    let pane = snapshot
+        .panes
+        .iter()
+        .find(|p| p.id.local_id() == Some(target))?;
+    let raw = std::path::PathBuf::from(pane.cwd.as_ref()?);
+    Some(raw.canonicalize().unwrap_or(raw))
+}
+
+/// phux-0v1l: the `SESSION_CREATE_KEY` create-without-attach path honors a
+/// valid wire `cwd`, seeding the new session's pane in that directory —
+/// uniform with the attach `CreateIfMissing` seed path.
+#[test]
+fn session_create_honors_valid_wire_cwd() {
+    run_local(async {
+        use phux_protocol::wire::frame::{SESSION_CREATE_KEY, Scope};
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // PTY mode, no server-wide override command: the wire cwd takes effect.
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        let cwd_dir = TempDir::new().unwrap();
+        let cwd_path = cwd_dir.path().canonicalize().expect("canonicalize cwd");
+
+        let value = serde_json::to_vec(&serde_json::json!({
+            "name": "rooted",
+            "command": serde_json::Value::Null,
+            "cwd": cwd_path.display().to_string(),
+        }))
+        .unwrap();
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: SESSION_CREATE_KEY.to_owned(),
+                value,
+            },
+        )
+        .await;
+
+        let terminal_id = read_session_create_terminal_id(&mut stream, 2)
+            .await
+            .expect("create must publish a terminal_id (a valid cwd must not fail the create)");
+        let snapshot = get_server_snapshot(&mut stream, 3).await;
+        let pane_cwd = pane_cwd_by_local_id(&snapshot, terminal_id)
+            .expect("the created pane must appear in the snapshot with a cwd");
+        assert_eq!(
+            pane_cwd, cwd_path,
+            "seed pane must start in the wire-supplied cwd",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-0v1l: a `SESSION_CREATE_KEY` write whose wire `cwd` does not name an
+/// existing directory must NOT fail the create. Previously the path was
+/// passed to `portable_pty` unvalidated, so a stale cwd failed the seed and
+/// the session was never created. The validate-and-fall-back path now drops
+/// the bad cwd and seeds the pane in the default directory instead.
+#[test]
+fn session_create_invalid_wire_cwd_falls_back_without_failing() {
+    run_local(async {
+        use phux_protocol::wire::frame::{SESSION_CREATE_KEY, Scope};
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // A path guaranteed absent: inside a fresh tempdir, never created.
+        let bogus = tmp.path().join("does-not-exist");
+        assert!(!bogus.exists(), "fixture path must not exist");
+
+        let value = serde_json::to_vec(&serde_json::json!({
+            "name": "fallback",
+            "command": serde_json::Value::Null,
+            "cwd": bogus.display().to_string(),
+        }))
+        .unwrap();
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: SESSION_CREATE_KEY.to_owned(),
+                value,
+            },
+        )
+        .await;
+
+        // The create must succeed despite the bad cwd: the result key is
+        // published only on success.
+        let terminal_id = read_session_create_terminal_id(&mut stream, 2)
+            .await
+            .expect("create must succeed and publish a terminal_id even with an invalid cwd");
+        let snapshot = get_server_snapshot(&mut stream, 3).await;
+        // The session is registered...
+        let names: Vec<&str> = snapshot.sessions.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"fallback"),
+            "an invalid cwd must not prevent the session from being created; got {names:?}",
+        );
+        // ...and the bogus path was NOT honored; the pane fell back to a real
+        // directory.
+        let pane_cwd = pane_cwd_by_local_id(&snapshot, terminal_id)
+            .expect("the created pane must appear in the snapshot with a cwd");
+        assert_ne!(
+            pane_cwd,
+            bogus.canonicalize().unwrap_or_else(|_| bogus.clone()),
+            "the bogus cwd must not be honored",
+        );
+        assert!(
+            pane_cwd.is_dir(),
+            "fallback cwd must be a real directory, got {}",
+            pane_cwd.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-0v1l: a wire `cwd` that is an existing directory but is NOT
+/// enterable (no search/execute permission) must fall back rather than fail
+/// the create. A plain `is_dir()` gate accepts such a directory, which then
+/// fails `portable_pty`'s spawn (contradicting the fallback contract); the
+/// enterability gate rejects it up front. Unix-only: the fixture uses a
+/// mode-000 directory (`is_dir()` true, `X_OK` denied for its non-root
+/// owner).
+#[cfg(unix)]
+#[test]
+fn session_create_unenterable_wire_cwd_falls_back_without_failing() {
+    use std::os::unix::fs::PermissionsExt;
+    run_local(async {
+        use phux_protocol::wire::frame::{SESSION_CREATE_KEY, Scope};
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // A real directory stripped of all permissions: it stats as a
+        // directory but cannot be entered (chdir needs X_OK).
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let value = serde_json::to_vec(&serde_json::json!({
+            "name": "locked-cwd",
+            "command": serde_json::Value::Null,
+            "cwd": locked.display().to_string(),
+        }))
+        .unwrap();
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: SESSION_CREATE_KEY.to_owned(),
+                value,
+            },
+        )
+        .await;
+
+        // Under a non-root owner the enterability gate rejects the locked dir
+        // and the create still succeeds (fallback). The result key is
+        // published only on success — its presence is the regression guard.
+        let created = read_session_create_terminal_id(&mut stream, 2).await;
+
+        // Restore permissions so the TempDir can be cleaned up on drop,
+        // regardless of the assertion outcome below.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).ok();
+
+        assert!(
+            created.is_some(),
+            "an unenterable cwd must not fail the create (enterability gate must fall back)",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
     });
 }
 

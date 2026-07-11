@@ -20,4 +20,4 @@ pub use registry::{Registry, RegistryError};
 pub use screen::{CursorState, SCHEMA_VERSION, ScreenState};
 pub use session::Session;
 pub use terminal::TerminalDescriptor;
-pub use window::{Direction, LayoutError, LayoutNode, Rect, SplitDir, Window};
+pub use window::{Direction, LayoutError, LayoutNode, SplitDir, Window};

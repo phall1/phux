@@ -190,3 +190,112 @@ fn unattached_subscriber_receives_events() {
             .expect("server run_async ok");
     });
 }
+
+/// Drain `EVENT` frames until `command_started`, `command_finished`, and
+/// `cwd_changed` have all been seen, the pane closes (nothing further can
+/// arrive), or `deadline` elapses.
+async fn collect_command_and_cwd_events(
+    stream: &mut UnixStream,
+    deadline: Duration,
+) -> Vec<AgentEvent> {
+    let end = tokio::time::Instant::now() + deadline;
+    let mut seen = Vec::new();
+    let mut saw_started = false;
+    let mut saw_finished = false;
+    let mut saw_cwd = false;
+    loop {
+        let remaining = end.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return seen;
+        }
+        let Ok((_type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
+            return seen;
+        };
+        if let FrameKind::Event { event, .. } = frame {
+            let closed = matches!(event, AgentEvent::PaneClosed { .. });
+            match &event {
+                AgentEvent::CommandStarted => saw_started = true,
+                AgentEvent::CommandFinished { .. } => saw_finished = true,
+                AgentEvent::CwdChanged { .. } => saw_cwd = true,
+                _ => {}
+            }
+            seen.push(event);
+            if (saw_started && saw_finished && saw_cwd) || closed {
+                return seen;
+            }
+        }
+    }
+}
+
+/// phux-foz.4: a subscribed client receives `command_started`,
+/// `command_finished` (WITH the OSC-133 `D`-mark exit code), and
+/// `cwd_changed` as the seed shell runs a shell-integration-marked
+/// command after a `cd`. Pins the raw-PTY-stream OSC-133 scan (the grid
+/// projection cannot yield the exit code) and the prompt-boundary kernel
+/// cwd re-query.
+#[test]
+fn subscribed_client_receives_command_and_cwd_events() {
+    run_local(async {
+        let _cap = TracingCapture::install("agent_events_cmd_cwd");
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // Deferred like the title/bell seed so the client wins the race to
+        // subscribe. The shell: cd to / (a directory that cannot equal the
+        // spawn cwd of a tempdir-homed test server), then emit an OSC-133
+        // C mark (command executing), fake output, and a D mark carrying
+        // exit code 7. It lingers briefly so the prompt-boundary kernel
+        // cwd query still finds a live child.
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(
+            "sleep 0.25; cd /; \
+             printf '\\033]133;C\\007out\\r\\n\\033]133;D;7\\007'; \
+             sleep 0.3; exit 0",
+        );
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(&mut stream, &attach_by_name("demo")).await;
+        let (type_byte, _attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED);
+
+        send_frame(&mut stream, &FrameKind::SubscribeEvents { terminal: None }).await;
+
+        // Drain EVENT frames until all three targets are seen, or the
+        // pane closes (no further events can follow), or the deadline
+        // elapses. A dedicated collector rather than `collect_events`
+        // because that helper only early-returns on title/bell/closed and
+        // would read into the server's post-exit socket teardown.
+        let events = collect_command_and_cwd_events(&mut stream, Duration::from_secs(4)).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::CommandStarted)),
+            "expected command_started from the OSC-133 C mark; got {events:?}",
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AgentEvent::CommandFinished { exit_code } if *exit_code == Some(7))
+            ),
+            "expected command_finished carrying the D-mark exit code 7; got {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::CwdChanged { cwd } if cwd == "/")),
+            "expected cwd_changed to / after the cd; got {events:?}",
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}

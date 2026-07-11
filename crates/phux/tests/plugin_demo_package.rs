@@ -10,6 +10,7 @@ const LIST_ACTION: &str = "list-integrations";
 const VALIDATE_ACTION: &str = "validate-integrations";
 const DETECT_ACTION: &str = "detect-agents";
 const LAUNCH_BENCH_ACTION: &str = "launch-bench";
+const SMOKE_AGENT_WRAP_ACTION: &str = "smoke-agent-wrap";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -154,6 +155,35 @@ fn agent_detection_is_opt_in_and_path_overridable() {
     let detected = stdout_from_json(&output);
     assert!(detected.contains("codex\tCodex\tcodex\tavailable"));
     assert!(detected.contains("claude-code\tClaude Code\tclaude\tmissing"));
+}
+
+/// phux-r82.11: the agent-identity wrapper writes a `phux.agent/v1`
+/// record at launch and clears it on exit. `smoke-agent-wrap` drives
+/// `phux-agent-wrap.sh` against a stub `phux` (that logs its argv) and a
+/// fake agent, asserting `phux agent set --name ... --kind ...` runs at
+/// launch and `phux agent clear` runs on exit — the record-write path the
+/// sidebar consumes, exercised with no server.
+#[test]
+fn agent_wrap_writes_and_clears_the_identity_record() {
+    let (code, stdout, stderr) = run_demo(&[
+        "config",
+        "run",
+        PLUGIN_ID,
+        SMOKE_AGENT_WRAP_ACTION,
+        "--json",
+    ]);
+    assert_eq!(
+        code, 0,
+        "agent wrap smoke should succeed; stderr={stderr}\nstdout={stdout}"
+    );
+    let output: serde_json::Value =
+        serde_json::from_str(&stdout).expect("agent wrap smoke stdout is JSON");
+    assert_eq!(output["action_id"], SMOKE_AGENT_WRAP_ACTION);
+    assert_eq!(output["exit_code"], 0);
+    assert!(
+        stdout_from_json(&output).contains("agent wrap smoke ok"),
+        "smoke script should confirm the set/clear record path: {output}"
+    );
 }
 
 #[test]

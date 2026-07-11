@@ -15,9 +15,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+use super::input_lane::{InputLaneHandle, RoutedInput};
 use super::{
-    STALE_PROBE_TIMEOUT, ServerError, handle_attach, handle_command, handle_frame_ack,
-    handle_spawn_terminal, handle_terminal_input, handle_terminal_resize, handle_viewport_resize,
+    STALE_PROBE_TIMEOUT, ServerError, SpawnRequest, handle_attach, handle_command,
+    handle_frame_ack, handle_spawn_terminal, handle_terminal_input, handle_terminal_resize,
+    handle_viewport_resize,
 };
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::ConsumerDetachRequest;
@@ -122,6 +124,15 @@ pub(crate) fn spawn_terminal_exit_watcher(
                 served,
             }
         });
+
+        // docs/consumers/tui.md §9 (phux-r82.1): the inner process exited —
+        // the `pane-exit` hook point. Fired off-lock (the hook helper
+        // re-takes the state lock briefly to clone the dispatcher handle);
+        // `fire` itself is a non-blocking try_send.
+        crate::hooks::fire_hook(
+            &state,
+            crate::hooks::HookEvent::pane_exit(&wire_terminal_id, exit_status),
+        );
 
         // phux-4li.11 / phux-4r1: broadcast the L1 lifecycle event
         // TERMINAL_CLOSED to every client that was subscribed to the
@@ -246,6 +257,18 @@ pub(crate) async fn broadcast_terminal_closed(
 /// observes the mailbox as `Closed` on its next tick and reaps the
 /// orphaned per-consumer entry itself (phux-ddg, the self-healing path).
 pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: ClientId) {
+    // docs/consumers/tui.md §9 (phux-r82.1): capture whether this client
+    // was actually attached (and to which session, if it still exists)
+    // BEFORE tearing anything down. Runs for every connection teardown,
+    // but the `client-detached` hook fires only for attached clients —
+    // a connection that never attached never "detaches".
+    let attached_session: Option<Option<String>> = state.with(|s| {
+        s.attached.get(&client_id).map(|client| {
+            s.registry
+                .session(client.session)
+                .map(|session| session.name.clone())
+        })
+    });
     state.with_mut(|s| s.remove_peer_identity(client_id));
     let wire_client_id =
         phux_protocol::ids::ClientId::new(u32::try_from(client_id.0).unwrap_or(u32::MAX));
@@ -291,7 +314,39 @@ pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: 
                 actor: wire_client_id,
             });
     }
+    // Federation relay (phux-v45.4): drop every hub-side proxy
+    // subscription this client holds on any satellite link — the
+    // counterpart to the registrations the satellite-scoped
+    // SUBSCRIBE_EVENTS / SUBSCRIBE_TERMINAL_EVENTS / ATTACH_TERMINAL
+    // paths performed. Empty (no-op) on a non-hub server. Undroppable
+    // (phux-v45.11 finding 1): rides the unbounded unsubscribe channel,
+    // so a saturated relay mailbox can never leave a stale subscriber
+    // that outlives its consumer.
+    for relay in state.with(crate::state::ServerState::hub_relays_all) {
+        relay.unsubscribe_client(client_id);
+    }
+    // Release any hub-side satellite input leases this client held
+    // (phux-v45.7, the federation mirror of the ADR-0033 release above):
+    // relay a detached RELEASE_INPUT per lease so the satellite-side
+    // lease (held by the link identity) follows the hub-side ledger,
+    // which `detach` below clears regardless.
+    for (host, terminal) in state.with(|s| s.satellite_leases_held_by(client_id)) {
+        if let Some(relay) = state.with(|s| s.hub_relay(&host)) {
+            relay.command_detached(phux_protocol::wire::frame::Command::ReleaseInput {
+                terminal_id: phux_protocol::ids::TerminalId::local(terminal),
+            });
+        }
+    }
     state.with_mut(|s| s.detach(client_id));
+    // docs/consumers/tui.md §9 (phux-r82.1): the client is fully detached —
+    // the `client-detached` hook point (any reason: explicit DETACH,
+    // transport drop, EOF). Skipped for connections that never attached.
+    if let Some(session_name) = attached_session {
+        crate::hooks::fire_hook(
+            state,
+            crate::hooks::HookEvent::client_detached(client_id, session_name.as_deref()),
+        );
+    }
 }
 
 /// Prepare the parent directory of `socket_path` with mode `0o700`.
@@ -354,6 +409,11 @@ pub(crate) async fn accept_loop<L: Incoming>(
     listener: &L,
     state: SharedState,
     root_token: CancellationToken,
+    // Dedicated input lane (phux-51n6.2, ADR-0044). `Some` in production so
+    // each client task routes `INPUT_*` off the main runtime; `None` in the
+    // direct-drive tests that never spawn the lane, which fall back to inline
+    // routing (identical behavior, on-thread).
+    input_lane: Option<InputLaneHandle>,
 ) -> Result<(), ServerError> {
     // JoinSet of per-client tasks. Dropping this set on loop exit
     // aborts every still-running client task in one step — much
@@ -377,8 +437,9 @@ pub(crate) async fn accept_loop<L: Incoming>(
                         let task_state = state.clone();
                         let client_token = root_token.child_token();
                         let task_root_token = root_token.clone();
+                        let task_input_lane = input_lane.clone();
                         clients.spawn_local(async move {
-                            if let Err(err) = handle_client(reader, writer, task_state.clone(), client_id, client_token, task_root_token).await {
+                            if let Err(err) = handle_client(reader, writer, task_state.clone(), client_id, client_token, task_root_token, task_input_lane).await {
                                 warn!(error = %err, "client task ended with error");
                             }
                             // Implicit detach on EOF / error path — matches
@@ -431,6 +492,7 @@ pub(crate) async fn handle_client<R, W>(
     client_id: ClientId,
     token: CancellationToken,
     root_token: CancellationToken,
+    input_lane: Option<InputLaneHandle>,
 ) -> io::Result<()>
 where
     R: FrameReader + 'static,
@@ -645,28 +707,31 @@ where
                 handle_viewport_resize(&state, client_id, &viewport);
             }
             FrameKind::InputKey { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Key(event),
                     "INPUT_KEY",
                 );
             }
             FrameKind::InputMouse { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Mouse(event),
                     "INPUT_MOUSE",
                 );
             }
             FrameKind::InputFocus { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Focus(event),
                     "INPUT_FOCUS",
                 );
@@ -677,10 +742,11 @@ where
                 // DEC 2004 bracketing (SPEC §9.4). Until this arm existed the
                 // frame fell into the unhandled-type debug arm and pastes
                 // from projection clients silently vanished.
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Paste(event),
                     "INPUT_PASTE",
                 );
@@ -734,16 +800,20 @@ where
                 cwd,
                 env,
                 term,
+                satellite,
             } => {
                 handle_spawn_terminal(
                     &state,
                     client_id,
                     request_id,
-                    group,
-                    command,
-                    cwd,
-                    env,
-                    term,
+                    SpawnRequest {
+                        group,
+                        command,
+                        cwd,
+                        env,
+                        term,
+                        satellite,
+                    },
                     &out_tx,
                     &root_token,
                 )
@@ -767,6 +837,38 @@ where
             }
         }
     }
+}
+
+/// Route one decoded `INPUT_*` event, preferring the dedicated input lane
+/// (phux-51n6.2, ADR-0044).
+///
+/// A **local** pane id with a live lane is handed to the lane thread, which
+/// runs the lease/subscription gating and mailbox delivery off the main
+/// runtime. Everything else falls back to the inline
+/// [`handle_terminal_input`]: satellite-tagged ids (their delivery is a
+/// hub-link relay, not a mailbox `try_send`, so it stays on the main thread)
+/// and the no-lane path used by direct-drive tests. Both call the same routing
+/// function, so lease and subscription semantics are identical either way.
+fn route_client_input(
+    state: &SharedState,
+    input_lane: Option<&InputLaneHandle>,
+    client_id: ClientId,
+    terminal_id: phux_protocol::ids::TerminalId,
+    input: TerminalInput,
+    frame_label: &'static str,
+) {
+    if let Some(lane) = input_lane
+        && terminal_id.is_local()
+    {
+        lane.route(RoutedInput {
+            client_id,
+            terminal_id,
+            input,
+            frame_label,
+        });
+        return;
+    }
+    handle_terminal_input(state, client_id, &terminal_id, input, frame_label);
 }
 
 pub(crate) async fn abort_output_pumps(
@@ -1053,6 +1155,55 @@ pub(crate) fn handle_subscribe_events(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
 ) {
     debug!(?client_id, ?terminal, "SUBSCRIBE_EVENTS");
+    // Satellite-scoped subscription (phux-v45.4): register the caller as
+    // a hub-side proxy subscriber on the owning link and forward the
+    // SUBSCRIBE_EVENTS frame (id rewritten satellite-local) so the
+    // satellite starts pushing EVENT frames back over the link; the relay
+    // re-tags them `Local -> Satellite { host, .. }` on the way to this
+    // consumer. SUBSCRIBE_EVENTS has no reply frame, so a missing route
+    // (non-hub server / unknown host) surfaces as a typed ERROR push
+    // rather than silence.
+    if let Some(wire_id) = &terminal
+        && let Some((host, id)) = crate::hub::relay::satellite_route(wire_id)
+    {
+        if let Some(relay) = state.with(|s| s.hub_relay(&host)) {
+            // Atomic register-and-forward (phux-v45.11 finding 2): the
+            // hub-side registration and the satellite-side SUBSCRIBE_EVENTS
+            // either both happen or the consumer gets a typed error push.
+            relay.subscribe(
+                crate::hub::relay::ProxySubscription {
+                    terminal: id,
+                    client: client_id,
+                    out_tx: out_tx.clone(),
+                    // Stamped with the issue-order token by `subscribe`
+                    // at enqueue.
+                    seq: 0,
+                    // An event subscription carries no snapshot; its EVENT
+                    // deltas must flow immediately, so it is not gated
+                    // (phux-v45.14).
+                    awaits_snapshot: false,
+                },
+                FrameKind::SubscribeEvents {
+                    terminal: Some(phux_protocol::ids::TerminalId::local(id)),
+                },
+            );
+        } else {
+            warn!(
+                ?client_id,
+                satellite = %host,
+                "SUBSCRIBE_EVENTS: no route to satellite; refusing subscription"
+            );
+            let _ = out_tx.try_send(Outbound::Frame(FrameKind::Error {
+                request_id: None,
+                code: ErrorCode::UnsupportedSatelliteRoute,
+                message: format!(
+                    "no satellite route to {host:?}: this server is not a federation hub \
+                     for that host"
+                ),
+            }));
+        }
+        return;
+    }
     // Capture the client's mailbox in the subscription so event fanout
     // reaches it even without an ATTACH (a pure `watch` client never
     // attaches).

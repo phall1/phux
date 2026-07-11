@@ -395,3 +395,356 @@ fn plugin_manifest_parse_errors_use_supplied_symlink_path() -> Result<(), Box<dy
     );
     Ok(())
 }
+
+#[test]
+fn plugin_action_keys_field_parses_and_defaults_to_none() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.keys"
+name = "Keys"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "bound"
+title = "Bound action"
+command = ["true"]
+keys = "g"
+
+[[actions]]
+id = "unbound"
+title = "Unbound action"
+command = ["true"]
+
+[[actions]]
+id = "blank"
+title = "Blank keys action"
+command = ["true"]
+keys = "   "
+"#,
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.actions[0].keys.as_deref(), Some("g"));
+    assert_eq!(loaded.actions[1].keys, None, "keys defaults to None");
+    assert_eq!(
+        loaded.actions[2].keys, None,
+        "whitespace-only keys normalizes to None"
+    );
+    Ok(())
+}
+
+#[test]
+fn load_enabled_manifests_skips_disabled_and_broken_plugins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let config_path = dir.path().join("config.toml");
+    // Three manifests: one healthy + enabled, one healthy + disabled, one
+    // missing entirely. Only the first must load; the rest are skipped
+    // without failing the batch.
+    let good = dir.path().join("good.toml");
+    std::fs::write(
+        &good,
+        r#"
+id = "example.good"
+name = "Good"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[actions]]
+id = "act"
+title = "Act"
+command = ["true"]
+"#,
+    )?;
+    let off = dir.path().join("off.toml");
+    std::fs::write(
+        &off,
+        r#"
+id = "example.off"
+name = "Off"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+"#,
+    )?;
+
+    let entries = vec![
+        plugin::PluginConfigEntry {
+            // Relative path: resolves against the config file's directory.
+            manifest: std::path::PathBuf::from("good.toml"),
+            enabled: true,
+        },
+        plugin::PluginConfigEntry {
+            manifest: off,
+            enabled: false,
+        },
+        plugin::PluginConfigEntry {
+            manifest: dir.path().join("missing.toml"),
+            enabled: true,
+        },
+    ];
+
+    let manifests = plugin::load_enabled_manifests(&config_path, &entries);
+
+    assert_eq!(manifests.len(), 1, "only the enabled, healthy manifest");
+    assert_eq!(manifests[0].id, "example.good");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// phux-r82.6: [[widgets]] status-bar contributions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn plugin_manifest_loads_widget_contributions() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.battery"
+name = "Battery"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "battery"
+slot = "right"
+kind = "exec"
+command = "battery.sh"
+interval = "30s"
+
+[[widgets]]
+id = "branch"
+kind = "exec"
+command = ["git-branch-widget"]
+"#,
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.widgets.len(), 2);
+    assert_eq!(loaded.widgets[0].id, "battery");
+    assert_eq!(loaded.widgets[0].kind, "exec");
+    assert_eq!(
+        loaded.widgets[0].slot,
+        plugin::PluginWidgetSlot::Right,
+        "explicit slot"
+    );
+    assert_eq!(
+        loaded.widgets[0].opts.get("interval"),
+        Some(&toml::Value::String("30s".to_owned())),
+        "kind-specific options ride the flattened opts map"
+    );
+    assert_eq!(
+        loaded.widgets[1].slot,
+        plugin::PluginWidgetSlot::Right,
+        "slot defaults to right"
+    );
+    Ok(())
+}
+
+#[test]
+fn plugin_manifest_rejects_duplicate_widget_ids() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.dup"
+name = "Dup"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "w"
+kind = "exec"
+command = "a"
+
+[[widgets]]
+id = "w"
+kind = "exec"
+command = "b"
+"#,
+    )?;
+    assert!(plugin::load_plugin_manifest(&manifest).is_err());
+    Ok(())
+}
+
+#[test]
+fn merge_widget_contributions_appends_after_user_widgets_and_drops_invalid()
+-> Result<(), Box<dyn std::error::Error>> {
+    use phux_config::widget::WidgetRegistry;
+    use phux_config::{StatusCfg, Widget};
+
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.mixed"
+name = "Mixed"
+version = "0.1.0"
+min_phux_version = "0.0.2"
+
+[[widgets]]
+id = "ok"
+slot = "left"
+kind = "exec"
+command = "ok.sh"
+
+[[widgets]]
+id = "bad-kind"
+kind = "no-such-widget"
+
+[[widgets]]
+id = "bad-opts"
+kind = "exec"
+interval = "30s"
+"#,
+    )?;
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    let mut status = StatusCfg {
+        left: vec![Widget::Bare("session-name".to_owned())],
+        ..StatusCfg::default()
+    };
+    plugin::merge_widget_contributions(
+        &mut status,
+        std::slice::from_ref(&loaded),
+        &WidgetRegistry::with_builtins(),
+    );
+
+    // The valid contribution appended AFTER the user's widget; the unknown
+    // kind and the command-less exec were both dropped.
+    assert_eq!(status.left.len(), 2);
+    assert!(matches!(&status.left[0], Widget::Bare(k) if k == "session-name"));
+    match &status.left[1] {
+        Widget::Spec(spec) => assert_eq!(spec.kind, "exec"),
+        other @ Widget::Bare(_) => panic!("expected contributed spec, got {other:?}"),
+    }
+    assert!(status.center.is_empty() && status.right.is_empty());
+    Ok(())
+}
+
+/// The `min_phux_version` gate (phux-r82.2): a manifest whose floor is at
+/// or below the current phux version loads; equality is the boundary case.
+#[test]
+fn manifest_at_current_phux_version_loads() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        &format!(
+            r#"
+id = "example.current"
+name = "Current"
+version = "0.1.0"
+min_phux_version = "{}"
+"#,
+            plugin::CURRENT_PHUX_VERSION
+        ),
+    )?;
+
+    let loaded = plugin::load_plugin_manifest(&manifest)?;
+
+    assert_eq!(loaded.id, "example.current");
+    assert_eq!(loaded.min_phux_version, plugin::CURRENT_PHUX_VERSION);
+    Ok(())
+}
+
+/// A manifest demanding a future phux is rejected at load time with an
+/// error naming the plugin, its floor, and the running version — so both
+/// `phux plugin link` (which loads the manifest) and every load-time
+/// consumer see the same clear refusal.
+#[test]
+fn manifest_requiring_future_phux_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.future"
+name = "Future"
+version = "0.1.0"
+min_phux_version = "99.0.0"
+"#,
+    )?;
+
+    let err = plugin::load_plugin_manifest(&manifest).expect_err("future floor must be rejected");
+
+    let message = err.to_string();
+    assert!(message.contains("example.future"), "{message}");
+    assert!(message.contains("99.0.0"), "{message}");
+    assert!(message.contains(plugin::CURRENT_PHUX_VERSION), "{message}");
+    Ok(())
+}
+
+/// A `min_phux_version` that is not a dotted numeric version is a schema
+/// error, not a silent pass.
+#[test]
+fn manifest_with_malformed_min_phux_version_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
+    let dir = TempDir::new()?;
+    let manifest = write_manifest(
+        &dir,
+        r#"
+id = "example.badfloor"
+name = "Bad Floor"
+version = "0.1.0"
+min_phux_version = "latest"
+"#,
+    )?;
+
+    let err =
+        plugin::load_plugin_manifest(&manifest).expect_err("malformed floor must be rejected");
+
+    let message = err.to_string();
+    assert!(message.contains("malformed min_phux_version"), "{message}");
+    Ok(())
+}
+
+/// The best-effort batch loader skips (never propagates) a plugin gated
+/// out by `min_phux_version`, so one too-new plugin cannot take down the
+/// TUI or server consuming the healthy ones.
+#[test]
+fn load_enabled_manifests_skips_version_gated_plugin() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let config_path = dir.path().join("config.toml");
+    let good = dir.path().join("good.toml");
+    std::fs::write(
+        &good,
+        r#"
+id = "example.good-floor"
+name = "Good"
+version = "0.1.0"
+min_phux_version = "0.0.1"
+"#,
+    )?;
+    let future = dir.path().join("future.toml");
+    std::fs::write(
+        &future,
+        r#"
+id = "example.future-floor"
+name = "Future"
+version = "0.1.0"
+min_phux_version = "99.0.0"
+"#,
+    )?;
+
+    let entries = vec![
+        plugin::PluginConfigEntry {
+            manifest: good,
+            enabled: true,
+        },
+        plugin::PluginConfigEntry {
+            manifest: future,
+            enabled: true,
+        },
+    ];
+
+    let manifests = plugin::load_enabled_manifests(&config_path, &entries);
+
+    assert_eq!(manifests.len(), 1, "the gated plugin is skipped");
+    assert_eq!(manifests[0].id, "example.good-floor");
+    Ok(())
+}

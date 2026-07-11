@@ -15,7 +15,7 @@ last-reviewed: 2026-06-23
 [![CI](https://github.com/phall1/phux/actions/workflows/ci.yml/badge.svg)](https://github.com/phall1/phux/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-[Start](#start-now) |
+[Install](#install-and-run) |
 [Keys](#keys-you-need-first) |
 [Config](#settings-and-config) |
 [Headless](#headless-and-agent-control) |
@@ -32,23 +32,47 @@ later to the same shells. The difference is underneath. In phux, a terminal is
 a first-class object on a wire, so your TUI, a GUI, and an AI agent can all
 hold the same live terminal instead of reading screenshots or copied text.
 
-If you are new here, start with the commands below. You should be able to open
-this page, run phux, find help, change config, split panes, detach, reattach,
-and drive a pane from a script without hunting through the docs.
+If you are new here, install phux, run it, detach, reattach, and drive the same
+pane from a script without hunting through the docs.
 
-## Start now
+## Install and run
 
-Source is the install path guaranteed to work today:
+Fastest path on supported Homebrew platforms:
+
+```sh
+brew install phall1/phux/phux
+phux
+```
+
+Portable installer for the latest GitHub release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
+export PATH="$HOME/.local/bin:$PATH"
+phux
+```
+
+Install from a source checkout:
 
 ```sh
 git clone https://github.com/phall1/phux
 cd phux
-nix develop
-cargo run --bin phux
+nix develop -c cargo install --locked --path crates/phux
+nix develop -c cargo install --locked --path crates/phux-mcp
+phux
 ```
 
-That starts the server if needed and attaches a TUI client to the default
-session. You are now inside a real shell running under phux.
+`phux` starts the server if needed and attaches a TUI client to the default
+session. You are now inside a real shell running under phux. Detach with
+`Ctrl-A d`; the server and pane processes keep running. Reattach with:
+
+```sh
+phux
+```
+
+No Nix? Use [Install](./docs/INSTALL.md) for the current release channels and
+off-Nix build notes. The GitHub latest release is `v0.0.3`, with `phux` and
+`phux-mcp` artifacts for macOS arm64, Linux x86_64, and Linux arm64.
 
 ## Keys you need first
 
@@ -68,17 +92,8 @@ Inside phux, the default prefix is `Ctrl-A`:
 | Copy mode | `Ctrl-A [` |
 | Detach | `Ctrl-A d` |
 
-After detaching, the server and pane processes keep running. Reattach with:
-
-```sh
-cargo run --bin phux
-```
-
-Once you have an installed binary on your PATH, the same flow is just:
-
-```sh
-phux
-```
+After detaching, the server and pane processes keep running. Reattach with
+`phux`.
 
 ## Settings and config
 
@@ -113,29 +128,27 @@ for the schema, examples, status widgets, hooks, and plugin manifests.
 
 ## Install paths
 
-phux is v0.0.x. Source is the only install path guaranteed to work today while
-the latest GitHub release is the seeded `v0.0.1`.
+phux is v0.0.x, but the public install surface now exists: Homebrew, the curl
+installer, release tarballs, and source installs from a clone all install both
+`phux` and `phux-mcp`.
 
 ### Supported install channels
 
 | Channel | Status | Command |
 |---|---|---|
-| From source | Works today on macOS and Linux | `nix develop`, then `cargo run --bin phux` |
-| Homebrew | Primary binary path after a post-`v0.0.1` Formula lands | `brew install phall1/phux/phux` |
-| Curl installer | Release-tarball wrapper after a post-`v0.0.1` portable release lands | `curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh \| bash` |
-| Release tarball | CI-built macOS arm64, Linux x86_64, and Linux arm64 artifacts after `v0.0.1` | download `phux-<tag>-<target>.tar.gz` plus `.sha256` |
+| Homebrew | Primary binary path on supported Homebrew platforms | `brew install phall1/phux/phux` |
+| Curl installer | Scripted install from GitHub release tarballs | `curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh \| bash` |
+| Release tarball | Manual install and checksum verification | download `phux-<tag>-<target>.tar.gz` plus `.sha256` |
+| From source | Source install from a clone on macOS and Linux | `nix develop -c cargo install --locked --path crates/phux` |
 
-Homebrew becomes the primary binary install path once the Formula is live for
-your platform:
+Homebrew is the cleanest install path when your platform has a published
+Formula artifact:
 
 ```sh
 brew install phall1/phux/phux
 ```
 
-Until that release exists and the Formula is live on your platform, use the
-source path.
-
-**Curl installer — after the next portable release.**
+**Curl installer.**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash
@@ -145,31 +158,32 @@ The installer is a wrapper around GitHub release tarballs. It verifies the
 release `.sha256` sidecar before unpacking and installs both `phux` and
 `phux-mcp` into `${PHUX_INSTALL_DIR:-$HOME/.local/bin}`; set
 `PHUX_INSTALL_DIR` to choose a different bin directory. With no `--version`, it
-installs the latest GitHub release. Today latest is `v0.0.1`, which is
-intentionally refused because it is not a portable binary release.
+installs the latest GitHub release.
 
-To install a specific future tag before it is latest:
+To pin a specific release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.2
+curl -fsSL https://raw.githubusercontent.com/phall1/phux/main/scripts/install.sh | bash -s -- --version v0.0.3
 ```
 
 **Prebuilt release artifacts.** Version tags build tarballs for macOS arm64,
-Linux x86_64, and Linux arm64. The seeded `v0.0.1` Linux tarball is Nix-linked
-and not portable; use the next CI-built tag, Homebrew, or source.
+Linux x86_64, and Linux arm64. `v0.0.2` is the first portable public release;
+the seeded `v0.0.1` Linux tarball was Nix-linked and should be ignored.
 
-**From source — works today.**
+**From source.**
 
 ```sh
 git clone https://github.com/phall1/phux
 cd phux
-nix develop          # pins the toolchain, including the zig libghostty needs
-cargo run --bin phux
+nix develop -c cargo install --locked --path crates/phux
+nix develop -c cargo install --locked --path crates/phux-mcp
+phux
 ```
 
-You're attached. Detach with `Ctrl-A d` — the server keeps your shells alive —
-and run `phux` again to come back to exactly where you were. Off-Nix pins and the
-agent binaries are in [INSTALL.md](./docs/INSTALL.md).
+The Nix dev shell pins Rust and the Zig compiler required by libghostty; the
+commands above still install normal `phux` and `phux-mcp` binaries into
+Cargo's bin directory. Off-Nix pins and platform notes are in
+[INSTALL.md](./docs/INSTALL.md).
 
 `cargo install phux is unsupported`: crates.io is scoped to `phux-protocol`;
 the binary and internal crates are not publishable, and the binary still
@@ -190,9 +204,9 @@ that same persistent pane:
 
 ```sh
 phux ls --json
-phux run . --json "printf 'phux-agent-loop\n'"
-phux wait . --until "phux-agent-loop" --timeout 10
-phux snapshot . --json --scrollback 50
+phux send-keys . "printf '%s\n' phux-ready | tr a-z A-Z" Enter
+phux wait --until "PHUX-READY" --timeout 10 .
+phux snapshot --json --scrollback 50 .
 ```
 
 For MCP clients, point the client at the bundled `phux-mcp` binary. It exposes
@@ -204,26 +218,12 @@ the same `ls`, `snapshot`, `send-keys`, `run`, `wait`, `ask`, `new`, `kill`,
 Everything above also works without a TTY. The same terminals can be addressed
 by name or id from scripts, CI, or an agent:
 
-If you are still running from source, prefix these with
-`cargo run --bin phux --` too.
-
 ```sh
-
-curl -fsSL https://install.determinate.systems/nix | sh -s -- install  # if you don't have Nix
-
-
-git clone https://github.com/phall1/phux
-
-cd phux
-nix develop          # pins the toolchain, including the zig libghostty needs
-
-
-cargo run --bin phux
 phux ls --json                         # list sessions and panes
 phux snapshot .                        # read the focused pane
 phux send-keys . 'cargo test' Enter    # type into the focused pane
 phux run . "cargo test"                # run in a real pane, return its exit code
-phux wait . --until "0 failed"         # block until output appears
+phux wait --until "0 failed" .         # block until output appears
 phux watch --json .                    # stream pane events
 ```
 
@@ -316,12 +316,14 @@ The line between shipped and promised is kept explicit:
 - Config scaffolding and effective-config inspection
 - Workspace restore that recreates sessions and seed processes from a typed
   archive; live PTY handoff belongs to `phux upgrade`, not restore
+- Predictive local echo behind the opt-in `[experimental]` configuration,
+  with authoritative reconciliation and adaptive backoff
 
 **Designed and addressed-for, not wired yet**
 
 - Federation across machines. The wire already carries `SATELLITE { host, id }`;
   nothing routes it yet. That is the v0.2 arc.
-- A native GUI consumer, a typed Rust SDK crate, predictive local echo.
+- A native GUI consumer and a typed public Rust SDK crate.
 
 Anything not in the first two lists is a direction, not a feature.
 
@@ -330,7 +332,7 @@ Anything not in the first two lists is a direction, not a feature.
 | You want to | Read |
 |---|---|
 | Run your first session | [Quickstart](./docs/QUICKSTART.md) |
-| Install without Nix | [Install](./docs/INSTALL.md) |
+| Install phux | [Install](./docs/INSTALL.md) |
 | Customize keys and config | [Configuration](./docs/CONFIG.md) |
 | Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
 | Understand the model | [Concepts](./docs/CONCEPTS.md) |
@@ -338,6 +340,7 @@ Anything not in the first two lists is a direction, not a feature.
 | Use the MCP adapter | [MCP](./docs/consumers/mcp.md) |
 | Read the wire spec | [Spec](./docs/spec/) |
 | See how it is built | [Architecture](./docs/architecture/) |
+| Ship a release | [Releasing](./docs/RELEASING.md) |
 | Read where it is going | [Vision](./docs/vision.md) |
 | See the decisions | [ADRs](./ADR/README.md) |
 | Build it with us | [Contributing](./CONTRIBUTING.md) |

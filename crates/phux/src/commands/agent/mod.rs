@@ -1,6 +1,7 @@
 mod config;
 mod detect;
 mod model;
+mod record;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +16,13 @@ use crate::commands::{
 
 use self::config::configured_agents;
 use self::detect::infer_agent_state;
-use self::model::{AgentStateReport, PaneEvidence, format_terminal};
+use self::model::{AgentStateReport, PaneEvidence};
+use self::record::{run_agent_clear, run_agent_set};
+
+// Shared with the `phux config agents` live projection (phux-r82.10):
+// the pipelined per-pane `phux.agent/v1` index and the pane formatter.
+pub(crate) use self::model::format_terminal;
+pub(crate) use self::record::fetch_agent_index;
 
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum AgentAction {
@@ -43,6 +50,33 @@ pub(crate) enum AgentAction {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    #[command(about = "Declare a pane's agent identity (writes the phux.agent/v1 L3 record)")]
+    Set {
+        target: Option<String>,
+        /// Human-facing agent name (required, non-empty).
+        #[arg(long)]
+        name: String,
+        /// Open-vocabulary kind slug, e.g. "claude" or "codex".
+        #[arg(long)]
+        kind: Option<String>,
+        /// Declared lifecycle state.
+        #[arg(long, value_parser = ["unknown", "idle", "working", "blocked", "done"])]
+        state: Option<String>,
+        /// Declared attention priority (defaults derive from state).
+        #[arg(long, value_parser = ["none", "low", "normal", "high"])]
+        attention: Option<String>,
+        /// Free-form association label (fleet/job name).
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+    #[command(about = "Clear a pane's declared agent identity (deletes phux.agent/v1)")]
+    Clear {
+        target: Option<String>,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 pub(crate) fn run_agent(action: &AgentAction) -> ExitCode {
@@ -58,6 +92,24 @@ pub(crate) fn run_agent(action: &AgentAction) -> ExitCode {
             json: _,
             socket: _,
         } => run_agent_one(action),
+        AgentAction::Set {
+            target,
+            name,
+            kind,
+            state,
+            attention,
+            session,
+            socket,
+        } => run_agent_set(
+            target.as_deref(),
+            name,
+            kind.as_deref(),
+            state.as_deref(),
+            attention.as_deref(),
+            session.as_deref(),
+            socket.clone(),
+        ),
+        AgentAction::Clear { target, socket } => run_agent_clear(target.as_deref(), socket.clone()),
     }
 }
 
@@ -96,7 +148,9 @@ fn run_agent_one(action: &AgentAction) -> ExitCode {
             json,
             socket,
         } => (target.as_deref(), *json, socket.clone(), AgentView::Explain),
-        AgentAction::List { .. } => return ExitCode::FAILURE,
+        AgentAction::List { .. } | AgentAction::Set { .. } | AgentAction::Clear { .. } => {
+            return ExitCode::FAILURE;
+        }
     };
     let selector = match parse_selector(target) {
         Ok(selector) => selector,
@@ -155,9 +209,13 @@ async fn classify_snapshot(
     snapshot: &SessionSnapshot,
     plugins: &[model::PluginAgent],
 ) -> Vec<AgentStateReport> {
+    // ADR-0040: structured `phux.agent/v1` records outrank every heuristic
+    // source, so fetch them up front (one pipelined connection).
+    let records = fetch_agent_index(socket_path, snapshot).await;
     let mut states = Vec::with_capacity(snapshot.panes.len());
     for pane in &snapshot.panes {
-        let evidence = pane_evidence(socket_path, snapshot, pane).await;
+        let mut evidence = pane_evidence(socket_path, snapshot, pane).await;
+        evidence.record = records.get(&pane.id).cloned();
         states.push(infer_agent_state(&evidence, plugins));
     }
     states.sort_by(|a, b| a.terminal.cmp(&b.terminal));
@@ -181,6 +239,7 @@ async fn pane_evidence(
         window: window_label(window),
         title: pane.title.clone(),
         cwd: pane.cwd.clone(),
+        record: None,
         lines: screen.as_ref().map_or_else(Vec::new, |s| s.lines.clone()),
         semantic_input: screen
             .as_ref()

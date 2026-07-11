@@ -14,6 +14,8 @@ pub mod cwd_query;
 pub mod downsample;
 pub mod extract;
 pub mod grid;
+pub mod hooks;
+pub mod hub;
 pub mod id_bridge;
 pub mod input;
 pub mod policy;
@@ -25,6 +27,8 @@ pub mod terminal_actor;
 pub mod transport;
 pub mod upgrade;
 
+pub use hub::link::{HubLinkStatuses, LinkStatus};
+pub use hub::{HubEntry, HubTable, HubTableError, SatelliteTarget};
 pub use id_bridge::IdBridge;
 pub use runtime::{ServerConfig, ServerError, ServerRuntime, default_socket_path};
 pub use state::{

@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-10
 ---
 
 # The phux agent CLI
@@ -91,30 +91,30 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
 - **`phux ls [--json] [--socket P]`** — list sessions. Does not auto-start a
   server (like `tmux ls`): with none running it reports as much and exits
   non-zero. `--json` emits `SessionListJson` (§4.1).
-- **`phux snapshot [TARGET] [--json] [--scrollback[=N]] [--cells]
-  [--socket P]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
+- **`phux snapshot [--json] [--scrollback[=N]] [--cells] [--socket P]
+  [TARGET]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
   optional (defaults to the focused/last session). `--json` emits `ScreenState`
   (§4.2); without it, a boxed text view.
-- **`phux send-keys TARGET KEYS... [--socket P]`** — route named keys or
+- **`phux send-keys [--socket P] TARGET KEYS...`** — route named keys or
   literal strings to one resolved pane by id (`ROUTE_INPUT`). `TARGET` is
   required. No JSON. `KEYS` are tmux-shaped: named keys (`Enter`, `Tab`,
   `Escape`, `Up`, `C-c`, `M-x`) or a literal string sent character by
   character.
-- **`phux run TARGET CMD... [--timeout SECS] [--json] [--socket P]`** — run a
+- **`phux run [--timeout SECS] [--json] [--socket P] TARGET CMD...`** — run a
   command in a pane and capture its exit code, output, and duration via printed
   sentinels (assumes a POSIX shell: sh/bash/zsh). `TARGET` is required.
   `--json` emits `RunResult` (§4.3). The exit code mirrors the child (§5.2).
-  Flags must precede `CMD`, or clap's `trailing_var_arg` swallows them into the
+  Flags must precede `TARGET`, or clap's `trailing_var_arg` swallows them into the
   command line.
-- **`phux wait [TARGET] [--until TEXT] [--idle MS] [--timeout SECS] [--json]
-  [--socket P]`** — poll the side-effect-free screen read until a condition
+- **`phux wait [--until TEXT] [--idle MS] [--timeout SECS] [--json]
+  [--socket P] [TARGET]`** — poll the side-effect-free screen read until a condition
   holds. `--until` takes precedence over `--idle`; with neither, it settles on
   idle. `--json` emits the final `ScreenState`. Exit 0 when the condition is
   met, 124 on timeout. Two gotchas: flags must precede `TARGET`; and `--until`
   matches any visible row, including the shell's echo of the command you just
   typed — match on text that appears only in command output, never the command
   itself.
-- **`phux watch [TARGET] [--json] [--socket P]`** — stream a pane's live events
+- **`phux watch [--json] [--socket P] [TARGET]`** — stream a pane's live events
   (the push half of the agent surface; see [`../spec/L1.md`](../spec/L1.md)).
   Subscribes to the server's event stream scoped to the resolved pane and
   prints one event per line until EOF (server gone) or Ctrl-C; the
@@ -147,30 +147,59 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   suggestions, excessive suggestion counts, and unknown panes fail without
   emitting an event.
 - **`phux agent <list|show|explain> [TARGET] [--json] [--socket P]`** —
-  project public agent state from already-phux-shaped evidence: session/pane
-  metadata, OSC/title hints, side-effect-free `snapshot --cells`, and enabled
-  plugin `[[agents]]` declarations. `list` covers every pane; `show` returns
-  the selected pane; `explain` keeps the same state but expands the evidence
-  trail in the human view. `--json` emits `AgentStateJson` (§4.7). States are
-  `unknown`, `idle`, `working`, `blocked`, or `done`; each state carries
-  confidence and ordered provenance so consumers can show why phux believes it.
+  project public agent state. A pane carrying a declared `phux.agent/v1`
+  record (ADR-0040; see `agent set` below) reports straight from it with
+  `agent_record` provenance and no heuristics; otherwise state is inferred
+  from already-phux-shaped evidence: session/pane metadata, OSC/title hints,
+  side-effect-free `snapshot --cells`, and enabled plugin `[[agents]]`
+  declarations. `list` covers every pane; `show` returns the selected pane;
+  `explain` keeps the same state but expands the evidence trail in the human
+  view. `--json` emits `AgentStateJson` (§4.7). States are `unknown`, `idle`,
+  `working`, `blocked`, or `done`; each state carries confidence and ordered
+  provenance so consumers can show why phux believes it.
+- **`phux agent set [TARGET] --name NAME [--kind K] [--state S]
+  [--attention A] [--session L] [--socket P]`** — declare the target pane's
+  agent identity by writing the whole `phux.agent/v1` L3 record
+  ([`docs/spec/L3.md`](../spec/L3.md) §3.7, ADR-0040; last writer wins). An
+  agent integration calls it (or issues the equivalent `SET_METADATA`) when
+  it starts, changes state, or hands off, instead of encoding lifecycle into
+  its OSC title. The declared record outranks title/screen heuristics in
+  every consumer, and the reference TUI labels the pane's window/sidebar tab
+  from it. States: `unknown|idle|working|blocked|done`; attention:
+  `none|low|normal|high` (defaults derive from state). Prints the confirmed
+  record as `@N<TAB>json`.
+- **`phux agent clear [TARGET] [--socket P]`** — delete the declared record
+  (`DELETE_METADATA`); consumers fall back to the OSC-title and screen
+  heuristics. Prints `@N<TAB>-` on confirmation.
 - **`phux new [-s NAME] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** —
   create a new session. Without `--json` it creates and attaches: an explicit
   `-s NAME` that already exists is an error (like tmux's duplicate-session
-  refusal); an omitted name is auto-assigned the smallest free numeric name
-  (tmux-style); a server is auto-spawned if none is running. With `--json` it
+  refusal); an omitted name starts from `defaults.session-name-template` and
+  gains a numeric suffix when needed; a server is auto-spawned if none is
+  running. With `--json` it
   creates the session without attaching (no attach, no resize), then prints the
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
   Shape in §4.4.
+- **`phux spawn [--satellite NAME] [-c CWD] [-- COMMAND...] [--json]
+  [--socket P]`** — spawn a terminal without attaching (`SPAWN_TERMINAL`);
+  the pane joins the server's most recently active session and the new
+  terminal id prints on success. `--satellite NAME` routes the spawn
+  through a federation hub (`phux server --hub`) to the named registry
+  satellite and prints the satellite-tagged id, which every
+  satellite-capable verb can address through the hub. Does not auto-start
+  a server. Typed failures (unknown/unrouted satellite, unreachable link)
+  exit nonzero with the diagnostic on stderr. Shape in §4.11.
 - **`phux plugin <list|link|unlink|enable|disable|validate> [--json]`** —
   manage declarative plugin manifest entries in the local config registry.
   This never contacts a running server and never executes plugin commands.
   `--json` emits the plugin registry document (§4.5); failure paths leave
   stdout empty and report diagnostics on stderr.
-- **`phux config agents [--json]`** — project configured plugin
-  `[[agents]]` declarations into a flat agent-state list. It never contacts a
-  server. `--json` emits `ConfiguredAgentsJson` (§4.6).
+- **`phux config agents [--json] [--socket PATH]`** — project configured
+  plugin `[[agents]]` declarations into a flat agent-state list, merged with
+  live per-pane `phux.agent/v1` records and asked state when a server answers
+  on the socket (phux-r82.10). No reachable server degrades to the declared
+  manifest values. `--json` emits `ConfiguredAgentsJson` (§4.6).
 - **`phux config run PLUGIN ACTION [--timeout SECS] [--cwd PATH] [--json]`** —
   execute one action declared by an enabled configured plugin manifest. The
   command runs as argv from the plugin root; there is no implicit shell
@@ -194,8 +223,8 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   `--json` emits the satellite registry document (§4.10); failure paths leave
   stdout empty and report diagnostics on stderr.
 
-**Not implemented.** `split` and `detach` do not exist as subcommands today
-(tracked as bead phux-99te). The shipped verbs are listed in
+`split` and `detach` are interactive TUI actions, not headless subcommands; that
+boundary is intentional. The shipped verbs are listed in
 [`tui.md`](./tui.md) §1; the agent-relevant subset is the catalog above plus
 `kill` and `attach`.
 
@@ -390,11 +419,16 @@ nonzero, stdout empty, stderr diagnostic.
 ### 4.6 `ConfiguredAgentsJson` — `phux config agents --json`
 
 `phux config agents --json` emits configured plugin agent declarations as a
-consumer-ready list. It is a config projection, not a live runtime detector:
+consumer-ready list, merged with live runtime state when a server answers
+(phux-r82.10). Schema history: version 1 was the pure manifest projection;
+version 2 (current) makes `state`/`attention` the *effective* values —
+runtime `phux.agent/v1` record first, declared manifest baseline as fallback
+— and adds `live`, `source`, `declared`, and `runtime`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "live": true,
   "agents": [
     {
       "plugin_id": "example.agent-tools",
@@ -402,16 +436,37 @@ consumer-ready list. It is a config projection, not a live runtime detector:
       "id": "codex",
       "label": "Codex",
       "description": "Coding agent",
-      "state": "working",
-      "attention": "normal",
+      "state": "blocked",
+      "attention": "high",
+      "source": "runtime",
+      "declared": { "state": "working", "attention": "normal" },
+      "runtime": {
+        "terminal": "@3",
+        "name": "codex",
+        "kind": "codex",
+        "state": "blocked",
+        "attention": "high",
+        "asked": false
+      },
       "contexts": ["workspace", "pane"]
     }
   ]
 }
 ```
 
-`state` is one of `unknown`, `idle`, `working`, or `blocked`. `attention` is
-one of `none`, `low`, `normal`, or `high`. Invalid manifests are hard failures
+`state` is one of `unknown`, `idle`, `working`, `blocked`, or (runtime only)
+`done`. `attention` is one of `none`, `low`, `normal`, or `high`. `live` is
+whether a server answered; with `live: false` every row is `source:
+"manifest"`. `source` is `"runtime"` when a live `phux.agent/v1` record
+matched the row (record `kind` slug, else lowercased `name`, equals the
+agent id — the same identity derivation as `phux agent`), `"manifest"`
+otherwise; `runtime` is `null` for manifest rows. When several panes declare
+the same agent, the most attention-worthy binding is reported. Attention
+follows the record's convention: declared value first, else derived from
+state (blocked→high, working→normal, done/unknown→low, idle→none). An
+active ADR-0035 ask on the matched pane sets `runtime.asked` and elevates a
+record that declares *no* state to `blocked`; a declared record state
+outranks the ask sentinel (ADR-0040). Invalid manifests are hard failures
 and leave stdout empty on `--json`, preserving the script contract.
 
 ### 4.7 `AgentStateJson` — `phux agent ... --json`
@@ -586,6 +641,24 @@ The satellite lifecycle surface is config-local. It edits or reads
 endpoint URIs, duplicate configured names, and refused registry writes are hard
 failures: exit nonzero, stdout empty, stderr diagnostic.
 
+### 4.11 `phux spawn --json`
+
+`phux spawn --json` emits a small fixed object naming the spawned terminal:
+
+```json
+{
+  "terminal_id": 7,
+  "satellite": null
+}
+```
+
+`satellite` is the registry name when the spawn was routed with
+`--satellite NAME` (in which case `terminal_id` is the id *on that
+satellite* — address the pane through the hub by the pair), and `null`
+for a local spawn (address it as `@7`). Failures — no route to the named
+satellite, unreachable satellite link, server-side spawn failure — exit
+nonzero with stdout empty and the typed diagnostic on stderr.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
@@ -596,8 +669,8 @@ worked example in `sh`:
 
 ```sh
 phux send-keys build "cargo test" Enter
-phux wait build --until "test result:" --timeout 120
-phux snapshot build --json --scrollback 200 > out.json
+phux wait --until "test result:" --timeout 120 build
+phux snapshot --json --scrollback 200 build > out.json
 ```
 
 When you only want a command's exit code and output, the one-shot `phux run` is
@@ -605,7 +678,7 @@ the higher-level alternative — it brackets the command with sentinels and
 mirrors `$?`:
 
 ```sh
-phux run build "cargo test" --json
+phux run --json build "cargo test"
 ```
 
 The contrast: `run` is "I want the exit code"; `send-keys` plus `wait` is "I am

@@ -36,12 +36,16 @@ pub mod copy_mode;
 pub mod help;
 pub mod prompt;
 pub mod select_list;
+pub mod toast;
+pub mod which_key;
 pub mod widgets;
 
 pub use copy_mode::CopyModeOverlay;
 pub use help::HelpOverlay;
 pub use prompt::PromptOverlay;
 pub use select_list::{SelectItem, SelectList};
+pub use toast::ToastOverlay;
+pub use which_key::WhichKeyOverlay;
 
 /// Test double: a [`RenderOverlay`] that records every key handed to it and
 /// never dismisses, so a test can assert exactly which keystrokes reached
@@ -118,6 +122,27 @@ pub trait RenderOverlay {
     /// selected cells invert.
     fn copy_selection(&self) -> Option<SelectionRect> {
         None
+    }
+
+    /// `true` for a display-only overlay that must never capture input
+    /// (phux-foz.2: the which-key popup). The dispatcher checks this
+    /// BEFORE overlay routing: instead of feeding keys to the overlay it
+    /// dismisses it and processes the event exactly as if the overlay
+    /// were not there, so a passthrough overlay can never eat or delay a
+    /// chord. Default `false` — every modal overlay captures input.
+    fn is_input_passthrough(&self) -> bool {
+        false
+    }
+
+    /// phux-foz.7: offer this overlay a freshly rebuilt row set tagged
+    /// `key`. A *live* overlay whose data projects shared client state —
+    /// the agent-fleet dashboard — replaces its rows in place (preserving
+    /// query/selection) and returns `true` so the driver repaints it; every
+    /// other overlay ignores the offer (default `false`). This is push, not
+    /// poll: the driver calls it only when a server frame actually changed
+    /// the projected state.
+    fn refresh_items(&mut self, _key: &str, _items: &[SelectItem]) -> bool {
+        false
     }
 }
 
@@ -283,6 +308,15 @@ impl OverlayState {
         self.stack.len()
     }
 
+    /// `true` when the top overlay is input-passthrough (phux-foz.2:
+    /// the which-key popup). The dispatcher consults this before overlay
+    /// routing so a passthrough overlay is dismissed by — and never
+    /// consumes — the next input event.
+    #[must_use]
+    pub fn top_is_passthrough(&self) -> bool {
+        self.stack.last().is_some_and(|o| o.is_input_passthrough())
+    }
+
     /// Push `overlay` onto the top of the stack. It becomes the input
     /// target and is painted last (above any overlays beneath it).
     pub fn push(&mut self, overlay: Box<dyn RenderOverlay>) {
@@ -324,6 +358,19 @@ impl OverlayState {
         }
     }
 
+    /// phux-foz.7: hand a freshly rebuilt row set tagged `key` to the
+    /// stacked overlays, top-down. The first overlay that accepts it (a
+    /// live [`SelectList`] carrying the matching key — the agent-fleet
+    /// dashboard) replaces its rows and stops the walk; `true` means some
+    /// overlay refreshed and the caller should repaint the overlay layer.
+    /// `false` (no live overlay in the stack) costs nothing downstream.
+    pub fn refresh_items(&mut self, key: &str, items: &[SelectItem]) -> bool {
+        self.stack
+            .iter_mut()
+            .rev()
+            .any(|overlay| overlay.refresh_items(key, items))
+    }
+
     /// Dispatch a mouse event to the top overlay. The overlay stays active;
     /// scroll requests are handed back to the dispatcher for local terminal
     /// viewport mutation.
@@ -352,21 +399,26 @@ impl OverlayState {
     /// The bounding `Rect` to float the active overlay stack within, or
     /// `None` if any stacked overlay paints the whole viewport.
     ///
-    /// Returns the union of every stacked overlay's [`RenderOverlay::bounds`].
+    /// Returns the union of every stacked overlay's [`RenderOverlay::bounds`],
+    /// each centered inside `content` — the pane content rect (the viewport
+    /// minus the sidebar strip and status-bar row), NOT the raw viewport
+    /// (phux-foz.14). Centering against `content` keeps a modal's box off the
+    /// sidebar columns, so it never occludes the chrome the floating-modal
+    /// base-frame repaint (phux-foz.10) works to preserve.
+    ///
     /// When `Some`, the driver paints the live panes as a base frame and
     /// emits only this region on top (a true floating modal); when `None`,
     /// it falls back to the full-screen clear+paint. Copy-mode is handled
     /// earlier (via [`Self::copy_selection`]) and never reaches here.
     #[must_use]
-    pub fn active_bounds(&self, viewport_dims: (u16, u16)) -> Option<Rect> {
+    pub fn active_bounds(&self, content: Rect) -> Option<Rect> {
         if self.stack.is_empty() {
             return None;
         }
-        let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
         let mut union: Option<Rect> = None;
         for overlay in &self.stack {
             // Any full-screen overlay forces the whole-viewport path.
-            let b = overlay.bounds(area)?;
+            let b = overlay.bounds(content)?;
             union = Some(union.map_or(b, |u| u.union(b)));
         }
         union
@@ -401,10 +453,17 @@ impl OverlayState {
     /// the shadow) are never written, so nothing erases the panes. The
     /// `shadow` color gives the box depth over the panes; pass `Color::Reset`
     /// to disable it. No-op when inactive.
+    ///
+    /// Overlays render against `content` — the pane content rect (viewport
+    /// minus the sidebar strip and status-bar row), so a centered modal lands
+    /// inside the pane region rather than over the chrome (phux-foz.14). The
+    /// buffer stays full-viewport sized (`viewport_dims`) so `clip` and the
+    /// drop shadow keep absolute screen coordinates.
     pub fn paint_clipped(
         &self,
         out: &mut impl Write,
         viewport_dims: (u16, u16),
+        content: Rect,
         clip: Rect,
         shadow: Color,
     ) -> io::Result<()> {
@@ -414,7 +473,7 @@ impl OverlayState {
         let area = Rect::new(0, 0, viewport_dims.0, viewport_dims.1);
         let mut buf = Buffer::empty(area);
         for overlay in &self.stack {
-            overlay.render(area, &mut buf);
+            overlay.render(content, &mut buf);
         }
         emit_buffer_clipped(out, &mut buf, clip.intersection(area), shadow)
     }
@@ -656,6 +715,57 @@ mod tests {
         assert!(!s.is_active());
     }
 
+    // ---------- phux-foz.7: live row refresh routing ----------
+
+    fn live_fleet_list() -> SelectList {
+        let items = vec![SelectItem::new(
+            "stale-row",
+            phux_config::keybind::ResolvedAction {
+                action: "focus-pane".to_owned(),
+                args: std::collections::BTreeMap::new(),
+            },
+        )];
+        SelectList::new("agent fleet", items, &crate::render::Theme::default())
+            .with_live_key("agent-fleet")
+    }
+
+    fn fresh_rows() -> Vec<SelectItem> {
+        vec![SelectItem::new(
+            "fresh-row",
+            phux_config::keybind::ResolvedAction {
+                action: "focus-pane".to_owned(),
+                args: std::collections::BTreeMap::new(),
+            },
+        )]
+    }
+
+    #[test]
+    fn refresh_items_reaches_a_live_overlay() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(live_fleet_list()));
+        assert!(s.refresh_items("agent-fleet", &fresh_rows()));
+    }
+
+    #[test]
+    fn refresh_items_reaches_a_live_overlay_under_the_top() {
+        // A modal stacked on top of the fleet (e.g. help) must not shield
+        // it from data refreshes — the walk descends the stack.
+        let mut s = OverlayState::new();
+        s.push(Box::new(live_fleet_list()));
+        s.push(Box::new(EscDismiss));
+        assert!(s.refresh_items("agent-fleet", &fresh_rows()));
+    }
+
+    #[test]
+    fn refresh_items_false_without_a_live_overlay() {
+        let mut s = OverlayState::new();
+        s.push(Box::new(EscDismiss));
+        assert!(!s.refresh_items("agent-fleet", &fresh_rows()));
+        // Empty stack: also false.
+        let mut s = OverlayState::new();
+        assert!(!s.refresh_items("agent-fleet", &fresh_rows()));
+    }
+
     #[test]
     fn paint_composes_stack_bottom_up() {
         // Two overlays writing to distinct cells: both appear. The top
@@ -728,7 +838,7 @@ mod tests {
         // EscDismiss uses the default `bounds` (None) ⇒ full-screen path.
         let mut s = OverlayState::new();
         s.push(Box::new(EscDismiss));
-        assert_eq!(s.active_bounds((80, 24)), None);
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 80, 24)), None);
     }
 
     #[test]
@@ -736,7 +846,7 @@ mod tests {
         let mut s = OverlayState::new();
         let rect = Rect::new(5, 3, 10, 4);
         s.push(Box::new(Bounded { rect }));
-        assert_eq!(s.active_bounds((40, 12)), Some(rect));
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 40, 12)), Some(rect));
     }
 
     #[test]
@@ -749,7 +859,10 @@ mod tests {
             rect: Rect::new(10, 8, 4, 4),
         }));
         // Union bounding box spans x∈[2,14), y∈[2,12).
-        assert_eq!(s.active_bounds((40, 20)), Some(Rect::new(2, 2, 12, 10)));
+        assert_eq!(
+            s.active_bounds(Rect::new(0, 0, 40, 20)),
+            Some(Rect::new(2, 2, 12, 10))
+        );
     }
 
     #[test]
@@ -759,7 +872,7 @@ mod tests {
             rect: Rect::new(2, 2, 4, 4),
         }));
         s.push(Box::new(EscDismiss)); // default bounds = None
-        assert_eq!(s.active_bounds((40, 20)), None);
+        assert_eq!(s.active_bounds(Rect::new(0, 0, 40, 20)), None);
     }
 
     #[test]
@@ -769,8 +882,14 @@ mod tests {
         s.push(Box::new(Bounded { rect }));
         let mut out = Vec::new();
         // Color::Reset disables the drop shadow ⇒ only the box rows emit.
-        s.paint_clipped(&mut out, (40, 12), rect, Color::Reset)
-            .expect("paint");
+        s.paint_clipped(
+            &mut out,
+            (40, 12),
+            Rect::new(0, 0, 40, 12),
+            rect,
+            Color::Reset,
+        )
+        .expect("paint");
         let txt = String::from_utf8_lossy(&out);
         // Content inside the clip is emitted...
         assert!(txt.contains("INSIDE"), "modal content must paint: {txt:?}");
@@ -799,8 +918,14 @@ mod tests {
         let rect = Rect::new(5, 3, 10, 4);
         s.push(Box::new(Bounded { rect }));
         let mut out = Vec::new();
-        s.paint_clipped(&mut out, (40, 12), rect, Color::Rgb(20, 20, 30))
-            .expect("paint");
+        s.paint_clipped(
+            &mut out,
+            (40, 12),
+            Rect::new(0, 0, 40, 12),
+            rect,
+            Color::Rgb(20, 20, 30),
+        )
+        .expect("paint");
         let txt = String::from_utf8_lossy(&out);
         // A shadow row emits just below the box: box bottom row is 6 (0-based)
         // so the shadow row is 7 ⇒ 1-based CUP row 8, started one cell in

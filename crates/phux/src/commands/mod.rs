@@ -42,6 +42,7 @@ pub(crate) mod attach;
 pub(crate) mod config;
 pub(crate) mod config_action;
 pub(crate) mod kill;
+pub(crate) mod launch;
 pub(crate) mod ls;
 pub(crate) mod new;
 pub(crate) mod pair;
@@ -52,6 +53,8 @@ pub(crate) mod satellite;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod spawn;
+pub(crate) mod stdio_bridge;
 pub(crate) mod supervise;
 pub(crate) mod tag;
 pub(crate) mod upgrade;
@@ -85,8 +88,8 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
 
         /// Attach over QUIC to a remote `phux server --quic` listener at this
-        /// `HOST:PORT` instead of the local Unix socket (`phux-y8v6`,
-        /// ADR-0007). QUIC is always TLS 1.3-encrypted. A loopback address
+        /// `HOST:PORT` instead of the local Unix socket. QUIC is always TLS
+        /// 1.3-encrypted. A loopback address
         /// trusts the server's self-signed cert for local dev; any routable
         /// address requires `--cert-fingerprint` (the value `phux pair`
         /// prints on the server host).
@@ -140,7 +143,7 @@ pub(crate) enum Command {
         /// Also accept WebSocket clients on this `HOST:PORT` (the UDS stays
         /// on). Loopback (e.g. `127.0.0.1:8787`) is plaintext for local
         /// browser dev; any routable address (e.g. `0.0.0.0:8787`)
-        /// auto-provisions TLS and requires a `phux pair` token (ADR-0031).
+        /// auto-provisions TLS and requires a `phux pair` token.
         /// Overrides `$PHUX_WS_ADDR`.
         #[arg(long, value_name = "HOST:PORT")]
         listen: Option<std::net::SocketAddr>,
@@ -148,10 +151,33 @@ pub(crate) enum Command {
         /// Also accept QUIC clients on this `HOST:PORT` (the UDS stays on).
         /// QUIC is always TLS 1.3-encrypted; a loopback address skips token
         /// auth (local dev), while any routable address requires a `phux pair`
-        /// token sent as the stream's opening preamble (ADR-0007, ADR-0031).
+        /// token sent as the stream's opening preamble.
         /// Overrides `$PHUX_QUIC_ADDR`.
         #[arg(long, value_name = "HOST:PORT")]
         quic: Option<std::net::SocketAddr>,
+
+        /// Also accept WebTransport (HTTP/3 over QUIC) clients on this
+        /// `HOST:PORT` (the UDS stays on) — the browser's door to QUIC-class
+        /// transport; the browser client dials it, falling back to WebSocket.
+        /// Always TLS 1.3-encrypted; a loopback address skips token auth
+        /// (local dev), while any routable address requires a `phux pair`
+        /// token carried in the CONNECT request (`Authorization: Bearer`
+        /// from native consumers, `?token=<hex>` on the session URL from
+        /// browsers). Overrides `$PHUX_WT_ADDR`.
+        #[arg(long, value_name = "HOST:PORT")]
+        webtransport: Option<std::net::SocketAddr>,
+
+        /// Run as a federation hub: consume the `[[satellites]]`
+        /// registry from `config.toml` at startup, validating every enabled
+        /// entry's endpoint (`quic://`, `ws://`, `wss://`, or `ssh://`) into
+        /// the runtime satellite table, then dial and maintain one outbound
+        /// link per satellite (QUIC and WebSocket links authenticate with a
+        /// bearer token; `ssh://` bridges over `ssh HOST phux stdio-bridge`),
+        /// relaying satellite-tagged frames over the links.
+        /// A malformed enabled endpoint or a duplicate satellite name fails
+        /// startup. Without this flag the registry is ignored.
+        #[arg(long)]
+        hub: bool,
 
         /// Detach from the controlling terminal via `setsid(2)` before
         /// binding. Set by the auto-spawn path so the server outlives
@@ -162,13 +188,13 @@ pub(crate) enum Command {
 
         /// Run this command (via `$SHELL -c`) as the pre-seeded session's
         /// initial program instead of a bare shell. The naked-`phux`
-        /// auto-spawn path passes `defaults.spawn-on-attach` here
-        /// (phux-07y); `phux new` deliberately does not, so an
+        /// auto-spawn path passes `defaults.spawn-on-attach` here;
+        /// `phux new` deliberately does not, so an
         /// explicitly-created session still gets a shell.
         #[arg(long, hide = true)]
         seed_command: Option<String>,
 
-        /// Graceful-upgrade resume (ADR-0032): read the handoff state blob
+        /// Graceful-upgrade resume: read the handoff state blob
         /// from this inherited descriptor, adopt the inherited listener, and
         /// rebuild the live session tree instead of starting fresh. Set by
         /// the upgrade orchestrator's re-exec; never passed by hand.
@@ -178,15 +204,14 @@ pub(crate) enum Command {
 
     /// List sessions on the running server.
     ///
-    /// Queries the server via the `GET_STATE` control command (ADR-0021)
-    /// and prints one line per session. Does not start a server: with no
-    /// server running it reports as much and exits non-zero (like
-    /// `tmux ls`). Pass `--json` for the stable, versioned machine shape
-    /// (ADR-0022) instead of the human text.
+    /// Queries the running server and prints one line per session. Does not
+    /// start a server: with no server running it reports as much and exits
+    /// non-zero (like `tmux ls`). Pass `--json` for the stable, versioned
+    /// machine shape instead of the human text.
     #[command(visible_alias = "list")]
     Ls {
-        /// Emit the session list as stable, versioned JSON
-        /// (`SessionListJson`, ADR-0022) instead of human text.
+        /// Emit the session list as stable, versioned JSON instead of
+        /// human text.
         #[arg(long)]
         json: bool,
 
@@ -197,16 +222,16 @@ pub(crate) enum Command {
 
     /// Create a new session and attach to it.
     ///
-    /// v0.1 maps to "create the named session if it does not exist, then
-    /// attach" (the server's `CreateIfMissing` path). Auto-starts a
-    /// server if none is running.
+    /// Creates the named session if it does not already exist, then
+    /// attaches. Auto-starts a server if none is running. A name already
+    /// in use is an error; omit the name to take the configured
+    /// `session-name-template`, disambiguated with a numeric suffix.
     ///
     /// With `--json`, creates the session *without* attaching and prints
-    /// the seed pane's id as JSON instead — the `CREATE_SESSION` control
-    /// command (ADR-0021 §3, `phux-fdh`). This neither attaches nor
-    /// resizes, and the create is atomic server-side (no `GET_STATE`→attach
-    /// race). `--json` requires an explicit `-s NAME`, and a name already
-    /// in use is an error (create-only, never create-or-attach).
+    /// the seed pane's id as JSON instead. This neither attaches nor
+    /// resizes, and the create is atomic server-side (no attach race).
+    /// `--json` requires an explicit `-s NAME`, and a name already in use
+    /// is an error (create-only, never create-or-attach).
     New {
         /// Session name. `phux new work` creates a session named "work".
         /// Omitted ⇒ the `session-name-template` (e.g. "default"),
@@ -228,8 +253,8 @@ pub(crate) enum Command {
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
 
-        /// Create without attaching and print the seed pane's id as JSON
-        /// (the `CREATE_SESSION` command). Requires `-s NAME`.
+        /// Create without attaching and print the seed pane's id as JSON.
+        /// Requires `-s NAME`.
         #[arg(long)]
         json: bool,
 
@@ -239,12 +264,90 @@ pub(crate) enum Command {
         command: Vec<String>,
     },
 
+    /// Spawn a Terminal without attaching (`SPAWN_TERMINAL`).
+    ///
+    /// The pane joins the server's most recently active session; the new
+    /// Terminal's id prints to stdout. With `--satellite NAME` on a
+    /// federation hub (`phux server --hub`), the spawn is routed over
+    /// the hub's link to that satellite and the returned id is
+    /// satellite-tagged — addressable through the hub by every
+    /// satellite-capable verb. Does not auto-start a server.
+    Spawn {
+        /// Route the spawn to a configured federation satellite (a name
+        /// from `phux satellite list`, on a server running `--hub`).
+        #[arg(long, value_name = "NAME")]
+        satellite: Option<String>,
+
+        /// Working directory for the new pane.
+        #[arg(short = 'c', long = "cwd")]
+        cwd: Option<String>,
+
+        /// Emit the result as JSON:
+        /// `{"terminal_id": N, "satellite": "NAME" | null}`.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Command (and arguments) to run instead of the default shell.
+        /// Must follow `--`: `phux spawn -- htop`.
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
+    /// Launch an agent integration in a new pane.
+    ///
+    /// Resolves INTEGRATION (a `phux launch --list` id) to its `[launch]`
+    /// command from an enabled plugin's integration template, then spawns a
+    /// pane running it. The template routes the agent through its identity
+    /// wrapper, so the pane self-declares its `phux.agent/v1` identity with
+    /// no alias or per-shell config: the server injects `PHUX_TERMINAL_ID`,
+    /// the wrapper targets its own pane with it, and writes name + kind at
+    /// launch.
+    ///
+    /// `--print` resolves and prints the argv without spawning (a server-free
+    /// dry run). Extra agent arguments follow `--`:
+    /// `phux launch codex -- --model o3`.
+    Launch {
+        /// Integration id to launch (from `phux launch --list`).
+        #[arg(value_name = "INTEGRATION", required_unless_present = "list")]
+        integration: Option<String>,
+
+        /// List launchable integrations from enabled plugins and exit.
+        #[arg(long)]
+        list: bool,
+
+        /// Resolve and print the launch argv (and cwd) without spawning a
+        /// pane — a server-free dry run.
+        #[arg(long, visible_alias = "dry-run")]
+        print: bool,
+
+        /// Emit the result as JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+
+        /// Working directory for a `working_directory = "workspace"`
+        /// template. Defaults to the current directory.
+        #[arg(short = 'c', long = "cwd", value_name = "DIR")]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Extra arguments appended to the agent command, after `--`.
+        #[arg(last = true)]
+        extra: Vec<String>,
+    },
+
     /// Kill a session, window, or pane.
     ///
     /// `TARGET` uses the selector grammar (`docs/consumers/tui.md` §3):
     /// `name`, `name:N`, `name:N.M`, `name:tag`, `@N`, `.`. The selector
     /// is resolved client-side against a server-state snapshot to a set of
-    /// Terminals; the server is then asked to kill each (ADR-0021).
+    /// Terminals; the server is then asked to kill each.
     Kill {
         /// What to kill (selector).
         target: String,
@@ -254,7 +357,7 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Take the input wheel of a pane (ADR-0033).
+    /// Take the input wheel of a pane.
     ///
     /// Seizes exclusive input authority over the resolved pane: while held,
     /// only this connection's input reaches the PTY — every other client's
@@ -270,7 +373,7 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Give back the input wheel of a pane (ADR-0033).
+    /// Give back the input wheel of a pane.
     ///
     /// Releases the input lease taken with `phux take`, returning the pane to
     /// open input. A no-op if you do not hold the lease. TARGET is a selector.
@@ -283,7 +386,7 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Signal a pane's process group (ADR-0033).
+    /// Signal a pane's process group.
     ///
     /// Delivers a POSIX signal to the program running in the resolved pane and
     /// every subprocess it spawned — distinct from `phux kill`, which destroys
@@ -305,7 +408,7 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Graceful-upgrade the running server in place (ADR-0032).
+    /// Graceful-upgrade the running server in place.
     ///
     /// Asks the server to snapshot every pane, re-exec the on-disk binary, and
     /// re-adopt the live PTYs, so the shells / editors / agents in every
@@ -320,7 +423,7 @@ pub(crate) enum Command {
     /// Rename a session.
     ///
     /// Reassigns `SESSION`'s human-readable name to `NEW_NAME` in one
-    /// `RENAME_SESSION` round-trip (ADR-0021). The server is authoritative;
+    /// round-trip. The server is authoritative;
     /// attached clients pick up the new name on their next snapshot. An
     /// unknown `SESSION` or a `NEW_NAME` already in use is an error.
     Rename {
@@ -338,10 +441,10 @@ pub(crate) enum Command {
     /// Capture a pane's screen as JSON or a boxed text view.
     ///
     /// The agent "floor": read what's on screen as JSON (`--json`) or a
-    /// boxed text view, without a TTY or tmux. Issues the side-effect-free
-    /// `GET_SCREEN` command (ADR-0022) — the server walks its own grid, so
-    /// this neither attaches nor resizes the pane, and is safe to poll
-    /// against a pane another client is using.
+    /// boxed text view, without a TTY or tmux. The read is side-effect-free
+    /// — the server walks its own grid, so this neither attaches nor
+    /// resizes the pane, and is safe to poll against a pane another client
+    /// is using.
     ///
     /// TARGET is a selector (see the top-level help); omit it for the
     /// most-recently-focused session.
@@ -355,14 +458,14 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
 
-        /// Include scrollback history above the viewport (`phux-o1v`).
+        /// Include scrollback history above the viewport.
         /// Bare `--scrollback` requests all retained history; `--scrollback
         /// N` requests the most-recent N rows. History appears in the JSON
         /// `scrollback` field; the boxed view shows it above the viewport.
         #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0")]
         scrollback: Option<u32>,
 
-        /// Include per-cell OSC-133 semantic marks + styles (`phux-8yl`).
+        /// Include per-cell OSC-133 semantic marks + styles.
         /// Populates the JSON `cells` array (sparse: only cells with a
         /// non-default style or a semantic mark). No effect on the boxed
         /// view, which is plain text.
@@ -371,7 +474,7 @@ pub(crate) enum Command {
 
         /// Emit the CLIENT's composited multi-pane view — the assembled
         /// frame (layout tiling + dividers + status bar) as the human's glass
-        /// shows it — as dense structured cells (`phux-l5xa`). Unlike the
+        /// shows it — as dense structured cells. Unlike the
         /// default side-effect-free read this ATTACHES (drives the headless
         /// client render path). Mutually exclusive with `--cells` /
         /// `--scrollback`; sizes the composite via `--cols` / `--rows`.
@@ -397,7 +500,7 @@ pub(crate) enum Command {
     /// `Up`, `C-c`, `M-x`, …) or a literal string sent character by
     /// character. TARGET is a selector (see the top-level help); it
     /// resolves client-side to one pane and the events route to it by id,
-    /// so the live pane is neither attached nor resized (ADR-0022).
+    /// so the live pane is neither attached nor resized.
     ///
     /// Flags (`--socket`) MUST precede TARGET: KEYS is a trailing var-arg,
     /// so anything after TARGET is taken as a key to send.
@@ -421,7 +524,7 @@ pub(crate) enum Command {
 
     /// Block until a pane meets a condition.
     ///
-    /// Polls the side-effect-free screen read (ADR-0022 §4) — the poll
+    /// Polls the side-effect-free screen read — the poll
     /// floor of the event surface: always works, no shell integration.
     /// Exits 0 when met, 124 on `--timeout`. TARGET is a selector (see the
     /// top-level help); omit it for the most-recently-focused session.
@@ -429,8 +532,8 @@ pub(crate) enum Command {
     /// Flags (`--until`, `--idle`, `--timeout`, `--json`, `--socket`) MUST
     /// precede TARGET if you give one.
     ///
-    ///   phux wait build --until "BUILD SUCCESSFUL"
-    ///   phux wait repl --idle 750
+    ///   phux wait --until "BUILD SUCCESSFUL" build
+    ///   phux wait --idle 750 repl
     #[command(about = "Block until a pane meets a condition")]
     Wait {
         /// Target selector. Omit for the most-recently-focused session.
@@ -463,8 +566,8 @@ pub(crate) enum Command {
 
     /// Stream a pane's live events (the push half of the agent surface).
     ///
-    /// Subscribes to the server's `EVENT` stream (SPEC §7.5, ADR-0022
-    /// 'events') and prints one event per line until EOF or Ctrl-C. The
+    /// Subscribes to the server's event stream and prints one event per
+    /// line until EOF or Ctrl-C. The
     /// subscription neither attaches nor resizes the pane — safe to watch
     /// a pane a human or another agent is actively using. This is the
     /// latency-cutting accelerator of `phux wait`'s poll floor: events
@@ -533,7 +636,11 @@ pub(crate) enum Command {
         question: String,
     },
 
-    /// List, show, or explain inferred public agent state.
+    /// List, show, explain, set, or clear per-pane agent state.
+    ///
+    /// Inference (`list`/`show`/`explain`) reports the agent phux infers is
+    /// running in each pane. `set`/`clear` write and delete an explicit
+    /// per-pane agent identity that overrides inference.
     Agent {
         #[command(subcommand)]
         action: agent::AgentAction,
@@ -541,8 +648,8 @@ pub(crate) enum Command {
 
     /// Run a command in a pane and capture its exit code.
     ///
-    /// Reports the command's exit code, output, and duration (ADR-0022
-    /// §3). Brackets the command with sentinels to capture `$?`, so it
+    /// Reports the command's exit code, output, and duration.
+    /// Brackets the command with sentinels to capture `$?`, so it
     /// assumes a POSIX shell (sh/bash/zsh). The process exit code mirrors
     /// the command's (125 if `phux` gives up on `--timeout`), so
     /// `phux run … && next` composes like a shell. TARGET is a selector
@@ -578,11 +685,12 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Inspect and scaffold the phux config file (phux-ijp).
+    /// Inspect, scaffold, and reload the phux config file.
     ///
-    /// phux is config-driven (ADR-0023): defaults ship in the binary and
+    /// phux is config-driven: defaults ship in the binary and
     /// your `config.toml` is a sparse overlay merged on top. These
-    /// subcommands never touch a running server.
+    /// subcommands never touch a running server, except `reload`,
+    /// which signals attached clients to re-read their config in place.
     Config {
         #[command(subcommand)]
         action: config_action::ConfigAction,
@@ -618,7 +726,7 @@ pub(crate) enum Command {
         action: SatelliteAction,
     },
 
-    /// Read and write a Terminal's L3 tags (phux-f8wi, ADR-0027).
+    /// Read and write a Terminal's L3 tags.
     ///
     /// Tags are freeform strings stored as L3 metadata (`phux.tags/v1`),
     /// the server stores them opaquely. Once a Terminal is tagged, the
@@ -635,7 +743,22 @@ pub(crate) enum Command {
         action: TagAction,
     },
 
-    /// Mint a pairing token for a remote consumer (ADR-0031).
+    /// Bridge stdin/stdout to the local server socket for SSH-stdio transport.
+    ///
+    /// The remote end of the SSH-stdio transport: `ssh HOST phux
+    /// stdio-bridge` gives the dialing side a byte-transparent pipe to the
+    /// phux server's Unix socket on HOST — the federation hub dials
+    /// `ssh://` satellites through it. The bridge neither
+    /// parses nor injects bytes; stdout is protocol-only and diagnostics
+    /// go to stderr. Exits when either side closes.
+    #[command(name = "stdio-bridge")]
+    StdioBridge {
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Mint a pairing token for a remote consumer.
     ///
     /// Remote consumers (e.g. the native mobile app) attach over `wss://`
     /// without an SSH tunnel: TLS encrypts the link and an opaque bearer
@@ -706,6 +829,53 @@ pub(crate) enum PluginAction {
         /// Register the plugin but leave it disabled.
         #[arg(long)]
         disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Fetch, build, validate, and link a plugin package.
+    ///
+    /// REF is a git URL (`https://…`, `git@…`, `file://…` — cloned with
+    /// the system `git`), a local plugin directory (copied), or a local
+    /// tarball (`.tar`, `.tar.gz`, `.tgz` — extracted with the system
+    /// `tar`). The package lands under the managed plugins directory
+    /// (`$XDG_DATA_HOME/phux/plugins`, else `~/.local/share/phux/plugins`),
+    /// its manifest `[[build]]` steps for this platform run with a bounded
+    /// timeout and captured output, the manifest is validated (including
+    /// the `min_phux_version` gate), and the result is linked into
+    /// `config.toml` like `phux plugin link`. Provenance (ref, branch,
+    /// resolved commit) is recorded in the managed directory's
+    /// `plugins.lock` so `phux plugin update` can re-fetch it later.
+    Install {
+        /// Git URL, local plugin directory, or local tarball path.
+        #[arg(value_name = "REF")]
+        reference: String,
+
+        /// Branch or tag to clone (git sources only).
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+
+        /// Install and link the plugin but leave it disabled.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-fetch, rebuild, and revalidate installed plugins.
+    ///
+    /// Reads the managed directory's `plugins.lock`, re-fetches each
+    /// recorded source (all of them, or just NAME), reruns its `[[build]]`
+    /// steps, revalidates the manifest, swaps the managed copy, and
+    /// records the new resolved commit. `config.toml` is untouched — the
+    /// linked manifest path does not move.
+    Update {
+        /// Plugin id to update. Omit to update every installed plugin.
+        name: Option<String>,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]
@@ -801,6 +971,10 @@ pub(crate) enum SatelliteAction {
     },
 
     /// Add or update a satellite endpoint in `config.toml`.
+    ///
+    /// Updating replaces the whole entry, so repeat `--token-file` /
+    /// `--cert-fingerprint` when re-adding a name or the auth material
+    /// is cleared.
     Add {
         /// Hub-local satellite name.
         name: String,
@@ -812,6 +986,20 @@ pub(crate) enum SatelliteAction {
         /// Register the satellite but leave it disabled.
         #[arg(long)]
         disabled: bool,
+
+        /// Path to a file holding the pairing bearer token for this
+        /// satellite, minted by running `phux pair` on the satellite host.
+        /// The file holds one hex token and should be
+        /// owner-only (0600); only the path lands in `config.toml` — the
+        /// token itself is never written to config or printed.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<std::path::PathBuf>,
+
+        /// SHA-256 fingerprint of the satellite server's TLS certificate,
+        /// as printed by `phux pair` on the satellite host. Pins the
+        /// certificate for routable endpoints; not a secret.
+        #[arg(long, value_name = "FINGERPRINT")]
+        cert_fingerprint: Option<String>,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]

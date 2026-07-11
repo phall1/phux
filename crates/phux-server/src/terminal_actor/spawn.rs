@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 /// Default PTY read chunk size. Mirrors the example. Sized comfortably
 /// above the typical libghostty escape-sequence span so a single read
@@ -105,9 +105,19 @@ pub(crate) fn exit_status_to_wire(status: &portable_pty::ExitStatus) -> Option<i
 /// Trade-off: phux loses ghostty-specific terminfo extensions (sixel,
 /// kitty graphics caps as advertised by terminfo, the ghostty-specific
 /// SGR colour extensions). Those features are still reachable when the
-/// app opts in directly. When phux's own input/output layer fully
-/// supports the kitty keyboard protocol round-trip, revert this to
-/// `ghostty` (or expose a config switch).
+/// app opts in directly, and both opt-in paths exist today: the
+/// server-wide `defaults.term` config knob and the per-spawn
+/// `SPAWN_TERMINAL.term` wire field (phux-ign).
+///
+/// Status of the "revert to ghostty" question (phux-0o8): the
+/// round-trip harness in `tests/kip_roundtrip.rs` proves the phux stack
+/// itself round-trips the kitty keyboard protocol end-to-end under
+/// `TERM=ghostty` (nvim opts in via CSI-u and every key still lands;
+/// fzf/less/vim/btop are regression-free) — but htop, the canonical
+/// phux-7vx reproducer, was not available to test and is exactly the
+/// ncurses-`fullkbd` shape that broke before. The default therefore
+/// deliberately stays `xterm-256color`; flip it only with fresh htop
+/// evidence (the harness has an `#[ignore]`d htop probe ready).
 #[must_use]
 pub fn default_shell_command() -> CommandBuilder {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
@@ -140,6 +150,86 @@ pub const DEFAULT_TERM: &str = "xterm-256color";
 /// attach-time creation, and `SPAWN_TERMINAL`.
 pub fn apply_term(cmd: &mut CommandBuilder, term: &str) {
     cmd.env("TERM", term);
+}
+
+/// Inject `PHUX_TERMINAL_ID` (phux-w7mj) — the spawned pane's own local
+/// wire id — into `cmd`'s environment so a process running inside the
+/// pane can self-target on the phux wire with zero configuration.
+///
+/// The agent-record wrapper (`examples/plugins/agent-tools`) reads this
+/// var as an `@N` selector to attribute its records to the pane it runs
+/// in; because the server now always provides it, the wrapper needs no
+/// manual id. The value matches the hook `PHUX_TERMINAL_ID` (the same
+/// `local_id().to_string()`), so both surfaces name a pane identically.
+///
+/// Set only for a `Local` wire id — the sole shape a freshly-spawned pane
+/// receives. A `Satellite` id has no server-local `@N` and yields no var.
+/// Interning the wire id is idempotent, so callers can intern pre-spawn
+/// (to inject here) and re-intern after `spawn_terminal_actor` for the
+/// same value.
+pub fn apply_terminal_id(
+    cmd: &mut CommandBuilder,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+) {
+    if let Some(id) = wire_terminal_id.local_id() {
+        cmd.env("PHUX_TERMINAL_ID", id.to_string());
+    }
+}
+
+/// Apply a wire-supplied working directory to `cmd` with the uniform
+/// validation and fallback the seed-and-attach create path and the
+/// `SESSION_CREATE_KEY` create-without-attach path share (phux-0v1l).
+///
+/// Precedence: a cwd already set on `cmd` is never clobbered. Only a
+/// server-wide override command (`attach_create_seed_command`) can carry
+/// one, and its configuration wins wholesale — the wire cwd is applied only
+/// over an otherwise cwd-less builder. Both create paths call this after
+/// building the command, so their precedence is identical.
+///
+/// Validation: the wire cwd is honored only when it names an existing,
+/// *enterable* directory on this host (a directory the process can `chdir`
+/// into — existence plus search/`X_OK` permission).
+/// `portable_pty`'s spawn fails outright on a cwd it cannot enter, which
+/// would turn a stale or foreign client-supplied path into a failed session
+/// create/attach; instead an invalid path is dropped with a warn and the
+/// builder's cwd stays unset, so the child lands wherever a `cwd: None`
+/// spawn would. This never fails the caller — a bad cwd degrades to the
+/// default directory, matching the fallback both paths document.
+///
+/// `session` names the target session for the warn log only.
+pub fn apply_spawn_cwd(builder: &mut CommandBuilder, cwd: Option<&str>, session: &str) {
+    let Some(path) = cwd else {
+        return;
+    };
+    if builder.get_cwd().is_some() {
+        // A server-wide override command pinned the cwd; it wins wholesale.
+        return;
+    }
+    if dir_is_enterable(std::path::Path::new(path)) {
+        builder.cwd(path);
+    } else {
+        warn!(
+            session = %session,
+            cwd = %path,
+            "wire cwd is not an enterable directory; \
+             falling back to the default spawn directory",
+        );
+    }
+}
+
+/// Best-effort check that `path` is a directory the spawned child can
+/// actually enter (phux-0v1l).
+///
+/// A plain `is_dir()` gate accepts a directory the server cannot `chdir`
+/// into — e.g. a mode-700 directory owned by another user — which then
+/// fails the PTY spawn, contradicting the "fall back, never fail" contract.
+/// This additionally requires search (execute, `X_OK`) permission, the
+/// exact permission `chdir` needs, checked against the process's real
+/// uid/gid via `rustix` (libc-free, cross-platform). It is best-effort:
+/// a TOCTOU race or an exotic filesystem can still surprise the spawn, in
+/// which case the actor build surfaces the error normally.
+fn dir_is_enterable(path: &std::path::Path) -> bool {
+    path.is_dir() && rustix::fs::access(path, rustix::fs::Access::EXEC_OK).is_ok()
 }
 
 /// Build a [`CommandBuilder`] that runs a user-supplied command line as a

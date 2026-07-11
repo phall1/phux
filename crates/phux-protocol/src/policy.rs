@@ -54,6 +54,9 @@ pub enum TransportType {
     Quic,
     /// WebSocket upgrade (browser or proxy).
     WebSocket,
+    /// WebTransport session (HTTP/3 over QUIC) — the browser's door to
+    /// QUIC-class transport, since browsers cannot open raw QUIC streams.
+    WebTransport,
     /// Loopback / same-process.
     Localhost,
 }

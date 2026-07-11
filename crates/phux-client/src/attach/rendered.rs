@@ -64,8 +64,8 @@ pub(super) fn compose_full_frame_cells(
     now: SystemTime,
 ) -> RenderedFrame {
     let (cols, rows) = viewport_dims;
-    let has_bar = status_bar.is_some();
-    let content = content_rect(viewport_dims, has_bar, sidebar);
+    let bar = status_bar.map(StatusBarPainter::position);
+    let content = content_rect(viewport_dims, bar, sidebar);
     let multi = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims);
 
     let mut frame = RenderedFrame::blank(cols, rows);
@@ -105,7 +105,7 @@ pub(super) fn compose_full_frame_cells(
     // the strip's full extent shows; it sits in columns `content_rect` carved
     // out, never over pane content.
     if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
-        let rect = sidebar_rect(viewport_dims, has_bar, res);
+        let rect = sidebar_rect(viewport_dims, bar, res);
         let strip = painter.compose_buffer(rect);
         overlay_buffer(&mut frame, &strip, (rect.x, rect.y), false);
     }
@@ -338,11 +338,15 @@ mod tests {
                 name: "editor".to_owned(),
                 active: true,
                 zoomed: false,
+                attention: false,
+                branch: None,
             },
             WindowInfo {
                 name: "shell".to_owned(),
                 active: false,
                 zoomed: false,
+                attention: false,
+                branch: None,
             },
         ]);
 
@@ -372,17 +376,26 @@ mod tests {
             sep.contains('│'),
             "sidebar separator must sit at the strip's last column (19); got {sep:?}"
         );
-        let strip_text: String = (0..19)
+        // Row 0 carries the `spaces` section header (phux-foz.9); the
+        // first window's name row is row 1.
+        let header_text: String = (0..19)
             .filter_map(|c| enabled.cell(0, c).map(|cell| cell.grapheme.clone()))
             .collect();
         assert!(
-            strip_text.contains('e') && strip_text.contains('r'),
+            header_text.contains("spaces"),
+            "the spaces header must top the strip; got {header_text:?}"
+        );
+        let strip_text: String = (0..19)
+            .filter_map(|c| enabled.cell(1, c).map(|cell| cell.grapheme.clone()))
+            .collect();
+        assert!(
+            strip_text.contains("editor"),
             "active window label 'editor' must paint into the strip's text columns; got {strip_text:?}"
         );
 
         // (b) Panes inset: with a 20-col Left strip, the content rect starts at
         // x = 20, so the focused (left) pane's first cell lands at column 20.
-        let content = content_rect((80, 24), false, Some(res));
+        let content = content_rect((80, 24), None, Some(res));
         let multi = super::super::multi_pane::compute_layout_in(ls, content, (80, 24));
         let left_rect = multi.rects.get(&left).copied().expect("left rect");
         assert_eq!(left_rect.x, 20, "left pane must inset to the strip's edge");

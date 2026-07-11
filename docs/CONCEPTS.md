@@ -1,20 +1,39 @@
 ---
 audience: humans, contributors, agents, consumers
 stability: evolving
-last-reviewed: 2026-06-07
+last-reviewed: 2026-07-09
 ---
 
-# Concepts
+# How phux works
 
-**TL;DR.** This is the doc that says what phux is and how mature it is. phux manages the terminal as the unit of work: spawned, observed, driven, persisted, addressable across hosts. A human's TUI, a browser client, and an agent are peer consumers of the same terminal, none privileged on the wire. The wire carries only identity, lifecycle, transport, opaque terminal bytes, and metadata; every structured view is computed by a consumer. phux is pre-alpha and spec-first.
+**TL;DR.** phux makes a terminal an addressable object that can outlive any one
+view. A person, browser, script, or agent can observe and drive the same live
+terminal as peer consumers. The wire preserves the terminal stream; each
+consumer turns that stream into the structured view it needs. phux is
+pre-alpha and spec-first.
 
 ---
+
+## The short version
+
+A terminal in phux belongs to the server, not to the window currently showing
+it. You can detach, attach from another client, inspect it from a script, or
+let an agent drive it without creating a second copy of the session.
+
+The familiar multiplexer is one view of that model. It gives a person splits,
+focus, status, and keybindings. The headless CLI gives programs selectors,
+snapshots, input, events, and JSON results. Both operate on the same terminals.
+
+The protocol stays small by carrying terminal identity, lifecycle, input,
+output, and metadata. It does not turn the wire into a second terminal model.
+The same libghostty engine runs at each end, so each consumer can render or
+project structure locally from the real stream.
 
 ## Maturity: pre-alpha, spec-first
 
 phux is pre-alpha. The protocol is at version 0.5.0 and the spec leads the code: several behaviors are designed and written down before they are built, and a few shipped behaviors still diverge from the target the spec describes. This document distinguishes what runs today from a stated direction. Where they disagree, the divergence is marked inline and pointed at the ADR that decides it.
 
-What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). What is designed but not built includes federation routing and the encoding migration noted below.
+What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). Cross-machine federation routing is designed but not built.
 
 This document owns the maturity fact. Other docs link here rather than restating it.
 
@@ -22,7 +41,7 @@ This document owns the maturity fact. Other docs link here rather than restating
 
 ## Terminals, not panes
 
-A terminal runs a process, parses bytes into a grid of cells, accepts structured input, and reports events (title, working directory, command lifecycle, hyperlinks, bells). That object is the whole model. A person looking at one and a program driving one are holding the same thing two different ways.
+A terminal runs a process, parses bytes into a grid of cells, accepts structured input, and reports observable events such as title, bell, output activity, lifecycle, and agent asks. That object is the whole model. A person looking at one and a program driving one are holding the same thing two different ways. Working-directory and command-boundary events are part of the target surface, not fully emitted today.
 
 Sessions, windows, panes, and splits — the tmux vocabulary — are not on the wire. They are how a consumer arranges terminals for a person, expressed as metadata and client logic. An agent never has to learn them to spawn a terminal, drive it, and read its exit code.
 
@@ -34,9 +53,9 @@ The reference TUI ships in-tree because a substrate is only real if something ri
 
 ## The engine is delegated; structure is a projection
 
-Both ends of the wire run the same terminal engine, libghostty: the server holds canonical state, each client holds a local mirror for rendering. The same parser runs on both ends, and nothing re-encodes terminal state into a second representation in between.
+The server and rendering clients run the same terminal engine, libghostty: the server holds canonical state and a rendering client holds a local mirror. The same parser runs on both ends, and terminal synchronization does not depend on a second cell model in between.
 
-It follows that any structured view of a terminal — a cell grid, a command-boundary event stream, a pane tree, a layout, a "run a command and collect its output" result — is computed by a consumer from the engine it already runs. Structure is a projection, not a transmission. Putting a structured terminal representation on the wire would re-create the re-parse problem one layer up: a second model that can drift from the engine and lose fidelity when capabilities mismatch. Older multiplexers re-parse VT mid-path; phux delegates to one engine on both ends and forwards opaque bytes.
+Structured state is a projection, not the canonical synchronization tier. A rendering consumer can compute it from its local engine; the current CLI and MCP adapter also use server-derived convenience snapshots and results such as `GET_SCREEN`. Those replies make headless tools practical without defining a second screen model that every terminal stream must traverse. Older multiplexers re-parse VT mid-path; phux keeps terminal bytes and the shared engine as the authoritative path.
 
 This is the central design commitment. See [ADR-0013 (libghostty bytes on the wire)](../ADR/0013-libghostty-bytes-on-wire.md), [ADR-0004 (libghostty-vt as the canonical grid)](../ADR/0004-libghostty-vt-as-grid.md), [ADR-0008 (use libghostty types directly)](../ADR/0008-use-libghostty-types-directly.md), and [ADR-0030 (engine-delegated wire and projection consumers)](../ADR/0030-engine-delegated-wire-and-projection-consumers.md).
 
@@ -50,13 +69,13 @@ In practice:
 
 ## What the wire carries
 
-The wire carries terminal **identity**, terminal **lifecycle** (including one atomic multi-terminal teardown operation), **transport** framing and capability negotiation, **opaque terminal bytes**, and **metadata** the server stores without interpreting. It does not carry structured screen state, a normative semantic-event type system, panes, layouts, or command-runner results. Those are consumer projections.
+The wire carries terminal **identity**, terminal **lifecycle** (including one atomic multi-terminal teardown operation), **transport** framing and capability negotiation, **opaque terminal bytes**, and **metadata** the server stores without interpreting. Structured screen state is not its normative synchronization model. Convenience commands may return snapshots and command results for headless consumers; panes and layouts remain consumer projections.
 
 The spec organizes this as layers declared at connect time:
 
 | Tier | Concept | Carries |
 |---|---|---|
-| **L1** | Terminal | The PTY plus its libghostty Terminal: output bytes, structured input, snapshots, resize, close, bell, and engine-derived events (title, working directory, command lifecycle, hyperlinks). |
+| **L1** | Terminal | The PTY plus its libghostty Terminal: output bytes, structured input, snapshots, resize, close, bell, and engine-derived events. The reference server emits a subset today; working-directory and command-boundary emission remain incomplete. |
 | **L3** | Metadata | Opaque key-value pairs scoped to a terminal or globally. Consumers store conventions here (TUI layout, window and session names, group membership). The server stores; it does not interpret. |
 
 There is no L2 collection tier. Group lifecycle — "these terminals belong together, tear them down as a unit" — is metadata plus client logic, with one exception. The one thing a consumer cannot do correctly on its own is an atomic group teardown: a client killing N terminals one at a time exposes intermediate states to other observers. That single irreducible need is met by one L1 operation, `KILL_TERMINALS { ids }` (command tag `0x09`), which the server applies all-or-nothing under its single state lock. Atomicity earns one operation, not a tier. See [ADR-0030](../ADR/0030-engine-delegated-wire-and-projection-consumers.md) and [ADR-0015 (protocol layering)](../ADR/0015-protocol-layering.md).

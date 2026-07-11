@@ -11,7 +11,8 @@ use super::workspace::{RawPluginManifestWorkspace, WorkspaceSourceSlices, normal
 use super::{
     PluginAgentAttention, PluginAgentState, PluginManifest, PluginManifestAction,
     PluginManifestAgent, PluginManifestBuild, PluginManifestError, PluginManifestEvent,
-    PluginManifestPane, PluginPanePlacement, PluginPlatform,
+    PluginManifestPane, PluginManifestWidget, PluginPanePlacement, PluginPlatform,
+    PluginWidgetSlot,
 };
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +40,8 @@ struct RawPluginManifest {
     links: Vec<RawPluginManifestLinkHandler>,
     #[serde(default)]
     workspaces: Vec<RawPluginManifestWorkspace>,
+    #[serde(default)]
+    widgets: Vec<RawPluginManifestWidget>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -76,6 +79,8 @@ struct RawPluginManifestAction {
     #[serde(default)]
     platforms: Option<Vec<PluginPlatform>>,
     command: Vec<String>,
+    #[serde(default)]
+    keys: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,6 +94,19 @@ struct RawPluginManifestEvent {
     #[serde(default)]
     platforms: Option<Vec<PluginPlatform>>,
     command: Vec<String>,
+}
+
+/// Raw `[[widgets]]` entry. No `deny_unknown_fields`: every key besides
+/// `id` / `slot` / `kind` is a kind-specific widget option captured by the
+/// flattened `opts` map (the same open shape `[status]` widget tables use).
+#[derive(Debug, Deserialize)]
+struct RawPluginManifestWidget {
+    id: String,
+    #[serde(default)]
+    slot: PluginWidgetSlot,
+    kind: String,
+    #[serde(flatten)]
+    opts: std::collections::BTreeMap<String, toml::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +146,11 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
     let name = non_empty(&raw.name, "plugin name")?;
     let version = non_empty(&raw.version, "plugin version")?;
     let min_phux_version = non_empty(&raw.min_phux_version, "plugin min_phux_version")?;
+    super::version::enforce_min_phux_version(
+        &id,
+        &min_phux_version,
+        super::version::CURRENT_PHUX_VERSION,
+    )?;
     let description = raw.description.as_deref().and_then(trim_optional);
 
     let build = raw
@@ -180,6 +203,15 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
             panes: &panes,
         },
     )?;
+    let widgets = raw
+        .widgets
+        .into_iter()
+        .map(normalize_widget)
+        .collect::<Result<Vec<_>, _>>()?;
+    reject_duplicate_ids(
+        widgets.iter().map(|widget| widget.id.as_str()),
+        "plugin widget",
+    )?;
 
     Ok(PluginManifest {
         id,
@@ -197,6 +229,18 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest, PluginManifes
         panes,
         links,
         workspaces,
+        widgets,
+    })
+}
+
+fn normalize_widget(
+    raw: RawPluginManifestWidget,
+) -> Result<PluginManifestWidget, PluginManifestError> {
+    Ok(PluginManifestWidget {
+        id: normalize_id(&raw.id, false, "plugin widget id")?,
+        slot: raw.slot,
+        kind: non_empty(&raw.kind, "plugin widget kind")?,
+        opts: raw.opts,
     })
 }
 
@@ -247,6 +291,7 @@ fn normalize_action(
         contexts,
         platforms: raw.platforms,
         command,
+        keys: raw.keys.as_deref().and_then(trim_optional),
     })
 }
 

@@ -30,6 +30,7 @@
 #![deny(missing_docs)]
 
 pub mod agent;
+pub mod agent_meta;
 pub mod ask;
 pub mod attach;
 pub mod l2;
@@ -38,6 +39,7 @@ pub mod run;
 pub mod selector;
 pub mod send_keys;
 pub mod snapshot;
+pub mod vcs;
 pub mod wait;
 pub mod watch;
 

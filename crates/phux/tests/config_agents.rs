@@ -60,8 +60,15 @@ enabled = true
     )
     .expect("write config");
 
-    let (code, stdout, stderr) =
-        run_with_xdg(&["config", "agents", "--json"], &tmp.path().join("xdg"));
+    // A socket path nothing listens on: the projection must degrade to
+    // the declared manifest values instead of picking up whatever server
+    // happens to run on the developer's default socket.
+    let dead_socket = tmp.path().join("no-server.sock");
+    let dead_socket = dead_socket.to_str().expect("utf-8 tmp path");
+    let (code, stdout, stderr) = run_with_xdg(
+        &["config", "agents", "--json", "--socket", dead_socket],
+        &tmp.path().join("xdg"),
+    );
 
     assert_eq!(
         code, 0,
@@ -72,11 +79,18 @@ enabled = true
         "`config agents --json` must not print the banner; stdout={stdout:?} stderr={stderr:?}"
     );
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
+    assert_eq!(value["live"], false, "no server answered: {stdout}");
     assert_eq!(value["agents"][0]["plugin_id"], "example.agent-tools");
     assert_eq!(value["agents"][0]["id"], "codex");
     assert_eq!(value["agents"][0]["label"], "Codex");
     assert_eq!(value["agents"][0]["state"], "working");
     assert_eq!(value["agents"][0]["attention"], "normal");
     assert_eq!(value["agents"][0]["contexts"][0], "workspace");
+    // phux-r82.10: schema_version 2 carries merge provenance — with no
+    // server the effective values fall back to the declared baseline.
+    assert_eq!(value["agents"][0]["source"], "manifest");
+    assert_eq!(value["agents"][0]["declared"]["state"], "working");
+    assert_eq!(value["agents"][0]["declared"]["attention"], "normal");
+    assert_eq!(value["agents"][0]["runtime"], serde_json::Value::Null);
 }

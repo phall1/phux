@@ -26,7 +26,9 @@
 use std::collections::BTreeMap;
 
 use crate::schema::{StatusCfg, Widget, WidgetSpec};
-use crate::widget::{Cell, StatusWidget, WidgetCells, WidgetContext, WidgetError, WidgetRegistry};
+use crate::widget::{
+    Cell, ExecFeed, StatusWidget, WidgetCells, WidgetContext, WidgetError, WidgetRegistry,
+};
 
 /// One composed slot's worth of widgets.
 struct Slot {
@@ -119,6 +121,22 @@ impl StatusBar {
         }
     }
 
+    /// phux-r82.6: the asynchronous data feeds behind this bar's `exec`
+    /// widgets, in slot order (left, center, right). The host runs each
+    /// feed's command on its interval and pushes output through
+    /// [`ExecFeed::apply_output`]; a bar with no `exec` widgets returns
+    /// an empty vec and the host spawns nothing.
+    #[must_use]
+    pub fn exec_feeds(&self) -> Vec<ExecFeed> {
+        self.left
+            .widgets
+            .iter()
+            .chain(&self.center.widgets)
+            .chain(&self.right.widgets)
+            .filter_map(|w| w.exec_feed())
+            .collect()
+    }
+
     /// True if no slot carries any widgets — caller may then skip
     /// reserving a status row entirely.
     #[must_use]
@@ -204,16 +222,11 @@ pub fn row_to_string(row: &[Cell]) -> String {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::schema::{StatusCfg, Widget, WidgetSpec};
+    use crate::schema::{StatusCfg, StatusPosition, Widget, WidgetSpec};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn ctx_with(session: &str) -> WidgetContext<'_> {
-        WidgetContext {
-            now: UNIX_EPOCH + Duration::from_secs(0),
-            session_name: session,
-            prefix: "C-a",
-            windows: &[],
-        }
+        WidgetContext::new(UNIX_EPOCH + Duration::from_secs(0), session, "C-a", &[])
     }
 
     fn spec(kind: &str, opts: &[(&str, toml::Value)]) -> Widget {
@@ -281,6 +294,7 @@ mod tests {
                 "session-name",
                 &[("prefix", toml::Value::String("R:".into()))],
             )],
+            position: StatusPosition::default(),
         };
         let reg = WidgetRegistry::with_builtins();
         let bar = StatusBar::build(&cfg, &reg).unwrap();
@@ -307,6 +321,7 @@ mod tests {
                 "session-name",
                 &[("prefix", toml::Value::String("RIGHT".into()))],
             )],
+            position: StatusPosition::default(),
         };
         let reg = WidgetRegistry::with_builtins();
         let bar = StatusBar::build(&cfg, &reg).unwrap();
@@ -319,6 +334,126 @@ mod tests {
         let s = row_to_string(&row);
         assert_eq!(s, "LEFTCRIGHT");
         assert_eq!(s.len(), 10);
+    }
+
+    /// phux-foz.12: window-tab hit targets survive slot placement — a
+    /// left-slot tab strip keeps its per-column `CellHit::Window` stamps at
+    /// the columns the tabs occupy, other columns stay inert, and the same
+    /// holds when the strip rides the right slot (offset by the flush).
+    #[test]
+    fn window_tab_hits_survive_slot_placement() {
+        use crate::widget::{CellHit, WindowInfo};
+        let windows = [
+            WindowInfo {
+                name: "a".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "b".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ];
+        let ctx = WidgetContext::new(UNIX_EPOCH, "", "C-a", &windows);
+        let reg = WidgetRegistry::with_builtins();
+        let hits_of = |cfg: &StatusCfg, width: u16| -> Vec<Option<usize>> {
+            let bar = StatusBar::build(cfg, &reg).unwrap();
+            bar.render(&ctx, width)
+                .iter()
+                .map(|c| c.hit.map(|CellHit::Window(i)| i))
+                .collect()
+        };
+        // Left slot: "0:a 1:b" flush at column 0 in a 10-wide row.
+        let left = StatusCfg {
+            left: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            hits_of(&left, 10),
+            vec![
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(1),
+                None,
+                None,
+                None
+            ]
+        );
+        // Right slot: same strip flush against the last column.
+        let right = StatusCfg {
+            right: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        assert_eq!(
+            hits_of(&right, 10),
+            vec![
+                None,
+                None,
+                None,
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1),
+                Some(1)
+            ]
+        );
+    }
+
+    /// phux-foz.12: truncation drops trailing tabs' hits with their cells —
+    /// the surviving columns still map to the right windows, and no stale
+    /// target outlives its glyphs.
+    #[test]
+    fn window_tab_hits_track_truncation() {
+        use crate::widget::{CellHit, WindowInfo};
+        let mk = |name: &str, active: bool| WindowInfo {
+            name: name.to_owned(),
+            active,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        };
+        let windows = [mk("alpha", true), mk("beta", false), mk("gamma", false)];
+        let ctx = WidgetContext::new(UNIX_EPOCH, "", "C-a", &windows);
+        let reg = WidgetRegistry::with_builtins();
+        let cfg = StatusCfg {
+            left: vec![Widget::Bare("windows".into())],
+            ..Default::default()
+        };
+        let bar = StatusBar::build(&cfg, &reg).unwrap();
+        // Full strip "0:alpha 1:beta 2:gamma" is 22 cells; width 10 keeps
+        // "0:alpha 1:" — window 0's tab plus the head of window 1's.
+        let row = bar.render(&ctx, 10);
+        let hits: Vec<Option<usize>> = row
+            .iter()
+            .map(|c| c.hit.map(|CellHit::Window(i)| i))
+            .collect();
+        assert_eq!(
+            hits,
+            vec![
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(0),
+                None,
+                Some(1),
+                Some(1)
+            ]
+        );
+        assert_eq!(row_to_string(&row), "0:alpha 1:");
     }
 
     #[test]

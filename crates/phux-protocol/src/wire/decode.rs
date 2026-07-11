@@ -338,8 +338,9 @@ impl<'a> Decoder<'a> {
                         field::hello::CLIENT_CAPS => {
                             // Caps blob: a prefix of color_support, layers,
                             // image_protocols, kbd_protocols, hyperlinks,
-                            // output_mode. A shorter blob (older peer) leaves
-                            // the trailing caps at their defaults.
+                            // output_mode, then an optional palette-present
+                            // byte + foreground/background RGB. A shorter blob
+                            // (older peer) leaves trailing caps at defaults.
                             let mut d = Decoder::new(value);
                             if !d.at_body_end() {
                                 let cs = crate::caps::ColorSupport::from_wire(d.read_u8()?)
@@ -366,6 +367,24 @@ impl<'a> Decoder<'a> {
                             if !d.at_body_end() {
                                 client_caps = client_caps.with_output_mode(
                                     crate::caps::OutputMode::from_wire(d.read_u8()?),
+                                );
+                            }
+                            if !d.at_body_end() && d.read_u8()? != 0 {
+                                let foreground = crate::caps::TerminalColor {
+                                    r: d.read_u8()?,
+                                    g: d.read_u8()?,
+                                    b: d.read_u8()?,
+                                };
+                                let background = crate::caps::TerminalColor {
+                                    r: d.read_u8()?,
+                                    g: d.read_u8()?,
+                                    b: d.read_u8()?,
+                                };
+                                client_caps = client_caps.with_default_colors(
+                                    crate::caps::TerminalDefaultColors {
+                                        foreground,
+                                        background,
+                                    },
                                 );
                             }
                         }
@@ -853,6 +872,7 @@ impl<'a> Decoder<'a> {
                 let mut cwd: Option<String> = None;
                 let mut env: Option<Vec<(String, String)>> = None;
                 let mut term: Option<String> = None;
+                let mut satellite: Option<crate::ids::SatelliteHost> = None;
                 while let Some((id, value)) = self.read_field()? {
                     match id {
                         field::spawn_terminal::REQUEST_ID => {
@@ -880,6 +900,12 @@ impl<'a> Decoder<'a> {
                                     .to_owned(),
                             );
                         }
+                        field::spawn_terminal::SATELLITE => {
+                            satellite = Some(crate::ids::SatelliteHost::new(
+                                core::str::from_utf8(value)
+                                    .map_err(|_| DecodeError::InvalidUtf8)?,
+                            ));
+                        }
                         _ => {}
                     }
                 }
@@ -890,6 +916,7 @@ impl<'a> Decoder<'a> {
                     cwd,
                     env,
                     term,
+                    satellite,
                 }
             }
             TYPE_TERMINAL_SPAWNED => {

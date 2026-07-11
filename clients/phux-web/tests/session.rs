@@ -2,6 +2,7 @@
 //! no WebSocket/DOM needed (runs under node).
 
 use bytes::BytesMut;
+use phux_protocol::caps::ImageProtocolSet;
 use phux_protocol::ids::TerminalId;
 use phux_protocol::wire::frame::FrameKind;
 use phux_vt_web::Vt;
@@ -19,7 +20,7 @@ async fn terminal_output_frame_feeds_engine_and_acks() {
     let frame = FrameKind::TerminalOutput {
         terminal_id: tid.clone(),
         seq: 7,
-        bytes: b"Hi phux".to_vec(),
+        bytes: bytes::Bytes::from_static(b"Hi phux"),
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -62,5 +63,27 @@ async fn handshake_emits_hello_then_attach() {
     assert!(
         matches!(attach, FrameKind::Attach { .. }),
         "second is ATTACH"
+    );
+}
+
+/// Regression for phux-ycw0: the canvas renderer paints text/color/cursor
+/// only, so the HELLO must not advertise any image protocol — otherwise the
+/// server forwards image escapes (kitty graphics, sixel, iTerm2) this client
+/// silently drops on the floor.
+#[wasm_bindgen_test]
+async fn hello_advertises_no_image_protocols() {
+    let vt = Vt::load().await.expect("load engine");
+    let session = Session::new(&vt, 80, 24);
+
+    let frames = session.handshake();
+    let (hello, _) = FrameKind::decode(&frames[0]).expect("decode hello");
+    let FrameKind::Hello { client_caps, .. } = hello else {
+        panic!("first handshake frame must be HELLO");
+    };
+    assert_eq!(
+        client_caps.image_protocols,
+        ImageProtocolSet::new(),
+        "phux-web cannot render images yet; it must not advertise image \
+         protocols (docs/consumers/web.md, ADR-0034)"
     );
 }

@@ -11,7 +11,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod distro;
 mod error;
+pub mod integration; // phux-ark7 (ADR-0042): agent integration templates + launch
+mod layer;
 pub mod plugin;
 pub mod satellite;
 mod schema;
@@ -23,10 +26,14 @@ pub mod scaffold; // phux-ijp (config init: commented projection of default.toml
 pub mod widget; // phux-nz4.4 (note: schema::Widget is the TOML enum; widget::Widget is the trait)
 
 pub use error::{ConfigError, byte_offset_to_line_col};
+pub use layer::{
+    ConfigProvenance, KeyOrigin, LayerSource, MAX_EXTENDS_DEPTH, merged_config_with_provenance,
+};
 pub use satellite::SatelliteConfigEntry;
 pub use schema::{
     Action, Config, CwdInheritance, DefaultsCfg, ExperimentalCfg, HookEntry, KeybindingsCfg,
-    ParamAction, SidebarCfg, SidebarPosition, StatusCfg, ThemeCfg, Widget, WidgetSpec, WindowSize,
+    ParamAction, SidebarCfg, SidebarPosition, StatusCfg, StatusPosition, ThemeCfg, Widget,
+    WidgetSpec, WindowSize,
 };
 pub use widget::{
     Cell, CellStyle, SessionNameWidget, StatusBar, StatusWidget, TimeWidget, WidgetCells,
@@ -86,21 +93,30 @@ pub fn parse_str(input: &str, path: &Path) -> Result<Config, ConfigError> {
     }
 }
 
-/// Parse `user_input` and layer it over [`DEFAULT_CONFIG_TOML`].
+/// Parse `user_input` and layer it over [`DEFAULT_CONFIG_TOML`] plus
+/// any layers its `extends` key names (ADR-0039).
 ///
-/// Merge semantics: every leaf the user sets wins. Tables merge
-/// recursively (so the user can add one binding without restating the
+/// Merge semantics: every leaf a later layer sets wins. Tables merge
+/// recursively (so a layer can add one binding without restating the
 /// whole `prefix-table`). Arrays do NOT merge element-wise — they
 /// overwrite, because there is no per-element identity for widget
-/// lists / hook lists.
+/// lists / hook lists. A key `x-append` holding an array is the
+/// explicit opt-in: it appends to the inherited array `x` instead of
+/// replacing it.
 ///
-/// `path` is used only for error reporting on the user input.
+/// `path` is used for error reporting on the user input AND as the
+/// base directory for resolving relative `extends` entries; when
+/// `user_input` (or a resolved layer) declares `extends`, this
+/// function reads those layer files from disk.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError::Parse`] if either the embedded defaults or
-/// the user input fail to parse as TOML, or if the merged document
-/// fails to deserialize into the schema.
+/// Returns [`ConfigError::Parse`] if the embedded defaults, the user
+/// input, or a layer file fail to parse as TOML, or if the merged
+/// document fails to deserialize into the schema. Layer resolution
+/// failures surface as [`ConfigError::LayerRead`],
+/// [`ConfigError::LayerCycle`], or [`ConfigError::Layer`], each naming
+/// the offending file.
 pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, ConfigError> {
     let merged = merged_config_table(user_input, path)?;
     toml::Value::Table(merged).try_into().map_err(|e| {
@@ -116,61 +132,33 @@ pub fn parse_with_defaults(user_input: &str, path: &Path) -> Result<Config, Conf
     })
 }
 
-/// Merge `user_input` over [`DEFAULT_CONFIG_TOML`] and return the
+/// Merge the full layer stack — [`DEFAULT_CONFIG_TOML`], any layers
+/// named via `extends` (ADR-0039), then `user_input` — and return the
 /// resulting TOML table *without* deserializing into [`Config`].
 ///
 /// This is the document-level half of [`parse_with_defaults`]: it is
 /// what `phux config show` serializes to render the effective config
-/// (the shipped defaults with the user's overrides applied). Keeping it
-/// at the table level means the rendered output is valid round-trippable
+/// (the shipped defaults with all layers applied). Keeping it at the
+/// table level means the rendered output is valid round-trippable
 /// TOML rather than a typed struct re-serialized in schema order.
 ///
-/// `path` is used only for error reporting on `user_input`.
+/// `path` is used for error reporting on `user_input` and as the base
+/// directory for relative `extends` entries; layer files are read from
+/// disk. When `user_input` declares no `extends`, no I/O occurs.
+///
+/// Callers that also need per-key layer attribution (`phux config show
+/// --layers`) should use [`merged_config_with_provenance`], of which
+/// this is the table-only projection.
 ///
 /// # Errors
 ///
-/// Returns [`ConfigError::Parse`] if the embedded defaults or
-/// `user_input` are not valid TOML.
+/// Returns [`ConfigError::Parse`] if the embedded defaults,
+/// `user_input`, or a layer file are not valid TOML;
+/// [`ConfigError::LayerRead`] / [`ConfigError::LayerCycle`] /
+/// [`ConfigError::Layer`] for layer-resolution and `-append` failures,
+/// each naming the offending file.
 pub fn merged_config_table(user_input: &str, path: &Path) -> Result<toml::Table, ConfigError> {
-    let default_table: toml::Table = toml::from_str(DEFAULT_CONFIG_TOML).map_err(|e| {
-        let (line, col) = e.span().map_or((1, 1), |r| {
-            byte_offset_to_line_col(DEFAULT_CONFIG_TOML, r.start)
-        });
-        ConfigError::Parse {
-            path: Path::new("<embedded default.toml>").to_path_buf(),
-            line,
-            col,
-            message: e.message().to_owned(),
-        }
-    })?;
-    let user_table: toml::Table = toml::from_str(user_input).map_err(|e| {
-        let (line, col) = e
-            .span()
-            .map_or((1, 1), |r| byte_offset_to_line_col(user_input, r.start));
-        ConfigError::Parse {
-            path: path.to_path_buf(),
-            line,
-            col,
-            message: e.message().to_owned(),
-        }
-    })?;
-    Ok(merge_tables(default_table, user_table))
-}
-
-/// Recursively merge `overlay` into `base`. Tables merge per-key;
-/// any other Value type (including arrays) replaces wholesale.
-fn merge_tables(mut base: toml::Table, overlay: toml::Table) -> toml::Table {
-    for (k, ov) in overlay {
-        match (base.remove(&k), ov) {
-            (Some(toml::Value::Table(b)), toml::Value::Table(o)) => {
-                base.insert(k, toml::Value::Table(merge_tables(b, o)));
-            }
-            (_, v) => {
-                base.insert(k, v);
-            }
-        }
-    }
-    base
+    merged_config_with_provenance(user_input, path).map(|(table, _)| table)
 }
 
 /// Render a [`DefaultsCfg::session_name_template`] into a concrete

@@ -1,10 +1,10 @@
 ---
 audience: contributors, agents
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
-# docs/architecture/
+# Architecture reference
 
 **TL;DR.** Internal structure of phux — process model, threading,
 transport, crate graph, data model, state sync, rendering, and the quality
@@ -19,7 +19,7 @@ are). What you read to understand how phux is built.
 |---|---|
 | [process-model.md](./process-model.md) | Per-user server, single process, current-thread runtime; supervision (ADR-0003, ADR-0014) |
 | [threading.md](./threading.md) | `!Send`/`!Sync` constraints, LocalSet, why this matters for libghostty |
-| [transport.md](./transport.md) | The Transport trait, UDS today, QUIC + SSH-stdio later (ADR-0007) |
+| [transport.md](./transport.md) | The Transport trait: UDS, WebSocket, QUIC, and SSH-stdio (ADR-0007) |
 | [crate-graph.md](./crate-graph.md) | Crate dependency edges and the protocol-core independence (ADR-0011) |
 | [data-model.md](./data-model.md) | Sessions, windows, terminals, layouts as in-process types — distinct from wire shape |
 | [state-sync.md](./state-sync.md) | What happens on attach: snapshots, replay, scrollback policy (ADR-0018) |
