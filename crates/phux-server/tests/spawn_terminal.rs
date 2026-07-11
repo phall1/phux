@@ -237,6 +237,7 @@ fn spawn_terminal_in_default_group_round_trips_input() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -334,6 +335,7 @@ fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -415,6 +417,7 @@ fn spawn_terminal_env_term_overrides_default() {
                 cwd: None,
                 env: Some(vec![("TERM".to_owned(), "phux-spawn-override".to_owned())]),
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -468,6 +471,7 @@ fn spawn_terminal_default_term_is_xterm_256color() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -520,6 +524,7 @@ fn spawn_terminal_term_field_overrides_default() {
                 cwd: None,
                 env: None,
                 term: Some("phux-term-field".to_owned()),
+                satellite: None,
             },
         )
         .await;
@@ -570,6 +575,7 @@ fn spawn_terminal_env_term_beats_term_field() {
                 cwd: None,
                 env: Some(vec![("TERM".to_owned(), "phux-env-wins".to_owned())]),
                 term: Some("phux-term-field".to_owned()),
+                satellite: None,
             },
         )
         .await;
@@ -615,6 +621,7 @@ fn spawn_terminal_unknown_group_returns_group_not_found() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -661,6 +668,7 @@ fn spawn_terminal_emits_terminal_closed_on_pty_exit() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -725,6 +733,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -913,6 +922,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -1002,6 +1012,7 @@ fn spawn_terminal_session_root_inherits_seed_pane_dir() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
@@ -1085,6 +1096,7 @@ fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;

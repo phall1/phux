@@ -253,6 +253,13 @@ fn main() -> ExitCode {
             json,
             command,
         }) => commands::new::run_new(name, session, cwd, socket, json, command),
+        Some(Command::Spawn {
+            satellite,
+            cwd,
+            json,
+            socket,
+            command,
+        }) => commands::spawn::run_spawn(satellite, cwd, json, socket, command),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
         Some(Command::Take { target, socket }) => commands::supervise::run_take(&target, socket),
         Some(Command::Give { target, socket }) => commands::supervise::run_give(&target, socket),

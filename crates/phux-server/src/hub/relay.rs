@@ -51,8 +51,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
-use phux_protocol::ids::{SatelliteHost, TerminalId};
-use phux_protocol::wire::frame::{Command, CommandResult, ErrorCode, FrameKind};
+use phux_protocol::ids::{GroupId, SatelliteHost, TerminalId};
+use phux_protocol::wire::frame::{
+    Command, CommandResult, ErrorCode, FrameKind, SpawnError, SpawnResult,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, trace, warn};
 
@@ -155,6 +157,28 @@ pub(crate) enum RelayRequest {
     Forward {
         /// The frame to forward verbatim.
         frame: FrameKind,
+    },
+    /// Relay a `SPAWN_TERMINAL` to this satellite (phux-v45.6, L1 §3.1 /
+    /// §9.1). Like [`Self::Command`] the session allocates the link-side
+    /// `request_id` (the spawn shares the pending id space) and resolves
+    /// `reply` with the correlated `TERMINAL_SPAWNED.result`, the freshly
+    /// allocated id re-tagged `Local -> Satellite { host, id }`. The
+    /// frame put on the wire carries `satellite: None` — the satellite
+    /// spawns locally; hub-and-spoke never chains.
+    Spawn {
+        /// Group under which the satellite spawns (validated there).
+        group: GroupId,
+        /// Command + argv, or `None` for the satellite's default shell.
+        command: Option<Vec<String>>,
+        /// Working directory on the satellite, or `None` for its default.
+        cwd: Option<String>,
+        /// Environment pairs, `None` = inherit the satellite's env.
+        env: Option<Vec<(String, String)>>,
+        /// First-class `TERM` override, `None` = the satellite's default.
+        term: Option<String>,
+        /// Resolved with the re-tagged spawn result (or a typed
+        /// `SpawnError` on disconnect / timeout).
+        reply: oneshot::Sender<SpawnResult>,
     },
     /// Register a proxy subscription AND put `forward` on the wire, as
     /// one atomic step (phux-v45.11 finding 2). Used by the satellite-
@@ -310,6 +334,58 @@ impl RelayHandle {
         }
     }
 
+    /// Relay a `SPAWN_TERMINAL` and await the correlated re-tagged
+    /// `SpawnResult` (phux-v45.6). The same fail-fast / bounded contract
+    /// as [`Self::command`], expressed in the spawn reply's own typed
+    /// error vocabulary: a saturated mailbox is `SpawnFailed` (retryable,
+    /// the link is up), a dead or unanswering link is
+    /// `SatelliteUnreachable`. Timing out drops the oneshot receiver,
+    /// which marks the pending entry for [`RelaySession::prune_abandoned`].
+    pub(crate) async fn spawn(
+        &self,
+        group: GroupId,
+        command: Option<Vec<String>>,
+        cwd: Option<String>,
+        env: Option<Vec<(String, String)>>,
+        term: Option<String>,
+    ) -> SpawnResult {
+        let (reply, rx) = oneshot::channel();
+        match self.tx.try_send(RelayRequest::Spawn {
+            group,
+            command,
+            cwd,
+            env,
+            term,
+            reply,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                return SpawnResult::Err(SpawnError::SpawnFailed(format!(
+                    "satellite {} link is saturated; retry",
+                    self.host
+                )));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                return SpawnResult::Err(SpawnError::SatelliteUnreachable(format!(
+                    "satellite {} link is down",
+                    self.host
+                )));
+            }
+        }
+        match tokio::time::timeout(RELAY_COMMAND_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => SpawnResult::Err(SpawnError::SatelliteUnreachable(format!(
+                "satellite {} link dropped before the spawn reply",
+                self.host
+            ))),
+            Err(_) => SpawnResult::Err(SpawnError::SatelliteUnreachable(format!(
+                "satellite {} did not answer the spawn within {}s",
+                self.host,
+                RELAY_COMMAND_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
     /// Relay `command` without awaiting the result (the idempotent batch
     /// path — `KILL_TERMINALS` semantics tolerate a silent skip).
     pub(crate) fn command_detached(&self, command: Command) {
@@ -451,6 +527,11 @@ pub(crate) fn fail_fast(request: RelayRequest, host: &SatelliteHost, why: &str) 
                 message: format!("satellite {host} is unreachable: {why}"),
             });
         }
+        RelayRequest::Spawn { reply, .. } => {
+            let _ = reply.send(SpawnResult::Err(SpawnError::SatelliteUnreachable(format!(
+                "satellite {host} is unreachable: {why}"
+            ))));
+        }
         RelayRequest::Forward { frame } => {
             trace!(satellite = %host, kind = ?frame_label(&frame), why, "relay frame dropped while disconnected");
         }
@@ -534,6 +615,10 @@ pub(crate) struct RelaySession {
     host: SatelliteHost,
     next_request_id: u32,
     pending: HashMap<u32, PendingCommand>,
+    /// Relayed `SPAWN_TERMINAL`s awaiting their `TERMINAL_SPAWNED`
+    /// (phux-v45.6). Shares the link-side `request_id` space with
+    /// [`Self::pending`] so one allocator covers both reply frames.
+    pending_spawns: HashMap<u32, oneshot::Sender<SpawnResult>>,
     subscribers: HashMap<u32, Vec<ProxySubscriber>>,
     encode_buf: BytesMut,
 }
@@ -545,6 +630,7 @@ impl RelaySession {
             host,
             next_request_id: 1,
             pending: HashMap::new(),
+            pending_spawns: HashMap::new(),
             subscribers: HashMap::new(),
             encode_buf: BytesMut::with_capacity(1024),
         }
@@ -585,6 +671,28 @@ impl RelaySession {
                 })
             }
             RelayRequest::Forward { frame } => self.encode(&frame),
+            RelayRequest::Spawn {
+                group,
+                command,
+                cwd,
+                env,
+                term,
+                reply,
+            } => {
+                let request_id = self.allocate_request_id();
+                self.pending_spawns.insert(request_id, reply);
+                self.encode(&FrameKind::SpawnTerminal {
+                    request_id,
+                    group,
+                    command,
+                    cwd,
+                    env,
+                    term,
+                    // The satellite spawns locally: the addressing field
+                    // never crosses the link (hub-and-spoke, no chaining).
+                    satellite: None,
+                })
+            }
             RelayRequest::Subscribe {
                 subscription,
                 forward,
@@ -700,7 +808,11 @@ impl RelaySession {
     }
 
     /// Dispatch one frame arriving from the satellite: resolve relayed
-    /// command replies and re-tag + fan out subscribed streams.
+    /// command and spawn replies and re-tag + fan out subscribed streams.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one resolve/re-tag arm per relayable return-leg frame kind; splitting hides the catalog"
+    )]
     pub(crate) fn handle_inbound(&mut self, framed: &[u8]) {
         let frame = match FrameKind::decode(framed) {
             Ok((frame, _rest)) => frame,
@@ -713,12 +825,28 @@ impl RelaySession {
             FrameKind::CommandResult { request_id, result } => {
                 self.resolve_pending(request_id, result);
             }
+            FrameKind::TerminalSpawned { request_id, result } => {
+                self.resolve_pending_spawn(request_id, result);
+            }
             FrameKind::Error {
                 request_id: Some(request_id),
                 code,
                 message,
             } => {
-                self.resolve_pending(request_id, CommandResult::Error { code, message });
+                // Correlated errors resolve whichever request kind holds
+                // the id — commands own it in the common case, but a
+                // satellite MAY answer a relayed spawn with a generic
+                // correlated ERROR instead of TERMINAL_SPAWNED.
+                if self.pending_spawns.contains_key(&request_id) {
+                    self.resolve_pending_spawn(
+                        request_id,
+                        SpawnResult::Err(SpawnError::SpawnFailed(format!(
+                            "satellite refused the spawn: {code:?}: {message}"
+                        ))),
+                    );
+                } else {
+                    self.resolve_pending(request_id, CommandResult::Error { code, message });
+                }
             }
             FrameKind::Event { terminal, event } => {
                 if let Some(id) = self.retag_inbound(terminal.as_ref()) {
@@ -813,6 +941,12 @@ impl RelaySession {
                 message: format!("satellite {} is unreachable: {why}", self.host),
             });
         }
+        for (_, reply) in self.pending_spawns.drain() {
+            let _ = reply.send(SpawnResult::Err(SpawnError::SatelliteUnreachable(format!(
+                "satellite {} is unreachable: {why}",
+                self.host
+            ))));
+        }
         // One typed ERROR per consumer (not per subscription): the frame
         // names the host, and every terminal of that host is gone at once.
         let mut notified: Vec<ClientId> = Vec::new();
@@ -847,14 +981,15 @@ impl RelaySession {
     /// the pending map without bound (only [`RELAY_MAILBOX`] entries drain
     /// per mailbox refill, and nothing else removes them).
     pub(crate) fn prune_abandoned(&mut self) -> usize {
-        let before = self.pending.len();
+        let before = self.pending.len() + self.pending_spawns.len();
         self.pending.retain(|_, pending| !pending.reply.is_closed());
-        let pruned = before - self.pending.len();
+        self.pending_spawns.retain(|_, reply| !reply.is_closed());
+        let pruned = before - self.pending.len() - self.pending_spawns.len();
         if pruned > 0 {
             debug!(
                 satellite = %self.host,
                 pruned,
-                remaining = self.pending.len(),
+                remaining = self.pending.len() + self.pending_spawns.len(),
                 "pruned relayed commands whose consumer stopped waiting"
             );
         }
@@ -900,6 +1035,44 @@ impl RelaySession {
         }
     }
 
+    /// Resolve a link-side spawn `request_id` back to its waiting
+    /// consumer, re-tagging a successful result's freshly allocated id
+    /// `Local { id }` -> `Satellite { host, id }` (phux-v45.6). A
+    /// `Satellite`-tagged id in the satellite's own reply is out of the
+    /// hub-and-spoke topology and resolves as a `SpawnFailed` error
+    /// rather than being chained onward.
+    fn resolve_pending_spawn(&mut self, request_id: u32, result: SpawnResult) {
+        let Some(reply) = self.pending_spawns.remove(&request_id) else {
+            debug!(
+                satellite = %self.host,
+                request_id,
+                "satellite spawn reply with no pending spawn; dropping"
+            );
+            return;
+        };
+        let retagged = match result {
+            SpawnResult::Ok(TerminalId::Local { id }) => {
+                SpawnResult::Ok(TerminalId::satellite(self.host.clone(), id))
+            }
+            SpawnResult::Ok(TerminalId::Satellite { .. }) => {
+                warn!(
+                    satellite = %self.host,
+                    "satellite answered a spawn with a Satellite-tagged id; hub-and-spoke does not chain"
+                );
+                SpawnResult::Err(SpawnError::SpawnFailed(
+                    "satellite returned a chained satellite id".to_owned(),
+                ))
+            }
+            err @ SpawnResult::Err(_) => err,
+            // `SpawnResult` is `#[non_exhaustive]`: a future variant a
+            // newer satellite sends passes through untouched (it carries
+            // no terminal id to re-tag).
+            other => other,
+        };
+        // A dropped receiver (consumer timed out / disconnected) is fine.
+        let _ = reply.send(retagged);
+    }
+
     /// The satellite-local id of an inbound frame's terminal scope, or
     /// `None` when the frame is unscoped or (out of ADR-0007 topology)
     /// already satellite-tagged — satellites do not chain.
@@ -931,12 +1104,13 @@ impl RelaySession {
     }
 
     /// Allocate the next link-side request id, skipping ids still pending
-    /// (u32 wrap-around safety, not a practical collision).
+    /// in either reply map (u32 wrap-around safety, not a practical
+    /// collision).
     fn allocate_request_id(&mut self) -> u32 {
         loop {
             let id = self.next_request_id;
             self.next_request_id = self.next_request_id.wrapping_add(1).max(1);
-            if !self.pending.contains_key(&id) {
+            if !self.pending.contains_key(&id) && !self.pending_spawns.contains_key(&id) {
                 return id;
             }
         }
@@ -1348,6 +1522,112 @@ mod tests {
                 message: "nope".to_owned(),
             }
         );
+    }
+
+    // --- session: spawn relay (phux-v45.6) --------------------------------
+
+    fn spawn_request(reply: oneshot::Sender<SpawnResult>) -> RelayRequest {
+        RelayRequest::Spawn {
+            group: GroupId::new(1),
+            command: None,
+            cwd: None,
+            env: None,
+            term: None,
+            reply,
+        }
+    }
+
+    #[test]
+    fn session_relays_spawn_with_stripped_addressing_and_retags_the_reply() {
+        let mut session = RelaySession::new(host());
+        let (reply, mut rx) = oneshot::channel();
+        let wire = session
+            .handle_request(spawn_request(reply))
+            .expect("spawn produces a wire frame");
+        let FrameKind::SpawnTerminal {
+            request_id,
+            satellite,
+            ..
+        } = decode(&wire)
+        else {
+            panic!("expected SPAWN_TERMINAL on the wire");
+        };
+        assert_eq!(
+            satellite, None,
+            "the addressing field never crosses the link (no chaining)"
+        );
+        // The satellite answers with its Local id; the consumer sees it
+        // re-tagged with this link's host.
+        session.handle_inbound(&encode(&FrameKind::TerminalSpawned {
+            request_id,
+            result: SpawnResult::Ok(TerminalId::local(42)),
+        }));
+        assert_eq!(
+            rx.try_recv().expect("spawn resolved"),
+            SpawnResult::Ok(TerminalId::satellite("devbox", 42))
+        );
+    }
+
+    #[test]
+    fn session_rejects_chained_ids_and_relays_spawn_errors_verbatim() {
+        let mut session = RelaySession::new(host());
+        // A Satellite-tagged id in the satellite's own reply never chains.
+        let (reply, mut rx) = oneshot::channel();
+        let wire = session.handle_request(spawn_request(reply)).expect("wire");
+        let FrameKind::SpawnTerminal { request_id, .. } = decode(&wire) else {
+            panic!("expected SPAWN_TERMINAL");
+        };
+        session.handle_inbound(&encode(&FrameKind::TerminalSpawned {
+            request_id,
+            result: SpawnResult::Ok(TerminalId::satellite("nested", 7)),
+        }));
+        assert!(matches!(
+            rx.try_recv().expect("resolved"),
+            SpawnResult::Err(SpawnError::SpawnFailed(_))
+        ));
+        // A typed satellite-side error relays verbatim.
+        let (reply, mut rx) = oneshot::channel();
+        let wire = session.handle_request(spawn_request(reply)).expect("wire");
+        let FrameKind::SpawnTerminal { request_id, .. } = decode(&wire) else {
+            panic!("expected SPAWN_TERMINAL");
+        };
+        session.handle_inbound(&encode(&FrameKind::TerminalSpawned {
+            request_id,
+            result: SpawnResult::Err(SpawnError::GroupNotFound),
+        }));
+        assert_eq!(
+            rx.try_recv().expect("resolved"),
+            SpawnResult::Err(SpawnError::GroupNotFound)
+        );
+    }
+
+    #[test]
+    fn teardown_and_fail_fast_resolve_spawns_with_satellite_unreachable() {
+        let mut session = RelaySession::new(host());
+        let (reply, mut rx) = oneshot::channel();
+        let _ = session.handle_request(spawn_request(reply));
+        session.teardown("satellite went away");
+        assert!(matches!(
+            rx.try_recv().expect("pending spawn failed"),
+            SpawnResult::Err(SpawnError::SatelliteUnreachable(_))
+        ));
+
+        let (reply, mut rx) = oneshot::channel();
+        fail_fast(spawn_request(reply), &host(), "backoff");
+        assert!(matches!(
+            rx.try_recv().expect("spawn failed fast"),
+            SpawnResult::Err(SpawnError::SatelliteUnreachable(_))
+        ));
+    }
+
+    #[test]
+    fn prune_abandoned_covers_pending_spawns() {
+        let mut session = RelaySession::new(host());
+        let (reply, rx) = oneshot::channel();
+        let _ = session.handle_request(spawn_request(reply));
+        assert_eq!(session.prune_abandoned(), 0, "consumer still waits");
+        drop(rx);
+        assert_eq!(session.prune_abandoned(), 1, "abandoned spawn pruned");
     }
 
     // --- session: return-leg re-tagging ----------------------------------

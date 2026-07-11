@@ -52,6 +52,7 @@ pub(crate) mod satellite;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod spawn;
 pub(crate) mod supervise;
 pub(crate) mod tag;
 pub(crate) mod upgrade;
@@ -255,6 +256,39 @@ pub(crate) enum Command {
 
         /// Command (and arguments) to run in the seed pane instead of the
         /// default shell. Must follow `--`: `phux new work -- htop`.
+        #[arg(last = true)]
+        command: Vec<String>,
+    },
+
+    /// Spawn a Terminal without attaching (`SPAWN_TERMINAL`).
+    ///
+    /// The pane joins the server's most recently active session; the new
+    /// Terminal's id prints to stdout. With `--satellite NAME` on a
+    /// federation hub (`phux server --hub`), the spawn is routed over
+    /// the hub's link to that satellite and the returned id is
+    /// satellite-tagged — addressable through the hub by every
+    /// satellite-capable verb. Does not auto-start a server.
+    Spawn {
+        /// Route the spawn to a configured federation satellite (a name
+        /// from `phux satellite list`, on a server running `--hub`).
+        #[arg(long, value_name = "NAME")]
+        satellite: Option<String>,
+
+        /// Working directory for the new pane.
+        #[arg(short = 'c', long = "cwd")]
+        cwd: Option<String>,
+
+        /// Emit the result as JSON:
+        /// `{"terminal_id": N, "satellite": "NAME" | null}`.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Command (and arguments) to run instead of the default shell.
+        /// Must follow `--`: `phux spawn -- htop`.
         #[arg(last = true)]
         command: Vec<String>,
     },

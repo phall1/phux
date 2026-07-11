@@ -1466,6 +1466,7 @@ fn run_action(
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             };
             effects.spawn_terminal = Some((
                 request_id,
@@ -1620,6 +1621,7 @@ fn run_action(
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             };
             effects.spawn_window = Some((request_id, PendingWindow { name }, frame));
         }

@@ -249,6 +249,10 @@ pub mod spawn_terminal {
     pub const ENV: u32 = 5;
     /// Optional first-class `TERM` for the new Terminal (absent = `None`).
     pub const TERM: u32 = 6;
+    /// Optional satellite host to spawn on (absent = `None`, spawn locally).
+    /// Federation-hub addressing per `docs/spec/L1.md` §3.1 / §9.1
+    /// (phux-v45.6, ADR-0007).
+    pub const SATELLITE: u32 = 7;
 }
 
 /// `TERMINAL_SPAWNED` body fields (`docs/spec/L1.md` §10.1).

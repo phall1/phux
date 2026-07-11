@@ -492,6 +492,51 @@ pub(crate) async fn refresh_registry_cwds(state: &SharedState) {
     });
 }
 
+/// The decoded `SPAWN_TERMINAL` payload, bundled 1:1 with the wire frame
+/// (minus `request_id`, threaded separately like every reply-correlated
+/// handler). Keeps [`handle_spawn_terminal`]'s signature stable as the
+/// frame grows additive fields (`term` — phux-ign, `satellite` —
+/// phux-v45.6).
+#[derive(Debug)]
+pub(crate) struct SpawnRequest {
+    /// Group under which to spawn (v0.1 servers expose `GroupId(1)`).
+    pub(crate) group: GroupId,
+    /// Command + argv, or `None` for the server's default shell.
+    pub(crate) command: Option<Vec<String>>,
+    /// Working directory, or `None` for the server's default policy.
+    pub(crate) cwd: Option<String>,
+    /// Environment pairs, `None` = inherit the server's environment.
+    pub(crate) env: Option<Vec<(String, String)>>,
+    /// First-class `TERM` override (phux-ign).
+    pub(crate) term: Option<String>,
+    /// Satellite host to route the spawn to (phux-v45.6), `None` = local.
+    pub(crate) satellite: Option<phux_protocol::ids::SatelliteHost>,
+}
+
+/// Relay one satellite-addressed spawn over the owning hub link
+/// (phux-v45.6, L1 §3.1 / §9.1) and return the re-tagged result. A
+/// missing route — non-hub server, or `host` absent from the hub's
+/// registry — is the typed configuration refusal; an unreachable
+/// satellite fails fast inside [`crate::hub::relay::RelayHandle::spawn`].
+async fn relay_spawn_to_satellite(
+    state: &SharedState,
+    host: &phux_protocol::ids::SatelliteHost,
+    group: GroupId,
+    command: Option<Vec<String>>,
+    cwd: Option<String>,
+    env: Option<Vec<(String, String)>>,
+    term: Option<String>,
+) -> SpawnResult {
+    let Some(relay) = state.with(|s| s.hub_relay(host)) else {
+        debug!(
+            satellite = %host,
+            "SPAWN_TERMINAL: no route to satellite (non-hub server, or host not in the registry)",
+        );
+        return SpawnResult::Err(SpawnError::UnsupportedSatelliteRoute);
+    };
+    relay.spawn(group, command, cwd, env, term).await
+}
+
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
 /// v0.1 servers expose a single default Group at
@@ -533,27 +578,38 @@ pub(crate) async fn refresh_registry_cwds(state: &SharedState) {
 /// (phux-i9zl): a TUI split keeps the session intact so `phux ls` shows one
 /// session and a reattach resolves every split pane. The session is
 /// resolved from the client's attachment; a `SPAWN_TERMINAL` from a
-/// non-attached client is refused (no session to host the pane).
-#[allow(
-    clippy::too_many_arguments,
-    reason = "1:1 with the SPAWN_TERMINAL wire frame (request_id + group + command + cwd + env) plus the standard SharedState/client_id/out_tx/root_token threading the rest of this file uses"
-)]
+/// non-attached client (the headless `phux spawn` CLI, or a hub's relayed
+/// spawn arriving over the link — phux-v45.6) falls back to the server's
+/// most recently active session, and is refused only when the server has
+/// no session at all to host the pane.
+///
+/// A `satellite: Some(host)` spawn never touches local dispatch: on a hub
+/// it is relayed over `host`'s link and the reply carries the new
+/// Terminal re-tagged `Satellite { host, id }`; a non-hub server (or a
+/// hub without `host` in its registry) refuses with the typed
+/// [`SpawnError::UnsupportedSatelliteRoute`], and an unreachable
+/// satellite fails fast with [`SpawnError::SatelliteUnreachable`]
+/// (L1 §3.1 / §9.1).
 #[allow(
     clippy::too_many_lines,
-    reason = "linear orchestration: validate group → build CommandBuilder from wire frame → resolve spawning client's session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
+    reason = "linear orchestration: route satellite spawns → validate group → build CommandBuilder from wire frame → resolve hosting session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
 )]
 pub(crate) async fn handle_spawn_terminal(
     state: &SharedState,
     client_id: ClientId,
     request_id: u32,
-    group: GroupId,
-    command: Option<Vec<String>>,
-    cwd: Option<String>,
-    env: Option<Vec<(String, String)>>,
-    term: Option<String>,
+    request: SpawnRequest,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
 ) {
+    let SpawnRequest {
+        group,
+        command,
+        cwd,
+        env,
+        term,
+        satellite,
+    } = request;
     debug!(
         ?client_id,
         request_id,
@@ -561,8 +617,24 @@ pub(crate) async fn handle_spawn_terminal(
         command = ?command,
         cwd = ?cwd,
         env_count = env.as_ref().map_or(0, Vec::len),
+        satellite = ?satellite,
         "SPAWN_TERMINAL",
     );
+
+    // Satellite-targeted spawn (phux-v45.6, L1 §3.1 / §9.1): relay over
+    // the owning hub link; the group and PTY details are validated on the
+    // satellite, whose errors relay back verbatim. Never falls through to
+    // local dispatch.
+    if let Some(host) = satellite {
+        let result = relay_spawn_to_satellite(state, &host, group, command, cwd, env, term).await;
+        let _ = out_tx
+            .send(Outbound::Frame(FrameKind::TerminalSpawned {
+                request_id,
+                result,
+            }))
+            .await;
+        return;
+    }
 
     if group != crate::state::DEFAULT_GROUP_ID {
         let _ = out_tx
@@ -620,14 +692,25 @@ pub(crate) async fn handle_spawn_terminal(
     // phux-i9zl: a split spawns into the spawning client's CURRENT session's
     // window, not a fresh `spawn-N` wrapper session. Resolve that session
     // from the client's attachment (the same `s.attached` lookup the cwd
-    // inheritance above uses). A `SPAWN_TERMINAL` from a non-attached client
-    // has no session to host the pane — reject it rather than orphan a PTY.
-    let Some(session) = state.with(|s| s.attached.get(&client_id).map(|c| c.session)) else {
+    // inheritance above uses). A non-attached spawner — the headless
+    // `phux spawn` CLI, or a hub's relayed spawn arriving over the link
+    // (phux-v45.6; the hub's link consumer never attaches) — falls back to
+    // the server's most recently active session (the same focus heuristic
+    // `GET_STATE` snapshots use). Only a server with no session at all
+    // refuses, rather than orphan a PTY nothing can list.
+    let session = state.with(|s| {
+        s.attached
+            .get(&client_id)
+            .map(|c| c.session)
+            .or_else(|| s.most_recently_touched_session())
+            .or_else(|| s.registry.sessions().next().map(|(id, _)| id))
+    });
+    let Some(session) = session else {
         let _ = out_tx
             .send(Outbound::Frame(FrameKind::TerminalSpawned {
                 request_id,
                 result: SpawnResult::Err(SpawnError::SpawnFailed(
-                    "spawning client is not attached to a session".to_owned(),
+                    "server has no session to host the spawned pane".to_owned(),
                 )),
             }))
             .await;

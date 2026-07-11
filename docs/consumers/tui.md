@@ -111,9 +111,14 @@ phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
                               # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
                               # --hub validates [[satellites]] into the runtime
-                              # satellite table at startup (no dialing/routing yet)
+                              # satellite table, dials each entry, and routes
+                              # satellite-tagged traffic over the links (§4.2)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
+phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
+                              # spawn a terminal without attaching; --satellite
+                              # routes the spawn to a federation satellite via
+                              # a --hub server and prints the routed id
 phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
 phux rename SESSION NEW-NAME  # rename a session
@@ -190,8 +195,8 @@ words. Each command's `--help` calls this out.
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
 into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `config show`, `config plugins`, `config agents`, `config run`,
-`plugin`, and `satellite`. Their
+`run`, `new`, `spawn`, `config show`, `config plugins`, `config agents`,
+`config run`, `plugin`, and `satellite`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -715,9 +720,9 @@ agent-tools demo launches and drives an `agent-bench` profile through
 `phux config run`.
 
 **Federation satellites** live under `[[satellites]]`. This is the
-hub-side registry for remote phux servers; routing is a later federation
-slice, but the registry name is already the host token that will appear in
-`TerminalId::Satellite.host`. `endpoint` is an opaque URI string in the
+hub-side registry for remote phux servers; the registry name is the host
+token that appears in `TerminalId::Satellite.host` — the address every
+satellite-routed frame carries. `endpoint` is an opaque URI string in the
 registry CRUD so `ssh://devbox`, `quic://host:8788`, and `wss://host:8787`
 can share one control-plane shape; `enabled` defaults to `true`.
 
@@ -726,8 +731,17 @@ startup it validates every enabled entry's endpoint by scheme (`quic://`
 requires an explicit `host:port`; `ssh://` is accepted but its transport
 is deferred) into a runtime satellite table keyed by the registry name,
 and refuses to start on a malformed enabled endpoint or a duplicate name.
-Disabled entries are skipped. Dialing and routing are later federation
-slices; without `--hub` the server ignores the registry entirely.
+Disabled entries are skipped. The hub then dials each table entry with
+capped-backoff reconnect and routes satellite-tagged traffic over the
+established links (SPEC L1 §9.1): per-terminal commands, input, and
+subscribed streams relay both directions with ids re-tagged at the hub;
+`phux ls` / `GET_STATE` on the hub aggregates every satellite's terminals
+next to the local ones (an unreachable satellite degrades to an
+un-correlated typed error, never a failed list); and
+`phux spawn --satellite NAME` creates a terminal *on* the satellite,
+returning a satellite-tagged id that routes through the hub immediately.
+Without `--hub` the server ignores the registry entirely and refuses
+satellite-tagged traffic with the typed `UnsupportedSatelliteRoute`.
 
 The hub authenticates to a satellite as an ordinary remote consumer
 (ADR-0038): a pairing bearer token plus a TLS certificate-fingerprint pin,
