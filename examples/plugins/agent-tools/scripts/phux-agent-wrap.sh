@@ -31,12 +31,33 @@
 # the whole point of the trap. Running the agent as a foreground child and
 # forwarding its exit status is the only way to guarantee cleanup.
 #
+# Pane targeting is REQUIRED and resolved exactly once, up front, then
+# reused verbatim for both the launch-time `set` and the exit-time `clear`.
+# We never let `phux agent set/clear` fall back to whatever pane happens to
+# be FOCUSED at CLI-run time: focus moves freely, and the exit-time clear
+# fires at an arbitrary later moment, so a focused-pane guess would race —
+# in a multi-pane / fleet run the clear would delete a *different*, still-
+# running agent's record and leave this pane's record stale. If we cannot
+# resolve which pane we are running in, we write nothing at all (best-
+# effort no-op) and still launch the agent; a missing sidebar label is
+# always safer than corrupting a sibling pane's identity.
+#
+# The pane target comes from, in order: `--target` / PHUX_AGENT_TARGET, or
+# else PHUX_TERMINAL_ID (the pane's wire id, used as the `@N` selector).
+# PHUX_TERMINAL_ID is the automatic path: phux exposes it to hook children
+# today, and once the server also injects it into spawned pane processes
+# (see the README follow-up) a wrapped agent self-targets with no config.
+# Until then, a launcher that knows the pane must pass PHUX_AGENT_TARGET /
+# --target for the record to be written.
+#
 # Overrides (env):
 #   PHUX_AGENT_PHUX_BIN / PHUX_BIN  path to the `phux` binary (default `phux`)
 #   PHUX_AGENT_NAME                 default --name
 #   PHUX_AGENT_KIND                 default --kind
 #   PHUX_AGENT_STATE                default --state (see note below)
 #   PHUX_AGENT_TARGET               default --target (pane selector)
+#   PHUX_TERMINAL_ID                pane wire id; used as target `@N` when
+#                                   no explicit --target/PHUX_AGENT_TARGET
 #
 # State note: the wrapper only observes the agent's launch/exit boundary,
 # so it does NOT continuously feed a working/blocked lifecycle state. It
@@ -92,6 +113,20 @@ if [ -z "$agent_name" ]; then
   agent_name=$(basename -- "$1")
 fi
 
+# Resolve the pane target exactly once, here, so `set` (launch) and `clear`
+# (exit) always act on the SAME pane. Never guess the focused pane: if no
+# explicit target is given, fall back to the pane's own wire id
+# (PHUX_TERMINAL_ID) as the `@N` selector, and if that is also absent leave
+# the target empty — in which case we deliberately skip the record writes.
+if [ -z "$agent_target" ] && [ -n "${PHUX_TERMINAL_ID:-}" ]; then
+  agent_target="@${PHUX_TERMINAL_ID}"
+fi
+
+if [ -z "$agent_target" ]; then
+  printf '%s: no pane target (set PHUX_AGENT_TARGET/--target, or run where PHUX_TERMINAL_ID is set); launching %s without a phux.agent record\n' \
+    "$0" "$agent_name" >&2
+fi
+
 # Run `phux` with the given argv, best-effort: never let a missing binary
 # or absent server abort the agent launch or the cleanup. Positional
 # params here are local to the function, so the caller's agent argv ($@)
@@ -101,11 +136,10 @@ run_phux() {
 }
 
 set_record() {
-  set -- agent set
-  if [ -n "$agent_target" ]; then
-    set -- "$@" "$agent_target"
-  fi
-  set -- "$@" --name "$agent_name"
+  # No resolved pane target => do not write. Writing here would target the
+  # focused pane, which may be a different agent's pane.
+  [ -n "$agent_target" ] || return 0
+  set -- agent set "$agent_target" --name "$agent_name"
   if [ -n "$agent_kind" ]; then
     set -- "$@" --kind "$agent_kind"
   fi
@@ -118,11 +152,11 @@ set_record() {
 # Invoked indirectly through the EXIT trap below.
 # shellcheck disable=SC2329
 clear_record() {
-  set -- agent clear
-  if [ -n "$agent_target" ]; then
-    set -- "$@" "$agent_target"
-  fi
-  run_phux "$@"
+  # Only clear the exact pane we set at launch. With no target we would
+  # otherwise clear whichever pane is focused at exit time — very likely a
+  # different, still-running agent's record. Skipping is the safe default.
+  [ -n "$agent_target" ] || return 0
+  run_phux agent clear "$agent_target"
 }
 
 # Clear on any exit path. Signal traps re-raise through `exit`, which then

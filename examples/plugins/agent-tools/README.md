@@ -123,8 +123,8 @@ that: it wraps the real agent command so the pane writes a first-class
 `phux.agent/v1` L3 record (ADR-0040) the moment the agent launches, and clears
 it on exit.
 
-Each `integrations/*.toml` now launches its agent through the wrapper. For
-Claude Code the launch command is:
+Each `integrations/*.toml` declares a `[launch]` command that runs its agent
+through the wrapper. For Claude Code:
 
 ```toml
 [agent_identity]
@@ -132,33 +132,61 @@ name = "claude"
 kind = "claude"
 
 [launch]
-command = ["sh", "scripts/phux-agent-wrap.sh", "--name", "claude", "--kind", "claude", "--", "claude"]
+command = ["sh", "${PHUX_PLUGIN_ROOT}/scripts/phux-agent-wrap.sh", "--name", "claude", "--kind", "claude", "--", "claude"]
+working_directory = "plugin-root"
 ```
 
-Installing the agent-tools plugin (or the herdr distro that bundles it) and
-launching an agent from a template is therefore all it takes for a
-`claude`/`codex`/`gemini` pane to self-identify with a declared name + kind.
+### How to activate the wrapper today
+
+phux does **not** yet ship a launch executor: nothing in phux reads a
+template's `[launch] command` and runs it (only `validate-integrations` checks
+that the key is present), and the bench helpers spawn plain shells. So
+installing the plugin (or the herdr distro that bundles it) does **not** by
+itself make a `claude` pane self-identify — a launcher has to actually run the
+wrapper. Two follow-up beads track closing that gap: `phux-ark7` (a launch
+executor that runs a template's `[launch]` command as a pane's program) and
+`phux-w7mj` (server-side `PHUX_TERMINAL_ID` injection so the wrapper can
+self-target with zero config). Until those land, activate the wrapper yourself:
+
+- **Wrap the command directly** in the pane where you start the agent:
+
+  ```sh
+  PHUX_TERMINAL_ID=<pane> \
+    sh "$PHUX_PLUGIN_ROOT/scripts/phux-agent-wrap.sh" --name reviewer --kind claude -- claude
+  ```
+
+- **Alias it** in your shell rc so `claude` transparently runs through the
+  wrapper, passing the pane target via `PHUX_AGENT_TARGET` / `--target`.
+
 The sidebar's `agents` section and `phux agent list` already prefer the
 `phux.agent/v1` record over the title heuristic
-(`crates/phux-client/src/agent_meta.rs`), so the wrapped panes get a first-class
-identity while un-wrapped panes still fall back to the heuristic.
+(`crates/phux-client/src/agent_meta.rs`), so a wrapped pane gets a first-class
+identity while un-wrapped panes still fall back to the heuristic. The heuristic
+remains as a fallback-only path for un-wrapped agents — it is not removed.
 
-Run the wrapper directly to wrap any command:
+### Pane targeting is required (no focused-pane guessing)
 
-```sh
-sh scripts/phux-agent-wrap.sh --name reviewer --kind claude -- claude
-```
+The wrapper resolves the pane it is running in **exactly once, at launch**, and
+reuses that same target for the exit-time `clear`. It does this from, in order:
+`--target` / `PHUX_AGENT_TARGET`, else `PHUX_TERMINAL_ID` (used as the `@N`
+selector). It deliberately **never** falls back to `phux agent set`'s
+focused-pane default: focus moves freely and the exit-time `clear` fires much
+later, so a focused-pane guess would race — in a multi-pane / fleet run it would
+delete a *different*, still-running agent's record. If the wrapper cannot
+resolve its pane it writes **nothing** (and prints one diagnostic to stderr) but
+still launches the agent — a missing label is safer than a corrupted sibling.
 
-The wrapper is best-effort and injection-safe: every value is passed as its own
-quoted argv element to `phux` (never through `eval`/`sh -c`), and if `phux` is
-missing or no server is up the record write fails silently so the agent still
-launches. It resolves the pane through `phux agent set`'s focused-pane fallback;
-set `PHUX_AGENT_TARGET` (or pass `--target`) to pin a specific pane, and
-`PHUX_AGENT_PHUX_BIN` to point at a non-`PATH` `phux` binary.
+The wrapper is otherwise best-effort and injection-safe: every value is passed
+as its own quoted argv element to `phux` (never through `eval`/`sh -c`), and if
+`phux` is missing or no server is up the record write fails silently so the
+agent still launches. Set `PHUX_AGENT_PHUX_BIN` to point at a non-`PATH` `phux`
+binary.
 
 `smoke-agent-wrap` drives the wrapper against a stub `phux` and a fake agent,
-asserting the `agent set --name ... --kind ...` launch write and the
-`agent clear` exit write. It needs no server and leaves nothing behind:
+asserting the launch write (`agent set @<pane> --name ... --kind ...`) and the
+exit write pinned to the same pane (`agent clear @<pane>`), plus the safety case
+that with no resolvable target the wrapper writes nothing at all. It needs no
+server and leaves nothing behind:
 
 ```sh
 cargo run -q -p phux -- config run com.phux.demo.agent-tools smoke-agent-wrap
