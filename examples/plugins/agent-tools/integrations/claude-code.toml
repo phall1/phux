@@ -22,6 +22,14 @@ mode = "native-or-phux"
 native_env = "PHUX_CLAUDE_SESSION_ID"
 restore = "external-cli"
 
+# phux-r82.11: launch through the agent wrapper so the pane self-declares
+# a `phux.agent/v1` record (ADR-0040) — name + kind land automatically, so
+# the sidebar/fleet show a first-class identity instead of the OSC-title
+# substring heuristic. Clearing on exit is handled by the wrapper's trap.
+[agent_identity]
+name = "claude"
+kind = "claude"
+
 [launch]
-command = ["claude"]
+command = ["sh", "scripts/phux-agent-wrap.sh", "--name", "claude", "--kind", "claude", "--", "claude"]
 working_directory = "workspace"

@@ -66,6 +66,17 @@ anywhere.
   without erasing plugin entries from your own config or another layer.
   To drop them, assign a plain `plugins = [...]` in your config —
   replacement wins over inherited appends.
+- **Automatic agent identity.** Because herdr bundles `agent-tools`, its
+  integration templates launch `claude`/`codex`/`gemini` through
+  `scripts/phux-agent-wrap.sh`, which writes a `phux.agent/v1` L3 record
+  (ADR-0040) at launch and clears it on exit. Panes that launch an agent
+  from a template self-identify with a first-class name + kind in the
+  sidebar's `agents` section and in `phux agent list`, instead of the
+  OSC-title substring heuristic that false-positives on titles like
+  `vim CLAUDE.md`. See
+  `examples/plugins/agent-tools/README.md` section "Automatic agent
+  identity" for the wrapper's flags, the pane-targeting fallback, and why
+  live working/blocked state still needs a separate signal feed.
 
 ## Overriding herdr
 

@@ -22,6 +22,14 @@ mode = "phux"
 native_env = "PHUX_GENERIC_AGENT_SESSION_ID"
 restore = "phux-session"
 
+# phux-r82.11: template for wrapping any CLI assistant so its pane
+# self-declares a `phux.agent/v1` record (ADR-0040). Replace the name,
+# kind, and the argv after `--` with your agent's; the wrapper writes the
+# record at launch and clears it on exit.
+[agent_identity]
+name = "shell-agent"
+kind = "generic"
+
 [launch]
-command = ["sh", "-lc", "echo configure this template with your agent command"]
+command = ["sh", "scripts/phux-agent-wrap.sh", "--name", "shell-agent", "--kind", "generic", "--", "sh", "-lc", "echo configure this template with your agent command"]
 working_directory = "workspace"
