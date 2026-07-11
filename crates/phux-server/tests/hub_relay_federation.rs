@@ -137,10 +137,20 @@ fn spawn_hub(
     socket_path: PathBuf,
     satellites: Vec<SatelliteConfigEntry>,
 ) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    spawn_hub_with_session(socket_path, satellites, None)
+}
+
+/// Like [`spawn_hub`] but optionally pre-seeds a local (no-PTY) session,
+/// so aggregation tests can see local AND satellite terminals.
+fn spawn_hub_with_session(
+    socket_path: PathBuf,
+    satellites: Vec<SatelliteConfigEntry>,
+    pre_seeded_session: Option<&str>,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
     let (tx, rx) = oneshot::channel::<()>();
     let cfg = ServerConfig {
         socket_path,
-        pre_seeded_session: None,
+        pre_seeded_session: pre_seeded_session.map(str::to_owned),
         seed_with_pty: false,
         seed_command: None,
         ..ServerConfig::with_default_socket()
@@ -408,6 +418,145 @@ fn command_round_trip_and_stream_retagging() {
             "command to a dead satellite must fail fast, got {result:?}"
         );
 
+        drop(hub_shutdown);
+        hub_task.await.unwrap().unwrap();
+    });
+}
+
+/// Issue one `GET_STATE { SERVER }` through the hub; return the correlated
+/// result plus every un-correlated `ERROR` frame observed before it (the
+/// per-satellite degradation indication, L1 §9.1 "Aggregated LIST").
+async fn get_state_via_hub(
+    hub: &mut UnixStream,
+    request_id: u32,
+) -> (CommandResult, Vec<(ErrorCode, String)>) {
+    send_frame(
+        hub,
+        &FrameKind::Command {
+            request_id,
+            command: Command::GetState {
+                scope: phux_protocol::wire::frame::StateScope::Server,
+            },
+        },
+    )
+    .await;
+    let mut errors = Vec::new();
+    loop {
+        let (_, frame) = recv_typed(hub).await;
+        match frame {
+            FrameKind::CommandResult {
+                request_id: got,
+                result,
+            } if got == request_id => return (result, errors),
+            FrameKind::Error {
+                request_id: None,
+                code,
+                message,
+            } => errors.push((code, message)),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear aggregation scenario over a three-server topology; splitting re-boots it per assertion"
+)]
+fn aggregated_list_merges_local_and_satellite_terminals_and_degrades() {
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let ws_port = free_port();
+        let (sat_shutdown, sat_task) = spawn_satellite(tmp.path().join("sat.sock"), ws_port);
+        // Two registry entries: "sat" is live, "down" points at a port
+        // nothing listens on — the degradation half of phux-v45.5.
+        let dead_port = free_port();
+        let (hub_shutdown, hub_task) = spawn_hub_with_session(
+            tmp.path().join("hub.sock"),
+            vec![
+                satellite_entry("sat", ws_port),
+                satellite_entry("down", dead_port),
+            ],
+            Some("hub-session"),
+        );
+
+        let sat_pane = discover_satellite_pane(ws_port).await;
+        let sat_id = TerminalId::satellite("sat", sat_pane);
+        let mut hub = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // Retry until the live link is up and its pane appears in the
+        // aggregate (the dialer backs off while the satellite boots). The
+        // dead satellite must never fail the LIST — every attempt returns
+        // Ok, with "down" degrading to an un-correlated typed ERROR.
+        let deadline = Instant::now() + STEP_DEADLINE;
+        let mut request_id = 4000;
+        let (snapshot, errors) = loop {
+            let (result, errors) = get_state_via_hub(&mut hub, request_id).await;
+            let CommandResult::OkWith(CommandValue::State(snapshot)) = result else {
+                panic!("aggregated GET_STATE must never fail, got {result:?}");
+            };
+            if snapshot.panes.iter().any(|p| p.id == sat_id) {
+                break (snapshot, errors);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "satellite pane never appeared in the aggregate: {snapshot:?}"
+            );
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        // Local terminals are present and stay Local-tagged.
+        assert!(
+            snapshot
+                .panes
+                .iter()
+                .any(|p| matches!(p.id, TerminalId::Local { .. })),
+            "hub's own seeded pane must stay in the aggregate: {snapshot:?}"
+        );
+        // The satellite pane is re-tagged and its shape relayed verbatim
+        // (the satellite's seeded no-PTY pane is 80x24).
+        let sat_info = snapshot
+            .panes
+            .iter()
+            .find(|p| p.id == sat_id)
+            .expect("satellite pane in aggregate");
+        assert_eq!(
+            (sat_info.cols, sat_info.rows),
+            (80, 24),
+            "satellite pane dims relayed verbatim"
+        );
+        // The dead satellite contributes nothing...
+        assert!(
+            !snapshot
+                .panes
+                .iter()
+                .any(|p| p.id.host().is_some_and(|h| h.as_str() == "down")),
+            "dead satellite must contribute no panes: {snapshot:?}"
+        );
+        // ...but degrades observably: one un-correlated typed ERROR naming
+        // the host arrived before the COMMAND_RESULT.
+        assert!(
+            errors
+                .iter()
+                .any(|(code, message)| *code == ErrorCode::SatelliteUnreachable
+                    && message.contains("down")),
+            "expected a SatelliteUnreachable degradation notice for 'down', got {errors:?}"
+        );
+        // Satellite sessions/windows are NOT merged (their ids are not
+        // federation-routable): the only session is the hub's own.
+        assert_eq!(
+            snapshot
+                .sessions
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["hub-session"],
+            "satellite sessions must not merge into the hub snapshot"
+        );
+
+        drop(sat_shutdown);
+        sat_task.await.unwrap().unwrap();
         drop(hub_shutdown);
         hub_task.await.unwrap().unwrap();
     });

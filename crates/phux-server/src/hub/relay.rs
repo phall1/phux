@@ -225,6 +225,12 @@ impl RelayHandle {
         self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// The satellite host this handle relays to (aggregation callers
+    /// re-tag return-leg ids with it — phux-v45.5).
+    pub(crate) const fn host(&self) -> &SatelliteHost {
+        &self.host
+    }
+
     /// Relay `command` and await the correlated result. Fails fast — a
     /// saturated mailbox, a dead link task, or a link lost mid-flight all
     /// produce a typed error instead of a hang (the session and the link
