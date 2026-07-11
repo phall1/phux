@@ -1541,9 +1541,7 @@ mod tests {
     fn session_relays_spawn_with_stripped_addressing_and_retags_the_reply() {
         let mut session = RelaySession::new(host());
         let (reply, mut rx) = oneshot::channel();
-        let wire = session
-            .handle_request(spawn_request(reply))
-            .expect("spawn produces a wire frame");
+        let wire = session.handle_request(spawn_request(reply));
         let FrameKind::SpawnTerminal {
             request_id,
             satellite,
@@ -1573,7 +1571,7 @@ mod tests {
         let mut session = RelaySession::new(host());
         // A Satellite-tagged id in the satellite's own reply never chains.
         let (reply, mut rx) = oneshot::channel();
-        let wire = session.handle_request(spawn_request(reply)).expect("wire");
+        let wire = session.handle_request(spawn_request(reply));
         let FrameKind::SpawnTerminal { request_id, .. } = decode(&wire) else {
             panic!("expected SPAWN_TERMINAL");
         };
@@ -1587,7 +1585,7 @@ mod tests {
         ));
         // A typed satellite-side error relays verbatim.
         let (reply, mut rx) = oneshot::channel();
-        let wire = session.handle_request(spawn_request(reply)).expect("wire");
+        let wire = session.handle_request(spawn_request(reply));
         let FrameKind::SpawnTerminal { request_id, .. } = decode(&wire) else {
             panic!("expected SPAWN_TERMINAL");
         };
