@@ -912,6 +912,9 @@ async fn handle_satellite_command(
                                 terminal: id,
                                 client: client_id,
                                 out_tx: out_tx.clone(),
+                                // Stamped with the issue-order token by
+                                // `command_subscribing` at enqueue.
+                                seq: 0,
                             },
                         )
                         .await

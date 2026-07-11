@@ -47,6 +47,7 @@
 //! so one slow consumer never stalls the link or the hub's other work.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
@@ -84,6 +85,17 @@ pub(crate) struct ProxySubscription {
     pub(crate) client: ClientId,
     /// The client's outbound mailbox.
     pub(crate) out_tx: mpsc::Sender<Outbound>,
+    /// Monotonic ordering token stamped by [`RelayHandle`] at enqueue
+    /// (phux-v45.7 reorder guard). A registration and its later
+    /// withdrawal ride *different* channels — the bounded request mailbox
+    /// vs. the unbounded unsubscribe channel — which the link session's
+    /// `select!` may drain in either order. Carrying the issue order lets
+    /// the session tell a fresh re-attach (higher token) from a stale
+    /// detach (lower token) so a detach-then-reattach of the same
+    /// `(client, terminal)` cannot silently tear the re-attach down.
+    /// Producers set this via `RelayHandle::next_seq`; direct session-test
+    /// construction sets it explicitly.
+    pub(crate) seq: u64,
 }
 
 /// A subscription-withdrawal request, carried on the relay's dedicated
@@ -104,6 +116,13 @@ pub(crate) enum Unsubscribe {
         client: ClientId,
         /// The satellite-local terminal id it stops observing.
         terminal: u32,
+        /// Ordering token this withdrawal was issued with (see
+        /// [`ProxySubscription::seq`]). The session applies the
+        /// withdrawal only when no registration with a *newer* token
+        /// exists — otherwise a same-`(client, terminal)` re-attach that
+        /// the request mailbox delivered first would be torn down by this
+        /// stale detach.
+        seq: u64,
     },
 }
 
@@ -169,6 +188,13 @@ pub(crate) struct RelayHandle {
     host: SatelliteHost,
     tx: mpsc::Sender<RelayRequest>,
     unsub_tx: mpsc::UnboundedSender<Unsubscribe>,
+    /// Shared monotonic source of the ordering token every proxy
+    /// registration and terminal unsubscribe carries (see
+    /// [`ProxySubscription::seq`]). One counter per link, shared across
+    /// every `RelayHandle` clone for the host, so all of that host's
+    /// subscribe/detach operations are totally ordered by issue time
+    /// regardless of which mailbox they ride.
+    seq: Arc<AtomicU64>,
 }
 
 impl RelayHandle {
@@ -177,12 +203,26 @@ impl RelayHandle {
         let (tx, rx) = mpsc::channel(RELAY_MAILBOX);
         let (unsub_tx, unsub_rx) = mpsc::unbounded_channel();
         (
-            Self { host, tx, unsub_tx },
+            Self {
+                host,
+                tx,
+                unsub_tx,
+                seq: Arc::new(AtomicU64::new(1)),
+            },
             RelayMailbox {
                 requests: rx,
                 unsubscribes: unsub_rx,
             },
         )
+    }
+
+    /// Allocate the next issue-order token for a registration or a
+    /// terminal withdrawal (phux-v45.7 reorder guard). `Relaxed` is
+    /// sufficient: the hub runs on a single-threaded `LocalSet`
+    /// (ADR-0014), so all allocations are already program-ordered; the
+    /// atomic only needs to hand out distinct, increasing values.
+    fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Relay `command` and await the correlated result. Fails fast — a
@@ -221,6 +261,12 @@ impl RelayHandle {
         command: Command,
         subscribe: Option<ProxySubscription>,
     ) -> CommandResult {
+        // Stamp the registration's issue-order token before it can race a
+        // later detach across the channel split (phux-v45.7).
+        let subscribe = subscribe.map(|mut sub| {
+            sub.seq = self.next_seq();
+            sub
+        });
         let (reply, rx) = oneshot::channel();
         match self.tx.try_send(RelayRequest::Command {
             command,
@@ -293,7 +339,8 @@ impl RelayHandle {
     /// gets a typed `ERROR` push instead of silence (phux-v45.11
     /// finding 2 — `SUBSCRIBE_EVENTS` has no reply frame to carry the
     /// failure, so the push is the only observable channel).
-    pub(crate) fn subscribe(&self, subscription: ProxySubscription, forward: FrameKind) {
+    pub(crate) fn subscribe(&self, mut subscription: ProxySubscription, forward: FrameKind) {
+        subscription.seq = self.next_seq();
         let consumer = subscription.out_tx.clone();
         let terminal = subscription.terminal;
         if let Err(err) = self.tx.try_send(RelayRequest::Subscribe {
@@ -337,9 +384,12 @@ impl RelayHandle {
     /// (the relayed `DETACH_TERMINAL` path, phux-v45.7). Same undroppable
     /// channel as [`Self::unsubscribe_client`].
     pub(crate) fn unsubscribe_terminal(&self, client: ClientId, terminal: u32) {
-        let _ = self
-            .unsub_tx
-            .send(Unsubscribe::Terminal { client, terminal });
+        let seq = self.next_seq();
+        let _ = self.unsub_tx.send(Unsubscribe::Terminal {
+            client,
+            terminal,
+            seq,
+        });
     }
 }
 
@@ -445,6 +495,11 @@ const fn frame_label(frame: &FrameKind) -> &'static str {
 struct ProxySubscriber {
     client: ClientId,
     out_tx: mpsc::Sender<Outbound>,
+    /// Issue-order token of the registration currently held for this
+    /// `(terminal, client)` (see [`ProxySubscription::seq`]). Compared
+    /// against a terminal withdrawal's token so a stale detach cannot
+    /// tear down a newer re-attach.
+    seq: u64,
 }
 
 /// One in-flight relayed command: the waiting consumer plus, when the
@@ -546,13 +601,21 @@ impl RelaySession {
             terminal,
             client,
             out_tx,
+            seq,
         } = subscription;
         let subs = self.subscribers.entry(terminal).or_default();
         if let Some(existing) = subs.iter_mut().find(|s| s.client == client) {
             existing.out_tx = out_tx;
+            // Advance to the freshest token seen: a re-attach must never
+            // regress the stored order below a withdrawal it superseded.
+            existing.seq = existing.seq.max(seq);
             false
         } else {
-            subs.push(ProxySubscriber { client, out_tx });
+            subs.push(ProxySubscriber {
+                client,
+                out_tx,
+                seq,
+            });
             true
         }
     }
@@ -579,12 +642,34 @@ impl RelaySession {
                     }
                 });
             }
-            Unsubscribe::Terminal { client, terminal } => {
+            Unsubscribe::Terminal {
+                client,
+                terminal,
+                seq,
+            } => {
                 if let Some(subs) = self.subscribers.get_mut(&terminal) {
-                    subs.retain(|s| s.client != client);
-                    if subs.is_empty() {
-                        self.subscribers.remove(&terminal);
-                        orphaned.push(terminal);
+                    // Drop this withdrawal if a registration for the same
+                    // client with a token at least as new exists: a
+                    // detach-then-reattach can arrive here reordered (the
+                    // re-attach rode the bounded request mailbox, this
+                    // detach the unbounded unsubscribe channel), and
+                    // applying the stale detach would tear the live
+                    // re-attach down and emit a spurious satellite-side
+                    // DETACH_TERMINAL (phux-v45.7).
+                    let superseded = subs.iter().any(|s| s.client == client && s.seq >= seq);
+                    if superseded {
+                        debug!(
+                            satellite = %self.host,
+                            terminal,
+                            ?client,
+                            "stale terminal unsubscribe superseded by a newer re-attach; dropping"
+                        );
+                    } else {
+                        subs.retain(|s| s.client != client);
+                        if subs.is_empty() {
+                            self.subscribers.remove(&terminal);
+                            orphaned.push(terminal);
+                        }
                     }
                 }
             }
@@ -1044,11 +1129,24 @@ mod tests {
 
     /// Register a proxy subscription through the atomic Subscribe request
     /// (the `SUBSCRIBE_EVENTS` shape) and assert the paired forward frame
-    /// was produced.
+    /// was produced. Registers at the baseline issue-order token 1;
+    /// [`subscribe_at`] controls the token for reorder tests.
     fn subscribe(
         session: &mut RelaySession,
         terminal: u32,
         client: ClientId,
+        out_tx: mpsc::Sender<Outbound>,
+    ) {
+        subscribe_at(session, terminal, client, 1, out_tx);
+    }
+
+    /// [`subscribe`] with an explicit issue-order token, for exercising
+    /// the detach/reattach reorder guard (phux-v45.7).
+    fn subscribe_at(
+        session: &mut RelaySession,
+        terminal: u32,
+        client: ClientId,
+        seq: u64,
         out_tx: mpsc::Sender<Outbound>,
     ) {
         let wire = session.handle_request(RelayRequest::Subscribe {
@@ -1056,6 +1154,7 @@ mod tests {
                 terminal,
                 client,
                 out_tx,
+                seq,
             },
             forward: FrameKind::SubscribeEvents {
                 terminal: Some(TerminalId::local(terminal)),
@@ -1404,6 +1503,7 @@ mod tests {
         let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
             client: ClientId(1),
             terminal: 9,
+            seq: 2,
         });
         assert!(
             frames.is_empty(),
@@ -1418,8 +1518,61 @@ mod tests {
         let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
             client: ClientId(2),
             terminal: 9,
+            seq: 2,
         });
         assert_eq!(frames.len(), 1);
+    }
+
+    #[test]
+    fn stale_terminal_unsubscribe_does_not_tear_down_a_fresher_reattach() {
+        // phux-v45.7 reorder guard. A consumer's DETACH_TERMINAL rides the
+        // unbounded unsubscribe channel; its immediate same-terminal
+        // re-ATTACH rides the bounded request mailbox. The link session's
+        // `select!` can drain the re-attach first, so by the time the
+        // stale detach is applied a newer registration already exists.
+        // The detach carries the token it was issued with (2); the live
+        // registration carries the re-attach token (3), so the withdrawal
+        // is dropped: no subscriber removed, no satellite-side
+        // DETACH_TERMINAL emitted, and the re-attached stream keeps
+        // flowing.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        // Original attach (token 1), then the re-attach that raced ahead
+        // of the stale detach (token 3).
+        subscribe_at(&mut session, 9, ClientId(1), 1, out_tx.clone());
+        subscribe_at(&mut session, 9, ClientId(1), 3, out_tx);
+
+        let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
+            client: ClientId(1),
+            terminal: 9,
+            seq: 2,
+        });
+        assert!(
+            frames.is_empty(),
+            "a stale detach must not emit a satellite-side DETACH for a re-attached terminal"
+        );
+
+        // The re-attached stream is intact.
+        session.handle_inbound(&encode(&FrameKind::TerminalOutput {
+            terminal_id: TerminalId::local(9),
+            seq: 7,
+            bytes: bytes::Bytes::from_static(b"live"),
+        }));
+        let Outbound::Frame(frame) = out_rx.try_recv().expect("re-attached stream torn down");
+        assert!(matches!(
+            frame,
+            FrameKind::TerminalOutput { terminal_id, seq: 7, .. }
+                if terminal_id == TerminalId::satellite("devbox", 9)
+        ));
+
+        // A genuine later detach (token newer than the registration) still
+        // withdraws and detaches satellite-side.
+        let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
+            client: ClientId(1),
+            terminal: 9,
+            seq: 4,
+        });
+        assert_eq!(frames.len(), 1, "an in-order detach still tears down");
     }
 
     #[tokio::test]
@@ -1436,13 +1589,16 @@ mod tests {
             mailbox.unsubscribes.try_recv().expect("delivered"),
             Unsubscribe::Client(ClientId(1))
         );
-        assert_eq!(
+        // The issue-order token is opaque here; match on the routing
+        // fields (the reorder guard's semantics are covered separately).
+        assert!(matches!(
             mailbox.unsubscribes.try_recv().expect("delivered"),
             Unsubscribe::Terminal {
                 client: ClientId(2),
                 terminal: 7,
+                ..
             }
-        );
+        ));
     }
 
     #[tokio::test]
@@ -1460,6 +1616,8 @@ mod tests {
                 terminal: 9,
                 client: ClientId(1),
                 out_tx,
+                // Stamped by `handle.subscribe` at enqueue.
+                seq: 0,
             },
             FrameKind::SubscribeEvents {
                 terminal: Some(TerminalId::local(9)),
@@ -1492,6 +1650,7 @@ mod tests {
                 terminal: 9,
                 client: ClientId(1),
                 out_tx,
+                seq: 1,
             }),
         });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {
@@ -1535,6 +1694,9 @@ mod tests {
                 terminal: 9,
                 client: ClientId(1),
                 out_tx,
+                // Idempotent re-subscribe: a newer token than the
+                // pre-existing registration at 1.
+                seq: 2,
             }),
         });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {
