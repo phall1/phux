@@ -22,6 +22,14 @@ mode = "native-or-phux"
 native_env = "PHUX_GEMINI_SESSION_ID"
 restore = "external-cli"
 
+# phux-r82.11: launch through the agent wrapper so the pane self-declares
+# a `phux.agent/v1` record (ADR-0040) — name + kind land automatically, so
+# the sidebar/fleet show a first-class identity instead of the OSC-title
+# substring heuristic. Clearing on exit is handled by the wrapper's trap.
+[agent_identity]
+name = "gemini"
+kind = "gemini"
+
 [launch]
-command = ["gemini"]
+command = ["sh", "scripts/phux-agent-wrap.sh", "--name", "gemini", "--kind", "gemini", "--", "gemini"]
 working_directory = "workspace"

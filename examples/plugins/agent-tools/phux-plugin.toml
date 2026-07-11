@@ -82,6 +82,13 @@ description = "Runs package validation, link, status, detection, and unlink chec
 contexts = ["workspace"]
 command = ["sh", "scripts/smoke-integrations.sh"]
 
+[[actions]]
+id = "smoke-agent-wrap"
+title = "Smoke test the agent identity wrapper"
+description = "Runs phux-agent-wrap.sh against a stub phux and fake agent, asserting the phux.agent/v1 record set/clear path."
+contexts = ["workspace"]
+command = ["sh", "scripts/smoke-agent-wrap.sh"]
+
 [[agents]]
 id = "codex"
 label = "Codex"

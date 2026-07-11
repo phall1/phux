@@ -112,3 +112,67 @@ do not execute or inspect any local agent binaries.
 `smoke-integrations` runs validation, list, link, status, fake-CLI detection,
 unlink, and missing-status checks in a temporary state directory. It needs no
 private credentials and leaves no plugin state behind.
+
+## Automatic agent identity (phux-r82.11)
+
+Plain `claude` / `codex` / `gemini` sessions never announce themselves, so the
+sidebar and fleet views used to fall back to an OSC-title substring heuristic —
+which false-positives on titles like `vim CLAUDE.md` and can never show a real
+working/blocked state. `scripts/phux-agent-wrap.sh` fixes the identity half of
+that: it wraps the real agent command so the pane writes a first-class
+`phux.agent/v1` L3 record (ADR-0040) the moment the agent launches, and clears
+it on exit.
+
+Each `integrations/*.toml` now launches its agent through the wrapper. For
+Claude Code the launch command is:
+
+```toml
+[agent_identity]
+name = "claude"
+kind = "claude"
+
+[launch]
+command = ["sh", "scripts/phux-agent-wrap.sh", "--name", "claude", "--kind", "claude", "--", "claude"]
+```
+
+Installing the agent-tools plugin (or the herdr distro that bundles it) and
+launching an agent from a template is therefore all it takes for a
+`claude`/`codex`/`gemini` pane to self-identify with a declared name + kind.
+The sidebar's `agents` section and `phux agent list` already prefer the
+`phux.agent/v1` record over the title heuristic
+(`crates/phux-client/src/agent_meta.rs`), so the wrapped panes get a first-class
+identity while un-wrapped panes still fall back to the heuristic.
+
+Run the wrapper directly to wrap any command:
+
+```sh
+sh scripts/phux-agent-wrap.sh --name reviewer --kind claude -- claude
+```
+
+The wrapper is best-effort and injection-safe: every value is passed as its own
+quoted argv element to `phux` (never through `eval`/`sh -c`), and if `phux` is
+missing or no server is up the record write fails silently so the agent still
+launches. It resolves the pane through `phux agent set`'s focused-pane fallback;
+set `PHUX_AGENT_TARGET` (or pass `--target`) to pin a specific pane, and
+`PHUX_AGENT_PHUX_BIN` to point at a non-`PATH` `phux` binary.
+
+`smoke-agent-wrap` drives the wrapper against a stub `phux` and a fake agent,
+asserting the `agent set --name ... --kind ...` launch write and the
+`agent clear` exit write. It needs no server and leaves nothing behind:
+
+```sh
+cargo run -q -p phux -- config run com.phux.demo.agent-tools smoke-agent-wrap
+```
+
+### State is not fed live (yet)
+
+The wrapper only observes the agent's launch/exit boundary, so it sets the
+always-honest half — `name` + `kind` — and leaves lifecycle `state` unset
+(`unknown`) unless you pass `--state` / `PHUX_AGENT_STATE`. A live
+working/blocked feed would need a continuous signal updating the same record,
+for example: the agent itself calling `phux agent set --state working|blocked`
+on its own lifecycle transitions (e.g. via a phux hook or the agent's own
+tool-call boundaries), or phux polling the ADR-0035 "asked" detector / OSC-133
+prompt boundaries and writing the state field. Either path reuses this exact
+record, so the sidebar's declared-state branch lights up the moment a state
+feed exists — no consumer changes required.
