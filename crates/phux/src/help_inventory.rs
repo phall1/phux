@@ -122,6 +122,8 @@ phux send-keys
 phux server
 phux signal
 phux snapshot
+phux spawn
+phux stdio-bridge
 phux tag
 phux tag add
 phux tag ls
