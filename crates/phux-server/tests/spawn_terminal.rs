@@ -1121,9 +1121,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
 /// inherited the server process's CWD and the wire `cwd` was dropped.
 #[test]
 fn create_if_missing_seeds_pane_in_wire_cwd() {
-    use phux_protocol::wire::frame::{
-        AttachTarget, TYPE_ATTACHED, TYPE_TERMINAL_SNAPSHOT, ViewportInfo,
-    };
+    use phux_protocol::wire::frame::{AttachTarget, TYPE_ATTACHED, ViewportInfo};
 
     run_local(async {
         let tmp = TempDir::new().unwrap();
@@ -1161,21 +1159,21 @@ fn create_if_missing_seeds_pane_in_wire_cwd() {
         )
         .await;
 
-        let (type_byte, _attached) = recv_typed(&mut stream).await;
+        // ATTACHED carries the seed pane's wire id.
+        let (type_byte, attached) = recv_typed(&mut stream).await;
         assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
-        // The seed pane's TERMINAL_SNAPSHOT carries its terminal id.
-        let (type_byte, snap) = recv_typed(&mut stream).await;
-        assert_eq!(
-            type_byte, TYPE_TERMINAL_SNAPSHOT,
-            "expected TERMINAL_SNAPSHOT",
-        );
-        let seed_id = match snap {
-            FrameKind::TerminalSnapshot { terminal_id, .. } => terminal_id,
-            other => panic!("expected TerminalSnapshot, got {other:?}"),
+        let seed_id = match attached {
+            FrameKind::Attached { snapshot, .. } => {
+                assert_eq!(snapshot.panes.len(), 1, "attach-create seeds one pane");
+                snapshot.panes[0].id.clone()
+            }
+            other => panic!("expected Attached, got {other:?}"),
         };
 
         let needle = cwd_path.to_str().expect("utf8 cwd").as_bytes();
-        let acc = await_output_contains(&mut stream, &seed_id, needle).await;
+        // The seed child may print `pwd` before or after the snapshot is
+        // captured, so scan both the snapshot replay and any live output.
+        let acc = await_snapshot_or_output_contains(&mut stream, &seed_id, needle).await;
         let body = String::from_utf8_lossy(&acc);
         assert!(
             acc.windows(needle.len()).any(|w| w == needle),
