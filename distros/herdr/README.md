@@ -72,13 +72,15 @@ anywhere.
   L3 record (ADR-0040) — a first-class name + kind the sidebar's `agents`
   section and `phux agent list` prefer over the OSC-title substring
   heuristic that false-positives on titles like `vim CLAUDE.md` — and clears
-  it on exit, pinned to the wrapper's own pane. Note that phux has no launch
-  executor yet, so nothing runs the template `[launch]` command
-  automatically; you activate the wrapper by wrapping the command yourself
-  or via a shell alias. See `examples/plugins/agent-tools/README.md` section
-  "Automatic agent identity" for how to activate it, the required
-  pane-targeting, the tracked follow-up (`phux-ark7`, `phux-w7mj`), and why
-  live working/blocked state still needs a separate signal feed.
+  it on exit, pinned to the wrapper's own pane. Because herdr enables
+  `agent-tools`, `phux launch claude-code` (or `codex` / `gemini-cli`) opens
+  a self-identifying pane end-to-end: the launch executor (ADR-0042) runs
+  the template `[launch]` command and the server injects `PHUX_TERMINAL_ID`
+  so the wrapper self-targets with no alias. `phux launch --list` shows the
+  bundled integrations. See `examples/plugins/agent-tools/README.md` section
+  "Automatic agent identity" for the manual-activation fallback, the required
+  pane-targeting, and why live working/blocked state still needs a separate
+  signal feed.
 
 ## Overriding herdr
 

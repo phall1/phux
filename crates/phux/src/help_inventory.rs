@@ -100,6 +100,7 @@ phux config run
 phux config show
 phux give
 phux kill
+phux launch
 phux ls
 phux new
 phux pair

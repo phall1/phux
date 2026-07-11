@@ -121,6 +121,14 @@ phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
                               # spawn a terminal without attaching; --satellite
                               # routes the spawn to a federation satellite via
                               # a --hub server and prints the routed id
+phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
+                              # spawn a pane running an agent integration's
+                              # [launch] command (ADR-0042); resolves the named
+                              # template from an enabled plugin and routes the
+                              # agent through its identity wrapper, so the pane
+                              # self-declares its phux.agent/v1 identity with no
+                              # alias. --list enumerates; --print is a
+                              # server-free dry run of the resolved argv
 phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
 phux rename SESSION NEW-NAME  # rename a session

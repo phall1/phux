@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use phux_client::attach::connection::Connection;
@@ -31,10 +31,6 @@ pub(crate) fn run_spawn(
     command: Vec<String>,
 ) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
-    let rt = match cli_runtime() {
-        Ok(rt) => rt,
-        Err(code) => return code,
-    };
     let request_id = 1u32;
     let frame = FrameKind::SpawnTerminal {
         request_id,
@@ -50,9 +46,38 @@ pub(crate) fn run_spawn(
         term: None,
         satellite: satellite.map(SatelliteHost::new),
     };
+    match dispatch_spawn(&socket_path, &frame, request_id, "spawn") {
+        Ok(SpawnResult::Ok(terminal_id)) => print_spawned(&terminal_id, json),
+        Ok(SpawnResult::Err(err)) => {
+            report_spawn_error(&err);
+            ExitCode::FAILURE
+        }
+        Ok(other) => {
+            eprintln!("phux: unexpected SPAWN_TERMINAL result: {other:?}");
+            ExitCode::FAILURE
+        }
+        Err(code) => code,
+    }
+}
+
+/// Send a `SPAWN_TERMINAL` frame and return the matching `TERMINAL_SPAWNED`
+/// result. Shared by `phux spawn` and `phux launch` (phux-ark7) so both
+/// ride the identical wire path — the server injects `PHUX_TERMINAL_ID`
+/// into the spawned pane regardless of which verb requested it.
+///
+/// On a connect/transport failure this prints the `no server` diagnostic
+/// (attributed to `verb`) and returns the failure [`ExitCode`] in `Err`, so
+/// callers only handle the `SpawnResult` variants.
+pub(crate) fn dispatch_spawn(
+    socket_path: &Path,
+    frame: &FrameKind,
+    request_id: u32,
+    verb: &str,
+) -> Result<SpawnResult, ExitCode> {
+    let rt = cli_runtime()?;
     let result = rt.block_on(async {
-        let mut conn = Connection::connect(&socket_path).await?;
-        conn.send(&frame).await?;
+        let mut conn = Connection::connect(socket_path).await?;
+        conn.send(frame).await?;
         loop {
             if let FrameKind::TerminalSpawned {
                 request_id: got,
@@ -64,18 +89,7 @@ pub(crate) fn run_spawn(
             }
         }
     });
-    match result {
-        Ok(SpawnResult::Ok(terminal_id)) => print_spawned(&terminal_id, json),
-        Ok(SpawnResult::Err(err)) => {
-            report_spawn_error(&err);
-            ExitCode::FAILURE
-        }
-        Ok(other) => {
-            eprintln!("phux: unexpected SPAWN_TERMINAL result: {other:?}");
-            ExitCode::FAILURE
-        }
-        Err(err) => report_no_server(&err, &socket_path, "spawn"),
-    }
+    result.map_err(|err| report_no_server(&err, socket_path, verb))
 }
 
 /// Print the freshly spawned Terminal id — human line or the stable JSON
@@ -108,7 +122,7 @@ fn print_spawned(terminal_id: &TerminalId, json: bool) -> ExitCode {
 }
 
 /// Map the typed `SpawnError` to an actionable stderr diagnostic.
-fn report_spawn_error(err: &SpawnError) {
+pub(crate) fn report_spawn_error(err: &SpawnError) {
     match err {
         SpawnError::GroupNotFound => {
             eprintln!("phux: spawn failed: server rejected the default group");

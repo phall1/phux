@@ -42,6 +42,7 @@ pub(crate) mod attach;
 pub(crate) mod config;
 pub(crate) mod config_action;
 pub(crate) mod kill;
+pub(crate) mod launch;
 pub(crate) mod ls;
 pub(crate) mod new;
 pub(crate) mod pair;
@@ -294,6 +295,51 @@ pub(crate) enum Command {
         /// Must follow `--`: `phux spawn -- htop`.
         #[arg(last = true)]
         command: Vec<String>,
+    },
+
+    /// Launch an agent integration in a new pane.
+    ///
+    /// Resolves INTEGRATION (a `phux launch --list` id) to its `[launch]`
+    /// command from an enabled plugin's integration template, then spawns a
+    /// pane running it. The template routes the agent through its identity
+    /// wrapper, so the pane self-declares its `phux.agent/v1` identity with
+    /// no alias or per-shell config: the server injects `PHUX_TERMINAL_ID`,
+    /// the wrapper targets its own pane with it, and writes name + kind at
+    /// launch.
+    ///
+    /// `--print` resolves and prints the argv without spawning (a server-free
+    /// dry run). Extra agent arguments follow `--`:
+    /// `phux launch codex -- --model o3`.
+    Launch {
+        /// Integration id to launch (from `phux launch --list`).
+        #[arg(value_name = "INTEGRATION", required_unless_present = "list")]
+        integration: Option<String>,
+
+        /// List launchable integrations from enabled plugins and exit.
+        #[arg(long)]
+        list: bool,
+
+        /// Resolve and print the launch argv (and cwd) without spawning a
+        /// pane — a server-free dry run.
+        #[arg(long, visible_alias = "dry-run")]
+        print: bool,
+
+        /// Emit the result as JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+
+        /// Working directory for a `working_directory = "workspace"`
+        /// template. Defaults to the current directory.
+        #[arg(short = 'c', long = "cwd", value_name = "DIR")]
+        cwd: Option<std::path::PathBuf>,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+
+        /// Extra arguments appended to the agent command, after `--`.
+        #[arg(last = true)]
+        extra: Vec<String>,
     },
 
     /// Kill a session, window, or pane.
