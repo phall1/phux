@@ -1126,6 +1126,9 @@ pub(crate) fn handle_subscribe_events(
                     terminal: id,
                     client: client_id,
                     out_tx: out_tx.clone(),
+                    // Stamped with the issue-order token by `subscribe`
+                    // at enqueue.
+                    seq: 0,
                 },
                 FrameKind::SubscribeEvents {
                     terminal: Some(phux_protocol::ids::TerminalId::local(id)),
