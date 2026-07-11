@@ -82,6 +82,17 @@ pub struct ConsumerAttachRequest {
     /// suppresses its broadcast pump for it; when `false` the consumer
     /// stays on the raw PTY broadcast (the human-TUI default).
     pub wants_state_sync: bool,
+    /// Whether this consumer is on a lossy/forwarded leg and should use the
+    /// advance-on-ack loss-tolerant emission model (phux-v45.8, ADR-0042).
+    ///
+    /// Only meaningful together with `wants_state_sync` (a raw broadcast-pump
+    /// consumer has no per-consumer reference to make loss-tolerant). When
+    /// `true` the actor enables loss-tolerance right after registration: the
+    /// per-consumer reference then advances on `FRAME_ACK` rather than on emit,
+    /// so a frame the forwarded leg drops re-diffs against the last-acked
+    /// reference and self-heals. `false` (the default for a direct,
+    /// reliable-transport consumer) keeps the emit-once model.
+    pub loss_tolerant: bool,
     /// Channel the actor uses to acknowledge the lifecycle insertion.
     /// `Ok(outcome)` on success (the outcome reports whether this actor
     /// is tick-managing the consumer); `Err(...)` if the per-consumer

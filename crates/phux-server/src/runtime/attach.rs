@@ -1085,6 +1085,16 @@ pub(crate) async fn handle_attach(
                         client_caps.output_mode,
                         phux_protocol::caps::OutputMode::StateSync
                     ),
+                    // phux-v45.8: a directly-attached consumer rides a reliable,
+                    // ordered transport (UDS / SSH stdio / WebSocket / QUIC
+                    // stream), so the emit-once model is correct and cheapest —
+                    // no loss-tolerant re-diff needed. Activation for a
+                    // forwarded (hub->satellite->consumer) leg, where the hub's
+                    // fan-out can drop whole frames, is the deferred follow-up
+                    // (the satellite cannot see the downstream drop from the
+                    // link's reliable transport); the advance-on-ack mechanism
+                    // it flips on is fully implemented here (ADR-0042).
+                    loss_tolerant: false,
                     reply: attach_reply_tx,
                 })
                 .await

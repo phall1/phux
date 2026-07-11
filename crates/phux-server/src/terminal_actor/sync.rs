@@ -135,6 +135,12 @@ pub const MAX_EMIT_INSTANTS: usize = 256;
 /// `!Send + !Sync` because `RenderState` is `!Send + !Sync` (per the
 /// `libghostty-send-sync` bd memory). Lives only inside the actor,
 /// which runs on the `LocalSet` thread that owns the `Terminal`.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-consumer state flags (needs_initial_emit, behind, \
+              wants_state_sync, loss_tolerant); collapsing them into an enum would \
+              obscure the per-flag lifecycle each drives"
+)]
 pub struct ConsumerSyncState {
     /// Per-consumer reference grid for the lazy state-sync diff
     /// (phux-ia4). Holds the last-synced rendered body of every viewport
@@ -220,6 +226,35 @@ pub struct ConsumerSyncState {
     /// silent for it. The global `consumer_tick_emits` test override still
     /// forces emission for every consumer regardless of this flag.
     pub wants_state_sync: bool,
+    /// Whether this consumer is on a lossy/forwarded leg and uses the
+    /// advance-on-ack loss-tolerant emission model (phux-v45.8, ADR-0042).
+    ///
+    /// `false` (the default) keeps the v0.1 emit-once model: the reference
+    /// (`reference`) advances on emit and `FRAME_ACK` only drives backpressure
+    /// accounting — correct and cheapest on a reliable ordered transport (UDS,
+    /// SSH stdio, WebSocket, a QUIC reliable stream). `true` switches to the
+    /// Mosh loss-tolerant model: each tick re-diffs the live grid against
+    /// [`Self::acked_reference`] (the last state the consumer provably has), the
+    /// reference advances only when a matching `FRAME_ACK` lands, and an
+    /// un-acked frame is retransmitted after a retransmit timeout — so a frame
+    /// the forwarded leg dropped self-heals rather than diverging the mirror
+    /// forever. Opt-in per consumer; the reliable-transport default path is
+    /// untouched.
+    pub loss_tolerant: bool,
+    /// The last-*acked* reference grid — the diff base for the loss-tolerant
+    /// model (phux-v45.8). Unused (empty) unless [`Self::loss_tolerant`]. Primed
+    /// to the live grid when loss-tolerance is enabled (the consumer's
+    /// `TERMINAL_SNAPSHOT` brings its mirror to this same point); advanced by
+    /// the actor's `on_frame_ack` to the grid snapshot a cumulative ack covers.
+    pub acked_reference: ConsumerReference,
+    /// Grid snapshots of each emitted-but-not-yet-acked frame, keyed by the
+    /// `seq` stamped on its `TERMINAL_OUTPUT` (phux-v45.8). On `FRAME_ACK` the
+    /// consumer's [`Self::acked_reference`] advances to the snapshot of the
+    /// highest `seq` the (cumulative) ack covers, and every entry at or below it
+    /// is pruned. Bounded by the in-flight window for an acking consumer and
+    /// hard-capped at [`MAX_EMIT_INSTANTS`] (oldest-evicted) so a wedged leg
+    /// cannot grow it without bound. Empty unless [`Self::loss_tolerant`].
+    pub pending_refs: std::collections::BTreeMap<u64, ConsumerReference>,
 }
 
 impl std::fmt::Debug for ConsumerSyncState {
