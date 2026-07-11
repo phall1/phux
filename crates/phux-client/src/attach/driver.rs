@@ -605,10 +605,31 @@ fn paint_copy_mode_status<W: Write>(
     if rows == 0 || cols == 0 {
         return Ok(());
     }
-    let cell_count =
-        u32::from(sel.end_row - sel.start_row + 1) * u32::from(sel.end_col - sel.start_col + 1);
-    let status =
-        format!(" copy-mode | {cell_count} cell(s) | arrows/PgUp/PgDn scroll | Enter copy | Esc ");
+    let span_rows = u32::from(sel.end_row - sel.start_row + 1);
+    let cell_count = if sel.rectangle {
+        // Block (rectangle) selection: a columnar band on every spanned row, so
+        // the count is span_rows * band_cols. The overlay only tuple-normalizes
+        // the corners by `(row, col)`, which does NOT order the columns, so the
+        // band width takes the min/max of the two column bounds — a plain
+        // `end_col - start_col` would underflow whenever the drag runs up-left
+        // (cursor column left of the anchor's on a lower row).
+        let band_cols =
+            u32::from(sel.start_col.max(sel.end_col) - sel.start_col.min(sel.end_col)) + 1;
+        span_rows * band_cols
+    } else {
+        // Linear (text-flow) selection: the historical bounding-box arithmetic.
+        // `saturating_sub` keeps the value identical for the ordered common
+        // case while refusing to underflow on a multi-row drag whose corners
+        // tuple-normalize to `start_col > end_col`.
+        span_rows * (u32::from(sel.end_col.saturating_sub(sel.start_col)) + 1)
+    };
+    // Surface the active geometry from the one bit the renderer carries: block
+    // (columnar band) vs linear (text-flow, incl. whole-line Line mode). `Tab`
+    // cycles it (ADR-0045).
+    let geom = if sel.rectangle { "block" } else { "linear" };
+    let status = format!(
+        " copy-mode | {geom} | {cell_count} cell(s) | arrows/PgUp/PgDn scroll | Tab mode | Enter copy | Esc "
+    );
     write_cup(out, rows - 1, 0)?;
     // Selection strip from the theme (`selection_bg`/`selection_fg`). `\x1b[K`
     // fills the rest of the row with the strip bg; then reset + hide the cursor.
@@ -5712,5 +5733,56 @@ mod tests {
                 rows.join("\n")
             );
         }
+    }
+
+    /// The copy-mode status strip counts a block selection as
+    /// `span_rows * band_cols`, distinct from the linear bounding-box count,
+    /// and never underflows when the tuple-normalized corners leave
+    /// `start_col > end_col` (a multi-row up-left drag).
+    #[test]
+    fn copy_mode_status_block_cell_count_differs_from_linear() {
+        let theme = crate::render::Theme::default();
+        let status_of = |sel: SelectionRect| -> String {
+            let mut out: Vec<u8> = Vec::new();
+            paint_copy_mode_status(&mut out, sel, (80, 24), &theme).expect("status");
+            String::from_utf8_lossy(&out).into_owned()
+        };
+
+        // Corners tuple-normalize to start=(0,5), end=(2,2): 3 spanned rows,
+        // column band {2,3,4,5} = 4 wide. Note start_col (5) > end_col (2).
+        let corners = |rectangle| SelectionRect {
+            start_row: 0,
+            start_col: 5,
+            end_row: 2,
+            end_col: 2,
+            rectangle,
+        };
+
+        // Block: 3 rows * 4 band cols = 12 (and no underflow despite 5 > 2).
+        assert!(
+            status_of(corners(true)).contains("12 cell(s)"),
+            "block count must be span_rows * band_cols = 12"
+        );
+        // Linear: the bounding-box arithmetic saturates the reversed columns to
+        // a width of 1, giving 3 rows * 1 = 3 — a different number, proving the
+        // branch is taken and that the shared corners no longer panic.
+        assert!(
+            status_of(corners(false)).contains("3 cell(s)"),
+            "linear count must differ from the block count"
+        );
+
+        // A plainly-ordered block (start_col <= end_col) counts the full band.
+        let ordered_block = SelectionRect {
+            start_row: 1,
+            start_col: 2,
+            end_row: 3,
+            end_col: 6,
+            rectangle: true,
+        };
+        // 3 rows * band {2..=6} (5 wide) = 15.
+        assert!(
+            status_of(ordered_block).contains("15 cell(s)"),
+            "ordered block: 3 rows * 5 band cols = 15"
+        );
     }
 }

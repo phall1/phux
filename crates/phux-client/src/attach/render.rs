@@ -959,7 +959,73 @@ mod tests {
 
     // `SelectionRect::contains` (linear + block geometry) is owned and tested
     // by the shared contract module, `render::overlay::selection`, after
-    // ADR-0045 relocated the type there.
+    // ADR-0045 relocated the type there. The render-layer test below
+    // (`block_and_linear_selection_invert_different_cells`) instead exercises
+    // the *paint* path — that the two geometries emit different VT.
+
+    /// Block and linear inversion visibly differ in the emitted VT. Three rows
+    /// so row 1 is a *true interior* row; select corners (0,2)..(2,5). Linear
+    /// reverse-videos the full interior row (including its leading `ab`); block
+    /// reverse-videos only the [2,5] band on every row, so the interior row's
+    /// leading `ab` stays plain. The renders MUST differ on exactly that.
+    #[test]
+    fn block_and_linear_selection_invert_different_cells() {
+        let mut t = fresh(8, 3);
+        // Distinct glyphs per row; the interior row's leading pair "ab" is
+        // unique to row 1, so a substring match pins the interior row.
+        t.vt_write(b"ABCDEFGH\r\nabcdefgh\r\n01234567");
+        let sel_corners = |rectangle| SelectionRect {
+            start_row: 0,
+            start_col: 2,
+            end_row: 2,
+            end_col: 5,
+            rectangle,
+        };
+
+        let mut r = TerminalRenderer::new().expect("renderer");
+
+        r.set_selection(Some(sel_corners(false)));
+        let mut linear_out: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut linear_out, (0, 0), (8, 3));
+        let linear = String::from_utf8_lossy(&linear_out);
+
+        r.set_selection(Some(sel_corners(true)));
+        let mut block_out: Vec<u8> = Vec::new();
+        let _ = r.render_at_full(&t, &mut block_out, (0, 0), (8, 3));
+        let block = String::from_utf8_lossy(&block_out);
+
+        // Both invert *something*, and the two geometries produce different VT.
+        assert!(linear.contains("\x1b[7"), "linear must invert something");
+        assert!(block.contains("\x1b[7"), "block must invert something");
+        assert_ne!(
+            linear, block,
+            "block and linear geometries must paint differently"
+        );
+
+        // The load-bearing contrast, robust to SGR coalescing: each row starts
+        // with a `\x1b[0m` reset (emitted = default). In BLOCK, the interior
+        // row's leading `ab` (cols 0,1 — outside the [2,5] band) is plain, so
+        // the glyphs follow the row-start reset directly: `\x1b[0mab`. In
+        // LINEAR the whole interior row is selected, so an inverse SGR sits
+        // between the reset and `ab`, and `\x1b[0mab` never appears. "ab" is
+        // unique to the interior row, so this isolates that row.
+        assert!(
+            block.contains("\x1b[0mab"),
+            "block: interior row's leading `ab` (outside the band) stays plain \
+             right after the row reset, got {block:?}"
+        );
+        assert!(
+            !linear.contains("\x1b[0mab"),
+            "linear: interior row is fully selected, so `ab` is inverted (an \
+             SGR intervenes after the reset), got {linear:?}"
+        );
+        // And the shared band glyphs c,d,e,f (cols 2..=5) render in both.
+        assert!(block.contains("cdef"), "block band glyphs, got {block:?}");
+        assert!(
+            linear.contains("cdef"),
+            "linear band glyphs, got {linear:?}"
+        );
+    }
 
     fn fresh(cols: u16, rows: u16) -> GhosttyTerminal<'static, 'static> {
         GhosttyTerminal::new(TerminalOptions {
