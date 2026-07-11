@@ -28,16 +28,16 @@ restore = "external-cli"
 # wrapper's trap. The wrapper targets its own pane via PHUX_TERMINAL_ID and
 # writes nothing if it cannot resolve the pane (never a focused-pane guess).
 #
-# NOTE: phux has no launch executor yet, so nothing runs this `command`
-# automatically today (see README "Automatic agent identity" for how to
-# activate the wrapper and the tracked follow-up). The path is anchored to
-# ${PHUX_PLUGIN_ROOT} so it resolves from any cwd once a launcher exists —
-# `working_directory = "workspace"` with a relative `scripts/...` path did
-# not.
+# NOTE: `phux launch <id>` (ADR-0042) now runs this `command` as a pane's
+# program, so an installed + enabled plugin makes `phux launch gemini-cli`
+# open a self-identifying pane. The path is anchored to ${PHUX_PLUGIN_ROOT}
+# (the launch executor expands it to the absolute plugin root before
+# spawning), so the wrapper script resolves from any cwd while the agent
+# itself runs in the caller's workspace (`working_directory = "workspace"`).
 [agent_identity]
 name = "gemini"
 kind = "gemini"
 
 [launch]
 command = ["sh", "${PHUX_PLUGIN_ROOT}/scripts/phux-agent-wrap.sh", "--name", "gemini", "--kind", "gemini", "--", "gemini"]
-working_directory = "plugin-root"
+working_directory = "workspace"

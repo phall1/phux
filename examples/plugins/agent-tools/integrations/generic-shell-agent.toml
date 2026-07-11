@@ -29,14 +29,17 @@ restore = "phux-session"
 # PHUX_TERMINAL_ID and writes nothing if it cannot resolve the pane (never
 # a focused-pane guess).
 #
-# NOTE: phux has no launch executor yet, so nothing runs this `command`
-# automatically today (see README "Automatic agent identity"). The path is
-# anchored to ${PHUX_PLUGIN_ROOT} so it resolves from any cwd once a
-# launcher exists — a relative `scripts/...` path did not.
+# NOTE: `phux launch <id>` (ADR-0042) now runs this `command` as a pane's
+# program (`phux launch generic-shell-agent`). The path is anchored to
+# ${PHUX_PLUGIN_ROOT} (the launch executor expands it to the absolute plugin
+# root before spawning), so the wrapper script resolves from any cwd while
+# the agent itself runs in the caller's workspace
+# (`working_directory = "workspace"`). Replace the argv after `--` with your
+# agent's command.
 [agent_identity]
 name = "shell-agent"
 kind = "generic"
 
 [launch]
 command = ["sh", "${PHUX_PLUGIN_ROOT}/scripts/phux-agent-wrap.sh", "--name", "shell-agent", "--kind", "generic", "--", "sh", "-lc", "echo configure this template with your agent command"]
-working_directory = "plugin-root"
+working_directory = "workspace"

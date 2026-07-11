@@ -73,6 +73,7 @@ amends / extends) are hand-curated from each ADR's body.
 | [0039](./0039-layered-config.md) | Layered config: an ordered `extends` stack with explicit array append | Accepted |
 | [0040](./0040-agent-identity-metadata.md) | Agent identity and lifecycle are an L3 metadata record | Accepted |
 | [0041](./0041-managed-plugin-installs.md) | Managed plugin installs: snapshot fetches, system tools, one lockfile | Accepted |
+| [0042](./0042-launch-executor.md) | Launch executor: a CLI verb that spawns an integration template | Accepted |
 
 ## When to write an ADR
 

@@ -153,20 +153,35 @@ kind = "claude"
 
 [launch]
 command = ["sh", "${PHUX_PLUGIN_ROOT}/scripts/phux-agent-wrap.sh", "--name", "claude", "--kind", "claude", "--", "claude"]
-working_directory = "plugin-root"
+working_directory = "workspace"
 ```
 
-### How to activate the wrapper today
+### Launch through `phux launch` (recommended)
 
-phux does **not** yet ship a launch executor: nothing in phux reads a
-template's `[launch] command` and runs it (only `validate-integrations` checks
-that the key is present), and the bench helpers spawn plain shells. So
-installing the plugin (or the herdr distro that bundles it) does **not** by
-itself make a `claude` pane self-identify — a launcher has to actually run the
-wrapper. Two follow-up beads track closing that gap: `phux-ark7` (a launch
-executor that runs a template's `[launch]` command as a pane's program) and
-`phux-w7mj` (server-side `PHUX_TERMINAL_ID` injection so the wrapper can
-self-target with zero config). Until those land, activate the wrapper yourself:
+phux **does** ship a launch executor: `phux launch <integration>`
+(phux-ark7, [ADR-0042](../../../ADR/0042-launch-executor.md)) resolves a
+template's `[launch]` command from an enabled plugin, expands
+`${PHUX_PLUGIN_ROOT}` to the absolute plugin root, and spawns a pane
+running it via `SPAWN_TERMINAL`. Because the server injects
+`PHUX_TERMINAL_ID` into the spawned pane (phux-w7mj), the wrapper
+self-targets with **zero extra config**:
+
+```sh
+phux launch --list          # codex, claude-code, gemini-cli, ...
+phux launch claude-code     # opens a pane running claude through the wrapper
+phux launch codex -- --model o3   # extra args pass through to the agent
+phux launch codex --print   # resolve + print the argv without spawning
+```
+
+So with the plugin installed and enabled, `phux launch claude-code`
+opens a **self-identifying** pane end-to-end — the wrapper writes the
+`phux.agent/v1` record at launch and clears it on exit, no alias needed.
+`working_directory = "workspace"` runs the agent in the directory you ran
+`phux launch` from (the launch executor expands the wrapper path
+absolutely, so it still resolves).
+
+You can still activate the wrapper by hand — useful when you start an agent
+in an existing pane rather than a fresh launch:
 
 - **Wrap the command directly** in the pane where you start the agent:
 
