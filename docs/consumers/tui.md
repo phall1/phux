@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-10
+last-reviewed: 2026-07-11
 ---
 
 # The phux reference TUI
@@ -843,8 +843,8 @@ Recognized slots:
 | `accent`         | `#bef264`   | Modal titles (help / prompt border title) |
 | `chord`          | `#86efac`   | Keybinding chords in the help table       |
 | `action`         | terminal fg | Action labels                             |
-| `dim`            | dark gray   | Footer hints, the "no bindings" notice    |
-| `border`         | `#52525b`   | Modal borders                             |
+| `dim`            | `#64748b`   | Footer hints, "no bindings" notice, sidebar branch/affordance/empty-state text |
+| `border`         | `#334155`   | Modal borders + the sidebar separator rule |
 | `title`          | `#bef264`   | Titles that diverge from `accent`         |
 | `section_header` | yellow      | Section headings inside the help modal    |
 | `error`          | red         | Error / alarm text                        |
@@ -853,17 +853,28 @@ Recognized slots:
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
 | `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint, fleet-dashboard hot rows) |
-| `sidebar_section`| dark gray   | Sidebar `spaces` / `agents` section headers |
+| `sidebar_section`| `#64748b`   | Sidebar `spaces` / `agents` section headers + affordance action glyphs |
 | `agent_idle`     | `#94a3b8`   | Sidebar agent row in the `idle` state      |
 | `agent_working`  | `#86efac`   | Sidebar agent row in the `working` state   |
 | `agent_blocked`  | `#fbbf24`   | Sidebar agent row in the `blocked` state   |
 | `agent_done`     | `#60a5fa`   | Sidebar agent row in the `done` state      |
 
+The default palette is deliberately **muted-chrome / bright-content**: the
+always-on chrome (sidebar headers, branch sub-lines, affordances, the
+separator rule, empty-state placeholders) sits in one cohesive recessive
+slate scale (`#334155` → `#64748b`), so pane content and the `accent`
+lime/active markers carry the eye. Every value is a slot, so a theme or
+distro retints the whole chrome by overriding a handful of keys — the
+bundled `herdr` distro maps this scale onto tokyonight (see
+`distros/herdr/herdr.toml`).
+
 ```toml
 [theme]
 accent = "#bef264"
 chord = "#86efac"
-border = "#52525b"
+border = "#334155"
+dim = "#64748b"
+sidebar_section = "#64748b"
 shadow = "#1c1c26"
 ```
 
@@ -1238,8 +1249,13 @@ undeclared state renders in `dim`). Per pane, in preference order:
    event needed.
 
 Panes matching neither source produce no row — the section lists
-agents, not shells. When no pane matches, the section is omitted
-entirely. Getting first-class rows for CLI agents without the heuristic
+agents, not shells. When no pane matches, the section still renders its
+header with a quiet `no agents` empty-state line (dim + italic) rather
+than vanishing, so the strip reads as two composed sections; the `spaces`
+section shows an equivalent `no spaces` placeholder when there are no
+windows. The empty-state lines are inert — never click targets. (A short
+strip that cannot fit the gap + header + one row drops the whole agents
+section as before.) Getting first-class rows for CLI agents without the heuristic
 means something has to write the record: an agent-tools integration (a
 wrapper or hook that runs `phux agent set` when the agent starts and
 updates state as it works) upgrades the same pane from the fallback row
