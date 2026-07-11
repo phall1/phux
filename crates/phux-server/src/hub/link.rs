@@ -500,14 +500,23 @@ pub(crate) trait LinkConn {
     clippy::future_not_send,
     reason = "ADR-0014: hub link supervisors run on the server's LocalSet; the transport seam is generic so tests can inject !Send scripted transports"
 )]
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "one linear supervisor loop: plan -> dial (drain) -> relay -> backoff (drain); every drain arm repeats the same three-way select and splitting them scatters the lifecycle"
+)]
 pub(crate) async fn run_link<T: LinkTransport>(
     host: SatelliteHost,
     entry: HubEntry,
     transport: T,
     statuses: HubLinkStatuses,
-    mut relay_rx: tokio::sync::mpsc::Receiver<super::relay::RelayRequest>,
+    mailbox: super::relay::RelayMailbox,
     cancel: CancellationToken,
 ) {
+    let super::relay::RelayMailbox {
+        requests: mut relay_rx,
+        unsubscribes: mut unsub_rx,
+    } = mailbox;
     let spec = match plan_link(&entry) {
         Ok(spec) => spec,
         Err(refusal) => {
@@ -523,7 +532,9 @@ pub(crate) async fn run_link<T: LinkTransport>(
                 },
             );
             // Never dialed, never will be until the registry changes:
-            // fail every relay request fast until shutdown.
+            // fail every relay request fast until shutdown. Unsubscribes
+            // are drained and discarded — no session exists, so there is
+            // no registry to withdraw from.
             loop {
                 tokio::select! {
                     () = cancel.cancelled() => return,
@@ -535,6 +546,7 @@ pub(crate) async fn run_link<T: LinkTransport>(
                         ),
                         None => return,
                     },
+                    unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
                 }
             }
         }
@@ -562,6 +574,7 @@ pub(crate) async fn run_link<T: LinkTransport>(
                     Some(request) => super::relay::fail_fast(request, &host, "link is connecting"),
                     None => return,
                 },
+                unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
                 outcome = &mut connect => break outcome,
             }
         };
@@ -571,7 +584,7 @@ pub(crate) async fn run_link<T: LinkTransport>(
                 info!(satellite = %host, target = %spec, "hub link established");
                 backoff.reset();
                 statuses.set(&host, LinkStatus::Connected);
-                match run_relay_session(&host, conn, &mut relay_rx, &cancel).await {
+                match run_relay_session(&host, conn, &mut relay_rx, &mut unsub_rx, &cancel).await {
                     Some(reason) => {
                         warn!(
                             satellite = %host,
@@ -614,6 +627,7 @@ pub(crate) async fn run_link<T: LinkTransport>(
                     Some(request) => super::relay::fail_fast(request, &host, "link is backing off before redial"),
                     None => return,
                 },
+                unsubscribe = unsub_rx.recv() => if unsubscribe.is_none() { return },
                 () = &mut sleep => break,
             }
         }
@@ -635,6 +649,7 @@ async fn run_relay_session<C: LinkConn>(
     host: &SatelliteHost,
     mut conn: C,
     relay_rx: &mut tokio::sync::mpsc::Receiver<super::relay::RelayRequest>,
+    unsub_rx: &mut tokio::sync::mpsc::UnboundedReceiver<super::relay::Unsubscribe>,
     cancel: &CancellationToken,
 ) -> Option<String> {
     let mut session = super::relay::RelaySession::new(host.clone());
@@ -652,9 +667,26 @@ async fn run_relay_session<C: LinkConn>(
                 let Some(request) = request else {
                     break (false, "relay handles dropped".to_owned());
                 };
-                if let Some(frame) = session.handle_request(request)
-                    && let Err(error) = send_bounded(&mut conn, &frame).await
-                {
+                let frame = session.handle_request(request);
+                if let Err(error) = send_bounded(&mut conn, &frame).await {
+                    break (true, error);
+                }
+            }
+            unsubscribe = unsub_rx.recv() => {
+                // Undroppable subscription teardown (phux-v45.11): apply
+                // the withdrawal and tell the satellite to stop streaming
+                // any terminal whose last proxy subscriber just left.
+                let Some(unsubscribe) = unsubscribe else {
+                    break (false, "relay handles dropped".to_owned());
+                };
+                let mut lost_reason = None;
+                for frame in session.handle_unsubscribe(unsubscribe) {
+                    if let Err(error) = send_bounded(&mut conn, &frame).await {
+                        lost_reason = Some(error);
+                        break;
+                    }
+                }
+                if let Some(error) = lost_reason {
                     break (true, error);
                 }
             }
@@ -712,14 +744,14 @@ pub(crate) fn spawn_links(
     cancel: &CancellationToken,
 ) {
     for (host, entry) in table.iter() {
-        let (handle, relay_rx) = super::relay::RelayHandle::new(host.clone());
+        let (handle, mailbox) = super::relay::RelayHandle::new(host.clone());
         relays.insert(handle);
         tokio::task::spawn_local(run_link(
             host.clone(),
             entry.clone(),
             NetLinkTransport,
             statuses.clone(),
-            relay_rx,
+            mailbox,
             cancel.child_token(),
         ));
     }
@@ -1247,14 +1279,14 @@ mod tests {
         }
     }
 
-    /// A live relay handle + receiver pair for driving [`run_link`]; the
+    /// A live relay handle + mailbox pair for driving [`run_link`]; the
     /// handle must stay alive or the supervisor treats the relay as
     /// abandoned and exits.
     fn relay_pair(
         host: &SatelliteHost,
     ) -> (
         super::super::relay::RelayHandle,
-        tokio::sync::mpsc::Receiver<super::super::relay::RelayRequest>,
+        super::super::relay::RelayMailbox,
     ) {
         super::super::relay::RelayHandle::new(host.clone())
     }

@@ -19,6 +19,22 @@
 //! * `unknown_satellite_host_is_unsupported_route` — a host absent from
 //!   the hub table (and any satellite id on a non-hub server) yields
 //!   `UnsupportedSatelliteRoute`.
+//! * `two_hop_attach_snapshot_output_input_ack_and_detach` (phux-v45.7) —
+//!   interactive attach to a satellite terminal through the hub:
+//!   `ATTACH_TERMINAL` relays, the authoritative `TERMINAL_SNAPSHOT`
+//!   arrives (re-tagged, before any output delta), `INPUT_KEY` echoes
+//!   back as re-tagged `TERMINAL_OUTPUT` from the satellite's PTY,
+//!   `FRAME_ACK` relays without stalling the stream, and
+//!   `DETACH_TERMINAL` + re-attach cycle cleanly.
+//! * `satellite_input_lease_excludes_other_hub_consumers` (phux-v45.7) —
+//!   the hub-side lease ledger: consumer A's cooperative `ACQUIRE_INPUT`
+//!   over a satellite terminal excludes consumer B's `ACQUIRE_INPUT` /
+//!   `ROUTE_INPUT`, and B's `RELEASE_INPUT` cannot release A's lease —
+//!   even though both share the link's identity on the satellite.
+//! * `acquire_and_release_input_off_hub_are_unsupported_routes`
+//!   (phux-v45.11 finding 5) — satellite-tagged supervisory verbs on a
+//!   non-hub server resolve through the shared routing path, not dead
+//!   per-handler guards.
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -77,6 +93,32 @@ fn spawn_satellite(
         pre_seeded_session: Some("sat-session".to_owned()),
         seed_with_pty: false,
         seed_command: None,
+        ..ServerConfig::with_default_socket()
+    };
+    let handle = tokio::task::spawn_local(async move {
+        ServerRuntime::new(cfg)
+            .listen_ws(format!("127.0.0.1:{ws_port}").parse().unwrap())
+            .run_async(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    (tx, handle)
+}
+
+/// Spawn a satellite whose seeded pane is backed by a real PTY running
+/// `/bin/cat` — the deterministic echo fixture the two-hop attach test
+/// drives input through (mirrors `input_dispatch.rs`).
+fn spawn_satellite_with_cat(
+    socket_path: PathBuf,
+    ws_port: u16,
+) -> (oneshot::Sender<()>, JoinHandle<Result<(), ServerError>>) {
+    let (tx, rx) = oneshot::channel::<()>();
+    let cfg = ServerConfig {
+        socket_path,
+        pre_seeded_session: Some("sat-session".to_owned()),
+        seed_with_pty: true,
+        seed_command: Some(portable_pty::CommandBuilder::new("/bin/cat")),
         ..ServerConfig::with_default_socket()
     };
     let handle = tokio::task::spawn_local(async move {
@@ -403,6 +445,386 @@ fn down_satellite_fails_fast_with_typed_error() {
 
         drop(hub_shutdown);
         hub_task.await.unwrap().unwrap();
+    });
+}
+
+/// Send `command` through `hub` and await the correlated result,
+/// collecting every satellite-tagged `TERMINAL_SNAPSHOT` /
+/// `TERMINAL_OUTPUT` frame that interleaves before it (SPEC §5 allows
+/// command-triggered stream frames to precede `COMMAND_RESULT`).
+async fn command_via_hub(
+    hub: &mut UnixStream,
+    request_id: u32,
+    command: Command,
+) -> (CommandResult, Vec<FrameKind>) {
+    send_frame(
+        hub,
+        &FrameKind::Command {
+            request_id,
+            command,
+        },
+    )
+    .await;
+    let mut interleaved = Vec::new();
+    loop {
+        let (_, frame) = recv_typed(hub).await;
+        match frame {
+            FrameKind::CommandResult {
+                request_id: got,
+                result,
+            } if got == request_id => return (result, interleaved),
+            other => interleaved.push(other),
+        }
+    }
+}
+
+/// Keep issuing `ATTACH_TERMINAL` for the satellite pane until the link
+/// is up and the command succeeds; returns the frames that interleaved
+/// before the successful `Ok`.
+async fn attach_terminal_until_ok(hub: &mut UnixStream, sat_id: &TerminalId) -> Vec<FrameKind> {
+    let deadline = Instant::now() + STEP_DEADLINE;
+    let mut request_id = 5000;
+    loop {
+        let (result, frames) = command_via_hub(
+            hub,
+            request_id,
+            Command::AttachTerminal {
+                terminal_id: sat_id.clone(),
+            },
+        )
+        .await;
+        match result {
+            CommandResult::Ok => return frames,
+            CommandResult::Error {
+                code: ErrorCode::SatelliteUnreachable,
+                ..
+            } if Instant::now() < deadline => {
+                request_id += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            other => panic!("ATTACH_TERMINAL through the hub must succeed, got {other:?}"),
+        }
+    }
+}
+
+/// Send one ASCII key + Enter to `sat_id` over `hub` (cooked-mode PTYs
+/// are line-buffered, so the Enter flushes `cat`'s echo).
+async fn send_key_and_enter(hub: &mut UnixStream, sat_id: &TerminalId, c: char) {
+    use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+    let key = match c {
+        'a' => PhysicalKey::A,
+        'b' => PhysicalKey::B,
+        _ => panic!("extend the fixture map for {c:?}"),
+    };
+    send_frame(
+        hub,
+        &FrameKind::InputKey {
+            terminal_id: sat_id.clone(),
+            event: KeyEvent {
+                action: KeyAction::Press,
+                key,
+                mods: ModSet::empty(),
+                consumed_mods: ModSet::empty(),
+                composing: false,
+                text: Some(c.to_string()),
+                unshifted_codepoint: Some(c as u32),
+            },
+        },
+    )
+    .await;
+    send_frame(
+        hub,
+        &FrameKind::InputKey {
+            terminal_id: sat_id.clone(),
+            event: KeyEvent {
+                action: KeyAction::Press,
+                key: PhysicalKey::Enter,
+                mods: ModSet::empty(),
+                consumed_mods: ModSet::empty(),
+                composing: false,
+                text: None,
+                unshifted_codepoint: None,
+            },
+        },
+    )
+    .await;
+}
+
+/// Drain re-tagged `TERMINAL_OUTPUT` frames for `sat_id` until `needle`
+/// appears in the accumulated bytes; returns the last observed `seq`.
+/// Panics when `STEP_DEADLINE` elapses first.
+async fn await_satellite_echo(hub: &mut UnixStream, sat_id: &TerminalId, needle: u8) -> u64 {
+    let mut acc: Vec<u8> = Vec::new();
+    let deadline = Instant::now() + STEP_DEADLINE;
+    while Instant::now() < deadline {
+        let (_, frame) = recv_typed(hub).await;
+        if let FrameKind::TerminalOutput {
+            terminal_id,
+            seq,
+            bytes,
+        } = frame
+        {
+            assert_eq!(
+                &terminal_id, sat_id,
+                "two-hop output must be re-tagged Satellite {{ host, id }}"
+            );
+            acc.extend_from_slice(&bytes);
+            if acc.contains(&needle) {
+                return seq;
+            }
+        }
+    }
+    panic!(
+        "echo byte {:?} never arrived through the hub; got {:?}",
+        needle as char,
+        String::from_utf8_lossy(&acc)
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear two-hop attach scenario: boot the topology once, then walk attach -> snapshot -> input echo -> ack -> detach -> re-attach in order; splitting re-boots both servers per step"
+)]
+fn two_hop_attach_snapshot_output_input_ack_and_detach() {
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let ws_port = free_port();
+        let (sat_shutdown, sat_task) =
+            spawn_satellite_with_cat(tmp.path().join("sat.sock"), ws_port);
+        let (hub_shutdown, hub_task) = spawn_hub(
+            tmp.path().join("hub.sock"),
+            vec![satellite_entry("sat", ws_port)],
+        );
+        let sat_pane = discover_satellite_pane(ws_port).await;
+        let sat_id = TerminalId::satellite("sat", sat_pane);
+        let mut hub = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // 1. ATTACH_TERMINAL relays through the hub, and the ADR-0007 §4
+        //    snapshot-on-attach invariant holds across both hops: an
+        //    authoritative TERMINAL_SNAPSHOT — re-tagged to the id the
+        //    consumer used, with the satellite as the byte authority —
+        //    arrives, and no TERMINAL_OUTPUT delta precedes it.
+        let frames = attach_terminal_until_ok(&mut hub, &sat_id).await;
+        let snapshot_pos = frames
+            .iter()
+            .position(|f| matches!(f, FrameKind::TerminalSnapshot { .. }))
+            .expect("ATTACH_TERMINAL must deliver a TERMINAL_SNAPSHOT");
+        if let FrameKind::TerminalSnapshot {
+            terminal_id,
+            cols,
+            rows,
+            ..
+        } = &frames[snapshot_pos]
+        {
+            assert_eq!(
+                terminal_id, &sat_id,
+                "snapshot must be re-tagged Satellite {{ host, id }}"
+            );
+            assert!(*cols > 0 && *rows > 0, "snapshot carries real dims");
+        }
+        assert!(
+            !frames[..snapshot_pos]
+                .iter()
+                .any(|f| matches!(f, FrameKind::TerminalOutput { .. })),
+            "no output delta may precede the attach snapshot"
+        );
+
+        // 2. Interactive input over two hops: INPUT_KEY frames relayed
+        //    over the link pass the satellite's subscription gate (the
+        //    link consumer holds an ATTACH_TERMINAL subscription) and
+        //    `cat` echoes back as re-tagged TERMINAL_OUTPUT.
+        send_key_and_enter(&mut hub, &sat_id, 'a').await;
+        let seq = await_satellite_echo(&mut hub, &sat_id, b'a').await;
+
+        // 3. FRAME_ACK relays without deadlocking or killing the stream
+        //    (ADR-0018 flow control across the extra hop): ack what we
+        //    saw, then prove the stream still flows.
+        send_frame(
+            &mut hub,
+            &FrameKind::FrameAck {
+                terminal_id: sat_id.clone(),
+                seq,
+            },
+        )
+        .await;
+        send_key_and_enter(&mut hub, &sat_id, 'b').await;
+        let _ = await_satellite_echo(&mut hub, &sat_id, b'b').await;
+
+        // 4. DETACH_TERMINAL resolves hub-side (idempotent Ok), and a
+        //    re-attach delivers a fresh snapshot — the lifecycle cycles.
+        let (result, _) = command_via_hub(
+            &mut hub,
+            7000,
+            Command::DetachTerminal {
+                terminal_id: sat_id.clone(),
+            },
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok, "DETACH_TERMINAL acks Ok");
+        let frames = attach_terminal_until_ok(&mut hub, &sat_id).await;
+        assert!(
+            frames
+                .iter()
+                .any(|f| matches!(f, FrameKind::TerminalSnapshot { .. })),
+            "re-attach after detach must deliver a fresh snapshot"
+        );
+
+        drop(sat_shutdown);
+        drop(hub_shutdown);
+        let _ = sat_task.await.unwrap();
+        hub_task.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn satellite_input_lease_excludes_other_hub_consumers() {
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let ws_port = free_port();
+        let (sat_shutdown, sat_task) = spawn_satellite(tmp.path().join("sat.sock"), ws_port);
+        let (hub_shutdown, hub_task) = spawn_hub(
+            tmp.path().join("hub.sock"),
+            vec![satellite_entry("sat", ws_port)],
+        );
+        let sat_pane = discover_satellite_pane(ws_port).await;
+        let sat_id = TerminalId::satellite("sat", sat_pane);
+        let mut a = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+        let mut b = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // Wait for the link (any relayed command succeeding proves it).
+        let _ = get_screen_until_ok(&mut a, sat_pane).await;
+
+        let acquire = |terminal_id: TerminalId| Command::AcquireInput {
+            terminal_id,
+            mode: phux_protocol::wire::frame::InputMode::Cooperative,
+            ttl_ms: 0,
+        };
+
+        // A takes the wheel over the satellite pane, through the hub.
+        let (result, _) = command_via_hub(&mut a, 100, acquire(sat_id.clone())).await;
+        assert_eq!(result, CommandResult::Ok, "A's cooperative acquire wins");
+
+        // B — a different hub consumer sharing the same link identity on
+        // the satellite — must be excluded by the hub's lease ledger:
+        // cooperative acquire and ROUTE_INPUT both refuse with
+        // InputLeaseHeld (phux-v45.7, L1 §9.1).
+        let (result, _) = command_via_hub(&mut b, 200, acquire(sat_id.clone())).await;
+        assert!(
+            matches!(
+                result,
+                CommandResult::Error {
+                    code: ErrorCode::InputLeaseHeld,
+                    ..
+                }
+            ),
+            "B's cooperative acquire must lose to A, got {result:?}"
+        );
+        let (result, _) = command_via_hub(
+            &mut b,
+            201,
+            Command::RouteInput {
+                terminal_id: sat_id.clone(),
+                event: phux_protocol::input::InputEvent::Focus(
+                    phux_protocol::input::focus::FocusEvent::Gained,
+                ),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                CommandResult::Error {
+                    code: ErrorCode::InputLeaseHeld,
+                    ..
+                }
+            ),
+            "B's ROUTE_INPUT must be lease-gated, got {result:?}"
+        );
+
+        // B's RELEASE_INPUT is the idempotent no-op Ok — and must NOT
+        // release A's lease (the aliasing bug this ledger fixes).
+        let (result, _) = command_via_hub(
+            &mut b,
+            202,
+            Command::ReleaseInput {
+                terminal_id: sat_id.clone(),
+            },
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok, "non-holder release is a no-op");
+        let (result, _) = command_via_hub(&mut b, 203, acquire(sat_id.clone())).await;
+        assert!(
+            matches!(
+                result,
+                CommandResult::Error {
+                    code: ErrorCode::InputLeaseHeld,
+                    ..
+                }
+            ),
+            "A's lease must survive B's release, got {result:?}"
+        );
+
+        // A releases; now B acquires.
+        let (result, _) = command_via_hub(
+            &mut a,
+            101,
+            Command::ReleaseInput {
+                terminal_id: sat_id.clone(),
+            },
+        )
+        .await;
+        assert_eq!(result, CommandResult::Ok, "holder release succeeds");
+        let (result, _) = command_via_hub(&mut b, 204, acquire(sat_id)).await;
+        assert_eq!(result, CommandResult::Ok, "freed lease grants to B");
+
+        drop(sat_shutdown);
+        drop(hub_shutdown);
+        let _ = sat_task.await.unwrap();
+        hub_task.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn acquire_and_release_input_off_hub_are_unsupported_routes() {
+    // phux-v45.11 finding 5: the per-handler satellite guards in
+    // handle_acquire_input / handle_release_input were dead code — the
+    // shared route interception owns that dispatch. This pins the wire
+    // behavior their removal must preserve.
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (shutdown, task) = common::spawn_server(tmp.path().join("plain.sock"), Some("s"));
+        let mut plain = wait_for_socket(&tmp.path().join("plain.sock"), STEP_DEADLINE).await;
+        for (request_id, command) in [
+            (
+                1,
+                Command::AcquireInput {
+                    terminal_id: TerminalId::satellite("sat", 1),
+                    mode: phux_protocol::wire::frame::InputMode::Cooperative,
+                    ttl_ms: 0,
+                },
+            ),
+            (
+                2,
+                Command::ReleaseInput {
+                    terminal_id: TerminalId::satellite("sat", 1),
+                },
+            ),
+        ] {
+            let (result, _) = command_via_hub(&mut plain, request_id, command).await;
+            assert!(
+                matches!(
+                    result,
+                    CommandResult::Error {
+                        code: ErrorCode::UnsupportedSatelliteRoute,
+                        ..
+                    }
+                ),
+                "satellite-tagged supervisory verbs must refuse off-hub, got {result:?}"
+            );
+        }
+        drop(shutdown);
+        task.await.unwrap().unwrap();
     });
 }
 

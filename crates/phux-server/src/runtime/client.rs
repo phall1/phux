@@ -314,12 +314,26 @@ pub(crate) fn detach_and_release_consumer_state(state: &SharedState, client_id: 
     }
     // Federation relay (phux-v45.4): drop every hub-side proxy
     // subscription this client holds on any satellite link — the
-    // counterpart to the `Subscribe` registrations the satellite-scoped
-    // SUBSCRIBE_EVENTS / SUBSCRIBE_TERMINAL_EVENTS paths performed.
-    // Empty (no-op) on a non-hub server; best-effort try_send per link,
-    // matching the local consumer_detach discipline above.
+    // counterpart to the registrations the satellite-scoped
+    // SUBSCRIBE_EVENTS / SUBSCRIBE_TERMINAL_EVENTS / ATTACH_TERMINAL
+    // paths performed. Empty (no-op) on a non-hub server. Undroppable
+    // (phux-v45.11 finding 1): rides the unbounded unsubscribe channel,
+    // so a saturated relay mailbox can never leave a stale subscriber
+    // that outlives its consumer.
     for relay in state.with(crate::state::ServerState::hub_relays_all) {
         relay.unsubscribe_client(client_id);
+    }
+    // Release any hub-side satellite input leases this client held
+    // (phux-v45.7, the federation mirror of the ADR-0033 release above):
+    // relay a detached RELEASE_INPUT per lease so the satellite-side
+    // lease (held by the link identity) follows the hub-side ledger,
+    // which `detach` below clears regardless.
+    for (host, terminal) in state.with(|s| s.satellite_leases_held_by(client_id)) {
+        if let Some(relay) = state.with(|s| s.hub_relay(&host)) {
+            relay.command_detached(phux_protocol::wire::frame::Command::ReleaseInput {
+                terminal_id: phux_protocol::ids::TerminalId::local(terminal),
+            });
+        }
     }
     state.with_mut(|s| s.detach(client_id));
     // docs/consumers/tui.md §9 (phux-r82.1): the client is fully detached —
@@ -1104,10 +1118,19 @@ pub(crate) fn handle_subscribe_events(
         && let Some((host, id)) = crate::hub::relay::satellite_route(wire_id)
     {
         if let Some(relay) = state.with(|s| s.hub_relay(&host)) {
-            relay.subscribe(id, client_id, out_tx.clone());
-            relay.forward(FrameKind::SubscribeEvents {
-                terminal: Some(phux_protocol::ids::TerminalId::local(id)),
-            });
+            // Atomic register-and-forward (phux-v45.11 finding 2): the
+            // hub-side registration and the satellite-side SUBSCRIBE_EVENTS
+            // either both happen or the consumer gets a typed error push.
+            relay.subscribe(
+                crate::hub::relay::ProxySubscription {
+                    terminal: id,
+                    client: client_id,
+                    out_tx: out_tx.clone(),
+                },
+                FrameKind::SubscribeEvents {
+                    terminal: Some(phux_protocol::ids::TerminalId::local(id)),
+                },
+            );
         } else {
             warn!(
                 ?client_id,

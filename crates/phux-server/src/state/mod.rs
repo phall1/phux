@@ -90,6 +90,28 @@ pub struct ServerState {
     /// input passes (the back-compat default). Released automatically when the
     /// holder detaches or its connection drops.
     input_leases: HashMap<TerminalId, ClientId>,
+    /// Hub-side ledger of which **hub consumer** owns the input lease over
+    /// a satellite terminal (phux-v45.7). All hub consumers share the
+    /// link's single client identity on the satellite, so the satellite's
+    /// own lease map cannot tell them apart: without this ledger, consumer
+    /// A's `ACQUIRE_INPUT` over a satellite terminal would not exclude
+    /// consumer B's relayed input, and B's `RELEASE_INPUT` would release
+    /// A's lease. The hub therefore gates relayed `ACQUIRE_INPUT` /
+    /// `RELEASE_INPUT` / `ROUTE_INPUT` / `INPUT_*` on this map *before*
+    /// forwarding, and the satellite-side lease (held by the link
+    /// identity) keeps excluding the satellite's own local clients.
+    /// Entries are keyed `(host, satellite-local id)` and cleared when the
+    /// holder detaches (with a detached `RELEASE_INPUT` relayed so the
+    /// satellite-side lease follows). See L1 §9.1.
+    satellite_leases:
+        std::collections::BTreeMap<(phux_protocol::ids::SatelliteHost, u32), ClientId>,
+    /// Per-`(client, terminal)` cancellation for `ATTACH_TERMINAL` output
+    /// pumps (phux-v45.7). `DETACH_TERMINAL` cancels one entry; client
+    /// detach / disconnect cancels all of the client's entries; pane reap
+    /// cancels the pane's entries. Without the token the pump task (which
+    /// holds the client's outbound sender) would keep streaming until the
+    /// connection died.
+    attach_terminal_pumps: HashMap<(ClientId, TerminalId), tokio_util::sync::CancellationToken>,
     /// Bridge between core slotmap [`SessionId`]s and wire-level
     /// `phux_protocol::ids::SessionId` (u32). Lives in this crate (and only
     /// this crate) because `phux-core` and `phux-protocol` must not depend
