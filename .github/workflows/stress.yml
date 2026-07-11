@@ -42,6 +42,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write # FlakeHub Cache auth via GitHub OIDC (magic-nix-cache)
 
 jobs:
   stress:
