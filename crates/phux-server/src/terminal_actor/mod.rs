@@ -276,7 +276,7 @@ const MAX_PTY_COALESCE: usize = 64;
 /// with `MAX_INPUT_COALESCE`, this is the load-bearing bound on the output
 /// arm: the two consts together keep either direction from monopolizing
 /// the single-thread actor loop.
-const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
+pub(crate) const MAX_PTY_COALESCE_BYTES: usize = 48 * 1024;
 
 /// Upper bound on input events drained in a single `input_rx` wakeup
 /// before returning to the `select!`. Input events are tiny (one encode +
@@ -1528,7 +1528,7 @@ impl TerminalActor {
     /// Silent no-op if the subscriber is not found.
     fn unsubscribe_from_events(&self, request: &UnsubscribeFromEventsRequest) {
         let mut subs = self.event_subscribers.borrow_mut();
-        subs.retain(|sub| !std::ptr::eq(&raw const sub.outbound, request.outbound_ptr));
+        subs.retain(|sub| (&raw const sub.outbound) as usize != request.outbound_addr);
     }
 
     /// Broadcast an `AgentEvent` to all interested subscribers based on the
