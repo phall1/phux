@@ -288,6 +288,7 @@ fn parse_ansi_line(line: &str) -> WidgetCells {
             cells.push(Cell {
                 text: smallvec::smallvec![c],
                 style: (!style.is_plain()).then(|| style.clone()),
+                hit: None,
             });
         }
     }

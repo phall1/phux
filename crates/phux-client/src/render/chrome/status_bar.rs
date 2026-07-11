@@ -655,6 +655,19 @@ impl StatusBarPainter {
         if self.bar.is_empty() && self.windows.is_empty() {
             return Ok(());
         }
+        // The window list is owned by the painter (the driver sets it
+        // from the Workspace); inject it into the render context so
+        // callers don't have to thread it through every paint path.
+        // Injected BEFORE the cache compose (phux-foz.12) so `last_row`
+        // holds the strip actually painted — window tabs included — and
+        // [`Self::window_hit_at`] hit-tests against what is on screen.
+        let ctx = StatusBarContext {
+            prefix: &self.prefix,
+            windows: &self.windows,
+            cwd: self.focused_cwd.as_deref().unwrap_or(""),
+            last_exit: self.last_exit,
+            ..*ctx
+        };
         let new_row = self.bar.render(&ctx.as_widget(), cols);
         let viewport_changed = self.last_viewport != Some((cols, rows));
         let row_changed = match &self.last_row {
@@ -667,16 +680,6 @@ impl StatusBarPainter {
         let row_index: u16 = match self.position {
             Position::Bottom => rows.saturating_sub(1),
             Position::Top => 0,
-        };
-        // The window list is owned by the painter (the driver sets it
-        // from the Workspace); inject it into the render context so
-        // callers don't have to thread it through every paint path.
-        let ctx = StatusBarContext {
-            prefix: &self.prefix,
-            windows: &self.windows,
-            cwd: self.focused_cwd.as_deref().unwrap_or(""),
-            last_exit: self.last_exit,
-            ..*ctx
         };
         // Delegate to the ratatui-backed renderer. We pre-composed
         // `new_row` for cache-keying; the renderer recomposes — cheap
@@ -859,6 +862,23 @@ impl StatusBarPainter {
     pub fn invalidate(&mut self) {
         self.last_row = None;
         self.last_viewport = None;
+    }
+
+    /// phux-foz.12: resolve a click column on the bar row to the window
+    /// tab painted there, reading the strip cached by the last
+    /// [`Self::paint`] — so hit targets derive from exactly what is on
+    /// screen and cannot drift from the composed layout (slot placement,
+    /// separators, truncation, `Z`/`!` markers all included).
+    ///
+    /// `None` when the bar has never painted, `x` is off the strip, or
+    /// the cell under `x` is not a window tab (a separator, another
+    /// widget, blank padding, or the error line — whose cached row is
+    /// empty).
+    #[must_use]
+    pub fn window_hit_at(&self, x: u16) -> Option<usize> {
+        let (_, row) = self.last_row.as_ref()?;
+        let phux_config::widget::CellHit::Window(i) = row.get(usize::from(x))?.hit?;
+        Some(i)
     }
 }
 
@@ -1401,6 +1421,97 @@ mod tests {
             visible.contains("BAT 87%"),
             "cached exec output must render; got {visible:?}"
         );
+    }
+
+    /// phux-foz.12: after a paint, the painter resolves click columns to
+    /// the window tabs of the strip it painted: "0:bash 1:vim" in the left
+    /// slot puts window 0 on columns 0..6, the separator on 6, window 1 on
+    /// 7..12, and blank padding after — hit, miss, hit, miss.
+    #[test]
+    fn window_hit_at_maps_painted_tab_columns() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![
+            WindowInfo {
+                name: "bash".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "vim".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        // Before the first paint there is no strip to hit.
+        assert_eq!(p.window_hit_at(0), None);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        // "0:bash 1:vim": tabs at 0..=5 and 7..=11.
+        for x in 0..=5 {
+            assert_eq!(p.window_hit_at(x), Some(0), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(6), None, "separator is inert");
+        for x in 7..=11 {
+            assert_eq!(p.window_hit_at(x), Some(1), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(12), None, "padding is inert");
+        assert_eq!(p.window_hit_at(39), None, "right edge is inert");
+        assert_eq!(p.window_hit_at(40), None, "off-strip is inert");
+    }
+
+    /// phux-foz.12: the hit map tracks the strip across a window-list
+    /// change + repaint — after a select the active marker moves but the
+    /// columns keep resolving against the fresh paint.
+    #[test]
+    fn window_hit_at_follows_repaints() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "a".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert_eq!(p.window_hit_at(0), Some(0));
+        assert_eq!(p.window_hit_at(4), None, "only one 3-cell tab");
+        // Grow the list; the next paint extends the hit map.
+        p.set_windows(vec![
+            WindowInfo {
+                name: "a".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "b".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        assert_eq!(p.window_hit_at(4), Some(1), "new tab is hittable");
+    }
+
+    /// phux-foz.12: the error-line painter paints a diagnostic strip, not
+    /// tabs — every column is inert.
+    #[test]
+    fn window_hit_at_is_inert_on_the_error_line() {
+        let mut p = StatusBarPainter::error_line("config error: boom");
+        let mut buf = Vec::new();
+        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        for x in 0..40 {
+            assert_eq!(p.window_hit_at(x), None);
+        }
     }
 
     #[test]

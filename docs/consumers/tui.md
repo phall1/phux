@@ -1268,7 +1268,10 @@ the pointer over a divider whenever the inner program has no mouse mode.
 |                          | copy-mode it scrolls the focused      |
 |                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
-| Click on status bar slot | Slot-defined; default no-op           |
+| Click on status bar row  | A `windows`-widget tab selects that   |
+|                          | window (`select-window { index }`,    |
+|                          | phux-foz.12); every other cell on the |
+|                          | row is consumed as chrome (no-op)     |
 | Click on a sidebar row   | Select that window (window blocks and |
 |                          | agent rows); `+ new` / `= menu` / the |
 |                          | collapse chevron run their actions    |
@@ -1374,7 +1377,7 @@ architectural revision to grow a status bar plugin story.
 |-----------------|--------------------------------------------------------------|
 | `session-name`  | `format?` (default: `"{name}"`) — **implemented**           |
 | `time`          | `format` (strftime) — **implemented**                       |
-| `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented** |
+| `windows`       | `active?`/`inactive?` (style tables), `separator?`, `format?` (`{index}`/`{name}`) — **implemented**; tabs are click targets (`select-window`, phux-foz.12) wherever the widget sits (any slot, top or bottom bar) |
 | `help-hints`    | prefix-aware help / palette / copy affordances — **implemented** |
 | `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |

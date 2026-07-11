@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::widget::{Cell, CellStyle, StatusWidget, WidgetCells, WidgetContext, WidgetError};
+use crate::widget::{
+    Cell, CellHit, CellStyle, StatusWidget, WidgetCells, WidgetContext, WidgetError,
+};
 
 /// Widget kind, used in error messages.
 const KIND: &str = "windows";
@@ -82,7 +84,15 @@ impl StatusWidget for WindowsWidget {
                 self.inactive.clone()
             };
             let style = if style.is_plain() { None } else { Some(style) };
-            cells.extend(WidgetCells::from_styled(&text, style).cells);
+            // phux-foz.12: stamp every cell of the segment (markers
+            // included) as a hit target for window `i`, so a click on the
+            // tab commits `select-window { index = i }`. Separator cells
+            // above stay inert.
+            let mut segment = WidgetCells::from_styled(&text, style).cells;
+            for cell in &mut segment {
+                cell.hit = Some(CellHit::Window(i));
+            }
+            cells.extend(segment);
         }
         WidgetCells { cells }
     }
