@@ -1,30 +1,39 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
-# docs/consumers/
+# Ways to use phux
 
-**TL;DR.** One file per consumer surface that rides on the phux wire. The
-surfaces are peers: a reference TUI, a reference browser projection, an agent
-surface, an MCP adapter, and the client library they share. No consumer is
-protocol-privileged; each speaks a subset of the wire spec and projects what
-it needs locally. This index lists them and points at the owning doc for each.
+**TL;DR.** Choose the interface that fits the job: the reference TUI for a
+person, the CLI or MCP adapter for an agent, the browser client for the web,
+or the Rust client library for a new integration. They are peer consumers of
+one wire and one terminal model.
 
 ---
+
+## Choose an interface
+
+| You want to | Start with |
+|---|---|
+| Work interactively with persistent sessions and splits | [The reference TUI](./tui.md) |
+| Read and drive terminals from a script or coding agent | [Agents and the CLI](./agents.md) |
+| Connect a tool client over MCP | [The MCP adapter](./mcp.md) |
+| Run the terminal client in a browser | [The web client](./web.md) |
+| Study the in-tree Rust client API | [The internal client library](./sdk.md) |
 
 ## The peer principle
 
-No consumer is protocol-privileged. The TUI, the web client, and the agent
-surface are peers over one wire, and the structured views each one shows
-(screen state, panes, layouts, run-and-wait results) are computed locally
-from the shared engine, not transmitted as a wire tier. This is stated once
-here; the per-consumer docs link it rather than restating it. See
+No consumer is protocol-privileged. The TUI, web client, and agent surface are
+peers over one wire. Rendering clients project structured views from a local
+engine; the CLI and MCP adapter also consume server-derived convenience
+snapshots. In neither case is structured screen state the canonical wire tier.
+See
 [ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md) (the TUI gets no
 protocol-level standing) and
 [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md)
-(every structured surface is a consumer-side projection of the shared engine).
+(structured views are projections rather than a second synchronization model).
 
 If a consumer needs behavior the wire does not provide, the answer is to
 extend the spec with an ADR, not to add a consumer-shaped hook. The reference

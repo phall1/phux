@@ -64,12 +64,7 @@ fn register_then_build_invokes_factory() {
         opts: BTreeMap::new(),
     };
     let w = r.build(&spec).expect("custom builds");
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "main",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(fixed_time(), "main", "C-a", &[]));
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
     assert_eq!(chars, "X:main");
 }
@@ -89,12 +84,12 @@ fn session_name_renders_prefix_and_truncated_name() {
         ]),
     };
     let w = r.build(&spec).expect("session-name builds");
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "very-long-session-name",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(
+        fixed_time(),
+        "very-long-session-name",
+        "C-a",
+        &[],
+    ));
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
     assert_eq!(chars, "[sess]very");
 }
@@ -107,12 +102,7 @@ fn session_name_max_len_accepts_snake_case_alias() {
         opts: opts_with(&[("max_len", toml::Value::Integer(3))]),
     };
     let w = r.build(&spec).unwrap();
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "abcdef",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(fixed_time(), "abcdef", "C-a", &[]));
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
     assert_eq!(chars, "abc");
 }
@@ -120,12 +110,7 @@ fn session_name_max_len_accepts_snake_case_alias() {
 #[test]
 fn session_name_no_options_renders_full_name() {
     let w = SessionNameWidget::new(None, None);
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "main",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(fixed_time(), "main", "C-a", &[]));
     let chars: String = cells.cells.iter().filter_map(|c| c.text.first()).collect();
     assert_eq!(chars, "main");
 }
@@ -168,12 +153,7 @@ fn time_widget_default_format_renders_h_m() {
         opts: BTreeMap::new(),
     };
     let w = r.build(&spec).expect("time builds");
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(fixed_time(), "", "C-a", &[]));
     // Default %H:%M renders to 5 chars (HH:MM) in any locale.
     assert_eq!(
         cells.cells.len(),
@@ -196,12 +176,7 @@ fn time_widget_explicit_format_uses_format_string() {
         opts: opts_with(&[("format", toml::Value::String("%Y".to_owned()))]),
     };
     let w = r.build(&spec).expect("time builds");
-    let cells = w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "",
-        prefix: "C-a",
-        windows: &[],
-    });
+    let cells = w.render(&WidgetContext::new(fixed_time(), "", "C-a", &[]));
     // %Y is a 4-digit year.
     assert_eq!(cells.cells.len(), 4);
 }
@@ -283,6 +258,8 @@ fn win(name: &str, active: bool) -> WindowInfo {
         name: name.to_owned(),
         active,
         zoomed: false,
+        attention: false,
+        branch: None,
     }
 }
 
@@ -291,6 +268,18 @@ fn win_zoomed(name: &str, active: bool) -> WindowInfo {
         name: name.to_owned(),
         active,
         zoomed: true,
+        attention: false,
+        branch: None,
+    }
+}
+
+fn win_attention(name: &str, active: bool) -> WindowInfo {
+    WindowInfo {
+        name: name.to_owned(),
+        active,
+        zoomed: false,
+        attention: true,
+        branch: None,
     }
 }
 
@@ -302,12 +291,7 @@ fn render_windows(opts: &[(&str, toml::Value)], windows: &[WindowInfo]) -> Widge
     let w = WidgetRegistry::with_builtins()
         .build(&spec)
         .expect("windows builds");
-    w.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "",
-        prefix: "C-a",
-        windows,
-    })
+    w.render(&WidgetContext::new(fixed_time(), "", "C-a", windows))
 }
 
 fn text_of(cells: &WidgetCells) -> String {
@@ -345,12 +329,7 @@ fn help_hints_widget_uses_configured_prefix() {
     let widget = WidgetRegistry::with_builtins()
         .build(&spec)
         .expect("help-hints builds");
-    let cells = widget.render(&WidgetContext {
-        now: fixed_time(),
-        session_name: "",
-        prefix: "C-b",
-        windows: &[],
-    });
+    let cells = widget.render(&WidgetContext::new(fixed_time(), "", "C-b", &[]));
 
     assert_eq!(text_of(&cells), "C-b ? help | C-b : palette | C-b [ copy");
 }
@@ -367,6 +346,14 @@ fn windows_widget_appends_z_marker_when_zoomed() {
     // (non-zoomed) tab is unmarked.
     let cells = render_windows(&[], &[win_zoomed("a", true), win("b", false)]);
     assert_eq!(text_of(&cells), "0:a Z 1:b");
+}
+
+#[test]
+fn windows_widget_appends_attention_marker() {
+    // phux-foz.1: a window whose pane asked for a human answer (ADR-0035)
+    // gets a ` !` suffix on its tab; unmarked windows stay plain.
+    let cells = render_windows(&[], &[win("a", true), win_attention("b", false)]);
+    assert_eq!(text_of(&cells), "0:a 1:b !");
 }
 
 #[test]

@@ -29,11 +29,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use libghostty_vt::terminal::Mode;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
 use phux_protocol::ids::{ClientId, GroupId, TerminalId};
-use phux_protocol::wire::frame::{AttachTarget, FrameKind, Scope, TerminalLifecycle, ViewportInfo};
+use phux_protocol::wire::frame::{
+    AttachTarget, CONFIG_RELOAD_KEY, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
+};
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
 use tokio::signal::unix::{SignalKind, signal};
@@ -41,6 +44,7 @@ use tracing::Instrument as _;
 
 use super::actions::{PendingSplit, PendingWindow};
 use super::connection::{Connection, Dial};
+use super::exec_widgets::spawn_exec_feed_runners;
 use super::input::StdinParser;
 use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
@@ -48,12 +52,15 @@ use super::input_dispatch::{
 use super::paint::{
     SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
 };
+use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
+use super::plugin_panes;
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
-use super::server_frame::handle_server_frame;
+use super::server_frame::{AgentMetaIndex, handle_server_frame};
+use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY};
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::sidebar::SidebarPainter;
-use crate::render::chrome::status_bar::{Position, StatusBarPainter};
+use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
 
@@ -84,6 +91,27 @@ pub(super) struct PaneSlot {
     /// scrollback forever and the pane looks frozen: new output (e.g. the
     /// shell prompt after a TUI app exits) lands below the visible rows.
     pub viewport_scrolled: bool,
+    /// phux-foz.1: `true` when an agent in this pane is waiting on a human
+    /// answer. Set by an inbound ADR-0035 `AgentEvent::Asked`; cleared when
+    /// the user sends key/paste input to the pane (see
+    /// [`clear_attention_on_input`]). Read at chrome-paint time for the
+    /// window tab marker and the status-bar attention hint.
+    pub attention: bool,
+    /// Start of the current DEC synchronized-output transaction (`?2026h`).
+    pub sync_output_since: Option<tokio::time::Instant>,
+    /// Whether mirror state changed during the transaction.
+    pub sync_output_dirty: bool,
+    /// phux-foz.4: the pane's working directory as the server last
+    /// announced it — seeded from the `ATTACHED` snapshot's
+    /// `TerminalInfo.cwd` (the spawn cwd) and refined by `cwd_changed`
+    /// events. `None` until either lands. Projected into the status-bar
+    /// `cwd` widget when this pane is focused.
+    pub cwd: Option<String>,
+    /// phux-foz.4: exit code of the last command that finished in this
+    /// pane (`command_finished.exit_code`, OSC-133 `D` mark). `None`
+    /// before the first command finishes or when the shell reported no
+    /// code. Projected into the status-bar `exit` widget when focused.
+    pub last_exit: Option<i32>,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -121,6 +149,11 @@ impl PaneSlot {
             lifecycle: TerminalLifecycle::Running,
             input_holder: None,
             viewport_scrolled: false,
+            attention: false,
+            sync_output_since: None,
+            sync_output_dirty: false,
+            cwd: None,
+            last_exit: None,
         })
     }
 
@@ -129,6 +162,20 @@ impl PaneSlot {
     /// viewport, or layout already tells us the pane's real dimensions.
     pub(super) fn new() -> Result<Self, AttachError> {
         Self::new_with_size(80, 24)
+    }
+
+    /// Refresh synchronized-output bookkeeping after a VT write. Returns
+    /// `true` while painting must remain suppressed.
+    pub(super) fn update_sync_output(&mut self, now: tokio::time::Instant) -> bool {
+        let active = self.terminal.mode(Mode::SYNC_OUTPUT).unwrap_or(false);
+        if active {
+            self.sync_output_since.get_or_insert(now);
+            self.sync_output_dirty = true;
+        } else {
+            self.sync_output_since = None;
+            self.sync_output_dirty = false;
+        }
+        active
     }
 }
 
@@ -170,12 +217,79 @@ fn format_supervisory_badge(
     }
 }
 
-/// Refresh the window strip AND the supervisory badge together (ADR-0033).
+/// phux-foz.1: compose the status-bar attention hint, or `None` when no pane
+/// is waiting on a human answer. Counts every pane with the ADR-0035 asked
+/// flag set (across ALL windows, not just the active one — the hint's job is
+/// to surface a question the user cannot currently see).
+fn attention_hint(panes: &HashMap<TerminalId, PaneSlot>) -> Option<String> {
+    format_attention_hint(panes.values().filter(|slot| slot.attention).count())
+}
+
+/// Pure hint formatter (split out from [`attention_hint`] so the count→string
+/// mapping is testable without a libghostty-backed `PaneSlot`). `None` ⇒ no
+/// hint (nothing is asking). Plain ASCII chrome, matching the ADR-0033
+/// supervisory badge convention.
+fn format_attention_hint(asking: usize) -> Option<String> {
+    match asking {
+        0 => None,
+        1 => Some("[ ASK ]".to_owned()),
+        n => Some(format!("[ ASK x{n} ]")),
+    }
+}
+
+/// phux-p4vp: the driver's per-pane workspace metadata — each pane's
+/// working directory (from the `ATTACHED` snapshot's `TerminalInfo::cwd`)
+/// plus the memoizing branch cache that turns a cwd into a VCS branch
+/// label by reading `.git/HEAD` (see [`crate::vcs`]). Entirely
+/// client-local: nothing here touches the wire or the server's actor
+/// path, and lookups are cached file reads, never a `git` subprocess.
+#[derive(Debug, Default)]
+pub(super) struct VcsIndex {
+    /// Pane → working directory, seeded from the `ATTACHED` snapshot.
+    cwds: HashMap<TerminalId, std::path::PathBuf>,
+    /// cwd → branch memo.
+    cache: crate::vcs::BranchCache,
+}
+
+impl VcsIndex {
+    /// Fold an `ATTACHED` snapshot's `(pane, cwd)` pairs into the index.
+    /// The snapshot is authoritative for the panes it names; panes that no
+    /// longer exist are dropped (re-attach hygiene).
+    pub(super) fn apply_snapshot(&mut self, pane_cwds: Vec<(TerminalId, String)>) {
+        if pane_cwds.is_empty() {
+            return;
+        }
+        self.cwds = pane_cwds
+            .into_iter()
+            .map(|(id, cwd)| (id, std::path::PathBuf::from(cwd)))
+            .collect();
+    }
+
+    /// The VCS branch label for `pane`'s working directory, or `None` when
+    /// the cwd is unknown or not inside a repository.
+    pub(super) fn branch_for_pane(&mut self, pane: &TerminalId) -> Option<String> {
+        let cwd = self.cwds.get(pane)?.clone();
+        self.cache.branch_for(&cwd)
+    }
+}
+
+/// Refresh the window strip AND the supervisory badge together (ADR-0033),
+/// plus the phux-foz.1 attention hint.
 ///
-/// Both feed one status-bar paint, so they must stay in lockstep: a site that
-/// refreshed the window list on a focus/layout change but forgot the badge
-/// would silently desync them. This single chokepoint makes that impossible —
-/// every focus/layout-change site calls it instead of hand-rolling the pair.
+/// All three feed one status-bar paint, so they must stay in lockstep: a site
+/// that refreshed the window list on a focus/layout change but forgot the
+/// badge would silently desync them. This single chokepoint makes that
+/// impossible — every focus/layout-change site calls it instead of
+/// hand-rolling the trio.
+///
+/// Returns `true` when any painter input actually changed, so a caller that
+/// paints nothing else (the `chrome_dirty` event path) can gate its repaint
+/// on it instead of repainting the full frame for state the user already
+/// sees.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "arg list mirrors the driver's chrome state; the ADR-0040 agent index made it 8 and the phux-p4vp vcs index 9"
+)]
 fn refresh_window_chrome(
     status_bar: Option<&mut StatusBarPainter>,
     sidebar_painter: &mut SidebarPainter,
@@ -184,13 +298,30 @@ fn refresh_window_chrome(
     focused_pane: Option<&TerminalId>,
     zoomed: Option<&TerminalId>,
     own_client_id: Option<ClientId>,
-) {
-    let windows = window_infos(workspace, panes, zoomed);
+    // ADR-0040: structured `phux.agent/v1` records; a window whose focused
+    // leaf carries one is labelled from it instead of the OSC title.
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
+    // phux-p4vp: pane cwd + branch memo; each window's branch line derives
+    // from its focused leaf's working directory.
+    vcs: &mut VcsIndex,
+) -> bool {
+    let windows = window_infos(workspace, panes, zoomed, agent_meta, vcs);
+    let mut changed = false;
     if let Some(sb) = status_bar {
-        sb.set_windows(windows.clone());
-        sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
+        changed |= sb.set_windows(windows.clone());
+        changed |= sb.set_supervisory(supervisory_badge(panes, focused_pane, own_client_id));
+        changed |= sb.set_attention(attention_hint(panes));
+        // phux-foz.4: project the focused pane's data feeds into the bar so
+        // the `cwd` / `exit` widgets track focus changes and inbound
+        // `cwd_changed` / `command_finished` events through this same
+        // chokepoint. Unfocused (or unknown) folds to None => the widgets
+        // render nothing.
+        let focused = focused_pane.and_then(|id| panes.get(id));
+        changed |= sb.set_focused_cwd(focused.and_then(|slot| slot.cwd.clone()));
+        changed |= sb.set_last_exit(focused.and_then(|slot| slot.last_exit));
     }
-    sidebar_painter.set_windows(windows);
+    changed |= sidebar_painter.set_windows(windows);
+    changed
 }
 
 /// Re-anchor the predictive-echo layer to a (newly) focused pane (phux-7ry0).
@@ -253,6 +384,10 @@ const ESC_FLUSH_IDLE: Duration = Duration::from_millis(10);
 /// startup) is a few dozen frames; the cap only guards against a server
 /// that streams without pause starving the stdin/signal `select!` arms.
 const FRAME_COALESCE_CAP: usize = 1024;
+
+/// Safety valve for an application that enters DEC synchronized output and
+/// never leaves it. Normal TUI transactions last milliseconds.
+const SYNC_OUTPUT_WATCHDOG: Duration = Duration::from_secs(1);
 
 /// The terminal a frame would repaint under normal handling, if any — the
 /// `vt_write` + render pair a coalesced burst can defer to a later same-pane
@@ -480,6 +615,15 @@ impl From<io::Error> for AttachError {
     }
 }
 
+impl From<phux_dial::DialError> for AttachError {
+    fn from(value: phux_dial::DialError) -> Self {
+        match value {
+            phux_dial::DialError::Io(err) => Self::Io(err),
+            phux_dial::DialError::Connect(msg) => Self::Connect(msg),
+        }
+    }
+}
+
 impl From<super::render::RenderError> for AttachError {
     fn from(value: super::render::RenderError) -> Self {
         match value {
@@ -539,6 +683,7 @@ async fn run_buffered(
         predict,
         Some(resync.as_ref()),
         Some(writer),
+        true,
     )
     .await
 }
@@ -626,7 +771,7 @@ pub async fn run_with_stdout_predict<W: super::RenderSink>(
     predict: PredictiveConfig,
 ) -> Result<(), AttachError> {
     // Synchronous-sink test seam: no off-loop writer, no resync flag.
-    attach_session(&Dial::uds(socket), target, out, predict, None, None).await
+    attach_session(&Dial::uds(socket), target, out, predict, None, None, false).await
 }
 
 /// Headless one-shot: attach, ingest the session's snapshot + layout, and
@@ -670,7 +815,7 @@ pub async fn run_headless_rendered(
     const SETTLE_DEADLINE: Duration = Duration::from_secs(3);
 
     let mut conn = Connection::connect(socket).await?;
-    let _mode = handshake(&mut conn).await?;
+    let _mode = handshake(&mut conn, None).await?;
     send_attach(&mut conn, target).await?;
     let attached = wait_for_attached(&mut conn).await?;
 
@@ -713,6 +858,12 @@ pub async fn run_headless_rendered(
     let mut pending_splits: HashMap<u32, PendingSplit> = HashMap::new();
     let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
     let mut layout_get_request_id: Option<u32> = None;
+    // ADR-0040: one-shot `phux.agent/v1` reads so the composited window
+    // labels prefer structured agent records, matching a live attach.
+    let mut agent_meta = AgentMetaIndex::default();
+    // phux-p4vp: pane cwd + branch memo so the composited sidebar carries
+    // the same branch lines a live attach would.
+    let mut vcs = VcsIndex::default();
 
     // Replay ATTACHED so the focused-pane + workspace bootstrap runs once.
     let outcome = handle_server_frame(
@@ -731,10 +882,30 @@ pub async fn run_headless_rendered(
         layout_get_request_id,
         &mut pending_splits,
         &mut pending_windows,
+        &mut agent_meta,
         false,
         true,
     )?;
+    vcs.apply_snapshot(outcome.pane_cwds);
     let focused_session = outcome.sessions.map(|(_, focused)| focused);
+
+    // ADR-0040: pipeline one `phux.agent/v1` GET per pane (no SUBSCRIBE —
+    // this is a one-shot composite). Replies drain through the settle loop
+    // below and land in `agent_meta.records`. Request ids start high above
+    // the layout GET's `1` so the two reply streams cannot collide.
+    {
+        let mut req_id: u32 = 1000;
+        for id in panes.keys() {
+            agent_meta.pending.insert(req_id, id.clone());
+            conn.send(&FrameKind::GetMetadata {
+                request_id: req_id,
+                scope: Scope::Terminal(id.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+            })
+            .await?;
+            req_id = req_id.wrapping_add(1);
+        }
+    }
 
     // Pull any persisted multi-pane layout for this session so dividers +
     // tiling match a live attach. One-shot, so we GET but do not SUBSCRIBE.
@@ -774,6 +945,7 @@ pub async fn run_headless_rendered(
                         layout_get_request_id,
                         &mut pending_splits,
                         &mut pending_windows,
+                        &mut agent_meta,
                         false,
                         true,
                     )?;
@@ -787,7 +959,13 @@ pub async fn run_headless_rendered(
 
     // Seed the window/tab strip exactly as the live loop does before its
     // first bar paint, so the composited bar shows the windows.
-    let windows = window_infos(&workspace, &panes, zoomed.as_ref());
+    let windows = window_infos(
+        &workspace,
+        &panes,
+        zoomed.as_ref(),
+        &agent_meta.records,
+        &mut vcs,
+    );
     if let Some(sb) = status_bar.as_mut() {
         sb.set_windows(windows.clone());
     }
@@ -835,6 +1013,7 @@ async fn attach_session<W: super::RenderSink>(
     predict: PredictiveConfig,
     resync: Option<&AtomicBool>,
     mut writer: Option<super::stdout_writer::WriterHandle>,
+    probe_default_colors: bool,
 ) -> Result<(), AttachError> {
     // STAGE 1 — pre-handshake, on the cooked outer terminal.
     //
@@ -848,7 +1027,10 @@ async fn attach_session<W: super::RenderSink>(
     // wants for "why was the first paint slow." Lifecycle-rate, so info.
     let handshake_span = tracing::info_span!("attach_handshake", ?target);
     let (attached, output_mode) = async {
-        let mode = handshake(&mut conn).await?;
+        let default_colors = probe_default_colors
+            .then(super::terminal_probe::default_colors)
+            .flatten();
+        let mode = handshake(&mut conn, default_colors).await?;
         send_attach(&mut conn, target).await?;
         let attached = wait_for_attached(&mut conn).await?;
         Ok::<_, AttachError>((attached, mode))
@@ -898,19 +1080,43 @@ async fn attach_session<W: super::RenderSink>(
     // never left in a bad state. On `Detached` the loop exits via
     // `exit_after_detach` (which never returns — see its doc comment).
     let mut attached = attached;
+    // phux-foz.6: first-run onboarding hint, decided ONCE per attach
+    // invocation by a single existence check at the canonical config path
+    // (see `super::onboarding` for the trigger rule). `mem::take` hands the
+    // flag to the first `main_loop` entry only, so an in-invocation session
+    // switch (which re-enters `main_loop` with fresh session state) does
+    // not re-show a hint the user already dismissed.
+    let mut show_onboarding = super::onboarding::should_show(&phux_config::loader::config_path());
+    // phux-foz.8: window index to select after a one-step cross-session
+    // window pick (`switch-session { name, window }`) re-attaches. `None`
+    // on the first attach and after plain switches; set per-iteration by
+    // the SwitchTo arm below, consumed by `main_loop` once the target's
+    // persisted layout loads.
+    let mut pending_window: Option<usize> = None;
     loop {
-        let exit =
-            match main_loop(&mut conn, attached, predict, out, resync, wants_state_sync).await {
-                Ok(exit) => exit,
-                Err(err) => {
-                    // Drain + stop the off-loop writer before propagating; the
-                    // RawModeGuard's Drop restores the terminal as we unwind.
-                    if let Some(writer) = writer.take() {
-                        writer.shutdown_and_join();
-                    }
-                    return Err(err);
+        let show_onboarding_hint = std::mem::take(&mut show_onboarding);
+        let exit = match main_loop(
+            &mut conn,
+            attached,
+            predict,
+            out,
+            resync,
+            wants_state_sync,
+            show_onboarding_hint,
+            pending_window.take(),
+        )
+        .await
+        {
+            Ok(exit) => exit,
+            Err(err) => {
+                // Drain + stop the off-loop writer before propagating; the
+                // RawModeGuard's Drop restores the terminal as we unwind.
+                if let Some(writer) = writer.take() {
+                    writer.shutdown_and_join();
                 }
-            };
+                return Err(err);
+            }
+        };
         match exit {
             LoopExit::Detached => {
                 // Lifecycle transition (info): the attach loop is exiting.
@@ -948,8 +1154,14 @@ async fn attach_session<W: super::RenderSink>(
                 // to any single session. An existing session re-attaches
                 // by name; a new-session request creates it (or attaches if
                 // the name is already taken) via CreateIfMissing.
+                // phux-foz.8: a one-step window pick carries the target
+                // window; stash it for the next `main_loop` entry, which
+                // resolves it once the new session's layout loads.
                 let attach_target = match target {
-                    ReattachTarget::Existing(name) => AttachTarget::ByName(name),
+                    ReattachTarget::Existing { name, window } => {
+                        pending_window = window;
+                        AttachTarget::ByName(name)
+                    }
                     ReattachTarget::Create(name) => AttachTarget::CreateIfMissing {
                         name,
                         command: None,
@@ -1027,7 +1239,10 @@ fn should_emit_frame_ack(
 /// [`OutputMode`] the client advertised — a per-connection HELLO
 /// property the caller threads into the session loop to decide whether
 /// `FRAME_ACK` accounting is load-bearing.
-async fn handshake(conn: &mut Connection) -> Result<OutputMode, AttachError> {
+async fn handshake(
+    conn: &mut Connection,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<OutputMode, AttachError> {
     // Sniff `$COLORTERM` / `$TERM` / `$TERM_PROGRAM` per
     // `detect_color_support`. The advertised tier feeds the server's
     // per-client `downsample::rewrite_bytes` (SPEC §6.2).
@@ -1036,9 +1251,12 @@ async fn handshake(conn: &mut Connection) -> Result<OutputMode, AttachError> {
     // `MetadataChanged` events for the `phux.tui.layout/v1` key — the
     // reconcile-on-attach path in `main_loop` subscribes to that key
     // and re-renders multi-pane when another client mutates the layout.
-    let client_caps = ClientCapabilities::new()
+    let mut client_caps = ClientCapabilities::new()
         .with_color_support(detect_color_support())
         .with_layers(LayerSet::with(&[Layer::L3]));
+    if let Some(colors) = default_colors {
+        client_caps = client_caps.with_default_colors(colors);
+    }
     conn.send(&FrameKind::Hello {
         client_name: format!("phux-client/{}", env!("CARGO_PKG_VERSION")),
         protocol_major: PROTOCOL_VERSION.major,
@@ -1148,6 +1366,10 @@ enum LoopExit {
     clippy::cognitive_complexity,
     reason = "select! arms + phux-4li.5 outcome dispatch; ditto"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "per-entry knobs from attach_session's outer loop; foz-6 onboarding + foz-8 window pick made it 8"
+)]
 async fn main_loop<W: super::RenderSink>(
     conn: &mut Connection,
     initial_attached: FrameKind,
@@ -1162,6 +1384,19 @@ async fn main_loop<W: super::RenderSink>(
     // per-frame `FRAME_ACK`: only a state-sync consumer's acks are tracked
     // server-side, so a raw consumer skips them (see `should_emit_frame_ack`).
     wants_state_sync: bool,
+    // phux-foz.6: show the first-run onboarding hint after the bootstrap
+    // paint. The caller decides this once per attach invocation (config-path
+    // existence check in `attach_session`'s outer loop) and passes `true`
+    // only on the first `main_loop` entry, so a session switch never
+    // re-shows a hint the user already dismissed.
+    show_onboarding: bool,
+    // phux-foz.8: window index to select once this session's persisted
+    // layout loads. Set by the outer loop when a one-step cross-session
+    // window pick (`switch-session { name, window }`) drove the re-attach;
+    // `None` on a plain attach/switch. Resolved (and consumed) on the
+    // first layout reconcile; out-of-range degrades to the session's own
+    // restored focus with a warning.
+    initial_window: Option<usize>,
 ) -> Result<LoopExit, AttachError> {
     // phux-4li.4: hold N client-side Terminals keyed by `TerminalId`,
     // not the single Terminal of the wave-A driver. Each pane's slot is
@@ -1186,12 +1421,9 @@ async fn main_loop<W: super::RenderSink>(
     // `workspace.render_window(zoomed)` (a synthetic single-leaf layout)
     // instead of the real tiled tree, which is left untouched for mutation.
     let mut zoomed: Option<TerminalId> = None;
-    // phux-4li.5: keybind resolver + request-id allocator for L3 GET
-    // correlation. The resolver consumes `InputEvent::Key` events
-    // *before* they would be forwarded to the focused pane; a chord
-    // that resolves to a layout action mutates the active window here
-    // and never reaches the server's input pipe.
-    let mut resolver = build_resolver();
+    // phux-4li.5: request-id allocator for L3 GET correlation. (The
+    // keybind resolver is built below, from the plugin-merged
+    // keybindings snapshot.)
     let mut layout_get_request_id: Option<u32> = None;
     let mut next_request_id: u32 = 1;
     // phux-4li.12: in-flight `split-pane` actions parked by request id.
@@ -1205,6 +1437,15 @@ async fn main_loop<W: super::RenderSink>(
     // same lifecycle as `pending_splits`. The TerminalSpawned arm checks
     // this map first; a hit opens a new window on the spawned pane.
     let mut pending_windows: HashMap<u32, PendingWindow> = HashMap::new();
+    // ADR-0040 (phux-3ert): the structured agent-identity index. Each pane
+    // gets a one-shot `GET_METADATA` + a live `SUBSCRIBE_METADATA` on
+    // `phux.agent/v1` (see `sync_agent_meta_subscriptions`); decoded records
+    // feed the window labels so the sidebar/tab strip renders agent
+    // name/state from structured data, with the OSC title as the fallback.
+    let mut agent_meta = AgentMetaIndex::default();
+    // phux-p4vp: pane cwd + branch memo behind the sidebar's branch line.
+    // Seeded from every ATTACHED snapshot; read at chrome-refresh time.
+    let mut vcs = VcsIndex::default();
     // phux-nz4.5: status-bar painter, built from the on-disk config.
     // Load failures fall back to an empty bar so a malformed config
     // never blocks attach — the user still gets a working pane mirror.
@@ -1220,16 +1461,71 @@ async fn main_loop<W: super::RenderSink>(
     // modal shows "no bindings" and chrome paints with the built-in
     // palette.
     let loaded_cfg = phux_config::loader::load().ok();
-    let keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
-        loaded_cfg.as_ref().map(|c| c.keybindings.clone());
+    // phux-r82.5 / phux-r82.7: snapshot the enabled plugins' manifests once
+    // at driver start (same policy as the keybindings snapshot — no config
+    // I/O under user fingers), then derive both the action entries (palette
+    // rows + manifest `keys` merged into the prefix table below, user config
+    // winning every conflict) and the hostable pane entries (palette rows
+    // committing `plugin-pane`; placement `split`/`tab`/`zoomed` — overlay
+    // is deferred and dropped with a warning). A broken manifest is skipped
+    // with a warning; manifests resolve relative to the canonical config
+    // path, the same resolution `phux config run` uses. Both derived
+    // vectors are `mut` because the in-place config reload (phux-foz.5)
+    // swaps them when a reload succeeds.
+    let plugin_manifests: Vec<phux_config::plugin::PluginManifest> = loaded_cfg
+        .as_ref()
+        .map(|cfg| {
+            phux_config::plugin::load_enabled_manifests(
+                &phux_config::loader::config_path(),
+                &cfg.plugins,
+            )
+        })
+        .unwrap_or_default();
+    let mut plugin_actions: Vec<PluginActionEntry> =
+        plugin_actions::entries_from_manifests(&plugin_manifests);
+    let mut plugin_panes: Vec<plugin_panes::PluginPaneEntry> =
+        plugin_panes::entries_from_manifests(&plugin_manifests);
+    // The plugin-events channel: spawned plugin-action tasks report
+    // completion here; the select! arm below toasts failures. Sender is
+    // lent to `DispatchCtx` each batch.
+    let (plugin_tx, mut plugin_rx) = tokio::sync::mpsc::unbounded_channel::<PluginRunResult>();
+    let mut keybindings_snapshot: Option<phux_config::KeybindingsCfg> =
+        loaded_cfg.as_ref().map(|c| {
+            let mut kb = c.keybindings.clone();
+            plugin_actions::merge_plugin_bindings(&mut kb, &plugin_actions);
+            kb
+        });
+    // phux-4li.5: keybind resolver, built from the plugin-merged snapshot
+    // so a manifest `keys` chord resolves exactly like a user binding.
+    // The resolver consumes `InputEvent::Key` events *before* they would
+    // be forwarded to the focused pane; a chord that resolves to an
+    // action mutates the active window here and never reaches the
+    // server's input pipe.
+    let mut resolver = keybindings_snapshot.as_ref().and_then(build_resolver_from);
     // phux-ahv.4: single source of truth for chrome + overlay colors,
     // owned alongside the keybindings snapshot and threaded into the
     // overlay render path via `DispatchCtx`.
-    let theme: crate::render::Theme = loaded_cfg
+    let mut theme: crate::render::Theme = loaded_cfg
         .as_ref()
         .map_or_else(crate::render::Theme::default, |c| {
             crate::render::Theme::from_cfg(&c.theme)
         });
+    // phux-foz.1: the attention hint's chip color comes from the theme's
+    // `attention` slot rather than a hardcoded SGR in the painter.
+    if let Some(sb) = status_bar.as_mut() {
+        sb.set_attention_color(theme.attention);
+    }
+    // phux-r82.6: spawn one bounded interval runner per `exec` widget. The
+    // runners execute off-loop and write into the widgets' shared caches;
+    // the bar's normal repaint tick picks changed cells up, so the render
+    // loop never blocks on a widget command. The guard aborts the tasks
+    // (and via kill_on_drop, their children) when this attach loop ends.
+    let _exec_runners = spawn_exec_feed_runners(
+        status_bar
+            .as_ref()
+            .map(StatusBarPainter::exec_feeds)
+            .unwrap_or_default(),
+    );
     // phux-4h5a: window-sidebar render state, driver-local like `zoomed`. The
     // `[sidebar]` config seeds the initial enabled flag, width, and edge; the
     // `toggle-sidebar` action flips `sidebar_enabled` at runtime. Each frame
@@ -1260,6 +1556,17 @@ async fn main_loop<W: super::RenderSink>(
     // different `select!` wakeups), so it is owned here and lent to
     // `DispatchCtx` by reference each batch.
     let mut drag: Option<super::input_dispatch::DragGrab> = None;
+    // phux-npb3 (ADR-0035 decision 3 follow-up): per-pane mouse opt-out.
+    // `set-pane mouse off` puts the focused pane in this set; the dispatcher
+    // then never synthesizes INPUT_MOUSE for it, and the sync at the top of
+    // each loop iteration drops the outer-terminal mouse-tracking DECSET
+    // whenever the focused pane is opted out — so the host's raw mouse
+    // handling (native selection etc.) returns for that pane alone while
+    // sibling panes keep drag-to-resize. Client-local; nothing on the wire.
+    // `mouse_capture_cfg` mirrors the global `mouse` gate the RawModeGuard
+    // install used: with `mouse = false` capture stays off unconditionally.
+    let mouse_capture_cfg = loaded_cfg.as_ref().is_none_or(|c| c.defaults.mouse);
+    let mut mouse_optout: std::collections::HashSet<TerminalId> = std::collections::HashSet::new();
     // Track the current outer-terminal viewport so the painter knows
     // which row is "bottom". Initialized to a sensible default and
     // updated by SIGWINCH; the server doesn't drive client-side
@@ -1273,6 +1580,17 @@ async fn main_loop<W: super::RenderSink>(
     // client is currently attached to (excluded from the picker).
     let mut sessions: Vec<phux_protocol::wire::info::SessionInfo> = Vec::new();
     let mut focused_session: Option<phux_protocol::ids::SessionId> = None;
+    // phux-foz.8: peer sessions' persisted layouts, fetched right after the
+    // session graph lands (one GET_METADATA per peer, correlated through
+    // `foreign_layout_pending`). The window picker reads the cache to render
+    // one-step cross-session window rows; sessions with no entry fall back
+    // to the plain "switch to this session" row. Attach-time snapshot only —
+    // we do not subscribe to peers' layout keys.
+    let mut foreign_layouts: HashMap<phux_protocol::ids::SessionId, Workspace> = HashMap::new();
+    let mut foreign_layout_pending: HashMap<u32, phux_protocol::ids::SessionId> = HashMap::new();
+    // phux-foz.8: the deferred window select of a one-step cross-session
+    // pick, consumed on the first layout reconcile below.
+    let mut pending_window = initial_window;
     let mut parser = StdinParser::new();
     // Predictive local echo (phux-9gw.1). State is updated alongside
     // every keystroke and drained on every TERMINAL_OUTPUT; when
@@ -1298,11 +1616,35 @@ async fn main_loop<W: super::RenderSink>(
     // highlight repaints) a lone Escape could be deferred far past the
     // intended window. `None` ⇔ nothing pending.
     let mut esc_deadline: Option<tokio::time::Instant> = None;
+    // phux-foz.2: which-key popup arming. When the resolver sits at the
+    // pending-prefix state (`<prefix>` pressed, continuation awaited) for
+    // `which_key_delay` without a follow-up chord, the loop pushes a
+    // which-key overlay listing the prefix-table continuations. Config
+    // comes from the same `[keybindings]` snapshot the help overlay uses;
+    // with no loaded config there is no resolver (and so no prefix to
+    // hesitate on), so the popup is naturally inert. `None` ⇔ not armed.
+    // Same anchored-deadline pattern as `esc_deadline`: the deadline is
+    // set once when the pending state is first observed and survives
+    // unrelated arms firing, so a busy output stream cannot starve it.
+    let mut which_key_enabled = keybindings_snapshot.as_ref().is_some_and(|kb| kb.which_key);
+    let mut which_key_delay = Duration::from_millis(
+        keybindings_snapshot
+            .as_ref()
+            .map_or(600, |kb| kb.which_key_delay_ms),
+    );
+    let mut which_key_deadline: Option<tokio::time::Instant> = None;
     // phux-eb0: set by `apply_action_effects` when the user commits a
     // `switch-session`. Checked after each input-dispatch batch; a value
     // here makes `main_loop` return `LoopExit::SwitchTo` so the outer
     // loop re-attaches to the named session on the same connection.
     let mut switch_request: Option<ReattachTarget> = None;
+    // phux-foz.5: set by `apply_action_effects` when the user commits a
+    // `reload-config` (palette or bound chord). Checked after each
+    // input-dispatch batch; the driver then re-runs the layered config
+    // loader and swaps its config-derived state in place — or keeps the
+    // old state and toasts the error. The `phux config reload` CLI
+    // doorbell reaches the same handler via `FrameOutcome::config_reload`.
+    let mut reload_request = false;
 
     // Replay the `ATTACHED` frame so the focused-pane bookkeeping in
     // `handle_server_frame` runs exactly once, in one place. The sidebar
@@ -1328,6 +1670,7 @@ async fn main_loop<W: super::RenderSink>(
         layout_get_request_id,
         &mut pending_splits,
         &mut pending_windows,
+        &mut agent_meta,
         overlays.is_active(),
         // Single replayed frame — no burst to coalesce, paint it.
         false,
@@ -1335,10 +1678,23 @@ async fn main_loop<W: super::RenderSink>(
     if outcome.exit {
         return Ok(LoopExit::Detached);
     }
+    vcs.apply_snapshot(outcome.pane_cwds);
     if let Some((list, focused)) = outcome.sessions {
         sessions = list;
         focused_session = Some(focused);
     }
+    // phux-foz.8: fetch each peer session's persisted layout so the window
+    // picker can list foreign windows as one-step jump rows. Fire-and-forget:
+    // replies drain through the recv arm below; a peer with nothing persisted
+    // never replies with a value and simply keeps its fallback row.
+    request_foreign_layouts(
+        conn,
+        &sessions,
+        focused_session,
+        &mut next_request_id,
+        &mut foreign_layout_pending,
+    )
+    .await?;
     // ADR-0033: cache our own ClientId (for the "you hold the wheel" badge) and
     // opt into the agent-event stream so `TerminalControl` broadcasts (lease +
     // lifecycle) reach this client. Server-scoped (`terminal: None`) so we see
@@ -1348,6 +1704,16 @@ async fn main_loop<W: super::RenderSink>(
     }
     conn.send(&FrameKind::SubscribeEvents { terminal: None })
         .await?;
+    // phux-foz.5: watch the config-reload doorbell so a `phux config
+    // reload` from any shell reaches this client as a METADATA_CHANGED
+    // broadcast (the config itself never crosses the wire — we re-read
+    // our own file). Torn down implicitly on detach like every metadata
+    // subscription.
+    conn.send(&FrameKind::SubscribeMetadata {
+        scope: Scope::Global,
+        key: CONFIG_RELOAD_KEY.to_owned(),
+    })
+    .await?;
     if outcome.subscribe_layout
         && let Some(session) = focused_session
     {
@@ -1373,6 +1739,16 @@ async fn main_loop<W: super::RenderSink>(
         })
         .await?;
     }
+    // ADR-0040: read + watch every bootstrap pane's `phux.agent/v1` record
+    // so window labels can prefer structured agent identity from the first
+    // paint. The same sweep re-runs whenever the pane set changes.
+    sync_agent_meta_subscriptions(
+        conn,
+        panes.keys().cloned().collect(),
+        &mut agent_meta,
+        &mut next_request_id,
+    )
+    .await?;
     // phux-4li.17: seed the window/tab strip from the bootstrap layout so
     // the first bar paint (driven by TERMINAL_SNAPSHOT) shows the window.
     // phux-4h5a: the sidebar painter tracks the same window list so the strip's
@@ -1386,6 +1762,38 @@ async fn main_loop<W: super::RenderSink>(
             focused_pane.as_ref(),
             zoomed.as_ref(),
             own_client_id,
+            &agent_meta.records,
+            &mut vcs,
+        );
+    }
+
+    // phux-foz.6: first-run onboarding hint. The caller already applied the
+    // trigger rule (nothing exists at the canonical config path; once per
+    // attach invocation — see `super::onboarding`); here we push the notice
+    // onto the ordinary overlay stack AFTER the bootstrap frame painted, so
+    // it floats over the live pane like any other modal. It reuses
+    // `ToastOverlay`, so any key dismisses it and triggers the standard
+    // dismiss-repaint; while it is up, frames keep applying to the pane
+    // mirrors with the outbound flush paused (ADR-0020 invariant 5), exactly
+    // as for every other overlay.
+    if show_onboarding {
+        overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+            super::onboarding::ONBOARDING_TITLE,
+            super::onboarding::hint_lines(&phux_config::loader::config_path()),
+            &theme,
+        )));
+        paint_active_overlay(
+            out,
+            &overlays,
+            &workspace,
+            &mut panes,
+            focused_pane.as_ref(),
+            zoomed.as_ref(),
+            viewport_dims,
+            status_bar.as_mut(),
+            sidebar,
+            &session_name,
+            &theme,
         );
     }
 
@@ -1400,6 +1808,19 @@ async fn main_loop<W: super::RenderSink>(
             edge: sidebar_edge,
             width: sidebar_width,
         });
+        // phux-npb3: capture follows focus. Re-derive the outer-terminal
+        // mouse-tracking DECSET from the focused pane's opt-out state every
+        // iteration — one call site covers every way focus or the set can
+        // change (set-pane, click-to-focus, keybind navigation, spawn/close
+        // reflows). `sync_mouse_capture` is a no-op when nothing changed, so
+        // the steady-state cost is one bool compare. Closed panes are pruned
+        // so a recycled TerminalId can never inherit a stale opt-out.
+        if !mouse_optout.is_empty() {
+            mouse_optout.retain(|id| panes.contains_key(id));
+        }
+        let want_capture =
+            desired_mouse_capture(mouse_capture_cfg, focused_pane.as_ref(), &mouse_optout);
+        sync_mouse_capture(out, want_capture).map_err(AttachError::Io)?;
         // phux-fysb: the off-loop stdout writer dropped a stale backlog under
         // a slow terminal. Repaint the latest state from scratch — a
         // self-contained full frame (or overlay) supersedes the dropped
@@ -1454,6 +1875,27 @@ async fn main_loop<W: super::RenderSink>(
             None => Box::pin(std::future::pending::<()>()),
         };
 
+        // phux-foz.2: (dis)arm the which-key deadline from the resolver's
+        // CURRENT pending state. An early continuation chord (dispatched
+        // in the stdin arm) leaves the resolver non-pending, so the next
+        // pass through here disarms the timer before it can fire — the
+        // popup is suppressed without any explicit cancellation call.
+        update_which_key_deadline(
+            &mut which_key_deadline,
+            resolver
+                .as_ref()
+                .is_some_and(phux_config::keybind::Resolver::pending_at_prefix),
+            which_key_enabled,
+            overlays.is_active(),
+            tokio::time::Instant::now(),
+            which_key_delay,
+        );
+        let which_key_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = match which_key_deadline
+        {
+            Some(deadline) => Box::pin(tokio::time::sleep_until(deadline)),
+            None => Box::pin(std::future::pending::<()>()),
+        };
+
         // phux-nz4.5: per-bar repaint cadence. Driven by the slowest
         // widget that wants periodic refresh (currently floor-1s via the
         // `time` widget). Empty bar ⇒ `Pending` forever so this select!
@@ -1465,6 +1907,20 @@ async fn main_loop<W: super::RenderSink>(
             Some(interval) => Box::pin(tokio::time::sleep(interval)),
             None => Box::pin(std::future::pending::<()>()),
         };
+
+        // Synchronized-output transactions intentionally span arbitrary
+        // socket reads, so their deadline is pane state rather than a
+        // per-batch timer. A stuck producer gets one bounded recovery paint;
+        // later bytes re-arm suppression if mode 2026 is still set.
+        let sync_output_sleep: std::pin::Pin<Box<dyn Future<Output = ()>>> = panes
+            .values()
+            .filter_map(|slot| slot.sync_output_since)
+            .map(|since| since + SYNC_OUTPUT_WATCHDOG)
+            .min()
+            .map_or_else(
+                || Box::pin(std::future::pending::<()>()) as _,
+                |deadline| Box::pin(tokio::time::sleep_until(deadline)) as _,
+            );
 
         tokio::select! {
             biased;
@@ -1492,7 +1948,11 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
@@ -1506,14 +1966,20 @@ async fn main_loop<W: super::RenderSink>(
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
                     sessions: &sessions,
+                    foreign_layouts: &foreign_layouts,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
-                    has_bar: status_bar.is_some(),
+                    bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
+                    mouse_optout: &mut mouse_optout,
+                    plugin_actions: &plugin_actions,
+                    plugin_panes: &plugin_panes,
+                    plugin_tx: Some(&plugin_tx),
+                    reload_request: &mut reload_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1551,11 +2017,24 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                        content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     )
                     .await?;
                 }
                 if layout_changed {
+                    // ADR-0040: an input action may have split/closed panes;
+                    // keep the agent-metadata watches in step with the set.
+                    sync_agent_meta_subscriptions(
+                        conn,
+                        panes.keys().cloned().collect(),
+                        &mut agent_meta,
+                        &mut next_request_id,
+                    )
+                    .await?;
                     refresh_window_chrome(
                         status_bar.as_mut(),
                         &mut sidebar_painter,
@@ -1564,6 +2043,8 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
+                        &agent_meta.records,
+                    &mut vcs,
                     );
                     // phux-5ke.4: on overlay dismiss the dispatcher
                     // sets layout_changed=true; the full-frame repaint
@@ -1602,6 +2083,35 @@ async fn main_loop<W: super::RenderSink>(
                         &theme,
                     );
                 }
+                // phux-foz.5: a `reload-config` committed in this batch
+                // (palette row or bound chord). Runs LAST in the arm so
+                // its repaint reflects the new theme/bar.
+                if reload_request {
+                    reload_request = false;
+                    handle_config_reload(
+                        out,
+                        &mut keybindings_snapshot,
+                        &mut resolver,
+                        &mut theme,
+                        &mut status_bar,
+                        &mut sidebar_painter,
+                        &mut plugin_actions,
+                        &mut plugin_panes,
+                        &mut which_key_enabled,
+                        &mut which_key_delay,
+                        &mut overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                        &agent_meta,
+                        &mut vcs,
+                        viewport_dims,
+                        sidebar,
+                        &session_name,
+                    );
+                }
             }
 
             // Inbound frames are drained in a `FRAME_COALESCE_CAP`-bounded
@@ -1638,6 +2148,25 @@ async fn main_loop<W: super::RenderSink>(
                             .collect();
                         let defer_flags = coalesce_defer_flags(&paint_targets);
                         for (frame_idx, f) in batch.into_iter().enumerate() {
+                        // phux-foz.8: a peer session's persisted-layout GET
+                        // reply. Picker display data only — decode into the
+                        // cache and skip the general frame handler (whose
+                        // MetadataValue arm would drop the unmatched id).
+                        let f = match f {
+                            FrameKind::MetadataValue { request_id, value }
+                                if foreign_layout_pending.contains_key(&request_id) =>
+                            {
+                                if let Some(session) = foreign_layout_pending.remove(&request_id) {
+                                    apply_foreign_layout_reply(
+                                        &mut foreign_layouts,
+                                        session,
+                                        value.as_deref(),
+                                    );
+                                }
+                                continue;
+                            }
+                            other => other,
+                        };
                         let defer_paint = frame_defers_paint(defer_flags[frame_idx], &f);
                         // phux-tnh: snapshot the current per-leaf rects
                         // BEFORE the frame may fold (close) or split the
@@ -1658,7 +2187,7 @@ async fn main_loop<W: super::RenderSink>(
                                         ls.as_ref(),
                                         content_rect(
                                             viewport_dims,
-                                            status_bar.is_some(),
+                                            status_bar.as_ref().map(StatusBarPainter::position),
                                             sidebar,
                                         ),
                                         viewport_dims,
@@ -1682,36 +2211,72 @@ async fn main_loop<W: super::RenderSink>(
                             layout_get_request_id,
                             &mut pending_splits,
                             &mut pending_windows,
+                            &mut agent_meta,
                             overlays.is_active(),
                             defer_paint,
                         )?;
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
                         }
+                        // ADR-0040: the frame may have added panes
+                        // (TerminalSpawned, a peer's layout broadcast) or
+                        // removed them (TerminalClosed). Re-sweep so every
+                        // live pane has a `phux.agent/v1` watch; the len
+                        // guard keeps the steady state zero-cost.
+                        if panes.len() != agent_meta.subscribed.len() {
+                            sync_agent_meta_subscriptions(
+                                conn,
+                                panes.keys().cloned().collect(),
+                                &mut agent_meta,
+                                &mut next_request_id,
+                            )
+                            .await?;
+                        }
                         // phux-4li.20: refresh the cached session graph
                         // whenever an ATTACHED snapshot lands so the
                         // session picker lists the current peer set.
+                        // phux-p4vp: the same snapshot refreshes the
+                        // pane-cwd index behind the sidebar branch line.
+                        vcs.apply_snapshot(outcome.pane_cwds);
+                        // phux-foz.8: re-request the peers' persisted
+                        // layouts against the fresh graph so the window
+                        // picker's one-step rows track it; replies
+                        // overwrite stale cache entries.
                         if let Some((list, focused)) = outcome.sessions {
                             sessions = list;
                             focused_session = Some(focused);
+                            request_foreign_layouts(
+                                conn,
+                                &sessions,
+                                focused_session,
+                                &mut next_request_id,
+                                &mut foreign_layout_pending,
+                            )
+                            .await?;
                         }
-                        // ADR-0033: a `TerminalControl` event changed a pane's
-                        // lease/lifecycle. The event frame paints nothing, so
-                        // refresh the badge and repaint the bar here — but only
-                        // when the FOCUSED pane's badge actually changed
-                        // (`set_supervisory` reports it), so an event on a
-                        // background pane doesn't force a full-window repaint for
-                        // state the user can't see. (`own_client_id` is fixed for
-                        // the life of this loop; it was captured at bootstrap.)
+                        // ADR-0033 / phux-foz.1: a `TerminalControl` or `Asked`
+                        // event changed a pane's lease/lifecycle/attention. The
+                        // event frame paints nothing, so refresh the chrome
+                        // (supervisory badge, attention hint, window markers)
+                        // and repaint here — but only when a painter input
+                        // actually changed (`refresh_window_chrome` reports
+                        // it), so an event that alters no visible state doesn't
+                        // force a full-window repaint. (`own_client_id` is
+                        // fixed for the life of this loop; it was captured at
+                        // bootstrap.)
                         if outcome.chrome_dirty {
-                            let badge_changed = status_bar.as_mut().is_some_and(|sb| {
-                                sb.set_supervisory(supervisory_badge(
-                                    &panes,
-                                    focused_pane.as_ref(),
-                                    own_client_id,
-                                ))
-                            });
-                            if badge_changed
+                            let chrome_changed = refresh_window_chrome(
+                                status_bar.as_mut(),
+                                &mut sidebar_painter,
+                                &workspace,
+                                &panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                                &agent_meta.records,
+                            &mut vcs,
+                            );
+                            if chrome_changed
                                 && !overlays.is_active()
                                 && let Some(ls) =
                                     workspace.render_window(zoomed.as_ref()).as_deref()
@@ -1780,7 +2345,11 @@ async fn main_loop<W: super::RenderSink>(
                             && ls.tree.is_some()
                         {
                             let new_content =
-                                content_rect(viewport_dims, status_bar.is_some(), sidebar);
+                                content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    );
                             let diff = super::reflow::compute_reflow(
                                 ls.as_ref(),
                                 prev_rects,
@@ -1796,6 +2365,29 @@ async fn main_loop<W: super::RenderSink>(
                             }
                         }
                         if outcome.layout_replaced {
+                            // phux-foz.8: a one-step cross-session window
+                            // pick drove this attach; the multi-window
+                            // layout just landed, so resolve the deferred
+                            // select against it before the repaint below.
+                            // Out-of-range (a peer mutated the layout
+                            // between pick and load) keeps the session's
+                            // restored focus with a warning.
+                            if let Some(idx) = pending_window.take() {
+                                if workspace.select(idx) {
+                                    focused_pane = workspace
+                                        .active_window()
+                                        .and_then(|ls| ls.focus.clone());
+                                    if let Some(fid) = focused_pane.as_ref() {
+                                        reanchor_predict_to_pane(&mut predict, &panes, fid);
+                                    }
+                                } else {
+                                    tracing::warn!(
+                                        index = idx,
+                                        windows = workspace.windows.len(),
+                                        "cross-session window pick out of range; keeping restored focus",
+                                    );
+                                }
+                            }
                             // phux-4li.5: layout changed under us
                             // (either the GET reply or a peer's broadcast).
                             // Trigger a full repaint: clear screen + paint
@@ -1812,6 +2404,8 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
+                                &agent_meta.records,
+                            &mut vcs,
                             );
                             if !overlays.is_active()
                                 && let Some(ls) =
@@ -1834,6 +2428,71 @@ async fn main_loop<W: super::RenderSink>(
                             // MetadataValue can't trample state.
                             layout_get_request_id = None;
                         }
+                        // ADR-0040: a `phux.agent/v1` record changed (GET
+                        // reply or subscribed broadcast). The window labels
+                        // derive from it, so recompose the tab strip +
+                        // sidebar and repaint — the same shape as the
+                        // layout_replaced arm, minus the layout bookkeeping.
+                        if outcome.agent_meta_changed {
+                            refresh_window_chrome(
+                                status_bar.as_mut(),
+                                &mut sidebar_painter,
+                                &workspace,
+                                &panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                                &agent_meta.records,
+                            &mut vcs,
+                            );
+                            if !overlays.is_active()
+                                && let Some(ls) =
+                                    workspace.render_window(zoomed.as_ref()).as_deref()
+                            {
+                                paint_full_frame(
+                                    out,
+                                    ls,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
+                                    &session_name,
+                                );
+                            }
+                        }
+                        // phux-foz.5: the `phux config reload` doorbell
+                        // rang (a subscribed `phux.config.reload/v1`
+                        // broadcast). Re-read our own config file and swap
+                        // the config-derived state in place — same handler
+                        // as the `reload-config` action; failures keep the
+                        // previous config and toast.
+                        if outcome.config_reload {
+                            handle_config_reload(
+                                out,
+                                &mut keybindings_snapshot,
+                                &mut resolver,
+                                &mut theme,
+                                &mut status_bar,
+                                &mut sidebar_painter,
+                                &mut plugin_actions,
+                                &mut plugin_panes,
+                                &mut which_key_enabled,
+                                &mut which_key_delay,
+                                &mut overlays,
+                                &workspace,
+                                &mut panes,
+                                focused_pane.as_ref(),
+                                zoomed.as_ref(),
+                                own_client_id,
+                                &agent_meta,
+                                &mut vcs,
+                                viewport_dims,
+                                sidebar,
+                                &session_name,
+                            );
+                        }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -1844,6 +2503,41 @@ async fn main_loop<W: super::RenderSink>(
                         return Ok(LoopExit::Detached);
                     }
                     Err(err) => return Err(err),
+                }
+            }
+
+            // Bound the failure mode of an application that omits `?2026l`.
+            // Expose the latest complete mirror once, then let subsequent
+            // output re-arm the transaction watchdog.
+            () = sync_output_sleep => {
+                let now = tokio::time::Instant::now();
+                let mut expired = false;
+                for slot in panes.values_mut() {
+                    if slot.sync_output_dirty
+                        && slot.sync_output_since.is_some_and(|since| {
+                            now.saturating_duration_since(since) >= SYNC_OUTPUT_WATCHDOG
+                        })
+                    {
+                        slot.sync_output_since = None;
+                        slot.sync_output_dirty = false;
+                        expired = true;
+                    }
+                }
+                if expired
+                    && !overlays.is_active()
+                    && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
+                {
+                    paint_full_frame(
+                        out,
+                        ls,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        Some(&mut sidebar_painter),
+                        &session_name,
+                    );
                 }
             }
 
@@ -1859,7 +2553,11 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_zoom_rects = zoom_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
-                    content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                    content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     viewport_dims,
                 );
                 let mut ctx = DispatchCtx {
@@ -1873,14 +2571,20 @@ async fn main_loop<W: super::RenderSink>(
                     keybindings: keybindings_snapshot.as_ref(),
                     theme: &theme,
                     sessions: &sessions,
+                    foreign_layouts: &foreign_layouts,
                     focused_session,
                     session_name: &mut session_name,
                     switch_request: &mut switch_request,
                     zoomed: &mut zoomed,
                     sidebar,
                     sidebar_enabled: &mut sidebar_enabled,
-                    has_bar: status_bar.is_some(),
+                    bar: status_bar.as_ref().map(StatusBarPainter::position),
                     drag: &mut drag,
+                    mouse_optout: &mut mouse_optout,
+                    plugin_actions: &plugin_actions,
+                    plugin_panes: &plugin_panes,
+                    plugin_tx: Some(&plugin_tx),
+                    reload_request: &mut reload_request,
                 };
                 let layout_changed = dispatch_input_events(
                     out,
@@ -1913,11 +2617,24 @@ async fn main_loop<W: super::RenderSink>(
                         &workspace,
                         zoomed.as_ref(),
                         &prev_zoom_rects,
-                        content_rect(viewport_dims, status_bar.is_some(), sidebar),
+                        content_rect(
+                        viewport_dims,
+                        status_bar.as_ref().map(StatusBarPainter::position),
+                        sidebar,
+                    ),
                     )
                     .await?;
                 }
                 if layout_changed {
+                    // ADR-0040: keep the agent-metadata watches in step
+                    // with a pane set changed by this flush's actions.
+                    sync_agent_meta_subscriptions(
+                        conn,
+                        panes.keys().cloned().collect(),
+                        &mut agent_meta,
+                        &mut next_request_id,
+                    )
+                    .await?;
                     refresh_window_chrome(
                         status_bar.as_mut(),
                         &mut sidebar_painter,
@@ -1926,6 +2643,8 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
+                        &agent_meta.records,
+                    &mut vcs,
                     );
                 }
                 if layout_changed
@@ -1945,6 +2664,66 @@ async fn main_loop<W: super::RenderSink>(
                     );
                 }
                 if overlays.is_active() {
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        &session_name,
+                        &theme,
+                    );
+                }
+                // phux-foz.5: same reload-on-commit check as the stdin
+                // arm — a bare-ESC flush can carry the final chord of a
+                // palette selection committing `reload-config`.
+                if reload_request {
+                    reload_request = false;
+                    handle_config_reload(
+                        out,
+                        &mut keybindings_snapshot,
+                        &mut resolver,
+                        &mut theme,
+                        &mut status_bar,
+                        &mut sidebar_painter,
+                        &mut plugin_actions,
+                        &mut plugin_panes,
+                        &mut which_key_enabled,
+                        &mut which_key_delay,
+                        &mut overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        own_client_id,
+                        &agent_meta,
+                        &mut vcs,
+                        viewport_dims,
+                        sidebar,
+                        &session_name,
+                    );
+                }
+            }
+
+            // phux-foz.2: which-key idle timeout. Armed only while the
+            // resolver sits at the pending-prefix state (see the update
+            // above); fires once per hesitation. Pushing the popup does
+            // not touch the resolver — the pending prefix stays live, so
+            // the next chord executes exactly as if the popup never
+            // appeared (the dispatcher's passthrough branch dismisses it
+            // on the way through).
+            () = which_key_sleep => {
+                which_key_deadline = None;
+                if push_which_key_overlay(
+                    &mut overlays,
+                    resolver.as_ref(),
+                    keybindings_snapshot.as_ref(),
+                    &theme,
+                ) {
                     paint_active_overlay(
                         out,
                         &overlays,
@@ -1996,13 +2775,13 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(ls) = workspace.render_window(zoomed.as_ref())
                     && ls.tree.is_some()
                 {
-                    let has_bar = status_bar.is_some();
+                    let bar = status_bar.as_ref().map(StatusBarPainter::position);
                     // phux-4h5a: size each PTY to the inset content rect (the
                     // pane area after the status bar + sidebar reservation),
                     // not the full viewport — otherwise an enabled sidebar
                     // resizes panes to the full width while they paint inset.
-                    let prev_content = content_rect(prev_dims, has_bar, sidebar);
-                    let new_content = content_rect(viewport_dims, has_bar, sidebar);
+                    let prev_content = content_rect(prev_dims, bar, sidebar);
+                    let new_content = content_rect(viewport_dims, bar, sidebar);
                     let prev_rects =
                         super::multi_pane::compute_layout_in(ls.as_ref(), prev_content, prev_dims)
                             .rects;
@@ -2072,8 +2851,8 @@ async fn main_loop<W: super::RenderSink>(
                     // hasn't seeded yet) the old code passed None →
                     // paint_bar_after_pane emitted no CUP → cursor
                     // stranded at the bar's last cell every tick.
-                    let has_bar = status_bar.is_some();
-                    let content = content_rect(viewport_dims, has_bar, sidebar);
+                    let bar = status_bar.as_ref().map(StatusBarPainter::position);
+                    let content = content_rect(viewport_dims, bar, sidebar);
                     let fallback_origin = Some(
                         focused_pane
                             .as_ref()
@@ -2107,6 +2886,39 @@ async fn main_loop<W: super::RenderSink>(
                         // painter's content cache repaints only when a
                         // widget (e.g. the clock) actually changed.
                         false,
+                    );
+                }
+            }
+
+            // phux-r82.5: a spawned plugin action finished. Successes just
+            // log (no modal to dismiss on the happy path); failures push a
+            // dismissable toast carrying the captured output, so a broken
+            // plugin is *seen* without ever having blocked the input loop.
+            // The channel can't close while this loop holds `plugin_tx`,
+            // so the `Some` pattern always matches when the arm fires.
+            Some(result) = plugin_rx.recv() => {
+                tracing::info!(
+                    plugin = %result.plugin_id,
+                    action = %result.action_id,
+                    ok = plugin_actions::run_succeeded(&result),
+                    "plugin action finished",
+                );
+                if let Some((title, lines)) = plugin_actions::failure_toast(&result) {
+                    overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+                        title, lines, &theme,
+                    )));
+                    paint_active_overlay(
+                        out,
+                        &overlays,
+                        &workspace,
+                        &mut panes,
+                        focused_pane.as_ref(),
+                        zoomed.as_ref(),
+                        viewport_dims,
+                        status_bar.as_mut(),
+                        sidebar,
+                        &session_name,
+                        &theme,
                     );
                 }
             }
@@ -2161,6 +2973,64 @@ pub(super) fn layout_key(session: phux_protocol::ids::SessionId) -> String {
     format!("{LAYOUT_KEY}/{}", session.get())
 }
 
+/// phux-foz.8: fetch each peer session's persisted layout — one
+/// `GET_METADATA` on the per-session layout key per session other than
+/// `focused` — so the window picker can render one-step cross-session
+/// window rows. Correlation is via `pending` (request id -> session id);
+/// replies drain through the driver's recv arm into the foreign-layout
+/// cache. Best-effort: a peer with nothing persisted replies `value: None`
+/// (dropped by [`apply_foreign_layout_reply`]) and keeps its fallback
+/// "switch to this session" row.
+async fn request_foreign_layouts(
+    conn: &mut Connection,
+    sessions: &[phux_protocol::wire::info::SessionInfo],
+    focused: Option<phux_protocol::ids::SessionId>,
+    next_request_id: &mut u32,
+    pending: &mut HashMap<u32, phux_protocol::ids::SessionId>,
+) -> Result<(), AttachError> {
+    for s in sessions.iter().filter(|s| Some(s.id) != focused) {
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.wrapping_add(1);
+        pending.insert(request_id, s.id);
+        conn.send(&FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Group(DEFAULT_GROUP_ID),
+            key: layout_key(s.id),
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+/// phux-foz.8: fold one foreign-session layout GET reply into the picker's
+/// cache. `value: None` (nothing persisted) or an undecodable envelope
+/// clears the entry, so the picker falls back to the plain
+/// "switch to this session" row rather than showing stale windows.
+fn apply_foreign_layout_reply(
+    cache: &mut HashMap<phux_protocol::ids::SessionId, Workspace>,
+    session: phux_protocol::ids::SessionId,
+    value: Option<&[u8]>,
+) {
+    match value {
+        Some(bytes) => match Workspace::decode_cbor(bytes) {
+            Ok(ws) => {
+                cache.insert(session, ws);
+            }
+            Err(err) => {
+                tracing::debug!(
+                    session = session.get(),
+                    error = %err,
+                    "foreign layout decode failed; window picker keeps the fallback row",
+                );
+                cache.remove(&session);
+            }
+        },
+        None => {
+            cache.remove(&session);
+        }
+    }
+}
+
 /// Whether `key` is any session's layout key — the bare [`LAYOUT_KEY`] (legacy
 /// persisted value) or a `LAYOUT_KEY/<session>` form. Used to recognise layout
 /// `SET_METADATA` broadcasts (a client only ever receives its own session's).
@@ -2176,20 +3046,16 @@ pub(super) fn is_layout_key_string(key: &str) -> bool {
 /// won't match).
 pub(super) const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
-/// phux-4li.5: build a [`phux_config::keybind::Resolver`] from the
-/// on-disk config. Failures log and return `None` — a malformed
-/// `[keybindings]` table degrades to "no actions are bound" rather
-/// than blocking attach. Detach is a normal keybinding action, so a
-/// disabled resolver also disables configured detach chords.
-fn build_resolver() -> Option<phux_config::keybind::Resolver> {
-    let cfg = match phux_config::loader::load() {
-        Ok(c) => c,
-        Err(err) => {
-            tracing::warn!(error = %err, "phux-config load failed; keybind resolver disabled");
-            return None;
-        }
-    };
-    match phux_config::keybind::Resolver::new(&cfg.keybindings) {
+/// phux-4li.5: build a [`phux_config::keybind::Resolver`] from a
+/// keybindings snapshot (post phux-r82.5: the plugin-merged one, so
+/// manifest `keys` chords resolve like user bindings — the merge already
+/// validated each contributed chord, so a plugin can't poison this
+/// build). Failures log and return `None` — a malformed `[keybindings]`
+/// table degrades to "no actions are bound" rather than blocking attach.
+/// Detach is a normal keybinding action, so a disabled resolver also
+/// disables configured detach chords.
+fn build_resolver_from(kb: &phux_config::KeybindingsCfg) -> Option<phux_config::keybind::Resolver> {
+    match phux_config::keybind::Resolver::new(kb) {
         Ok(r) => Some(r),
         Err(err) => {
             tracing::warn!(error = %err, "keybind resolver build failed; disabled");
@@ -2198,20 +3064,81 @@ fn build_resolver() -> Option<phux_config::keybind::Resolver> {
     }
 }
 
+/// phux-foz.2: (dis)arm the which-key popup deadline for one loop pass.
+///
+/// Arms (`Some(now + delay)`) only while ALL of: the resolver is pending
+/// exactly at the prefix, the popup is enabled in config, and no overlay
+/// is already active (a modal owns the screen; and once the popup itself
+/// is up, re-arming would re-push it forever). Re-invocations while armed
+/// keep the ORIGINAL deadline (anchored, like `esc_deadline`) so other
+/// select! arms firing cannot postpone the popup. Any pass that sees the
+/// conditions no longer met — e.g. an early continuation chord resolved
+/// the prefix — disarms, which is how a fast chord suppresses the popup.
+fn update_which_key_deadline(
+    deadline: &mut Option<tokio::time::Instant>,
+    pending_at_prefix: bool,
+    enabled: bool,
+    overlay_active: bool,
+    now: tokio::time::Instant,
+    delay: Duration,
+) {
+    if enabled && pending_at_prefix && !overlay_active {
+        deadline.get_or_insert(now + delay);
+    } else {
+        *deadline = None;
+    }
+}
+
+/// phux-foz.2: push the which-key popup when the timeout fires.
+///
+/// Re-checks the arming conditions against the CURRENT state (the select!
+/// arm may race a same-iteration resolver mutation) and pushes a
+/// [`WhichKeyOverlay`] built from the same keybindings snapshot the help
+/// overlay uses. Returns `true` iff the popup was pushed (the caller then
+/// paints the overlay layer). Never touches the resolver: the pending
+/// prefix must stay live so the next chord still completes normally.
+fn push_which_key_overlay(
+    overlays: &mut OverlayState,
+    resolver: Option<&phux_config::keybind::Resolver>,
+    keybindings: Option<&phux_config::KeybindingsCfg>,
+    theme: &crate::render::Theme,
+) -> bool {
+    if overlays.is_active() {
+        return false;
+    }
+    if !resolver.is_some_and(phux_config::keybind::Resolver::pending_at_prefix) {
+        return false;
+    }
+    let Some(kb) = keybindings else {
+        return false;
+    };
+    tracing::debug!("which-key: prefix hesitation timeout; showing popup");
+    overlays.push(Box::new(
+        crate::render::overlay::WhichKeyOverlay::from_config(kb, theme),
+    ));
+    true
+}
+
 /// phux-ahv.3: snapshot the current [`Workspace`] as the `windows`
 /// widget's input — display order with the active window flagged. The
 /// `windows` status-bar widget formats and styles these.
 /// Snapshot the window/tab strip, preferring each window's live OSC
 /// title over its stored name.
 ///
-/// A window's display label is the OSC 0/2 title of its focused leaf — the
-/// title the running program set (a shell shows the cwd/command, `vim` the
-/// file, an agent its task) — read straight from that pane's client-side
-/// libghostty mirror ([`PaneSlot::terminal`]). This is the tmux
-/// "automatic-rename" behaviour and Warp's tab titling, entirely
-/// client-local: titles flow in the PTY VT the mirror already consumes, so
-/// no wire frame or L3 key is involved. When the focused leaf has no slot
-/// yet or its title is empty, fall back to the window's stored `name`.
+/// A window's display label prefers, in order (ADR-0040):
+///
+/// 1. **The structured `phux.agent/v1` record** of the window's focused
+///    leaf, when one is declared — [`AgentRecord::label`], e.g.
+///    `reviewer (blocked)`. No title parsing, no substring heuristics.
+/// 2. **The OSC 0/2 title** of the focused leaf — the title the running
+///    program set (a shell shows the cwd/command, `vim` the file, an agent
+///    its task) — read straight from that pane's client-side libghostty
+///    mirror ([`PaneSlot::terminal`]). This is the tmux "automatic-rename"
+///    behaviour and Warp's tab titling, entirely client-local: titles flow
+///    in the PTY VT the mirror already consumes. It stays as the
+///    compatibility path for agents that only speak title conventions.
+/// 3. **The window's stored `name`**, when the focused leaf has no slot
+///    yet or its title is empty.
 fn window_infos(
     workspace: &Workspace,
     panes: &HashMap<TerminalId, PaneSlot>,
@@ -2219,29 +3146,118 @@ fn window_infos(
     // `Z` marker (`WindowInfo.zoomed`) when a pane is zoomed; non-active tabs
     // never show it (zoom is per the active window).
     zoomed: Option<&TerminalId>,
+    // ADR-0040: Terminal → decoded `phux.agent/v1` record, kept live by the
+    // driver's per-pane metadata subscriptions.
+    agent_meta: &HashMap<TerminalId, AgentRecord>,
+    // phux-p4vp: pane-cwd index + branch memo. The window's branch line is
+    // its focused leaf's VCS branch (mut only for the memo).
+    vcs: &mut VcsIndex,
 ) -> Vec<phux_config::widget::WindowInfo> {
     workspace
         .windows
         .iter()
         .enumerate()
         .map(|(i, w)| {
-            let title = w
-                .state
-                .focus
-                .as_ref()
+            let focus = w.state.focus.as_ref();
+            let agent_label = focus
+                .and_then(|fid| agent_meta.get(fid))
+                .map(AgentRecord::label);
+            let title = focus
                 .and_then(|fid| panes.get(fid))
                 .and_then(|slot| slot.terminal.title().ok())
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
                 .map(ToOwned::to_owned);
             let active = i == workspace.active;
+            // phux-foz.1: a window carries attention when ANY of its leaves
+            // has the ADR-0035 asked flag set — not just the focused leaf —
+            // so a question in a background split still marks the tab.
+            let attention = w
+                .state
+                .tree
+                .as_ref()
+                .map(crate::layout::leaves)
+                .unwrap_or_default()
+                .iter()
+                .any(|id| panes.get(id).is_some_and(|slot| slot.attention));
+            // phux-p4vp: the branch line under the label — the focused
+            // leaf's cwd resolved to its VCS branch (cached file read).
+            let branch = focus.and_then(|fid| vcs.branch_for_pane(fid));
             phux_config::widget::WindowInfo {
-                name: title.unwrap_or_else(|| w.name.clone()),
+                name: agent_label.or(title).unwrap_or_else(|| w.name.clone()),
                 active,
                 zoomed: active && zoomed.is_some(),
+                attention,
+                branch,
             }
         })
         .collect()
+}
+
+/// phux-foz.1: clear a pane's asked-attention flag because the user sent it
+/// input (the clearing rule documented in `docs/consumers/tui.md`). Returns
+/// `true` when the flag actually flipped, so the caller can schedule a
+/// chrome repaint only on a real transition.
+pub(super) fn clear_attention_on_input(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    pane: &TerminalId,
+) -> bool {
+    match panes.get_mut(pane) {
+        Some(slot) if slot.attention => {
+            slot.attention = false;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// ADR-0040 (phux-3ert): reconcile the agent-metadata index with the live
+/// pane set.
+///
+/// For every pane that has no live `phux.agent/v1` watch yet, send a
+/// one-shot `GET_METADATA` (the read-back for a record set before we
+/// attached; the reply is correlated through `AgentMetaIndex::pending`) plus
+/// a `SUBSCRIBE_METADATA` (the push path for later `SET`/`DELETE`
+/// broadcasts). Panes that closed are pruned from every side table — the
+/// server already dropped their per-Terminal store and our subscription
+/// with the Terminal, so pruning is purely local hygiene. Idempotent: a
+/// pane already in `subscribed` is skipped, so callers can re-run the sweep
+/// on every pane-set change (bootstrap, split, new window, layout
+/// broadcast) without duplicate wire traffic.
+async fn sync_agent_meta_subscriptions(
+    conn: &mut Connection,
+    // Owned id list (not `&HashMap<_, PaneSlot>`): `PaneSlot` holds a
+    // libghostty mirror that is not `Send`, and holding a reference to it
+    // across the sends would make this future `!Send` (clippy
+    // `future_not_send`). Callers pass `panes.keys().cloned().collect()`.
+    pane_ids: Vec<TerminalId>,
+    agent_meta: &mut AgentMetaIndex,
+    next_request_id: &mut u32,
+) -> Result<(), AttachError> {
+    agent_meta.subscribed.retain(|id| pane_ids.contains(id));
+    agent_meta.records.retain(|id, _| pane_ids.contains(id));
+    agent_meta.pending.retain(|_, id| pane_ids.contains(id));
+    for id in &pane_ids {
+        if agent_meta.subscribed.contains(id) {
+            continue;
+        }
+        let request_id = *next_request_id;
+        *next_request_id = next_request_id.wrapping_add(1);
+        agent_meta.pending.insert(request_id, id.clone());
+        conn.send(&FrameKind::GetMetadata {
+            request_id,
+            scope: Scope::Terminal(id.clone()),
+            key: TERMINAL_AGENT_KEY.to_owned(),
+        })
+        .await?;
+        conn.send(&FrameKind::SubscribeMetadata {
+            scope: Scope::Terminal(id.clone()),
+            key: TERMINAL_AGENT_KEY.to_owned(),
+        })
+        .await?;
+        agent_meta.subscribed.insert(id.clone());
+    }
+    Ok(())
 }
 
 /// phux-x2hm: the per-leaf rect map of the **zoom-honoring** view, used as the
@@ -2301,10 +3317,132 @@ async fn emit_zoom_reflow(
 /// silently either. On a load or build failure we surface a visible
 /// error line (`StatusBarPainter::error_line`) on the bar row pointing
 /// the user at `phux config show` for the full diagnostic, instead of
-/// dropping to an empty bar (and, alongside [`build_resolver`], no
+/// dropping to an empty bar (and, alongside [`build_resolver_from`], no
 /// keybindings) with only a `tracing::warn` nobody sees. Returns `None`
 /// only when the config is valid and the bar would be empty (no widgets
 /// configured) — callers short-circuit on that.
+/// phux-foz.5: perform one explicit live config reload and repaint.
+///
+/// Re-runs the layered config loader ([`super::reload::reload_in_place`])
+/// and, on success, swaps the driver's config-derived state — keybindings
+/// snapshot, resolver, theme, status bar, plugin-action rows, which-key
+/// knobs — in place, rebuilds the sidebar painter under the new theme
+/// (cache-cold, so the repaint recolors everything), refreshes the window
+/// chrome, and repaints. On ANY parse/validation failure the previous
+/// config stays fully in effect and the error is surfaced as a
+/// dismissable toast. Never crashes, never half-applies.
+///
+/// Reached from both reload surfaces: the `reload-config` action
+/// (`DispatchCtx::reload_request`) and the `phux config reload` CLI
+/// doorbell (`FrameOutcome::config_reload`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the config-derived slots and the repaint context are driver-loop locals threaded by reference, same shape as the paint helpers"
+)]
+fn handle_config_reload<W: super::RenderSink>(
+    out: &mut W,
+    keybindings_snapshot: &mut Option<phux_config::KeybindingsCfg>,
+    resolver: &mut Option<phux_config::keybind::Resolver>,
+    theme: &mut crate::render::Theme,
+    status_bar: &mut Option<StatusBarPainter>,
+    sidebar_painter: &mut SidebarPainter,
+    plugin_actions: &mut Vec<PluginActionEntry>,
+    plugin_panes: &mut Vec<plugin_panes::PluginPaneEntry>,
+    which_key_enabled: &mut bool,
+    which_key_delay: &mut Duration,
+    overlays: &mut OverlayState,
+    workspace: &Workspace,
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    zoomed: Option<&TerminalId>,
+    own_client_id: Option<ClientId>,
+    agent_meta: &AgentMetaIndex,
+    vcs: &mut VcsIndex,
+    viewport_dims: (u16, u16),
+    sidebar: Option<SidebarReservation>,
+    session_name: &str,
+) {
+    match super::reload::reload_in_place(
+        &phux_config::loader::config_path(),
+        keybindings_snapshot,
+        resolver,
+        theme,
+        status_bar,
+        plugin_actions,
+        plugin_panes,
+        which_key_enabled,
+        which_key_delay,
+    ) {
+        Ok(()) => {
+            tracing::info!("config reloaded in place");
+            // Fresh painters carry the new theme and start cache-cold so
+            // the repaint below recolors the whole chrome. The attention
+            // chip color rides the theme (phux-foz.1).
+            *sidebar_painter = SidebarPainter::new(*theme);
+            if let Some(sb) = status_bar.as_mut() {
+                sb.set_attention_color(theme.attention);
+            }
+            refresh_window_chrome(
+                status_bar.as_mut(),
+                sidebar_painter,
+                workspace,
+                panes,
+                focused_pane,
+                zoomed,
+                own_client_id,
+                &agent_meta.records,
+                vcs,
+            );
+            if !overlays.is_active()
+                && let Some(ls) = workspace.render_window(zoomed).as_deref()
+            {
+                paint_full_frame(
+                    out,
+                    ls,
+                    panes,
+                    focused_pane,
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    sidebar,
+                    Some(sidebar_painter),
+                    session_name,
+                );
+            }
+        }
+        Err(msg) => {
+            // Keep the old config (reload_in_place touched nothing) and
+            // make the failure visible: a dismissable toast, mirroring
+            // the plugin-action failure surface. The status bar, theme,
+            // and every binding keep working exactly as before.
+            tracing::warn!(error = %msg, "config reload failed; keeping previous config");
+            overlays.push(Box::new(crate::render::overlay::ToastOverlay::new(
+                "Config reload failed - previous config kept",
+                vec![
+                    msg,
+                    String::new(),
+                    "Fix the file and reload again (see: phux config show)".to_owned(),
+                ],
+                theme,
+            )));
+        }
+    }
+    if overlays.is_active() {
+        paint_active_overlay(
+            out,
+            overlays,
+            workspace,
+            panes,
+            focused_pane,
+            zoomed,
+            viewport_dims,
+            status_bar.as_mut(),
+            sidebar,
+            session_name,
+            theme,
+        );
+    }
+}
+
 fn build_status_bar_painter() -> Option<StatusBarPainter> {
     let cfg = match phux_config::loader::load() {
         Ok(c) => c,
@@ -2314,10 +3452,24 @@ fn build_status_bar_painter() -> Option<StatusBarPainter> {
         }
     };
     let registry = phux_config::WidgetRegistry::with_builtins();
-    match phux_config::widget::StatusBar::build(&cfg.status, &registry) {
+    // phux-r82.6: fold enabled plugins' `[[widgets]]` contributions in
+    // after the user's own `[status]` widgets. Invalid contributions are
+    // dropped with a warning inside the merge (mirroring the plugin
+    // keybinding policy), so a broken plugin cannot flip the bar into the
+    // error strip; a genuinely broken USER config still can, below.
+    let mut status = cfg.status.clone();
+    if !cfg.plugins.is_empty() {
+        let config_path = phux_config::loader::config_path();
+        let manifests = phux_config::plugin::load_enabled_manifests(&config_path, &cfg.plugins);
+        phux_config::plugin::merge_widget_contributions(&mut status, &manifests, &registry);
+    }
+    match phux_config::widget::StatusBar::build(&status, &registry) {
         Ok(bar) if bar.is_empty() => None,
         Ok(bar) => {
-            let mut painter = StatusBarPainter::new(bar, Position::default());
+            // phux-foz.8: `[status] position = "top" | "bottom"` picks the
+            // reserved row; the pane content rect shifts to match (see
+            // `paint::content_rect`).
+            let mut painter = StatusBarPainter::new(bar, cfg.status.position.into());
             painter.set_prefix(cfg.keybindings.prefix);
             Some(painter)
         }
@@ -2603,6 +3755,39 @@ fn write_enter_alt_screen<W: Write>(out: &mut W, mouse: bool) -> io::Result<()> 
     out.flush()
 }
 
+/// Reconcile the client's outer-terminal mouse-tracking DECSET with
+/// `want` (phux-npb3: capture follows focus).
+///
+/// The current state lives in [`MOUSE_CAPTURE_ACTIVE`] — the same flag
+/// [`write_enter_alt_screen`] sets and [`write_terminal_reset`] consumes —
+/// so a detach or signal reset while an opted-out pane holds focus never
+/// emits a redundant leave sequence. No-op when the state already
+/// matches; otherwise emits the ADR-0035 enter pair (`?1002h?1006h`) or
+/// its reverse-order leave (`?1006l?1002l`).
+/// Whether the client's outer-terminal mouse capture should currently be
+/// on (phux-npb3): the global `mouse` config gate must be on AND the
+/// focused pane must not have opted out via `set-pane mouse off`. With no
+/// focused pane yet (pre-ATTACHED) the global gate alone decides.
+fn desired_mouse_capture(
+    cfg_on: bool,
+    focused: Option<&TerminalId>,
+    optout: &std::collections::HashSet<TerminalId>,
+) -> bool {
+    cfg_on && !focused.is_some_and(|id| optout.contains(id))
+}
+
+fn sync_mouse_capture<W: Write>(out: &mut W, want: bool) -> io::Result<()> {
+    if MOUSE_CAPTURE_ACTIVE.swap(want, Ordering::SeqCst) == want {
+        return Ok(());
+    }
+    if want {
+        out.write_all(b"\x1b[?1002h\x1b[?1006h")?;
+    } else {
+        out.write_all(b"\x1b[?1006l\x1b[?1002l")?;
+    }
+    out.flush()
+}
+
 /// Restore the outer terminal to a sane post-attach state: drop SGR,
 /// show the cursor, and (if we ever entered the alt screen) leave it.
 ///
@@ -2750,7 +3935,7 @@ fn install_panic_hook_once() {
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use phux_protocol::caps::ServerCapabilities;
+    use phux_protocol::caps::{ServerCapabilities, TerminalColor, TerminalDefaultColors};
     use tokio::net::UnixStream;
 
     static TERMINAL_RESET_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -2803,11 +3988,222 @@ mod tests {
         );
     }
 
+    /// phux-foz.1: the status-bar attention hint. Nothing asking shows
+    /// nothing; one asking pane shows the plain chip; several asking panes
+    /// carry the count.
+    #[test]
+    fn attention_hint_formats_every_count() {
+        assert_eq!(format_attention_hint(0), None);
+        assert_eq!(format_attention_hint(1).as_deref(), Some("[ ASK ]"));
+        assert_eq!(format_attention_hint(3).as_deref(), Some("[ ASK x3 ]"));
+    }
+
+    /// phux-foz.1: key/paste input forwarded to a pane clears its asked
+    /// flag exactly once — the transition reports `true`, repeats and
+    /// unknown panes report `false` (no spurious chrome repaints).
+    #[test]
+    fn clear_attention_on_input_clears_once() {
+        let id = TerminalId::local(1);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.attention = true;
+        panes.insert(id.clone(), slot);
+
+        assert!(clear_attention_on_input(&mut panes, &id), "first clear");
+        assert!(
+            !panes.get(&id).expect("slot").attention,
+            "flag must be down after the clear"
+        );
+        assert!(
+            !clear_attention_on_input(&mut panes, &id),
+            "already-clear pane reports no transition"
+        );
+        assert!(
+            !clear_attention_on_input(&mut panes, &TerminalId::local(9)),
+            "unknown pane reports no transition"
+        );
+    }
+
+    /// phux-foz.1: `window_infos` marks a window when ANY of its leaves has
+    /// the asked flag — including a non-focused leaf — and only that window.
+    #[test]
+    fn window_infos_flags_attention_on_the_asking_window() {
+        let front = TerminalId::local(1);
+        let back = TerminalId::local(2);
+        let mut workspace = Workspace::single(front.clone());
+        workspace.add_window("2".to_owned(), back.clone());
+        workspace.select(0);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(front, PaneSlot::new_with_size(80, 24).expect("slot"));
+        let mut asking = PaneSlot::new_with_size(80, 24).expect("slot");
+        asking.attention = true;
+        panes.insert(back.clone(), asking);
+
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
+        assert!(
+            !infos[0].attention,
+            "quiet window must not carry the marker"
+        );
+        assert!(
+            infos[1].attention,
+            "the asking (background) window carries the marker"
+        );
+
+        // Clearing the flag clears the marker.
+        assert!(clear_attention_on_input(&mut panes, &back));
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
+        assert!(!infos[1].attention);
+    }
+
     #[test]
     fn attach_error_io_display_includes_source() {
         let err = AttachError::Io(io::Error::other("boom"));
         let msg = err.to_string();
         assert!(msg.contains("attach loop io error"));
+    }
+
+    // -- which-key popup arming (phux-foz.2) ------------------------------
+
+    /// Build a resolver from the shipped defaults and walk it to the
+    /// pending-prefix state (`C-a` fed, continuation awaited).
+    fn pending_resolver() -> phux_config::keybind::Resolver {
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let mut r = phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        let prefix = phux_config::keybind::parse_chord(&cfg.keybindings.prefix).expect("prefix");
+        assert_eq!(r.feed(prefix), phux_config::keybind::Feed::Partial);
+        assert!(r.pending_at_prefix());
+        r
+    }
+
+    #[test]
+    fn which_key_deadline_arms_once_and_holds_its_anchor() {
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert_eq!(deadline, Some(now + delay), "arms at now + delay");
+        // A later pass (other select! arms fired) keeps the ORIGINAL
+        // anchor — the popup is not postponed by unrelated wakeups.
+        update_which_key_deadline(
+            &mut deadline,
+            true,
+            true,
+            false,
+            now + Duration::from_millis(300),
+            delay,
+        );
+        assert_eq!(deadline, Some(now + delay), "anchor survives re-passes");
+    }
+
+    #[test]
+    fn which_key_deadline_disarms_when_an_early_chord_resolves() {
+        // The suppression path: prefix pressed (armed), then a fast
+        // continuation resolves the chord BEFORE the timeout — the next
+        // loop pass sees pending=false and must disarm, so the popup
+        // never appears.
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert!(deadline.is_some());
+        update_which_key_deadline(&mut deadline, false, true, false, now, delay);
+        assert_eq!(deadline, None, "early chord suppresses the popup");
+    }
+
+    #[test]
+    fn which_key_deadline_respects_disable_and_active_overlay() {
+        let mut deadline = None;
+        let now = tokio::time::Instant::now();
+        let delay = Duration::from_millis(600);
+        // Disabled in config: never arms.
+        update_which_key_deadline(&mut deadline, true, false, false, now, delay);
+        assert_eq!(deadline, None);
+        // A modal already up: never arms (it owns input; the resolver was
+        // reset on entry anyway).
+        update_which_key_deadline(&mut deadline, true, true, true, now, delay);
+        assert_eq!(deadline, None);
+        // Armed, then an overlay appears before the timeout: disarms.
+        update_which_key_deadline(&mut deadline, true, true, false, now, delay);
+        assert!(deadline.is_some());
+        update_which_key_deadline(&mut deadline, true, true, true, now, delay);
+        assert_eq!(deadline, None);
+    }
+
+    #[test]
+    fn which_key_timeout_pushes_the_popup_and_keeps_the_prefix_pending() {
+        // The timeout path: a pending-at-prefix resolver + keybindings
+        // snapshot ⇒ the popup is pushed; the resolver still holds the
+        // pending prefix so the NEXT chord completes normally.
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let resolver = pending_resolver();
+        let mut overlays = OverlayState::new();
+        let theme = crate::render::Theme::default();
+        let pushed = push_which_key_overlay(
+            &mut overlays,
+            Some(&resolver),
+            Some(&cfg.keybindings),
+            &theme,
+        );
+        assert!(pushed, "timeout must push the which-key popup");
+        assert!(overlays.is_active());
+        assert!(
+            overlays.top_is_passthrough(),
+            "the popup must be input-passthrough so it can never eat a chord"
+        );
+        assert!(
+            resolver.pending_at_prefix(),
+            "pushing the popup must not consume the pending prefix"
+        );
+    }
+
+    #[test]
+    fn which_key_push_declines_without_pending_prefix_or_over_a_modal() {
+        let cfg =
+            phux_config::parse_str(phux_config::DEFAULT_CONFIG_TOML, Path::new("default.toml"))
+                .expect("default config parses");
+        let theme = crate::render::Theme::default();
+
+        // Resolver at the root (no pending prefix): no push.
+        let idle = phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        let mut overlays = OverlayState::new();
+        assert!(!push_which_key_overlay(
+            &mut overlays,
+            Some(&idle),
+            Some(&cfg.keybindings),
+            &theme,
+        ));
+        assert!(!overlays.is_active());
+
+        // A modal already up: no push (would stack over user input).
+        let pending = pending_resolver();
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(crate::render::overlay::HelpOverlay::from_config(
+            &cfg.keybindings,
+            &theme,
+        )));
+        assert!(!push_which_key_overlay(
+            &mut overlays,
+            Some(&pending),
+            Some(&cfg.keybindings),
+            &theme,
+        ));
+        assert_eq!(overlays.depth(), 1, "nothing stacked on the modal");
     }
 
     /// phux-jy4t: the layout metadata key is per-session, so two sessions
@@ -2821,6 +4217,33 @@ mod tests {
         assert_eq!(b, "phux.tui.layout/v1/2");
         assert_ne!(a, b, "different sessions get different keys");
         assert!(a.starts_with(LAYOUT_KEY), "still under the layout prefix");
+    }
+
+    /// phux-foz.8: a foreign session's layout GET reply round-trips into
+    /// the picker cache; a tombstone (`None`) or garbage clears/skips the
+    /// entry so the picker falls back to the plain switch row.
+    #[test]
+    fn apply_foreign_layout_reply_caches_clears_and_survives_garbage() {
+        use phux_protocol::ids::SessionId;
+        let sid = SessionId::new(7);
+        let mut cache: HashMap<SessionId, Workspace> = HashMap::new();
+
+        // A decodable envelope lands in the cache with its windows intact.
+        let mut ws = Workspace::single(TerminalId::local(1));
+        ws.add_window("logs".to_owned(), TerminalId::local(2));
+        let bytes = ws.encode_cbor().expect("encode");
+        apply_foreign_layout_reply(&mut cache, sid, Some(&bytes));
+        assert_eq!(cache.get(&sid).map(|w| w.windows.len()), Some(2));
+
+        // Garbage clears the stale entry rather than keeping it.
+        apply_foreign_layout_reply(&mut cache, sid, Some(b"not cbor"));
+        assert!(!cache.contains_key(&sid), "undecodable reply clears");
+
+        // Re-cache, then a tombstone (nothing persisted) clears again.
+        apply_foreign_layout_reply(&mut cache, sid, Some(&bytes));
+        assert!(cache.contains_key(&sid));
+        apply_foreign_layout_reply(&mut cache, sid, None);
+        assert!(!cache.contains_key(&sid), "tombstone clears");
     }
 
     #[test]
@@ -2914,7 +4337,13 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos.len(), 1);
         assert_eq!(
             infos[0].name, "~/src/phux",
@@ -2931,7 +4360,13 @@ mod tests {
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
         panes.insert(id, PaneSlot::new_with_size(80, 24).expect("slot"));
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos[0].name, "1");
     }
 
@@ -2945,8 +4380,63 @@ mod tests {
         slot.terminal.vt_write(b"\x1b]2;   \x07");
         panes.insert(id, slot);
 
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert_eq!(infos[0].name, "1");
+    }
+
+    #[test]
+    fn window_infos_prefers_agent_record_over_osc_title() {
+        // ADR-0040: a declared `phux.agent/v1` record labels the window from
+        // structured data — the OSC title (set here to an unrelated string)
+        // must NOT leak through, and no substring parsing is involved.
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
+        panes.insert(id.clone(), slot);
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        records.insert(
+            id,
+            AgentRecord {
+                name: "reviewer".to_owned(),
+                state: crate::agent_meta::AgentMetaState::Blocked,
+                ..AgentRecord::default()
+            },
+        );
+
+        let infos = window_infos(&workspace, &panes, None, &records, &mut VcsIndex::default());
+        assert_eq!(
+            infos[0].name, "!reviewer (blocked)",
+            "structured record must beat the OSC title"
+        );
+    }
+
+    #[test]
+    fn window_infos_falls_back_to_title_when_record_cleared() {
+        // ADR-0040 compatibility path: no record ⇒ the OSC title labels the
+        // tab exactly as before.
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut slot = PaneSlot::new_with_size(80, 24).expect("slot");
+        slot.terminal.vt_write(b"\x1b]2;claude task\x07");
+        panes.insert(id, slot);
+
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
+        assert_eq!(infos[0].name, "claude task");
     }
 
     #[test]
@@ -2959,12 +4449,24 @@ mod tests {
         workspace.select(0); // active window is index 0
         let panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
 
-        let infos = window_infos(&workspace, &panes, Some(&active));
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            Some(&active),
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(infos[0].zoomed, "active window reflects the zoom state");
         assert!(!infos[1].zoomed, "a non-active window is never zoomed");
 
         // No zoom ⇒ no window is marked.
-        let infos = window_infos(&workspace, &panes, None);
+        let infos = window_infos(
+            &workspace,
+            &panes,
+            None,
+            &HashMap::new(),
+            &mut VcsIndex::default(),
+        );
         assert!(!infos[0].zoomed && !infos[1].zoomed);
     }
 
@@ -3023,11 +4525,44 @@ mod tests {
                 .expect("server send hello_ok");
         };
 
-        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        let (res, ()) = tokio::join!(handshake(&mut client, None), server_side);
         assert!(
             res.is_ok(),
             "handshake should succeed when HELLO_OK arrives"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handshake_advertises_probed_default_colors() {
+        let colors = TerminalDefaultColors {
+            foreground: TerminalColor { r: 1, g: 2, b: 3 },
+            background: TerminalColor { r: 4, g: 5, b: 6 },
+        };
+        let (client_stream, server_stream) = UnixStream::pair().expect("pair");
+        let mut client = Connection::from_stream(client_stream);
+        let mut server = Connection::from_stream(server_stream);
+
+        let server_side = async move {
+            let FrameKind::Hello { client_caps, .. } =
+                server.recv().await.expect("server recv hello")
+            else {
+                panic!("first client frame must be HELLO");
+            };
+            assert_eq!(client_caps.default_colors, Some(colors));
+            server
+                .send(&FrameKind::HelloOk {
+                    protocol_major: PROTOCOL_VERSION.major,
+                    protocol_minor: PROTOCOL_VERSION.minor,
+                    protocol_patch: PROTOCOL_VERSION.patch,
+                    server_caps: ServerCapabilities::new(),
+                    server_id: Vec::new(),
+                })
+                .await
+                .expect("server send hello_ok");
+        };
+
+        let (res, ()) = tokio::join!(handshake(&mut client, Some(colors)), server_side);
+        assert!(res.is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3048,7 +4583,7 @@ mod tests {
                 .expect("server send detached");
         };
 
-        let (res, ()) = tokio::join!(handshake(&mut client), server_side);
+        let (res, ()) = tokio::join!(handshake(&mut client, None), server_side);
         match res {
             Err(AttachError::Protocol(msg)) => {
                 assert!(msg.contains("HELLO_OK"));
@@ -3217,6 +4752,58 @@ mod tests {
             !reset.windows(8).any(|w| w == b"\x1b[?1006l"),
             "no capture ⇒ no SGR mouse-disable on reset: {reset:?}"
         );
+    }
+
+    /// phux-npb3: `sync_mouse_capture` reconciles the outer DECSET with the
+    /// desired state — leave pair when dropping, enter pair when restoring,
+    /// and nothing at all when the state already matches.
+    #[test]
+    fn sync_mouse_capture_emits_transitions_only() {
+        let _guard = TERMINAL_RESET_TEST_LOCK
+            .lock()
+            .expect("terminal reset test lock");
+        MOUSE_CAPTURE_ACTIVE.store(true, Ordering::SeqCst);
+
+        // Already on ⇒ no bytes.
+        let mut out = Vec::new();
+        sync_mouse_capture(&mut out, true).unwrap();
+        assert!(out.is_empty(), "no transition ⇒ no bytes: {out:?}");
+
+        // On → off emits the reverse-order leave pair.
+        sync_mouse_capture(&mut out, false).unwrap();
+        assert_eq!(out, b"\x1b[?1006l\x1b[?1002l");
+
+        // Off is now recorded ⇒ a second off is a no-op.
+        out.clear();
+        sync_mouse_capture(&mut out, false).unwrap();
+        assert!(out.is_empty(), "idempotent off ⇒ no bytes: {out:?}");
+
+        // Off → on emits the entry pair, and the reset path sees capture as
+        // active again (the shared MOUSE_CAPTURE_ACTIVE flag).
+        sync_mouse_capture(&mut out, true).unwrap();
+        assert_eq!(out, b"\x1b[?1002h\x1b[?1006h");
+        assert!(MOUSE_CAPTURE_ACTIVE.load(Ordering::SeqCst));
+
+        MOUSE_CAPTURE_ACTIVE.store(false, Ordering::SeqCst);
+    }
+
+    /// phux-npb3: capture follows focus — wanted iff the global gate is on
+    /// AND the focused pane has not opted out.
+    #[test]
+    fn desired_mouse_capture_follows_focused_pane_optout() {
+        let t1 = TerminalId::local(1);
+        let t2 = TerminalId::local(2);
+        let mut optout = std::collections::HashSet::new();
+        optout.insert(t2.clone());
+
+        // Global gate off wins unconditionally.
+        assert!(!desired_mouse_capture(false, Some(&t1), &optout));
+        assert!(!desired_mouse_capture(false, None, &optout));
+        // Gate on: an opted-in focused pane (or none yet) keeps capture.
+        assert!(desired_mouse_capture(true, Some(&t1), &optout));
+        assert!(desired_mouse_capture(true, None, &optout));
+        // Gate on but the focused pane opted out ⇒ capture drops.
+        assert!(!desired_mouse_capture(true, Some(&t2), &optout));
     }
 
     #[test]

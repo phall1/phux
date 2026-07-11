@@ -21,6 +21,8 @@ use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
 use super::paint::{SidebarReservation, content_rect};
+use super::plugin_actions::{PluginActionEntry, PluginRunResult};
+use super::plugin_panes::{HostedPlacement, PluginPaneEntry};
 use crate::layout::{Direction, SplitDir, Workspace};
 use crate::predict::{Overlay, PredictionState};
 use crate::render::Theme;
@@ -76,6 +78,16 @@ pub(super) struct DispatchCtx<'a> {
     /// from this list. Empty until the first snapshot lands (picker then
     /// bells).
     pub sessions: &'a [phux_protocol::wire::info::SessionInfo],
+    /// phux-foz.8: peer sessions' persisted L3 workspaces, fetched by the
+    /// driver right after ATTACH (one `GET_METADATA` per peer on the
+    /// per-session layout key). The `<leader> w` window picker reads this
+    /// to list a foreign session's windows as one-step jump rows
+    /// (`switch-session { name, window }`); a session with no entry (no
+    /// persisted layout, reply not landed yet, or created after attach)
+    /// falls back to the plain "switch to this session" row. Attach-time
+    /// snapshot — peers' later mutations are not tracked (the post-switch
+    /// select degrades to a logged no-op if the index went stale).
+    pub foreign_layouts: &'a HashMap<phux_protocol::ids::SessionId, Workspace>,
     /// phux-4li.20: id of the session this client is attached to. The
     /// picker marks this row and excludes it from selection (switching
     /// to the current session is a no-op). `None` before the first
@@ -115,17 +127,51 @@ pub(super) struct DispatchCtx<'a> {
     /// the per-frame `sidebar` reservation after dispatch so the toggle repaint
     /// reflects the new state. Owned by the driver like `zoomed`.
     pub sidebar_enabled: &'a mut bool,
-    /// Whether the status bar reserves its row this frame (`status_bar.is_some()`
-    /// in the driver). Mouse routing folds this into the same
-    /// `content_rect(viewport, has_bar, sidebar)` the paint path uses so a
-    /// click hit-tests against the rects actually on screen.
-    pub has_bar: bool,
+    /// The status bar's row reservation this frame (`None` when no bar;
+    /// the painter's `Position` otherwise — phux-foz.8). Mouse routing
+    /// folds this into the same `content_rect(viewport, bar, sidebar)` the
+    /// paint path uses so a click hit-tests against the rects actually on
+    /// screen, including the one-row downshift under a top-docked bar.
+    pub bar: Option<crate::render::chrome::status_bar::Position>,
     /// ADR-0035: the in-flight divider drag, or `None` when no divider is
     /// grabbed. A press on a divider cell records the grabbed split here;
     /// subsequent button-motion events re-tune that split's ratio from the
     /// pointer position; a release clears it. Owned by `main_loop` (it
     /// must survive across dispatch batches) and threaded in by reference.
     pub drag: &'a mut Option<DragGrab>,
+    /// phux-npb3 (ADR-0035 decision 3 follow-up): panes that opted out of
+    /// client mouse handling via `set-pane mouse off`. Client-local state,
+    /// owned by `main_loop` like `drag` and lent in by reference. Two
+    /// consumers: the dispatcher skips synthesizing `INPUT_MOUSE` (and the
+    /// local wheel-scroll) for an opted-out pane, and the driver drops the
+    /// outer-terminal mouse-tracking DECSET whenever the focused pane is in
+    /// this set — so the host terminal's raw mouse handling returns for that
+    /// pane without forcing the whole session to `mouse = false`.
+    pub mouse_optout: &'a mut std::collections::HashSet<TerminalId>,
+    /// phux-r82.5: enabled plugins' manifest `[[actions]]`, snapshotted at
+    /// driver start (same lifecycle as `keybindings`). The command palette
+    /// appends one namespaced row per entry under a "Plugin" header.
+    pub plugin_actions: &'a [PluginActionEntry],
+    /// phux-r82.7: enabled plugins' hostable manifest `[[panes]]`
+    /// (placement `split`/`tab`/`zoomed`; overlay is deferred), snapshotted
+    /// at driver start alongside `plugin_actions`. The command palette
+    /// appends one namespaced row per entry; a dispatched `plugin-pane`
+    /// looks its argv + placement up here.
+    pub plugin_panes: &'a [PluginPaneEntry],
+    /// phux-r82.5: sender half of the driver's plugin-events channel. A
+    /// dispatched `plugin-action` spawns the child-process run off the
+    /// input loop and reports completion here; the driver's `select!`
+    /// surfaces failures as a toast. `None` in unit tests (no runtime).
+    pub plugin_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<PluginRunResult>>,
+    /// phux-foz.5: out-channel for a dispatched `reload-config`. Set by
+    /// [`apply_action_effects`]; the driver reads it after the dispatch
+    /// batch and re-runs the layered config loader, swapping its
+    /// config-derived state in place (or keeping the old state and
+    /// surfacing the error when the re-read fails). Same driver-owned
+    /// out-channel shape as `switch_request` — the reload cannot happen
+    /// inside dispatch because the resolver/theme/keybindings borrows in
+    /// this ctx ARE the state being replaced.
+    pub reload_request: &'a mut bool,
 }
 
 /// An active divider drag (ADR-0035).
@@ -184,6 +230,42 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
     let mut predicted_any = false;
     let mut layout_changed = false;
     for ev in events {
+        // phux-foz.2: the which-key popup is transparent to input. It is
+        // dismissed by — and never consumes — the next event: a key press
+        // pops it and then executes exactly as if the popup were absent
+        // (the resolver still holds the pending prefix, so the chord
+        // completes normally), except Esc, which pops it AND cancels the
+        // pending prefix without reaching the pane. Mouse input pops it
+        // and cancels the prefix too (a click is not a chord
+        // continuation), then routes normally. Non-press key events and
+        // paste/focus bypass the popup entirely (it stays up; they flow
+        // to the pane) — the popup must never eat or delay real input.
+        if ctx.overlays.top_is_passthrough() {
+            use phux_protocol::input::key::{KeyAction, PhysicalKey};
+            match &ev {
+                InputEvent::Key(key_event) if matches!(key_event.action, KeyAction::Press) => {
+                    ctx.overlays.dismiss();
+                    layout_changed = true;
+                    if key_event.key == PhysicalKey::Escape {
+                        if let Some(resolver) = ctx.resolver.as_deref_mut() {
+                            resolver.reset();
+                        }
+                        tracing::debug!("which-key: Esc cancelled the pending prefix");
+                        continue;
+                    }
+                    // Fall through: the key executes as if no popup existed.
+                }
+                InputEvent::Mouse(_) => {
+                    ctx.overlays.dismiss();
+                    layout_changed = true;
+                    if let Some(resolver) = ctx.resolver.as_deref_mut() {
+                        resolver.reset();
+                    }
+                    // Fall through to normal mouse routing.
+                }
+                _ => {}
+            }
+        }
         // phux-5ke.4: while any overlay is active the stack captures all
         // input. Key events flow to `OverlayState::handle_key`, which
         // routes them to the *top* overlay (which may dismiss, popping
@@ -200,7 +282,13 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // modal is open is reachable by dismissing first (Esc), then
         // chording. The resolver is reset on entry so a partial chord begun
         // before the overlay opened cannot leak into post-dismiss input.
-        if ctx.overlays.is_active() {
+        //
+        // phux-foz.2: a passthrough popup (which-key) is excluded — the
+        // block above already dismissed it for presses/mouse, and events
+        // it deliberately ignores (key release/repeat, paste, focus) must
+        // flow to the pane, not be captured (and must NOT reset the
+        // resolver, which is holding the pending prefix the popup shows).
+        if ctx.overlays.is_active() && !ctx.overlays.top_is_passthrough() {
             if let InputEvent::Key(ref key_event) = ev {
                 if let Some(resolver) = ctx.resolver.as_deref_mut() {
                     resolver.reset();
@@ -385,6 +473,63 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 continue;
             }
+            // phux-npb3 hardening (PR #142 review, recorded in ADR-0035):
+            // while a divider drag is active, ONLY a release ends it and
+            // ONLY motion re-tunes it — both handled above. Anything else
+            // (notably a second Press from a chorded button, a wheel tick,
+            // or a re-encoded press glitch) is consumed here so it cannot
+            // fall through to normal routing mid-drag, where it would
+            // forward to a pane, move focus, or grab a second divider while
+            // the first grab is still live.
+            if ctx.drag.is_some() {
+                tracing::trace!(
+                    action = ?mouse.action,
+                    button = ?mouse.button,
+                    "dropping mouse event during divider drag"
+                );
+                continue;
+            }
+
+            // phux-fce4: the sidebar strip claims every pointer event over
+            // its own cells BEFORE pane routing — its rows are hit targets,
+            // not pane content. A left press resolves against the strip's
+            // row model (`sidebar::hit_test`) and dispatches the mapped
+            // action through the same `run_action` path a keybinding or
+            // palette row uses: a window block commits `select-window`, the
+            // `+ new` affordance `new-window`, and `= menu` the command
+            // palette (the session/plugin menu). Everything else over the
+            // strip (motion, non-left presses, blank rows, the separator
+            // column) is consumed and dropped so it can never leak into a
+            // pane whose rect does not contain it anyway.
+            if let Some(res) = ctx.sidebar {
+                let strip = super::paint::sidebar_rect(ctx.viewport, ctx.bar, res);
+                let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
+                if strip_contains(strip, cell_x, cell_y) {
+                    if matches!(mouse.action, MouseAction::Press)
+                        && mouse.button == MouseButton::Left
+                        && let Some(resolved) =
+                            sidebar_click_action(strip, ctx.workspace.windows.len(), cell_x, cell_y)
+                    {
+                        tracing::debug!(action = %resolved.action, "sidebar: click dispatched");
+                        let effects = run_action(&resolved, ctx, focused_pane.as_ref());
+                        if apply_action_effects(
+                            effects,
+                            out,
+                            conn,
+                            ctx,
+                            focused_pane,
+                            detach_pending,
+                            predict,
+                            panes,
+                        )
+                        .await?
+                        {
+                            layout_changed = true;
+                        }
+                    }
+                    continue;
+                }
+            }
             // Hit-test against the SAME inset content rect the renderer tiles
             // into — status-bar row and sidebar columns folded off the outer
             // viewport. Routing against the full viewport instead disagrees with
@@ -392,7 +537,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // status bar) and, with a sidebar docked, one strip-width off in x,
             // so it focuses/forwards to the wrong pane. Clicks in the reserved
             // chrome miss every pane rect and become a Miss (dropped).
-            let content = content_rect(ctx.viewport, ctx.has_bar, ctx.sidebar);
+            let content = content_rect(ctx.viewport, ctx.bar, ctx.sidebar);
             // phux-jow6: hit-test against the RENDER layout, not the real
             // tiled tree. When a pane is zoomed (phux-x2hm) the render layout
             // is a single full-content leaf, so any click lands on the
@@ -429,6 +574,20 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         // dividers + all leaves so the focused pane's
                         // surrounding edges render heavy.
                         layout_changed = true;
+                    }
+                    // phux-npb3: a pane opted out via `set-pane mouse off`
+                    // receives no client-synthesized mouse at all — no
+                    // INPUT_MOUSE forward, no local wheel viewport scroll.
+                    // Click-to-focus above still applies: it is chrome-level
+                    // (the pane never sees it) and it is also the path that
+                    // makes the driver drop outer capture once the opted-out
+                    // pane is focused, restoring the host's raw handling.
+                    if ctx.mouse_optout.contains(&target) {
+                        tracing::trace!(
+                            terminal = ?target,
+                            "dropping mouse event: pane opted out (set-pane mouse off)"
+                        );
+                        continue;
                     }
                     let mut routed = *mouse;
                     routed.x = pane_x;
@@ -572,6 +731,16 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             tracing::debug!("dropping input received before ATTACHED");
             continue;
         };
+        // phux-foz.1: forwarding key/paste input to a pane answers (or at
+        // least engages) its pending agent question, so clear its asked
+        // attention flag. Focus/mouse events don't clear — merely looking
+        // at a pane is not answering it. A real transition schedules the
+        // chrome repaint via `layout_changed`.
+        if matches!(ev, InputEvent::Key(_) | InputEvent::Paste(_))
+            && super::driver::clear_attention_on_input(panes, pane)
+        {
+            layout_changed = true;
+        }
         let frame = ev.into_frame(pane.clone());
         conn.send(&frame).await?;
     }
@@ -665,7 +834,7 @@ fn focused_pane_rect(
         ctx.zoomed.as_ref(),
         focused_pane,
         ctx.viewport,
-        ctx.has_bar,
+        ctx.bar,
         ctx.sidebar,
     )
 }
@@ -675,10 +844,10 @@ fn focused_pane_rect_for(
     zoomed: Option<&TerminalId>,
     focused_pane: Option<&TerminalId>,
     viewport: (u16, u16),
-    has_bar: bool,
+    bar: Option<crate::render::chrome::status_bar::Position>,
     sidebar: Option<SidebarReservation>,
 ) -> crate::layout::Rect {
-    let content = content_rect(viewport, has_bar, sidebar);
+    let content = content_rect(viewport, bar, sidebar);
     let Some(fid) = focused_pane else {
         return content;
     };
@@ -708,7 +877,7 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
     // Snapshot the geometry that feeds the resize before borrowing the
     // workspace mutably for the active window.
     let viewport = ctx.viewport;
-    let has_bar = ctx.has_bar;
+    let bar = ctx.bar;
     let sidebar = ctx.sidebar;
     let Some(ls) = ctx.workspace.active_window_mut() else {
         return false;
@@ -720,7 +889,7 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
         grab.axis,
         pointer,
         viewport,
-        has_bar,
+        bar,
         sidebar,
     ) {
         Ok(Some(new_state)) => {
@@ -730,6 +899,54 @@ fn drag_resize(ctx: &mut DispatchCtx<'_>, mouse: &MouseEvent, grab: &DragGrab) -
         // Min-cell floor or stale grab — keep the divider where it is.
         Ok(None) | Err(_) => false,
     }
+}
+
+/// phux-fce4: whether an outer-viewport cell lies within the sidebar
+/// strip's rect (separator column included — the strip consumes it even
+/// though it is not a hit target).
+const fn strip_contains(rect: crate::layout::Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.w)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.h)
+}
+
+/// phux-fce4: map a left press on the sidebar strip to the action it
+/// commits, or `None` when it lands on a blank row or the separator.
+///
+/// The mapping goes through [`ResolvedAction`] so a sidebar click runs
+/// exactly what a keybinding, palette row, or overlay commit would — one
+/// dispatch path, no bespoke click semantics:
+///
+/// * a window block (name or branch row) commits `select-window { index }`;
+/// * `+ new` commits `new-window` (the strip lists windows, so its create
+///   affordance creates one);
+/// * `= menu` commits `command-palette` — the menu covering window,
+///   session (`new-session` included), and plugin actions via the action
+///   registry.
+fn sidebar_click_action(
+    strip: crate::layout::Rect,
+    window_count: usize,
+    x: u16,
+    y: u16,
+) -> Option<phux_config::keybind::ResolvedAction> {
+    use crate::render::chrome::sidebar::{SidebarHit, hit_test};
+    let (action, args) = match hit_test(strip, window_count, x, y)? {
+        SidebarHit::Window(i) => {
+            let mut args = std::collections::BTreeMap::new();
+            args.insert(
+                "index".to_owned(),
+                toml::Value::Integer(i64::try_from(i).ok()?),
+            );
+            ("select-window", args)
+        }
+        SidebarHit::NewWindow => ("new-window", std::collections::BTreeMap::new()),
+        SidebarHit::Menu => ("command-palette", std::collections::BTreeMap::new()),
+    };
+    Some(phux_config::keybind::ResolvedAction {
+        action: action.to_owned(),
+        args,
+    })
 }
 
 /// Quantise an f64 pointer position (1-px-per-cell per SPEC §9.2.1) to an
@@ -768,6 +985,10 @@ fn quantize_cell(p: f64) -> u16 {
 #[allow(
     clippy::cognitive_complexity,
     reason = "flat per-effect dispatch — one guarded block per ActionEffects field (zoom, focus, metadata, bell, detach, spawn, kill); splitting would thread the same transport + render context through helpers"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "same flat per-effect dispatch; phux-r82.5 added the plugin-run spawn block"
 )]
 async fn apply_action_effects<W: super::RenderSink>(
     effects: ActionEffects,
@@ -855,6 +1076,27 @@ async fn apply_action_effects<W: super::RenderSink>(
     for frame in effects.command_frames {
         conn.send(&frame).await?;
     }
+    // phux-r82.5: a plugin action runs as a spawned child-process task —
+    // fire-and-forget from the input loop's perspective. The driver's
+    // `select!` picks up the completion report and toasts failures. All
+    // client-local (config + exec); nothing goes on the wire (ADR-0017).
+    if let Some((plugin_id, action_id)) = effects.run_plugin {
+        if let Some(tx) = ctx.plugin_tx {
+            super::plugin_actions::spawn_plugin_action(tx.clone(), plugin_id, action_id);
+        } else {
+            tracing::warn!(
+                plugin = %plugin_id,
+                action = %action_id,
+                "plugin-action dispatched with no plugin runtime channel; dropping",
+            );
+        }
+    }
+    // phux-foz.5: hand a `reload-config` up to the driver, which owns the
+    // config-derived state (resolver, theme, keybindings snapshot, status
+    // bar) this batch is still borrowing.
+    if effects.reload_config {
+        *ctx.reload_request = true;
+    }
     // phux-eb0 / new-session: an in-process re-attach request. Hand the
     // target up to the driver via `ctx.switch_request`; `main_loop` reads
     // it after this dispatch batch and returns a `SwitchTo` exit so the
@@ -867,13 +1109,17 @@ async fn apply_action_effects<W: super::RenderSink>(
     // existing session just attaches to it.
     if let Some(target) = effects.reattach {
         match target {
-            ReattachTarget::Existing(name) if &name == ctx.session_name => {
+            ReattachTarget::Existing { name, .. } if &name == ctx.session_name => {
+                // A `window` arg naming the CURRENT session is not a
+                // switch; the picker never emits it (current-session rows
+                // commit `select-window` directly), so bell rather than
+                // grow a second local window-select path here.
                 tracing::debug!(target_session = %name, "switch-session to current session; no-op");
                 let _ = actions::write_bell(out);
             }
-            ReattachTarget::Existing(name) => {
-                tracing::info!(target_session = %name, "switch-session requested");
-                *ctx.switch_request = Some(ReattachTarget::Existing(name));
+            ReattachTarget::Existing { name, window } => {
+                tracing::info!(target_session = %name, target_window = ?window, "switch-session requested");
+                *ctx.switch_request = Some(ReattachTarget::Existing { name, window });
             }
             ReattachTarget::Create(name) => {
                 tracing::info!(session = %name, "new-session requested");
@@ -1038,6 +1284,19 @@ struct ActionEffects {
     /// snapshot correct the optimistic name rather than blocking the input
     /// loop on the reply.
     rename_session: Option<String>,
+    /// phux-r82.5: a `plugin-action` dispatch carrying
+    /// `(plugin_id, action_id)`. The async caller
+    /// ([`apply_action_effects`]) spawns the child-process run via
+    /// [`super::plugin_actions::spawn_plugin_action`] so the input loop
+    /// never blocks on the plugin; completion lands on the driver's
+    /// plugin-events channel (failure output toasts there).
+    run_plugin: Option<(String, String)>,
+    /// phux-foz.5: `true` ⇒ the user asked for a live config reload
+    /// (`reload-config`, via palette or a bound chord). Carried up to the
+    /// driver via `DispatchCtx::reload_request`; the driver re-runs the
+    /// layered loader after this batch and swaps its config-derived
+    /// state atomically (old config kept on any failure).
+    reload_config: bool,
 }
 
 /// An in-process re-attach request raised by a dispatched action.
@@ -1049,7 +1308,18 @@ struct ActionEffects {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReattachTarget {
     /// Switch to an existing session by name (`switch-session`).
-    Existing(String),
+    Existing {
+        /// Target session name.
+        name: String,
+        /// phux-foz.8: window index to select once the target session's
+        /// persisted layout loads — the one-step cross-session window
+        /// pick. `None` keeps the session's own remembered focus. The
+        /// index addresses the target's L3 workspace (the same order its
+        /// own window picker shows); if the layout changed under us and
+        /// the index is out of range, the switch still lands and the
+        /// select is a logged no-op.
+        window: Option<usize>,
+    },
     /// Create — or attach to, if it already exists — a session by name
     /// (`new-session`).
     Create(String),
@@ -1091,6 +1361,10 @@ pub const ACTION_NAMES: &[&str] = &[
     "take-input",
     "give-input",
     "signal-terminal",
+    "set-pane",
+    "plugin-action",
+    "plugin-pane",
+    "reload-config",
 ];
 
 /// Dispatch a resolved action against the driver's context.
@@ -1158,6 +1432,7 @@ fn run_action(
                 PendingSplit {
                     focused_at_request: focused_id,
                     dir,
+                    zoom_on_spawn: false,
                 },
                 frame,
             ));
@@ -1246,6 +1521,46 @@ fn run_action(
                     signal,
                 },
             });
+        }
+        "set-pane" => {
+            // phux-npb3 (ADR-0035 decision 3 follow-up): flip the focused
+            // pane's per-pane mouse opt-out. `mouse = "off"` opts the pane
+            // out of client mouse handling (no synthesized INPUT_MOUSE; the
+            // driver drops outer capture while the pane is focused, so the
+            // host terminal's raw mouse handling returns for it alone);
+            // `"on"` opts back in; `"toggle"` flips. Entirely client-local —
+            // nothing crosses the wire.
+            let Some(mode) = mouse_arg(resolved) else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "set-pane missing/bad `mouse` arg (expected on|off|toggle or a bool)",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(focused_id) = focused.cloned() else {
+                tracing::warn!("set-pane: no focused pane; dropping action");
+                effects.bell = true;
+                return effects;
+            };
+            let opt_out = match mode {
+                PaneMouseArg::Off => true,
+                PaneMouseArg::On => false,
+                PaneMouseArg::Toggle => !ctx.mouse_optout.contains(&focused_id),
+            };
+            if opt_out {
+                ctx.mouse_optout.insert(focused_id.clone());
+            } else {
+                ctx.mouse_optout.remove(&focused_id);
+            }
+            tracing::info!(
+                terminal = ?focused_id,
+                mouse = !opt_out,
+                "set-pane: per-pane mouse opt-out updated"
+            );
+            // No repaint needed: the opt-out has no chrome today, and the
+            // driver re-syncs the outer capture DECSET from this set at the
+            // top of every loop iteration.
         }
         "new-window" => {
             // phux-4li.15: open a new window. Spawn a fresh Terminal
@@ -1392,6 +1707,15 @@ fn run_action(
                 effects.bell = true;
             }
         }
+        "reload-config" => {
+            // phux-foz.5: explicit live config reload. The actual re-read
+            // + swap happens in the driver after this batch (see
+            // `DispatchCtx::reload_request`): the resolver that just
+            // resolved this chord, the theme, and the keybindings
+            // snapshot are all borrowed by `ctx` right now — they are
+            // exactly the state the reload replaces.
+            effects.reload_config = true;
+        }
         "show-help" => {
             // phux-5ke.4: push the help overlay. The chord is consumed —
             // the bound key never reaches the pane (and it wouldn't make
@@ -1425,7 +1749,11 @@ fn run_action(
             // commits that action's `ResolvedAction`, which flows back
             // through this same `run_action` — keybinds and the palette
             // share one dispatch path (the architectural invariant).
-            let items = super::action_registry::palette_items(ctx.keybindings);
+            let items = super::action_registry::palette_items(
+                ctx.keybindings,
+                ctx.plugin_actions,
+                ctx.plugin_panes,
+            );
             ctx.overlays.push(Box::new(SelectList::new(
                 "command palette",
                 items,
@@ -1437,11 +1765,17 @@ fn run_action(
             // picker. Sessions are section headers; under the current
             // session each window (`index:name`, pane count) commits
             // `select-window { index }` (the same per-client switch the
-            // numeric prefix bindings use). Other sessions render a single
-            // "switch to session" row committing `switch-session { name }`
-            // — see the builder's doc-comment for the cross-session-window
-            // gap. With no rows at all it bells.
-            let items = window_picker_items(ctx.workspace, ctx.sessions, ctx.focused_session);
+            // numeric prefix bindings use). Other sessions list their own
+            // windows as one-step `switch-session { name, window }` rows
+            // when their persisted layout is cached (phux-foz.8), falling
+            // back to a single "switch to session" row otherwise. With no
+            // rows at all it bells.
+            let items = window_picker_items(
+                ctx.workspace,
+                ctx.sessions,
+                ctx.foreign_layouts,
+                ctx.focused_session,
+            );
             if items.iter().all(SelectItem::is_header) {
                 effects.bell = true;
                 return effects;
@@ -1472,8 +1806,19 @@ fn run_action(
             // `apply_action_effects`, which routes it to the driver's
             // outer re-attach loop (in-process re-attach on the same
             // connection). A bad/absent `name` arg bells.
+            //
+            // phux-foz.8: an optional `window = N` arg makes it the
+            // one-step cross-session window pick — after the re-attach
+            // loads the target's persisted layout, the driver selects
+            // window `N`. The grouped window picker's foreign-session
+            // rows commit this form.
             if let Some(name) = name_arg(resolved) {
-                effects.reattach = Some(ReattachTarget::Existing(name));
+                let window = resolved
+                    .args
+                    .get("window")
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|v| usize::try_from(v).ok());
+                effects.reattach = Some(ReattachTarget::Existing { name, window });
             } else {
                 tracing::warn!(
                     args = ?resolved.args,
@@ -1497,6 +1842,99 @@ fn run_action(
         }
         "detach" => {
             effects.detach = true;
+        }
+        "plugin-action" => {
+            // phux-r82.5: run a plugin manifest action through the same
+            // child-process runtime `phux config run PLUGIN ACTION` uses.
+            // Sync dispatch only records the intent; the async caller
+            // (`apply_action_effects`) spawns the run off the input loop so
+            // a slow plugin never freezes the TUI. Completion arrives on
+            // the driver's plugin-events channel; failures toast.
+            let (Some(plugin), Some(action)) =
+                (str_arg(resolved, "plugin"), str_arg(resolved, "action"))
+            else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "plugin-action missing/bad `plugin`/`action` args",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            effects.run_plugin = Some((plugin, action));
+        }
+        "plugin-pane" => {
+            // phux-r82.7: open a plugin manifest `[[panes]]` entry as a
+            // real server-side Terminal running the pane's argv. Routes
+            // through the SAME SPAWN_TERMINAL machinery `split-pane` /
+            // `new-window` use (ADR-0017: no plugin-privileged wire
+            // surface) — the manifest supplies the command, the plugin
+            // root the cwd, and PHUX_PLUGIN_* the additive env. Placement
+            // picks the parked intent: `split`/`zoomed` park a
+            // PendingSplit (zoomed also zooms the new pane when the
+            // reply lands), `tab` parks a PendingWindow named after the
+            // pane title. `overlay` entries never reach the snapshot
+            // (deferred), so an unknown (plugin, pane) pair here also
+            // covers a disabled plugin or an overlay declaration bound
+            // directly in user config.
+            let (Some(plugin), Some(pane)) =
+                (str_arg(resolved, "plugin"), str_arg(resolved, "pane"))
+            else {
+                tracing::warn!(
+                    args = ?resolved.args,
+                    "plugin-pane missing/bad `plugin`/`pane` args",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let Some(entry) = ctx
+                .plugin_panes
+                .iter()
+                .find(|e| e.plugin_id == plugin && e.pane_id == pane)
+            else {
+                tracing::warn!(
+                    plugin = %plugin,
+                    pane = %pane,
+                    "plugin-pane names no hostable pane (unknown, disabled, or overlay-deferred); dropping",
+                );
+                effects.bell = true;
+                return effects;
+            };
+            let request_id = *ctx.next_request_id;
+            *ctx.next_request_id = ctx.next_request_id.wrapping_add(1);
+            let frame = entry.spawn_frame(request_id);
+            match entry.placement {
+                HostedPlacement::Split | HostedPlacement::Zoomed => {
+                    let Some(focused_id) = focused.cloned() else {
+                        tracing::warn!(
+                            plugin = %plugin,
+                            pane = %pane,
+                            "plugin-pane split/zoomed placement needs a focused pane; dropping",
+                        );
+                        effects.bell = true;
+                        return effects;
+                    };
+                    effects.spawn_terminal = Some((
+                        request_id,
+                        PendingSplit {
+                            focused_at_request: focused_id,
+                            // Side-by-side, matching the palette's
+                            // `split-pane` default (vertical divider).
+                            dir: SplitDir::Horizontal,
+                            zoom_on_spawn: entry.placement == HostedPlacement::Zoomed,
+                        },
+                        frame,
+                    ));
+                }
+                HostedPlacement::Tab => {
+                    effects.spawn_window = Some((
+                        request_id,
+                        PendingWindow {
+                            name: entry.title.clone(),
+                        },
+                        frame,
+                    ));
+                }
+            }
         }
         "next-pane" => {
             if let Some(ls) = ctx.workspace.active_window_mut()
@@ -1594,6 +2032,45 @@ fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
     resolved.args.get("name")?.as_str().map(ToOwned::to_owned)
 }
 
+/// Pull an arbitrary string arg out of a
+/// [`phux_config::keybind::ResolvedAction`] (phux-r82.5: `plugin` /
+/// `action` on `plugin-action`).
+fn str_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option<String> {
+    resolved.args.get(key)?.as_str().map(ToOwned::to_owned)
+}
+
+/// The `mouse` argument of `set-pane` (phux-npb3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneMouseArg {
+    /// Opt the pane back in to client mouse handling.
+    On,
+    /// Opt the pane out (`set-pane mouse off`, ADR-0035's escape hatch).
+    Off,
+    /// Flip the pane's current state (the palette default).
+    Toggle,
+}
+
+/// Pull the `mouse = ...` arg out of a `set-pane` action. Accepts the
+/// documented strings (`"on"` / `"off"` / `"toggle"`) and, for TOML
+/// ergonomics in keybinding tables, plain booleans (`mouse = false` ≡
+/// `"off"`). Anything else yields `None` (the caller bells).
+fn mouse_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<PaneMouseArg> {
+    match resolved.args.get("mouse")? {
+        toml::Value::String(s) => match s.as_str() {
+            "on" => Some(PaneMouseArg::On),
+            "off" => Some(PaneMouseArg::Off),
+            "toggle" => Some(PaneMouseArg::Toggle),
+            _ => None,
+        },
+        toml::Value::Boolean(b) => Some(if *b {
+            PaneMouseArg::On
+        } else {
+            PaneMouseArg::Off
+        }),
+        _ => None,
+    }
+}
+
 /// Build the `<leader> w` grouped window picker's rows (phux-4li.19 / nav).
 ///
 /// The picker is hierarchical: one [`SelectItem::header`] per session, with
@@ -1605,17 +2082,15 @@ fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
 ///   the pane count as the dimmed secondary; it commits
 ///   `select-window { index }` — the same per-client window switch the
 ///   numeric prefix bindings use, routed through the single dispatch path.
-/// - Under **other** sessions, the client cannot enumerate individual
-///   windows: the cached session graph (`ctx.sessions`,
-///   [`phux_protocol::wire::info::SessionInfo`]) carries only a
-///   `window_count`, not per-window names, and the live `WindowInfo` list
-///   from the ATTACHED snapshot is not retained client-side. Each such
-///   session therefore renders a single "switch to session" row committing
-///   `switch-session { name }`, which re-attaches this client to that
-///   session (its own window picker then lists its windows). Selecting a
-///   window directly inside a foreign session in one step would need both
-///   the cached foreign `WindowInfo` list and a combined
-///   switch-session-and-select-window flow; see the PR's risk notes.
+/// - Under **other** sessions with a cached persisted layout
+///   (`foreign_layouts`, fetched by the driver at attach — phux-foz.8),
+///   each window renders the same `index:name` row committing
+///   `switch-session { name, window = index }`: one step re-attaches to
+///   that session AND selects the window once its layout loads.
+/// - A foreign session with **no** cached layout (nothing persisted yet,
+///   the GET reply hasn't landed, or the session appeared after attach)
+///   falls back to a single "switch to this session" row committing
+///   `switch-session { name }` — its own picker then lists its windows.
 ///
 /// Headers are non-selectable; a session with no rows beneath it (the
 /// current session with zero windows) still contributes its header, and
@@ -1623,6 +2098,7 @@ fn name_arg(resolved: &phux_config::keybind::ResolvedAction) -> Option<String> {
 fn window_picker_items(
     workspace: &Workspace,
     sessions: &[phux_protocol::wire::info::SessionInfo],
+    foreign_layouts: &HashMap<phux_protocol::ids::SessionId, Workspace>,
     focused: Option<phux_protocol::ids::SessionId>,
 ) -> Vec<SelectItem> {
     // Order sessions: current first, then the rest alphabetically by name
@@ -1646,8 +2122,17 @@ fn window_picker_items(
 
         if is_current {
             items.extend(current_session_window_rows(workspace));
+        } else if let Some(foreign) = foreign_layouts
+            .get(&session.id)
+            .filter(|ws| !ws.windows.is_empty())
+        {
+            // phux-foz.8: the one-step rows. Same `index:name` + pane-count
+            // shape as the current session's rows, but committing
+            // `switch-session { name, window }` so a single Enter lands in
+            // that window of that session.
+            items.extend(foreign_session_window_rows(&session.name, foreign));
         } else {
-            // No per-window detail for a foreign session; offer a switch.
+            // No cached layout for this foreign session; offer a switch.
             let windows = if session.window_count == 1 {
                 "1 window".to_owned()
             } else {
@@ -1706,6 +2191,52 @@ fn current_session_window_rows(workspace: &Workspace) -> Vec<SelectItem> {
                 label,
                 phux_config::keybind::ResolvedAction {
                     action: "select-window".to_owned(),
+                    args,
+                },
+            )
+            .secondary(secondary)
+            .indented()
+        })
+        .collect()
+}
+
+/// phux-foz.8: the indented one-step jump rows for a **foreign** session,
+/// drawn from its cached persisted [`Workspace`] (`DispatchCtx::
+/// foreign_layouts`). Same `index:name` + pane-count shape as
+/// [`current_session_window_rows`], but each row commits
+/// `switch-session { name, window = index }` — the combined
+/// re-attach-and-select the driver resolves after the target's layout
+/// loads.
+fn foreign_session_window_rows(session_name: &str, workspace: &Workspace) -> Vec<SelectItem> {
+    workspace
+        .windows
+        .iter()
+        .enumerate()
+        .map(|(index, window)| {
+            let panes = window
+                .state
+                .tree
+                .as_ref()
+                .map_or(0, |tree| crate::layout::leaves(tree).len());
+            let label = format!("{index}:{}", window.name);
+            let secondary = if panes == 1 {
+                "1 pane".to_owned()
+            } else {
+                format!("{panes} panes")
+            };
+            let mut args = std::collections::BTreeMap::new();
+            args.insert(
+                "name".to_owned(),
+                toml::Value::String(session_name.to_owned()),
+            );
+            // Window counts never approach i64::MAX; the lossless path is
+            // the only one that can fire in practice.
+            let idx_i64 = i64::try_from(index).unwrap_or(i64::MAX);
+            args.insert("window".to_owned(), toml::Value::Integer(idx_i64));
+            SelectItem::new(
+                label,
+                phux_config::keybind::ResolvedAction {
+                    action: "switch-session".to_owned(),
                     args,
                 },
             )
@@ -1813,7 +2344,7 @@ pub(super) fn encode_layout_or_log(workspace: &Workspace) -> Option<Vec<u8>> {
 /// The `direction` string names the DIVIDER orientation (the tmux mental
 /// model the default config documents): `vertical` = a vertical divider,
 /// i.e. side-by-side panes, which geometrically is a `SplitDir::Horizontal`
-/// (split along the width — see `layout::fill_rects`). `horizontal` = a
+/// (split along the width — see `multi_pane::pane_rects`). `horizontal` = a
 /// horizontal divider, i.e. stacked panes = `SplitDir::Vertical`. The
 /// names are deliberately crossed here: the user-facing word describes the
 /// divider; the internal enum describes the split axis.
@@ -2030,8 +2561,14 @@ mod tests {
             active: 0,
         };
 
-        let split_rect =
-            focused_pane_rect_for(&workspace, None, Some(&tid(2)), (80, 24), true, None);
+        let split_rect = focused_pane_rect_for(
+            &workspace,
+            None,
+            Some(&tid(2)),
+            (80, 24),
+            Some(crate::render::chrome::status_bar::Position::Bottom),
+            None,
+        );
         assert_eq!(split_rect.y, 0);
         assert_eq!(split_rect.h, 23, "status bar row is not copy-mode content");
         assert_eq!(split_rect.x + split_rect.w, 80);
@@ -2055,7 +2592,7 @@ mod tests {
             Some(&zoomed),
             Some(&tid(2)),
             (80, 24),
-            true,
+            Some(crate::render::chrome::status_bar::Position::Bottom),
             None,
         );
         assert_eq!(
@@ -2092,6 +2629,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace,
@@ -2103,17 +2643,36 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
         run_action(action, &mut ctx, focused.as_ref())
+    }
+
+    #[test]
+    fn reload_config_action_raises_the_reload_effect() {
+        // phux-foz.5: the arm only raises the effect — the driver owns
+        // the actual re-read + swap (the ctx borrows the state to
+        // replace). No layout mutation, no bell, no frames.
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("reload-config"), &mut workspace);
+        assert!(effects.reload_config, "reload-config must raise the effect");
+        assert!(!effects.layout_mutated);
+        assert!(!effects.bell);
+        assert!(effects.kill_frames.is_empty());
     }
 
     #[test]
@@ -2258,6 +2817,100 @@ mod tests {
         assert!(!effects.layout_mutated);
     }
 
+    /// A two-pane Horizontal split with focus on the left leaf, root
+    /// ratio 0.5 — the fixture the `resize-pane` dispatch tests mutate.
+    fn two_pane_workspace() -> Workspace {
+        use crate::layout::{LayoutState, WindowState, split_at};
+        let tree = split_at(
+            &crate::layout::LayoutNode::Leaf(tid(1)),
+            &tid(1),
+            &tid(2),
+            SplitDir::Horizontal,
+            0.5,
+        )
+        .unwrap();
+        Workspace {
+            windows: vec![WindowState {
+                name: "1".to_owned(),
+                state: LayoutState {
+                    tree: Some(tree),
+                    focus: Some(tid(1)),
+                },
+            }],
+            active: 0,
+        }
+    }
+
+    /// The root split's ratio, for asserting a resize actually moved it.
+    fn root_ratio(workspace: &Workspace) -> f32 {
+        match workspace.active_window().unwrap().tree.as_ref().unwrap() {
+            crate::layout::LayoutNode::Split { ratio, .. } => *ratio,
+            other => panic!("expected root Split, got {other:?}"),
+        }
+    }
+
+    /// phux-foz.3: `resize-pane { direction, amount }` dispatches through
+    /// `run_action` — the ratio moves by amount/axis-cells, the layout
+    /// repaints, and the mutation broadcasts via `SET_METADATA` (unlike
+    /// per-client focus moves).
+    #[test]
+    fn resize_pane_dispatch_moves_ratio_and_broadcasts() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let mut action = bare_action("resize-pane");
+        action
+            .args
+            .insert("direction".to_owned(), toml::Value::String("right".into()));
+        action
+            .args
+            .insert("amount".to_owned(), toml::Value::Integer(8));
+        let effects = run(&action, &mut workspace);
+        assert!(!effects.bell);
+        assert!(effects.layout_mutated, "resize repaints the layout");
+        assert!(
+            effects.set_metadata,
+            "a layout mutation broadcasts to other clients"
+        );
+        let after = root_ratio(&workspace);
+        // Growing the focused (left) pane rightward by 8 of 80 cols.
+        assert!(
+            (after - before - 0.1).abs() < 1e-4,
+            "ratio moved {before} -> {after}, wanted +0.1"
+        );
+    }
+
+    /// phux-foz.3: a `resize-pane` missing its args bells and mutates
+    /// nothing (ADR-0019 decision 5 bell-no-op contract).
+    #[test]
+    fn resize_pane_dispatch_missing_args_bells() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let effects = run(&bare_action("resize-pane"), &mut workspace);
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
+        assert!(!effects.set_metadata);
+        assert!((root_ratio(&workspace) - before).abs() < f32::EPSILON);
+    }
+
+    /// phux-foz.3: a resize that would squeeze a pane below the 2-cell
+    /// floor (ADR-0019 decision 5) bells and leaves the ratio unchanged.
+    #[test]
+    fn resize_pane_dispatch_min_cell_floor_bells() {
+        let mut workspace = two_pane_workspace();
+        let before = root_ratio(&workspace);
+        let mut action = bare_action("resize-pane");
+        action
+            .args
+            .insert("direction".to_owned(), toml::Value::String("right".into()));
+        action
+            .args
+            .insert("amount".to_owned(), toml::Value::Integer(80));
+        let effects = run(&action, &mut workspace);
+        assert!(effects.bell, "floor violation is a bell-no-op");
+        assert!(!effects.layout_mutated);
+        assert!((root_ratio(&workspace) - before).abs() < f32::EPSILON);
+    }
+
     /// phux-4h5a: `toggle-sidebar` requests the driver-side flip
     /// (`toggle_sidebar`) plus a repaint (`layout_mutated`), unconditionally —
     /// even single-pane, since the strip lists windows. It never bells and
@@ -2278,6 +2931,10 @@ mod tests {
     /// phux-4h5a: `apply_action_effects` flips the driver-owned
     /// `sidebar_enabled` when `toggle_sidebar` is set — off→on and back on a
     /// second toggle.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "two full DispatchCtx constructions; each new ctx field (mouse_optout, reload_request) adds two lines"
+    )]
     #[tokio::test]
     async fn apply_effects_flips_sidebar_enabled_state() {
         let mut workspace = Workspace::single(tid(1));
@@ -2291,6 +2948,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2302,14 +2962,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         let mut out: Vec<u8> = Vec::new();
@@ -2335,6 +3001,7 @@ mod tests {
         assert!(sidebar_enabled, "first toggle enables the sidebar");
 
         // A second toggle disables it again.
+        let mut reload_request = false;
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2346,14 +3013,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let effects = run_action(&bare_action("toggle-sidebar"), &mut ctx, None);
         apply_action_effects(
@@ -2411,7 +3084,10 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let effects = {
+            let mut reload_request = false;
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace,
@@ -2423,14 +3099,20 @@ mod tests {
                 keybindings: None,
                 theme: &theme,
                 sessions,
+                foreign_layouts: &HashMap::new(),
                 focused_session,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
-                has_bar: false,
+                bar: None,
                 drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
+                plugin_actions: &[],
+                plugin_panes: &[],
+                plugin_tx: None,
+                reload_request: &mut reload_request,
             };
             let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
             run_action(action, &mut ctx, focused.as_ref())
@@ -2470,7 +3152,7 @@ mod tests {
             std::path::Path::new("default.toml"),
         )
         .expect("default config parses");
-        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings));
+        let items = crate::attach::action_registry::palette_items(Some(&cfg.keybindings), &[], &[]);
         let detach = items
             .iter()
             .find(|i| i.action.action == "detach")
@@ -2478,6 +3160,226 @@ mod tests {
         let mut workspace = Workspace::default();
         let effects = run(&detach.action, &mut workspace);
         assert!(effects.detach, "committing the detach palette row detaches");
+    }
+
+    #[test]
+    fn plugin_action_records_run_intent_for_the_async_caller() {
+        // phux-r82.5: the sync dispatcher never execs the plugin itself —
+        // it records (plugin, action) and the async caller spawns the
+        // child-process run so the input loop can't freeze on a plugin.
+        let mut args = BTreeMap::new();
+        args.insert(
+            "plugin".to_owned(),
+            toml::Value::String("com.example.tools".to_owned()),
+        );
+        args.insert(
+            "action".to_owned(),
+            toml::Value::String("summarize".to_owned()),
+        );
+        let action = phux_config::keybind::ResolvedAction {
+            action: "plugin-action".to_owned(),
+            args,
+        };
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.run_plugin,
+            Some(("com.example.tools".to_owned(), "summarize".to_owned()))
+        );
+        assert!(!effects.bell);
+        assert!(!effects.layout_mutated, "no repaint for a spawned run");
+    }
+
+    #[test]
+    fn plugin_action_missing_args_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("plugin-action"), &mut workspace);
+        assert!(effects.bell, "missing plugin/action args must bell");
+        assert!(effects.run_plugin.is_none());
+    }
+
+    // ---------- phux-r82.7: plugin-pane placement routing ----------
+
+    /// Build the `plugin-pane { plugin, pane }` dispatcher action.
+    fn plugin_pane_action(plugin: &str, pane: &str) -> phux_config::keybind::ResolvedAction {
+        let mut args = BTreeMap::new();
+        args.insert("plugin".to_owned(), toml::Value::String(plugin.to_owned()));
+        args.insert("pane".to_owned(), toml::Value::String(pane.to_owned()));
+        phux_config::keybind::ResolvedAction {
+            action: "plugin-pane".to_owned(),
+            args,
+        }
+    }
+
+    /// A hostable pane snapshot entry with the given placement.
+    fn pane_entry(placement: HostedPlacement) -> PluginPaneEntry {
+        PluginPaneEntry {
+            plugin_id: "com.example.board".to_owned(),
+            plugin_name: "Board".to_owned(),
+            pane_id: "board".to_owned(),
+            title: "Agent Board".to_owned(),
+            placement,
+            command: vec!["agent-board".to_owned(), "--watch".to_owned()],
+            plugin_root: std::path::PathBuf::from("/plugins/board"),
+        }
+    }
+
+    /// Like [`run`], but with a plugin-pane snapshot installed.
+    fn run_with_panes(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+        panes: &[PluginPaneEntry],
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout = std::collections::HashSet::new();
+        let mut reload_request = false;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            bar: None,
+            drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: panes,
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+        };
+        let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+        run_action(action, &mut ctx, focused.as_ref())
+    }
+
+    /// The spawn frame's plugin-relevant fields, destructured for
+    /// assertions.
+    struct SpawnParts {
+        command: Option<Vec<String>>,
+        cwd: Option<String>,
+        env: Option<Vec<(String, String)>>,
+    }
+
+    fn spawn_frame_parts(frame: &FrameKind) -> SpawnParts {
+        let FrameKind::SpawnTerminal {
+            command, cwd, env, ..
+        } = frame
+        else {
+            panic!("expected SpawnTerminal, got {frame:?}");
+        };
+        SpawnParts {
+            command: command.clone(),
+            cwd: cwd.clone(),
+            env: env.clone(),
+        }
+    }
+
+    #[test]
+    fn plugin_pane_split_placement_parks_pending_split_with_argv_and_env() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        let (_req, pending, frame) = effects
+            .spawn_terminal
+            .expect("split placement parks a PendingSplit + SPAWN");
+        assert_eq!(pending.focused_at_request, tid(1));
+        assert!(!pending.zoom_on_spawn, "plain split must not zoom");
+        assert!(effects.spawn_window.is_none());
+        let SpawnParts { command, cwd, env } = spawn_frame_parts(&frame);
+        assert_eq!(
+            command,
+            Some(vec!["agent-board".to_owned(), "--watch".to_owned()]),
+            "spawn runs the manifest argv, not the default shell",
+        );
+        assert_eq!(cwd.as_deref(), Some("/plugins/board"));
+        let env = env.expect("identity env injected");
+        assert!(env.contains(&("PHUX_PLUGIN_ID".to_owned(), "com.example.board".to_owned())));
+        assert!(env.contains(&("PHUX_PLUGIN_PANE_ID".to_owned(), "board".to_owned())));
+        assert!(env.contains(&("PHUX_PLUGIN_ROOT".to_owned(), "/plugins/board".to_owned())));
+    }
+
+    #[test]
+    fn plugin_pane_zoomed_placement_requests_zoom_on_spawn() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Zoomed)],
+        );
+        let (_req, pending, _frame) = effects
+            .spawn_terminal
+            .expect("zoomed placement parks a PendingSplit + SPAWN");
+        assert!(pending.zoom_on_spawn, "zoomed placement zooms on reply");
+    }
+
+    #[test]
+    fn plugin_pane_tab_placement_parks_pending_window_named_after_title() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Tab)],
+        );
+        let (_req, pending, frame) = effects
+            .spawn_window
+            .expect("tab placement parks a PendingWindow + SPAWN");
+        assert_eq!(pending.name, "Agent Board");
+        assert!(effects.spawn_terminal.is_none());
+        let SpawnParts { command, .. } = spawn_frame_parts(&frame);
+        assert_eq!(
+            command,
+            Some(vec!["agent-board".to_owned(), "--watch".to_owned()])
+        );
+    }
+
+    #[test]
+    fn plugin_pane_unknown_entry_bells() {
+        // Covers a disabled plugin, a typo'd id, or an overlay declaration
+        // (never snapshotted) reached via a user-config binding.
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.absent", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        assert!(effects.bell);
+        assert!(effects.spawn_terminal.is_none());
+        assert!(effects.spawn_window.is_none());
+    }
+
+    #[test]
+    fn plugin_pane_split_without_focused_pane_bells() {
+        let mut workspace = Workspace::default(); // empty: no focus
+        let effects = run_with_panes(
+            &plugin_pane_action("com.example.board", "board"),
+            &mut workspace,
+            &[pane_entry(HostedPlacement::Split)],
+        );
+        assert!(effects.bell);
+        assert!(effects.spawn_terminal.is_none());
     }
 
     #[test]
@@ -2537,6 +3439,7 @@ mod tests {
         let items = window_picker_items(
             &workspace,
             &sessions,
+            &HashMap::new(),
             Some(phux_protocol::ids::SessionId::new(1)),
         );
         // Current session ("work") leads, as a header marked "(current)".
@@ -2556,6 +3459,131 @@ mod tests {
             items[scratch + 1].action.args.get("name"),
             Some(&toml::Value::String("scratch".to_owned())),
         );
+        // No cached layout for "scratch" ⇒ no `window` arg (fallback row,
+        // plain switch).
+        assert!(!items[scratch + 1].action.args.contains_key("window"));
+    }
+
+    /// phux-foz.8: with a peer session's persisted layout cached, the
+    /// picker lists that session's windows as one-step rows committing
+    /// `switch-session { name, window }` — same `index:name` + pane-count
+    /// shape as the current session's rows.
+    #[test]
+    fn window_picker_lists_foreign_windows_one_step_when_layout_cached() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("editor".to_owned(), tid(2));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        // scratch's persisted workspace: two windows, "build" and "logs".
+        let mut scratch_ws = Workspace::single(tid(10));
+        scratch_ws.rename_active("build".to_owned());
+        scratch_ws.add_window("logs".to_owned(), tid(11));
+        let mut foreign = HashMap::new();
+        foreign.insert(phux_protocol::ids::SessionId::new(2), scratch_ws);
+
+        let items = window_picker_items(
+            &workspace,
+            &sessions,
+            &foreign,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        let scratch = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        // Two one-step window rows, indented under the header.
+        let row0 = &items[scratch + 1];
+        let row1 = &items[scratch + 2];
+        assert_eq!(row0.label, "0:build");
+        assert_eq!(row0.secondary.as_deref(), Some("1 pane"));
+        assert!(row0.indented);
+        assert_eq!(row0.action.action, "switch-session");
+        assert_eq!(
+            row0.action.args.get("name"),
+            Some(&toml::Value::String("scratch".to_owned())),
+        );
+        assert_eq!(
+            row0.action.args.get("window"),
+            Some(&toml::Value::Integer(0)),
+        );
+        assert_eq!(row1.label, "1:logs");
+        assert_eq!(
+            row1.action.args.get("window"),
+            Some(&toml::Value::Integer(1)),
+        );
+        // No fallback "switch to this session" row when windows list.
+        assert!(
+            items.iter().all(|i| i.label != "switch to this session"),
+            "one-step rows replace the fallback row"
+        );
+    }
+
+    /// phux-foz.8: an empty cached workspace (decoded but windowless) is
+    /// not useful — the picker falls back to the plain switch row.
+    #[test]
+    fn window_picker_empty_foreign_layout_falls_back_to_switch_row() {
+        let workspace = Workspace::single(tid(1));
+        let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
+        let mut foreign = HashMap::new();
+        foreign.insert(phux_protocol::ids::SessionId::new(2), Workspace::default());
+        let items = window_picker_items(
+            &workspace,
+            &sessions,
+            &foreign,
+            Some(phux_protocol::ids::SessionId::new(1)),
+        );
+        let scratch = items
+            .iter()
+            .position(|i| i.is_header() && i.label == "scratch")
+            .expect("scratch header present");
+        assert_eq!(items[scratch + 1].label, "switch to this session");
+        assert!(!items[scratch + 1].action.args.contains_key("window"));
+    }
+
+    /// phux-foz.8: committing a one-step picker row through `run_action`
+    /// yields the combined reattach target — session name AND window index
+    /// — that the driver resolves after the re-attach.
+    #[test]
+    fn one_step_picker_row_commits_switch_session_with_window() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut scratch_ws = Workspace::single(tid(10));
+        scratch_ws.add_window("logs".to_owned(), tid(11));
+        let rows = foreign_session_window_rows("scratch", &scratch_ws);
+        assert_eq!(rows.len(), 2);
+        let effects = run(&rows[1].action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: Some(1),
+            }),
+            "the one-step row carries the target window through dispatch"
+        );
+        // The switch is a re-attach, not a local window change.
+        assert_eq!(workspace.active, 0);
+    }
+
+    /// phux-foz.8: a `switch-session` with a bad `window` arg (negative /
+    /// non-integer) degrades to a plain switch rather than belling — the
+    /// `name` is still valid and honoring it is strictly more useful.
+    #[test]
+    fn switch_session_bad_window_arg_degrades_to_plain_switch() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut args = BTreeMap::new();
+        args.insert("name".to_owned(), toml::Value::String("scratch".to_owned()));
+        args.insert("window".to_owned(), toml::Value::Integer(-3));
+        let action = phux_config::keybind::ResolvedAction {
+            action: "switch-session".to_owned(),
+            args,
+        };
+        let effects = run(&action, &mut workspace);
+        assert_eq!(
+            effects.reattach,
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: None,
+            }),
+        );
+        assert!(!effects.bell);
     }
 
     #[test]
@@ -2657,7 +3685,10 @@ mod tests {
         let effects = run(&items[0].action, &mut workspace);
         assert_eq!(
             effects.reattach,
-            Some(ReattachTarget::Existing("scratch".to_owned())),
+            Some(ReattachTarget::Existing {
+                name: "scratch".to_owned(),
+                window: None,
+            }),
             "committing the picker row requests a switch to that session"
         );
     }
@@ -2714,6 +3745,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -2725,14 +3759,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let action = phux_config::keybind::ResolvedAction {
             action: "detach".to_owned(),
@@ -2781,7 +3821,10 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let effects = {
+            let mut reload_request = false;
             let mut ctx = DispatchCtx {
                 resolver: None,
                 workspace: &mut workspace,
@@ -2793,14 +3836,20 @@ mod tests {
                 keybindings: None,
                 theme: &theme,
                 sessions: &[],
+                foreign_layouts: &HashMap::new(),
                 focused_session: None,
                 session_name: &mut session_name,
                 switch_request: &mut switch_request,
                 zoomed: &mut zoomed,
                 sidebar: None,
                 sidebar_enabled: &mut sidebar_enabled,
-                has_bar: false,
+                bar: None,
                 drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
+                plugin_actions: &[],
+                plugin_panes: &[],
+                plugin_tx: None,
+                reload_request: &mut reload_request,
             };
             run_action(&bare_action("rename-session"), &mut ctx, None)
         };
@@ -2871,6 +3920,10 @@ mod tests {
     /// intercepted the next key too. A user typing a name into the rename
     /// prompt that contained the leader chord lost characters.
     #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture's DispatchCtx grows a line per composed feature (wave-2 + wave-2.5); the scenario itself is one flow"
+    )]
     async fn overlay_active_prefix_key_reaches_overlay_not_resolver() {
         use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 
@@ -2929,6 +3982,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
@@ -2940,14 +3996,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         dispatch_input_events(
             &mut out,
@@ -2972,6 +4034,152 @@ mod tests {
         assert_eq!(received[0].key, PhysicalKey::A);
         assert!(received[0].mods.contains(ModSet::CTRL));
         assert_eq!(received[1].key, PhysicalKey::X);
+    }
+
+    // -- which-key popup passthrough (phux-foz.2) --------------------------
+
+    /// Drive `dispatch_input_events` with the given events against a
+    /// resolver already pending at the prefix and the which-key popup on
+    /// the overlay stack. Returns `(overlays_active_after, detach_pending,
+    /// resolver_pending_after)`.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_with_which_key_popup(events: Vec<InputEvent>) -> (bool, bool, bool) {
+        let cfg = phux_config::parse_str(
+            phux_config::DEFAULT_CONFIG_TOML,
+            std::path::Path::new("default.toml"),
+        )
+        .expect("default config parses");
+        let mut resolver =
+            phux_config::keybind::Resolver::new(&cfg.keybindings).expect("resolver builds");
+        // Walk to the pending-prefix state the popup describes.
+        let prefix =
+            phux_config::keybind::parse_chord(&cfg.keybindings.prefix).expect("prefix parses");
+        assert_eq!(resolver.feed(prefix), phux_config::keybind::Feed::Partial);
+        assert!(resolver.pending_at_prefix());
+
+        let theme = Theme::default();
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(
+            crate::render::overlay::WhichKeyOverlay::from_config(&cfg.keybindings, &theme),
+        ));
+        assert!(overlays.top_is_passthrough());
+
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
+        let mut ctx = DispatchCtx {
+            resolver: Some(&mut resolver),
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: Some(&cfg.keybindings),
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            bar: None,
+            drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+        };
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            events,
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+        (overlays.is_active(), detach_pending, resolver.is_pending())
+    }
+
+    fn press(key: phux_protocol::input::key::PhysicalKey, text: Option<&str>) -> InputEvent {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet};
+        InputEvent::Key(KeyEvent {
+            action: KeyAction::Press,
+            key,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: text.map(ToOwned::to_owned),
+            unshifted_codepoint: text.and_then(|t| t.chars().next()).map(u32::from),
+        })
+    }
+
+    /// phux-foz.2 requirement 3 (execute path): with the which-key popup
+    /// up and the prefix pending, the next key must dismiss the popup AND
+    /// execute its prefix-table binding exactly as if the popup had never
+    /// appeared — the popup eats nothing.
+    #[tokio::test]
+    async fn which_key_popup_next_chord_dismisses_and_executes() {
+        use phux_protocol::input::key::PhysicalKey;
+        // Default prefix table binds `d` = detach.
+        let (overlay_active, detach_pending, resolver_pending) =
+            dispatch_with_which_key_popup(vec![press(PhysicalKey::D, Some("d"))]).await;
+        assert!(!overlay_active, "the chord must dismiss the popup");
+        assert!(
+            detach_pending,
+            "the chord must still execute its binding (C-a d = detach)"
+        );
+        assert!(!resolver_pending, "the chord resolved; nothing pending");
+    }
+
+    /// phux-foz.2 requirement 3 (cancel path): Esc dismisses the popup
+    /// and cancels the pending prefix — the binding does NOT run, and a
+    /// following prefix-table key is a plain keystroke for the pane.
+    #[tokio::test]
+    async fn which_key_popup_esc_cancels_the_prefix() {
+        use phux_protocol::input::key::PhysicalKey;
+        let (overlay_active, detach_pending, resolver_pending) =
+            dispatch_with_which_key_popup(vec![
+                press(PhysicalKey::Escape, None),
+                // With the prefix cancelled, `d` must NOT resolve to detach.
+                press(PhysicalKey::D, Some("d")),
+            ])
+            .await;
+        assert!(!overlay_active, "Esc must dismiss the popup");
+        assert!(!resolver_pending, "Esc must cancel the pending prefix");
+        assert!(
+            !detach_pending,
+            "after Esc, `d` is a plain pane keystroke, not `C-a d`"
+        );
     }
 
     #[tokio::test]
@@ -3023,6 +4231,9 @@ mod tests {
         let mut zoomed = None;
         let mut sidebar_enabled = false;
         let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
         let mut ctx = DispatchCtx {
             resolver: None,
             workspace: &mut workspace,
@@ -3034,14 +4245,20 @@ mod tests {
             keybindings: None,
             theme: &theme,
             sessions: &[],
+            foreign_layouts: &HashMap::new(),
             focused_session: None,
             session_name: &mut session_name,
             switch_request: &mut switch_request,
             zoomed: &mut zoomed,
             sidebar: None,
             sidebar_enabled: &mut sidebar_enabled,
-            has_bar: false,
+            bar: None,
             drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
         };
         let page_up = KeyEvent {
             action: KeyAction::Press,
@@ -3073,5 +4290,566 @@ mod tests {
             before, after,
             "dispatch should apply copy-mode scroll to the focused pane viewport"
         );
+    }
+
+    // ---------- phux-fce4: sidebar hit targets ----------
+
+    /// The pure click→action mapping: window blocks commit
+    /// `select-window { index }`, the footer rows `new-window` and
+    /// `command-palette`, and blank/separator cells nothing.
+    #[test]
+    fn sidebar_click_action_maps_rows_to_registry_actions() {
+        // Left-docked 20-column strip over a 24-row viewport with a status
+        // bar: rows 0..=22, footer on rows 21 (new) and 22 (menu).
+        let strip = crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 23,
+        };
+        // Window 1's name row (y = 2) and branch row (y = 3) both select it.
+        for y in [2, 3] {
+            let resolved = sidebar_click_action(strip, 2, 4, y).expect("window row hits");
+            assert_eq!(resolved.action, "select-window");
+            assert_eq!(index_arg(&resolved), Some(1));
+        }
+        let new = sidebar_click_action(strip, 2, 4, 21).expect("new row hits");
+        assert_eq!(new.action, "new-window");
+        assert!(new.args.is_empty());
+        let menu = sidebar_click_action(strip, 2, 4, 22).expect("menu row hits");
+        assert_eq!(menu.action, "command-palette");
+        // Blank padding row and the separator column commit nothing.
+        assert!(sidebar_click_action(strip, 2, 4, 10).is_none());
+        assert!(sidebar_click_action(strip, 2, 19, 0).is_none());
+    }
+
+    /// Every action a sidebar click can commit must be a dispatched action
+    /// name — the same lockstep the palette registry test enforces.
+    #[test]
+    fn sidebar_click_actions_are_dispatched_names() {
+        let strip = crate::layout::Rect {
+            x: 0,
+            y: 0,
+            w: 20,
+            h: 23,
+        };
+        for y in 0..strip.h {
+            if let Some(resolved) = sidebar_click_action(strip, 3, 2, y) {
+                assert!(
+                    ACTION_NAMES.contains(&resolved.action.as_str()),
+                    "sidebar committed `{}`, which run_action does not dispatch",
+                    resolved.action,
+                );
+            }
+        }
+    }
+
+    fn left_press_at(x: u16, y: u16) -> InputEvent {
+        use phux_protocol::input::key::ModSet;
+        InputEvent::Mouse(MouseEvent {
+            action: MouseAction::Press,
+            button: MouseButton::Left,
+            mods: ModSet::empty(),
+            x: f64::from(x),
+            y: f64::from(y),
+        })
+    }
+
+    /// Drive `dispatch_input_events` with a left-docked sidebar reservation
+    /// and one mouse event; returns `(active_window, overlay_active,
+    /// pending_window_count)` so the callers can assert each affordance's
+    /// end-to-end effect.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_sidebar_click(ev: InputEvent) -> (usize, bool, usize) {
+        let (a, _b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut out: Vec<u8> = Vec::new();
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("two".to_owned(), tid(2));
+        workspace.select(0);
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = true;
+        let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            std::collections::HashSet::new();
+        let mut reload_request = false;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace: &mut workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: Some(SidebarReservation {
+                edge: super::super::paint::SidebarEdge::Left,
+                width: 20,
+            }),
+            sidebar_enabled: &mut sidebar_enabled,
+            bar: Some(crate::render::chrome::status_bar::Position::Bottom),
+            drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+        };
+        dispatch_input_events(
+            &mut out,
+            &mut conn,
+            vec![ev],
+            &mut focused_pane,
+            &mut detach_pending,
+            &mut predict,
+            &overlay,
+            &mut panes,
+            &mut ctx,
+        )
+        .await
+        .expect("dispatch");
+        (
+            workspace.active,
+            overlays.is_active(),
+            pending_windows.len(),
+        )
+    }
+
+    /// A left press on the second window's block switches to it — the
+    /// mouse route runs the same `select-window` a keybinding would.
+    #[tokio::test]
+    async fn sidebar_click_on_window_block_selects_it() {
+        // Strip rows with a status bar: h = 23; window 1's name row is y=2.
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 2)).await;
+        assert_eq!(active, 1, "clicking window 1's block must select it");
+        assert!(!overlay_active);
+        assert_eq!(pending, 0);
+    }
+
+    /// A left press on `+ new` parks a `new-window` spawn (the reply opens
+    /// the window), exactly like the `new-window` chord.
+    #[tokio::test]
+    async fn sidebar_click_on_new_parks_a_window_spawn() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 21)).await;
+        assert_eq!(active, 0, "spawn is parked; no window switch yet");
+        assert!(!overlay_active);
+        assert_eq!(pending, 1, "new-window spawn must be parked");
+    }
+
+    /// A left press on `= menu` opens the command palette overlay — the
+    /// session/plugin menu built from the action registry.
+    #[tokio::test]
+    async fn sidebar_click_on_menu_opens_the_command_palette() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 22)).await;
+        assert_eq!(active, 0);
+        assert!(overlay_active, "menu click must push the palette overlay");
+        assert_eq!(pending, 0);
+    }
+
+    /// Pointer events over the strip never leak into pane routing: a press
+    /// on a blank row is consumed, mutating nothing.
+    #[tokio::test]
+    async fn sidebar_consumes_clicks_on_blank_rows() {
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 10)).await;
+        assert_eq!(active, 0);
+        assert!(!overlay_active);
+        assert_eq!(pending, 0);
+    }
+
+    // -- phux-npb3: per-pane mouse opt-out + drag double-press hardening ---
+    // (reuses the `two_pane_workspace` fixture defined for the resize-pane
+    // dispatch tests above.)
+
+    /// Build a mouse event in outer-viewport cell coordinates.
+    fn mev(action: MouseAction, button: MouseButton, x: f64, y: f64) -> MouseEvent {
+        MouseEvent {
+            action,
+            button,
+            mods: phux_protocol::input::key::ModSet::empty(),
+            x,
+            y,
+        }
+    }
+
+    /// The divider column of [`two_pane_workspace`] at viewport 80x24 (no
+    /// bar, no sidebar), found by hit-testing rather than hardcoding the
+    /// rasterizer's rounding.
+    fn two_pane_divider_x() -> u16 {
+        use crate::multi_pane::{RouteDecision, route_mouse_event};
+        let workspace = two_pane_workspace();
+        let ls = workspace.active_window().expect("active window");
+        let content = content_rect((80, 24), None, None);
+        (0..80u16)
+            .find(|&x| {
+                matches!(
+                    route_mouse_event(
+                        ls,
+                        content,
+                        (80, 24),
+                        &mev(MouseAction::Press, MouseButton::Left, f64::from(x), 5.0),
+                    ),
+                    RouteDecision::Divider { .. }
+                )
+            })
+            .expect("a two-pane split has a divider column")
+    }
+
+    /// Drive `dispatch_input_events` with `events` against
+    /// [`two_pane_workspace`] (viewport 80x24, no bar / sidebar), seeding
+    /// the per-pane opt-out set with `seed_optout`. Returns every frame the
+    /// peer end of the connection received plus the post-dispatch drag,
+    /// focus, and opt-out state.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_mouse_two_pane(
+        events: Vec<InputEvent>,
+        seed_optout: &[TerminalId],
+    ) -> (
+        Vec<FrameKind>,
+        Option<DragGrab>,
+        Option<TerminalId>,
+        std::collections::HashSet<TerminalId>,
+    ) {
+        let mut workspace = two_pane_workspace();
+        let (a, b) = tokio::net::UnixStream::pair().expect("uds pair");
+        let mut conn = Connection::from_stream(a);
+        let mut peer = Connection::from_stream(b);
+        let mut out: Vec<u8> = Vec::new();
+        let mut focused_pane = Some(tid(1));
+        let mut detach_pending = false;
+        let mut predict =
+            PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut next_request_id = 1;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut mouse_optout: std::collections::HashSet<TerminalId> =
+            seed_optout.iter().cloned().collect();
+        let mut reload_request = false;
+        {
+            let mut ctx = DispatchCtx {
+                resolver: None,
+                workspace: &mut workspace,
+                viewport: (80, 24),
+                next_request_id: &mut next_request_id,
+                pending_splits: &mut pending_splits,
+                pending_windows: &mut pending_windows,
+                overlays: &mut overlays,
+                keybindings: None,
+                theme: &theme,
+                sessions: &[],
+                foreign_layouts: &HashMap::new(),
+                focused_session: None,
+                session_name: &mut session_name,
+                switch_request: &mut switch_request,
+                zoomed: &mut zoomed,
+                sidebar: None,
+                sidebar_enabled: &mut sidebar_enabled,
+                bar: None,
+                drag: &mut drag,
+                mouse_optout: &mut mouse_optout,
+                plugin_actions: &[],
+                plugin_panes: &[],
+                plugin_tx: None,
+                reload_request: &mut reload_request,
+            };
+            dispatch_input_events(
+                &mut out,
+                &mut conn,
+                events,
+                &mut focused_pane,
+                &mut detach_pending,
+                &mut predict,
+                &overlay,
+                &mut panes,
+                &mut ctx,
+            )
+            .await
+            .expect("dispatch");
+        }
+        // Close the writer so the peer's drain terminates: once the buffered
+        // frames are consumed, `recv` sees the EOF and returns Disconnected.
+        // (`try_recv` is not used here — tokio's non-blocking read reports
+        // WouldBlock until the reactor has observed readiness, which this
+        // freshly-paired socket never awaited.)
+        drop(conn);
+        let mut received = Vec::new();
+        loop {
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), peer.recv())
+                .await
+                .expect("timed out draining the peer connection");
+            match next {
+                Ok(frame) => received.push(frame),
+                Err(_) => break, // EOF after the writer dropped
+            }
+        }
+        (received, drag, focused_pane, mouse_optout)
+    }
+
+    /// phux-npb3 hardening: a second Press arriving while a divider drag is
+    /// active must be consumed — not fall through to normal routing, where
+    /// it would move focus and forward an `INPUT_MOUSE` mid-drag.
+    #[tokio::test]
+    async fn second_press_during_divider_drag_is_consumed() {
+        let dx = f64::from(two_pane_divider_x());
+        let (received, drag, focused, _) = dispatch_mouse_two_pane(
+            vec![
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, dx, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, 70.0, 5.0)),
+            ],
+            &[],
+        )
+        .await;
+        assert!(drag.is_some(), "the divider press grabs a drag");
+        assert_eq!(
+            focused,
+            Some(tid(1)),
+            "a press mid-drag must not move focus"
+        );
+        assert!(
+            received.is_empty(),
+            "a press mid-drag must not forward to a pane; got {received:?}"
+        );
+    }
+
+    /// The double-press guard must not eat the release that ends the drag.
+    #[tokio::test]
+    async fn release_after_guarded_press_still_ends_drag() {
+        let dx = f64::from(two_pane_divider_x());
+        let (_received, drag, _focused, _) = dispatch_mouse_two_pane(
+            vec![
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Left, dx, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Press, MouseButton::Right, 70.0, 5.0)),
+                InputEvent::Mouse(mev(MouseAction::Release, MouseButton::Left, 70.0, 5.0)),
+            ],
+            &[],
+        )
+        .await;
+        assert!(
+            drag.is_none(),
+            "the release must still end the drag after a guarded press"
+        );
+    }
+
+    /// phux-npb3 routing: a press inside an opted-out pane still
+    /// click-focuses it (chrome-level — that is also what makes the driver
+    /// drop outer capture), but no `INPUT_MOUSE` is synthesized for it.
+    #[tokio::test]
+    async fn press_in_opted_out_pane_focuses_but_does_not_forward() {
+        let (received, _, focused, _) = dispatch_mouse_two_pane(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Left,
+                70.0,
+                5.0,
+            ))],
+            &[tid(2)],
+        )
+        .await;
+        assert_eq!(
+            focused,
+            Some(tid(2)),
+            "click-to-focus still applies to an opted-out pane"
+        );
+        assert!(
+            received.is_empty(),
+            "an opted-out pane must receive no INPUT_MOUSE; got {received:?}"
+        );
+    }
+
+    /// The opt-out is per-pane: a sibling that did NOT opt out still gets
+    /// its `INPUT_MOUSE` forwarded (with pane-local coordinates) while the
+    /// other pane sits in the opt-out set.
+    #[tokio::test]
+    async fn press_in_opted_in_sibling_still_forwards() {
+        let dx = two_pane_divider_x();
+        let (received, _, focused, _) = dispatch_mouse_two_pane(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Left,
+                70.0,
+                5.0,
+            ))],
+            &[tid(1)], // the OTHER pane is opted out
+        )
+        .await;
+        assert_eq!(focused, Some(tid(2)));
+        match received.as_slice() {
+            [FrameKind::InputMouse { terminal_id, event }] => {
+                assert_eq!(*terminal_id, tid(2));
+                assert!(
+                    event.x < f64::from(dx),
+                    "forwarded coordinates are pane-local; got x = {}",
+                    event.x
+                );
+            }
+            other => panic!("expected exactly one INPUT_MOUSE, got {other:?}"),
+        }
+    }
+
+    /// Run a `set-pane` action against `workspace` with a caller-owned
+    /// opt-out set, returning the effects.
+    fn run_set_pane(
+        mouse: Option<toml::Value>,
+        workspace: &mut Workspace,
+        mouse_optout: &mut std::collections::HashSet<TerminalId>,
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag: Option<DragGrab> = None;
+        let mut reload_request = false;
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            bar: None,
+            drag: &mut drag,
+            mouse_optout,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+        };
+        let mut action = bare_action("set-pane");
+        if let Some(v) = mouse {
+            action.args.insert("mouse".to_owned(), v);
+        }
+        let focused = ctx.workspace.active_window().and_then(|w| w.focus.clone());
+        run_action(&action, &mut ctx, focused.as_ref())
+    }
+
+    #[test]
+    fn set_pane_mouse_off_then_on_updates_optout() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(
+            Some(toml::Value::String("off".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!effects.bell);
+        assert!(optout.contains(&tid(1)), "`mouse = off` opts the pane out");
+
+        let effects = run_set_pane(
+            Some(toml::Value::String("on".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!effects.bell);
+        assert!(
+            !optout.contains(&tid(1)),
+            "`mouse = on` opts the pane back in"
+        );
+    }
+
+    #[test]
+    fn set_pane_toggle_flips_state() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let toggle = || toml::Value::String("toggle".to_owned());
+        run_set_pane(Some(toggle()), &mut workspace, &mut optout);
+        assert!(optout.contains(&tid(1)), "first toggle opts out");
+        run_set_pane(Some(toggle()), &mut workspace, &mut optout);
+        assert!(!optout.contains(&tid(1)), "second toggle opts back in");
+    }
+
+    #[test]
+    fn set_pane_bool_arg_maps_to_on_off() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        run_set_pane(
+            Some(toml::Value::Boolean(false)),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(optout.contains(&tid(1)), "`mouse = false` means off");
+        run_set_pane(
+            Some(toml::Value::Boolean(true)),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(!optout.contains(&tid(1)), "`mouse = true` means on");
+    }
+
+    #[test]
+    fn set_pane_missing_or_bad_mouse_arg_bells() {
+        let mut workspace = Workspace::single(tid(1));
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(None, &mut workspace, &mut optout);
+        assert!(effects.bell, "missing `mouse` arg bells");
+        let effects = run_set_pane(
+            Some(toml::Value::String("sideways".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(effects.bell, "unknown `mouse` value bells");
+        assert!(optout.is_empty());
+    }
+
+    #[test]
+    fn set_pane_without_focused_pane_bells() {
+        let mut workspace = Workspace::default();
+        let mut optout = std::collections::HashSet::new();
+        let effects = run_set_pane(
+            Some(toml::Value::String("off".to_owned())),
+            &mut workspace,
+            &mut optout,
+        );
+        assert!(effects.bell, "no focused pane to set");
+        assert!(optout.is_empty());
     }
 }

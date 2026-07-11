@@ -13,6 +13,13 @@ authors.workspace = true
 workspace = true
 
 [features]
+default = ["webtransport"]
+# WebTransport (HTTP/3 over QUIC) listener for browser consumers
+# (phux-0wmf). Browsers cannot open raw QUIC, so this is their door to
+# QUIC-class transport; `phux-web` dials it, falling back to WebSocket.
+# On by default because the shipped binary should serve browsers out of
+# the box; disable for a leaner daemon that keeps UDS/WS/QUIC only.
+webtransport = ["dep:wtransport"]
 # Compile-in the tokio-console async-runtime debugger. Off by default
 # (pulls a TCP server + extra task instrumentation). Requires Tokio
 # built with `--cfg tokio_unstable`, so build with:
@@ -29,6 +36,16 @@ phux-core.workspace = true
 # the server reads the schema's default and threads the resolved value into
 # each `TerminalActor`'s scrollback cap.
 phux-config.workspace = true
+# phux-plugin supplies the shared child-process runner (`run_command_spec`:
+# env injection, kill_on_drop, timeout) behind the server-side event-hook
+# dispatcher (`crate::hooks`, phux-r82.1). Reusing it keeps a single
+# execution path — the no-in-process-host rule — for plugin actions and
+# event hooks. Internal workspace crate; adds no new external dependencies.
+phux-plugin.workspace = true
+# `[[hooks.<name>]]` `when` predicates are `BTreeMap<String, toml::Value>`
+# in the phux-config schema, so the hook dispatcher's matcher names
+# `toml::Value` directly. Already in the graph via phux-config.
+toml.workspace = true
 # `GET_SCREEN` serializes `phux_core::ScreenState` into the COMMAND_RESULT
 # JSON payload (ADR-0022 §2); the CLI deserializes the same contract.
 chrono.workspace = true
@@ -111,6 +128,30 @@ rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"]
 # wide, inflating every `tracing` macro's expansion (and tripping
 # `clippy::cognitive_complexity` in tracing-heavy functions far from here).
 quinn.workspace = true
+# Hub outbound dialer (phux-v45.3, ADR-0038): the hub authenticates to its
+# satellites exactly like a remote consumer, so it dials through the same
+# shared establishment stack (fingerprint-pin TLS, bearer preamble /
+# Authorization header) the attach CLI uses. Internal workspace crate,
+# factored out of phux-client; adds no new external dependencies — quinn,
+# rustls, tokio-tungstenite, sha2, and hex are all already in this crate's
+# graph for the listener side.
+phux-dial.workspace = true
+# WebTransport listener (phux-0wmf, `webtransport` feature). Browsers cannot
+# open raw QUIC, so the quinn listener above is unreachable from `phux-web`;
+# WebTransport (HTTP/3 CONNECT over QUIC, RFC 9220-adjacent draft) is the one
+# QUIC-class transport a browser exposes. wtransport implements BOTH the
+# server role (this listener) and the client role (the native test dialer in
+# `transport::webtransport`'s tests), riding the exact quinn 0.11 + rustls
+# 0.23 + `ring` stack already in this crate (`default-features = false` +
+# `ring` keeps it off aws-lc-rs/cmake; `self-signed` stays off because cert
+# provisioning reuses this crate's rcgen path). The hyperium h3 +
+# h3-webtransport pair was evaluated and rejected: h3-webtransport is
+# server-only, and h3 0.0.8's client builder cannot advertise the
+# SETTINGS_ENABLE_WEBTRANSPORT the server-side session accept requires — so
+# the handshake, auth gating, and wire echo could not be tested honestly
+# without a browser in the loop. wtransport's spawned driver tasks are Send
+# futures, compatible with the current-thread runtime (ADR-0003).
+wtransport = { version = "0.7.1", optional = true, default-features = false, features = ["ring"] }
 # Optional: opt-in via the `tokio-console` feature. See the feature
 # comment above for the build incantation.
 console-subscriber = { version = "0.5", optional = true }
@@ -154,6 +195,11 @@ dhat.workspace = true
 # sleeps.
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+# The WebTransport tests dial the listener with wtransport's native client;
+# `dangerous-configuration` unlocks `with_no_cert_validation` so the test
+# client trusts the throwaway self-signed leaf (the TLS handshake and full
+# HTTP/3 CONNECT are still exercised end-to-end). Test builds only.
+wtransport = { version = "0.7.1", default-features = false, features = ["ring", "dangerous-configuration"] }
 
 [[bench]]
 name = "capture"

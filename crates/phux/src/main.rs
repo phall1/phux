@@ -217,6 +217,8 @@ fn main() -> ExitCode {
             socket,
             listen,
             quic,
+            webtransport,
+            hub,
             daemonize,
             seed_command,
             resume,
@@ -225,6 +227,8 @@ fn main() -> ExitCode {
             socket,
             listen,
             quic,
+            webtransport,
+            hub,
             daemonize,
             seed_command.as_deref(),
             resume,
@@ -386,5 +390,35 @@ mod tests {
         };
         assert_eq!(name, None);
         assert_eq!(session.as_deref(), Some("flagged"));
+    }
+
+    /// phux-foz.5: `phux config reload` parses, with and without an
+    /// explicit `--socket`.
+    #[test]
+    fn config_reload_parses_with_optional_socket() {
+        use crate::commands::config_action::ConfigAction;
+
+        let cli =
+            Cli::try_parse_from(["phux", "config", "reload"]).expect("`config reload` parses");
+        let Some(Command::Config {
+            action: ConfigAction::Reload { socket },
+        }) = cli.command
+        else {
+            panic!("expected Config Reload");
+        };
+        assert_eq!(socket, None);
+
+        let cli = Cli::try_parse_from(["phux", "config", "reload", "--socket", "/tmp/phux.sock"])
+            .expect("`config reload --socket` parses");
+        let Some(Command::Config {
+            action: ConfigAction::Reload { socket },
+        }) = cli.command
+        else {
+            panic!("expected Config Reload");
+        };
+        assert_eq!(
+            socket.as_deref(),
+            Some(std::path::Path::new("/tmp/phux.sock"))
+        );
     }
 }

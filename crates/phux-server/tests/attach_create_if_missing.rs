@@ -26,6 +26,19 @@
 //! the helper plumbing and the wire `recv` shape — see
 //! `byc_6_6_attach_unknown_session_error.rs` for the precedent of
 //! one-binary-per-ticket with multiple `#[test]` functions.
+//!
+//! phux-3mtf adds two PTY-backed scenarios for the wire `cwd` field:
+//!
+//! 4. **Seed honors the wire cwd.** Under `seed_with_pty` with no
+//!    server-wide override command, `CreateIfMissing { cwd: Some(dir) }`
+//!    spawns the seed shell *in* `dir`, and the `ATTACHED` snapshot's
+//!    pane carries it (spawn-time stamp + attach-time kernel refresh
+//!    both resolve to `dir`).
+//!
+//! 5. **Invalid cwd falls back without failing the attach.** A wire
+//!    `cwd` that does not name an existing directory is dropped: the
+//!    attach still succeeds and the seed pane lands wherever a
+//!    `cwd: None` spawn would have (the pre-3mtf behavior).
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -39,7 +52,8 @@ use phux_protocol::wire::frame::{
 use tempfile::TempDir;
 
 use crate::common::{
-    SOCKET_CONNECT_DEADLINE, recv_typed, run_local, send_frame, spawn_server, wait_for_socket,
+    SOCKET_CONNECT_DEADLINE, recv_typed, run_local, send_frame, spawn_server,
+    spawn_server_seed_pty_no_cmd, wait_for_socket,
 };
 
 /// Canonical 80x24 viewport, matching the byc.6.* fixtures so snapshot
@@ -54,6 +68,46 @@ fn create_if_missing_frame(name: &str) -> FrameKind {
         viewport: ViewportInfo::new(80, 24),
         request_scrollback: false,
         scrollback_limit_lines: 0,
+    }
+}
+
+/// `CreateIfMissing` carrying a wire `cwd` and a deterministic blocked
+/// shell (`read _` is a builtin, so the child stays alive on the PTY in
+/// whatever directory it was spawned in). Used by the phux-3mtf tests
+/// against a PTY-backed server with no override command.
+fn create_if_missing_with_cwd_frame(name: &str, cwd: &str) -> FrameKind {
+    FrameKind::Attach {
+        target: AttachTarget::CreateIfMissing {
+            name: name.to_owned(),
+            command: Some(vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "read _".to_owned(),
+            ]),
+            cwd: Some(cwd.to_owned()),
+        },
+        viewport: ViewportInfo::new(80, 24),
+        request_scrollback: false,
+        scrollback_limit_lines: 0,
+    }
+}
+
+/// Pull the lone pane's `cwd` out of an `ATTACHED` frame, canonicalized
+/// (the spawn-time stamp is the builder path while a live kernel refresh
+/// may return an equivalent-but-distinct spelling, e.g. macOS's
+/// /var -> /private/var).
+fn attached_pane_cwd(attached: FrameKind) -> std::path::PathBuf {
+    match attached {
+        FrameKind::Attached { snapshot, .. } => {
+            assert_eq!(snapshot.panes.len(), 1, "exactly one seed pane");
+            let wire_cwd = snapshot.panes[0]
+                .cwd
+                .as_deref()
+                .expect("ATTACHED pane must carry a cwd for a PTY-backed pane");
+            let wire_path = std::path::PathBuf::from(wire_cwd);
+            wire_path.canonicalize().unwrap_or(wire_path)
+        }
+        other => panic!("expected Attached, got {other:?}"),
     }
 }
 
@@ -112,6 +166,98 @@ fn create_if_missing_creates_session_when_absent() {
             }
             other => panic!("expected TerminalSnapshot, got {other:?}"),
         }
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
+}
+
+/// phux-3mtf scenario 4: the wire `cwd` seeds the PTY child's working
+/// directory, and the `ATTACHED` snapshot's pane reports it.
+#[test]
+fn create_if_missing_seeds_pane_in_wire_cwd() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        // PTY mode, no server-wide override command: the wire command
+        // and cwd take effect.
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+
+        // Canonicalize up front so the wire value, the spawn-time stamp,
+        // and the kernel-reported cwd all agree in spelling.
+        let cwd_dir = TempDir::new().unwrap();
+        let cwd_path = cwd_dir.path().canonicalize().expect("canonicalize cwd");
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(
+            &mut stream,
+            &create_if_missing_with_cwd_frame("cwd-honored", &cwd_path.display().to_string()),
+        )
+        .await;
+
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte, TYPE_ATTACHED,
+            "expected ATTACHED (got 0x{type_byte:02x})",
+        );
+        assert_eq!(
+            attached_pane_cwd(attached),
+            cwd_path,
+            "seed pane must start in the wire-supplied cwd",
+        );
+        // Drain the trailing TERMINAL_SNAPSHOT so the writer task isn't
+        // blocked on its mailbox when the server tears down.
+        let _ = recv_typed(&mut stream).await;
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        server_handle.await.unwrap().unwrap();
+    });
+}
+
+/// phux-3mtf scenario 5: a wire `cwd` that is not an existing directory
+/// is dropped — the attach still succeeds and the seed pane lands
+/// wherever a `cwd: None` spawn would have (the pre-3mtf fallback).
+#[test]
+fn create_if_missing_invalid_cwd_falls_back_without_failing_attach() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+
+        // A path guaranteed absent: inside a fresh tempdir, never created.
+        let bogus = tmp.path().join("does-not-exist");
+        assert!(!bogus.exists(), "fixture path must not exist");
+
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(
+            &mut stream,
+            &create_if_missing_with_cwd_frame("cwd-fallback", &bogus.display().to_string()),
+        )
+        .await;
+
+        // The attach must succeed: ATTACHED, not ERROR. (Without the
+        // validation gate, portable_pty's spawn fails on a nonexistent
+        // cwd and the server replies with an ERROR frame instead.)
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(
+            type_byte, TYPE_ATTACHED,
+            "invalid cwd must not fail the attach (got 0x{type_byte:02x})",
+        );
+        // The fallback directory is whatever the PTY spawn defaults to
+        // when the builder carries no cwd (portable_pty picks the user's
+        // home directory) — the contract under test is only that the
+        // bogus path was NOT honored and the pane still landed in a real
+        // directory, exactly as if the wire had sent `cwd: None`.
+        let pane_cwd = attached_pane_cwd(attached);
+        assert_ne!(pane_cwd, bogus, "the bogus cwd must not be honored");
+        assert!(
+            pane_cwd.is_dir(),
+            "fallback cwd must be a real directory, got {}",
+            pane_cwd.display(),
+        );
+        let _ = recv_typed(&mut stream).await;
 
         drop(stream);
         shutdown_tx.send(()).ok();

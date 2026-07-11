@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-17
+last-reviewed: 2026-07-10
 ---
 
 # The phux reference TUI
@@ -91,7 +91,9 @@ explicit-attach paths.
 
 ### 1.1 The shipped verbs
 
-These are the subcommands the binary ships today:
+These are the main interactive and control entrypoints. `phux --help` is the
+complete generated inventory, including supervision, upgrade, tags, pairing,
+agents, and workspace commands:
 
 ```
 phux                          # attach to default session, autostart server
@@ -104,10 +106,12 @@ phux attach --ws ws://127.0.0.1:8787
                               # attach over the WebSocket/TCP fallback locally
 phux attach --ws wss://HOST:PORT --cert-fingerprint FP --token HEX
                               # attach over TLS WebSocket when UDP/QUIC is blocked
-phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT]
+phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
                               # run server in foreground (incl. for SSH; no --stdio yet)
                               # --listen also accepts WebSocket clients (= PHUX_WS_ADDR)
                               # --quic also accepts QUIC clients (= PHUX_QUIC_ADDR)
+                              # --hub validates [[satellites]] into the runtime
+                              # satellite table at startup (no dialing/routing yet)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
 phux ls                       # list sessions (alias: list)
@@ -124,7 +128,7 @@ phux config <init|path|show>  # scaffold + inspect config
 phux config plugins [--json]  # compatibility alias: inspect plugin manifests
 phux config agents [--json]   # inspect configured plugin agent states
 phux config run PLUGIN ACTION # execute a configured plugin action
-phux plugin <COMMAND>         # link/list/toggle/unlink/validate plugin manifests
+phux plugin <COMMAND>         # install/update/link/list/toggle/unlink/validate plugins
 phux satellite <COMMAND>      # add/list/remove federation satellites
 phux --version                # print version
 phux help [COMMAND]
@@ -164,8 +168,8 @@ detach` would have no attached viewport to act on.
 
 > **Status (design intent, not shipped):** `windows`, `panes`, and
 > `messages` are listed in earlier drafts as future read verbs; none
-> ships today. `config` ships `init` / `path` / `show`; `config edit`
-> and `config reload` are design intent (§4.3).
+> ships today. `config` ships `init` / `path` / `show` / `reload` (§4.3);
+> `config edit` is design intent.
 
 **The target convention.** The verbs that address an existing pane —
 `kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
@@ -284,12 +288,23 @@ alone. To get a documented starting point and to inspect what's active:
 phux config path            # print the resolved config path (no I/O)
 phux config init            # scaffold a commented starter config there;
                             #   refuses to overwrite (use --force)
+phux config init --distro herdr
+                            # same scaffold plus one active extends line
+                            #   layering a starter distribution (bundled
+                            #   name or path); see docs/CONFIG.md
 phux config show            # print the effective config (defaults + your
                             #   overrides) as canonical TOML
 phux config show --default  # print the shipped defaults verbatim,
                             #   comments and all — the annotated source
+phux config show --layers   # provenance: which layer of the extends
+                            #   stack (ADR-0039) set each effective key;
+                            #   arrays list each element's contributor.
+                            #   --json for the stable document
+                            #   (schema_version 1)
 phux config plugins --json  # print configured plugin manifests as JSON
 phux config agents --json   # print configured plugin agent states as JSON
+phux config reload          # validate, then apply the config to running
+                            #   clients in place (see 4.3)
 phux plugin list --json     # inspect the plugin registry
 phux plugin validate        # validate every configured plugin manifest
 ```
@@ -298,7 +313,12 @@ phux plugin validate        # validate every configured plugin manifest
 out*: the file documents every option next to its real default value, yet
 imposes no overrides until you uncomment a line. That is what keeps the
 binary's defaults authoritative — uncommenting is the only way the file
-changes behavior. `config show` renders the merged TOML *table*, so it
+changes behavior. The `--distro` flavor adds exactly one live statement —
+an `extends` line layering a curated starter distribution (ADR-0039)
+between the defaults and your file; the distro layer is referenced, never
+copied, so its updates keep reaching you. Distribution mechanics and the
+bundled `herdr` starter are documented in
+[docs/CONFIG.md](../CONFIG.md#starter-distributions-config-init---distro). `config show` renders the merged TOML *table*, so it
 answers "what is my effective config" rather than reproducing your file's
 comments or key order; `cat` the file for the latter.
 
@@ -307,12 +327,41 @@ For testing config changes inside a checkout without touching your real
 worktree-local `./.phux-xdg` (gitignored); point `XDG_CONFIG_HOME` at it
 to exercise the result.
 
+### 4.0.1 First-run onboarding hint
+
+On attach, when **nothing exists at the resolved config path** (the path
+`phux config path` prints), the TUI shows a small dismissible overlay
+pointing at `phux config init` and the `C-a ?` help binding — the two
+affordances that answer "now what?" on a fresh install. The exact rules:
+
+* **Decided once per `phux attach` invocation**, by a single existence
+  check at attach time. Switching sessions inside the same invocation
+  does not re-show it; creating a config mid-attach does not retract an
+  already-shown hint (the next attach simply won't show one).
+* **Any key dismisses it** for the rest of that invocation. The
+  keystroke is consumed by the overlay (like every modal), so the hint
+  costs exactly one keystroke.
+* **It never appears when anything exists at the config path** — a
+  config file (even one that fails to parse) or a stray directory.
+  Presence, not validity, is the test: an unparsable config means you
+  have already found the config system, and `phux config init` refuses
+  to overwrite, so the hint's advice would be wrong there. When the
+  check itself is undetermined (e.g. a permission error on the config
+  directory), the hint stays suppressed.
+* **Nothing is persisted.** There is no "seen" flag or state file: while
+  no config exists, every attach shows the hint once; running
+  `phux config init` (or writing any config file) silences it
+  permanently.
+
+The hint hardcodes `C-a ?` deliberately — it only ever shows when no
+config file exists, which is exactly when the embedded defaults (prefix
+`C-a`, `?` = `show-help`, section 5.3) are guaranteed to be active.
+
 ### 4.1 File location
 
-Config is read in order, later files overriding earlier:
-
-1. `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`)
-2. `$PHUX_CONFIG` if set, replacing the above (used by `phux --config`)
+Config is read from `$XDG_CONFIG_HOME/phux/config.toml` (or
+`~/.config/phux/config.toml`). Set `XDG_CONFIG_HOME` to isolate configuration
+for a test or alternate environment; there is no global config-path flag.
 
 Runtime and persistent state are split. The Unix socket lives in the
 runtime dir (where it's expected to disappear on reboot); persistent
@@ -322,20 +371,16 @@ state lives in the state dir.
 $XDG_RUNTIME_DIR/phux/phux.sock     # SOCK_STREAM, parent dir mode 0o700
                                     #   (fallback: /tmp/phux-$UID/phux.sock)
 
-$XDG_STATE_HOME/phux/               # design intent; not yet implemented
-├── server.pid
-├── log/
-│   └── server.log                  # tracing output, rotated daily
-└── journal/
-    └── <pane_id>.log               # per-pane PTY journal, capped ring
-                                    #   (default 10 MiB)
+$XDG_STATE_HOME/phux/
+├── client-<pid>.log                # default interactive-client log
+├── remote-cert.pem                 # auto-provisioned remote certificate
+├── remote-key.pem                  # owner-only private key
+└── remote-tokens                   # owner-only pairing tokens
 ```
 
-Today only the socket is real (see
-[`phux-server::runtime::default_socket_path`](../../crates/phux-server/src/runtime/mod.rs)).
-The state-dir layout matches what
-[`../architecture/process-model.md`](../architecture/process-model.md)
-describes; both docs treat it as the destination shape.
+These files are real today. A server PID file, rotated server-log directory,
+and per-terminal PTY journal remain design intent; workspace archives are
+written only when requested with `phux workspace save`.
 
 ### 4.2 Format
 
@@ -348,6 +393,7 @@ A minimal config:
 ```toml
 [defaults]
 shell                 = "/bin/zsh"
+term                  = "xterm-256color"   # TERM advertised to spawned panes
 history-limit         = 50000
 refresh-rate          = 60
 # Sane-default spawn knobs (phux-4li.1):
@@ -406,6 +452,26 @@ section_header = "yellow"
 **Spawn defaults under `[defaults]`** shape what happens when a new pane
 or session comes into being:
 
+- **`term`** (string, default `"xterm-256color"`) is the `TERM` the
+  server advertises to the inner program of every spawned pane. The
+  resolution order for one spawn, lowest to highest: compiled-in
+  baseline → `defaults.term` → the `SPAWN_TERMINAL.term` wire field → a
+  `TERM` entry in `SPAWN_TERMINAL.env` (spec L1 §3.1). The default is
+  deliberately the safe xterm baseline rather than `ghostty`: ghostty's
+  terminfo advertises the `fullkbd` capability, which ncurses apps read
+  as "kitty keyboard protocol available" and push `CSI > N u` — and at
+  least htop then fails to parse the CSI-u key reports it asked for, so
+  its `q` quit dies (phux-7vx). The phux stack itself round-trips the
+  kitty protocol — the phux-0o8 harness
+  (`crates/phux-server/tests/kip_roundtrip.rs`) drives real TUIs through
+  the full wire path under `TERM=ghostty` and proves nvim's CSI-u
+  opt-in works end-to-end, with fzf/less/vim/btop regression-free — but
+  the canonical ncurses reproducer (htop) remains unproven, so the
+  default stays conservative. Set `term = "ghostty"` to opt into
+  ghostty's extended terminfo (sixel, kitty graphics advertisement,
+  ghostty SGR extensions) once the apps you run are known to round-trip
+  it; apps that opt into kitty mode at runtime get it under either
+  default.
 - **`cwd-inheritance`** (string enum, default `"inherit-focused"`)
   controls how a freshly-spawned pane picks its working directory when a
   `SPAWN_TERMINAL` leaves `cwd` unset (an explicit `cwd` always wins).
@@ -492,12 +558,32 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+# Optional: contribute a prefix-table keybinding for this action
+# (chord syntax per section 5.1, e.g. "g" or "g s"). The TUI merges it
+# at attach; a chord that conflicts with the user's own [keybindings]
+# (exact chord or ambiguous prefix) is dropped with a logged warning —
+# user config always wins. Plugin actions also always appear in the
+# command palette (section 5.5) whether or not keys is set.
+keys = "g"
 
 [[events]]
 id = "idle"
 title = "Pane idle"
 on = "pane.idle"
 command = ["sh", "-c", "printf idle"]
+
+# Optional: contribute status-bar widgets (section 8.3). Each entry is a
+# widget table (kind + kind-specific options) plus a plugin-local id and
+# the bar slot ("left" | "center" | "right", default "right") to append
+# to. Contributions never displace user config: the TUI appends them
+# after the user's own [status] widgets, and an entry whose spec fails
+# widget validation is dropped with a logged warning.
+[[widgets]]
+id = "battery"
+slot = "right"
+kind = "exec"
+command = "./battery.sh"
+interval = "30s"
 
 [[agents]]
 id = "codex"
@@ -506,6 +592,13 @@ state = "working"
 attention = "normal"
 contexts = ["workspace", "pane"]
 
+# A pane the TUI can open as a real server-side Terminal running this
+# command (section 5.5). `placement` routes where it opens: "split"
+# (beside the focused pane), "tab" (a new window named after `title`),
+# or "zoomed" (a split that opens filling the window). "overlay" is
+# accepted by the schema but NOT hosted yet — a floating live-terminal
+# surface is deferred; overlay entries are skipped with a logged
+# warning and do not appear in the palette.
 [[panes]]
 id = "board"
 title = "Agent Board"
@@ -547,6 +640,9 @@ The lifecycle verbs edit `[[plugins]]` in `config.toml` without starting
 a server:
 
 ```
+phux plugin install https://example.com/agent-tools.git
+phux plugin install ./plugins/agent-tools       # local dir or .tar/.tar.gz/.tgz
+phux plugin update [example.agent-tools]
 phux plugin link ./plugins/agent-tools/phux-plugin.toml
 phux plugin list --json
 phux plugin disable example.agent-tools
@@ -554,10 +650,46 @@ phux plugin enable example.agent-tools
 phux plugin unlink example.agent-tools
 ```
 
-`phux config agents --json` projects `[[agents]]` entries into a flat
-`schema_version = 1` document with `plugin_id`, `id`, `label`, `state`,
-`attention`, and `contexts`, so consumers can render
-unknown/idle/working/blocked state without knowing every plugin entrypoint.
+Manifest validation includes the `min_phux_version` gate: a manifest whose
+floor is newer than the running phux is rejected at link, install, and load
+time with an error naming both versions (best-effort batch consumers such
+as the attach TUI skip the gated plugin with a logged warning instead of
+failing wholesale).
+
+`phux plugin install REF` fetches a whole plugin package into the managed
+plugins directory — `$XDG_DATA_HOME/phux/plugins`, else
+`~/.local/share/phux/plugins`. `REF` is a git URL (`https://`, `git@`,
+`file://`; cloned shallow with the system `git`, `--rev BRANCH_OR_TAG` picks
+a ref), a local plugin directory (copied, `.git` excluded), or a local
+tarball (`.tar`, `.tar.gz`, `.tgz`; extracted with the system `tar`). After
+the fetch, the manifest's `[[build]]` steps for the current platform run as
+child processes from the plugin root with a five-minute per-step timeout and
+captured output; a failing or timed-out build aborts the install with the
+step's stdout/stderr and leaves nothing linked. The validated package is
+then linked into `[[plugins]]` exactly like `phux plugin link` (pass
+`--disabled` to link it disabled), and its provenance — source kind, ref,
+requested branch, and the resolved commit for git sources — is recorded in
+the managed directory's `plugins.lock`. With `--json`, the result is a
+`schema_version = 1` document under an `installed` key with `id`, `version`,
+`dir`, `source`, `ref`, `branch`, `rev`, and `enabled`.
+
+`phux plugin update [NAME]` re-fetches from the lockfile's recorded sources
+(every entry, or just `NAME`), reruns the build steps, revalidates the
+manifest (id changes are refused), swaps the managed copy, and records the
+new resolved commit. `config.toml` is untouched because the linked manifest
+path does not move. With `--json`, the result is a `schema_version = 1`
+document whose `updated` array carries `id`, `version`, and `rev` per
+plugin.
+
+`phux config agents --json [--socket PATH]` projects `[[agents]]` entries
+into a flat `schema_version = 2` document with `plugin_id`, `id`, `label`,
+`state`, `attention`, `source`, `declared`, `runtime`, and `contexts`, so
+consumers can render unknown/idle/working/blocked/done state without knowing
+every plugin entrypoint. The projection is live (phux-r82.10): when a server
+answers on the socket, per-pane `phux.agent/v1` records (ADR-0040) and asked
+state override the declared manifest baseline; without a server the declared
+values are reported with `source = "manifest"`. See
+`docs/consumers/agents.md` §4.6 for the normative shape.
 The config/plugin commands load the user config, resolve every configured
 manifest, and validate ids and non-empty command argv values. Invalid manifests
 are hard failures: they are never silently skipped, because the runtime host
@@ -585,38 +717,83 @@ agent-tools demo launches and drives an `agent-bench` profile through
 **Federation satellites** live under `[[satellites]]`. This is the
 hub-side registry for remote phux servers; routing is a later federation
 slice, but the registry name is already the host token that will appear in
-`TerminalId::Satellite.host`. `endpoint` is an opaque URI string so
-`ssh://devbox`, `quic://host:8788`, and `wss://host:8787` can share one
-control-plane shape; `enabled` defaults to `true`.
+`TerminalId::Satellite.host`. `endpoint` is an opaque URI string in the
+registry CRUD so `ssh://devbox`, `quic://host:8788`, and `wss://host:8787`
+can share one control-plane shape; `enabled` defaults to `true`.
+
+A server started with `phux server --hub` consumes this registry: at
+startup it validates every enabled entry's endpoint by scheme (`quic://`
+requires an explicit `host:port`; `ssh://` is accepted but its transport
+is deferred) into a runtime satellite table keyed by the registry name,
+and refuses to start on a malformed enabled endpoint or a duplicate name.
+Disabled entries are skipped. Dialing and routing are later federation
+slices; without `--hub` the server ignores the registry entirely.
+
+The hub authenticates to a satellite as an ordinary remote consumer
+(ADR-0038): a pairing bearer token plus a TLS certificate-fingerprint pin,
+both produced by running `phux pair` on the satellite host. The token is
+stored **by reference** — `token-file` is an absolute path to an owner-only
+file holding the hex token (the same shape as the server's token store); the
+secret never appears in `config.toml` and is never printed by the lifecycle
+verbs. `cert-fingerprint` is the satellite certificate's SHA-256 pin (64 hex
+digits, optionally colon-separated; not a secret, stored inline).
 
 ```toml
 [[satellites]]
 name = "devbox"
-endpoint = "ssh://devbox"
+endpoint = "quic://devbox.example:8788"
 enabled = true
+token-file = "/home/me/.local/state/phux/satellites/devbox.token"
+cert-fingerprint = "AB:CD:..."
 ```
 
 The lifecycle verbs edit `[[satellites]]` in `config.toml` without
 starting a server:
 
 ```
-phux satellite add devbox ssh://devbox
+phux satellite add devbox quic://devbox.example:8788 \
+    --token-file /home/me/.local/state/phux/satellites/devbox.token \
+    --cert-fingerprint AB:CD:...
 phux satellite list --json
 phux satellite remove devbox
 ```
 
+`add` is add-or-update and replaces the whole entry, so repeat the auth
+flags when re-adding a name; omitting them clears the stored auth material.
+
 ### 4.3 Reloading
 
-> **Status:** Design intent. No live-reload verb ships today. The shipped
-> `phux config` subcommands are `init`, `path`, `show`, `plugins`, `agents`,
-> and `run` (§4.0); a running client picks up config changes on its next
-> start, not in place.
+Config reloads are **explicit, never automatic** (phux-foz.5). Two
+surfaces trigger the same in-place reload of a running client:
 
-Config reloads are designed to be explicit, not automatic: a future
-reload path re-reads the file and applies it without restarting, and the
-file is deliberately not watched, because watch-reload introduces a class
-of "saved-mid-edit, now my keybindings are gone" papercuts. Until that
-lands, restart the client (or detach and re-attach) to apply edits.
+- **The `reload-config` action** — a command-palette row ("Reload the
+  config file"), also bindable to any chord: `R = "reload-config"` in
+  `[keybindings.prefix-table]`. It ships unbound by default.
+- **`phux config reload`** from any shell. The CLI validates the config
+  locally first — a broken file fails right there with the parse error
+  and signals nothing — then rings a reload doorbell on the server (the
+  conventional L3 key `phux.config.reload/v1`, spec §3.8 of
+  [`../spec/L3.md`](../spec/L3.md)) so **every** attached client re-reads
+  its own config file. The config bytes never cross the wire.
+
+A reload re-runs the full layered loader — `extends` stacks and `-append`
+array merges resolve exactly as at startup — and rebuilds, atomically:
+keybindings (prefix, both tables, plugin-contributed chords, the
+which-key knobs), the theme, the status-bar composition, and the plugin
+action rows in the palette. Failure semantics are all-or-nothing: on any
+parse or validation error the client keeps the **previous** config fully
+in effect and surfaces the error as a dismissable toast — never a crash,
+never a half-applied mix of old and new.
+
+Not covered by a reload (restart the client, or detach and re-attach):
+pane-behavior settings read once at attach, such as `[predict]`,
+`[sidebar]` geometry, and `[defaults]` (which the server owns anyway).
+
+The file is deliberately **not watched**: watch-reload introduces a class
+of "saved-mid-edit, now my keybindings are gone" papercuts, and an
+explicit verb keeps a broken intermediate save inert until you ask for
+it. This was the design intent recorded here before the verb shipped; it
+is now the shipped behavior.
 
 ### 4.4 Theme color slots
 
@@ -643,6 +820,7 @@ Recognized slots:
 | `shadow`         | `#1c1c26`   | Modal drop shadow                         |
 | `selection_fg`   | white       | Copy-mode status strip foreground         |
 | `selection_bg`   | ANSI 240    | Copy-mode status strip background         |
+| `attention`      | `#fbbf24`   | Agent-attention chrome (asked marker/hint) |
 
 ```toml
 [theme]
@@ -752,11 +930,15 @@ test, so this table cannot silently drift):
 | `window-picker`   | (opens the grouped window picker — §5.5)    |
 | `session-picker`  | (opens the session picker — §5.5)           |
 | `new-session`     | `name?` (bare opens an interactive prompt)  |
-| `switch-session`  | `name` (re-attaches this client)            |
+| `switch-session`  | `name`, `window?` (re-attaches this client; `window` selects that window index after the switch — §5.5) |
 | `detach`          |                                             |
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
+| `set-pane`        | `mouse` = `on`\|`off`\|`toggle` — per-pane mouse opt-out (§7, ADR-0035) |
+| `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
+| `plugin-pane`     | `plugin`, `pane` — open a plugin manifest pane (§5.5) |
+| `reload-config`   | re-read the config and apply it in place (§4.3) |
 
 ### 5.5 Command palette and pickers
 
@@ -769,16 +951,88 @@ word-boundary hits, and earliness all raise a row's rank), so typing `sp`
 floats `split-pane` to the top. Enter commits the selected row through the
 same `run_action` path a keybinding takes.
 
+Enabled plugins' manifest `[[actions]]` appear under a trailing
+**Plugin** header, one namespaced row per action
+(`plugin: <plugin-name>: <action title>`). Committing one runs
+`plugin-action { plugin, action }`, which executes the manifest's argv
+through the same child-process runtime as `phux config run PLUGIN
+ACTION` — spawned off the input loop, so a slow plugin never freezes the
+TUI. A failed run (non-zero exit, timeout, or spawn error) pops a
+dismissable toast showing the captured output; successes only log. A
+manifest action may also declare `keys = "..."` to contribute a
+prefix-table binding (see the plugin-manifest block in §4.2); user
+config always wins on conflict, and the palette row shows whichever
+chord actually ended up bound.
+
+Manifest `[[panes]]` share the same **Plugin** header, one row per
+hostable pane (`plugin pane: <plugin-name>: <pane title>`). Committing
+one runs `plugin-pane { plugin, pane }`, which opens a real server-side
+Terminal running the pane's argv through the same `SPAWN_TERMINAL` verb
+`split-pane` / `new-window` use — no plugin-privileged wire surface
+(ADR-0017); any consumer could do the same. The spawn's working
+directory is the plugin root, and the child sees `PHUX_PLUGIN_ID`,
+`PHUX_PLUGIN_PANE_ID`, and `PHUX_PLUGIN_ROOT` on top of the server's
+environment (the pane counterpart of the action runtime's identity
+variables). The manifest's `placement` routes where it opens:
+
+- `split` — beside the focused pane (side-by-side), like `split-pane`.
+- `tab` — a new window named after the pane's `title`.
+- `zoomed` — a split whose new pane opens zoomed to fill the window;
+  `toggle-zoom` reveals it tiled beside the anchor pane.
+- `overlay` — **not hosted yet.** A floating live-terminal overlay is a
+  larger chrome surface than the current overlay stack (modal select
+  lists and prompts) supports; entries declaring it are skipped with a
+  logged warning and never listed. The declaration remains valid
+  manifest schema so packages can ship it ahead of the host.
+
+Unlike `[[actions]]`, panes contribute no keybindings today; a user can
+still bind one manually with a parameterized action
+(`{ action = "plugin-pane", plugin = "...", pane = "..." }`).
+Disabled plugins (`enabled = false`) contribute no rows.
+
 The **session picker** (`session-picker`, `C-a s`, alias `C-a a`) lists the
 server's other sessions; choosing one re-attaches this client to it
 in-process (`switch-session`). A trailing "+ New session" row creates one.
 
 The **window picker** (`window-picker`, `C-a w`) is hierarchical: every
 session is a section header with its windows nested beneath it. Choosing a
-window in the **current** session switches to it directly; choosing
-another session switches to that session (its windows then list under its
-own picker). Directly selecting a window inside a different session in one
-step is not yet wired — see the picker's source for the gap.
+window in the **current** session switches to it directly
+(`select-window { index }`). Other sessions' windows are **one-step
+jumps**: the client fetches each peer session's persisted layout right
+after attach, so the picker lists their windows (`index:name`, pane
+count) too, and choosing one commits `switch-session { name, window }` —
+a single Enter re-attaches to that session and selects that window once
+its layout loads. A peer session with nothing persisted yet (or one
+created after this client attached) falls back to a single "switch to
+this session" row; its own picker then lists its windows. The cached
+foreign layouts are an attach-time snapshot: if a peer rearranged its
+windows since, the jump still switches sessions and the stale window
+index degrades to the session's own remembered focus (logged, no bell).
+
+### 5.6 Which-key popup
+
+Press the prefix and hesitate, and a small floating panel lists every
+prefix-table continuation — key on the left, action on the right — built
+from your live bindings (rebinds included; it is the same config snapshot
+the help overlay reads). The numeric window-jump keys collapse into a
+single `0-9` row.
+
+The popup is display-only and never captures input:
+
+- **Any key** dismisses it and executes its binding exactly as if the
+  popup had never appeared. A continuation typed *before* the delay
+  elapses suppresses the popup entirely — it can never eat or delay a
+  chord.
+- **Esc** dismisses it and cancels the pending prefix (nothing is sent to
+  the pane).
+
+Configured under `[keybindings]`:
+
+```toml
+[keybindings]
+which-key = true          # default; false disables the popup
+which-key-delay-ms = 600  # hesitation before it appears
+```
 
 ---
 
@@ -817,10 +1071,11 @@ the `phux-4li` epic.
 
 ### 6.2 Resize behavior
 
-> **Status:** Design intent. Not yet implemented as of 2026-05-25.
-> The layout tree, split, kill-pane, and directional focus shipped in
-> `phux-byc.2`; viewport-driven re-flow, minimum-size freezing, and
-> the `resize-pane` command have no tickets filed yet.
+> **Status:** Viewport-driven reflow ships. Automatic minimum-size freezing
+> now also ships (phux-foz.3): proportional re-flow and freezing are
+> implemented in the layout walk itself, so paint, reflow
+> (`TERMINAL_RESIZE` sizing), and mouse hit-testing all read the same frozen
+> tiling.
 
 When the client viewport (or server-aggregated viewport for multi-client
 sessions) resizes, split ratios are preserved and dimensions are
@@ -829,10 +1084,19 @@ redistributed proportionally. A leaf that hits its minimum size
 client) freezes; remaining space redistributes among non-frozen leaves.
 This mirrors tmux's resize behavior.
 
+Below the layout's aggregate minimums (every leaf at its floor plus one
+cell per interior divider) freezing disengages and pure proportional
+tiling resumes: panes degrade to sub-viable rectangles rather than
+disappearing, and the exact-tiling invariant (no gaps, no overlaps)
+holds at every viewport size.
+
 ### 6.3 Resize commands
 
-> **Status:** Design intent. Not yet implemented as of 2026-05-25.
-> No `resize-pane` action wired into the dispatcher; no ticket filed.
+> **Status:** Keyboard `resize-pane` actions and mouse divider dragging ship
+> (ADR-0035, phux-foz.3). `resize-pane` dispatches through the
+> single-dispatch action registry, `C-a H/J/K/L` are the default bindings
+> (see §5.3), the command palette offers a resize row, and drag-on-divider
+> (§7) commits through the same ratio math.
 
 `resize-pane direction=right amount=5` moves the boundary between the
 focused pane and its right neighbor by 5 columns toward the right,
@@ -842,16 +1106,68 @@ Resize commands modify the relevant interior node's `ratio` (not
 absolute sizes). After a subsequent window resize, the new ratio is
 preserved.
 
+A resize that would push either side of the boundary below 2 cells on
+the resize axis is a bell-no-op (ADR-0019 decision 5). The gate measures
+the ratio's *proportional* tiling — what the ratio asks for — not the
+frozen tiling of §6.2, so a command cannot silently bank ratio behind a
+frozen divider that the layout would snap to on the next viewport grow.
+The new layout broadcasts to other attached clients via `SET_METADATA`
+(`phux.tui.layout/v1`), like every other layout mutation.
+
+### 6.4 Window sidebar
+
+> **Status:** Shipped (`phux-4h5a`; herdr-shaped by `phux-p4vp`;
+> interactive per `phux-fce4`).
+
+`[sidebar]` docks a vertical window strip on the left (default) or
+right edge; `toggle-sidebar` (`C-a b`) flips it at runtime. Panes tile
+into the remaining content rect, so the strip never overlaps content.
+
+Each window occupies a fixed **two-row block**, top to bottom in
+`select-window` index order:
+
+- **Name row.** The window's display label (agent record, OSC title, or
+  stored name — same resolution as the status-bar tab strip), with the
+  active-window marker and the §8.6 attention `!`.
+- **Branch row.** The VCS branch of the window's focused pane, dim and
+  nested under the label (`main`, a `wave2/...` branch, or a short
+  commit hash for a detached HEAD). Blank when the pane's working
+  directory is not inside a git repository.
+
+Branch inference is **client-local and read-only**: the pane's working
+directory (carried by the `ATTACHED` snapshot) is walked up to the
+enclosing `.git`, worktree gitfiles (`gitdir: ...`) are resolved, and
+`HEAD` is read directly — one cached file read, never a `git`
+subprocess, and nothing added to the wire. The cache re-validates on a
+short TTL keyed by `HEAD`'s mtime, so a `git switch` shows up on the
+next chrome refresh without stat storms.
+
+The strip's last two rows are **interactive affordances** (`phux-fce4`),
+and the window blocks are click targets. Every sidebar click commits the
+same `ResolvedAction` a keybinding or palette row would — one `run_action`
+dispatch path, no bespoke click semantics:
+
+| Target                      | Committed action                       |
+|-----------------------------|----------------------------------------|
+| A window block (either row) | `select-window { index }`              |
+| `+ new`                     | `new-window`                           |
+| `= menu`                    | `command-palette` (the session/plugin menu; `new-session` lives in its Session group) |
+
+Pointer events over the strip never leak into pane routing: presses on
+blank rows or the separator column are consumed and dropped. The same
+targets stay keyboard-reachable through their actions (`C-a c`,
+`C-a :`, `C-a 0`–`9`).
+
 ---
 
 ## 7. Mouse
 
-> **Status:** Shipped (ADR-0035). Click-to-focus, drag-on-divider to
-> resize, and default outer-terminal mouse capture are implemented. The
-> client enables its own mouse tracking on attach so divider drags work
-> without an inner program turning mouse mode on. The per-pane
-> `set-pane mouse off` escape hatch is **follow-up** — the global
-> `mouse = false` config is the current opt-out.
+> **Status:** Shipped (ADR-0035; per-pane opt-out in phux-npb3).
+> Click-to-focus, drag-on-divider to resize, and default outer-terminal
+> mouse capture are implemented. The client enables its own mouse
+> tracking on attach so divider drags work without an inner program
+> turning mouse mode on. Opt-outs: the global `mouse = false` config,
+> and the per-pane `set-pane mouse off` action described below.
 
 Mouse handling is enabled by default. On attach the client emits DECSET
 `?1002h` (button-event tracking) + `?1006h` (SGR coordinates) for the
@@ -871,6 +1187,8 @@ the pointer over a divider whenever the inner program has no mouse mode.
 |                          | pane's local viewport                 |
 | Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar slot | Slot-defined; default no-op           |
+| Click on a sidebar row   | Select that window; `+ new` / `= menu`|
+|                          | run their actions (§6.4)              |
 
 Only divider cells change meaning. Every event inside a pane's rectangle
 is forwarded to that pane with pane-local coordinates, so an inner TUI
@@ -885,10 +1203,22 @@ terminal's click-drag text selection inside the phux viewport. Hold
 enforce it). A host that does not honour Shift-bypass needs
 `mouse = false` for easy selection.
 
-**Escape hatch.** `mouse = false` in `[defaults]` skips the DECSET
+**Escape hatches.** `mouse = false` in `[defaults]` skips the DECSET
 entirely and reverts to pass-through-only (the client only sees mouse
-when an inner program enables it). The per-pane `set-pane mouse off`
-remains follow-up work (needs a `set-pane` verb + per-pane client state).
+when an inner program enables it).
+
+Per-pane (phux-npb3): the `set-pane` action with `mouse = "on"`,
+`"off"`, or `"toggle"` (bindable, and offered by the command palette as
+a toggle) opts the *focused* pane out of client mouse handling without
+touching its siblings. The state is client-local and capture follows
+focus: while an opted-out pane is focused the client drops its own
+mouse-tracking DECSET, so the host terminal's raw handling (native
+click-drag selection and friends) returns for that pane; focusing any
+opted-in pane re-enables capture and drag-to-resize. While capture is
+on (another pane focused), a click on the opted-out pane still focuses
+it — that is the mouse path back in — but the client never synthesizes
+`INPUT_MOUSE` (or the local wheel viewport scroll) for an opted-out
+pane. Nothing crosses the wire; a pane's opt-out ends when it closes.
 
 We do not ship copy-mode mouse drag selection — see §11.
 
@@ -900,7 +1230,8 @@ We do not ship copy-mode mouse drag selection — see §11.
 
 The status bar is **rendered entirely client-side**. A GUI client may
 ignore it and render its own chrome; the TUI client composes it from
-widgets and draws it on the bottom row of the outer terminal.
+widgets and draws it on one reserved row of the outer terminal — the
+bottom row by default, or the top row with `position = "top"`.
 
 Every slot's contents are a list of **widgets**. A widget is a typed
 thing that produces styled text. The default config looks short because
@@ -911,7 +1242,13 @@ a bare string is shorthand for a no-parameters widget:
 left   = ["session-name"]                               # → [{ kind = "session-name" }]
 center = []
 right  = [{ kind = "time", format = " %H:%M" }]
+position = "bottom"   # or "top"; default "bottom"
 ```
+
+`position` moves the whole reserved row: with `"top"` the bar draws on
+the outer terminal's first row and the panes (and sidebar strip) shift
+down one row, so nothing ever underlaps the bar. Everything else —
+widgets, styling, refresh — is identical in both positions.
 
 There are three categories of widgets:
 
@@ -957,21 +1294,37 @@ architectural revision to grow a status bar plugin story.
 | `help-hints`    | prefix-aware help / palette / copy affordances — **implemented** |
 | `window`        | `format?` (default: `"{name}"`)                              |
 | `pane`          | `format?`                                                    |
-| `cwd`           | `format?`, `truncate?` (chars)                               |
-| `exit`          | `format?` (last command exit code, OSC 133)                  |
+| `cwd`           | `format?`, `truncate?` (chars; keeps the path tail), `$HOME` collapses to `~` — **implemented** |
+| `exit`          | `format?` (`{code}` placeholder; last command exit code, OSC 133) — **implemented** |
 | `host`          | `format?`                                                    |
 | `mode`          | `format?` (current input mode)                               |
 | `key-indicator` | shows the last key/chord pressed; reserved for v0.2          |
 | `text`          | `value` (literal styled text)                                |
 | `spacer`        | flexible expanding space; no parameters                      |
-| `exec`          | `command`, `interval?` (default `5s`), `parse-ansi?` (true)  |
+| `exec`          | `command` (string via `/bin/sh -c`, or argv array), `interval?` (default `5s`, floor `1s`), `parse-ansi?` (true) — **implemented** |
 
 Every widget kind accepts a `style` table with optional `fg`, `bg`
 (color strings: names, `#rrggbb`, or palette indices), and the boolean
 attributes `bold`, `dim`, `italic`, `underline`, `reverse`. The
-implemented built-ins today are `session-name`, `time`, `windows`, and
-`help-hints` (the others above are design intent); `windows` takes its
-`active` and `inactive` segments as such style tables.
+implemented built-ins today are `session-name`, `time`, `windows`,
+`help-hints`, `cwd`, `exit`, and `exec` (the others above are design
+intent); `windows` takes its `active` and `inactive` segments as such
+style tables. Plugin manifests can contribute additional widget entries
+via `[[widgets]]` (section 7's manifest contract): each contribution is a
+widget table plus a `slot`, appended after the user's own widgets, and a
+contribution that fails validation is dropped with a logged warning
+rather than degrading the bar.
+
+Data feeds behind the server-fact widgets: `cwd` renders the focused
+pane's live directory from `cwd_changed` events (the server queries the
+PTY child's kernel cwd at OSC-133 prompt boundaries and on output
+settle; the `ATTACHED` snapshot's spawn cwd seeds it), and `exit`
+renders `command_finished.exit_code` (the OSC-133 `D`-mark code, so it
+requires shell integration). `exec` widgets never run on the render
+path: the client runs the command per `interval` as a bounded
+`kill_on_drop` child process (10s hard cap) and folds captured stdout —
+first line only — into a cached strip the widget renders; a failed or
+timed-out run keeps the last good output.
 
 ### 8.4 Refresh and ordering
 
@@ -986,21 +1339,57 @@ implemented built-ins today are `session-name`, `time`, `windows`, and
 
 ### 8.5 What the status bar is not
 
-- Not multi-row. One row, bottom of the outer terminal. If you need
-  more, dedicate a pane.
+- Not multi-row. One row — bottom of the outer terminal by default,
+  top with `position = "top"` (§8.1). If you need more, dedicate a
+  pane.
 - Not themable via a styling engine. Per-widget `style` tables only.
 - Not server-rendered. Every client owns its chrome. This is what
   enables a future GUI client with native chrome to coexist with the
   TUI client trivially.
 
+### 8.6 Agent attention (the asked chrome)
+
+When an agent in a pane blocks for a human answer, the server emits
+`AgentEvent::Asked` on the subscribed event stream
+([ADR-0035](../../ADR/0035-agent-asked-event.md); detection sources in
+[ADR-0036](../../ADR/0036-agent-asked-detection.md)). The interactive
+TUI folds that event into per-pane state (the same fold as the
+ADR-0033 `TerminalControl` badge) and renders it on every chrome
+surface that names windows, colored by the `attention` theme slot
+(§4.4):
+
+- **Window tab marker.** The asking pane's window gets a ` !` suffix on
+  its tab, in both the sidebar strip and the status bar's `windows`
+  widget — including for a background window, so the question is
+  findable from anywhere. (The sidebar marker is themed; the `windows`
+  widget marker rides the segment's own style, like the zoom `Z`.)
+- **Status-bar hint.** A right-aligned `[ ASK ]` chip on the bar row
+  (`[ ASK xN ]` when several panes are asking), sitting left of the
+  ADR-0033 supervisory badge when one is up.
+
+**Clearing rule.** Attention clears when the client forwards key or
+paste input to the asking pane — i.e. you focused it and typed
+(presumably answering). Merely focusing or clicking the pane does
+*not* clear it: looking at a question is not answering it. A repeated
+`Asked` for a still-flagged pane changes nothing; the flag re-raises
+on the next `Asked` after input cleared it. The flag is client-local
+and per-attach — it does not persist across detach/reattach (a
+re-emitted `Asked` from the ADR-0036 detector re-raises it).
+
 ---
 
 ## 9. Hooks
 
-> **Status:** Design intent. Config parsing for `[[hooks.<name>]]`
-> entries ships in `phux-config` (see `schema.rs`); the server-side
-> dispatcher that actually fires hooks on real events is **not yet
-> implemented** as of 2026-05-25. No tickets filed.
+> **Status:** Partially shipped (phux-r82.1). Config parsing for
+> `[[hooks.<name>]]` entries ships in `phux-config` (see `schema.rs`),
+> and the server-side dispatcher (`phux-server::hooks`) fires a starter
+> set of real events: `after-new-pane`, `pane-exit`, `focus-changed`,
+> `client-attached`, and `client-detached`. Enabled plugin manifests'
+> `[[events]]` entries whose `on` names one of these events fire through
+> the same dispatcher. The remaining hook points in the table below
+> (`after-new-session`, `after-new-window`, `after-kill-pane`,
+> `output-silenced`, `output-active`) stay design intent — the server
+> does not observe those edges yet.
 
 Hooks fire at named events. Each hook in the config is an
 array-of-tables (TOML `[[hooks.<name>]]`) of `{ when, action }` pairs.
@@ -1041,6 +1430,27 @@ Hook points (initial):
 | `focus-changed`       | any client changes focus                 |
 | `output-silenced`     | configurable silence threshold elapsed   |
 | `output-active`       | first byte after a silence               |
+
+Server-side execution semantics (the shipped subset):
+
+- **Child processes only.** There is no in-process plugin host. A `run`
+  action's `command` may be a string (executed via `/bin/sh -c`) or an
+  argv array (executed directly). `noop` matches and does nothing;
+  other action kinds (e.g. `message`) are client-side and the server
+  dispatcher skips them (the entry still consumes the event under
+  first-match-wins).
+- **Event context rides environment variables.** Every hook child gets
+  `PHUX_EVENT` plus one `PHUX_*` variable per context key:
+  `PHUX_TERMINAL_ID`, `PHUX_SESSION`, `PHUX_EXIT_CODE` (absent for
+  signal-killed children), `PHUX_CLIENT_ID`. Plugin event hooks
+  additionally get `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_EVENT_ID`, and
+  `PHUX_PLUGIN_ROOT`, and run with the plugin root as their working
+  directory.
+- **Fire-and-forget, bounded.** Events queue onto the dispatcher through
+  a non-blocking bounded channel (a full queue drops the event); at most
+  a fixed number of hook children run concurrently, each under a timeout
+  with kill-on-drop. A slow or wedged hook never blocks the terminal
+  actor hot path.
 
 ---
 
@@ -1106,11 +1516,13 @@ The shipped defaults, in one place:
 | Setting                       | Default                                  |
 |-------------------------------|------------------------------------------|
 | Shell                         | `$SHELL`, fallback `/bin/sh`             |
+| `TERM` advertised to panes    | `xterm-256color` (phux-7vx/phux-0o8; set `defaults.term = "ghostty"` to opt in) |
 | History limit per pane        | 50 000 lines                             |
 | Pane refresh rate cap         | 60 Hz                                    |
 | Backpressure threshold        | 32 unacked frames                        |
 | Journal size cap (per pane)   | 10 MiB ring                              |
 | Prefix key                    | `C-a`                                    |
+| Which-key popup               | on, 600 ms hesitation delay              |
 | Pane on PTY exit              | close                                    |
 | Mouse                         | on                                       |
 | New-pane CWD inheritance      | `inherit-focused` (tmux-shaped)          |
@@ -1118,6 +1530,7 @@ The shipped defaults, in one place:
 | Session name template         | `"default"` (supports `${cwd-basename}`) |
 | Window-size policy            | `smallest` (shared Terminal geometry, ADR-0027) |
 | Status bar                    | `[{ kind = "windows" }]` / `[{ kind = "help-hints" }]` / `["session-name", { kind = "time", format = " %H:%M" }]` |
+| Status bar position           | `bottom` (`[status] position`, or `top`) |
 | Activity / silence thresholds | activity off; silence 2 min when enabled |
 | Resize on attach              | aggregate min bounding box per session   |
 | Cursor blink                  | follow inner program request             |
@@ -1143,9 +1556,15 @@ Discoverability: the default status bar keeps the highest-value prefix
 affordances visible without consuming pane space. If the prefix is
 rebound, the `help-hints` widget renders the configured prefix.
 
-Beyond that, `?` after the prefix opens a popup listing every binding.
-The popup is rendered server-side (a temporary overlay pane) so
-keyboard users and GUI clients both see the same list.
+Beyond that, two client-rendered overlays teach the bindings themselves
+(the TUI owns its chrome — nothing here is server-rendered):
+
+- `C-a ?` opens the **help modal**, a centered reference listing every
+  prefix-table and global binding. Esc (or `?` again) dismisses it.
+- Press `C-a` and *hesitate*, and the **which-key popup** appears after
+  `which-key-delay-ms` (default 600 ms), listing the available prefix
+  continuations. Any key dismisses it and executes normally; Esc cancels
+  the prefix. See §5.6.
 
 ---
 

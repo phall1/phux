@@ -4,12 +4,14 @@ mod link;
 mod loader;
 mod source;
 mod validate;
+mod version;
 mod workspace;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use loader::load_plugin_manifest;
 use serde::{Deserialize, Serialize};
+pub use version::CURRENT_PHUX_VERSION;
 
 /// A plugin declared in `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,7 +25,9 @@ pub struct PluginConfigEntry {
 }
 
 /// Parsed `phux-plugin.toml` manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// `Eq` is not derived: `PluginManifestWidget.opts` carries `toml::Value`
+// (not `Eq` because of `f64`), matching the schema-crate convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginManifest {
     /// Globally unique plugin id.
     pub id: String,
@@ -55,6 +59,8 @@ pub struct PluginManifest {
     pub links: Vec<PluginManifestLinkHandler>,
     /// Workspace profiles declared by the plugin.
     pub workspaces: Vec<PluginManifestWorkspace>,
+    /// Status-bar widgets contributed by the plugin (phux-r82.6).
+    pub widgets: Vec<PluginManifestWidget>,
 }
 
 /// Platform names accepted in plugin manifests.
@@ -140,6 +146,14 @@ pub struct PluginManifestAction {
     pub platforms: Option<Vec<PluginPlatform>>,
     /// Command argv to execute.
     pub command: Vec<String>,
+    /// Optional prefix-table chord sequence (e.g. `"g"` or `"g s"`,
+    /// chord syntax per [`crate::keybind`]) the TUI merges into its
+    /// prefix table so this action can fire from a keybinding.
+    /// Contributed bindings never override user config: on any conflict
+    /// (same chord, or an ambiguous-prefix relationship) the user's
+    /// binding wins and the plugin's is dropped with a logged warning.
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
 /// Event hook entrypoint declared in a plugin manifest.
@@ -231,6 +245,81 @@ pub struct PluginWorkspacePane {
     pub description: Option<String>,
 }
 
+/// Status-bar widget contributed by a plugin manifest (phux-r82.6,
+/// `[[widgets]]` in `phux-plugin.toml`).
+///
+/// The entry is a [`crate::WidgetSpec`]-shaped table (`kind` plus
+/// kind-specific options) with two extra fields: a plugin-local `id` and
+/// the bar `slot` to append to. Contributions never displace user config:
+/// the TUI appends them after the user's own `[status]` widgets, and an
+/// entry whose spec fails widget validation is dropped with a logged
+/// warning (mirroring the [`PluginManifestAction::keys`] conflict policy).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginManifestWidget {
+    /// Plugin-local widget id.
+    pub id: String,
+    /// Which status-bar slot the widget appends to.
+    pub slot: PluginWidgetSlot,
+    /// Widget kind (`exec`, `text`, ... — any registered kind).
+    pub kind: String,
+    /// Kind-specific options, exactly as a `[status]` widget table would
+    /// carry them.
+    pub opts: std::collections::BTreeMap<String, toml::Value>,
+}
+
+/// Status-bar slot a plugin widget appends to.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginWidgetSlot {
+    /// Append to the left slot.
+    Left,
+    /// Append to the center slot.
+    Center,
+    /// Append to the right slot (the conventional home for indicators).
+    #[default]
+    Right,
+}
+
+/// Fold enabled plugins' `[[widgets]]` contributions into a `[status]`
+/// config (phux-r82.6), appending each contributed spec after the user's
+/// own widgets in its declared slot.
+///
+/// Contributions are validated against `registry` first; a spec that does
+/// not build (unknown kind, bad option) is dropped with a `tracing::warn!`
+/// so one broken plugin cannot degrade the whole bar into the error strip.
+pub fn merge_widget_contributions(
+    status: &mut crate::schema::StatusCfg,
+    manifests: &[PluginManifest],
+    registry: &crate::widget::WidgetRegistry,
+) {
+    for manifest in manifests {
+        for widget in &manifest.widgets {
+            let spec = crate::schema::WidgetSpec {
+                kind: widget.kind.clone(),
+                opts: widget.opts.clone(),
+            };
+            match registry.build(&spec) {
+                Ok(_) => {
+                    let slot = match widget.slot {
+                        PluginWidgetSlot::Left => &mut status.left,
+                        PluginWidgetSlot::Center => &mut status.center,
+                        PluginWidgetSlot::Right => &mut status.right,
+                    };
+                    slot.push(crate::schema::Widget::Spec(spec));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        plugin = %manifest.id,
+                        widget = %widget.id,
+                        error = %err,
+                        "dropping plugin status-widget contribution that failed validation",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Placement requested by a plugin pane entrypoint.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -244,6 +333,55 @@ pub enum PluginPanePlacement {
     Tab,
     /// Zoomed pane view.
     Zoomed,
+}
+
+/// Resolve a configured manifest path against the config file's directory.
+///
+/// Absolute paths pass through; relative paths resolve under
+/// `config_path`'s parent (the documented `[[plugins]]` contract — see
+/// `docs/consumers/tui.md`).
+#[must_use]
+pub fn resolve_manifest_path(manifest: &Path, config_path: &Path) -> PathBuf {
+    if manifest.is_absolute() {
+        return manifest.to_path_buf();
+    }
+    config_path
+        .parent()
+        .map_or_else(|| manifest.to_path_buf(), |parent| parent.join(manifest))
+}
+
+/// Load the manifests of every **enabled** plugin in `entries`,
+/// resolving relative manifest paths against `config_path`'s directory.
+///
+/// Best-effort by design: a manifest that fails to load or validate is
+/// skipped with a `tracing::warn!` rather than failing the whole batch —
+/// one broken plugin must not take down a consumer (e.g. the attach TUI)
+/// that only wants to surface the healthy ones. Disabled entries are
+/// skipped silently. Callers that need per-manifest errors should use
+/// [`load_plugin_manifest`] directly.
+#[must_use]
+pub fn load_enabled_manifests(
+    config_path: &Path,
+    entries: &[PluginConfigEntry],
+) -> Vec<PluginManifest> {
+    let mut manifests = Vec::new();
+    for entry in entries {
+        if !entry.enabled {
+            continue;
+        }
+        let manifest_path = resolve_manifest_path(&entry.manifest, config_path);
+        match load_plugin_manifest(&manifest_path) {
+            Ok(manifest) => manifests.push(manifest),
+            Err(err) => {
+                tracing::warn!(
+                    manifest = %manifest_path.display(),
+                    error = %err,
+                    "skipping plugin manifest that failed to load",
+                );
+            }
+        }
+    }
+    manifests
 }
 
 /// Error raised while reading or validating a plugin manifest.

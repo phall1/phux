@@ -67,4 +67,5 @@ Resolver {
         key: B,
     },
     cursor: None,
+    pending_path: [],
 }

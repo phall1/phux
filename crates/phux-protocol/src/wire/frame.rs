@@ -217,6 +217,41 @@ pub const TERMINAL_TAGS_KEY: &str = "phux.tags/v1";
 /// ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)).
 pub const TERMINAL_LINK_KEY: &str = "phux.link/v1";
 
+/// Conventional L3 metadata key holding a Terminal's declared agent
+/// identity and lifecycle record (ADR-0040, `phux-3ert`).
+///
+/// Scope: the Terminal the agent runs in. Value: a UTF-8 JSON object
+/// `{ "name": str, "kind"?: str, "state"?: str, "attention"?: str,
+/// "session"?: str }` where `state` and `attention` are OPEN string enums —
+/// a consumer reading an unrecognized value treats it as `unknown` /
+/// `normal` rather than failing the parse. The server stores the bytes
+/// without interpreting them ([`docs/spec/L3.md`](../../../docs/spec/L3.md)
+/// §3.7); the *schema* is the normative client convention this key names, so
+/// a record written by one integration (CLI, plugin, provider hook) reads
+/// identically in every consumer. A consumer that finds this record MUST
+/// prefer it over OSC-title or screen-scrape heuristics; heuristics remain
+/// the fallback when the key is absent. Set via `SET_METADATA`, cleared via
+/// `DELETE_METADATA`, observed via `GET_METADATA`/`SUBSCRIBE_METADATA`.
+pub const TERMINAL_AGENT_KEY: &str = "phux.agent/v1";
+
+/// Conventional L3 metadata key acting as the config-reload doorbell for
+/// attached consumers (phux-foz.5).
+///
+/// Scope: [`Scope::Global`]. Value: an opaque, writer-chosen nonce (the
+/// reference CLI writes a UTF-8 `unix-nanos-pid` string); its only job is
+/// to DIFFER from the previous value so the server's equal-bytes SET
+/// dedup does not swallow the broadcast. The server stores the bytes
+/// without interpreting them. A consumer subscribed to this key treats a
+/// non-tombstone `METADATA_CHANGED` as "re-read your local config now":
+/// it re-runs its own layered config load and rebuilds its config-derived
+/// state in place. The config itself NEVER crosses the wire — each
+/// consumer reads its own file — and a consumer whose re-read fails MUST
+/// keep its previous configuration (surface the error locally, never
+/// half-apply). Tombstones (`DELETE_METADATA`) are ignored. Set via
+/// `SET_METADATA`, observed via `SUBSCRIBE_METADATA`. Backs
+/// `phux config reload` and the TUI `reload-config` action.
+pub const CONFIG_RELOAD_KEY: &str = "phux.config.reload/v1";
+
 /// Discriminant for `METADATA_VALUE` (server to client, `docs/spec/L3.md` §1).
 ///
 /// Reply frame for `GET_METADATA`; correlated by `request_id`. Carries
@@ -411,6 +446,12 @@ pub(crate) const EVENT_TAG_TERMINAL_CONTROL: u8 = 0x08;
 /// optional elapsed counter are additive and an older decoder skips the whole
 /// event by its length prefix as [`AgentEvent::Unknown`].
 pub(crate) const EVENT_TAG_ASKED: u8 = 0x09;
+/// Wire tag for [`AgentEvent::CwdChanged`]. Appended after `ASKED`'s `0x09`
+/// (phux-foz.4): the scoped Terminal's working directory changed. Sourced
+/// server-side from the kernel cwd of the PTY child (the same query the
+/// spawn-inheritance path uses), polled at OSC-133 prompt boundaries and
+/// output-idle and coalesced on change. Backs the `cwd` status widget.
+pub(crate) const EVENT_TAG_CWD_CHANGED: u8 = 0x0a;
 
 // Wire tags for the `Command` tagged union (SPEC §5.1). Tags follow the
 // spec catalog order so the allocation is stable as later verbs land:
@@ -1345,6 +1386,19 @@ pub enum AgentEvent {
         /// Seconds the agent has been waiting, or `None` when not reported.
         elapsed_seconds: Option<u64>,
     },
+    /// The scoped Terminal's working directory changed (phux-foz.4).
+    ///
+    /// Sourced from the kernel cwd of the PTY child process (the same
+    /// query the spawn-inheritance path uses — `/proc/<pid>/cwd` on Linux,
+    /// `proc_pidinfo` on macOS), polled at OSC-133 prompt boundaries and
+    /// on output-idle, and coalesced: emitted only when the directory
+    /// actually differs from the last observation. Best-effort like every
+    /// event — a consumer seeds from the `ATTACHED` snapshot's
+    /// `TerminalInfo::cwd` (the spawn cwd) and refines from this stream.
+    CwdChanged {
+        /// The Terminal's new working directory (absolute, lossy UTF-8).
+        cwd: String,
+    },
     /// An event whose `tag` this protocol version does not recognise.
     ///
     /// Produced **only by the decoder** when it reads an `EVENT` frame
@@ -2053,7 +2107,8 @@ impl FrameKind {
                 });
                 // ClientCapabilities rides as one field whose value is the
                 // positional caps blob: color_support, layers,
-                // image_protocols, kbd_protocols, hyperlinks, output_mode.
+                // image_protocols, kbd_protocols, hyperlinks, output_mode,
+                // optional default foreground/background RGB values.
                 enc.write_field_with(field::hello::CLIENT_CAPS, |e| {
                     e.write_u8(client_caps.color_support.as_wire());
                     e.write_u8(client_caps.layers.as_wire());
@@ -2061,6 +2116,15 @@ impl FrameKind {
                     e.write_u8(client_caps.kbd_protocols.as_wire());
                     e.write_u8(u8::from(client_caps.hyperlinks));
                     e.write_u8(client_caps.output_mode.as_wire());
+                    if let Some(colors) = client_caps.default_colors {
+                        e.write_u8(1);
+                        e.write_u8(colors.foreground.r);
+                        e.write_u8(colors.foreground.g);
+                        e.write_u8(colors.foreground.b);
+                        e.write_u8(colors.background.r);
+                        e.write_u8(colors.background.g);
+                        e.write_u8(colors.background.b);
+                    }
                 });
             }
             Self::HelloOk {
@@ -3422,8 +3486,9 @@ pub(super) fn decode_optional_i32(dec: &mut Decoder<'_>) -> Result<Option<i32>, 
 //   PANE_CLOSED      (0x05) → optional<i32> exit_status
 //   DIRTY            (0x06) → empty
 //   IDLE             (0x07) → empty
-//   ASKED            (0x08) → field-tagged TLV: str id, str question,
+//   ASKED            (0x09) → field-tagged TLV: str id, str question,
 //                            repeated str suggestion, optional u64 elapsed_seconds
+//   CWD_CHANGED      (0x0a) → str cwd
 // -----------------------------------------------------------------------------
 
 pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
@@ -3473,6 +3538,10 @@ pub(super) fn encode_agent_event(event: &AgentEvent, enc: &mut Encoder<'_>) {
             } => {
                 encode_asked_fields(id, question, suggestions, *elapsed_seconds, &mut body_enc);
                 EVENT_TAG_ASKED
+            }
+            AgentEvent::CwdChanged { cwd } => {
+                body_enc.write_str(cwd);
+                EVENT_TAG_CWD_CHANGED
             }
             // `Unknown` is decoder-only: an encoder that reaches here has
             // round-tripped an event this version did not understand.
@@ -3561,6 +3630,9 @@ pub(super) fn decode_agent_event(dec: &mut Decoder<'_>) -> Result<AgentEvent, De
             }
         }
         EVENT_TAG_ASKED => decode_asked_event(&mut body_dec)?,
+        EVENT_TAG_CWD_CHANGED => AgentEvent::CwdChanged {
+            cwd: body_dec.read_str()?.to_owned(),
+        },
         // Unknown event tag: preserve the body verbatim and skip. This is
         // the forward-compat path — a v0.2.x server may add event kinds an
         // older client does not know.

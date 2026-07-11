@@ -93,7 +93,12 @@ pub struct DefaultsCfg {
     /// phux-ign). Set explicitly to e.g. `"ghostty"` to opt into ghostty's
     /// extended terminfo (sixel, kitty-graphics advertisement, the ghostty
     /// SGR extensions) once the host's apps are known to round-trip the
-    /// kitty keyboard protocol.
+    /// kitty keyboard protocol. The phux-0o8 harness
+    /// (`crates/phux-server/tests/kip_roundtrip.rs`) records the evidence
+    /// per app: nvim's CSI-u opt-in round-trips end-to-end and
+    /// fzf/less/vim/btop are regression-free under `TERM=ghostty`, but
+    /// htop — the phux-7vx regression app — is unproven, so the shipped
+    /// default stays conservative.
     ///
     /// A per-spawn `SPAWN_TERMINAL.env` entry for `TERM` always wins over
     /// this default — the wire frame is authoritative for the Terminal it
@@ -291,6 +296,20 @@ pub struct KeybindingsCfg {
     /// Bindings that fire any time (typically `super`/`hyper` chords).
     #[serde(default)]
     pub global: BTreeMap<String, Action>,
+
+    /// Show the which-key popup: after the prefix is pressed, if no
+    /// continuation chord arrives within [`Self::which_key_delay_ms`],
+    /// the client pops a panel listing the available prefix-table
+    /// bindings. Any key dismisses it and executes normally; Esc
+    /// cancels the prefix. Default `true`.
+    #[serde(default = "default_true", rename = "which-key")]
+    pub which_key: bool,
+
+    /// Milliseconds to wait after the prefix before showing the
+    /// which-key popup. Default `600`. A fast continuation chord always
+    /// suppresses the popup entirely.
+    #[serde(default = "default_which_key_delay_ms", rename = "which-key-delay-ms")]
+    pub which_key_delay_ms: u64,
 }
 
 impl Default for KeybindingsCfg {
@@ -299,12 +318,19 @@ impl Default for KeybindingsCfg {
             prefix: default_prefix(),
             prefix_table: BTreeMap::new(),
             global: BTreeMap::new(),
+            which_key: true,
+            which_key_delay_ms: default_which_key_delay_ms(),
         }
     }
 }
 
 fn default_prefix() -> String {
     "C-a".to_owned()
+}
+
+/// Serde default for [`KeybindingsCfg::which_key_delay_ms`].
+const fn default_which_key_delay_ms() -> u64 {
+    600
 }
 
 /// An action attached to a binding, hook, or status slot.
@@ -345,7 +371,8 @@ pub struct ParamAction {
 // [status]
 // ---------------------------------------------------------------------------
 
-/// `[status]` table: three slots, each a list of widgets.
+/// `[status]` table: three slots, each a list of widgets, plus the row
+/// the bar reserves (`position`, phux-foz.8).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct StatusCfg {
@@ -358,6 +385,25 @@ pub struct StatusCfg {
     /// Right slot.
     #[serde(default)]
     pub right: Vec<Widget>,
+    /// Which outer-terminal row the bar reserves. Default `bottom`
+    /// (per `docs/consumers/tui.md` section 8).
+    #[serde(default)]
+    pub position: StatusPosition,
+}
+
+/// Which row the [`StatusCfg`] bar occupies (phux-foz.8).
+///
+/// Consumed by the TUI's chrome layer, which maps it onto its own
+/// `Position` render enum; kept as plain config data here (ADR-0020:
+/// phux-config carries no render types).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusPosition {
+    /// One row at the very bottom of the outer terminal (default).
+    #[default]
+    Bottom,
+    /// One row at the very top of the outer terminal.
+    Top,
 }
 
 /// `[sidebar]` — the Warp-style window sidebar (phux-4h5a).

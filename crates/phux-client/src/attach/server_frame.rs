@@ -8,15 +8,48 @@
 use std::collections::HashMap;
 
 use phux_protocol::ids::{ClientId, SessionId, TerminalId};
-use phux_protocol::wire::frame::{AgentEvent, FrameKind, Scope, SpawnError, SpawnResult};
+use phux_protocol::wire::frame::{
+    AgentEvent, CONFIG_RELOAD_KEY, FrameKind, Scope, SpawnError, SpawnResult,
+};
 use phux_protocol::wire::info::SessionInfo;
 
 use super::actions::{self, PendingSplit, PendingWindow, apply_spawned_ok, apply_terminal_closed};
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot};
 use super::paint::{SidebarReservation, content_rect, paint_bar_after_pane, paint_focused_pane};
+use crate::agent_meta::{AgentRecord, TERMINAL_AGENT_KEY, parse_agent_record};
 use crate::layout::{self, LayoutState, Workspace};
 use crate::predict::{Overlay, PredictionState, reconcile_terminal_output_per_cell};
 use crate::render::chrome::status_bar::StatusBarPainter;
+
+/// ADR-0040 (`phux-3ert`): the driver-held index of `phux.agent/v1` records.
+///
+/// `records` is what the window chrome reads (structured agent labels for
+/// the sidebar/tab strip); `pending` correlates in-flight `GET_METADATA`
+/// request ids to the Terminal they asked about; `subscribed` tracks which
+/// Terminals already have a live `SUBSCRIBE_METADATA` so the driver's
+/// subscription sweep is idempotent.
+#[derive(Debug, Default)]
+pub(super) struct AgentMetaIndex {
+    /// Terminal → its decoded agent record (absent = no declared agent).
+    pub(super) records: HashMap<TerminalId, AgentRecord>,
+    /// In-flight `GET_METADATA` request id → the Terminal it targets.
+    pub(super) pending: HashMap<u32, TerminalId>,
+    /// Terminals with a live `SUBSCRIBE_METADATA` on the agent key.
+    pub(super) subscribed: std::collections::HashSet<TerminalId>,
+}
+
+impl AgentMetaIndex {
+    /// Apply a metadata value for `terminal` (a `GET` reply or a
+    /// `METADATA_CHANGED` broadcast; `None` bytes = tombstone). Returns
+    /// `true` when the stored record actually changed, so the driver only
+    /// repaints chrome for real transitions.
+    fn apply(&mut self, terminal: &TerminalId, bytes: Option<&[u8]>) -> bool {
+        match bytes.and_then(parse_agent_record) {
+            Some(record) => self.records.insert(terminal.clone(), record.clone()) != Some(record),
+            None => self.records.remove(terminal).is_some(),
+        }
+    }
+}
 
 /// Outcome of processing a single server-to-client frame.
 ///
@@ -78,11 +111,32 @@ pub(super) struct FrameOutcome {
     /// another client holding it when rendering the supervisory badge. Set ONLY
     /// by the `Attached` arm.
     pub(super) own_client_id: Option<ClientId>,
-    /// ADR-0033: `true` ⇒ a `TerminalControl` event updated a pane's lifecycle
-    /// or input-lease holder, so the driver must repaint the status-bar chrome
-    /// (the supervisory badge) even though no grid content changed. Set ONLY by
-    /// the `Event` arm.
+    /// ADR-0033 / phux-foz.1: `true` ⇒ an agent event updated a pane's
+    /// lifecycle, input-lease holder (`TerminalControl`), or asked-attention
+    /// flag (ADR-0035 `Asked`), so the driver must repaint the chrome
+    /// (supervisory badge, attention hint, window-tab markers) even though no
+    /// grid content changed. Set ONLY by the `Event` arms.
     pub(super) chrome_dirty: bool,
+    /// ADR-0040: `true` ⇒ a `phux.agent/v1` record changed for some pane
+    /// (a `GET_METADATA` reply or a `METADATA_CHANGED` broadcast). Window
+    /// labels derive from it, so the driver refreshes the window chrome
+    /// (tab strip + sidebar) and repaints. Set ONLY by the
+    /// `MetadataValue` / `MetadataChanged` arms.
+    pub(super) agent_meta_changed: bool,
+    /// phux-p4vp: per-pane working directories carried by the `ATTACHED`
+    /// snapshot (`TerminalInfo::cwd`). The driver folds these into its
+    /// pane-cwd index, from which the sidebar's branch line is derived
+    /// client-side (see `crate::vcs`). Set ONLY by the `Attached` arm;
+    /// empty otherwise.
+    pub(super) pane_cwds: Vec<(TerminalId, String)>,
+    /// phux-foz.5: `true` ⇒ a subscribed `phux.config.reload/v1`
+    /// doorbell rang (a `phux config reload` from some shell). The driver
+    /// re-runs its layered config loader and swaps its config-derived
+    /// state in place, exactly as for the `reload-config` action; on a
+    /// failed re-read it keeps the previous config and surfaces the
+    /// error. Set ONLY by the `MetadataChanged` arm; tombstones do not
+    /// set it.
+    pub(super) config_reload: bool,
 }
 
 /// Payload-free label for the inbound `FrameKind` — the `kind` field on
@@ -150,6 +204,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
     pending_layout_request: Option<u32>,
     pending_splits: &mut HashMap<u32, PendingSplit>,
     pending_windows: &mut HashMap<u32, PendingWindow>,
+    // ADR-0040: the driver-held `phux.agent/v1` index. The MetadataValue /
+    // MetadataChanged arms decode agent records into it; the driver reads
+    // it when composing window labels.
+    agent_meta: &mut AgentMetaIndex,
     // phux-5ke.4: when `true` an overlay is on top; pane libghostty
     // mirrors keep ingesting `vt_write` (per ADR-0013) but stdout
     // flushes (render_at, bar paint, predict-overlay paint) are
@@ -206,15 +264,29 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // and absolute cursor movement for wider/taller viewports.
             for pane in &snapshot.panes {
                 if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(pane.id.clone()) {
-                    v.insert(PaneSlot::new_with_size(pane.cols, pane.rows)?);
+                    let slot = v.insert(PaneSlot::new_with_size(pane.cols, pane.rows)?);
+                    // phux-foz.4: seed the pane's cwd from the snapshot (the
+                    // spawn cwd); `cwd_changed` events refine it live.
+                    slot.cwd.clone_from(&pane.cwd);
                 }
             }
+            // phux-p4vp: hand the per-pane cwds up to the driver so the
+            // sidebar can derive each window's VCS branch client-side.
+            let pane_cwds: Vec<(TerminalId, String)> = snapshot
+                .panes
+                .iter()
+                .filter_map(|p| p.cwd.clone().map(|cwd| (p.id.clone(), cwd)))
+                .collect();
             // Ensure the focused pane has a slot even if an older server's
             // ATTACHED graph omitted it. Fall back to the current pane
             // viewport (the same dimensions used for rendering) rather
             // than the historical 80x24 placeholder.
             if let std::collections::hash_map::Entry::Vacant(v) = panes.entry(bootstrap) {
-                let content = content_rect(viewport_dims, status_bar.is_some(), sidebar);
+                let content = content_rect(
+                    viewport_dims,
+                    status_bar.as_ref().map(|p| p.position()),
+                    sidebar,
+                );
                 v.insert(PaneSlot::new_with_size(content.w, content.h)?);
             }
             // phux-17u: stash the session name for the status-bar
@@ -246,6 +318,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // ADR-0033: cache our own ClientId so the supervisory badge can
                 // distinguish "you hold the wheel" from another client.
                 own_client_id: Some(initial_client_id),
+                pane_cwds,
                 ..FrameOutcome::default()
             })
         }
@@ -268,8 +341,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // Resolve the pane's outer-viewport Rect BEFORE the
             // `panes.entry(terminal_id)` move. Multi-pane: ask the
             // layout. Single-pane / no layout: anchor at (0,0).
-            let has_bar = status_bar.is_some();
-            let content = content_rect(viewport_dims, has_bar, sidebar);
+            let bar = status_bar.as_ref().map(|p| p.position());
+            let content = content_rect(viewport_dims, bar, sidebar);
             // The pane's outer-viewport Rect: origin positions the paint,
             // (w, h) clips it. Multi-pane: ask the layout. Single-pane / no
             // layout: anchor at the content rect spanning the full pane area.
@@ -290,6 +363,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     v.insert(PaneSlot::new_with_size(cols, rows)?)
                 }
             };
+            let prior_sync_output = slot.sync_output_since;
             // The mirror grid size is server-authoritative: the TERMINAL_SNAPSHOT
             // carries the server's `(cols, rows)` and this is the ONE place that
             // resizes the pane's libghostty Terminal to them (alongside a future
@@ -304,7 +378,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // apply-vs-paint split as the `TerminalOutput` hot path. The
             // `bytes` field counts the replay payload (the dominant term;
             // scrollback is rarely present in the live attach path).
-            {
+            let sync_output_active = {
                 let _apply =
                     tracing::debug_span!("vt_apply", bytes = vt_replay_bytes.len()).entered();
                 // Apply scrollback first (if any), then the visible-state
@@ -313,7 +387,19 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     slot.terminal.vt_write(&sb);
                 }
                 slot.terminal.vt_write(&vt_replay_bytes);
-            }
+                let active = slot.update_sync_output(tokio::time::Instant::now());
+                if let Some(since) = prior_sync_output {
+                    // A resync snapshot may reset DEC modes in its preamble,
+                    // but it must not tear down a raw transaction that began
+                    // before the snapshot. The matching live `?2026l` remains
+                    // the publication barrier.
+                    slot.sync_output_since = Some(since);
+                    slot.sync_output_dirty = true;
+                    true
+                } else {
+                    active
+                }
+            };
             if is_focused {
                 // A fresh snapshot replaces the world — drop any
                 // outstanding predictions and resize the predict layer.
@@ -328,7 +414,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // excludes `TerminalSnapshot` from the defer mask), so here
                 // `defer_paint` is set only by the headless ingest path, which
                 // suppresses all VT emission and composes once at the end.
-                if overlay_active || defer_paint {
+                if overlay_active || defer_paint || sync_output_active {
                     let _ = overlay;
                 } else {
                     // phux-flywheel: the snapshot paint trigger, timed
@@ -380,7 +466,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                         false,
                     );
                 }
-            } else if !overlay_active && !defer_paint {
+            } else if !overlay_active && !defer_paint && !sync_output_active {
                 // phux-paer: a NON-focused pane's snapshot must paint into its
                 // rect — the symmetric counterpart to the `TerminalOutput`
                 // non-focused branch (phux-2x9). Without it, re-attaching to a
@@ -486,10 +572,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // (`paint_full_frame`, opened inside `paint_focused_pane`)
             // separately. Debug-level + a lazy `bytes` field ⇒ free at the
             // default `phux=info` filter.
-            {
+            let sync_output_active = {
                 let _apply = tracing::debug_span!("vt_apply", bytes = bytes.len()).entered();
-                let has_bar = status_bar.is_some();
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let bar = status_bar.as_ref().map(|p| p.position());
+                let content = content_rect(viewport_dims, bar, sidebar);
                 // Best-known dims for sizing a freshly-allocated slot only. An
                 // existing slot's libghostty grid is server-authoritative and
                 // must NOT be resized here: the server authored these bytes for
@@ -515,7 +601,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     }
                 };
                 slot.terminal.vt_write(&bytes);
-            }
+                slot.update_sync_output(tokio::time::Instant::now())
+            };
             // The libghostty mirror is now warm even for panes in a
             // non-active window (off-screen invariant). Rendering only
             // applies to the active window's composition; if there's no
@@ -533,6 +620,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             if is_focused
                 && !overlay_active
                 && !defer_paint
+                && !sync_output_active
                 && let Some(fid) = focused_pane.as_ref()
             {
                 // phux-flywheel: the paint trigger — render the focused
@@ -544,14 +632,14 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // default filter.
                 let _paint_trigger =
                     tracing::debug_span!("paint_trigger", rows = viewport_dims.1).entered();
-                let has_bar = status_bar.is_some();
+                let bar = status_bar.as_ref().map(|p| p.position());
                 let _ = paint_focused_pane(
                     out,
                     active_ls,
                     panes,
                     fid,
                     viewport_dims,
-                    has_bar,
+                    bar,
                     sidebar,
                     false,
                 );
@@ -601,7 +689,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // `last_cursor` is None. Without this fallback the
                 // bar's final write leaves the host terminal cursor
                 // at bottom-right.
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let content = content_rect(viewport_dims, bar, sidebar);
                 let fallback_origin =
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims)
                         .rects
@@ -620,7 +708,7 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                     // no-op (incremental-paint win).
                     false,
                 );
-            } else if !overlay_active && !defer_paint {
+            } else if !overlay_active && !defer_paint && !sync_output_active {
                 // phux-2x9: repaint a NON-focused pane on its own output
                 // so it isn't visually frozen — output (and the
                 // post-split/resize resync snapshot) must show without
@@ -629,8 +717,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 // painting into this pane's rect we restore the focused
                 // pane's cursor so the host cursor stays where the user is
                 // typing.
-                let has_bar = status_bar.is_some();
-                let content = content_rect(viewport_dims, has_bar, sidebar);
+                let bar = status_bar.as_ref().map(|p| p.position());
+                let content = content_rect(viewport_dims, bar, sidebar);
                 let rects =
                     super::multi_pane::compute_layout_in(active_ls, content, viewport_dims).rects;
                 if let Some(rect) = rects.get(&terminal_id).copied() {
@@ -701,6 +789,15 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // the workspace in place. `value: None` means "no persisted
         // layout" — keep the single-pane bootstrap untouched.
         FrameKind::MetadataValue { request_id, value } => {
+            // ADR-0040: a pending per-Terminal `phux.agent/v1` GET reply.
+            // `value: None` (key absent) clears any stale record.
+            if let Some(terminal) = agent_meta.pending.remove(&request_id) {
+                let changed = agent_meta.apply(&terminal, value.as_deref());
+                return Ok(FrameOutcome {
+                    agent_meta_changed: changed,
+                    ..FrameOutcome::default()
+                });
+            }
             if Some(request_id) != pending_layout_request {
                 tracing::debug!(
                     request_id,
@@ -734,6 +831,28 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // fall back to the single-pane bootstrap so the next render
         // doesn't try to draw against a stale tree.
         FrameKind::MetadataChanged { scope, key, value } => {
+            // ADR-0040: a `phux.agent/v1` broadcast for a subscribed pane.
+            // A tombstone (`value: None`, the DELETE_METADATA path) clears
+            // the record and the label falls back to the OSC title.
+            if key == TERMINAL_AGENT_KEY {
+                if let Scope::Terminal(terminal) = &scope {
+                    let changed = agent_meta.apply(terminal, value.as_deref());
+                    return Ok(FrameOutcome {
+                        agent_meta_changed: changed,
+                        ..FrameOutcome::default()
+                    });
+                }
+                return Ok(FrameOutcome::default());
+            }
+            // phux-foz.5: the config-reload doorbell. Value bytes are an
+            // opaque nonce (only there to defeat the server's equal-bytes
+            // SET dedup); a tombstone is not a reload request.
+            if key == CONFIG_RELOAD_KEY && matches!(scope, Scope::Global) {
+                return Ok(FrameOutcome {
+                    config_reload: value.is_some(),
+                    ..FrameOutcome::default()
+                });
+            }
             if !is_layout_key(&scope, &key) {
                 return Ok(FrameOutcome::default());
             }
@@ -803,7 +922,16 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                             // new pane needs its tile, and the reflow_panes
                             // diff below is taken against the now-cleared
                             // (real, tiled) view.
-                            *zoomed = None;
+                            // phux-r82.7: unless the parked intent asked to
+                            // zoom the spawned pane (`placement = "zoomed"`
+                            // plugin panes) — then the new pane fills the
+                            // window and un-zooming reveals it tiled beside
+                            // its anchor.
+                            *zoomed = if pending.zoom_on_spawn {
+                                Some(new_id.clone())
+                            } else {
+                                None
+                            };
                             // Seed a PaneSlot for the new Terminal so the
                             // first TERMINAL_SNAPSHOT lands on a warm
                             // mirror. Vacant-or-occupied — never overwrite
@@ -975,8 +1103,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // ADR-0033: a pushed agent event. We subscribed to the stream at
         // attach (SUBSCRIBE_EVENTS) for the supervisory `TerminalControl`
         // broadcast; fold its lifecycle + lease-holder into the pane's slot so
-        // the next paint renders the "FROZEN" / "wheel" badge. Other event
-        // kinds (dirty/idle/bell/...) are not consumed by the interactive TUI.
+        // the next paint renders the "FROZEN" / "wheel" badge. The ADR-0035
+        // `Asked` event is folded into the same per-pane state below. Other
+        // event kinds (dirty/idle/bell/...) are not consumed by the
+        // interactive TUI.
         FrameKind::Event {
             terminal: Some(terminal),
             event:
@@ -1000,6 +1130,74 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
                 Ok(FrameOutcome::default())
             }
         }
+        // phux-foz.1 / ADR-0035: an agent in `terminal` is waiting on a human
+        // answer. Mirror the `TerminalControl` fold above: raise the pane's
+        // attention flag so the next chrome paint renders the window-tab `!`
+        // marker and the status-bar `[ ASK ]` hint. The flag clears when the
+        // user sends key/paste input to the pane (see
+        // `driver::clear_attention_on_input`); a repeated `Asked` while
+        // already flagged changes nothing, so no repaint is requested for it.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::Asked { .. },
+        } => {
+            if let Some(slot) = panes.get_mut(&terminal) {
+                if slot.attention {
+                    Ok(FrameOutcome::default())
+                } else {
+                    slot.attention = true;
+                    Ok(FrameOutcome {
+                        chrome_dirty: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+            } else {
+                // An Asked for a pane we have no slot for yet (it can precede
+                // the first snapshot). Dropped like an early TerminalControl;
+                // the ADR-0036 detector coalesces repeated markers, so the
+                // next re-ask re-raises it once the slot exists.
+                Ok(FrameOutcome::default())
+            }
+        }
+        // phux-foz.4: the pane's shell changed directory (kernel-observed,
+        // announced at prompt boundaries / output settle). Fold it into the
+        // slot so the status-bar `cwd` widget tracks the focused pane;
+        // `chrome_dirty` only when the value actually moved, and the chrome
+        // refresh itself no-ops for an unfocused pane's change.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::CwdChanged { cwd },
+        } => {
+            match panes.get_mut(&terminal) {
+                Some(slot) if slot.cwd.as_deref() != Some(cwd.as_str()) => {
+                    slot.cwd = Some(cwd);
+                    Ok(FrameOutcome {
+                        chrome_dirty: true,
+                        ..FrameOutcome::default()
+                    })
+                }
+                // Unchanged value, or a pane we have no slot for yet — the
+                // next cwd_changed (or the ATTACHED seed) covers it.
+                _ => Ok(FrameOutcome::default()),
+            }
+        }
+        // phux-foz.4: a command finished in the pane; record its OSC-133
+        // exit code for the status-bar `exit` widget. `None` is recorded
+        // too — "the last command reported no code" honestly blanks the
+        // widget rather than pinning a stale code.
+        FrameKind::Event {
+            terminal: Some(terminal),
+            event: AgentEvent::CommandFinished { exit_code },
+        } => match panes.get_mut(&terminal) {
+            Some(slot) if slot.last_exit != exit_code => {
+                slot.last_exit = exit_code;
+                Ok(FrameOutcome {
+                    chrome_dirty: true,
+                    ..FrameOutcome::default()
+                })
+            }
+            _ => Ok(FrameOutcome::default()),
+        },
         other => {
             // Anything else — `HELLO_OK`, `PONG`, future spec frames — is
             // accepted-but-ignored. The protocol decoder rejects unknown
@@ -1177,7 +1375,7 @@ fn reconcile_loaded_layout(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
-    use super::{FrameOutcome, handle_server_frame};
+    use super::{AgentMetaIndex, FrameOutcome, handle_server_frame};
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -1435,6 +1633,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -1473,6 +1672,81 @@ mod tests {
             .read_grapheme_at(&slot.terminal, 0, 99)
             .expect("read cell");
         assert_eq!(cell, Some('X'));
+    }
+
+    #[test]
+    fn synchronized_output_paints_only_after_end_across_frames() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out = Vec::new();
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026hhalf-drawn",
+        );
+        assert!(out.is_empty(), "begin/body must update only the mirror");
+        assert!(panes[&pane].sync_output_since.is_some());
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b" frame\x1b[?2026l",
+        );
+        assert!(!out.is_empty(), "end must publish the completed frame");
+        assert!(panes[&pane].sync_output_since.is_none());
+        let printable = strip_csi(&String::from_utf8_lossy(&out));
+        assert!(printable.contains("half-drawn frame"));
+    }
+
+    #[test]
+    fn snapshot_during_synchronized_output_waits_for_live_end() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+        let mut out = Vec::new();
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026hpartial",
+        );
+        drive_snapshot(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            80,
+            24,
+            b"\x1b[!p\x1b[2J\x1b[Hstable snapshot",
+            (80, 24),
+        );
+        assert!(out.is_empty(), "snapshot must not break the transaction");
+        assert!(panes[&pane].sync_output_since.is_some());
+
+        drive_output(
+            &mut out,
+            &mut layout,
+            &mut focused,
+            &mut panes,
+            &pane,
+            b"\x1b[?2026l",
+        );
+        assert!(!out.is_empty());
+        assert!(panes[&pane].sync_output_since.is_none());
     }
 
     /// phux-ih39: the ATTACHED graph already carries per-pane dimensions.
@@ -1515,6 +1789,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -1669,6 +1944,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -1862,6 +2138,74 @@ mod tests {
         assert!(outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes);
     }
 
+    /// Drive a `TERMINAL_SPAWNED { Ok }` reply through the full dispatcher
+    /// with one parked [`PendingSplit`], returning the resulting `zoomed`
+    /// state (phux-r82.7's zoom-on-spawn contract lives there).
+    fn drive_spawned_with_pending_split(zoom_on_spawn: bool) -> Option<TerminalId> {
+        use crate::attach::actions::PendingSplit;
+        use phux_protocol::wire::frame::SpawnResult;
+
+        let anchor = tid(1);
+        let mut workspace = Workspace::single(anchor.clone());
+        let mut focused = Some(anchor.clone());
+        let mut panes = panes_for(&[&anchor]);
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = Some(anchor.clone());
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        pending_splits.insert(
+            7,
+            PendingSplit {
+                focused_at_request: anchor,
+                dir: SplitDir::Horizontal,
+                zoom_on_spawn,
+            },
+        );
+        let mut pending_windows = HashMap::new();
+        let outcome = handle_server_frame(
+            &mut out,
+            FrameKind::TerminalSpawned {
+                request_id: 7,
+                result: SpawnResult::Ok(tid(2)),
+            },
+            &mut panes,
+            &mut workspace,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut AgentMetaIndex::default(),
+            false,
+            false,
+        )
+        .expect("handle_server_frame");
+        assert!(outcome.layout_replaced, "split reply replaces the layout");
+        assert_eq!(focused, Some(tid(2)), "focus follows the spawned pane");
+        zoomed
+    }
+
+    /// phux-r82.7: a parked split with `zoom_on_spawn` zooms the freshly
+    /// spawned pane (placement = "zoomed" plugin panes).
+    #[test]
+    fn terminal_spawned_zoom_on_spawn_zooms_the_new_pane() {
+        assert_eq!(drive_spawned_with_pending_split(true), Some(tid(2)));
+    }
+
+    /// phux-x2hm parity guard: a plain split still un-zooms.
+    #[test]
+    fn terminal_spawned_without_zoom_on_spawn_clears_zoom() {
+        assert_eq!(drive_spawned_with_pending_split(false), None);
+    }
+
     /// phux-flywheel: the apply-vs-paint split is observable. Driving a
     /// `TERMINAL_OUTPUT` for the focused pane under a debug-level capturing
     /// subscriber must close BOTH child spans — `vt_apply` (libghostty
@@ -1975,6 +2319,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -2019,6 +2364,7 @@ mod tests {
             None,
             &mut pending_splits,
             &mut pending_windows,
+            &mut AgentMetaIndex::default(),
             false,
             false,
         )
@@ -2054,6 +2400,252 @@ mod tests {
         );
     }
 
+    /// Drive an `EVENT { terminal, Asked }` through [`handle_server_frame`]
+    /// and return the outcome (phux-foz.1 / ADR-0035).
+    fn drive_asked(
+        layout: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+    ) -> FrameOutcome {
+        use phux_protocol::wire::frame::AgentEvent;
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut agent_meta = AgentMetaIndex::default();
+        handle_server_frame(
+            &mut out,
+            FrameKind::Event {
+                terminal: Some(terminal_id.clone()),
+                event: AgentEvent::Asked {
+                    id: "q1".to_owned(),
+                    question: "deploy to prod?".to_owned(),
+                    suggestions: vec!["yes".to_owned(), "no".to_owned()],
+                    elapsed_seconds: None,
+                },
+            },
+            panes,
+            layout,
+            focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut agent_meta,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-foz.1: an ADR-0035 `Asked` event raises the pane's attention
+    /// flag and asks the driver to repaint the chrome — including for a
+    /// NON-focused pane (the whole point is surfacing a question the user
+    /// is not looking at).
+    #[test]
+    fn asked_event_sets_attention_and_dirties_chrome() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut layout = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+
+        let outcome = drive_asked(&mut layout, &mut focused, &mut panes, &right);
+
+        assert!(
+            panes.get(&right).expect("slot").attention,
+            "the asking pane's attention flag must raise"
+        );
+        assert!(
+            !panes.get(&left).expect("slot").attention,
+            "the other pane stays quiet"
+        );
+        assert!(outcome.chrome_dirty, "the chrome must repaint");
+    }
+
+    /// phux-foz.1: a repeated `Asked` while the flag is already up changes
+    /// no visible state, so it must not request another repaint.
+    #[test]
+    fn repeated_asked_event_does_not_redirty_chrome() {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane.clone());
+        let mut panes = panes_for(&[&pane]);
+
+        let first = drive_asked(&mut layout, &mut focused, &mut panes, &pane);
+        assert!(first.chrome_dirty);
+        let second = drive_asked(&mut layout, &mut focused, &mut panes, &pane);
+        assert!(
+            !second.chrome_dirty,
+            "an already-flagged pane must not force a repaint"
+        );
+        assert!(panes.get(&pane).expect("slot").attention, "flag stays up");
+    }
+
+    /// phux-foz.1: an `Asked` for a pane with no slot yet (it can precede
+    /// the first snapshot) is dropped without a repaint, mirroring the
+    /// early-`TerminalControl` policy.
+    #[test]
+    fn asked_event_for_unknown_pane_is_dropped() {
+        let known = tid(1);
+        let unknown = tid(9);
+        let mut layout = Workspace::single(known.clone());
+        let mut focused = Some(known.clone());
+        let mut panes = panes_for(&[&known]);
+
+        let outcome = drive_asked(&mut layout, &mut focused, &mut panes, &unknown);
+
+        assert!(!outcome.chrome_dirty, "no slot, nothing to repaint");
+        assert!(
+            !panes.contains_key(&unknown),
+            "no slot is allocated for an event-only pane"
+        );
+    }
+
+    /// phux-foz.4: drive one agent event through [`handle_server_frame`]
+    /// with minimal single-pane scaffolding; returns the outcome.
+    fn drive_event(
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+        terminal_id: &TerminalId,
+        event: phux_protocol::wire::frame::AgentEvent,
+    ) -> FrameOutcome {
+        let mut layout = Workspace::single(terminal_id.clone());
+        let mut focused = Some(terminal_id.clone());
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut agent_meta = AgentMetaIndex::default();
+        handle_server_frame(
+            &mut out,
+            FrameKind::Event {
+                terminal: Some(terminal_id.clone()),
+                event,
+            },
+            panes,
+            &mut layout,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut agent_meta,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// phux-foz.4: a `cwd_changed` event lands in the pane's slot and
+    /// dirties the chrome; repeating the same directory is a no-op.
+    #[test]
+    fn cwd_changed_event_updates_slot_and_coalesces() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let pane = tid(1);
+        let mut panes = panes_for(&[&pane]);
+
+        let first = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CwdChanged {
+                cwd: "/tmp/work".to_owned(),
+            },
+        );
+        assert!(first.chrome_dirty, "a new cwd must repaint the chrome");
+        assert_eq!(
+            panes.get(&pane).expect("slot").cwd.as_deref(),
+            Some("/tmp/work")
+        );
+
+        let repeat = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CwdChanged {
+                cwd: "/tmp/work".to_owned(),
+            },
+        );
+        assert!(!repeat.chrome_dirty, "unchanged cwd must not repaint");
+    }
+
+    /// phux-foz.4: a `command_finished` event records the exit code (and a
+    /// later code replaces it); an unchanged value is a no-op.
+    #[test]
+    fn command_finished_event_records_last_exit() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let pane = tid(1);
+        let mut panes = panes_for(&[&pane]);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, None);
+
+        let first = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished { exit_code: Some(0) },
+        );
+        assert!(first.chrome_dirty);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, Some(0));
+
+        let repeat = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished { exit_code: Some(0) },
+        );
+        assert!(!repeat.chrome_dirty, "same code must not repaint");
+
+        let failed = drive_event(
+            &mut panes,
+            &pane,
+            AgentEvent::CommandFinished {
+                exit_code: Some(127),
+            },
+        );
+        assert!(failed.chrome_dirty);
+        assert_eq!(panes.get(&pane).expect("slot").last_exit, Some(127));
+    }
+
+    /// phux-foz.4: cwd/exit events for a pane with no slot yet are dropped
+    /// without a repaint, mirroring the early-`TerminalControl` policy.
+    #[test]
+    fn cwd_and_exit_events_for_unknown_pane_are_dropped() {
+        use phux_protocol::wire::frame::AgentEvent;
+        let known = tid(1);
+        let unknown = tid(9);
+        let mut panes = panes_for(&[&known]);
+
+        let cwd = drive_event(
+            &mut panes,
+            &unknown,
+            AgentEvent::CwdChanged {
+                cwd: "/x".to_owned(),
+            },
+        );
+        let exit = drive_event(
+            &mut panes,
+            &unknown,
+            AgentEvent::CommandFinished { exit_code: Some(1) },
+        );
+        assert!(!cwd.chrome_dirty && !exit.chrome_dirty);
+        assert!(!panes.contains_key(&unknown));
+    }
+
     /// phux-4r1: closing one of several panes is NOT a detach. The
     /// survivor stays attached — the `TerminalClosed` arm folds the
     /// closed leaf out, re-anchors focus, and asks for a repaint +
@@ -2086,6 +2678,189 @@ mod tests {
             outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes,
             "the fold triggers repaint + sibling broadcast + survivor reflow",
         );
+    }
+
+    /// ADR-0040: drive one frame through [`handle_server_frame`] with a
+    /// caller-owned [`AgentMetaIndex`], for the agent-metadata arms.
+    fn drive_meta_frame(frame: FrameKind, agent_meta: &mut AgentMetaIndex) -> FrameOutcome {
+        let pane = tid(1);
+        let mut layout = Workspace::single(pane.clone());
+        let mut focused = Some(pane);
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            &mut out,
+            frame,
+            &mut panes,
+            &mut layout,
+            &mut focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            None,
+            &mut pending_splits,
+            &mut pending_windows,
+            agent_meta,
+            false,
+            false,
+        )
+        .expect("handle_server_frame")
+    }
+
+    /// ADR-0040: a subscribed `phux.agent/v1` broadcast decodes into the
+    /// index and flags the chrome refresh; the tombstone (DELETE) clears
+    /// the record so labels fall back to the OSC-title path.
+    #[test]
+    fn agent_metadata_broadcast_updates_index_and_tombstone_clears_it() {
+        use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(br#"{"name":"reviewer","state":"blocked"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "a new record must flag chrome");
+        let record = agent_meta.records.get(&pane).expect("record stored");
+        assert_eq!(record.name, "reviewer");
+        assert_eq!(record.state, crate::agent_meta::AgentMetaState::Blocked);
+
+        // Re-asserting the identical record is a no-op (no repaint churn).
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(br#"{"name":"reviewer","state":"blocked"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(
+            !outcome.agent_meta_changed,
+            "identical record must not flag"
+        );
+
+        // Tombstone (DELETE_METADATA) clears the record.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "a cleared record must flag");
+        assert!(!agent_meta.records.contains_key(&pane));
+    }
+
+    /// ADR-0040: a `GET_METADATA` reply correlated through
+    /// `AgentMetaIndex::pending` seeds the record for a pane whose agent
+    /// declared itself before we attached; an absent key (`value: None`)
+    /// resolves the pending entry without inventing a record.
+    #[test]
+    fn agent_metadata_get_reply_is_correlated_by_request_id() {
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+        agent_meta.pending.insert(77, pane.clone());
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataValue {
+                request_id: 77,
+                value: Some(br#"{"name":"codex","kind":"codex","state":"working"}"#.to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed);
+        assert!(agent_meta.pending.is_empty(), "pending entry consumed");
+        assert_eq!(agent_meta.records.get(&pane).expect("record").name, "codex");
+
+        agent_meta.pending.insert(78, pane);
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataValue {
+                request_id: 78,
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.agent_meta_changed, "absent key clears the record");
+        assert!(agent_meta.records.is_empty());
+    }
+
+    /// phux-foz.5: the `phux.config.reload/v1` doorbell flags a config
+    /// reload on a non-tombstone Global broadcast; tombstones and
+    /// non-Global scopes do not ring it.
+    #[test]
+    fn config_reload_doorbell_flags_reload_and_ignores_tombstones() {
+        use phux_protocol::wire::frame::{CONFIG_RELOAD_KEY, Scope};
+        let mut agent_meta = AgentMetaIndex::default();
+
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: Some(b"1234-99".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(outcome.config_reload, "the doorbell must flag a reload");
+        assert!(
+            !outcome.layout_replaced && !outcome.agent_meta_changed,
+            "the doorbell must not masquerade as a layout or agent change",
+        );
+
+        // Tombstone (DELETE_METADATA): not a reload request.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: None,
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.config_reload, "a tombstone must not ring it");
+
+        // Wrong scope: some other consumer's key reuse must not ring it.
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(tid(9)),
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: Some(b"5678-99".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.config_reload, "non-Global scope must not ring it");
+    }
+
+    /// ADR-0040: malformed record bytes (bad JSON, empty name) must read
+    /// as "no declared agent" — never a stored record, never a crash.
+    #[test]
+    fn agent_metadata_rejects_malformed_records() {
+        use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+        let pane = tid(1);
+        let mut agent_meta = AgentMetaIndex::default();
+        let outcome = drive_meta_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Terminal(pane),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: Some(b"not json at all".to_vec()),
+            },
+            &mut agent_meta,
+        );
+        assert!(!outcome.agent_meta_changed);
+        assert!(agent_meta.records.is_empty());
     }
 }
 

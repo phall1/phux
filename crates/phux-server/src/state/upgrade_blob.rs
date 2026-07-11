@@ -70,17 +70,26 @@ impl ServerState {
         self.assemble_upgrade_blob(listener_fd, &handoffs)
     }
 
-    /// Record the upgrade context — the listening socket's raw fd and path —
-    /// at startup, for `handle_upgrade` to read when building the handoff.
-    pub(crate) fn set_upgrade_context(&mut self, listener_fd: RawFd, socket_path: PathBuf) {
-        self.upgrade_ctx = Some((listener_fd, socket_path));
+    /// Record the upgrade context — the listening socket's raw fd, path, and
+    /// the server's effective runtime flags (phux-v45.10) — at startup, for
+    /// `handle_upgrade` to read when building the handoff.
+    pub(crate) fn set_upgrade_context(
+        &mut self,
+        listener_fd: RawFd,
+        socket_path: PathBuf,
+        flags: crate::runtime::RuntimeFlags,
+    ) {
+        self.upgrade_ctx = Some((listener_fd, socket_path, flags));
     }
 
-    /// The upgrade context `(listener_fd, socket_path)`, if serving has begun.
-    pub(crate) fn upgrade_context(&self) -> Option<(RawFd, &std::path::Path)> {
+    /// The upgrade context `(listener_fd, socket_path, runtime_flags)`, if
+    /// serving has begun.
+    pub(crate) fn upgrade_context(
+        &self,
+    ) -> Option<(RawFd, &std::path::Path, crate::runtime::RuntimeFlags)> {
         self.upgrade_ctx
             .as_ref()
-            .map(|(fd, path)| (*fd, path.as_path()))
+            .map(|(fd, path, flags)| (*fd, path.as_path(), *flags))
     }
 
     /// Clone every pane's [`TerminalHandle`] so the runtime can query each

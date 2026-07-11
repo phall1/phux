@@ -14,12 +14,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use super::{
-    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty, send_error,
-    spawn_pane_with_pty,
+    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty_and_colors,
+    send_error, spawn_pane_with_pty_and_colors,
 };
 use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
 use crate::terminal_actor::{
-    ConsumerAttachRequest, PaneOutput, PwdRequest, ResizeRequest, SnapshotRequest,
+    ConsumerAttachRequest, PaneOutput, PwdRequest, ResizeRequest, SetDefaultColorsRequest,
+    SnapshotRequest,
 };
 
 /// Adapt a broadcast byte chunk to a client's capabilities for the wire:
@@ -54,6 +55,7 @@ pub(crate) async fn resolve_attach_target(
     target: AttachTarget,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Option<String> {
     match target {
         AttachTarget::ByName(name) => Some(name),
@@ -103,7 +105,16 @@ pub(crate) async fn resolve_attach_target(
             resolved
         }
         AttachTarget::CreateIfMissing { name, command, cwd } => {
-            resolve_create_if_missing(state, name, command, cwd, out_tx, root_token).await
+            resolve_create_if_missing(
+                state,
+                name,
+                command,
+                cwd,
+                out_tx,
+                root_token,
+                default_colors,
+            )
+            .await
         }
         _ => {
             send_error(
@@ -132,15 +143,19 @@ pub(crate) async fn resolve_attach_target(
 ///   or no-PTY via [`seed_session_with_actor`] otherwise), and return
 ///   the name so the caller proceeds with the normal attach path.
 ///
-/// `command` and `cwd` from the wire frame are honored only when the
-/// PTY mode is on AND no explicit
+/// `command` from the wire frame is honored only when the PTY mode is
+/// on AND no explicit
 /// [`crate::state::ServerState::attach_create_seed_command`] preempts
-/// them: an explicit per-server seed command always wins (it's how the
+/// it: an explicit per-server seed command always wins (it's how the
 /// `phux server` binary pins `default_shell_command()` for the user).
-/// The PTY path also currently ignores `cwd` — pre-seeded PTY launches
-/// land in the server's CWD today, and lifting that into a
-/// per-`CreateIfMissing` override is filed as a follow-up rather than
-/// snuck in here. The no-PTY path ignores both, matching the existing
+/// `cwd` from the wire frame (phux-3mtf) seeds the PTY child's working
+/// directory when it names an existing directory on the server host; a
+/// missing or non-directory path falls back to the pre-existing
+/// behavior (the builder's cwd stays unset, so the spawn lands where a
+/// `cwd: None` spawn would) rather than failing the attach — the
+/// client's idea of a path may be stale or belong to another host. A
+/// cwd already set on the server-wide override command is never
+/// clobbered. The no-PTY path ignores both, matching the existing
 /// `seed_session_with_actor` shape.
 ///
 /// On terminal-actor spawn failure (e.g. PTY allocation fails on a
@@ -156,9 +171,10 @@ pub(crate) async fn resolve_create_if_missing(
     state: &SharedState,
     name: String,
     command: Option<Vec<String>>,
-    _cwd: Option<String>,
+    cwd: Option<String>,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
     root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
 ) -> Option<String> {
     // Fast path: a session with this name already exists. Fall through
     // to the normal `ByName(name)` attach by returning `name` as-is.
@@ -191,7 +207,7 @@ pub(crate) async fn resolve_create_if_missing(
         //      use to spawn (e.g.) `phux new -- vim foo.txt`.
         //   3. `default_shell_command()` (the user's `$SHELL`, or
         //      `/bin/sh`) — same fallback the pre-seed path uses.
-        let mut cmd = override_cmd.unwrap_or_else(|| match command {
+        let mut seed_cmd = override_cmd.unwrap_or_else(|| match command {
             Some(argv) if !argv.is_empty() => {
                 let mut head = argv.into_iter();
                 // Safe: argv is non-empty here.
@@ -204,10 +220,44 @@ pub(crate) async fn resolve_create_if_missing(
             }
             _ => crate::terminal_actor::default_shell_command(),
         });
+        // phux-3mtf: honor the wire `cwd` when it names an existing
+        // directory on this host. Validated up front (rather than passed
+        // through blindly) because portable_pty's spawn fails outright on
+        // a nonexistent cwd, which would turn a stale client-supplied path
+        // into a failed attach; an invalid path instead falls back to the
+        // pre-existing behavior (the builder's cwd stays unset).
+        // Skipped when the builder already carries an explicit cwd —
+        // only possible via the server-wide override command, whose
+        // configuration wins wholesale (same precedence as `command`).
+        // The stamp in `seed_session_with_pty_and_colors` reads the
+        // builder's cwd back (`spawn_cwd_of`), so the honored value also
+        // lands on the pane's registry descriptor for the ATTACHED
+        // snapshot.
+        if seed_cmd.get_cwd().is_none()
+            && let Some(path) = cwd
+        {
+            if std::path::Path::new(&path).is_dir() {
+                seed_cmd.cwd(path);
+            } else {
+                warn!(
+                    session = %name,
+                    cwd = %path,
+                    "CreateIfMissing: wire cwd is not an existing directory; \
+                     falling back to the default spawn directory",
+                );
+            }
+        }
         // Apply the server-wide `defaults.term` (phux-ign); this overrides
         // whatever baseline the builder carried.
-        crate::terminal_actor::apply_term(&mut cmd, &term);
-        seed_session_with_pty(state, &name, cmd, history_limit, root_token)
+        crate::terminal_actor::apply_term(&mut seed_cmd, &term);
+        seed_session_with_pty_and_colors(
+            state,
+            &name,
+            seed_cmd,
+            history_limit,
+            root_token,
+            default_colors,
+        )
     } else {
         // No-PTY path: the wire `command` is meaningless without a
         // child to exec it on. We still create the session+pane so
@@ -379,6 +429,69 @@ pub(crate) async fn query_pane_cwd(
     rx.await.ok().flatten()
 }
 
+/// Refresh every live pane's registry `cwd` from its PTY child's kernel
+/// CWD (phux-p4vp).
+///
+/// `TerminalDescriptor.cwd` is stamped once at spawn time (see
+/// `stamp_spawn_cwd` in `runtime::commands`) and would otherwise go stale
+/// as soon as the shell `cd`s. `handle_attach` calls this right before
+/// `prepare_attach` builds the `ATTACHED` snapshot, so
+/// `SessionSnapshot.panes[].cwd` reflects each pane's *current* directory
+/// — the TUI sidebar derives its per-window VCS branch line from it.
+///
+/// Best-effort per pane: a dead child, an unsupported platform, or a
+/// vanished actor leaves that pane's stamped value untouched. Queries fan
+/// out concurrently (same `FuturesUnordered` rationale as the snapshot
+/// fan-out below: attach latency scales with the MAX pane reply time, not
+/// the SUM) and the whole drain is capped by [`CWD_REFRESH_DEADLINE`]:
+/// an actor that never services its `pwd` mailbox (wedged, or a
+/// synthetic test handle) must not stall the `ATTACHED` frame. Panes
+/// whose replies miss the deadline keep their stamped spawn-time value;
+/// replies that landed before it still apply. Handles are cloned out of
+/// state first — `with` must not be held across an await.
+pub(crate) async fn refresh_registry_cwds(state: &SharedState) {
+    /// Upper bound on the attach-time kernel-cwd fan-out. Real actors
+    /// answer a `PwdRequest` in well under a millisecond (one kernel
+    /// call, no PTY I/O), so this only ever fires for a wedged or
+    /// mock actor — where waiting longer buys nothing and every 100ms
+    /// visibly delays the attacher's first paint.
+    const CWD_REFRESH_DEADLINE: std::time::Duration = std::time::Duration::from_millis(250);
+
+    let handles: Vec<(TerminalId, crate::terminal_actor::TerminalHandle)> =
+        state.with(|s| s.terminals.iter().map(|(id, h)| (*id, h.clone())).collect());
+    if handles.is_empty() {
+        return;
+    }
+    let mut queries: FuturesUnordered<_> = handles
+        .into_iter()
+        .map(|(id, handle)| async move { (id, query_pane_cwd(handle).await) })
+        .collect();
+    let mut resolved: Vec<(TerminalId, std::path::PathBuf)> = Vec::new();
+    let drain = async {
+        while let Some((id, cwd)) = queries.next().await {
+            if let Some(cwd) = cwd {
+                resolved.push((id, std::path::PathBuf::from(cwd)));
+            }
+        }
+    };
+    if tokio::time::timeout(CWD_REFRESH_DEADLINE, drain)
+        .await
+        .is_err()
+    {
+        debug!("attach cwd refresh hit deadline; using stamped values for stragglers");
+    }
+    if resolved.is_empty() {
+        return;
+    }
+    state.with_mut(|s| {
+        for (id, cwd) in resolved {
+            if let Some(desc) = s.registry.terminal_mut(id) {
+                desc.cwd = cwd;
+            }
+        }
+    });
+}
+
 /// Handle `SPAWN_TERMINAL` (phux-4li.11, SPEC §7.2 / §10.1).
 ///
 /// v0.1 servers expose a single default Group at
@@ -521,43 +634,56 @@ pub(crate) async fn handle_spawn_terminal(
         return;
     };
 
-    let history_limit = state.with(crate::state::ServerState::history_limit);
-    let core_terminal_id =
-        match spawn_pane_with_pty(state, session, builder, history_limit, root_token) {
-            Ok(Some(id)) => id,
-            Ok(None) => {
-                warn!(
-                    ?client_id,
+    let (history_limit, default_colors) = state.with(|s| {
+        (
+            s.history_limit(),
+            s.attached
+                .get(&client_id)
+                .and_then(|client| client.client_caps.default_colors),
+        )
+    });
+    let core_terminal_id = match spawn_pane_with_pty_and_colors(
+        state,
+        session,
+        builder,
+        history_limit,
+        root_token,
+        default_colors,
+    ) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            warn!(
+                ?client_id,
+                request_id,
+                ?session,
+                "SPAWN_TERMINAL: attached session has no window to host the pane",
+            );
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::TerminalSpawned {
                     request_id,
-                    ?session,
-                    "SPAWN_TERMINAL: attached session has no window to host the pane",
-                );
-                let _ = out_tx
-                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
-                        request_id,
-                        result: SpawnResult::Err(SpawnError::SpawnFailed(
-                            "attached session has no window to host the pane".to_owned(),
-                        )),
-                    }))
-                    .await;
-                return;
-            }
-            Err(err) => {
-                warn!(
-                    ?client_id,
+                    result: SpawnResult::Err(SpawnError::SpawnFailed(
+                        "attached session has no window to host the pane".to_owned(),
+                    )),
+                }))
+                .await;
+            return;
+        }
+        Err(err) => {
+            warn!(
+                ?client_id,
+                request_id,
+                error = %err,
+                "SPAWN_TERMINAL: failed to spawn pane actor",
+            );
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::TerminalSpawned {
                     request_id,
-                    error = %err,
-                    "SPAWN_TERMINAL: failed to spawn pane actor",
-                );
-                let _ = out_tx
-                    .send(Outbound::Frame(FrameKind::TerminalSpawned {
-                        request_id,
-                        result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
-                    }))
-                    .await;
-                return;
-            }
-        };
+                    result: SpawnResult::Err(SpawnError::SpawnFailed(format!("{err}"))),
+                }))
+                .await;
+            return;
+        }
+    };
 
     // Auto-subscribe the spawning client to the new pane and snapshot
     // its `TerminalHandle` so we can spawn an output pump. Without
@@ -738,9 +864,22 @@ pub(crate) async fn handle_attach(
     // carries this so the actor primes TERMINAL_SNAPSHOT.scrollback_bytes.
     let scrollback_req: Option<u32> = request_scrollback.then_some(scrollback_limit_lines);
 
-    let Some(session_name) = resolve_attach_target(state, target, out_tx, root_token).await else {
+    let Some(session_name) = resolve_attach_target(
+        state,
+        target,
+        out_tx,
+        root_token,
+        client_caps.default_colors,
+    )
+    .await
+    else {
         return;
     };
+
+    // phux-p4vp: fold each live pane's kernel CWD into its registry
+    // descriptor before the snapshot is built, so ATTACHED carries a
+    // current `cwd` per pane (the sidebar's VCS branch line depends on it).
+    refresh_registry_cwds(state).await;
 
     let (snapshot, initial_client_id, panes_to_snapshot) =
         match prepare_attach(state, client_id, &session_name, out_tx, client_caps) {
@@ -764,6 +903,26 @@ pub(crate) async fn handle_attach(
                 return;
             }
         };
+
+    // Terminal defaults are shared pane state. The most recently attached
+    // interactive client that advertises a palette wins; palette-less agent
+    // and legacy attaches leave the last known values untouched. Await each
+    // acknowledgement before snapshotting so OSC 10/11 queries parsed after
+    // ATTACHED observe the selected host palette.
+    if let Some(colors) = client_caps.default_colors {
+        for pane in &panes_to_snapshot {
+            let (reply, done) = oneshot::channel();
+            if pane
+                .handle
+                .set_default_colors
+                .send(SetDefaultColorsRequest { colors, reply })
+                .await
+                .is_ok()
+            {
+                let _ = done.await;
+            }
+        }
+    }
 
     // phux-2lj: apply the client's ATTACH viewport to every pane so
     // freshly-spawned PTYs (currently built at hardcoded 80x24, see
@@ -789,6 +948,13 @@ pub(crate) async fn handle_attach(
     {
         return;
     }
+
+    // docs/consumers/tui.md §9 (phux-r82.1): the attach mutation landed and
+    // ATTACHED queued — the `client-attached` hook point.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::client_attached(client_id, &session_name),
+    );
 
     // Fan out all `SnapshotRequest`s concurrently. The mpsc sends below
     // are fast (they just push into each actor's mailbox); the slow part

@@ -188,7 +188,8 @@ impl RenderOverlay for HelpOverlay {
 /// Human-readable label for an [`Action`]. Bare actions show the name;
 /// parameterized actions show `name(key=value, ...)` so the user sees
 /// the args their binding actually carries (e.g. `split-pane(direction=vertical)`).
-fn action_label(action: &Action) -> String {
+/// `pub(super)` so the which-key popup labels its rows identically.
+pub(super) fn action_label(action: &Action) -> String {
     match action {
         Action::Bare(name) => name.clone(),
         Action::Parameterized(p) => {
@@ -215,8 +216,9 @@ fn value_label(v: &toml::Value) -> String {
 
 /// `true` for a `select-window` binding carrying an explicit `index` —
 /// the numeric 0-9 window-jump keys, which the overlay collapses into one
-/// row rather than listing individually.
-fn is_indexed_select_window(action: &Action) -> bool {
+/// row rather than listing individually. `pub(super)` so the which-key
+/// popup applies the same collapse.
+pub(super) fn is_indexed_select_window(action: &Action) -> bool {
     matches!(
         action,
         Action::Parameterized(p) if p.action == "select-window" && p.args.contains_key("index")
@@ -279,6 +281,7 @@ mod tests {
             prefix: "C-a".to_owned(),
             prefix_table,
             global,
+            ..KeybindingsCfg::default()
         }
     }
 

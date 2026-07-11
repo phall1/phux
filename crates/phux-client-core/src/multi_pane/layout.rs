@@ -5,7 +5,8 @@ use phux_protocol::TerminalId;
 use crate::layout::{LayoutNode, LayoutState, Rect};
 
 use super::rasterize::{
-    DividerCell, DividerHit, DividerSegment, divider_hits, rasterize, split_dim, walk_layout,
+    DividerCell, DividerHit, DividerSegment, divider_hits, freeze_split_dim, min_dims, rasterize,
+    walk_layout, walk_layout_proportional,
 };
 
 /// Result of [`compute_layout`]: per-pane rectangles plus the cells
@@ -199,12 +200,20 @@ pub fn split_content_span_at(
                 }
                 return Some((axis_start, content_len));
             }
-            // Descend, reproducing walk_layout's child-bounds math.
+            // Descend, reproducing walk_layout's child-bounds math —
+            // including §6.2 min-size freezing, so the span a drag
+            // converts pointer cells against matches the divider the
+            // frozen tiling actually painted.
             Some((step, rest)) => {
                 steps = rest;
                 let has_divider = axis_len >= 1;
                 let content_len = axis_len.saturating_sub(1);
-                let low = split_dim(content_len, *ratio);
+                let (min_low, min_high) = match dir {
+                    SplitDir::Horizontal => (min_dims(left).0, min_dims(right).0),
+                    SplitDir::Vertical => (min_dims(left).1, min_dims(right).1),
+                    _ => return None,
+                };
+                let low = freeze_split_dim(content_len, *ratio, min_low, min_high);
                 let high = content_len - low;
                 let divider = axis_start + low;
                 let (child, child_start, child_len) = match (dir, step) {
@@ -253,5 +262,24 @@ pub fn pane_rects_in(tree: &LayoutNode, content: Rect) -> HashMap<TerminalId, Re
     let mut segments: Vec<DividerSegment> = Vec::new();
     let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
     walk_layout(tree, content, &mut segments, &mut rects);
+    rects
+}
+
+/// [`pane_rects_in`] without §6.2 min-size freezing: the raw
+/// proportional tiling of the tree's ratios.
+///
+/// This is what a split's `ratio` *asks for*, before freezing
+/// redistributes space to hold squeezed leaves at their floor. The
+/// ADR-0019 decision 5 resize gate checks candidate ratios against this
+/// view: gating on the frozen rects would never trip on a frozen axis
+/// (the floor pins the rect at minimum while the ratio drifts past it),
+/// letting `resize-pane` bank unbounded ratio that the layout would
+/// snap to on the next viewport grow. Paint and reflow must keep using
+/// the frozen [`pane_rects_in`].
+#[must_use]
+pub fn pane_rects_proportional_in(tree: &LayoutNode, content: Rect) -> HashMap<TerminalId, Rect> {
+    let mut segments: Vec<DividerSegment> = Vec::new();
+    let mut rects: HashMap<TerminalId, Rect> = HashMap::new();
+    walk_layout_proportional(tree, content, &mut segments, &mut rects);
     rects
 }

@@ -134,6 +134,52 @@ pub struct ServerConfig {
     /// Optional policy extension bundle. When `None`, the server uses the
     /// default permissive policy (allow everything, audit nothing).
     pub policy_bundle: Option<crate::policy::PolicyBundle>,
+    /// Event-hook catalog (`docs/consumers/tui.md` §9, phux-r82.1): config
+    /// `[[hooks.<name>]]` entries plus enabled plugin manifests'
+    /// `[[events]]`, resolved by [`crate::hooks::HookCatalog::from_config`].
+    /// When non-empty the runtime spawns the hook dispatcher at startup and
+    /// registers its handle in shared state; when empty (the default) no
+    /// dispatcher task exists and firing events is a no-op.
+    pub hook_catalog: crate::hooks::HookCatalog,
+}
+
+/// The server's effective opt-in runtime flags, captured from the running
+/// [`ServerRuntime`] configuration at startup (phux-v45.10).
+///
+/// A graceful upgrade (ADR-0032) re-execs the current binary; the new image
+/// must be started with the same transport and federation surface the old one
+/// was serving, or `--listen` / `--quic` / `--webtransport` / `--hub`
+/// silently vanish across `phux server upgrade`. These are derived from the
+/// runtime's own fields — the values the builder methods
+/// ([`ServerRuntime::listen_ws`], [`ServerRuntime::listen_quic`],
+/// [`ServerRuntime::listen_webtransport`], [`ServerRuntime::hub`]) actually
+/// applied — not from a stashed copy of the original argv, so config-derived
+/// state stays consistent with what the server is really running.
+///
+/// Environment-derived fallbacks (`PHUX_WS_ADDR`, `PHUX_QUIC_ADDR`,
+/// `PHUX_WT_ADDR`) are deliberately *not* captured here: the environment
+/// survives the `execve`, so the resumed image re-derives them with the same
+/// precedence (explicit flag wins over environment) as the original start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RuntimeFlags {
+    /// WebSocket listen address from `phux server --listen <ADDR>`
+    /// ([`ServerRuntime::listen_ws`]). Re-emitted as `--listen` on resume.
+    pub ws_addr: Option<SocketAddr>,
+    /// QUIC listen address from `phux server --quic <ADDR>`
+    /// ([`ServerRuntime::listen_quic`]). Re-emitted as `--quic` on resume.
+    pub quic_addr: Option<SocketAddr>,
+    /// WebTransport listen address from `phux server --webtransport <ADDR>`
+    /// ([`ServerRuntime::listen_webtransport`]). Re-emitted as
+    /// `--webtransport` on resume. Not feature-gated: a phux-server built
+    /// without the `webtransport` feature ignores the address at the builder
+    /// (with a warning), so this stays `None` there and nothing is
+    /// re-emitted.
+    pub wt_addr: Option<SocketAddr>,
+    /// Federation-hub mode from `phux server --hub` ([`ServerRuntime::hub`]).
+    /// Re-emitted as `--hub` on resume; the resumed image re-reads and
+    /// re-validates the `[[satellites]]` registry from config, exactly like a
+    /// fresh `--hub` start.
+    pub hub: bool,
 }
 
 impl ServerConfig {
@@ -151,6 +197,7 @@ impl ServerConfig {
             term: phux_config::DefaultsCfg::default().term,
             window_size: phux_config::WindowSize::default(),
             policy_bundle: None,
+            hook_catalog: crate::hooks::HookCatalog::default(),
         }
     }
 }
@@ -222,6 +269,12 @@ pub enum ServerError {
     /// Failed to build the tokio runtime.
     #[error("failed to build tokio runtime: {0}")]
     Runtime(#[source] io::Error),
+
+    /// Hub mode was requested but the satellite registry did not validate
+    /// (phux-v45.1). A hub with a half-parsed table would silently drop
+    /// satellites, so startup fails instead.
+    #[error("hub: {0}")]
+    Hub(#[from] crate::hub::HubTableError),
 }
 
 /// Server runtime owning the listener loop and per-client task scaffolding.
@@ -239,11 +292,29 @@ pub struct ServerRuntime {
     /// encrypted, and binding off-loopback requires a paired bearer token
     /// (see [`build_quic_listener`]).
     quic_addr: Option<SocketAddr>,
+    /// Optional WebTransport listen address (in addition to the always-on
+    /// UDS). `None` falls back to the `PHUX_WT_ADDR` environment variable.
+    /// The `phux server --webtransport <ADDR>` flag populates this;
+    /// WebTransport is always TLS-encrypted (HTTP/3 over QUIC), and binding
+    /// off-loopback requires a paired bearer token (see
+    /// [`build_wt_listener`]).
+    #[cfg(feature = "webtransport")]
+    wt_addr: Option<SocketAddr>,
     /// Graceful-upgrade resume descriptor (ADR-0032). When `Some`, the runtime
     /// reads the handoff state blob from this inherited fd, adopts the
     /// inherited listener, and rebuilds the session tree instead of binding a
     /// fresh socket and seeding an empty state. Set by `phux server --resume`.
     resume_fd: Option<RawFd>,
+    /// Whether this server runs as a federation hub (phux-v45.1, ADR-0007).
+    /// Off by default; `phux server --hub` populates this. Only a hub
+    /// consumes [`Self::satellites`] — a non-hub server ignores the registry
+    /// entirely.
+    hub: bool,
+    /// The satellite registry from `config.toml` (`[[satellites]]`), as
+    /// loaded by the binary. Read only when [`Self::hub`] is set, at which
+    /// point every enabled entry's endpoint is validated into the runtime
+    /// [`crate::hub::HubTable`]; a validation failure fails startup.
+    satellites: Vec<phux_config::SatelliteConfigEntry>,
 }
 
 impl ServerRuntime {
@@ -254,7 +325,11 @@ impl ServerRuntime {
             cfg,
             ws_addr: None,
             quic_addr: None,
+            #[cfg(feature = "webtransport")]
+            wt_addr: None,
             resume_fd: None,
+            hub: false,
+            satellites: Vec::new(),
         }
     }
 
@@ -289,6 +364,50 @@ impl ServerRuntime {
     #[must_use]
     pub const fn listen_quic(mut self, addr: SocketAddr) -> Self {
         self.quic_addr = Some(addr);
+        self
+    }
+
+    /// Also accept WebTransport connections on `addr` (the UDS stays on).
+    ///
+    /// Overrides the `PHUX_WT_ADDR` environment variable. WebTransport is
+    /// HTTP/3 over QUIC — always TLS 1.3-encrypted — and is the browser's
+    /// door to QUIC-class transport (`phux-web` dials it, falling back to
+    /// WebSocket). A loopback address skips token auth (local dev), while
+    /// any routable address requires a paired bearer token carried in the
+    /// `CONNECT` request (ADR-0031 parity with `wss://`).
+    #[cfg(feature = "webtransport")]
+    #[must_use]
+    pub const fn listen_webtransport(mut self, addr: SocketAddr) -> Self {
+        self.wt_addr = Some(addr);
+        self
+    }
+
+    /// Built without the `webtransport` feature: the listen address is
+    /// ignored (with a warning) so callers keep one call site.
+    #[cfg(not(feature = "webtransport"))]
+    #[must_use]
+    pub fn listen_webtransport(self, addr: SocketAddr) -> Self {
+        warn!(
+            %addr,
+            "phux-server was built without the `webtransport` feature; ignoring the WebTransport listen address"
+        );
+        self
+    }
+
+    /// Run as a federation hub (phux-v45.1, ADR-0007): consume `satellites`
+    /// (the `[[satellites]]` registry from `config.toml`) at startup,
+    /// validating every enabled entry's endpoint into the runtime
+    /// [`crate::hub::HubTable`]. A malformed enabled endpoint or a duplicate
+    /// satellite name fails startup with [`ServerError::Hub`].
+    ///
+    /// Without this call the registry is never read: non-hub servers ignore
+    /// `[[satellites]]` entirely. No dialing or routing happens yet — this
+    /// is the validated table only (dialing is phux-v45.3, routing
+    /// phux-v45.4).
+    #[must_use]
+    pub fn hub(mut self, satellites: Vec<phux_config::SatelliteConfigEntry>) -> Self {
+        self.hub = true;
+        self.satellites = satellites;
         self
     }
 
@@ -333,6 +452,24 @@ impl ServerRuntime {
         // `state.rs`). Cloning the `SharedState` is cheap (`Arc::clone`).
         let state = SharedState::new();
 
+        // Hub mode (phux-v45.1, ADR-0007): validate the satellite registry
+        // into the runtime hub table before any I/O, so a malformed registry
+        // fails fast — before the socket is bound. Non-hub servers skip the
+        // registry entirely (`resolve_hub_table` returns `Ok(None)`). The
+        // table is kept locally too: the outbound link supervisors
+        // (phux-v45.3) are spawned from it inside the LocalSet below.
+        let hub_table = crate::hub::resolve_hub_table(self.hub, &self.satellites)?;
+        if let Some(table) = &hub_table {
+            info!(
+                satellites = table.len(),
+                "hub mode: satellite registry validated"
+            );
+            for (host, entry) in table.iter() {
+                info!(satellite = %host, target = %entry.target, "hub satellite registered");
+            }
+            state.with_mut(|s| s.set_hub_table(table.clone()));
+        }
+
         // Graceful upgrade (ADR-0032): when resuming, read the handoff blob and
         // adopt the inherited listener instead of binding a fresh socket. The
         // session tree is rebuilt from the blob inside the LocalSet below.
@@ -359,9 +496,23 @@ impl ServerRuntime {
         };
 
         // Capture the upgrade context (ADR-0032): the listening socket's fd +
-        // path, so `handle_upgrade` can build the handoff blob and re-pass
-        // `--socket` to the re-exec'd image.
-        state.with_mut(|s| s.set_upgrade_context(listener.as_raw_fd(), socket_path.clone()));
+        // path + effective runtime flags, so `handle_upgrade` can build the
+        // handoff blob and re-pass `--socket` / `--listen` / `--quic` /
+        // `--webtransport` / `--hub` to the re-exec'd image (phux-v45.10).
+        // The flags come from the runtime's own configuration — what the
+        // builder methods applied — not a stashed copy of the original argv.
+        let runtime_flags = RuntimeFlags {
+            ws_addr: self.ws_addr,
+            quic_addr: self.quic_addr,
+            #[cfg(feature = "webtransport")]
+            wt_addr: self.wt_addr,
+            #[cfg(not(feature = "webtransport"))]
+            wt_addr: None,
+            hub: self.hub,
+        };
+        state.with_mut(|s| {
+            s.set_upgrade_context(listener.as_raw_fd(), socket_path.clone(), runtime_flags);
+        });
 
         // The LocalSet hosts per-client tasks and per-pane actors —
         // both `!Send`. `LocalSet::run_until` drives the set to the
@@ -408,10 +559,18 @@ impl ServerRuntime {
         // QUIC listen address: the `--quic` flag (via `listen_quic`) wins;
         // otherwise fall back to `PHUX_QUIC_ADDR` inside the accept setup.
         let quic_addr_override = self.quic_addr;
+        // WebTransport listen address: the `--webtransport` flag (via
+        // `listen_webtransport`) wins; otherwise fall back to `PHUX_WT_ADDR`
+        // inside the accept setup.
+        #[cfg(feature = "webtransport")]
+        let webtransport_addr_override = self.wt_addr;
         // Wire policy bundle from config into shared state.
         if let Some(bundle) = self.cfg.policy_bundle.clone() {
             state.with_mut(|s| s.set_policy_bundle(bundle));
         }
+        // Event-hook catalog (phux-r82.1): moved into the LocalSet block
+        // below, where the dispatcher task can `spawn_local`.
+        let hook_catalog = self.cfg.hook_catalog.clone();
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -434,6 +593,30 @@ impl ServerRuntime {
                         debug!("shutdown future resolved; cancelling root token");
                         token.cancel();
                     });
+                }
+
+                // Event-hook dispatcher (docs/consumers/tui.md §9,
+                // phux-r82.1). Spawned BEFORE the seed/resume paths so a
+                // pre-seeded session's pane fires `after-new-pane` too.
+                // Skipped entirely when nothing is configured: firing an
+                // event with no dispatcher registered is a no-op.
+                if !hook_catalog.is_empty() {
+                    let dispatcher = crate::hooks::spawn_hook_dispatcher(hook_catalog);
+                    state.with_mut(|s| s.set_hook_dispatcher(dispatcher));
+                }
+
+                // Hub outbound dialer (phux-v45.3, ADR-0038): one link
+                // supervisor per validated satellite, spawned on the
+                // LocalSet as children of the root token. Each dials,
+                // authenticates like a remote consumer, and maintains the
+                // connection with capped exponential backoff; fail-closed
+                // refusals (routable endpoint without token/pin) surface as
+                // a `Refused` status without dialing. The status handle is
+                // mirrored into shared state for future LIST aggregation.
+                if let Some(table) = &hub_table {
+                    let statuses = crate::hub::link::HubLinkStatuses::default();
+                    state.with_mut(|s| s.set_hub_link_statuses(statuses.clone()));
+                    crate::hub::link::spawn_links(table, &statuses, &root_token);
                 }
 
                 // Graceful-upgrade resume (ADR-0032): rebuild the whole
@@ -494,6 +677,14 @@ impl ServerRuntime {
                 // QUIC carries the identical frames over a TLS 1.3 stream.
                 let quic_addr = quic_addr_override.or_else(|| env_socket_addr("PHUX_QUIC_ADDR"));
                 let quic_listener = quic_addr.and_then(build_quic_listener);
+                // Optionally also accept WebTransport connections (phux-0wmf):
+                // HTTP/3 over QUIC, the browser's QUIC-class door (`phux-web`
+                // dials it, falling back to WebSocket). Opt-in via
+                // `phux server --webtransport <ADDR>` or `PHUX_WT_ADDR`.
+                #[cfg(feature = "webtransport")]
+                let webtransport_listener = webtransport_addr_override
+                    .or_else(|| env_socket_addr("PHUX_WT_ADDR"))
+                    .and_then(build_wt_listener);
 
                 // UDS is always on; WS and QUIC are additive. Each transport's
                 // accept loop runs until the root token cancels; whichever
@@ -515,6 +706,10 @@ impl ServerRuntime {
                         state.clone(),
                         root_token.clone(),
                     )));
+                }
+                #[cfg(feature = "webtransport")]
+                if let Some(wt) = &webtransport_listener {
+                    accepts.push(Box::pin(accept_loop(wt, state.clone(), root_token.clone())));
                 }
                 let (result, _index, _remaining) = futures_util::future::select_all(accepts).await;
                 result
@@ -715,6 +910,81 @@ fn build_quic_listener(addr: SocketAddr) -> Option<crate::transport::quic::QuicL
     }
 }
 
+/// Build the optional WebTransport listener for `addr` (phux-0wmf). Returns
+/// `None` (WebTransport disabled, other transports unaffected) on any setup
+/// failure rather than failing the whole server.
+///
+/// WebTransport is HTTP/3 over QUIC, so it is **always** TLS 1.3-encrypted;
+/// a certificate is provisioned in both modes. It shares the persisted
+/// self-signed cert and token store with the `wss://` and QUIC paths (one
+/// `phux pair` token authorizes all three), keyed off the same
+/// `PHUX_WS_TLS_CERT` / `PHUX_WS_TLS_KEY` / `PHUX_WS_TOKENS` overrides:
+///
+/// * **Loopback address → TLS, no token.** Local dev; the `CONNECT` carries
+///   no token.
+/// * **Routable address (or `PHUX_WS_SECURE=1`) → TLS + bearer token.**
+///   Off-loopback is treated as exposing the server, so a paired token is
+///   required exactly as for a remote WebSocket consumer (ADR-0031). Native
+///   consumers send `Authorization: Bearer <hex>`; browsers — whose
+///   `WebTransport` JS API cannot set headers — append `?token=<hex>` to the
+///   session URL, still inside TLS.
+#[cfg(feature = "webtransport")]
+fn build_wt_listener(addr: SocketAddr) -> Option<crate::transport::webtransport::WtListener> {
+    let force_secure = std::env::var_os("PHUX_WS_SECURE").is_some_and(|v| !v.is_empty());
+    let secure = !addr.ip().is_loopback() || force_secure;
+
+    let cert_env = std::env::var_os("PHUX_WS_TLS_CERT").map(PathBuf::from);
+    let key_env = std::env::var_os("PHUX_WS_TLS_KEY").map(PathBuf::from);
+    let operator_cert = cert_env.is_some() || key_env.is_some();
+    let cert_path = cert_env.unwrap_or_else(crate::transport::tls::default_cert_path);
+    let key_path = key_env.unwrap_or_else(crate::transport::tls::default_key_path);
+    if !operator_cert
+        && let Err(err) = crate::transport::tls::ensure_self_signed(&cert_path, &key_path)
+    {
+        error!(error = %err, "failed to provision self-signed certificate; WebTransport disabled");
+        return None;
+    }
+
+    let tokens = if secure {
+        let tokens_path = std::env::var_os("PHUX_WS_TOKENS")
+            .map_or_else(crate::auth::default_token_store_path, PathBuf::from);
+        let store = match crate::auth::TokenStore::load(&tokens_path) {
+            Ok(store) => store,
+            Err(err) => {
+                error!(error = %err, path = %tokens_path.display(), "failed to load token store; WebTransport disabled");
+                return None;
+            }
+        };
+        if store.is_empty() {
+            warn!(
+                path = %tokens_path.display(),
+                "no pairing tokens; every remote WebTransport consumer is rejected until `phux pair`"
+            );
+        }
+        Some(std::sync::Arc::new(store))
+    } else {
+        None
+    };
+    let token_count = tokens.as_ref().map_or(0, |s| s.len());
+
+    match crate::transport::webtransport::WtListener::from_pem(addr, &cert_path, &key_path, tokens)
+    {
+        Ok(wt) => {
+            let bound = wt.local_addr().map(|a| a.to_string()).unwrap_or_default();
+            if secure {
+                info!(addr = %bound, tokens = token_count, "WebTransport listening with TLS + token auth");
+            } else {
+                info!(addr = %bound, "WebTransport listening (TLS, loopback, unauthenticated)");
+            }
+            Some(wt)
+        }
+        Err(err) => {
+            warn!(addr = %addr, error = %err, "failed to bind WebTransport; UDS only");
+            None
+        }
+    }
+}
+
 /// Queue an `ERROR` frame on `out_tx`. Used by attach failure paths.
 pub(crate) async fn send_error(
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
@@ -893,6 +1163,7 @@ mod tests {
         let handle = TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,
             upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
             pwd: pwd_tx,
@@ -1029,6 +1300,7 @@ mod tests {
                     let handle = TerminalHandle {
                         input: input_tx,
                         snapshot: snapshot_tx,
+                        set_default_colors: mpsc::channel(8).0,
                         screen: screen_tx,
                         upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
                         pwd: pwd_tx,
@@ -1184,6 +1456,7 @@ mod tests {
                 let handle = TerminalHandle {
                     input: input_tx,
                     snapshot: snapshot_tx,
+                    set_default_colors: mpsc::channel(8).0,
                     screen: screen_tx,
                     upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
                     pwd: pwd_tx,
@@ -1304,6 +1577,198 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): seeding a session fires the
+    /// `after-new-pane` hook with the pane's wire id and the session name
+    /// in context.
+    #[test]
+    fn seed_session_fires_after_new_pane_hook() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(tx));
+            });
+            let token = CancellationToken::new();
+            seed_session_with_actor(&state, "hooked", 100, &token).expect("seed");
+            let event = rx.try_recv().expect("after-new-pane fired");
+            assert_eq!(event.name, crate::hooks::AFTER_NEW_PANE);
+            assert_eq!(
+                event.context.get("session").map(String::as_str),
+                Some("hooked"),
+            );
+            assert!(
+                event.context.contains_key("terminal-id"),
+                "context must carry the pane's wire id",
+            );
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): the per-pane exit watcher
+    /// fires `pane-exit` with the reported exit code in context.
+    #[test]
+    fn exit_watcher_fires_pane_exit_hook_with_exit_code() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, pane) = state.with_mut(|s| s.seed_session("dying"));
+            let (exit_tx, exit_rx) = tokio::sync::oneshot::channel::<Option<i32>>();
+            let token = CancellationToken::new();
+            spawn_terminal_exit_watcher(state.clone(), pane, Some(exit_rx), token);
+            exit_tx.send(Some(3)).expect("exit notify");
+            let event = tokio::time::timeout(Duration::from_secs(2), hook_rx.recv())
+                .await
+                .expect("pane-exit hook timed out")
+                .expect("hook channel closed");
+            assert_eq!(event.name, crate::hooks::PANE_EXIT);
+            assert_eq!(
+                event.context.get("exit-code").map(String::as_str),
+                Some("3"),
+            );
+            assert!(event.context.contains_key("terminal-id"));
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): a routed `INPUT_FOCUS`
+    /// gained event fires `focus-changed`; a lost event (or a gated
+    /// frame) does not.
+    #[test]
+    fn focus_gained_fires_focus_changed_hook_and_lost_does_not() {
+        use phux_protocol::input::focus::FocusEvent;
+        use tokio::sync::{broadcast, mpsc};
+
+        use crate::terminal_actor::TerminalHandle;
+
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, pane) = state.with_mut(|s| s.seed_session("focus"));
+
+            // Hand-built handle: only the input channel matters here.
+            let (input_tx, _input_rx) = mpsc::channel(8);
+            let (output_tx, _output_rx_seed) =
+                broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
+            let handle = TerminalHandle {
+                input: input_tx,
+                snapshot: mpsc::channel(8).0,
+                set_default_colors: mpsc::channel(8).0,
+                screen: mpsc::channel(8).0,
+                upgrade: mpsc::channel::<crate::terminal_actor::UpgradeHandleRequest>(8).0,
+                pwd: mpsc::channel(8).0,
+                output: output_tx,
+                resize: mpsc::channel::<ResizeRequest>(8).0,
+                consumer_attach: mpsc::channel(8).0,
+                consumer_detach: mpsc::channel(8).0,
+                consumer_ack: mpsc::channel(8).0,
+                subscribe_to_events: mpsc::channel(8).0,
+                unsubscribe_from_events: mpsc::channel(8).0,
+                control: mpsc::channel(8).0,
+                cols: 80,
+                rows: 24,
+            };
+            let wire_terminal_id = state.with_mut(|s| {
+                let _ = s.register_terminal_handle(pane, handle, CancellationToken::new());
+                s.intern_terminal_wire(pane)
+            });
+
+            let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            state
+                .with_mut(|s| s.attach_default_caps(client_id, "focus", tx))
+                .expect("attach");
+
+            // Focus gained → hook fires.
+            handle_terminal_input(
+                &state,
+                client_id,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Gained),
+                "INPUT_FOCUS",
+            );
+            let event = hook_rx.try_recv().expect("focus-changed fired");
+            assert_eq!(event.name, crate::hooks::FOCUS_CHANGED);
+            assert!(event.context.contains_key("terminal-id"));
+            assert!(event.context.contains_key("client-id"));
+
+            // Focus lost → no hook.
+            handle_terminal_input(
+                &state,
+                client_id,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Lost),
+                "INPUT_FOCUS",
+            );
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "focus lost must not fire focus-changed",
+            );
+
+            // Focus gained from a non-attached client is gated → no hook.
+            let stranger = ClientId(4242);
+            handle_terminal_input(
+                &state,
+                stranger,
+                &wire_terminal_id,
+                crate::state::TerminalInput::Focus(FocusEvent::Gained),
+                "INPUT_FOCUS",
+            );
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "a gated focus frame must not fire focus-changed",
+            );
+        });
+    }
+
+    /// docs/consumers/tui.md §9 (phux-r82.1): tearing down an attached
+    /// client fires `client-detached` with the session name; a connection
+    /// that never attached fires nothing.
+    #[test]
+    fn detach_fires_client_detached_hook_only_for_attached_clients() {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        let local = LocalSet::new();
+        local.block_on(&rt, async {
+            let state = SharedState::new();
+            let (hook_tx, mut hook_rx) = tokio::sync::mpsc::channel(8);
+            state.with_mut(|s| {
+                s.set_hook_dispatcher(crate::hooks::HookDispatcher::from_sender(hook_tx));
+            });
+            let (_sid, _wid, _pane) = state.with_mut(|s| s.seed_session("leaving"));
+
+            // Never-attached connection: teardown fires nothing.
+            let stranger = state.with_mut(crate::state::ServerState::new_client_id);
+            detach_and_release_consumer_state(&state, stranger);
+            assert!(
+                hook_rx.try_recv().is_err(),
+                "an unattached connection must not fire client-detached",
+            );
+
+            // Attached client: teardown fires client-detached.
+            let client_id = state.with_mut(crate::state::ServerState::new_client_id);
+            let (tx, _rx) = tokio::sync::mpsc::channel(8);
+            state
+                .with_mut(|s| s.attach_default_caps(client_id, "leaving", tx))
+                .expect("attach");
+            detach_and_release_consumer_state(&state, client_id);
+            let event = hook_rx.try_recv().expect("client-detached fired");
+            assert_eq!(event.name, crate::hooks::CLIENT_DETACHED);
+            assert_eq!(
+                event.context.get("session").map(String::as_str),
+                Some("leaving"),
+            );
+        });
     }
 
     /// A `VIEWPORT_RESIZE` from a non-attached client is a benign no-op —

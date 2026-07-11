@@ -1,4 +1,5 @@
 mod config_json;
+mod live_feed;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -6,76 +7,37 @@ use std::time::Duration;
 
 use phux_config::loader as config_loader;
 use phux_config::plugin::{self, PluginManifest};
+use phux_server::runtime::default_socket_path;
 
 use super::config_action::ConfigAction;
 use config_json::{print_agents_json, print_plugins_json};
+use live_feed::{
+    AgentProjection, LiveAgentFeed, ManifestAgentRow, ProjectionSource, fetch_live_feed,
+    merge_agents,
+};
 
-/// `phux config <action>` (phux-ijp). Entirely client-local: inspects
-/// and scaffolds the on-disk config without contacting a server.
+/// `phux config <action>` (phux-ijp). Mostly client-local: inspects and
+/// scaffolds the on-disk config without contacting a server. The
+/// exceptions are `config agents`, which best-effort reads live
+/// `phux.agent/v1` state from a running server (phux-r82.10) and degrades
+/// to the declared manifest values when none answers, and `reload`
+/// (phux-foz.5), which rings
+/// the server-relayed reload doorbell for attached clients.
 pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
     match action {
         ConfigAction::Path => {
             println!("{}", config_loader::config_path().display());
             ExitCode::SUCCESS
         }
-        ConfigAction::Init { force } => {
-            let path = config_loader::config_path();
-            match phux_config::scaffold::write_reference_config(&path, *force) {
-                Ok(phux_config::scaffold::ScaffoldOutcome::Wrote(p)) => {
-                    println!("wrote {}", p.display());
-                    ExitCode::SUCCESS
-                }
-                Ok(phux_config::scaffold::ScaffoldOutcome::Skipped(p)) => {
-                    eprintln!(
-                        "phux: {} already exists; refusing to overwrite (use --force)",
-                        p.display()
-                    );
-                    ExitCode::FAILURE
-                }
-                Err(err) => {
-                    eprintln!("phux: could not write config: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
-        ConfigAction::Show { default } => {
-            // `--default` echoes the embedded defaults verbatim, comments
-            // and all — the annotated source of truth. Plain `show`
-            // renders the effective merged document (defaults + the user's
-            // overrides) as canonical TOML.
-            if *default {
-                print!("{}", phux_config::DEFAULT_CONFIG_TOML);
-                return ExitCode::SUCCESS;
-            }
-            let path = config_loader::config_path();
-            let user_input = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(err) => {
-                    eprintln!("phux: could not read {}: {err}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            };
-            let merged = match phux_config::merged_config_table(&user_input, &path) {
-                Ok(table) => table,
-                Err(err) => {
-                    eprintln!("phux: {err}");
-                    return ExitCode::FAILURE;
-                }
-            };
-            match toml::to_string(&merged) {
-                Ok(rendered) => {
-                    print!("{rendered}");
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("phux: could not render config: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+        ConfigAction::Init { force, distro } => run_config_init(*force, distro.as_deref()),
+        ConfigAction::Show {
+            default,
+            layers,
+            json,
+        } => run_config_show(*default, *layers, *json),
         ConfigAction::Plugins { json } => run_config_plugins(*json),
-        ConfigAction::Agents { json } => run_config_agents(*json),
+        ConfigAction::Agents { json, socket } => run_config_agents(*json, socket.clone()),
+        ConfigAction::Reload { socket } => run_config_reload(socket.clone()),
         ConfigAction::Run {
             plugin,
             action,
@@ -84,6 +46,236 @@ pub(crate) fn run_config(action: &ConfigAction) -> ExitCode {
             json,
         } => run_config_action(plugin, action, *timeout, cwd.clone(), *json),
     }
+}
+
+/// `phux config show [--default | --layers [--json]]`.
+///
+/// `--default` echoes the embedded defaults verbatim, comments and all
+/// — the annotated source of truth. Plain `show` renders the effective
+/// merged document (defaults + `extends` layers + the user's overrides,
+/// ADR-0039) as canonical TOML. `--layers` renders provenance instead:
+/// which layer of the stack set each effective key, and for `-append`
+/// arrays, which layer contributed each element.
+fn run_config_show(default: bool, layers: bool, json: bool) -> ExitCode {
+    if default {
+        print!("{}", phux_config::DEFAULT_CONFIG_TOML);
+        return ExitCode::SUCCESS;
+    }
+    let path = config_loader::config_path();
+    let user_input = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            eprintln!("phux: could not read {}: {err}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    if layers {
+        let provenance = match phux_config::merged_config_with_provenance(&user_input, &path) {
+            Ok((_, provenance)) => provenance,
+            Err(err) => {
+                eprintln!("phux: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        if json {
+            return config_json::print_layers_json(&path, &provenance);
+        }
+        return print_layers_human(&provenance);
+    }
+    let merged = match phux_config::merged_config_table(&user_input, &path) {
+        Ok(table) => table,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match toml::to_string(&merged) {
+        Ok(rendered) => {
+            print!("{rendered}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("phux: could not render config: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Render the provenance view: the layer stack, then one row per
+/// effective leaf key (arrays expand to one row per element) tagged
+/// with the 1-based index and short name of the owning layer.
+fn print_layers_human(provenance: &phux_config::ConfigProvenance) -> ExitCode {
+    println!("layers (merge order; later layers win):");
+    for (i, layer) in provenance.layers.iter().enumerate() {
+        let label = match layer {
+            phux_config::LayerSource::Defaults => "defaults (embedded)".to_owned(),
+            phux_config::LayerSource::Extended(p) => p.display().to_string(),
+            phux_config::LayerSource::User(p) => format!("{} (user)", p.display()),
+        };
+        println!("  [{}] {label}", i + 1);
+    }
+    println!();
+    println!("keys:");
+    let mut rows: Vec<(String, usize)> = Vec::new();
+    for (key, origin) in &provenance.keys {
+        match origin.elements.as_deref() {
+            Some(elements) if !elements.is_empty() => {
+                for (i, layer) in elements.iter().enumerate() {
+                    rows.push((format!("{key}[{i}]"), *layer));
+                }
+            }
+            _ => rows.push((key.clone(), origin.layer)),
+        }
+    }
+    let width = rows.iter().map(|(key, _)| key.len()).max().unwrap_or(0);
+    for (key, layer) in rows {
+        let label = provenance
+            .layers
+            .get(layer)
+            .map_or_else(|| "?".to_owned(), layer_short_label);
+        println!("  {key:<width$}  <- [{}] {label}", layer + 1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// Short per-row tag for a layer: `defaults`, the layer file's name,
+/// or `user`. The 1-based index printed beside it disambiguates layers
+/// whose file names collide.
+fn layer_short_label(layer: &phux_config::LayerSource) -> String {
+    match layer {
+        phux_config::LayerSource::Defaults => "defaults".to_owned(),
+        phux_config::LayerSource::Extended(p) => p.file_name().map_or_else(
+            || p.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        ),
+        phux_config::LayerSource::User(_) => "user".to_owned(),
+    }
+}
+
+/// `phux config init [--distro <name-or-path>]`: scaffold the starter
+/// config, plain or extending a starter distribution (phux-r82.9).
+///
+/// The distro flavor resolves the spec to an absolute layer path, then
+/// **validates the full merged stack before writing anything** — a
+/// broken or missing distro layer fails the command instead of leaving
+/// the user a config that errors on every subsequent invocation.
+fn run_config_init(force: bool, distro: Option<&str>) -> ExitCode {
+    let path = config_loader::config_path();
+    let contents = match distro {
+        None => phux_config::scaffold::reference_config(),
+        Some(spec) => {
+            let layer = match phux_config::distro::resolve_distro(spec) {
+                Ok(layer) => layer,
+                Err(err) => {
+                    eprintln!("phux: {err}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let contents = phux_config::scaffold::distro_reference_config(&layer);
+            if let Err(err) = phux_config::parse_with_defaults(&contents, &path) {
+                eprintln!(
+                    "phux: distro layer {} does not produce a valid config: {err}",
+                    layer.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            contents
+        }
+    };
+    match phux_config::scaffold::write_scaffold(&path, &contents, force) {
+        Ok(phux_config::scaffold::ScaffoldOutcome::Wrote(p)) => {
+            println!("wrote {}", p.display());
+            ExitCode::SUCCESS
+        }
+        Ok(phux_config::scaffold::ScaffoldOutcome::Skipped(p)) => {
+            eprintln!(
+                "phux: {} already exists; refusing to overwrite (use --force)",
+                p.display()
+            );
+            ExitCode::FAILURE
+        }
+        Err(err) => {
+            eprintln!("phux: could not write config: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `phux config reload` (phux-foz.5): validate the layered config
+/// locally, then ring the `phux.config.reload/v1` doorbell so attached
+/// clients re-read their config in place.
+///
+/// The local validation is the config-iteration fast path: a broken file
+/// fails HERE, with the parse error on stderr, and nothing is signalled
+/// (running clients would have kept their old config anyway — the
+/// doorbell just becomes pointless noise). The signal is a `SET_METADATA`
+/// of the conventional Global key with a fresh nonce value; the config
+/// bytes never cross the wire — every client re-reads its own file. The
+/// trailing `GET_METADATA` round-trip is load-bearing: `SET_METADATA` has
+/// no reply frame, so without it this process could exit and close the
+/// socket before the server reads the SET (same pattern as `phux tag`).
+fn run_config_reload(socket: Option<PathBuf>) -> ExitCode {
+    use phux_client::attach::connection::Connection;
+    use phux_protocol::wire::frame::{CONFIG_RELOAD_KEY, FrameKind, Scope};
+
+    // 1. Validate locally with the full layered loader (extends stacks).
+    let config_path = config_loader::config_path();
+    if let Err(err) = config_loader::load_from(&config_path) {
+        eprintln!("phux: config invalid, not signalling reload: {err}");
+        return ExitCode::FAILURE;
+    }
+
+    // 2. Ring the doorbell. The nonce only has to differ from the
+    // previous value (the server dedups equal-bytes SETs).
+    let socket_path = socket.unwrap_or_else(phux_server::runtime::default_socket_path);
+    let rt = match super::cli_runtime() {
+        Ok(rt) => rt,
+        Err(code) => return code,
+    };
+    rt.block_on(async move {
+        let mut conn = match Connection::connect(&socket_path).await {
+            Ok(conn) => conn,
+            Err(err) => return super::report_no_server(&err, &socket_path, "config reload"),
+        };
+        let nonce = format!(
+            "{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+            std::process::id(),
+        );
+        if let Err(err) = conn
+            .send(&FrameKind::SetMetadata {
+                request_id: 1,
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+                value: nonce.into_bytes(),
+            })
+            .await
+        {
+            return super::report_no_server(&err, &socket_path, "config reload");
+        }
+        if let Err(err) = conn
+            .send(&FrameKind::GetMetadata {
+                request_id: 2,
+                scope: Scope::Global,
+                key: CONFIG_RELOAD_KEY.to_owned(),
+            })
+            .await
+        {
+            return super::report_no_server(&err, &socket_path, "config reload");
+        }
+        loop {
+            match conn.recv().await {
+                Ok(FrameKind::MetadataValue { request_id: 2, .. }) => break,
+                Ok(_) => {}
+                Err(err) => return super::report_no_server(&err, &socket_path, "config reload"),
+            }
+        }
+        println!("config OK; reload signalled to attached clients");
+        ExitCode::SUCCESS
+    })
 }
 
 pub(super) struct LoadedPlugin {
@@ -137,7 +329,7 @@ fn run_config_plugins(json: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_config_agents(json: bool) -> ExitCode {
+fn run_config_agents(json: bool, socket: Option<PathBuf>) -> ExitCode {
     let loaded = match load_configured_plugins() {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -145,23 +337,62 @@ fn run_config_agents(json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let rows = manifest_agent_rows(&loaded);
+    // phux-r82.10: best-effort live feed. No server (or any transport
+    // failure) means `feed` is `None` and the projection reports the
+    // declared manifest values, exactly as before.
+    let feed = fetch_feed_blocking(socket);
+    let merged = merge_agents(&rows, feed.as_ref());
     if json {
-        return print_agents_json(&loaded);
+        return print_agents_json(&merged, feed.is_some());
     }
-    for plugin in loaded {
-        let plugin_state = if plugin.enabled {
+    for row in &merged {
+        let plugin_state = if row.plugin_enabled {
             "enabled"
         } else {
             "disabled"
         };
-        for agent in plugin.manifest.agents {
-            println!(
-                "{}:{} {} {:?} {:?} ({plugin_state})",
-                plugin.manifest.id, agent.id, agent.label, agent.state, agent.attention
-            );
-        }
+        println!(
+            "{}:{} {} {} {} ({plugin_state}, {})",
+            row.plugin_id,
+            row.id,
+            row.label,
+            row.state,
+            row.attention,
+            provenance_word(row)
+        );
     }
     ExitCode::SUCCESS
+}
+
+/// Flatten the loaded manifests into the merge input rows.
+fn manifest_agent_rows(loaded: &[LoadedPlugin]) -> Vec<ManifestAgentRow> {
+    loaded
+        .iter()
+        .flat_map(|plugin| {
+            plugin.manifest.agents.iter().map(|agent| ManifestAgentRow {
+                plugin_id: plugin.manifest.id.clone(),
+                plugin_enabled: plugin.enabled,
+                agent: agent.clone(),
+            })
+        })
+        .collect()
+}
+
+/// Fetch the live feed on a throwaway current-thread runtime; `None` when
+/// no runtime can be built or no server answers.
+fn fetch_feed_blocking(socket: Option<PathBuf>) -> Option<LiveAgentFeed> {
+    let socket_path = socket.unwrap_or_else(default_socket_path);
+    let rt = crate::commands::cli_runtime().ok()?;
+    rt.block_on(fetch_live_feed(&socket_path))
+}
+
+/// Human-output provenance suffix: where the effective state came from.
+fn provenance_word(row: &AgentProjection) -> String {
+    match (&row.source, &row.runtime) {
+        (ProjectionSource::Runtime, Some(binding)) => format!("live {}", binding.terminal),
+        _ => "declared".to_owned(),
+    }
 }
 
 fn run_config_action(

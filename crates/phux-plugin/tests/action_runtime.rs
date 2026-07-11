@@ -7,6 +7,15 @@ use phux_plugin::{
 };
 use tempfile::TempDir;
 
+/// Hang guard for tests that assert an action *completes*.
+///
+/// This must be generous, not tight: the continuum tests spawn a three-deep
+/// process chain (`sh -c` -> plugin script -> stub `phux`), and under full
+/// parallel nextest load a 2s deadline was occasionally exceeded, flipping the
+/// outcome to `TimedOut` and flaking the run (phux-ikfm). Timeout *behavior*
+/// is covered separately by `action_runtime_times_out_and_reports_cancellation`.
+const HANG_GUARD: Duration = Duration::from_secs(60);
+
 fn sh_quote(value: &std::path::Path) -> String {
     format!("'{}'", value.display().to_string().replace('\'', "'\\''"))
 }
@@ -169,7 +178,7 @@ async fn checked_in_continuum_restore_missing_archive_is_structured()
 
     let output = run_configured_action(
         &config,
-        &continuum_request("restore-latest", Some(Duration::from_secs(2))),
+        &continuum_request("restore-latest", Some(HANG_GUARD)),
     )
     .await?;
 
@@ -236,16 +245,7 @@ printf '{"schema_version":1,"sessions":[]}\n' > "$output"
     );
     let config = write_configured_plugin(&tmp, true, &command)?;
 
-    let output = run_configured_action(
-        &config,
-        &PluginActionRequest {
-            plugin_id: "example.actions".to_owned(),
-            action_id: "probe".to_owned(),
-            timeout: Some(Duration::from_secs(2)),
-            cwd: None,
-        },
-    )
-    .await?;
+    let output = run_configured_action(&config, &request(Some(HANG_GUARD))).await?;
 
     assert_eq!(output.outcome, PluginActionOutcome::Completed);
     assert_eq!(output.exit_code, Some(0));

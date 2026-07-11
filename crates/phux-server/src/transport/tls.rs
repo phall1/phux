@@ -153,6 +153,36 @@ pub(crate) fn quic_server_config(
     Ok(config)
 }
 
+/// Build the rustls [`ServerConfig`] for the WebTransport listener from a PEM
+/// cert + key: TLS 1.3 only (QUIC forbids earlier versions) with the standard
+/// HTTP/3 ALPN.
+///
+/// Unlike the raw-QUIC listener (which advertises the phux-private
+/// [`QUIC_ALPN`]), WebTransport rides HTTP/3, and browsers offer exactly
+/// `h3` — a private ALPN would fail every browser handshake. Reuses the same
+/// cert material as the `wss://` and QUIC paths so one pinned fingerprint
+/// covers all three remote transports.
+#[cfg(feature = "webtransport")]
+pub(crate) fn webtransport_server_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<ServerConfig, TlsError> {
+    let certs = load_certs(cert_path)?;
+    let key = load_key(key_path)?;
+
+    let mut config =
+        ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(TlsError::Rustls)?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)?;
+    // The IANA-registered HTTP/3 ALPN id. wtransport exports the same bytes
+    // (`wtransport::tls::WEBTRANSPORT_ALPN`); spelled literally here so this
+    // module stays wtransport-free apart from the cfg gate.
+    config.alpn_protocols = vec![b"h3".to_vec()];
+    Ok(config)
+}
+
 /// SHA-256 fingerprint of the leaf certificate, formatted as uppercase
 /// colon-separated hex (`AB:CD:…`) — the conventional shape for an
 /// out-of-band pin shown alongside a pairing token.

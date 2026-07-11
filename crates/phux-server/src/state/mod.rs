@@ -270,11 +270,37 @@ pub struct ServerState {
     policy_bundle: crate::policy::PolicyBundle,
     /// Per-client peer identities, keyed by server-assigned client id.
     peer_identities: HashMap<ClientId, phux_protocol::policy::PeerIdentity>,
-    /// Graceful-upgrade context (ADR-0032): the listening socket's raw fd and
-    /// its path, captured at startup. `handle_upgrade` reads these to build the
-    /// handoff blob and to re-pass `--socket` to the re-exec'd image. `None`
-    /// until [`Self::set_upgrade_context`] runs (i.e. before serving).
-    upgrade_ctx: Option<(std::os::fd::RawFd, std::path::PathBuf)>,
+    /// Graceful-upgrade context (ADR-0032): the listening socket's raw fd,
+    /// its path, and the server's effective runtime flags (phux-v45.10),
+    /// captured at startup. `handle_upgrade` reads these to build the handoff
+    /// blob and to re-pass `--socket` / `--listen` / `--quic` / `--hub` to
+    /// the re-exec'd image. `None` until [`Self::set_upgrade_context`] runs
+    /// (i.e. before serving).
+    upgrade_ctx: Option<(
+        std::os::fd::RawFd,
+        std::path::PathBuf,
+        crate::runtime::RuntimeFlags,
+    )>,
+    /// Validated satellite table for a federation hub (phux-v45.1,
+    /// ADR-0007). `None` on every non-hub server — the registry is never
+    /// read outside hub mode. Set once at startup by the runtime via
+    /// [`Self::set_hub_table`] after `crate::hub::resolve_hub_table`
+    /// succeeds. Held for the upcoming dial (phux-v45.3) and route
+    /// (phux-v45.4) beads; nothing consumes it for I/O yet.
+    hub_table: Option<crate::hub::HubTable>,
+    /// Per-satellite link statuses published by the hub's outbound link
+    /// supervisors (phux-v45.3). `None` on every non-hub server. Set once
+    /// at startup via [`Self::set_hub_link_statuses`] alongside the link
+    /// spawn; the handle is the read surface a future `LIST` aggregation
+    /// (phux-v45.4+) consumes.
+    hub_link_statuses: Option<crate::hub::link::HubLinkStatuses>,
+    /// Server-side event-hook dispatcher handle (`docs/consumers/tui.md`
+    /// §9, phux-r82.1). `None` until the runtime spawns the dispatcher
+    /// (it does so only when the hook catalog is non-empty), which is
+    /// also the default for every test that never configures hooks —
+    /// firing an event is then a no-op. Set once at startup via
+    /// [`Self::set_hook_dispatcher`].
+    hook_dispatcher: Option<crate::hooks::HookDispatcher>,
 }
 
 impl Default for ServerState {
@@ -373,6 +399,7 @@ mod tests {
         TerminalHandle {
             input: input_tx,
             snapshot: snapshot_tx,
+            set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,
             upgrade: upgrade_tx,
             pwd: pwd_tx,

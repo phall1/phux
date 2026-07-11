@@ -153,6 +153,27 @@ pub(crate) enum Command {
         #[arg(long, value_name = "HOST:PORT")]
         quic: Option<std::net::SocketAddr>,
 
+        /// Also accept WebTransport (HTTP/3 over QUIC) clients on this
+        /// `HOST:PORT` (the UDS stays on) — the browser's door to QUIC-class
+        /// transport; `phux-web` dials it, falling back to WebSocket.
+        /// Always TLS 1.3-encrypted; a loopback address skips token auth
+        /// (local dev), while any routable address requires a `phux pair`
+        /// token carried in the CONNECT request (`Authorization: Bearer`
+        /// from native consumers, `?token=<hex>` on the session URL from
+        /// browsers; ADR-0031). Overrides `$PHUX_WT_ADDR`.
+        #[arg(long, value_name = "HOST:PORT")]
+        webtransport: Option<std::net::SocketAddr>,
+
+        /// Run as a federation hub (ADR-0007): consume the `[[satellites]]`
+        /// registry from `config.toml` at startup, validating every enabled
+        /// entry's endpoint (`quic://`, `ws://`, `wss://`, or the deferred
+        /// `ssh://`) into the runtime satellite table. A malformed enabled
+        /// endpoint or a duplicate satellite name fails startup. Without
+        /// this flag the registry is ignored. No dialing or routing happens
+        /// yet — this is the validated table only.
+        #[arg(long)]
+        hub: bool,
+
         /// Detach from the controlling terminal via `setsid(2)` before
         /// binding. Set by the auto-spawn path so the server outlives
         /// the launching client's terminal; a foreground `phux server`
@@ -429,8 +450,8 @@ pub(crate) enum Command {
     /// Flags (`--until`, `--idle`, `--timeout`, `--json`, `--socket`) MUST
     /// precede TARGET if you give one.
     ///
-    ///   phux wait build --until "BUILD SUCCESSFUL"
-    ///   phux wait repl --idle 750
+    ///   phux wait --until "BUILD SUCCESSFUL" build
+    ///   phux wait --idle 750 repl
     #[command(about = "Block until a pane meets a condition")]
     Wait {
         /// Target selector. Omit for the most-recently-focused session.
@@ -578,11 +599,13 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
     },
 
-    /// Inspect and scaffold the phux config file (phux-ijp).
+    /// Inspect, scaffold, and reload the phux config file (phux-ijp).
     ///
     /// phux is config-driven (ADR-0023): defaults ship in the binary and
     /// your `config.toml` is a sparse overlay merged on top. These
-    /// subcommands never touch a running server.
+    /// subcommands never touch a running server, except `reload`
+    /// (phux-foz.5), which signals attached clients to re-read their
+    /// config in place.
     Config {
         #[command(subcommand)]
         action: config_action::ConfigAction,
@@ -712,6 +735,53 @@ pub(crate) enum PluginAction {
         json: bool,
     },
 
+    /// Fetch, build, validate, and link a plugin package.
+    ///
+    /// REF is a git URL (`https://…`, `git@…`, `file://…` — cloned with
+    /// the system `git`), a local plugin directory (copied), or a local
+    /// tarball (`.tar`, `.tar.gz`, `.tgz` — extracted with the system
+    /// `tar`). The package lands under the managed plugins directory
+    /// (`$XDG_DATA_HOME/phux/plugins`, else `~/.local/share/phux/plugins`),
+    /// its manifest `[[build]]` steps for this platform run with a bounded
+    /// timeout and captured output, the manifest is validated (including
+    /// the `min_phux_version` gate), and the result is linked into
+    /// `config.toml` like `phux plugin link`. Provenance (ref, branch,
+    /// resolved commit) is recorded in the managed directory's
+    /// `plugins.lock` so `phux plugin update` can re-fetch it later.
+    Install {
+        /// Git URL, local plugin directory, or local tarball path.
+        #[arg(value_name = "REF")]
+        reference: String,
+
+        /// Branch or tag to clone (git sources only).
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+
+        /// Install and link the plugin but leave it disabled.
+        #[arg(long)]
+        disabled: bool,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Re-fetch, rebuild, and revalidate installed plugins.
+    ///
+    /// Reads the managed directory's `plugins.lock`, re-fetches each
+    /// recorded source (all of them, or just NAME), reruns its `[[build]]`
+    /// steps, revalidates the manifest, swaps the managed copy, and
+    /// records the new resolved commit. `config.toml` is untouched — the
+    /// linked manifest path does not move.
+    Update {
+        /// Plugin id to update. Omit to update every installed plugin.
+        name: Option<String>,
+
+        /// Emit a stable JSON document instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Remove a configured plugin by id.
     Unlink {
         /// Plugin id from its manifest.
@@ -801,6 +871,10 @@ pub(crate) enum SatelliteAction {
     },
 
     /// Add or update a satellite endpoint in `config.toml`.
+    ///
+    /// Updating replaces the whole entry, so repeat `--token-file` /
+    /// `--cert-fingerprint` when re-adding a name or the auth material
+    /// is cleared.
     Add {
         /// Hub-local satellite name.
         name: String,
@@ -812,6 +886,20 @@ pub(crate) enum SatelliteAction {
         /// Register the satellite but leave it disabled.
         #[arg(long)]
         disabled: bool,
+
+        /// Path to a file holding the pairing bearer token for this
+        /// satellite, minted by running `phux pair` on the satellite host
+        /// (ADR-0038). The file holds one hex token and should be
+        /// owner-only (0600); only the path lands in `config.toml` — the
+        /// token itself is never written to config or printed.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<std::path::PathBuf>,
+
+        /// SHA-256 fingerprint of the satellite server's TLS certificate,
+        /// as printed by `phux pair` on the satellite host. Pins the
+        /// certificate for routable endpoints; not a secret.
+        #[arg(long, value_name = "FINGERPRINT")]
+        cert_fingerprint: Option<String>,
 
         /// Emit a stable JSON document instead of human text.
         #[arg(long)]

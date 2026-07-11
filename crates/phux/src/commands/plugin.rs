@@ -1,4 +1,6 @@
+mod install;
 mod json;
+mod lock;
 mod registry;
 
 use std::path::Path;
@@ -23,6 +25,13 @@ pub(crate) fn run_plugin(action: &PluginAction) -> ExitCode {
             disabled,
             json,
         } => run_link(manifest, !disabled, *json),
+        PluginAction::Install {
+            reference,
+            rev,
+            disabled,
+            json,
+        } => install::run_install(reference, rev.as_deref(), *disabled, *json),
+        PluginAction::Update { name, json } => install::run_update(name.as_deref(), *json),
         PluginAction::Unlink { id, json } => run_unlink(id, *json),
         PluginAction::Enable { id, json } => run_set_enabled(id, true, *json),
         PluginAction::Disable { id, json } => run_set_enabled(id, false, *json),
@@ -45,47 +54,15 @@ fn run_list(json: bool) -> ExitCode {
 }
 
 fn run_link(manifest_arg: &Path, enabled: bool, json: bool) -> ExitCode {
-    let config_path = config_loader::config_path();
     let manifest = match plugin::load_plugin_manifest(manifest_arg) {
         Ok(manifest) => manifest,
         Err(err) => {
             return fail(&format!("could not load {}: {err}", manifest_arg.display()));
         }
     };
-    let stored_manifest = manifest_path_for_config(&manifest.manifest_path, &config_path);
-    if let Err(err) = reject_symlinked_config(&config_path) {
-        return fail(&err);
-    }
-    let mut doc = match read_config_document(&config_path) {
-        Ok(doc) => doc,
+    let entry = match upsert_config_entry(manifest, enabled) {
+        Ok(entry) => entry,
         Err(err) => return fail(&err),
-    };
-    let mut updated = false;
-    let existing_entries = match load_registry_from_path(&config_path) {
-        Ok(entries) => entries,
-        Err(err) => return fail(&err),
-    };
-    for entry in existing_entries {
-        if entry.manifest.id == manifest.id {
-            if let Err(err) = update_entry(&mut doc, entry.index, &stored_manifest, enabled) {
-                return fail(&err);
-            }
-            updated = true;
-            break;
-        }
-    }
-    if !updated && let Err(err) = push_entry(&mut doc, &stored_manifest, enabled) {
-        return fail(&err);
-    }
-    if let Err(err) = write_config_document(&config_path, &doc) {
-        return fail(&err);
-    }
-    let entry = RegistryEntry {
-        index: 0,
-        manifest_text: stored_manifest,
-        manifest_path: manifest.manifest_path.clone(),
-        enabled,
-        manifest,
     };
     if json {
         print_plugin_json("plugin", &entry)
@@ -94,6 +71,37 @@ fn run_link(manifest_arg: &Path, enabled: bool, json: bool) -> ExitCode {
         println!("linked {} ({state})", entry.manifest.id);
         ExitCode::SUCCESS
     }
+}
+
+/// Add or update `manifest`'s `[[plugins]]` entry in `config.toml` (the
+/// shared write path behind `phux plugin link` and `phux plugin install`).
+fn upsert_config_entry(
+    manifest: plugin::PluginManifest,
+    enabled: bool,
+) -> Result<RegistryEntry, String> {
+    let config_path = config_loader::config_path();
+    let stored_manifest = manifest_path_for_config(&manifest.manifest_path, &config_path);
+    reject_symlinked_config(&config_path)?;
+    let mut doc = read_config_document(&config_path)?;
+    let mut updated = false;
+    for entry in load_registry_from_path(&config_path)? {
+        if entry.manifest.id == manifest.id {
+            update_entry(&mut doc, entry.index, &stored_manifest, enabled)?;
+            updated = true;
+            break;
+        }
+    }
+    if !updated {
+        push_entry(&mut doc, &stored_manifest, enabled)?;
+    }
+    write_config_document(&config_path, &doc)?;
+    Ok(RegistryEntry {
+        index: 0,
+        manifest_text: stored_manifest,
+        manifest_path: manifest.manifest_path.clone(),
+        enabled,
+        manifest,
+    })
 }
 
 fn run_unlink(id: &str, json: bool) -> ExitCode {

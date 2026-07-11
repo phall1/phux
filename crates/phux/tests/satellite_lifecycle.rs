@@ -96,6 +96,136 @@ fn add_list_update_remove_json_is_machine_readable() {
 }
 
 #[test]
+fn auth_material_is_stored_by_reference_and_cleared_on_bare_update() {
+    let tmp = TempDir::new().expect("tempdir");
+    let xdg = tmp.path().join("xdg");
+    let token_file = tmp.path().join("lab.token");
+    let secret = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    std::fs::write(&token_file, format!("{secret}\n")).expect("write token file");
+    let token_file_str = token_file.to_str().expect("utf-8 path");
+    let fingerprint = ["AB"; 32].join(":");
+
+    let (code, stdout, stderr) = run_with_xdg(
+        &[
+            "satellite",
+            "add",
+            "lab",
+            "quic://lab.example:8788",
+            "--token-file",
+            token_file_str,
+            "--cert-fingerprint",
+            &fingerprint,
+            "--json",
+        ],
+        &xdg,
+    );
+    assert_eq!(
+        code, 0,
+        "add with auth material should exit 0; stderr={stderr}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("add stdout is JSON");
+    assert_eq!(value["satellite"]["token_file"], token_file_str);
+    assert_eq!(value["satellite"]["cert_fingerprint"], fingerprint);
+    assert!(
+        !stdout.contains(secret),
+        "the token secret must never be printed: {stdout}"
+    );
+
+    // The registry stores the *path*, never the token bytes.
+    let config_path = xdg.join("phux").join("config.toml");
+    let config = std::fs::read_to_string(&config_path).expect("read config");
+    assert!(config.contains(&format!(r#"token-file = "{token_file_str}""#)));
+    assert!(config.contains(&format!(r#"cert-fingerprint = "{fingerprint}""#)));
+    assert!(
+        !config.contains(secret),
+        "the token secret must never land in config.toml: {config}"
+    );
+
+    // Human list shows auth material by reference only.
+    let (code, stdout, stderr) = run_with_xdg(&["satellite", "list"], &xdg);
+    assert_eq!(code, 0, "list should exit 0; stderr={stderr}");
+    assert!(stdout.contains(&format!("token-file={token_file_str}")));
+    assert!(stdout.contains(&format!("cert-fingerprint={fingerprint}")));
+    assert!(
+        !stdout.contains(secret),
+        "list must not read or print the token"
+    );
+
+    // `add` replaces the whole entry: omitting the auth flags clears them.
+    let (code, stdout, stderr) = run_with_xdg(
+        &[
+            "satellite",
+            "add",
+            "lab",
+            "quic://lab.example:8788",
+            "--json",
+        ],
+        &xdg,
+    );
+    assert_eq!(code, 0, "bare re-add should exit 0; stderr={stderr}");
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("update stdout is JSON");
+    assert_eq!(value["satellite"]["token_file"], serde_json::Value::Null);
+    assert_eq!(
+        value["satellite"]["cert_fingerprint"],
+        serde_json::Value::Null
+    );
+    let config = std::fs::read_to_string(&config_path).expect("read config after bare update");
+    assert!(
+        !config.contains("token-file") && !config.contains("cert-fingerprint"),
+        "a bare update must clear stale auth material: {config}"
+    );
+}
+
+#[test]
+fn relative_token_file_is_rejected() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    let (code, stdout, stderr) = run_with_xdg(
+        &[
+            "satellite",
+            "add",
+            "lab",
+            "quic://lab.example:8788",
+            "--token-file",
+            "relative/lab.token",
+            "--json",
+        ],
+        tmp.path(),
+    );
+
+    assert_ne!(code, 0, "relative token-file should fail");
+    assert!(stdout.is_empty());
+    assert!(stderr.contains("token-file must be an absolute path"));
+}
+
+#[test]
+fn malformed_cert_fingerprint_is_rejected() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    for bad in ["AB:CD", "not-a-fingerprint", ""] {
+        let (code, stdout, stderr) = run_with_xdg(
+            &[
+                "satellite",
+                "add",
+                "lab",
+                "quic://lab.example:8788",
+                "--cert-fingerprint",
+                bad,
+                "--json",
+            ],
+            tmp.path(),
+        );
+
+        assert_ne!(code, 0, "fingerprint {bad:?} should fail");
+        assert!(stdout.is_empty());
+        assert!(
+            stderr.contains("cert-fingerprint must be a SHA-256 fingerprint"),
+            "unexpected stderr for {bad:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_configured_satellite_names_are_rejected() {
     let tmp = TempDir::new().expect("tempdir");
     let xdg = tmp.path().join("xdg");

@@ -25,7 +25,12 @@
 # advertisement, so ncurses TUIs like htop keep working. A per-spawn
 # SPAWN_TERMINAL env override for TERM always wins over this. Set to
 # "ghostty" to opt into ghostty's extended terminfo once your apps are
-# known to round-trip the kitty keyboard protocol.
+# known to round-trip the kitty keyboard protocol. Evidence so far
+# (phux-0o8 harness, crates/phux-server/tests/kip_roundtrip.rs): the phux
+# stack round-trips the kitty protocol end-to-end — nvim opts in via
+# CSI-u and works, fzf/less/vim/btop are regression-free under
+# TERM=ghostty — but htop, the app that broke last time, is unproven, so
+# the shipped default stays conservative.
 term = "xterm-256color"
 history-limit = 50000
 refresh-rate = 60
@@ -75,6 +80,15 @@ window-size = "smallest"
 # Prefix: chord captured by the TUI before everything else. After hitting
 # the prefix, your next keystroke is matched against `prefix-table`.
 prefix = "C-a"
+
+# Which-key popup: press the prefix and hesitate for which-key-delay-ms
+# and a small panel pops up listing every prefix-table continuation
+# (built from YOUR bindings, including rebinds). It is display-only: any
+# key dismisses it and executes its binding exactly as if the popup were
+# not there; Esc dismisses it and cancels the prefix. Set
+# which-key = false to disable.
+which-key = true
+which-key-delay-ms = 600
 
 [keybindings.prefix-table]
 # Pane splits, tmux-style: " stacks panes (horizontal divider), % places
@@ -201,6 +215,14 @@ prefix = "C-a"
 # or ? again dismisses it.
 "?" = "show-help"
 
+# Live config reload (phux-foz.5): re-reads this file (full layered
+# load, `extends` included) and applies keybindings, theme, and status
+# bar in place; a file that fails to parse or validate keeps the old
+# config and surfaces the error in a toast. Unbound by default — the
+# command palette offers it as "Reload the config file"; bind it
+# yourself if you iterate on config a lot:
+#   "R" = "reload-config"
+
 [keybindings.global]
 # No other global bindings shipped by default. Add yours here, e.g.:
 #   "M-Enter" = "detach"
@@ -256,11 +278,18 @@ prefix = "C-a"
 
 # Federation satellites are remote phux servers a hub can route to. The registry
 # lands before routing so operators can declare stable names and endpoints.
+# The hub authenticates to a satellite as an ordinary remote consumer
+# (ADR-0038): run `phux pair` on the satellite host, save the printed token
+# into an owner-only file on the hub, and record that file's path plus the
+# printed certificate fingerprint here. The token itself never goes in this
+# file — only the path to it.
 #
 # [[satellites]]
 # name = "devbox"
-# endpoint = "ssh://devbox"
+# endpoint = "quic://devbox.example:8788"
 # enabled = true
+# token-file = "/home/me/.local/state/phux/satellites/devbox.token"
+# cert-fingerprint = "AB:CD:..."
 
 [status]
 # Left: the window/tab bar. The `windows` widget renders one tab per
@@ -275,3 +304,5 @@ prefix = "C-a"
 left   = [{ kind = "windows" }]
 center = [{ kind = "help-hints" }]
 right  = ["session-name", { kind = "time", format = " %H:%M" }]
+# Which outer-terminal row the bar reserves: "bottom" (default) or "top".
+# position = "bottom"

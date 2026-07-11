@@ -26,11 +26,19 @@ const AUTO_SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// is backed by a real PTY running the user's `$SHELL` (falling back
 /// to `/bin/sh`). On Ctrl-C, `run_async` returns `Ok(())` and the
 /// process exits 0.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_lines,
+    reason = "1:1 mirror of the `phux server` clap surface; bundling into a struct would just restate the clap enum"
+)]
 pub(crate) fn run_server(
     session: &str,
     socket: Option<PathBuf>,
     listen: Option<std::net::SocketAddr>,
     quic: Option<std::net::SocketAddr>,
+    webtransport: Option<std::net::SocketAddr>,
+    hub: bool,
     daemonize: bool,
     seed_command: Option<&str>,
     resume: Option<std::os::fd::RawFd>,
@@ -95,6 +103,15 @@ pub(crate) fn run_server(
         |cfg| cfg.defaults.window_size,
     );
 
+    // `[[hooks.<name>]]` entries plus enabled plugin manifests' `[[events]]`
+    // feed the server-side hook dispatcher (docs/consumers/tui.md §9,
+    // phux-r82.1). Relative manifest paths resolve against the config file's
+    // directory. Same fallback-on-error policy as the other config reads.
+    let hook_catalog = config_loader::load().map_or_else(
+        |_| phux_server::hooks::HookCatalog::default(),
+        |cfg| phux_server::hooks::HookCatalog::from_config(&cfg, &config_loader::config_path()),
+    );
+
     let cfg = ServerConfig {
         socket_path: socket_path.clone(),
         pre_seeded_session: Some(session.to_owned()),
@@ -105,6 +122,7 @@ pub(crate) fn run_server(
         term,
         window_size,
         policy_bundle: None,
+        hook_catalog,
     };
 
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -118,12 +136,20 @@ pub(crate) fn run_server(
         }
     };
 
-    let extra = match (listen, quic) {
+    let mut extra = match (listen, quic) {
         (Some(ws), Some(q)) => format!(" + ws://{ws} + quic://{q}"),
         (Some(ws), None) => format!(" + ws://{ws}"),
         (None, Some(q)) => format!(" + quic://{q}"),
         (None, None) => String::new(),
     };
+    if let Some(wt) = webtransport {
+        // WebTransport session URLs are https:// (HTTP/3 CONNECT).
+        let _ =
+            std::fmt::Write::write_fmt(&mut extra, format_args!(" + webtransport https://{wt}"));
+    }
+    if hub {
+        extra.push_str(" [hub]");
+    }
     eprintln!(
         "phux server listening on {}{extra} (session={session}; Ctrl-C to stop)",
         socket_path.display()
@@ -135,6 +161,24 @@ pub(crate) fn run_server(
     }
     if let Some(addr) = quic {
         server = server.listen_quic(addr);
+    }
+    if let Some(addr) = webtransport {
+        server = server.listen_webtransport(addr);
+    }
+    // Hub mode (phux-v45.1, ADR-0007): hand the `[[satellites]]` registry to
+    // the runtime, which validates it into the satellite table before
+    // binding. Unlike the `defaults.*` reads above, a failed config load is
+    // NOT swallowed here — the user explicitly asked for a hub, and starting
+    // one with a silently empty table would drop every configured satellite.
+    if hub {
+        let satellites = match config_loader::load() {
+            Ok(cfg) => cfg.satellites,
+            Err(err) => {
+                eprintln!("phux server --hub: cannot read the satellite registry: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        server = server.hub(satellites);
     }
     if let Some(fd) = resume {
         server = server.resume(fd);

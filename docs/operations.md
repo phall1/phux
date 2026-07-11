@@ -1,34 +1,25 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-10
 ---
 
 # Operations
 
-**TL;DR.** How phux behaves at the seams: error typing inside the workspace and translation at the IPC boundary; the logging and introspection surface an operator drives at runtime; and where the trust boundary sits and what it does and does not cover. Each section is one seam.
+**TL;DR.** How phux behaves at its operational seams: error translation at
+the wire boundary, structured and redaction-safe logging, workspace continuity,
+remote-listener authentication, and the exact trust boundary. phux has no
+durable access audit log or runtime status command today.
 
 ---
 
 ## Error model
 
-Each library crate defines its own error type with `thiserror`. The binary crate uses `anyhow` at the top level only — never inside library code.
-
-```rust
-// crates/phux-server/src/error.rs
-#[derive(Debug, thiserror::Error)]
-pub enum ServerError {
-    #[error("protocol: {0}")]
-    Protocol(#[from] phux_protocol::ProtocolError),
-    #[error("pty: {0}")]
-    Pty(#[from] PtyError),
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
-    // ...
-}
-```
-
-Errors crossing the IPC boundary translate to `ERROR` messages (see [`spec/proto.md`](./spec/proto.md)) with a `code: ErrorCode` and `message: str`. The server's IPC layer maps internal Rust errors to wire `ErrorCode`.
+Library and binary boundaries use typed Rust errors appropriate to their
+module; there is no single workspace-wide error enum. Errors that cross the
+IPC boundary translate to `ERROR` messages with a stable `ErrorCode` and a
+human-readable message. [`spec/proto.md`](./spec/proto.md) owns that wire shape
+and the code catalog.
 
 ## Logging and observability
 
@@ -74,7 +65,11 @@ PHUX_LOG=/tmp/phux.jsonl PHUX_LOG_FORMAT=json RUST_LOG=phux=debug \
 
 Two spans carry most of the signal. On the server, `synthesize_against_reference` (fields `changed_row_count`, `out_bytes`) is the per-tick CPU cost of diffing engine state for one consumer. On the client, `handle_server_frame` (grep `kind=terminal_output`) is the per-frame apply-and-paint cost; its children `vt_apply` (libghostty parse) and `paint_trigger` (render) let you attribute a client stall to parse versus paint by comparing their `time.busy`. Narrow a JSON capture to timed events with `jq -c 'select(.fields.message=="close")'`. Finer per-PTY-chunk and per-frame-emit detail is at **trace**; a wedged or leaked consumer shows as `consumer mailbox full` / `consumer mailbox closed` at debug.
 
-Runtime introspection ships as `phux server status --json`: number of sessions / windows / terminals / clients, per-terminal refresh rate, per-client queue depth, total bytes since start. This is the substrate for any future Prometheus/OpenTelemetry exporter — phux does not ship one. Runtime per-target log-level control and a `phux logs` discovery/tail verb are designed but not built ([ADR-0028](../ADR/0028-runtime-log-control.md) Slice 2); today the dials are the `RUST_LOG` / `PHUX_LOG` / `PHUX_LOG_FORMAT` environment knobs above, set at process start.
+There is no `phux server status`, Prometheus/OpenTelemetry exporter, runtime
+per-target log-level control, or `phux logs` discovery verb today. Use `phux
+ls --json` for the published session/pane view and the environment-controlled
+tracing sinks above for diagnosis. [ADR-0028](../ADR/0028-runtime-log-control.md)
+records the remaining operator surface.
 
 ## Workspace continuity and update survival
 
@@ -143,6 +138,15 @@ Current remote transports:
 - **QUIC/UDP:** `phux server --quic HOST:PORT`; always TLS 1.3 encrypted.
   Routable binds use the same token store and `phux pair` certificate
   fingerprint as the WebSocket path.
+- **WebTransport/UDP:** `phux server --webtransport HOST:PORT` (or
+  `PHUX_WT_ADDR`); HTTP/3 over QUIC, always TLS 1.3 encrypted — the browser's
+  door to QUIC-class transport, dialed by `phux-web` with a WebSocket
+  fallback. Routable binds require the same `phux pair` token, carried in the
+  CONNECT request: `Authorization: Bearer <hex>` from native consumers, or
+  `?token=<hex>` on the session URL from browsers (the JS `WebTransport` API
+  cannot set headers); a missing or invalid token is refused with HTTP 403
+  before the session exists. Shares the persisted certificate and token store
+  with the WebSocket and QUIC paths.
 - **SSH:** Reuses established SSH auth when operators tunnel or wrap the server;
   inherits SSH's trust model.
 
@@ -166,8 +170,9 @@ TCP/WebSocket, set it either with `phux server --listen HOST:PORT` or the
   in the WebSocket upgrade; a missing or unrecognized token is refused with HTTP
   401 before any phux frame is read. Plaintext never reaches a routable address.
   Tokens are minted with `phux pair`, which prints the token once alongside the
-  certificate's SHA-256 fingerprint to pin out-of-band. Revoke a device by
-  deleting its line from the token file (effective on server restart).
+  certificate's SHA-256 fingerprint to pin out-of-band. Pair before starting a
+  network listener: the server loads the token store at startup. Adding or
+  deleting a token takes effect after the server restarts.
 
 Native clients can use the same TCP fallback with:
 
@@ -192,8 +197,13 @@ and it does not replay a saved archive on the remote side by itself. Validate a
 remote deployment with a loopback-secure smoke before advertising it:
 
 ```sh
-PHUX_WS_SECURE=1 phux server --listen 127.0.0.1:8787
+# Before starting the server, mint a token and record its fingerprint:
 phux pair
+
+# Terminal 1:
+PHUX_WS_SECURE=1 phux server --listen 127.0.0.1:8787
+
+# Terminal 2:
 phux attach --ws wss://127.0.0.1:8787 --token HEX --cert-fingerprint FP
 ```
 
@@ -208,8 +218,8 @@ overrides the token-store path.
 **What this means:**
 - The trust boundary widens past the OS user: an authenticated network peer is a
   first-class consumer whose proof is a bearer token over TLS. This is a larger
-  attack surface than local UDS; it is off by default and engages only when the
-  three variables above are all set.
+  attack surface than local UDS. A routable `--listen` address engages TLS and
+  token auth automatically; `PHUX_WS_SECURE=1` only forces that path on loopback.
 - The token is a bearer credential — anyone holding it is the device until the
   token is revoked. The store is owner-only (`0o600`); the comparison is
   constant-time; tokens are 256-bit from the OS CSPRNG. A client certificate
@@ -247,9 +257,11 @@ phux is **overlay-agnostic** — pick what fits your trust model:
   identically to phux; it only ever sees an IP.
 
 ```sh
+# Before starting the server:
+phux pair                            # record the token + cert fingerprint
+
 # Server, reachable on its overlay address:
 phux server --listen 0.0.0.0:8787   # binds all interfaces, including the overlay
-phux pair                            # mint a token + print the cert fingerprint
 
 # Client, from anywhere on the overlay:
 phux attach --ws wss://<overlay-host>:8787 --token HEX --cert-fingerprint FP
@@ -270,9 +282,12 @@ peers, where byte-faithful pass-through is lowest-latency on a fast link.
 
 ### Known limitations
 
-- **No encryption on local UDS:** Contents flow plaintext through the socket. Roadmap does not include local TLS; if confidentiality is required, delegate to the transport layer (SSH, VPN).
+- **Local transports are plaintext:** UDS and explicit loopback WebSocket carry
+  plaintext. UDS relies on filesystem permissions; loopback WS is a development
+  path. Routable WSS and QUIC listeners use TLS.
 - **Scrollback unencrypted:** Terminal history is stored in the libghostty grid in RAM, unencrypted. A memory dump can recover it.
-- **No per-command encryption:** Control messages and terminal output are structured but unencrypted on the wire.
+- **Encryption belongs to the transport:** phux frames have no independent
+  per-command encryption. WSS and QUIC protect the complete stream with TLS.
 - **No audit logging:** phux does not log which user accessed which terminal or when. Can be added as future hooks.
 - **SSH is the trust boundary for remote attach (v0.1):** phux does not perform additional authentication over SSH; it delegates entirely to SSH key management and host verification.
 
@@ -280,5 +295,7 @@ peers, where byte-faithful pass-through is lowest-latency on a fast link.
 
 - **Kernel-enforced permission boundary:** On Linux and macOS, the OS prevents other users from connecting to your socket.
 - **No privilege escalation surface:** The server runs as your user (not setuid/setgid). A compromised terminal cannot elevate to other UIDs.
-- **No arbitrary-code-execution surface on the wire:** The wire carries structured commands (key, mouse, paste, focus events), not arbitrary scripts. The server does not `eval` or execute user input — it routes it to PTYs managed by the OS.
+- **No eval RPC:** phux does not evaluate source text inside the server, but an
+  authenticated consumer can spawn commands and drive shells with the server
+  user's authority. Treat a remote token as command-execution access.
 - **Process isolation via OS:** Each terminal's PTY is managed by the kernel; one terminal's PTY cannot directly access another terminal's memory or file descriptors.

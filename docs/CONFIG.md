@@ -1,12 +1,12 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-06-17
+last-reviewed: 2026-07-09
 ---
 
 # Configuration and keybindings
 
-**TL;DR.** Config lives in `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`); phux merges your file atop the shipped defaults. Customize keybindings (prefix + global chords), status bar widgets, and hooks via TOML tables.
+**TL;DR.** Config lives in `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml`); phux merges your file atop the shipped defaults, with an optional `extends` stack of shared layers in between. Customize keybindings (prefix + global chords), status bar widgets, and hooks via TOML tables.
 
 ---
 
@@ -15,10 +15,12 @@ last-reviewed: 2026-06-17
 phux loads configuration in this order:
 
 1. **Shipped defaults** — embedded in the binary as `default.toml`
-2. **User config** — `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml` if `$XDG_CONFIG_HOME` is not set)
-3. **Override via `$PHUX_CONFIG`** — if set, this path replaces the default location (used by `phux --config`)
+2. **Extended layers** — any files your config (or a layer) names via `extends`, in listed order (see the next section)
+3. **User config** — `$XDG_CONFIG_HOME/phux/config.toml` (or `~/.config/phux/config.toml` if `$XDG_CONFIG_HOME` is not set)
 
-Later files override earlier ones, key-by-key. A key you omit keeps the default, so a phux upgrade reaches you automatically without losing your overrides.
+Later files override earlier ones, key-by-key. A key you omit keeps the default, so a phux upgrade reaches you automatically without losing your overrides. phux does not currently expose a global config-path override; set `XDG_CONFIG_HOME` when a command needs an isolated config tree.
+
+See "Layered configs" below for the `extends` mechanics.
 
 ### Getting started
 
@@ -34,6 +36,11 @@ phux config show         # print the effective config (defaults merged
                          # with your overrides) as canonical TOML
 
 phux config show --default  # print the shipped defaults with comments
+
+phux config show --layers   # provenance: which layer (defaults, an
+                            # extends layer, or your file) set each
+                            # effective key; --json for the stable
+                            # machine-readable form
 
 phux plugin link ./my-plugin/phux-plugin.toml --json
                          # add or update a plugin manifest entry
@@ -57,6 +64,87 @@ phux config run PLUGIN ACTION --json  # execute a configured plugin action
 There is no live-reload verb today. To apply edits to the interactive client, restart it — detach and re-attach, or relaunch `phux` — so it re-reads the file on the next start. Local config/plugin subcommands (`init`, `path`, `show`, `plugins`, `agents`, `plugin ...`, and plugin action `run`) read the file fresh on each invocation.
 
 Reload is deliberately not automatic, even as design intent: the file is not watched, because watch-reload introduces papercuts ("saved-mid-edit, now my keybindings are gone"). An explicit reload path may land later (see `docs/consumers/tui.md` §4.3).
+
+---
+
+## Layered configs: `extends`
+
+A config file may name shared layers — a team baseline, a curated distribution — with a top-level `extends` key ([ADR-0039](../ADR/0039-layered-config.md)):
+
+```toml
+extends = ["distro.toml", "minimal"]
+
+[keybindings]
+prefix = "C-b"        # your overrides win over every layer
+```
+
+Rules:
+
+- **Order.** Layers merge in listed order, each atop the previous; your file merges last and wins per key. The shipped defaults always sit at the bottom.
+- **Resolution.** An entry with a path separator or a `.toml` suffix is a path, resolved relative to the directory of the file that declares it (absolute paths pass through). A bare name `n` means `layers/n.toml` beside the declaring file — so `extends = ["minimal"]` in `~/.config/phux/config.toml` loads `~/.config/phux/layers/minimal.toml`.
+- **Layers can extend layers**, up to 4 levels below your file. Cycles, missing layer files, and over-deep nesting are errors that name the offending file. A layer reachable through two branches merges once.
+
+### Array merge: replace by default, `-append` to add
+
+Tables merge per key across layers, but an array assignment replaces the inherited array wholesale — TOML arrays have no per-element identity to merge on. When a layer should *contribute to* a list instead of owning it, use the `-append` key suffix:
+
+```toml
+# In a distro layer or your own config:
+
+[[plugins-append]]                      # adds to inherited [[plugins]]
+manifest = "/opt/distro/phux-plugin.toml"
+
+[status]
+right-append = [{ kind = "time", format = "%H:%M" }]   # adds a widget
+
+[[hooks.pane-exit-append]]              # adds a pane-exit hook
+when   = { exit-code = "*" }
+action = "noop"
+```
+
+`x-append` must hold an array and appends its elements to the stack's current `x` (creating it when absent). Setting both `x` and `x-append` in one file, appending to a non-array, or a non-array `-append` value are errors naming that file. Keybindings need no append form: `prefix-table` and `global` are tables and already merge per chord. The `-append` suffix is reserved at every level; don't end a free-form key (for example a `[theme]` slot) with it. To *drop* an inherited entry, assign the full array plainly — replacement always wins over inheritance.
+
+**Plugin manifests in layers.** A relative `manifest` in `[[plugins]]` / `[[plugins-append]]` normally resolves against *your config file's* directory. Inside an extended layer that base would be wrong — the layer lives elsewhere — so layer resolution rewrites a relative manifest to an absolute path under the layer file's own directory (lexically normalized) before merging. Your root `config.toml` is left verbatim; only extended layers are rewritten. This is what lets a distro wire plugins that live next to it.
+
+### Where did this value come from?
+
+With several layers in play, `phux config show` tells you *what* the effective config is but not *who* set it. `phux config show --layers` answers that: it prints the resolved layer stack in merge order, then one row per effective leaf key naming the layer that set it. Arrays expand to one row per element, so an `-append` list shows exactly which layer contributed each entry:
+
+```
+layers (merge order; later layers win):
+  [1] defaults (embedded)
+  [2] /home/me/.config/phux/distro.toml
+  [3] /home/me/.config/phux/config.toml (user)
+
+keys:
+  defaults.history-limit  <- [2] distro.toml
+  keybindings.prefix      <- [3] user
+  status.right[0]         <- [1] defaults
+  status.right[1]         <- [1] defaults
+  status.right[2]         <- [2] distro.toml
+```
+
+`--layers --json` emits the same information as a stable document (`schema_version` 1): a `layers` array (1-based `index`, `kind` of `defaults` / `extended` / `user`, `path`) and a `keys` array (`key`, owning `layer` index, and for arrays an `element_layers` list, one entry per element).
+
+### Starter distributions: `config init --distro`
+
+A *distro* is a config layer curated as a starting point — the lazyvim idea applied to phux: keybindings, a status lineup, a theme, and a plugin set, shipped as one referenced file rather than pasted into yours. The repo bundles one, [`herdr`](../distros/herdr/README.md).
+
+```sh
+phux config init --distro herdr            # bundled name
+phux config init --distro ./my/layer.toml  # or any path (a directory
+                                           #   means <dir>/<dirname>.toml)
+```
+
+This writes the usual commented starter config with exactly one live statement at the top:
+
+```toml
+extends = ["/absolute/path/to/distros/herdr/herdr.toml"]
+```
+
+Nothing is copied out of the distro. Your file stays a sparse overlay: keys you set win over the distro, keys the distro sets win over the shipped defaults, and updating the distro file updates every config that extends it. `init --distro` validates the full merged stack before writing anything, so a broken or missing distro layer fails the command instead of leaving you an invalid config; `phux config show` then renders the effective result.
+
+A bundled name `n` resolves to `<dir>/n/n.toml` across, in order: `$PHUX_DISTROS_DIR` (explicit override), `$XDG_DATA_HOME/phux/distros` (default `~/.local/share/phux/distros`), and — as a dev-build convenience — the repo checkout's `distros/` directory. An unknown name lists every path that was checked.
 
 ---
 
@@ -174,6 +262,7 @@ id = "summarize"
 title = "Summarize pane"
 contexts = ["pane"]
 command = ["python3", "summarize.py"]
+keys = "g"   # optional TUI prefix-table binding; user config wins on conflict
 
 [[agents]]
 id = "codex"
@@ -208,6 +297,12 @@ expansion; a manifest only gets shell behavior when it explicitly declares an
 argv such as `["sh", "-c", "…"]`. The runtime inherits the phux process
 environment and adds `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_ACTION_ID`, and
 `PHUX_PLUGIN_ROOT`.
+
+Enabled plugins' actions also surface in the attach TUI: every action gets
+a command-palette row, and an action may declare an optional
+`keys = "..."` chord that merges into the TUI's prefix table (user
+`[keybindings]` always win on conflict). See
+[`consumers/tui.md`](./consumers/tui.md) §5.5.
 
 The manifest format also accepts `[[build]]`, `[[events]]`, `[[panes]]`,
 `[[links]]`, and `[[workspaces]]` entries. Agent declarations are static status

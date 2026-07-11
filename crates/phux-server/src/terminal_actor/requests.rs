@@ -232,6 +232,18 @@ pub struct SnapshotRequest {
     pub reply: oneshot::Sender<SnapshotBytes>,
 }
 
+/// Install the effective default palette reported by an interactive client.
+///
+/// The reply acknowledges that OSC 10/11 queries parsed after this point will
+/// observe these values. Palette-less clients never send this request.
+#[derive(Debug)]
+pub struct SetDefaultColorsRequest {
+    /// Outer terminal defaults to install on the canonical emulator.
+    pub colors: phux_protocol::caps::TerminalDefaultColors,
+    /// Completion acknowledgement.
+    pub reply: oneshot::Sender<()>,
+}
+
 /// Request for the pane's current screen as structured data
 /// (`phux-oki`, ADR-0022).
 ///
@@ -380,6 +392,9 @@ pub struct TerminalHandle {
     /// Sender for snapshot requests. The ATTACH handler uses this to
     /// build `TERMINAL_SNAPSHOT` frames.
     pub snapshot: mpsc::Sender<SnapshotRequest>,
+    /// Sender for host-palette updates. The most recently attached client
+    /// that advertises colors is authoritative for the shared pane.
+    pub set_default_colors: mpsc::Sender<SetDefaultColorsRequest>,
     /// Sender for structured screen reads. The `GET_SCREEN` command
     /// handler uses this to project the pane's grid to JSON without
     /// attaching (`phux-oki`, ADR-0022 §5).

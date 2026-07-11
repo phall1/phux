@@ -36,10 +36,16 @@ pub(crate) fn seed_session_with_actor(
         exit_notify,
         ..
     } = bundle;
-    state.with_mut(|s| {
+    let wire_terminal_id = state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
+        s.intern_terminal_wire(terminal)
     });
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the pane's actor is live.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, Some(name)),
+    );
     Ok(terminal)
 }
 
@@ -67,11 +73,37 @@ pub fn seed_session_with_pty(
     history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
+    seed_session_with_pty_and_colors(state, name, cmd, history_limit, root_token, None)
+}
+
+/// Palette-seeded variant used when a client's HELLO creates the session.
+pub fn seed_session_with_pty_and_colors(
+    state: &SharedState,
+    name: &str,
+    cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
+    root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<phux_core::ids::TerminalId, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
-    let terminal: TerminalId = state.with_mut(|s| s.seed_session(name).2);
+    // phux-p4vp: capture the spawn-time working directory before `cmd`
+    // is moved into the actor build below, so it can be stamped onto the
+    // pane's registry descriptor (see `stamp_spawn_cwd`).
+    let spawn_cwd = spawn_cwd_of(&cmd);
+    let terminal: TerminalId = state.with_mut(|s| {
+        let terminal = s.seed_session(name).2;
+        stamp_spawn_cwd(s, terminal, spawn_cwd);
+        terminal
+    });
     let terminal_token = root_token.child_token();
-    let bundle =
-        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
+    let bundle = TerminalActor::build_with_token_and_colors(
+        80,
+        24,
+        Some(cmd),
+        history_limit,
+        terminal_token.clone(),
+        default_colors,
+    )?;
     let crate::terminal_actor::TerminalActorBundle {
         mut actor,
         handle,
@@ -88,8 +120,14 @@ pub fn seed_session_with_pty(
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
-    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
+    spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the pane's actor is live and
+    // its PTY child spawned.
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, Some(name)),
+    );
     Ok(terminal)
 }
 
@@ -112,14 +150,38 @@ pub fn spawn_pane_with_pty(
     history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
+    spawn_pane_with_pty_and_colors(state, session, cmd, history_limit, root_token, None)
+}
+
+/// Palette-seeded split variant. The spawning client's advertised defaults
+/// are installed before the child PTY is parsed.
+pub fn spawn_pane_with_pty_and_colors(
+    state: &SharedState,
+    session: phux_core::ids::SessionId,
+    cmd: portable_pty::CommandBuilder,
+    history_limit: u32,
+    root_token: &CancellationToken,
+    default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
+) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
     use phux_core::ids::TerminalId;
-    let Some(terminal): Option<TerminalId> = state.with_mut(|s| s.add_pane_to_session(session))
-    else {
+    // phux-p4vp: same spawn-time cwd capture as `seed_session_with_pty`.
+    let spawn_cwd = spawn_cwd_of(&cmd);
+    let Some(terminal): Option<TerminalId> = state.with_mut(|s| {
+        let terminal = s.add_pane_to_session(session)?;
+        stamp_spawn_cwd(s, terminal, spawn_cwd);
+        Some(terminal)
+    }) else {
         return Ok(None);
     };
     let terminal_token = root_token.child_token();
-    let bundle =
-        TerminalActor::build_with_token(80, 24, Some(cmd), history_limit, terminal_token.clone())?;
+    let bundle = TerminalActor::build_with_token_and_colors(
+        80,
+        24,
+        Some(cmd),
+        history_limit,
+        terminal_token.clone(),
+        default_colors,
+    )?;
     let crate::terminal_actor::TerminalActorBundle {
         mut actor,
         handle,
@@ -134,9 +196,48 @@ pub fn spawn_pane_with_pty(
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
-    spawn_pane_event_drain(state.clone(), wire_terminal_id, event_rx);
+    spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
+    // docs/consumers/tui.md §9 (phux-r82.1): the split pane's actor is live.
+    let session_name = state.with(|s| s.registry.session(session).map(|sess| sess.name.clone()));
+    crate::hooks::fire_hook(
+        state,
+        crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, session_name.as_deref()),
+    );
     Ok(Some(terminal))
+}
+
+/// The working directory a PTY child spawned from `cmd` starts in
+/// (phux-p4vp): the builder's explicit cwd when set, else the server
+/// process's own CWD (which the child inherits). `None` only when the
+/// server's CWD itself is unreadable.
+fn spawn_cwd_of(cmd: &portable_pty::CommandBuilder) -> Option<std::path::PathBuf> {
+    cmd.get_cwd()
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+}
+
+/// Stamp a freshly-spawned pane's working directory onto its registry
+/// descriptor (phux-p4vp).
+///
+/// `phux_core::Registry::new_terminal` initializes `TerminalDescriptor.cwd`
+/// to the empty path, and `build_session_snapshot` filters an empty path
+/// to a wire `cwd: None` — so without this stamp the ATTACHED
+/// `SessionSnapshot.panes[].cwd` never populates for normally spawned
+/// panes and the TUI sidebar's per-window VCS branch line stays blank.
+/// The stamped value is the spawn-time directory; attach refreshes it
+/// from the live PTY child (see
+/// [`crate::runtime::attach::refresh_registry_cwds`]).
+fn stamp_spawn_cwd(
+    s: &mut crate::state::ServerState,
+    terminal: phux_core::ids::TerminalId,
+    cwd: Option<std::path::PathBuf>,
+) {
+    if let Some(cwd) = cwd
+        && let Some(desc) = s.registry.terminal_mut(terminal)
+    {
+        desc.cwd = cwd;
+    }
 }
 
 /// Bounded capacity of the per-pane agent-event sink (SPEC §7.5,
@@ -1487,7 +1588,16 @@ pub(crate) fn handle_terminal_input(
         );
         return;
     }
-    state.with_mut(|s| {
+    // docs/consumers/tui.md §9 (phux-r82.1): an INPUT_FOCUS gained event
+    // that passes every routing gate below means a client's focus landed
+    // on this pane — the `focus-changed` hook point. Computed up front
+    // because `input` moves into the closure; fired AFTER the `with_mut`
+    // scope closes (the hook helper re-takes the state lock).
+    let is_focus_gained = matches!(
+        input,
+        TerminalInput::Focus(phux_protocol::input::focus::FocusEvent::Gained)
+    );
+    let routed = state.with_mut(|s| {
         let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
             warn!(
                 ?client_id,
@@ -1495,7 +1605,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input frame for unknown pane; dropping",
             );
-            return;
+            return false;
         };
         let Some(attached) = s.attached.get(&client_id) else {
             warn!(
@@ -1504,7 +1614,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input frame from non-attached client; dropping",
             );
-            return;
+            return false;
         };
         // Subscription gate: the pane must be one the client is observing.
         // For byc.8's "active pane only" subscription model this is the
@@ -1521,7 +1631,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "client not subscribed to pane; dropping input",
             );
-            return;
+            return false;
         }
         // Input-lease gate (ADR-0033, "take the wheel"): when another client
         // holds the lease, drop this client's input. Dropped, not errored —
@@ -1534,7 +1644,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "input dropped: another client holds the input lease",
             );
-            return;
+            return false;
         }
         s.touch_session(session);
         let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
@@ -1544,7 +1654,7 @@ pub(crate) fn handle_terminal_input(
                 frame_label,
                 "no TerminalHandle for pane; dropping input",
             );
-            return;
+            return false;
         };
         match handle.input.try_send(input) {
             Ok(()) => {
@@ -1554,6 +1664,7 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "input routed to TerminalActor"
                 );
+                true
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 warn!(
@@ -1562,6 +1673,7 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
                 );
+                false
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 debug!(
@@ -1570,9 +1682,16 @@ pub(crate) fn handle_terminal_input(
                     frame_label,
                     "pane actor gone; dropping input",
                 );
+                false
             }
         }
     });
+    if routed && is_focus_gained {
+        crate::hooks::fire_hook(
+            state,
+            crate::hooks::HookEvent::focus_changed(wire_terminal_id, client_id),
+        );
+    }
 }
 
 /// Route an inbound `FRAME_ACK` (SPEC §7.proto.1 / §12.2) to the

@@ -1,10 +1,10 @@
 ---
 audience: contributors, agents
 stability: stable
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-09
 ---
 
-# docs/architecture/
+# Architecture reference
 
 **TL;DR.** Internal structure of phux — process model, threading,
 transport, crate graph, data model, state sync, rendering, and the quality

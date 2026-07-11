@@ -1,18 +1,21 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-06-11
+last-reviewed: 2026-07-10
 ---
 
 # Transport abstraction
 
 **TL;DR.** The wire codec sits behind an async `Transport` trait on both
-ends, so the same framing rides any byte stream. Three implementations exist
+ends, so the same framing rides any byte stream. Four implementations exist
 today: a Unix-domain-socket transport for local server/client links, a
 WebSocket transport that carries the identical codec to browser consumers,
-and a QUIC transport for remote clients. SSH-stdio is designed as an additive
-transport, not yet built. No domain module names a concrete transport type;
-all I/O goes through the trait.
+a QUIC transport for remote clients, and a WebTransport (HTTP/3 over QUIC)
+transport that gives browsers QUIC-class transport. SSH-stdio is designed as
+an additive transport, not yet built. Outbound establishment for the remote
+transports is shared in `phux-dial` (attach loop and hub dialer alike). No
+domain module names a concrete transport type; all I/O goes through the
+trait.
 
 ---
 
@@ -40,9 +43,37 @@ additive rather than invasive.
   store. Opt-in via `phux server --quic <HOST:PORT>`; the connection
   migration and 0-RTT resumption that motivate QUIC (the Mosh-class roaming
   UX) are inherent to the stack, with a roaming-aware client the follow-up.
+- **WebTransport transport** (via `wtransport`) — QUIC-class transport for
+  browsers, which cannot open raw QUIC connections. An HTTP/3 `CONNECT`
+  session whose single bidirectional stream carries the identical
+  length-prefixed frames the UDS and QUIC paths use; the HTTP/3 layer is a
+  transport detail below the frame seam, so nothing on the wire changes.
+  Always TLS 1.3 (QUIC mandates it); a routable listener requires the same
+  `phux pair` bearer token as the `wss://` path (ADR-0031), carried in the
+  `CONNECT` request — `Authorization: Bearer <hex>` from native consumers,
+  or `?token=<hex>` on the session URL from browsers (the JS `WebTransport`
+  API cannot set request headers) — and refused with HTTP 403 before the
+  session exists. Shares the persisted certificate and token store with the
+  WebSocket and QUIC listeners; binds its own UDP socket because browsers
+  offer only the `h3` ALPN while the raw-QUIC endpoint advertises the
+  phux-private one. Opt-in via `phux server --webtransport <HOST:PORT>` or
+  `PHUX_WT_ADDR`; `phux-web` dials it first and falls back to WebSocket.
+  Feature-gated in `phux-server` as `webtransport` (on by default).
 
-All three run the same codec. A consumer that can frame the codec over a
+All four run the same codec. A consumer that can frame the codec over a
 stream is a peer regardless of which stream it uses.
+
+## Outbound dialing is shared
+
+The client-side establishment of the two remote transports — TLS 1.3 with
+a fingerprint-pinned (or loopback skip-verify) certificate verifier, plus
+the ADR-0031 bearer token — lives in the `phux-dial` crate, consumed by
+both the `phux-client` attach loop and the federation hub's outbound
+link supervisors (`phux server --hub` dials each enabled satellite as an
+ordinary remote consumer per ADR-0038, with reconnect and capped
+exponential backoff; see `phux-server::hub::link`). `phux-dial` stops at
+the established byte stream; framing stays behind the transport trait on
+each end.
 
 ## Transports designed but not built
 

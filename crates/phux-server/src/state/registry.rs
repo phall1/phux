@@ -73,7 +73,51 @@ impl ServerState {
             policy_bundle: crate::policy::PolicyBundle::default(),
             peer_identities: HashMap::new(),
             upgrade_ctx: None,
+            hub_table: None,
+            hub_link_statuses: None,
+            hook_dispatcher: None,
         }
+    }
+
+    /// Install the validated hub satellite table (phux-v45.1). Called once
+    /// at server startup, only in hub mode, after
+    /// [`crate::hub::resolve_hub_table`] succeeds.
+    pub fn set_hub_table(&mut self, table: crate::hub::HubTable) {
+        self.hub_table = Some(table);
+    }
+
+    /// Read the hub satellite table set by [`Self::set_hub_table`].
+    /// `None` on a non-hub server.
+    #[must_use]
+    pub const fn hub_table(&self) -> Option<&crate::hub::HubTable> {
+        self.hub_table.as_ref()
+    }
+
+    /// Install the shared per-satellite link-status handle (phux-v45.3).
+    /// Called once at hub startup, alongside spawning the link
+    /// supervisors that publish into it.
+    pub fn set_hub_link_statuses(&mut self, statuses: crate::hub::link::HubLinkStatuses) {
+        self.hub_link_statuses = Some(statuses);
+    }
+
+    /// Read the per-satellite link statuses set by
+    /// [`Self::set_hub_link_statuses`]. `None` on a non-hub server.
+    #[must_use]
+    pub const fn hub_link_statuses(&self) -> Option<&crate::hub::link::HubLinkStatuses> {
+        self.hub_link_statuses.as_ref()
+    }
+
+    /// Install the event-hook dispatcher handle (phux-r82.1). Called once
+    /// at server startup, after [`crate::hooks::spawn_hook_dispatcher`].
+    pub fn set_hook_dispatcher(&mut self, dispatcher: crate::hooks::HookDispatcher) {
+        self.hook_dispatcher = Some(dispatcher);
+    }
+
+    /// The installed event-hook dispatcher handle, if any. `None` means no
+    /// hooks are configured and firing events is a no-op.
+    #[must_use]
+    pub const fn hook_dispatcher(&self) -> Option<&crate::hooks::HookDispatcher> {
+        self.hook_dispatcher.as_ref()
     }
 
     /// Set the policy extension bundle. Called once at server startup.

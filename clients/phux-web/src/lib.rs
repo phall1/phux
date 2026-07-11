@@ -8,6 +8,7 @@
 #![deny(missing_docs)]
 
 pub mod client;
+pub mod framing;
 pub mod session;
 
 pub use session::{Outcome, Session};
@@ -24,12 +25,40 @@ use web_sys::CanvasRenderingContext2d;
 /// Fails if the canvas element is missing or the connection can't be set up.
 #[wasm_bindgen]
 pub async fn start(ws_url: String, canvas_id: String, cols: u16, rows: u16) -> Result<(), JsValue> {
-    let canvas = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id(&canvas_id))
-        .ok_or_else(|| JsValue::from_str("canvas element not found"))?
-        .dyn_into::<web_sys::HtmlCanvasElement>()?;
+    let canvas = canvas_by_id(&canvas_id)?;
     client::run(&ws_url, canvas, cols, rows).await.map(|_| ())
+}
+
+/// JS entry point for the WebTransport-first path: try HTTP/3-over-QUIC at
+/// `wt_url` (an `https://` session URL; append `?token=<hex>` for a
+/// token-authenticated listener) and fall back to the WebSocket at `ws_url`
+/// when the API or the endpoint is unavailable.
+///
+/// # Errors
+/// Fails if the canvas element is missing or both transports fail to
+/// connect.
+#[wasm_bindgen]
+pub async fn start_webtransport(
+    wt_url: String,
+    ws_url: String,
+    canvas_id: String,
+    cols: u16,
+    rows: u16,
+) -> Result<(), JsValue> {
+    let canvas = canvas_by_id(&canvas_id)?;
+    client::run_with_fallback(&wt_url, &ws_url, canvas, cols, rows)
+        .await
+        .map(|_| ())
+}
+
+/// Resolve the `<canvas>` element the terminal renders into.
+fn canvas_by_id(canvas_id: &str) -> Result<web_sys::HtmlCanvasElement, JsValue> {
+    web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(canvas_id))
+        .ok_or_else(|| JsValue::from_str("canvas element not found"))?
+        .dyn_into::<web_sys::HtmlCanvasElement>()
+        .map_err(Into::into)
 }
 
 /// Cell geometry + font for the canvas renderer. A monospace cell grid: every

@@ -13,7 +13,8 @@
 use bytes::BytesMut;
 use phux_protocol::caps::{
     ClientCapabilities, ColorSupport, ImageProtocol, ImageProtocolSet, KeyboardProtocol,
-    KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities,
+    KeyboardProtocolSet, Layer, LayerSet, OutputMode, ServerCapabilities, TerminalColor,
+    TerminalDefaultColors,
 };
 use phux_protocol::ids::{ClientId, GroupId, SessionId, TerminalId, WindowId};
 use phux_protocol::input::InputEvent;
@@ -560,6 +561,34 @@ fn hello_round_trip_state_sync_output_mode() {
 }
 
 #[test]
+fn hello_round_trip_outer_terminal_default_colors() {
+    let colors = TerminalDefaultColors {
+        foreground: TerminalColor {
+            r: 0xd0,
+            g: 0xd0,
+            b: 0xd0,
+        },
+        background: TerminalColor {
+            r: 0x12,
+            g: 0x18,
+            b: 0x1b,
+        },
+    };
+    let frame = FrameKind::Hello {
+        client_name: "phux-client".to_owned(),
+        protocol_major: 0,
+        protocol_minor: 2,
+        protocol_patch: 0,
+        client_caps: ClientCapabilities::new().with_default_colors(colors),
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn hello_decoder_defaults_output_mode_raw_when_absent() {
     // A CLIENT_CAPS field (id 5) whose blob stops before the output_mode byte
     // (a pre-fseo client encodes only the first five caps bytes) decodes to the
@@ -585,6 +614,7 @@ fn hello_decoder_defaults_output_mode_raw_when_absent() {
         panic!("expected Hello");
     };
     assert_eq!(client_caps.output_mode, OutputMode::Raw);
+    assert_eq!(client_caps.default_colors, None);
 }
 
 #[test]
@@ -2309,15 +2339,33 @@ fn event_asked_round_trips_minimal() {
 }
 
 #[test]
+fn event_cwd_changed_round_trips() {
+    // phux-foz.4: the `cwd_changed` event (tag 0x0a) carries the pane's new
+    // working directory and MUST round-trip on the EVENT stream.
+    let frame = FrameKind::Event {
+        terminal: Some(TerminalId::local(7)),
+        event: AgentEvent::CwdChanged {
+            cwd: "/Users/phall/workspace/phux".to_string(),
+        },
+    };
+    let mut buf = BytesMut::new();
+    frame.encode(&mut buf);
+    let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+    assert_eq!(decoded, frame);
+    assert!(tail.is_empty());
+}
+
+#[test]
 fn event_asked_decodes_as_unknown_for_an_older_decoder() {
-    // Forward-compat guard: prove the unknown-event-tag skip path. ASKED is
-    // `0x09` and TERMINAL_CONTROL is `0x08`, so we build an event with tag
-    // `0x0a` — a tag THIS version does not know — carrying an opaque body, and
-    // assert an older-style decoder skips it by its outer length prefix to
-    // `AgentEvent::Unknown` (body preserved verbatim) rather than failing the
-    // frame parse. This pins the additive forward-compat contract.
+    // Forward-compat guard: prove the unknown-event-tag skip path. The
+    // highest allocated tag is CWD_CHANGED at `0x0a` (phux-foz.4), so we
+    // build an event with tag `0x0b` — a tag THIS version does not know —
+    // carrying an opaque body, and assert an older-style decoder skips it by
+    // its outer length prefix to `AgentEvent::Unknown` (body preserved
+    // verbatim) rather than failing the frame parse. This pins the additive
+    // forward-compat contract.
     let body_bytes = [0x01u8, 0x02, 0x03];
-    let mut agent_event = vec![0x0au8]; // a tag this version does not know
+    let mut agent_event = vec![0x0bu8]; // a tag this version does not know
     agent_event.extend_from_slice(&u32::try_from(body_bytes.len()).unwrap().to_be_bytes());
     agent_event.extend_from_slice(&body_bytes);
     let mut fields = Vec::new();
@@ -2330,7 +2378,7 @@ fn event_asked_decodes_as_unknown_for_an_older_decoder() {
         FrameKind::Event {
             terminal: None,
             event: AgentEvent::Unknown {
-                tag: 0x0a,
+                tag: 0x0b,
                 body: body_bytes.to_vec(),
             },
         }
