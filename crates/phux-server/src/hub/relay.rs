@@ -106,6 +106,18 @@ pub(crate) struct ProxySubscription {
     /// Producers set this via `RelayHandle::next_seq`; direct session-test
     /// construction sets it explicitly.
     pub(crate) seq: u64,
+    /// Whether this registration establishes a *content* stream that opens
+    /// with a return-leg `TERMINAL_SNAPSHOT` — i.e. it rode a relayed
+    /// `ATTACH_TERMINAL` (phux-v45.14). When `true`, the freshly-registered
+    /// subscriber starts gated: its content deltas are suppressed until its
+    /// own snapshot lands (L1 §9.1 snapshot-precedes-delta), because a
+    /// second consumer attaching to a terminal already streaming to another
+    /// consumer would otherwise observe that ongoing stream's
+    /// `TERMINAL_OUTPUT` before its own snapshot arrives ~1 RTT later.
+    /// `false` for event-only subscriptions (`SUBSCRIBE_TERMINAL_EVENTS`,
+    /// `SUBSCRIBE_EVENTS`): those carry no snapshot, so their `EVENT` deltas
+    /// must flow immediately and gating them would strand the subscriber.
+    pub(crate) awaits_snapshot: bool,
 }
 
 /// A subscription-withdrawal request, carried on the relay's dedicated
@@ -595,19 +607,42 @@ struct ProxySubscriber {
     /// against a terminal withdrawal's token so a stale detach cannot
     /// tear down a newer re-attach.
     seq: u64,
+    /// This subscriber's L1 §9.1 snapshot-ordering gate (phux-v45.12 /
+    /// phux-v45.14). Content deltas (`TERMINAL_OUTPUT`) are held back until
+    /// the subscriber's own `TERMINAL_SNAPSHOT` has been delivered, so a
+    /// delta can never overtake the snapshot across the two-hop attach. See
+    /// [`SnapshotGate`].
+    gate: SnapshotGate,
+}
+
+/// The per-subscriber snapshot-ordering gate on the return leg (L1 §9.1,
+/// "the snapshot MUST precede the first delta"). A subscriber may only
+/// receive content deltas once its own attach `TERMINAL_SNAPSHOT` has
+/// landed; this enum is the non-blocking mirror of the local attach's
+/// snapshot gate, holding the ordering guarantee without stalling the link
+/// for one slow consumer.
+#[derive(Debug)]
+enum SnapshotGate {
+    /// The subscriber attached (a relayed `ATTACH_TERMINAL`) but its own
+    /// return-leg snapshot has not been delivered yet (phux-v45.14). Deltas
+    /// are suppressed: a second consumer attaching to a terminal already
+    /// streaming to another consumer must not observe that ongoing stream's
+    /// `TERMINAL_OUTPUT` before its own snapshot arrives ~1 RTT later. The
+    /// first snapshot to fan out (its attach snapshot) clears this to
+    /// [`Self::Open`], or, if the mailbox refuses it, to [`Self::Retained`].
+    AwaitingFirst,
+    /// The subscriber's snapshot has been delivered (or it is an event-only
+    /// subscription that carries no snapshot): deltas flow normally.
+    Open,
     /// A return-leg `TERMINAL_SNAPSHOT` whose fan-out this consumer's
     /// briefly-full mailbox refused, retained to retry before any later
-    /// delta reaches it (phux-v45.12, L1 §9.1 "the snapshot MUST precede
-    /// the first delta"). While `Some`, `TERMINAL_OUTPUT` / event deltas to
-    /// this subscriber are suppressed so a delta can never overtake the
-    /// dropped snapshot across the two-hop attach; the retained frame is
-    /// retried on the next inbound frame for the terminal and on the link
-    /// keepalive tick ([`RelaySession::flush_pending_snapshots`]), and a
-    /// newer snapshot (a satellite resync) replaces it — full-grid, the
-    /// freshest wins. This is the non-blocking mirror of the local attach's
-    /// snapshot gate: it holds the ordering guarantee without stalling the
-    /// link for one slow consumer.
-    pending_snapshot: Option<FrameKind>,
+    /// delta reaches it (phux-v45.12). While retained, deltas to this
+    /// subscriber are suppressed so a delta can never overtake the dropped
+    /// snapshot; the retained frame is retried on the next inbound frame for
+    /// the terminal and on the link keepalive tick
+    /// ([`RelaySession::flush_pending_snapshots`]), and a newer snapshot (a
+    /// satellite resync) replaces it — full-grid, the freshest wins.
+    Retained(FrameKind),
 }
 
 /// One in-flight relayed command: the waiting consumer plus, when the
@@ -737,6 +772,7 @@ impl RelaySession {
             client,
             out_tx,
             seq,
+            awaits_snapshot,
         } = subscription;
         let subs = self.subscribers.entry(terminal).or_default();
         if let Some(existing) = subs.iter_mut().find(|s| s.client == client) {
@@ -744,13 +780,24 @@ impl RelaySession {
             // Advance to the freshest token seen: a re-attach must never
             // regress the stored order below a withdrawal it superseded.
             existing.seq = existing.seq.max(seq);
+            // Leave the existing gate untouched: an idempotent re-subscribe
+            // over a live registration must not re-suppress a stream the
+            // consumer is already reading in order (its snapshot precedence
+            // was satisfied at the first attach).
             false
         } else {
             subs.push(ProxySubscriber {
                 client,
                 out_tx,
                 seq,
-                pending_snapshot: None,
+                // An attach gates until its own snapshot lands (phux-v45.14);
+                // an event-only subscription carries no snapshot, so it opens
+                // straight away or its EVENT deltas would never flow.
+                gate: if awaits_snapshot {
+                    SnapshotGate::AwaitingFirst
+                } else {
+                    SnapshotGate::Open
+                },
             });
             true
         }
@@ -922,7 +969,12 @@ impl RelaySession {
                 exit_status,
             } => {
                 if let Some(id) = self.retag_inbound(Some(&terminal_id)) {
-                    self.fan_out(
+                    // Best-effort delivery bypassing the snapshot gate
+                    // (phux-v45.14 sub-finding a): the subscriptions are
+                    // reaped on the next line, so a subscriber still awaiting
+                    // its first snapshot must still learn the terminal closed
+                    // rather than be silently dropped.
+                    self.fan_out_close(
                         id,
                         &FrameKind::TerminalClosed {
                             terminal_id: TerminalId::satellite(self.host.clone(), id),
@@ -1116,16 +1168,23 @@ impl RelaySession {
     /// `id`. `try_send` per consumer: a slow consumer drops its copy, the
     /// link and its siblings keep flowing.
     ///
-    /// A `TERMINAL_SNAPSHOT` is the ordering anchor (phux-v45.12, L1 §9.1):
-    /// if a consumer's briefly-full mailbox refuses it, it is **retained**
-    /// (not dropped) and the consumer's later deltas are suppressed until it
-    /// lands, so a `TERMINAL_OUTPUT` can never overtake the snapshot across
-    /// the two-hop attach. This mirrors the local attach's snapshot gate
-    /// without blocking the link: the retained frame is retried here on the
-    /// next delta and on the keepalive tick, and a newer snapshot replaces
-    /// it. A sustained-saturation consumer may still lag on *content* (the
+    /// A `TERMINAL_SNAPSHOT` is the ordering anchor (L1 §9.1): a subscriber
+    /// receives content deltas only once its own snapshot has landed, gated
+    /// by [`SnapshotGate`]. Two cases hold the guarantee across the two-hop
+    /// attach. First, a second consumer attaching to a terminal already
+    /// streaming to another consumer starts [`SnapshotGate::AwaitingFirst`]
+    /// (phux-v45.14): the ongoing stream's `TERMINAL_OUTPUT` is suppressed
+    /// for it until its own attach snapshot fans out. Second, if a
+    /// consumer's briefly-full mailbox refuses that snapshot it is
+    /// **retained** (phux-v45.12, [`SnapshotGate::Retained`]) and retried —
+    /// here on the next delta, and on the keepalive tick — before any delta
+    /// may ride, with a newer snapshot (a satellite resync) replacing it.
+    /// This mirrors the local attach's snapshot gate without blocking the
+    /// link: a sustained-saturation consumer may still lag on *content* (the
     /// pre-existing slow-consumer condition) but never sees a delta before a
-    /// snapshot.
+    /// snapshot. `TERMINAL_CLOSED` is the one exception (`fan_out_close`):
+    /// best-effort delivered past the gate, since the subscription is reaped
+    /// with the terminal.
     fn fan_out(&mut self, id: u32, frame: &FrameKind) {
         let host = &self.host;
         let Some(subs) = self.subscribers.get_mut(&id) else {
@@ -1136,45 +1195,73 @@ impl RelaySession {
         for sub in subs.iter_mut() {
             if is_snapshot {
                 match sub.out_tx.try_send(Outbound::Frame(frame.clone())) {
-                    Ok(()) => sub.pending_snapshot = None,
+                    // Delivered: the gate opens and deltas may flow (this is
+                    // both the attach subscriber's first snapshot clearing
+                    // `AwaitingFirst` and a retained snapshot landing).
+                    Ok(()) => sub.gate = SnapshotGate::Open,
                     // Retain it: a later delta must not overtake it.
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        sub.pending_snapshot = Some(frame.clone());
+                        sub.gate = SnapshotGate::Retained(frame.clone());
                     }
                     // Dead consumer; teardown / disconnect reaps it.
                     Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
-            } else if sub.pending_snapshot.is_some() {
-                // A delta while this consumer's snapshot is still undelivered:
-                // flush the retained snapshot first; only if it lands may the
-                // delta ride after it. Otherwise the delta is dropped now —
-                // delivering it would precede the snapshot.
-                if Self::flush_pending_snapshot(sub) {
-                    let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
-                }
-            } else {
+            } else if Self::flush_pending_snapshot(sub) {
+                // The gate is open (its snapshot has landed) — the delta may
+                // ride. `flush_pending_snapshot` also retries a `Retained`
+                // snapshot first so the delta only follows once it lands.
                 let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
             }
+            // else: the subscriber is still `AwaitingFirst` (its snapshot has
+            // not been delivered) or its `Retained` snapshot is stuck behind
+            // a full mailbox — the delta is dropped now, since delivering it
+            // would precede the snapshot (L1 §9.1).
+        }
+    }
+
+    /// Best-effort deliver a terminal's final `TERMINAL_CLOSED` to every
+    /// proxy subscriber, bypassing the snapshot gate (phux-v45.14
+    /// sub-finding a). The subscription is reaped immediately after (the
+    /// satellite terminal is gone), so a subscriber still `AwaitingFirst` —
+    /// or one whose snapshot is stuck behind a full mailbox — would
+    /// otherwise be torn down without ever learning the terminal closed.
+    /// Ordering no longer matters once the terminal is gone: delivering the
+    /// close without a preceding snapshot is strictly better than silent
+    /// reaping. `try_send`, fire-and-forget: a full mailbox still drops it
+    /// (genuinely best-effort, the same discipline as every other delta).
+    fn fan_out_close(&self, id: u32, frame: &FrameKind) {
+        let Some(subs) = self.subscribers.get(&id) else {
+            trace!(satellite = %self.host, terminal = id, "TERMINAL_CLOSED with no proxy subscribers");
+            return;
+        };
+        for sub in subs {
+            let _ = sub.out_tx.try_send(Outbound::Frame(frame.clone()));
         }
     }
 
     /// Retry one subscriber's retained attach snapshot (phux-v45.12).
-    /// Returns `true` when nothing is pending or it was delivered (the
-    /// subscriber may resume deltas), `false` while it stays stuck behind a
-    /// full mailbox. A closed mailbox clears the entry (the dead consumer is
-    /// reaped elsewhere) and reads as delivered so callers do not loop.
+    /// Returns `true` when the gate is [`SnapshotGate::Open`] or the retained
+    /// snapshot was just delivered (the subscriber may receive deltas),
+    /// `false` while the subscriber is [`SnapshotGate::AwaitingFirst`]
+    /// (phux-v45.14, no snapshot delivered yet) or its retained snapshot
+    /// stays stuck behind a full mailbox. A closed mailbox opens the gate
+    /// (the dead consumer is reaped elsewhere) and reads as delivered so
+    /// callers do not loop.
     fn flush_pending_snapshot(sub: &mut ProxySubscriber) -> bool {
-        let Some(snapshot) = sub.pending_snapshot.as_ref() else {
-            return true;
-        };
-        match sub.out_tx.try_send(Outbound::Frame(snapshot.clone())) {
-            // Delivered, or the consumer is gone (reaped elsewhere): either
-            // way nothing stays pending and deltas may resume.
-            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {
-                sub.pending_snapshot = None;
-                true
+        match &sub.gate {
+            SnapshotGate::Open => true,
+            SnapshotGate::AwaitingFirst => false,
+            SnapshotGate::Retained(snapshot) => {
+                match sub.out_tx.try_send(Outbound::Frame(snapshot.clone())) {
+                    // Delivered, or the consumer is gone (reaped elsewhere):
+                    // either way the gate opens and deltas may resume.
+                    Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                        sub.gate = SnapshotGate::Open;
+                        true
+                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => false,
+                }
             }
-            Err(mpsc::error::TrySendError::Full(_)) => false,
         }
     }
 
@@ -1186,7 +1273,7 @@ impl RelaySession {
     pub(crate) fn flush_pending_snapshots(&mut self) {
         for subs in self.subscribers.values_mut() {
             for sub in subs.iter_mut() {
-                if sub.pending_snapshot.is_some() {
+                if matches!(sub.gate, SnapshotGate::Retained(_)) {
                     let _ = Self::flush_pending_snapshot(sub);
                 }
             }
@@ -1425,6 +1512,9 @@ mod tests {
                 client,
                 out_tx,
                 seq,
+                // The SUBSCRIBE_EVENTS shape: no return-leg snapshot, so the
+                // subscriber opens ungated.
+                awaits_snapshot: false,
             },
             forward: FrameKind::SubscribeEvents {
                 terminal: Some(TerminalId::local(terminal)),
@@ -1434,6 +1524,35 @@ mod tests {
             !wire.is_empty(),
             "atomic subscribe must produce the forward frame"
         );
+    }
+
+    /// Register an `ATTACH_TERMINAL` proxy subscription (the snapshot-bearing
+    /// content-stream shape, phux-v45.14): the subscriber starts gated and
+    /// its deltas are suppressed until its own return-leg `TERMINAL_SNAPSHOT`
+    /// lands. The command reply receiver is dropped — the registration is
+    /// applied synchronously in `handle_request`, which is all these
+    /// ordering tests exercise.
+    fn attach(
+        session: &mut RelaySession,
+        terminal: u32,
+        client: ClientId,
+        out_tx: mpsc::Sender<Outbound>,
+    ) {
+        let (reply, _rx) = oneshot::channel();
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::AttachTerminal {
+                terminal_id: TerminalId::local(terminal),
+            },
+            reply,
+            subscribe: Some(ProxySubscription {
+                terminal,
+                client,
+                out_tx,
+                seq: 1,
+                awaits_snapshot: true,
+            }),
+        });
+        assert!(!wire.is_empty(), "attach must produce the COMMAND frame");
     }
 
     // --- outbound command rewrite ---------------------------------------
@@ -1953,6 +2072,123 @@ mod tests {
         );
     }
 
+    // --- second-subscriber attach ordering (phux-v45.14) ------------------
+
+    #[test]
+    fn a_second_attach_sees_its_snapshot_before_any_delta_of_the_ongoing_stream() {
+        // The core phux-v45.14 fix. Consumer A is already attached and
+        // streaming; consumer B attaches to the same satellite terminal. B's
+        // registration lands immediately, but its own return-leg
+        // TERMINAL_SNAPSHOT arrives ~1 RTT after A's ongoing TERMINAL_OUTPUT.
+        // B must NOT observe that delta before its snapshot (L1 §9.1).
+        let mut session = RelaySession::new(host());
+        let (tx_a, mut rx_a) = mpsc::channel(8);
+        let (tx_b, mut rx_b) = mpsc::channel(8);
+
+        // A attaches and its snapshot lands: A is now streaming (gate Open).
+        attach(&mut session, 9, ClientId(1), tx_a);
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        let Outbound::Frame(a_snap) = rx_a.try_recv().expect("A's snapshot");
+        assert!(matches!(a_snap, FrameKind::TerminalSnapshot { .. }));
+
+        // B attaches to the same terminal (registration is immediate) but its
+        // snapshot has not been requested/answered yet.
+        attach(&mut session, 9, ClientId(2), tx_b);
+
+        // A's stream produces a delta before B's snapshot arrives. It fans
+        // out to both subscribers — A (Open) receives it; B (AwaitingFirst)
+        // must have it suppressed.
+        session.handle_inbound(&encode(&output_frame(9, 1, b"a-stream")));
+        let Outbound::Frame(a_delta) = rx_a.try_recv().expect("A sees the delta");
+        assert!(matches!(a_delta, FrameKind::TerminalOutput { seq: 1, .. }));
+        assert!(
+            rx_b.try_recv().is_err(),
+            "B must not see a delta before its own snapshot (L1 §9.1)"
+        );
+
+        // B's own snapshot finally lands: it is delivered, opening B's gate.
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        let Outbound::Frame(b_first) = rx_b.try_recv().expect("B's snapshot lands");
+        assert!(
+            matches!(b_first, FrameKind::TerminalSnapshot { .. }),
+            "B's first frame must be its snapshot, got {b_first:?}"
+        );
+
+        // A subsequent delta now rides after B's snapshot, in order.
+        session.handle_inbound(&encode(&output_frame(9, 2, b"after")));
+        let Outbound::Frame(b_delta) = rx_b.try_recv().expect("B sees the post-snapshot delta");
+        assert!(
+            matches!(
+                b_delta,
+                FrameKind::TerminalOutput { ref terminal_id, seq: 2, .. }
+                    if *terminal_id == TerminalId::satellite("devbox", 9)
+            ),
+            "B's delta must follow its snapshot, re-tagged, got {b_delta:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_attach_still_receives_terminal_closed_before_being_reaped() {
+        // phux-v45.14 sub-finding (a): a subscriber still awaiting its first
+        // snapshot is reaped when the terminal closes. TERMINAL_CLOSED must
+        // be delivered best-effort past the gate, or the consumer is torn
+        // down without ever learning its terminal is gone.
+        let mut session = RelaySession::new(host());
+        let (tx_b, mut rx_b) = mpsc::channel(8);
+        // B attaches: gate is AwaitingFirst, no snapshot delivered yet.
+        attach(&mut session, 9, ClientId(2), tx_b);
+
+        // A normal delta is still suppressed while gated...
+        session.handle_inbound(&encode(&output_frame(9, 1, b"suppressed")));
+        assert!(
+            rx_b.try_recv().is_err(),
+            "a content delta is suppressed before the snapshot"
+        );
+
+        // ...but the terminal closing must reach B before it is reaped.
+        session.handle_inbound(&encode(&FrameKind::TerminalClosed {
+            terminal_id: TerminalId::local(9),
+            exit_status: Some(0),
+        }));
+        let Outbound::Frame(frame) = rx_b.try_recv().expect("close delivered past the gate");
+        assert_eq!(
+            frame,
+            FrameKind::TerminalClosed {
+                terminal_id: TerminalId::satellite("devbox", 9),
+                exit_status: Some(0),
+            },
+            "a gated subscriber must still see TERMINAL_CLOSED"
+        );
+        // And the subscription is reaped: no further fan-out for the id.
+        session.handle_inbound(&encode(&output_frame(9, 2, b"after-close")));
+        assert!(
+            rx_b.try_recv().is_err(),
+            "subscription must be reaped on close"
+        );
+    }
+
+    #[test]
+    fn an_event_only_subscription_is_not_gated_by_the_snapshot() {
+        // A SUBSCRIBE_EVENTS / SUBSCRIBE_TERMINAL_EVENTS registration carries
+        // no snapshot: its EVENT deltas must flow immediately (gating them
+        // would strand the subscriber forever, since no snapshot ever comes).
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        subscribe(&mut session, 9, ClientId(1), out_tx);
+        session.handle_inbound(&encode(&FrameKind::Event {
+            terminal: Some(TerminalId::local(9)),
+            event: AgentEvent::CommandStarted,
+        }));
+        let Outbound::Frame(frame) = out_rx.try_recv().expect("event flows without a snapshot");
+        assert_eq!(
+            frame,
+            FrameKind::Event {
+                terminal: Some(TerminalId::satellite("devbox", 9)),
+                event: AgentEvent::CommandStarted,
+            }
+        );
+    }
+
     // --- session: lifecycle teardown --------------------------------------
 
     #[test]
@@ -2148,6 +2384,7 @@ mod tests {
                 out_tx,
                 // Stamped by `handle.subscribe` at enqueue.
                 seq: 0,
+                awaits_snapshot: false,
             },
             FrameKind::SubscribeEvents {
                 terminal: Some(TerminalId::local(9)),
@@ -2181,6 +2418,11 @@ mod tests {
                 client: ClientId(1),
                 out_tx,
                 seq: 1,
+                // Ungated on purpose: this exercises the phux-v45.11 rollback
+                // path in isolation. If rollback regressed, the trailing
+                // TERMINAL_OUTPUT must actually leak — a gated subscriber
+                // would suppress it and mask the regression.
+                awaits_snapshot: false,
             }),
         });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {
@@ -2225,8 +2467,10 @@ mod tests {
                 client: ClientId(1),
                 out_tx,
                 // Idempotent re-subscribe: a newer token than the
-                // pre-existing registration at 1.
+                // pre-existing registration at 1. `awaits_snapshot` is moot
+                // on a re-subscribe — the existing (Open) gate is preserved.
                 seq: 2,
+                awaits_snapshot: true,
             }),
         });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {

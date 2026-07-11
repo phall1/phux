@@ -1134,6 +1134,10 @@ pub(crate) fn handle_subscribe_events(
                     // Stamped with the issue-order token by `subscribe`
                     // at enqueue.
                     seq: 0,
+                    // An event subscription carries no snapshot; its EVENT
+                    // deltas must flow immediately, so it is not gated
+                    // (phux-v45.14).
+                    awaits_snapshot: false,
                 },
                 FrameKind::SubscribeEvents {
                     terminal: Some(phux_protocol::ids::TerminalId::local(id)),
