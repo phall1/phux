@@ -74,7 +74,13 @@ additive rather than invasive.
   `--`-guarded, charset-validated argv (endpoint parts that could read as
   ssh options are rejected at hub-table validation), and treats the child
   exiting as a dropped link, feeding the same capped-backoff redial loop
-  as the QUIC/WS paths.
+  as the QUIC/WS paths. **Keepalive / idle:** liveness for ssh links lives
+  at the SSH layer, not in-band — the hub dials with
+  `ServerAliveInterval` / `ServerAliveCountMax` derived from the same
+  interval/timeout constants the WS path uses, so a silent partition
+  makes the ssh child exit and the exit is the ordinary disconnect
+  signal. The bridged phux stream stays byte-transparent (no link ping
+  rides it), mirroring how QUIC delegates the same contract to quinn.
 
 All five run the same codec. A consumer that can frame the codec over a
 stream is a peer regardless of which stream it uses.
@@ -115,10 +121,12 @@ relayed command carries a hub-side deadline resolving to the same typed
 error, and every link enforces a keepalive / idle contract — QUIC via the
 transport (`phux-dial` sets `keep_alive_interval` / `max_idle_timeout`),
 WebSocket via hub-originated pings plus an inbound-idle limit in
-`phux-server::hub::link` — so a partition without FIN/RST is torn down
-like an ordinary disconnect instead of pinning consumers on a link that
-still looks connected. Normative routing semantics: `docs/spec/L1.md`
-§9.1.
+`phux-server::hub::link`, SSH-stdio via the SSH layer's
+`ServerAliveInterval` / `ServerAliveCountMax` on the dial argv (a peer
+that stops answering probes exits the ssh child — the drop signal) — so
+a partition without FIN/RST is torn down like an ordinary disconnect
+instead of pinning consumers on a link that still looks connected.
+Normative routing semantics: `docs/spec/L1.md` §9.1.
 
 With SSH-stdio built, every transport ADR-0007 designed exists. See
 ADR-0007 for the forward-compat constraints that still govern them
