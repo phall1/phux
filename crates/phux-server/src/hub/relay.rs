@@ -651,12 +651,31 @@ enum SnapshotGate {
 #[derive(Debug)]
 struct PendingCommand {
     reply: oneshot::Sender<CommandResult>,
-    /// `(terminal, client, was_new)` — `was_new` is `false` when the
-    /// client was already subscribed before this command (an idempotent
-    /// re-subscribe), in which case an error rolls back nothing: the
-    /// pre-existing registration belongs to an earlier successful
-    /// subscribe and must survive.
-    subscription: Option<(u32, ClientId, bool)>,
+    /// `(terminal, client, effect)` — the registration effect this command's
+    /// subscription rider had, so a satellite error undoes exactly what it did
+    /// (phux-v45.11 finding 3, phux-v45.15). See [`Registration`].
+    subscription: Option<(u32, ClientId, Registration)>,
+}
+
+/// What registering a subscription rider did, remembered so a satellite error
+/// can roll back precisely (phux-v45.11 finding 3, phux-v45.15).
+#[derive(Debug, Clone, Copy)]
+enum Registration {
+    /// A brand-new `(terminal, client)` subscriber was pushed. An error
+    /// removes it.
+    New,
+    /// An idempotent re-subscribe that **re-gated** an already-`Open`
+    /// subscriber to `AwaitingFirst` because it upgraded to a
+    /// snapshot-bearing attach (phux-v45.15). The attach's own snapshot
+    /// re-opens the gate — but a satellite error means that snapshot never
+    /// comes, so the error must restore the gate to `Open`, or the
+    /// pre-existing (event-only, or already-attached and snapshot-landed)
+    /// stream is stranded behind a gate that never opens.
+    Regated,
+    /// An idempotent re-subscribe that left the existing gate untouched (the
+    /// pre-existing registration belongs to an earlier successful subscribe
+    /// and must survive). An error rolls back nothing.
+    Idempotent,
 }
 
 /// The per-connection relay state a link supervisor drives while its
@@ -710,8 +729,8 @@ impl RelaySession {
                 // enough to roll it back on an error reply (finding 3).
                 let subscription = subscribe.map(|sub| {
                     let (terminal, client) = (sub.terminal, sub.client);
-                    let was_new = self.register_subscriber(sub);
-                    (terminal, client, was_new)
+                    let effect = self.register_subscriber(sub);
+                    (terminal, client, effect)
                 });
                 let request_id = self.allocate_request_id();
                 self.pending.insert(
@@ -763,10 +782,13 @@ impl RelaySession {
         }
     }
 
-    /// Register one proxy subscriber, idempotently. Returns `true` when
-    /// the `(terminal, client)` pair was not previously subscribed; a
-    /// re-subscribe refreshes the stored mailbox and returns `false`.
-    fn register_subscriber(&mut self, subscription: ProxySubscription) -> bool {
+    /// Register one proxy subscriber, idempotently. Returns the
+    /// [`Registration`] effect so a satellite error can undo exactly what this
+    /// did. A brand-new `(terminal, client)` pair is [`Registration::New`]; a
+    /// re-subscribe refreshes the stored mailbox and is either
+    /// [`Registration::Regated`] (an UPGRADE that re-gated an `Open` stream) or
+    /// [`Registration::Idempotent`] (gate left untouched).
+    fn register_subscriber(&mut self, subscription: ProxySubscription) -> Registration {
         let ProxySubscription {
             terminal,
             client,
@@ -780,11 +802,25 @@ impl RelaySession {
             // Advance to the freshest token seen: a re-attach must never
             // regress the stored order below a withdrawal it superseded.
             existing.seq = existing.seq.max(seq);
-            // Leave the existing gate untouched: an idempotent re-subscribe
-            // over a live registration must not re-suppress a stream the
-            // consumer is already reading in order (its snapshot precedence
-            // was satisfied at the first attach).
-            false
+            // Upgrade re-gating (phux-v45.15): a same-client re-subscribe that
+            // upgrades from an event-only stream (or an already-attached,
+            // snapshot-landed stream) to a snapshot-bearing attach must
+            // re-suppress deltas until *this* attach's own snapshot lands —
+            // otherwise the attach's deltas ride ahead of its snapshot on the
+            // still-`Open` gate (the L1 §9.1 violation v45.14 fixed for a
+            // fresh second attach, resurfacing on the upgrade path). Only an
+            // `Open` gate is re-gated: an `AwaitingFirst`/`Retained` gate
+            // already suppresses deltas until a snapshot lands, and the fresh
+            // attach's snapshot supersedes a retained one (freshest-wins) when
+            // it fans out. A non-attach (event-only) re-subscribe carries no
+            // snapshot and leaves the gate untouched, so an in-order stream
+            // the consumer is already reading is never re-suppressed.
+            if awaits_snapshot && matches!(existing.gate, SnapshotGate::Open) {
+                existing.gate = SnapshotGate::AwaitingFirst;
+                Registration::Regated
+            } else {
+                Registration::Idempotent
+            }
         } else {
             subs.push(ProxySubscriber {
                 client,
@@ -799,7 +835,7 @@ impl RelaySession {
                     SnapshotGate::Open
                 },
             });
-            true
+            Registration::New
         }
     }
 
@@ -974,7 +1010,7 @@ impl RelaySession {
                     // reaped on the next line, so a subscriber still awaiting
                     // its first snapshot must still learn the terminal closed
                     // rather than be silently dropped.
-                    self.fan_out_close(
+                    self.fan_out_ungated(
                         id,
                         &FrameKind::TerminalClosed {
                             terminal_id: TerminalId::satellite(self.host.clone(), id),
@@ -988,7 +1024,16 @@ impl RelaySession {
             }
             FrameKind::Bell { terminal_id } => {
                 if let Some(id) = self.retag_inbound(Some(&terminal_id)) {
-                    self.fan_out(
+                    // Best-effort delivery bypassing the snapshot gate
+                    // (phux-v45.15): a BELL is an ephemeral notification the
+                    // `TERMINAL_SNAPSHOT` does not capture, so gating it behind
+                    // an `AwaitingFirst` subscriber's snapshot would drop it
+                    // permanently — unlike a `TERMINAL_OUTPUT` delta, which the
+                    // snapshot supersedes (freshest full grid wins), so gating
+                    // content is safe but gating a bell loses it. Ordering
+                    // against the snapshot does not matter for a side-channel
+                    // notification, the same rationale as `TERMINAL_CLOSED`.
+                    self.fan_out_ungated(
                         id,
                         &FrameKind::Bell {
                             terminal_id: TerminalId::satellite(self.host.clone(), id),
@@ -1082,19 +1127,9 @@ impl RelaySession {
         match self.pending.remove(&request_id) {
             Some(pending) => {
                 if matches!(result, CommandResult::Error { .. })
-                    && let Some((terminal, client, true)) = pending.subscription
-                    && let Some(subs) = self.subscribers.get_mut(&terminal)
+                    && let Some((terminal, client, effect)) = pending.subscription
                 {
-                    subs.retain(|s| s.client != client);
-                    if subs.is_empty() {
-                        self.subscribers.remove(&terminal);
-                    }
-                    debug!(
-                        satellite = %self.host,
-                        terminal,
-                        ?client,
-                        "satellite refused the subscribing command; proxy registration rolled back"
-                    );
+                    self.roll_back_subscription(terminal, client, effect);
                 }
                 // A dropped receiver (detached relay) is fine.
                 let _ = pending.reply.send(result);
@@ -1106,6 +1141,53 @@ impl RelaySession {
                     "satellite reply with no pending command; dropping"
                 );
             }
+        }
+    }
+
+    /// Undo the registration effect a failed subscribing command had
+    /// (phux-v45.11 finding 3, phux-v45.15). The satellite refused, so this
+    /// registration's own stream and snapshot never come.
+    fn roll_back_subscription(&mut self, terminal: u32, client: ClientId, effect: Registration) {
+        match effect {
+            // The command created the subscriber: remove it, or a later
+            // unrelated subscriber's stream would fan out to a consumer told
+            // its subscribe failed.
+            Registration::New => {
+                if let Some(subs) = self.subscribers.get_mut(&terminal) {
+                    subs.retain(|s| s.client != client);
+                    if subs.is_empty() {
+                        self.subscribers.remove(&terminal);
+                    }
+                    debug!(
+                        satellite = %self.host,
+                        terminal,
+                        ?client,
+                        "satellite refused the subscribing command; proxy registration rolled back"
+                    );
+                }
+            }
+            // The command upgraded an already-`Open` stream to an attach and
+            // re-gated it to `AwaitingFirst`; the attach's snapshot never
+            // comes, so restore the gate to `Open` or the pre-existing stream
+            // is stranded (phux-v45.15).
+            Registration::Regated => {
+                if let Some(sub) = self
+                    .subscribers
+                    .get_mut(&terminal)
+                    .and_then(|subs| subs.iter_mut().find(|s| s.client == client))
+                {
+                    sub.gate = SnapshotGate::Open;
+                    debug!(
+                        satellite = %self.host,
+                        terminal,
+                        ?client,
+                        "satellite refused the upgrade attach; re-gated stream restored to Open"
+                    );
+                }
+            }
+            // A pre-existing registration this command did not touch: nothing
+            // to undo.
+            Registration::Idempotent => {}
         }
     }
 
@@ -1182,9 +1264,10 @@ impl RelaySession {
     /// This mirrors the local attach's snapshot gate without blocking the
     /// link: a sustained-saturation consumer may still lag on *content* (the
     /// pre-existing slow-consumer condition) but never sees a delta before a
-    /// snapshot. `TERMINAL_CLOSED` is the one exception (`fan_out_close`):
-    /// best-effort delivered past the gate, since the subscription is reaped
-    /// with the terminal.
+    /// snapshot. `TERMINAL_CLOSED` and `BELL` are the exceptions
+    /// ([`Self::fan_out_ungated`]): snapshot-independent lifecycle / notice
+    /// frames the snapshot does not capture, best-effort delivered past the
+    /// gate rather than dropped.
     fn fan_out(&mut self, id: u32, frame: &FrameKind) {
         let host = &self.host;
         let Some(subs) = self.subscribers.get_mut(&id) else {
@@ -1219,19 +1302,22 @@ impl RelaySession {
         }
     }
 
-    /// Best-effort deliver a terminal's final `TERMINAL_CLOSED` to every
-    /// proxy subscriber, bypassing the snapshot gate (phux-v45.14
-    /// sub-finding a). The subscription is reaped immediately after (the
-    /// satellite terminal is gone), so a subscriber still `AwaitingFirst` —
-    /// or one whose snapshot is stuck behind a full mailbox — would
-    /// otherwise be torn down without ever learning the terminal closed.
-    /// Ordering no longer matters once the terminal is gone: delivering the
-    /// close without a preceding snapshot is strictly better than silent
-    /// reaping. `try_send`, fire-and-forget: a full mailbox still drops it
-    /// (genuinely best-effort, the same discipline as every other delta).
-    fn fan_out_close(&self, id: u32, frame: &FrameKind) {
+    /// Best-effort deliver a snapshot-independent frame to every proxy
+    /// subscriber, **bypassing** the snapshot gate. Two return-leg frames take
+    /// this path: `TERMINAL_CLOSED` (phux-v45.14 sub-finding a) and `BELL`
+    /// (phux-v45.15). Neither is content the `TERMINAL_SNAPSHOT` captures, so
+    /// gating them behind an `AwaitingFirst` subscriber's not-yet-delivered
+    /// snapshot would drop them permanently — a close would tear the consumer
+    /// down before it learned its terminal is gone, and a bell notification
+    /// would simply vanish. A content `TERMINAL_OUTPUT` delta, by contrast,
+    /// the snapshot supersedes (freshest full grid wins), so gating it is
+    /// safe; these are not. Ordering against the snapshot is irrelevant for a
+    /// lifecycle signal or a side-channel notification. `try_send`,
+    /// fire-and-forget: a full mailbox still drops it (genuinely best-effort,
+    /// the same discipline as every other delta).
+    fn fan_out_ungated(&self, id: u32, frame: &FrameKind) {
         let Some(subs) = self.subscribers.get(&id) else {
-            trace!(satellite = %self.host, terminal = id, "TERMINAL_CLOSED with no proxy subscribers");
+            trace!(satellite = %self.host, terminal = id, "ungated frame with no proxy subscribers");
             return;
         };
         for sub in subs {
@@ -2189,6 +2275,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn subscribe_then_attach_upgrade_gates_deltas_until_the_attach_snapshot() {
+        // phux-v45.15 edge (1). A client is already event-subscribed to a
+        // satellite terminal (gate Open, its stream flowing) and then UPGRADES
+        // to an attach on the SAME terminal. The upgrade must re-gate the
+        // stream to AwaitingFirst so the attach's content deltas cannot ride
+        // ahead of the attach's own snapshot (L1 §9.1) — the same guarantee a
+        // fresh second attach gets (phux-v45.14), resurfacing on the upgrade
+        // path. Without the re-gate the delta at step 3 leaks, so this test is
+        // non-vacuous.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+
+        // 1. Event-only subscribe: gate Open, an EVENT flows immediately.
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        session.handle_inbound(&encode(&FrameKind::Event {
+            terminal: Some(TerminalId::local(9)),
+            event: AgentEvent::CommandStarted,
+        }));
+        assert!(
+            out_rx.try_recv().is_ok(),
+            "the event-only stream must be flowing before the upgrade"
+        );
+
+        // 2. UPGRADE the same client to an attach on the same terminal.
+        attach(&mut session, 9, ClientId(1), out_tx);
+
+        // 3. A content delta arrives before the attach's snapshot. It must now
+        //    be suppressed — the upgrade re-gated the stream.
+        session.handle_inbound(&encode(&output_frame(9, 1, b"pre-snapshot")));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "the upgrade must gate deltas until its own snapshot (L1 §9.1)"
+        );
+
+        // 4. The attach's snapshot lands: delivered, re-opening the gate.
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        let Outbound::Frame(first) = out_rx.try_recv().expect("the attach snapshot lands");
+        assert!(
+            matches!(first, FrameKind::TerminalSnapshot { .. }),
+            "the first post-upgrade frame must be the snapshot, got {first:?}"
+        );
+
+        // 5. A subsequent delta now rides after the snapshot, in order.
+        session.handle_inbound(&encode(&output_frame(9, 2, b"post-snapshot")));
+        let Outbound::Frame(delta) = out_rx.try_recv().expect("post-snapshot delta rides");
+        assert!(
+            matches!(
+                delta,
+                FrameKind::TerminalOutput { ref terminal_id, seq: 2, .. }
+                    if *terminal_id == TerminalId::satellite("devbox", 9)
+            ),
+            "the delta must follow the snapshot, re-tagged, got {delta:?}"
+        );
+    }
+
+    #[test]
+    fn an_event_only_re_subscribe_does_not_re_gate_a_flowing_stream() {
+        // The re-gate is scoped to an attach UPGRADE (a snapshot-bearing
+        // re-subscribe). An event-only re-subscribe carries no snapshot, so it
+        // must leave an already-Open stream flowing — re-gating it would strand
+        // the consumer forever (no snapshot ever comes to re-open the gate).
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        // A second event-only subscribe for the same client (idempotent).
+        subscribe(&mut session, 9, ClientId(1), out_tx);
+        session.handle_inbound(&encode(&FrameKind::Event {
+            terminal: Some(TerminalId::local(9)),
+            event: AgentEvent::CommandStarted,
+        }));
+        assert!(
+            out_rx.try_recv().is_ok(),
+            "an event-only re-subscribe must not re-gate the flowing stream"
+        );
+    }
+
+    #[test]
+    fn a_gated_attach_still_receives_a_bell_past_the_gate() {
+        // phux-v45.15 edge (2). A BELL is an ephemeral notification the
+        // snapshot does not capture, so gating it behind an AwaitingFirst
+        // subscriber's not-yet-delivered snapshot would drop it permanently.
+        // It routes past the gate best-effort, like TERMINAL_CLOSED.
+        let mut session = RelaySession::new(host());
+        let (tx, mut rx) = mpsc::channel(8);
+        // Attach: gate is AwaitingFirst, no snapshot delivered yet.
+        attach(&mut session, 9, ClientId(2), tx);
+
+        // A content delta is suppressed while gated...
+        session.handle_inbound(&encode(&output_frame(9, 1, b"suppressed")));
+        assert!(
+            rx.try_recv().is_err(),
+            "a content delta is suppressed before the snapshot"
+        );
+
+        // ...but a bell rings through, re-tagged, past the gate.
+        session.handle_inbound(&encode(&FrameKind::Bell {
+            terminal_id: TerminalId::local(9),
+        }));
+        let Outbound::Frame(frame) = rx.try_recv().expect("bell delivered past the gate");
+        assert_eq!(
+            frame,
+            FrameKind::Bell {
+                terminal_id: TerminalId::satellite("devbox", 9),
+            },
+            "a gated subscriber must still see a BELL"
+        );
+
+        // The gate is still closed: a further delta stays suppressed until the
+        // snapshot lands (the bell bypass does not open the gate).
+        session.handle_inbound(&encode(&output_frame(9, 2, b"still-gated")));
+        assert!(
+            rx.try_recv().is_err(),
+            "the bell bypass must not open the snapshot gate"
+        );
+    }
+
     // --- session: lifecycle teardown --------------------------------------
 
     #[test]
@@ -2450,9 +2653,13 @@ mod tests {
 
     #[test]
     fn satellite_error_never_rolls_back_a_preexisting_subscription() {
-        // The rollback is scoped to registrations the failing command
-        // created: an idempotent re-subscribe that errors must leave the
-        // original (successful) registration in place.
+        // The rollback never removes a registration the failing command did
+        // not create: an idempotent re-subscribe that errors must leave the
+        // original (successful) subscribe streaming. Here the re-subscribe
+        // upgrades an event-only stream to an attach, so it re-gates the
+        // stream (phux-v45.15, `Registration::Regated`); the error must
+        // *restore* the gate to `Open` rather than strand the pre-existing
+        // stream behind a snapshot that a refused attach never sends.
         let mut session = RelaySession::new(host());
         let (out_tx, mut out_rx) = mpsc::channel(8);
         subscribe(&mut session, 9, ClientId(1), out_tx.clone());
@@ -2466,9 +2673,8 @@ mod tests {
                 terminal: 9,
                 client: ClientId(1),
                 out_tx,
-                // Idempotent re-subscribe: a newer token than the
-                // pre-existing registration at 1. `awaits_snapshot` is moot
-                // on a re-subscribe — the existing (Open) gate is preserved.
+                // The UPGRADE: a newer token than the pre-existing event-only
+                // registration at 1, now awaiting the attach's snapshot.
                 seq: 2,
                 awaits_snapshot: true,
             }),
