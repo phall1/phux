@@ -720,10 +720,19 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // window's focus. The driver also mirrors that id into its
         // `focused_pane` local (server-frame handlers rely on it);
         // either reads the same TerminalId here.
+        //
+        // phux-51n6.1: proactive full-screen-app gate. When the focused
+        // pane is on the alternate screen (vim/nvim, a pager, an agent
+        // TUI), a printable key is a command the shell never echoes, so a
+        // speculative insert would paint a ghost the server contradicts.
+        // Predictive echo does nothing for app mode anyway — skip it here
+        // rather than rely on the reactive auto-back-off to clean up after
+        // the ghosts. The keystroke still travels upstream normally below.
         if let InputEvent::Key(ref key_event) = ev
             && predict.is_enabled()
             && let Some(fid) = ctx.workspace.active_window().and_then(|w| w.focus.as_ref())
             && let Some(slot) = panes.get_mut(fid)
+            && !terminal_in_alt_screen(slot)
         {
             use crate::predict::PredictionOutcome;
             let outcome = predict.predict_key_with_grid(key_event, |r, c| {
@@ -799,6 +808,31 @@ fn terminal_wants_mouse_tracking(slot: &PaneSlot) -> bool {
         Mode::NORMAL_MOUSE,
         Mode::BUTTON_MOUSE,
         Mode::ANY_MOUSE,
+    ]
+    .into_iter()
+    .any(|mode| slot.terminal.mode(mode).unwrap_or(false))
+}
+
+/// Whether the pane's mirror is on the alternate screen buffer — the
+/// proactive "full-screen app mode" gate for predictive echo (phux-51n6.1).
+///
+/// A pane running vim/nvim, `less`, `htop`, a pager, or an agent TUI (Claude
+/// Code, codex) switches to the alternate screen via DEC private mode `?1049h`
+/// (or the legacy `?1047h` / `?47h`). On the alt screen a printable keystroke
+/// is a *command*, not text the shell echoes — so a speculative local insert
+/// would paint a ghost the server never confirms. Predictive echo is inert in
+/// app mode anyway (the latency win is a shell-prompt phenomenon), so the
+/// correct behaviour is to predict nothing there rather than lean on the
+/// reactive [`PredictionState`] auto-back-off to clean up after up to
+/// `BACKOFF_THRESHOLD` mispredicted ghosts. libghostty tracks each variant
+/// independently and reports it via `terminal.mode()` (verified against a
+/// `?1049h`/`?1047h` probe), the same query path the mouse-tracking and
+/// synchronized-output gates already use.
+fn terminal_in_alt_screen(slot: &PaneSlot) -> bool {
+    [
+        Mode::ALT_SCREEN_SAVE,
+        Mode::ALT_SCREEN,
+        Mode::ALT_SCREEN_LEGACY,
     ]
     .into_iter()
     .any(|mode| slot.terminal.mode(mode).unwrap_or(false))
@@ -5462,5 +5496,85 @@ mod tests {
         );
         assert!(effects.bell, "no focused pane to set");
         assert!(optout.is_empty());
+    }
+
+    // ---- phux-51n6.1: predictive-echo full-screen-app (alt-screen) gate ----
+
+    use crate::predict::{PredictionOutcome, PredictionState, PredictiveConfig};
+
+    /// A fresh shell-prompt pane (main screen) is not in app mode: the gate
+    /// must let prediction through.
+    #[test]
+    fn alt_screen_gate_false_on_main_screen() {
+        let slot = PaneSlot::new().expect("slot");
+        assert!(
+            !terminal_in_alt_screen(&slot),
+            "a fresh pane sits on the main screen — predict here"
+        );
+    }
+
+    /// Entering the alternate screen (`?1049h`, as vim/nvim/less/agent TUIs
+    /// do) trips the gate; leaving it (`?1049l`) clears it. The legacy
+    /// `?1047h` variant is caught too.
+    #[test]
+    fn alt_screen_gate_tracks_dec_private_modes() {
+        let mut slot = PaneSlot::new().expect("slot");
+        slot.terminal.vt_write(b"\x1b[?1049h");
+        assert!(
+            terminal_in_alt_screen(&slot),
+            "1049h (save-cursor alt screen) is app mode"
+        );
+        slot.terminal.vt_write(b"\x1b[?1049l");
+        assert!(
+            !terminal_in_alt_screen(&slot),
+            "1049l returns to the main screen — predict again"
+        );
+
+        let mut legacy = PaneSlot::new().expect("slot");
+        legacy.terminal.vt_write(b"\x1b[?1047h");
+        assert!(
+            terminal_in_alt_screen(&legacy),
+            "1047h (legacy alt screen) is app mode too"
+        );
+    }
+
+    /// The load-bearing wiring: reproduce the dispatch-site gate condition
+    /// (`predict.is_enabled() && !terminal_in_alt_screen(slot)`) and prove a
+    /// keystroke is predicted at a shell prompt but skipped in a full-screen
+    /// app — no ghost queued in app mode, no reliance on the reactive
+    /// auto-back-off.
+    #[test]
+    fn key_predicted_at_prompt_but_gated_in_app_mode() {
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+        let key = KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::A,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: Some("a".to_owned()),
+            unshifted_codepoint: Some(u32::from('a')),
+        };
+
+        // Shell prompt (main screen): the gate is open, so the enabled
+        // predictor queues a ghost.
+        let prompt = PaneSlot::new().expect("slot");
+        let mut predict = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let gated = predict.is_enabled() && !terminal_in_alt_screen(&prompt);
+        assert!(gated, "prompt: gate open");
+        let outcome = predict.predict_key(&key);
+        assert_eq!(outcome, PredictionOutcome::Predicted);
+        assert_eq!(predict.pending_len(), 1, "prompt: one ghost queued");
+
+        // Full-screen app (alt screen): the gate closes before predict_key is
+        // ever reached, so nothing is queued — no ghost to reconcile away.
+        let mut app = PaneSlot::new().expect("slot");
+        app.terminal.vt_write(b"\x1b[?1049h");
+        let predict2 = PredictionState::new(PredictiveConfig::enabled(), 80, 24);
+        let gated2 = predict2.is_enabled() && !terminal_in_alt_screen(&app);
+        assert!(!gated2, "app mode: gate closed — predict_key not called");
+        // The dispatch site only calls predict_key when the gate is open, so
+        // in app mode the queue stays empty.
+        assert_eq!(predict2.pending_len(), 0, "app mode: no ghost queued");
     }
 }

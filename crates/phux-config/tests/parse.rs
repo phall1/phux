@@ -213,9 +213,14 @@ predictive-echo = true
 
 #[test]
 fn experimental_predictive_echo_defaults_off_when_absent() {
-    // No [experimental] section at all: the field defaults OFF (phux-pxaj) —
-    // predictive echo is experimental and opt-in until it stops mispredicting
-    // in vi-mode shells and fast transitions.
+    // No [experimental] section at all: the field defaults OFF (phux-pxaj,
+    // re-evaluated phux-51n6.1). The client now proactively gates prediction
+    // on the alternate screen (full-screen apps), but the default stays off
+    // because two main-screen cases remain un-gatable client-side — readline
+    // vi command-mode and no-echo password prompts — and the mosh mechanisms
+    // that make on-by-default safe (RTT-adaptive gating + a prediction
+    // display-timeout) are not yet ported. Opt in with `predictive-echo =
+    // true`.
     let cfg = parse_str("", &path()).expect("empty parses");
     assert!(
         !cfg.experimental.predictive_echo,

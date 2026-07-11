@@ -532,6 +532,31 @@ trigger adaptive auto-backoff. Leave it unset or set it to `false` to keep
 echo strictly authoritative; set it to `true` to opt in. Anything under
 `[experimental]` may be renamed or removed without a SemVer bump.
 
+**What it helps, and what it does not.** Predictive echo hides latency for
+**shell-prompt typing** over a slow link — the characters you type appear
+immediately instead of waiting a round trip for the server to echo them.
+It is **inert in full-screen app mode**: vim/nvim, pagers (`less`), and
+agent TUIs (Claude Code, codex) switch to the alternate screen, where a
+keystroke is a command the program interprets rather than text the shell
+echoes. The client detects the alternate screen and **predicts nothing
+there**, so enabling the knob costs full-screen apps nothing (and gains
+them nothing — their redraw is server-authoritative regardless). The win
+also shrinks toward zero as the round trip shrinks: over the local UDS
+transport the server echo is already near-instant, so the benefit is most
+visible on the higher-latency remote transport
+([ADR-0007](../../ADR/0007-mosh-class-transport-and-satellites.md)).
+
+**Why it is still off by default.** Beyond the alternate-screen gate, two
+main-screen cases the client cannot detect keep the default conservative:
+readline **vi command-mode** at the prompt (`set -o vi`), where normal-mode
+keys are mispredicted as inserts until the auto-backoff suspends (a brief
+underlined flicker), and **no-echo prompts** (`sudo`/`ssh` passwords), where
+echo is suppressed by the server PTY's termios — invisible to the client —
+so a predicted insert would momentarily render the typed characters. Making
+it safe on-by-default needs the mosh mechanisms not yet ported (an
+RTT-adaptive gate and a display-timeout that expires unconfirmed ghosts);
+until then it is a deliberate opt-in.
+
 ```toml
 [experimental]
 predictive-echo = false
