@@ -168,18 +168,21 @@ pub(crate) async fn attach_default_with_fallback(
             eprintln!(
                 "phux: no prior-attach session (server said: {message}); creating `{default_name}`"
             );
-            run_attach_once(
-                dial,
-                AttachTarget::CreateIfMissing {
-                    name: default_name.to_owned(),
-                    command: None,
-                    cwd: None,
-                },
-                predict_cfg,
-            )
-            .await
+            run_attach_once(dial, default_create_target(default_name), predict_cfg).await
         }
         Err(err) => Err(err),
+    }
+}
+
+fn default_create_target(default_name: &str) -> AttachTarget {
+    AttachTarget::CreateIfMissing {
+        name: default_name.to_owned(),
+        command: None,
+        // Seed the pane in the client's cwd so tools whose persistence is
+        // keyed by project directory, such as `claude --resume`, find it.
+        cwd: std::env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()),
     }
 }
 
@@ -562,6 +565,24 @@ pub(crate) fn run_attach_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_create_target_carries_client_cwd() {
+        let expected = std::env::current_dir()
+            .expect("test cwd")
+            .to_string_lossy()
+            .into_owned();
+        let target = default_create_target("default");
+
+        assert_eq!(
+            target,
+            AttachTarget::CreateIfMissing {
+                name: "default".to_owned(),
+                command: None,
+                cwd: Some(expected),
+            }
+        );
+    }
 
     /// The reconnect probe returns fast for a missing socket (clean shutdown),
     /// and `true` once a listener is bound (the re-exec'd server is up).

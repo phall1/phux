@@ -1113,6 +1113,84 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
     });
 }
 
+/// phux-0db acceptance: a `CreateIfMissing` attach that carries a `cwd`
+/// seeds the pane in *that* directory, not the daemon's CWD. This is the
+/// wire-level proof that a `claude` session launched in a phux shell lands
+/// in the user's project dir, so its transcript is keyed under the right
+/// path hash and `claude --resume` finds it. Before the fix the seed pane
+/// inherited the server process's CWD and the wire `cwd` was dropped.
+#[test]
+fn create_if_missing_seeds_pane_in_wire_cwd() {
+    use phux_protocol::wire::frame::{AttachTarget, TYPE_ATTACHED, ViewportInfo};
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+
+        // The "project" dir the client is sitting in. Canonicalize so the
+        // expected path matches what `pwd` prints (macOS resolves /var →
+        // /private/var).
+        let cwd_dir = TempDir::new().unwrap();
+        let cwd_path = cwd_dir.path().canonicalize().expect("canonicalize cwd");
+
+        // PTY seed with no override command → the wire command + cwd apply.
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        // CreateIfMissing carrying the project cwd and a command that prints
+        // its working directory. `read _` (a builtin) blocks the shell so the
+        // pane stays alive; `exec read _` would die and race the attach.
+        send_frame(
+            &mut stream,
+            &FrameKind::Attach {
+                target: AttachTarget::CreateIfMissing {
+                    name: "proj".to_owned(),
+                    command: Some(vec![
+                        "/bin/sh".to_owned(),
+                        "-c".to_owned(),
+                        "pwd; read _".to_owned(),
+                    ]),
+                    cwd: Some(cwd_path.to_string_lossy().into_owned()),
+                },
+                viewport: ViewportInfo::new(80, 24),
+                request_scrollback: false,
+                scrollback_limit_lines: 0,
+            },
+        )
+        .await;
+
+        // ATTACHED carries the seed pane's wire id.
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        let seed_id = match attached {
+            FrameKind::Attached { snapshot, .. } => {
+                assert_eq!(snapshot.panes.len(), 1, "attach-create seeds one pane");
+                snapshot.panes[0].id.clone()
+            }
+            other => panic!("expected Attached, got {other:?}"),
+        };
+
+        let needle = cwd_path.to_str().expect("utf8 cwd").as_bytes();
+        // The seed child may print `pwd` before or after the snapshot is
+        // captured, so scan both the snapshot replay and any live output.
+        let acc = await_snapshot_or_output_contains(&mut stream, &seed_id, needle).await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(needle.len()).any(|w| w == needle),
+            "seed pane must run in the wire cwd ({}); got output: {body:?}",
+            cwd_path.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
 /// phux-nyx acceptance: with `defaults.cwd-inheritance = session-root`, a
 /// `SPAWN_TERMINAL` with `cwd` unset opens the new pane in the *session's
 /// seed-pane* directory.
