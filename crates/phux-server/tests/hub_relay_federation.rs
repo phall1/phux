@@ -35,6 +35,13 @@
 //!   (phux-v45.11 finding 5) — satellite-tagged supervisory verbs on a
 //!   non-hub server resolve through the shared routing path, not dead
 //!   per-handler guards.
+//! * `ssh_stub_link_relays_commands_end_to_end` — the same relay over
+//!   the SSH-stdio dial path (phux-v45.9): the hub's registry entry is
+//!   `ssh://`, `$PHUX_SSH` points at a stub program (the documented
+//!   operator seam), and the harness plays the remote bridge by
+//!   splicing the stub child's stdio onto the satellite's real UDS —
+//!   the exact splice `phux stdio-bridge` performs, proven against the
+//!   real binary in `crates/phux/tests/stdio_bridge_e2e.rs`.
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -726,6 +733,166 @@ fn aggregated_list_merges_local_and_satellite_terminals_and_degrades() {
         sat_task.await.unwrap().unwrap();
         drop(hub_shutdown);
         hub_task.await.unwrap().unwrap();
+    });
+}
+
+/// Create a FIFO at `path` (unix-only, like the UDS transport itself).
+fn mkfifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("spawn mkfifo");
+    assert!(status.success(), "mkfifo {} failed", path.display());
+}
+
+/// Write the `$PHUX_SSH` stub: a shell-free-argv program the hub spawns
+/// in place of the system `ssh`. It pipes the child's stdin into the
+/// `c2s` FIFO and the `s2c` FIFO out its stdout, so the harness can play
+/// the remote end of the transport in-process. The argv the hub built
+/// (`-o BatchMode=yes ... -- HOST phux stdio-bridge`) is ignored, exactly
+/// as an operator wrapper is free to do; the argv itself is asserted in
+/// `phux-server::hub::link`'s stub tests.
+fn write_ssh_stub(dir: &std::path::Path, c2s: &std::path::Path, s2c: &std::path::Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("fake-ssh");
+    // `exec 3<&0` first: a background job's stdin is reassigned to
+    // /dev/null before its own redirections run (POSIX sh), so the
+    // child's real stdin must be duplicated onto another fd for the
+    // background cat to read it.
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nexec 3<&0\ncat <&3 > {c2s} &\nexec cat {s2c}\n",
+            c2s = c2s.display(),
+            s2c = s2c.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+/// Play the remote bridge: splice the stub ssh child's stdio (via the
+/// FIFO pair) onto the satellite server's real Unix socket, byte for
+/// byte — the job `phux stdio-bridge` does on a real satellite host.
+/// Ends when either side closes (satellite shutdown, or the hub tearing
+/// the child down).
+async fn run_stub_bridge(c2s: PathBuf, s2c: PathBuf, sat_sock: PathBuf) {
+    use tokio::net::unix::pipe;
+    // Read end first: opening a FIFO receiver never blocks. The phantom
+    // sender keeps the receiver from seeing EOF before (or between) stub
+    // children have the write end open.
+    let mut from_hub = pipe::OpenOptions::new().open_receiver(&c2s).unwrap();
+    let _hold_open = pipe::OpenOptions::new().open_sender(&c2s).unwrap();
+    // A FIFO sender cannot open until the stub's `cat` holds the read
+    // end; retry until the child the hub spawned is up.
+    let deadline = Instant::now() + STEP_DEADLINE;
+    let mut to_hub = loop {
+        match pipe::OpenOptions::new().open_sender(&s2c) {
+            Ok(tx) => break tx,
+            Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(err) => panic!("ssh stub never opened its stdout FIFO: {err}"),
+        }
+    };
+    let satellite = wait_for_socket(&sat_sock, STEP_DEADLINE).await;
+    let (mut sat_rd, mut sat_wr) = satellite.into_split();
+    // One finished direction ends the bridge, mirroring `phux
+    // stdio-bridge`: the transport is gone either way and the hub's
+    // redial loop owns recovery.
+    tokio::select! {
+        _ = tokio::io::copy(&mut from_hub, &mut sat_wr) => {}
+        _ = tokio::io::copy(&mut sat_rd, &mut to_hub) => {}
+    }
+}
+
+#[test]
+fn ssh_stub_link_relays_commands_end_to_end() {
+    let tmp = TempDir::new().unwrap();
+    let c2s = tmp.path().join("c2s.fifo");
+    let s2c = tmp.path().join("s2c.fifo");
+    mkfifo(&c2s);
+    mkfifo(&s2c);
+    let stub = write_ssh_stub(tmp.path(), &c2s, &s2c);
+    // SAFETY: nextest runs each test in its own process and no other
+    // thread exists yet — the runtime is built inside run_local below.
+    unsafe { std::env::set_var("PHUX_SSH", &stub) };
+
+    common::run_local(async move {
+        let ws_port = free_port();
+        let sat_sock = tmp.path().join("sat.sock");
+        let (sat_shutdown, sat_task) = spawn_satellite(sat_sock.clone(), ws_port);
+        let bridge = tokio::task::spawn_local(run_stub_bridge(c2s, s2c, sat_sock));
+
+        let (hub_shutdown, hub_task) = spawn_hub(
+            tmp.path().join("hub.sock"),
+            vec![SatelliteConfigEntry {
+                name: "sat".to_owned(),
+                // Validated ssh authority; the stub ignores the host, an
+                // operator wrapper's prerogative.
+                endpoint: "ssh://sat-host".to_owned(),
+                enabled: true,
+                token_file: None,
+                cert_fingerprint: None,
+            }],
+        );
+
+        // Discovery goes over the satellite's own WS listener — only the
+        // hub-to-satellite leg under test rides the bridged ssh stdio.
+        let sat_pane = discover_satellite_pane(ws_port).await;
+        let mut hub = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // A satellite-tagged command round-trips through the hub over
+        // the ssh child's pipes: spawn, length-prefixed framing on
+        // stdin/stdout, relay id rewrite, response correlation.
+        let result = get_screen_until_ok(&mut hub, sat_pane).await;
+        let CommandResult::OkWith(CommandValue::Json(json)) = result else {
+            panic!("GET_SCREEN over the ssh link must succeed, got {result:?}");
+        };
+        assert!(
+            json.contains("\"cols\""),
+            "screen JSON came from the satellite pane: {json}"
+        );
+
+        // Remove the stub before killing the satellite so every redial
+        // fails at spawn — post-teardown commands then always fail fast
+        // (backoff/connecting drains) instead of racing a fresh child
+        // that has no bridge behind it into the relay's 30s deadline.
+        std::fs::remove_file(&stub).unwrap();
+
+        // Satellite death closes the UDS, the bridge ends, the stub's
+        // cat sees EOF, the child exits: the hub must treat the exited
+        // ssh child as an ordinary dropped link and type the failure.
+        drop(sat_shutdown);
+        sat_task.await.unwrap().unwrap();
+        let deadline = Instant::now() + STEP_DEADLINE;
+        let mut request_id = 5000;
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "commands to the dead ssh satellite never failed with SatelliteUnreachable"
+            );
+            let result =
+                get_screen_via_hub(&mut hub, request_id, TerminalId::satellite("sat", sat_pane))
+                    .await;
+            if matches!(
+                result,
+                CommandResult::Error {
+                    code: ErrorCode::SatelliteUnreachable,
+                    ..
+                }
+            ) {
+                break;
+            }
+            request_id += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        drop(hub_shutdown);
+        hub_task.await.unwrap().unwrap();
+        // The bridge ended with the satellite; reap the task.
+        let _ = bridge.await;
     });
 }
 

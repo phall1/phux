@@ -20,10 +20,13 @@
 //! channel to pin) — see the ADR-0038 addendum. The child is spawned
 //! with `BatchMode=yes` (never an interactive prompt) and argv built
 //! from charset-validated parts (no shell, `--` before the host);
-//! "connected" means the ssh child is running — the first authoritative
-//! liveness signal is the child's exit, which redials like a dropped
-//! connection. The child's stderr is drained into a bounded tail for
-//! the failure reason (never buffered without limit).
+//! "connected" means the ssh child is running, and the bridged stream
+//! carries the same length-prefixed frames as every other link — the
+//! relay session pumps it exactly like QUIC/WS. The authoritative
+//! liveness signal is the child's exit (surfaced as a `recv_frame`
+//! EOF), which redials like a dropped connection; the child's stderr
+//! is drained into a bounded tail for the failure reason (never
+//! buffered without limit).
 //!
 //! **Fail closed.** [`plan_link`] refuses to dial a routable endpoint
 //! whose entry lacks a token file or fingerprint pin (and refuses
@@ -54,14 +57,19 @@
 //! A dead satellite that *looks* up is handled too: every link enforces a
 //! keepalive / idle contract. QUIC gets it from the transport (`phux-dial`
 //! sets `keep_alive_interval` + `max_idle_timeout`; expiry surfaces as a
-//! read error). WebSocket has no transport-level idle detection, so the
+//! read error). SSH-stdio gets it from the SSH layer: the hub dials with
+//! `ServerAliveInterval`/`ServerAliveCountMax` derived from the same two
+//! constants (see [`ssh_argv`]), so a partitioned peer makes the ssh
+//! child exit — the ordinary drop signal — and nothing rides the bridged
+//! stream. WebSocket has no transport-level idle detection, so the
 //! supervisor originates pings on `LINK_KEEPALIVE_INTERVAL` and tears
 //! the link down when nothing (not even a pong) has arrived within
 //! `LINK_IDLE_TIMEOUT` — a silent partition becomes an ordinary
 //! disconnect: session teardown, typed errors, redial. Wire writes are
 //! bounded by `LINK_SEND_TIMEOUT` so a peer with full socket buffers
-//! cannot wedge the supervisor loop, and the keepalive tick doubles as
-//! the sweep that prunes relayed commands whose consumer stopped waiting.
+//! cannot wedge the supervisor loop (for ssh links the bound applies to
+//! the child's stdin pipe), and the keepalive tick doubles as the sweep
+//! that prunes relayed commands whose consumer stopped waiting.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -203,13 +211,33 @@ impl core::fmt::Display for DialSpec {
 /// remote PTY (a PTY would translate the byte stream);
 /// `ClearAllForwardings=yes` keeps `ssh_config` forwardings from
 /// piggybacking on hub links.
+///
+/// **Keepalive / idle contract** (`docs/architecture/transport.md`): the
+/// link-level liveness the relay demands of every transport lives at the
+/// SSH layer for ssh links, mirroring how QUIC gets it from quinn rather
+/// than from hub pings. `ServerAliveInterval` probes on the
+/// `LINK_KEEPALIVE_INTERVAL` cadence and `ServerAliveCountMax` sizes
+/// the window to `LINK_IDLE_TIMEOUT`, so a silent partition makes ssh
+/// exit — and a child exit is the ordinary link-drop signal
+/// (`LinkConn::recv_frame` EOF). Nothing rides the bridged phux
+/// stream: the bridge stays byte-transparent, and
+/// `LinkConn::keepalive` is a no-op for ssh exactly as for QUIC.
 #[must_use]
 pub fn ssh_argv(user: Option<&str>, host: &str, port: Option<u16>) -> Vec<String> {
+    // Derived, not hardcoded, so the SSH-layer contract cannot drift
+    // from the WS/QUIC one: probe every LINK_KEEPALIVE_INTERVAL, declare
+    // the peer dead after LINK_IDLE_TIMEOUT of silence.
+    let alive_interval = LINK_KEEPALIVE_INTERVAL.as_secs().max(1);
+    let alive_count = (LINK_IDLE_TIMEOUT.as_secs() / alive_interval).max(1);
     let mut argv = vec![
         "-o".to_owned(),
         "BatchMode=yes".to_owned(),
         "-o".to_owned(),
         "ClearAllForwardings=yes".to_owned(),
+        "-o".to_owned(),
+        format!("ServerAliveInterval={alive_interval}"),
+        "-o".to_owned(),
+        format!("ServerAliveCountMax={alive_count}"),
         "-T".to_owned(),
     ];
     if let Some(port) = port {
@@ -420,7 +448,7 @@ impl Backoff {
 
     /// Settle the streak after a lost connection and return the 1-based
     /// attempt number to report the loss as. Only a connection that
-    /// stayed up at least [`LINK_STABLE_AFTER`] clears the failure
+    /// stayed up at least `LINK_STABLE_AFTER` clears the failure
     /// streak; one that died young counts like a dial that never
     /// connected (an ssh child whose spawn succeeded but whose auth was
     /// refused exits fast — resetting on mere establishment would
@@ -1137,11 +1165,13 @@ impl LinkConn for NetLinkConn {
             // timeout at the transport layer (`phux-dial` sets
             // `keep_alive_interval` + `max_idle_timeout`); expiry surfaces
             // as a `recv_frame` error, so there is nothing to drive here.
-            // The ssh child likewise *is* the transport: its exit is the
-            // authoritative liveness signal, surfaced as a `recv_frame`
-            // EOF (with the exit status and stderr as the reason). The
-            // bridged stream stays byte-transparent — there is no
-            // in-band phux ping to originate on either.
+            // The ssh child likewise *is* the transport: the dial argv
+            // carries ServerAliveInterval/ServerAliveCountMax (see
+            // `ssh_argv`), so SSH itself probes the peer and a silent
+            // partition makes the child exit — surfaced as a
+            // `recv_frame` EOF with the exit status and stderr as the
+            // reason. The bridged stream stays byte-transparent — there
+            // is no in-band phux ping to originate on either.
             Self::Quic { .. } | Self::Ssh { .. } => Ok(()),
             Self::Ws { ws, last_inbound } => {
                 if let Some(reason) = ws_idle_error(last_inbound.elapsed()) {
@@ -1417,6 +1447,10 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ClearAllForwardings=yes",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
                 "-T",
                 "--",
                 "devbox",
@@ -1431,6 +1465,10 @@ mod tests {
                 "BatchMode=yes",
                 "-o",
                 "ClearAllForwardings=yes",
+                "-o",
+                "ServerAliveInterval=10",
+                "-o",
+                "ServerAliveCountMax=3",
                 "-T",
                 "-p",
                 "2222",
@@ -1441,6 +1479,13 @@ mod tests {
                 "phux",
                 "stdio-bridge",
             ]
+        );
+        // The SSH-layer liveness window mirrors the WS idle contract:
+        // interval * count == LINK_IDLE_TIMEOUT (see ssh_argv).
+        assert_eq!(
+            LINK_KEEPALIVE_INTERVAL * 3,
+            LINK_IDLE_TIMEOUT,
+            "keepalive constants drifted; re-derive ServerAlive* expectations"
         );
         // The host always sits after `--`, so even a hostile host token
         // (which endpoint parsing already rejects) could not be read as
