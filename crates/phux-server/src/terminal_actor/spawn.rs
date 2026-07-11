@@ -152,6 +152,30 @@ pub fn apply_term(cmd: &mut CommandBuilder, term: &str) {
     cmd.env("TERM", term);
 }
 
+/// Inject `PHUX_TERMINAL_ID` (phux-w7mj) — the spawned pane's own local
+/// wire id — into `cmd`'s environment so a process running inside the
+/// pane can self-target on the phux wire with zero configuration.
+///
+/// The agent-record wrapper (`examples/plugins/agent-tools`) reads this
+/// var as an `@N` selector to attribute its records to the pane it runs
+/// in; because the server now always provides it, the wrapper needs no
+/// manual id. The value matches the hook `PHUX_TERMINAL_ID` (the same
+/// `local_id().to_string()`), so both surfaces name a pane identically.
+///
+/// Set only for a `Local` wire id — the sole shape a freshly-spawned pane
+/// receives. A `Satellite` id has no server-local `@N` and yields no var.
+/// Interning the wire id is idempotent, so callers can intern pre-spawn
+/// (to inject here) and re-intern after `spawn_terminal_actor` for the
+/// same value.
+pub fn apply_terminal_id(
+    cmd: &mut CommandBuilder,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+) {
+    if let Some(id) = wire_terminal_id.local_id() {
+        cmd.env("PHUX_TERMINAL_ID", id.to_string());
+    }
+}
+
 /// Build a [`CommandBuilder`] that runs a user-supplied command line as a
 /// seed pane's initial program (e.g. `defaults.spawn-on-attach`,
 /// phux-07y).

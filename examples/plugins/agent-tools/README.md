@@ -59,6 +59,26 @@ agent binaries. Set `PHUX_AGENT_BENCH_ROLES`, `PHUX_AGENT_BENCH_PROFILE`,
 `PHUX_AGENT_BENCH_STATE`, `PHUX_AGENT_BENCH_ROLE`, or `PHUX_AGENT_BENCH_KEYS`
 to customize the fixture.
 
+## Pane self-identification (`PHUX_TERMINAL_ID`)
+
+The phux server injects `PHUX_TERMINAL_ID` into the environment of every
+pane it spawns. Its value is the pane's own local wire id — the number in
+the `@N` client selector (`TerminalId::local(N)`). Because the server sets
+it automatically, a process running inside a pane can address itself on the
+phux wire with zero configuration:
+
+```sh
+# From inside any spawned pane, target this same pane:
+phux send-keys "@$PHUX_TERMINAL_ID" 'echo hi\n'
+```
+
+Agent tooling that records or supervises the pane it runs in (for example a
+record wrapper) reads `PHUX_TERMINAL_ID` as its `@N` self-target rather than
+requiring the id to be passed in. The same value is exposed to lifecycle
+hooks as `PHUX_TERMINAL_ID`, so the pane is named identically across both
+surfaces. Panes not spawned by phux (or addressed via a federation
+`Satellite` id, which has no server-local `@N`) do not receive the variable.
+
 ## Integration templates
 
 The `integrations/*.toml` files are sample manifests for terminal-native

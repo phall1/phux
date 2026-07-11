@@ -80,7 +80,7 @@ pub fn seed_session_with_pty(
 pub fn seed_session_with_pty_and_colors(
     state: &SharedState,
     name: &str,
-    cmd: portable_pty::CommandBuilder,
+    mut cmd: portable_pty::CommandBuilder,
     history_limit: u32,
     root_token: &CancellationToken,
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
@@ -93,6 +93,12 @@ pub fn seed_session_with_pty_and_colors(
     let terminal: TerminalId = state.with_mut(|s| {
         let terminal = s.seed_session(name).2;
         stamp_spawn_cwd(s, terminal, spawn_cwd);
+        // phux-w7mj: intern the pane's wire id pre-spawn and inject it into
+        // the child's environment as PHUX_TERMINAL_ID so an in-pane process
+        // (e.g. the agent-record wrapper) self-targets with zero config.
+        // Interning is idempotent — `spawn_terminal_actor` below returns the
+        // same id.
+        crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
         terminal
     });
     let terminal_token = root_token.child_token();
@@ -158,7 +164,7 @@ pub fn spawn_pane_with_pty(
 pub fn spawn_pane_with_pty_and_colors(
     state: &SharedState,
     session: phux_core::ids::SessionId,
-    cmd: portable_pty::CommandBuilder,
+    mut cmd: portable_pty::CommandBuilder,
     history_limit: u32,
     root_token: &CancellationToken,
     default_colors: Option<phux_protocol::caps::TerminalDefaultColors>,
@@ -169,6 +175,10 @@ pub fn spawn_pane_with_pty_and_colors(
     let Some(terminal): Option<TerminalId> = state.with_mut(|s| {
         let terminal = s.add_pane_to_session(session)?;
         stamp_spawn_cwd(s, terminal, spawn_cwd);
+        // phux-w7mj: inject the pane's own local wire id as PHUX_TERMINAL_ID
+        // (see `seed_session_with_pty_and_colors`). Idempotent interning —
+        // `spawn_terminal_actor` below returns the same id.
+        crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
         Some(terminal)
     }) else {
         return Ok(None);
