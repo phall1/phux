@@ -459,6 +459,22 @@ pub(crate) const EVENT_TAG_CWD_CHANGED: u8 = 0x0a;
 // RESIZE_TERMINAL=0x04, GET_STATE=0x05, RUN_HOOK=0x06. v0.1 implements only
 // KILL_TERMINAL and GET_STATE (ADR-0021 §3); the rest are reserved and
 // decode as `UnknownEnumValue` until wired.
+/// Wire tag for [`Command::AttachTerminal`], taking the `0x01` slot the
+/// SPEC §5.1 catalog reserved for `ATTACH_TERMINAL` (phux-v45.7). The
+/// per-Terminal output-subscription verb: it wires the caller to receive
+/// `TERMINAL_SNAPSHOT` + `TERMINAL_OUTPUT` for one Terminal without a
+/// session-scoped `ATTACH`. The catalog's `role_policy` field is not yet
+/// encoded — an absent policy decodes as
+/// `RolePolicy { requested_role: PRIMARY, takeover: NEVER }` per SPEC §8.1,
+/// which is exactly what this body-less-policy encoding means; the field
+/// lands additively behind its own wire bump.
+pub(crate) const COMMAND_TAG_ATTACH_TERMINAL: u8 = 0x01;
+/// Wire tag for [`Command::DetachTerminal`], taking the `0x02` slot the
+/// SPEC §5.1 catalog reserved for `DETACH_TERMINAL` (phux-v45.7). Drops the
+/// caller's per-Terminal output subscription (the `ATTACH_TERMINAL`
+/// counterpart) and its per-Terminal event-stream subscription; the
+/// Terminal itself is unaffected.
+pub(crate) const COMMAND_TAG_DETACH_TERMINAL: u8 = 0x02;
 /// Wire tag for [`Command::KillTerminal`].
 pub(crate) const COMMAND_TAG_KILL_TERMINAL: u8 = 0x03;
 /// Wire tag for [`Command::GetState`].
@@ -1077,6 +1093,36 @@ impl ControlAction {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Command {
+    /// Subscribe the calling client to one Terminal's content stream
+    /// (SPEC §5.1 `ATTACH_TERMINAL`, phux-v45.7): the server registers the
+    /// caller as an output subscriber, primes it with an authoritative
+    /// `TERMINAL_SNAPSHOT`, and streams `TERMINAL_OUTPUT` deltas from then
+    /// on — the per-Terminal interactive attach, without the session-scoped
+    /// `ATTACH` handshake. Idempotent: re-attaching re-sends a fresh
+    /// snapshot without duplicating the stream. Unlike session `ATTACH`
+    /// this does NOT resize the Terminal (no viewport rides the command);
+    /// callers that want their geometry applied follow with
+    /// `TERMINAL_RESIZE`. The catalog's `role_policy` field is not yet
+    /// encoded; absence means `{ PRIMARY, takeover: NEVER }` (SPEC §8.1).
+    /// Reply: `COMMAND_RESULT { Ok }` (the snapshot MAY precede it, per
+    /// SPEC §5 command/stream interleaving), or
+    /// `Error { TerminalNotFound }`. This is the verb a federation hub
+    /// relays for two-hop attach (ADR-0007 §4, L1 §9.1).
+    AttachTerminal {
+        /// The Terminal whose content stream to subscribe to.
+        terminal_id: TerminalId,
+    },
+    /// Drop the caller's per-Terminal subscriptions on `terminal_id`
+    /// (SPEC §5.1 `DETACH_TERMINAL`, phux-v45.7): the output stream wired
+    /// by [`Command::AttachTerminal`] and any per-Terminal event-stream
+    /// subscription. The Terminal itself is unaffected. Idempotent — a
+    /// no-op (still `Ok`) when the caller holds no subscription or the
+    /// Terminal is already gone, so detach can never race a natural close
+    /// into an error.
+    DetachTerminal {
+        /// The Terminal whose subscriptions to drop.
+        terminal_id: TerminalId,
+    },
     /// Terminate the underlying PTY of `terminal_id`. Asynchronously emits
     /// `TERMINAL_CLOSED`. Backs `phux kill` (one command per resolved
     /// Terminal — see ADR-0021).
@@ -3054,6 +3100,14 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
     match command {
+        Command::AttachTerminal { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_ATTACH_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
+        Command::DetachTerminal { terminal_id } => {
+            enc.write_u8(COMMAND_TAG_DETACH_TERMINAL);
+            encode_terminal_id(terminal_id, enc);
+        }
         Command::KillTerminal { terminal_id } => {
             enc.write_u8(COMMAND_TAG_KILL_TERMINAL);
             encode_terminal_id(terminal_id, enc);
@@ -3186,6 +3240,12 @@ fn decode_input_event(dec: &mut Decoder<'_>) -> Result<InputEvent, DecodeError> 
 pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
+        COMMAND_TAG_ATTACH_TERMINAL => Ok(Command::AttachTerminal {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
+        COMMAND_TAG_DETACH_TERMINAL => Ok(Command::DetachTerminal {
+            terminal_id: decode_terminal_id(dec)?,
+        }),
         COMMAND_TAG_KILL_TERMINAL => Ok(Command::KillTerminal {
             terminal_id: decode_terminal_id(dec)?,
         }),
