@@ -453,7 +453,7 @@ pub(crate) async fn handle_command(
         Command::DetachTerminal { terminal_id } => {
             handle_detach_terminal(state, client_id, &terminal_id)
         }
-        Command::GetState { scope } => handle_get_state(state, &scope),
+        Command::GetState { scope } => handle_get_state_federated(state, &scope, out_tx).await,
         Command::GetScreen {
             terminal_id,
             request_scrollback,
@@ -1243,6 +1243,114 @@ pub(crate) fn handle_get_state(state: &SharedState, scope: &StateScope) -> Comma
             message: "unsupported GET_STATE scope".to_owned(),
         },
     }
+}
+
+/// `GET_STATE` with federation aggregation (phux-v45.5, L1 §9.1): on a
+/// hub, the local snapshot from [`handle_get_state`] is merged with every
+/// dialed satellite's terminal inventory. Off-hub (no relays) this is
+/// exactly the local path.
+///
+/// Per satellite the hub relays `GET_STATE { scope: SERVER }` over the
+/// link (all links queried concurrently, each bounded by the relay's
+/// per-command deadline — see `crate::hub::relay::RELAY_COMMAND_TIMEOUT`)
+/// and appends the returned `panes` re-tagged
+/// `Local { id }` -> `Satellite { host, id }`.
+///
+/// **Result-shape honesty.** Only *terminals* aggregate. Session and
+/// window identities are not federation-routable (ADR-0016 makes
+/// `TerminalId` the wire primary), so the satellite's `sessions` /
+/// `windows` lists and focus fields are discarded — their `u32` ids
+/// would collide with the hub's own. A satellite pane's `window_id` is
+/// passed through **verbatim**: it is satellite-local, resolvable only on
+/// the satellite, and has no entry in the merged snapshot's `windows`
+/// list. `cols` / `rows` / `title` / `cwd` are likewise relayed verbatim
+/// from the satellite's snapshot; the hub synthesizes nothing.
+///
+/// **Degradation.** A satellite that is unreachable, saturated, or
+/// answers with an error contributes an empty set and NEVER fails the
+/// aggregate. The indication is the spec's observable-teardown shape: one
+/// un-correlated `ERROR` frame (typically `SatelliteUnreachable`), naming
+/// the host, pushed to the requesting consumer before the
+/// `COMMAND_RESULT`.
+pub(crate) async fn handle_get_state_federated(
+    state: &SharedState,
+    scope: &StateScope,
+    out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+) -> CommandResult {
+    let local = handle_get_state(state, scope);
+    if !matches!(scope, StateScope::Server) {
+        return local;
+    }
+    let relays = state.with(crate::state::ServerState::hub_relays_all);
+    if relays.is_empty() {
+        // Non-hub server (or hub with an empty table): the local snapshot
+        // is the whole truth.
+        return local;
+    }
+    let CommandResult::OkWith(CommandValue::State(mut snapshot)) = local else {
+        return local;
+    };
+    // Query every satellite concurrently: the aggregate's latency bound
+    // is one relay deadline, not one per satellite.
+    let queries = relays.into_iter().map(|relay| async move {
+        let result = relay
+            .command(Command::GetState {
+                scope: StateScope::Server,
+            })
+            .await;
+        (relay.host().clone(), result)
+    });
+    for (host, result) in futures_util::future::join_all(queries).await {
+        match result {
+            CommandResult::OkWith(CommandValue::State(sat)) => {
+                for mut pane in sat.panes {
+                    match pane.id {
+                        phux_protocol::ids::TerminalId::Local { id } => {
+                            pane.id = phux_protocol::ids::TerminalId::satellite(host.clone(), id);
+                            snapshot.panes.push(pane);
+                        }
+                        // Hub-and-spoke does not chain (L1 §9.1): a
+                        // satellite must never report Satellite-tagged
+                        // terminals of its own.
+                        phux_protocol::ids::TerminalId::Satellite { .. } => {
+                            warn!(
+                                satellite = %host,
+                                pane = %pane.id,
+                                "satellite listed a Satellite-tagged terminal; dropping (no chaining)"
+                            );
+                        }
+                    }
+                }
+            }
+            CommandResult::Error { code, message } => {
+                debug!(
+                    satellite = %host,
+                    ?code,
+                    %message,
+                    "GET_STATE aggregation: satellite contributes nothing"
+                );
+                // Observable degradation, not silence: the same
+                // un-correlated typed ERROR shape the relay uses for
+                // teardown notification (L1 §9.1). Sent before the
+                // COMMAND_RESULT the caller emits on return.
+                let _ = out_tx
+                    .send(Outbound::Frame(FrameKind::Error {
+                        request_id: None,
+                        code,
+                        message,
+                    }))
+                    .await;
+            }
+            other => {
+                warn!(
+                    satellite = %host,
+                    ?other,
+                    "GET_STATE aggregation: unexpected satellite result shape; skipping"
+                );
+            }
+        }
+    }
+    CommandResult::OkWith(CommandValue::State(snapshot))
 }
 
 /// Build the `OK_WITH(JSON(..))` reply for `GET_SCREEN`.
