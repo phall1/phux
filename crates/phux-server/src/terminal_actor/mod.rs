@@ -2156,64 +2156,90 @@ impl TerminalActor {
 
     /// Gracefully stop a still-running PTY child on pane teardown (phux-sw1).
     ///
-    /// A pane close is a hangup: send `SIGHUP` to the child's process group
-    /// so the foreground process (e.g. `claude`) and its descendants get a
-    /// chance to flush and exit cleanly, poll for exit within
-    /// [`PANE_KILL_GRACE`], then `SIGKILL` the group as a backstop. The PTY
-    /// master stays open for the duration, so the child can still write during
-    /// the grace window.
+    /// A pane close is a hangup: send `SIGHUP` to both the PTY's foreground
+    /// process group and the session-leading shell group. Interactive shells
+    /// put foreground jobs such as `claude` in a separate process group, so
+    /// signaling only the shell group misses the process that needs to flush.
+    /// Poll for both groups to exit within [`PANE_KILL_GRACE`], then `SIGKILL`
+    /// any survivors as a backstop. The PTY master stays open for the duration,
+    /// so the foreground process can still write during the grace window.
     ///
     /// This replaces an immediate `std::process::Child::kill` (a `SIGKILL` of
     /// the shell pid alone, with no grace), which killed a foreground agent
-    /// before it could persist its transcript. `killpg` matches
-    /// [`Self::deliver_signal`]'s rationale: `portable_pty` makes the child a
-    /// session/group leader (`setsid`), so its pid is its pgid and signaling
-    /// the group reaches the whole subtree. Falls back to the library kill if
-    /// the pid is already gone.
+    /// before it could persist its transcript. The foreground group is
+    /// snapshotted from the PTY before signaling to avoid losing it when the
+    /// shell exits. Falls back to the library kill if no group can be found.
     #[allow(
         clippy::future_not_send,
         reason = "ADR-0014: TerminalActor owns !Send Terminal; lives on LocalSet"
     )]
     async fn terminate_child_group(pty: &mut PtyOwned) {
+        use nix::errno::Errno;
         use nix::sys::signal::{Signal, killpg};
         use nix::unistd::Pid;
 
-        let Some(group) = pty
+        let shell_group = pty
             .child
             .process_id()
             .and_then(|id| i32::try_from(id).ok())
-            .map(Pid::from_raw)
-        else {
-            let _ = pty.child.kill();
-            return;
-        };
+            .map(Pid::from_raw);
+        let foreground_group = pty
+            .master
+            .lock()
+            .ok()
+            .and_then(|master| master.process_group_leader())
+            .filter(|id| *id > 0)
+            .map(Pid::from_raw);
 
-        // Hang up the group so the foreground process can flush.
-        if let Err(err) = killpg(group, Signal::SIGHUP) {
-            debug!(
-                ?err,
-                "SIGHUP to pane group failed; falling back to child kill"
-            );
+        // Signal the foreground job first. The shell may exit immediately on
+        // SIGHUP, at which point tcgetpgrp can no longer recover this group.
+        let mut groups = Vec::with_capacity(2);
+        if let Some(group) = foreground_group {
+            groups.push(group);
+        }
+        if let Some(group) = shell_group
+            && !groups.contains(&group)
+        {
+            groups.push(group);
+        }
+        if groups.is_empty() {
             let _ = pty.child.kill();
             return;
         }
 
-        // Poll for a clean exit within the grace budget.
-        let deadline = tokio::time::Instant::now() + PANE_KILL_GRACE;
-        while tokio::time::Instant::now() < deadline {
-            match pty.child.try_wait() {
-                Ok(Some(_status)) => return, // exited within grace
-                Ok(None) => tokio::time::sleep(PANE_KILL_POLL).await,
-                Err(err) => {
-                    debug!(?err, "try_wait during pane-kill grace failed");
-                    break;
-                }
+        let mut delivered = false;
+        for &group in &groups {
+            match killpg(group, Signal::SIGHUP) {
+                Ok(()) => delivered = true,
+                Err(Errno::ESRCH) => {}
+                Err(err) => debug!(?err, ?group, "SIGHUP to pane group failed"),
             }
         }
+        if !delivered {
+            let _ = pty.child.kill();
+            return;
+        }
 
-        // Backstop: the group ignored the hangup (or is mid-flush past the
-        // budget). Hard-kill the whole group.
-        let _ = killpg(group, Signal::SIGKILL);
+        // Poll every snapshotted group, not just the shell child: the shell can
+        // exit while a foreground job remains alive.
+        let deadline = tokio::time::Instant::now() + PANE_KILL_GRACE;
+        while tokio::time::Instant::now() < deadline {
+            if groups
+                .iter()
+                .all(|&group| matches!(killpg(group, None), Err(Errno::ESRCH)))
+            {
+                return;
+            }
+            tokio::time::sleep(PANE_KILL_POLL).await;
+        }
+
+        // Backstop: a group ignored the hangup (or is mid-flush past the
+        // budget). Hard-kill every surviving snapshotted group.
+        for group in groups {
+            if !matches!(killpg(group, None), Err(Errno::ESRCH)) {
+                let _ = killpg(group, Signal::SIGKILL);
+            }
+        }
     }
 
     /// Run the actor's event loop until shutdown.
@@ -3521,13 +3547,9 @@ mod tests {
     }
 
     /// phux-sw1: killing a pane (cancel the actor token → `shutdown_pty`)
-    /// must give a still-running foreground process a chance to flush before
-    /// it dies. The child traps `SIGHUP`, writes a marker file, and exits;
-    /// after the token is cancelled the marker must exist — proving the
-    /// graceful SIGHUP + grace-window path ran, not an immediate SIGKILL
-    /// (which would skip the trap and leave no marker). This is the wire-free
-    /// analogue of "quit the pane while `claude` is foreground; its transcript
-    /// still flushes".
+    /// must give a foreground job in a process group distinct from the shell a
+    /// chance to flush before it dies. This reproduces interactive job-control
+    /// topology rather than testing a shell and child that share one group.
     #[tokio::test(flavor = "current_thread")]
     async fn pane_kill_lets_foreground_process_flush_before_death() {
         use portable_pty::CommandBuilder;
@@ -3538,27 +3560,53 @@ mod tests {
                 let dir = tempfile::tempdir().expect("tempdir");
                 let marker = dir.path().join("flushed");
 
-                // A shell that flushes-on-hangup: trap SIGHUP, write the
-                // marker, exit. `sleep 30 & wait` keeps it alive and keeps the
-                // shell interruptible so the trap fires promptly on SIGHUP.
+                let script = dir.path().join("foreground.sh");
+                std::fs::write(
+                    &script,
+                    "trap 'printf flushed > \"$PHUX_TEST_MARKER\"; exit 0' HUP\n\
+                     while :; do sleep 30; done\n",
+                )
+                .expect("write foreground script");
+
+                // Monitor mode makes the script a foreground job in its own
+                // process group, matching an interactive shell running Claude.
                 let mut cmd = CommandBuilder::new("/bin/sh");
                 cmd.arg("-c");
-                cmd.arg(format!(
-                    "trap 'echo flushed > {}; exit 0' HUP; sleep 30 & wait",
-                    marker.display()
-                ));
+                cmd.arg(format!("set -m; /bin/sh {}", script.display()));
+                cmd.env("PHUX_TEST_MARKER", &marker);
 
                 let token = CancellationToken::new();
                 let bundle = TerminalActor::build_with_token(20, 5, Some(cmd), 1000, token.clone())
                     .expect("build actor");
-                let run = tokio::task::spawn_local(bundle.actor.run());
+                let actor = bundle.actor;
+                let pty = actor.pty.as_ref().expect("test actor has PTY");
+                let shell_group = i32::try_from(pty.child.process_id().expect("shell pid"))
+                    .expect("shell pid fits i32");
+                let master = std::sync::Arc::clone(&pty.master);
+                let run = tokio::task::spawn_local(actor.run());
 
-                // Let the child install its trap and reach `wait`.
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let foreground_group =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        loop {
+                            let group = master.lock().expect("master lock").process_group_leader();
+                            if let Some(group) = group
+                                && group != shell_group
+                            {
+                                break group;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                    })
+                    .await
+                    .expect("foreground job must acquire a distinct process group");
+                assert_ne!(foreground_group, shell_group);
 
                 // Kill the pane. The actor's shutdown runs SIGHUP + grace.
                 token.cancel();
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run).await;
+                tokio::time::timeout(std::time::Duration::from_secs(5), run)
+                    .await
+                    .expect("actor shutdown timed out")
+                    .expect("actor task failed");
 
                 let body = std::fs::read_to_string(&marker).unwrap_or_default();
                 assert!(
