@@ -102,6 +102,32 @@ impl CopyModeOverlay {
         }
     }
 
+    /// The current selection mode.
+    ///
+    /// The lockstep read side of the mode state machine: a global mode-cycle
+    /// keybind flips the mode via [`Self::cycle_mode`], the renderer and the
+    /// copy path read it back through here. Mode is client-local UI state, so
+    /// nothing about it touches the wire (ADR-0030).
+    #[must_use]
+    pub const fn mode(&self) -> SelectionMode {
+        self.mode
+    }
+
+    /// Advance the selection mode `Char -> Line -> Rect -> Char`.
+    ///
+    /// This is the lockstep write side a mode-cycle keystroke drives. The
+    /// keystroke itself is owned outside the overlay (the input dispatcher
+    /// wires a global action to this method) so exactly one layer owns the
+    /// key; copy-mode owns only the state transition. No wire traffic — the
+    /// mode is a consumer-side projection detail (ADR-0030).
+    pub const fn cycle_mode(&mut self) {
+        self.mode = match self.mode {
+            SelectionMode::Char => SelectionMode::Line,
+            SelectionMode::Line => SelectionMode::Rect,
+            SelectionMode::Rect => SelectionMode::Char,
+        };
+    }
+
     fn set_cursor_from_mouse(&mut self, mouse: &MouseEvent) {
         self.cursor_row = quantize_mouse_cell(mouse.y, self.pane_rows);
         self.cursor_col = quantize_mouse_cell(mouse.x, self.pane_cols);
@@ -418,6 +444,52 @@ mod tests {
     fn enter_grabs_rect() {
         let cmd = dispatch(PhysicalKey::Enter, ModSet::empty());
         assert_eq!(grab_of(&cmd), SelectionGrab::Rect);
+    }
+
+    #[test]
+    fn cycle_mode_advances_char_line_rect_char() {
+        let mut overlay = CopyModeOverlay::new(0, 0, 80, 24);
+        assert_eq!(overlay.mode(), SelectionMode::Char, "default is Char");
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Rect);
+        overlay.cycle_mode();
+        assert_eq!(overlay.mode(), SelectionMode::Char, "wraps back to Char");
+    }
+
+    #[test]
+    fn rect_mode_copy_request_is_block() {
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        overlay.cycle_mode(); // Char -> Line
+        overlay.cycle_mode(); // Line -> Rect
+        assert_eq!(overlay.mode(), SelectionMode::Rect);
+        let req = overlay.copy_request();
+        assert!(
+            req.rectangle,
+            "Rect mode must request block (rectangular) extraction"
+        );
+        assert_eq!(
+            req.grab,
+            SelectionGrab::Rect,
+            "the two-corner Enter path always tags SelectionGrab::Rect"
+        );
+    }
+
+    #[test]
+    fn char_and_line_mode_copy_request_is_linear() {
+        let mut overlay = CopyModeOverlay::new(2, 5, 80, 24);
+        assert_eq!(overlay.mode(), SelectionMode::Char);
+        assert!(
+            !overlay.copy_request().rectangle,
+            "Char mode is linear, not block"
+        );
+        overlay.cycle_mode(); // Char -> Line
+        assert_eq!(overlay.mode(), SelectionMode::Line);
+        assert!(
+            !overlay.copy_request().rectangle,
+            "Line mode is linear over the two-corner range, not block"
+        );
     }
 
     #[test]
