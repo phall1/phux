@@ -1006,7 +1006,7 @@ test, so this table cannot silently drift):
 | `agent-fleet`     | (opens the fleet dashboard — §5.6)          |
 | `focus-pane`      | `window`, `pane` — focus a pane by window index + DFS leaf ordinal (committed by fleet rows, §5.6) |
 | `new-session`     | `name?` (bare opens an interactive prompt)  |
-| `switch-session`  | `name`, `window?` (re-attaches this client; `window` selects that window index after the switch — §5.5) |
+| `switch-session`  | `name`, `window?`, `pane?` (re-attaches this client; `window` selects that window index after the switch — §5.5; `pane` then focuses that DFS leaf ordinal — the one-step cross-session pane pick the fleet's foreign rows commit, §5.6) |
 | `detach`          |                                             |
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
@@ -1108,13 +1108,21 @@ row carrying
 Enter focuses the chosen pane: current-session rows commit
 `focus-pane { window, pane }` through the single dispatch path (switching
 the window and moving its client-local focus in one step). Rows under
-**other** sessions commit `switch-session { name }` — the attach stream
-describes foreign sessions only as name + window count (their pane
-topology, agent records, and asked flags are per-attached-session state),
-so the dashboard hops there first; reopen it after the in-process
-re-attach to see that fleet's panes. An attach-stream view across all
-sessions at once would need new wire surface and is deliberately out of
-scope (ADR-0030: this overlay is a pure client-side projection).
+**other** sessions are **one-step cross-session pane focus** (phux-jpqd):
+each pane of a peer session with a cached persisted layout commits
+`switch-session { name, window, pane }`, so a single Enter re-attaches to
+that session, selects the window, and focuses that pane — with the peer's
+agent glyph and state already shown on the row (blocked, working, idle,
+done, or `?`). A peer session with nothing persisted yet (or created after
+this client attached) falls back to a single "switch to this session" row
+as before. The dashboard grows no wire surface for this (ADR-0030): it
+reuses the same lazy per-pane L3 reads the window picker uses (phux-foz.8,
+ADR-0018) — the peer's persisted `phux.tui.layout/v1` workspace for the
+pane tree, plus a one-shot `GET_METADATA` on each foreign pane's
+`phux.agent/v1` record for its identity. Foreign rows therefore carry no
+asked flag or branch/cwd — those need a live per-pane subscription, so the
+record's declared state is the honest maximum until you attach there. The
+`phux agent list` CLI remains the exhaustive cross-session projection.
 
 The dashboard is **live**: while it is open, agent-record changes, asked
 events, pane spawns/closes, and layout changes rebuild its rows in place
