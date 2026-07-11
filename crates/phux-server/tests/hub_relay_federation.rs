@@ -48,9 +48,9 @@ use std::time::{Duration, Instant};
 use common::{encode_frame, recv_typed, send_frame, wait_for_socket};
 use futures_util::{SinkExt, StreamExt};
 use phux_config::SatelliteConfigEntry;
-use phux_protocol::ids::TerminalId;
+use phux_protocol::ids::{GroupId, SatelliteHost, TerminalId};
 use phux_protocol::wire::frame::{
-    AgentEvent, Command, CommandResult, CommandValue, ErrorCode, FrameKind,
+    AgentEvent, Command, CommandResult, CommandValue, ErrorCode, FrameKind, SpawnError, SpawnResult,
 };
 use phux_server::{ServerConfig, ServerError, ServerRuntime};
 use tempfile::TempDir;
@@ -456,6 +456,173 @@ async fn get_state_via_hub(
             _ => {}
         }
     }
+}
+
+/// Issue one `SPAWN_TERMINAL` (optionally satellite-addressed) and return
+/// the correlated `TERMINAL_SPAWNED.result`.
+async fn spawn_via_stream(
+    stream: &mut UnixStream,
+    request_id: u32,
+    satellite: Option<&str>,
+    command: Option<Vec<String>>,
+) -> SpawnResult {
+    send_frame(
+        stream,
+        &FrameKind::SpawnTerminal {
+            request_id,
+            group: GroupId::new(1),
+            command,
+            cwd: None,
+            env: None,
+            term: None,
+            satellite: satellite.map(SatelliteHost::new),
+        },
+    )
+    .await;
+    loop {
+        let (_, frame) = recv_typed(stream).await;
+        if let FrameKind::TerminalSpawned {
+            request_id: got,
+            result,
+        } = frame
+            && got == request_id
+        {
+            return result;
+        }
+    }
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one linear spawn-routing scenario: boot the topology once, spawn on the satellite, prove the returned id routes, then the typed refusals"
+)]
+fn satellite_targeted_spawn_round_trips_and_routes() {
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let ws_port = free_port();
+        let (sat_shutdown, sat_task) = spawn_satellite(tmp.path().join("sat.sock"), ws_port);
+        let (hub_shutdown, hub_task) = spawn_hub(
+            tmp.path().join("hub.sock"),
+            vec![satellite_entry("sat", ws_port)],
+        );
+        // Wait for the satellite to be up (also proves it seeded its
+        // session, which will host the relayed spawn).
+        let _seed_pane = discover_satellite_pane(ws_port).await;
+        let mut hub = wait_for_socket(&tmp.path().join("hub.sock"), STEP_DEADLINE).await;
+
+        // 1. Spawn on the satellite through the hub, retrying while the
+        //    dialer backs off. /bin/cat: a quiet, portable PTY child.
+        let deadline = Instant::now() + STEP_DEADLINE;
+        let mut request_id = 5000;
+        let spawned_id = loop {
+            let result = spawn_via_stream(
+                &mut hub,
+                request_id,
+                Some("sat"),
+                Some(vec!["/bin/cat".to_owned()]),
+            )
+            .await;
+            match result {
+                SpawnResult::Ok(id) => break id,
+                SpawnResult::Err(SpawnError::SatelliteUnreachable(_))
+                    if Instant::now() < deadline =>
+                {
+                    request_id += 1;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                other => panic!("satellite spawn must succeed once the link is up: {other:?}"),
+            }
+        };
+        // The returned id is re-tagged with the registry host.
+        let TerminalId::Satellite { ref host, id } = spawned_id else {
+            panic!("satellite spawn must return a Satellite-tagged id, got {spawned_id:?}");
+        };
+        assert_eq!(host.as_str(), "sat");
+
+        // 2. The returned id routes through the hub immediately:
+        //    GET_SCREEN on it round-trips to the satellite's new pane.
+        let result = get_screen_via_hub(&mut hub, 6000, spawned_id.clone()).await;
+        assert!(
+            matches!(
+                result,
+                CommandResult::OkWith(CommandValue::Json(ref json)) if json.contains("\"cols\"")
+            ),
+            "GET_SCREEN on the spawned satellite pane must succeed, got {result:?}"
+        );
+
+        // 3. The aggregated LIST (phux-v45.5) now shows it too.
+        let (result, _) = get_state_via_hub(&mut hub, 6001).await;
+        let CommandResult::OkWith(CommandValue::State(snapshot)) = result else {
+            panic!("GET_STATE must succeed, got {result:?}");
+        };
+        assert!(
+            snapshot
+                .panes
+                .iter()
+                .any(|p| p.id == TerminalId::satellite("sat", id)),
+            "spawned satellite pane must appear in the aggregate: {snapshot:?}"
+        );
+
+        // 4. Unknown host on a hub: the typed configuration refusal.
+        let result = spawn_via_stream(&mut hub, 6002, Some("nowhere"), None).await;
+        assert!(
+            matches!(
+                result,
+                SpawnResult::Err(SpawnError::UnsupportedSatelliteRoute)
+            ),
+            "unknown satellite host must refuse with UnsupportedSatelliteRoute, got {result:?}"
+        );
+
+        drop(sat_shutdown);
+        sat_task.await.unwrap().unwrap();
+
+        // 5. Dead satellite: the typed fail-fast error, not a hang.
+        let deadline = Instant::now() + STEP_DEADLINE;
+        loop {
+            let result = spawn_via_stream(&mut hub, 6003, Some("sat"), None).await;
+            match result {
+                SpawnResult::Err(SpawnError::SatelliteUnreachable(message)) => {
+                    assert!(
+                        message.contains("sat"),
+                        "diagnostic names the host: {message}"
+                    );
+                    break;
+                }
+                // The link may not have observed the disconnect yet and
+                // still relay into the closing connection; retry briefly.
+                other => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "spawn to a dead satellite must fail with SatelliteUnreachable, got {other:?}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+
+        drop(hub_shutdown);
+        hub_task.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn non_hub_server_refuses_satellite_spawn() {
+    common::run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let (shutdown, task) = common::spawn_server(tmp.path().join("plain.sock"), Some("s"));
+        let mut plain = wait_for_socket(&tmp.path().join("plain.sock"), STEP_DEADLINE).await;
+        let result = spawn_via_stream(&mut plain, 1, Some("sat"), None).await;
+        assert!(
+            matches!(
+                result,
+                SpawnResult::Err(SpawnError::UnsupportedSatelliteRoute)
+            ),
+            "non-hub server must refuse satellite spawns, got {result:?}"
+        );
+        drop(shutdown);
+        task.await.unwrap().unwrap();
+    });
 }
 
 #[test]

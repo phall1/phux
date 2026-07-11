@@ -364,6 +364,10 @@ pub(crate) const SPAWN_RESULT_ERR: u8 = 1;
 pub(crate) const SPAWN_ERROR_TAG_GROUP_NOT_FOUND: u8 = 0;
 /// Wire tag for [`SpawnError::SpawnFailed`].
 pub(crate) const SPAWN_ERROR_TAG_SPAWN_FAILED: u8 = 1;
+/// Wire tag for [`SpawnError::UnsupportedSatelliteRoute`] (phux-v45.6).
+pub(crate) const SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE: u8 = 2;
+/// Wire tag for [`SpawnError::SatelliteUnreachable`] (phux-v45.6).
+pub(crate) const SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE: u8 = 3;
 
 // Wire tags for the `Scope` tagged union (SPEC §7.4 / §11.L3).
 /// Wire tag for [`Scope::Terminal`].
@@ -836,6 +840,18 @@ pub enum SpawnError {
     /// enough to log inline; the SPEC does not constrain its contents
     /// beyond UTF-8.
     SpawnFailed(String),
+    /// The spawn named a satellite (`SPAWN_TERMINAL.satellite`) but this
+    /// server cannot route to it: it is not a federation hub, or the host
+    /// is absent from its satellite registry (phux-v45.6). The spawn-reply
+    /// mirror of `ErrorCode::UnsupportedSatelliteRoute` — a configuration
+    /// refusal, fixed by `phux server --hub` / `phux satellite add`.
+    UnsupportedSatelliteRoute,
+    /// The spawn named a satellite this hub dials, but the link is down,
+    /// dialing, refused fail-closed, or did not answer within the relay
+    /// deadline (phux-v45.6). The spawn-reply mirror of
+    /// `ErrorCode::SatelliteUnreachable`; carries the same human-readable
+    /// diagnostic. Retryable — the hub redials with backoff.
+    SatelliteUnreachable(String),
 }
 
 /// Tagged union carried by [`FrameKind::TerminalSpawned`], SPEC §7.2 / §10.1.
@@ -1959,6 +1975,19 @@ pub enum FrameKind {
         /// still wins over this field on the server, but this gives
         /// consumers a typed knob without hand-rolling the env pair.
         term: Option<String>,
+        /// Satellite host to spawn on (phux-v45.6, ADR-0007 / L1 §9.1),
+        /// or `None` to spawn on the receiving server — the only shape a
+        /// non-federated consumer ever sends. A federation hub routes a
+        /// `Some(host)` spawn over its outbound link to that satellite
+        /// and replies with the new Terminal re-tagged
+        /// `Satellite { host, id }`; a non-hub server (or a hub whose
+        /// registry lacks `host`) replies
+        /// [`SpawnError::UnsupportedSatelliteRoute`], and a hub whose
+        /// link to `host` is down replies
+        /// [`SpawnError::SatelliteUnreachable`]. Encoded as optional
+        /// field id 7 (absent = `None`), so the field is wire-additive:
+        /// a pre-phux-v45.6 body decodes as `None`.
+        satellite: Option<SatelliteHost>,
     },
 
     /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
@@ -2410,6 +2439,7 @@ impl FrameKind {
                 cwd,
                 env,
                 term,
+                satellite,
             } => {
                 enc.write_field_with(field::spawn_terminal::REQUEST_ID, |e| {
                     e.write_u32_be(*request_id);
@@ -2433,6 +2463,9 @@ impl FrameKind {
                 }
                 if let Some(t) = term.as_deref() {
                     enc.write_field(field::spawn_terminal::TERM, t.as_bytes());
+                }
+                if let Some(host) = satellite.as_ref() {
+                    enc.write_field(field::spawn_terminal::SATELLITE, host.as_str().as_bytes());
                 }
             }
             Self::TerminalSpawned { request_id, result } => {
@@ -3027,8 +3060,10 @@ pub(super) fn decode_metadata_scope_key(
 // Layout (outer SpawnResult, the body of `TERMINAL_SPAWNED.result`):
 //   tag 0x00 Ok  → tagged TerminalId
 //   tag 0x01 Err → SpawnError body:
-//                    tag 0x00 GroupNotFound → no further bytes
-//                    tag 0x01 SpawnFailed        → length-prefixed UTF-8
+//                    tag 0x00 GroupNotFound             → no further bytes
+//                    tag 0x01 SpawnFailed               → length-prefixed UTF-8
+//                    tag 0x02 UnsupportedSatelliteRoute → no further bytes
+//                    tag 0x03 SatelliteUnreachable      → length-prefixed UTF-8
 //
 // The `Ok = 0x00 / Err = 0x01` convention deliberately mirrors the
 // `Option` tag convention (`None = 0x00 / Some = 0x01`) so hex-dump
@@ -3069,6 +3104,13 @@ fn encode_spawn_error(err: &SpawnError, enc: &mut Encoder<'_>) {
             enc.write_u8(SPAWN_ERROR_TAG_SPAWN_FAILED);
             enc.write_str(msg);
         }
+        SpawnError::UnsupportedSatelliteRoute => {
+            enc.write_u8(SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE);
+        }
+        SpawnError::SatelliteUnreachable(msg) => {
+            enc.write_u8(SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE);
+            enc.write_str(msg);
+        }
     }
 }
 
@@ -3077,6 +3119,10 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
     match tag {
         SPAWN_ERROR_TAG_GROUP_NOT_FOUND => Ok(SpawnError::GroupNotFound),
         SPAWN_ERROR_TAG_SPAWN_FAILED => Ok(SpawnError::SpawnFailed(dec.read_str()?.to_owned())),
+        SPAWN_ERROR_TAG_UNSUPPORTED_SATELLITE_ROUTE => Ok(SpawnError::UnsupportedSatelliteRoute),
+        SPAWN_ERROR_TAG_SATELLITE_UNREACHABLE => {
+            Ok(SpawnError::SatelliteUnreachable(dec.read_str()?.to_owned()))
+        }
         other => Err(DecodeError::UnknownEnumValue {
             field: "SpawnError",
             value: u32::from(other),

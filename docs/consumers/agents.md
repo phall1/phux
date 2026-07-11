@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-10
 ---
 
 # The phux agent CLI
@@ -181,6 +181,15 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
   Shape in §4.4.
+- **`phux spawn [--satellite NAME] [-c CWD] [-- COMMAND...] [--json]
+  [--socket P]`** — spawn a terminal without attaching (`SPAWN_TERMINAL`);
+  the pane joins the server's most recently active session and the new
+  terminal id prints on success. `--satellite NAME` routes the spawn
+  through a federation hub (`phux server --hub`) to the named registry
+  satellite and prints the satellite-tagged id, which every
+  satellite-capable verb can address through the hub. Does not auto-start
+  a server. Typed failures (unknown/unrouted satellite, unreachable link)
+  exit nonzero with the diagnostic on stderr. Shape in §4.11.
 - **`phux plugin <list|link|unlink|enable|disable|validate> [--json]`** —
   manage declarative plugin manifest entries in the local config registry.
   This never contacts a running server and never executes plugin commands.
@@ -631,6 +640,24 @@ The satellite lifecycle surface is config-local. It edits or reads
 --json` wraps the removed object under `"removed"`. Invalid names, invalid
 endpoint URIs, duplicate configured names, and refused registry writes are hard
 failures: exit nonzero, stdout empty, stderr diagnostic.
+
+### 4.11 `phux spawn --json`
+
+`phux spawn --json` emits a small fixed object naming the spawned terminal:
+
+```json
+{
+  "terminal_id": 7,
+  "satellite": null
+}
+```
+
+`satellite` is the registry name when the spawn was routed with
+`--satellite NAME` (in which case `terminal_id` is the id *on that
+satellite* — address the pane through the hub by the pair), and `null`
+for a local spawn (address it as `@7`). Failures — no route to the named
+satellite, unreachable satellite link, server-side spawn failure — exit
+nonzero with stdout empty and the typed diagnostic on stderr.
 
 ## 5. The read-act-wait loop and exit-code mirroring
 

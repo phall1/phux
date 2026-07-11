@@ -16,8 +16,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{
-    STALE_PROBE_TIMEOUT, ServerError, handle_attach, handle_command, handle_frame_ack,
-    handle_spawn_terminal, handle_terminal_input, handle_terminal_resize, handle_viewport_resize,
+    STALE_PROBE_TIMEOUT, ServerError, SpawnRequest, handle_attach, handle_command,
+    handle_frame_ack, handle_spawn_terminal, handle_terminal_input, handle_terminal_resize,
+    handle_viewport_resize,
 };
 use crate::state::{ClientId, DEFAULT_CLIENT_MAILBOX, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::ConsumerDetachRequest;
@@ -787,16 +788,20 @@ where
                 cwd,
                 env,
                 term,
+                satellite,
             } => {
                 handle_spawn_terminal(
                     &state,
                     client_id,
                     request_id,
-                    group,
-                    command,
-                    cwd,
-                    env,
-                    term,
+                    SpawnRequest {
+                        group,
+                        command,
+                        cwd,
+                        env,
+                        term,
+                        satellite,
+                    },
                     &out_tx,
                     &root_token,
                 )

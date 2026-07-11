@@ -396,6 +396,7 @@ fn kill_terminals_tears_down_a_multi_terminal_group_atomically() {
                 cwd: None,
                 env: None,
                 term: None,
+                satellite: None,
             },
         )
         .await;
