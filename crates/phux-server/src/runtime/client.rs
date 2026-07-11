@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+use super::input_lane::{InputLaneHandle, RoutedInput};
 use super::{
     STALE_PROBE_TIMEOUT, ServerError, SpawnRequest, handle_attach, handle_command,
     handle_frame_ack, handle_spawn_terminal, handle_terminal_input, handle_terminal_resize,
@@ -408,6 +409,11 @@ pub(crate) async fn accept_loop<L: Incoming>(
     listener: &L,
     state: SharedState,
     root_token: CancellationToken,
+    // Dedicated input lane (phux-51n6.2, ADR-0044). `Some` in production so
+    // each client task routes `INPUT_*` off the main runtime; `None` in the
+    // direct-drive tests that never spawn the lane, which fall back to inline
+    // routing (identical behavior, on-thread).
+    input_lane: Option<InputLaneHandle>,
 ) -> Result<(), ServerError> {
     // JoinSet of per-client tasks. Dropping this set on loop exit
     // aborts every still-running client task in one step — much
@@ -431,8 +437,9 @@ pub(crate) async fn accept_loop<L: Incoming>(
                         let task_state = state.clone();
                         let client_token = root_token.child_token();
                         let task_root_token = root_token.clone();
+                        let task_input_lane = input_lane.clone();
                         clients.spawn_local(async move {
-                            if let Err(err) = handle_client(reader, writer, task_state.clone(), client_id, client_token, task_root_token).await {
+                            if let Err(err) = handle_client(reader, writer, task_state.clone(), client_id, client_token, task_root_token, task_input_lane).await {
                                 warn!(error = %err, "client task ended with error");
                             }
                             // Implicit detach on EOF / error path — matches
@@ -485,6 +492,7 @@ pub(crate) async fn handle_client<R, W>(
     client_id: ClientId,
     token: CancellationToken,
     root_token: CancellationToken,
+    input_lane: Option<InputLaneHandle>,
 ) -> io::Result<()>
 where
     R: FrameReader + 'static,
@@ -699,28 +707,31 @@ where
                 handle_viewport_resize(&state, client_id, &viewport);
             }
             FrameKind::InputKey { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Key(event),
                     "INPUT_KEY",
                 );
             }
             FrameKind::InputMouse { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Mouse(event),
                     "INPUT_MOUSE",
                 );
             }
             FrameKind::InputFocus { terminal_id, event } => {
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Focus(event),
                     "INPUT_FOCUS",
                 );
@@ -731,10 +742,11 @@ where
                 // DEC 2004 bracketing (SPEC §9.4). Until this arm existed the
                 // frame fell into the unhandled-type debug arm and pastes
                 // from projection clients silently vanished.
-                handle_terminal_input(
+                route_client_input(
                     &state,
+                    input_lane.as_ref(),
                     client_id,
-                    &terminal_id,
+                    terminal_id,
                     TerminalInput::Paste(event),
                     "INPUT_PASTE",
                 );
@@ -825,6 +837,38 @@ where
             }
         }
     }
+}
+
+/// Route one decoded `INPUT_*` event, preferring the dedicated input lane
+/// (phux-51n6.2, ADR-0044).
+///
+/// A **local** pane id with a live lane is handed to the lane thread, which
+/// runs the lease/subscription gating and mailbox delivery off the main
+/// runtime. Everything else falls back to the inline
+/// [`handle_terminal_input`]: satellite-tagged ids (their delivery is a
+/// hub-link relay, not a mailbox `try_send`, so it stays on the main thread)
+/// and the no-lane path used by direct-drive tests. Both call the same routing
+/// function, so lease and subscription semantics are identical either way.
+fn route_client_input(
+    state: &SharedState,
+    input_lane: Option<&InputLaneHandle>,
+    client_id: ClientId,
+    terminal_id: phux_protocol::ids::TerminalId,
+    input: TerminalInput,
+    frame_label: &'static str,
+) {
+    if let Some(lane) = input_lane
+        && terminal_id.is_local()
+    {
+        lane.route(RoutedInput {
+            client_id,
+            terminal_id,
+            input,
+            frame_label,
+        });
+        return;
+    }
+    handle_terminal_input(state, client_id, &terminal_id, input, frame_label);
 }
 
 pub(crate) async fn abort_output_pumps(

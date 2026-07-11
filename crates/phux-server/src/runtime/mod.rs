@@ -45,6 +45,7 @@ use crate::state::{Outbound, SharedState};
 pub mod attach;
 pub mod client;
 pub mod commands;
+pub mod input_lane;
 mod resume;
 mod upgrade;
 
@@ -571,6 +572,15 @@ impl ServerRuntime {
         // Event-hook catalog (phux-r82.1): moved into the LocalSet block
         // below, where the dispatcher task can `spawn_local`.
         let hook_catalog = self.cfg.hook_catalog.clone();
+        // Dedicated input lane (phux-51n6.2, ADR-0044): a separate OS thread
+        // that runs the input routing stage off the main runtime, so a
+        // keystroke's lease/subscription gating and mailbox delivery preempt a
+        // large output-broadcast tick instead of waiting for the current-thread
+        // runtime to yield. `input_lane` is held here for the server's
+        // lifetime; its `Drop` joins the thread on the way out. Its handle is
+        // moved into the accept loops below and cloned per client.
+        let input_lane = input_lane::spawn_input_lane(state.clone())?;
+        let input_lane_handle = input_lane.handle();
         let local = LocalSet::new();
         // Hierarchical cancellation: a single root token is the parent
         // of every per-client / per-pane child. The external `shutdown`
@@ -703,25 +713,42 @@ impl ServerRuntime {
                     &listener,
                     state.clone(),
                     root_token.clone(),
+                    Some(input_lane_handle.clone()),
                 ))];
                 if let Some(ws) = &ws_listener {
-                    accepts.push(Box::pin(accept_loop(ws, state.clone(), root_token.clone())));
+                    accepts.push(Box::pin(accept_loop(
+                        ws,
+                        state.clone(),
+                        root_token.clone(),
+                        Some(input_lane_handle.clone()),
+                    )));
                 }
                 if let Some(quic) = &quic_listener {
                     accepts.push(Box::pin(accept_loop(
                         quic,
                         state.clone(),
                         root_token.clone(),
+                        Some(input_lane_handle.clone()),
                     )));
                 }
                 #[cfg(feature = "webtransport")]
                 if let Some(wt) = &webtransport_listener {
-                    accepts.push(Box::pin(accept_loop(wt, state.clone(), root_token.clone())));
+                    accepts.push(Box::pin(accept_loop(
+                        wt,
+                        state.clone(),
+                        root_token.clone(),
+                        Some(input_lane_handle.clone()),
+                    )));
                 }
                 let (result, _index, _remaining) = futures_util::future::select_all(accepts).await;
                 result
             })
             .await;
+
+        // The LocalSet has finished: every per-client task (and its cloned
+        // input-lane handle) is gone. Drop the lane owner to close the channel
+        // and join its thread (ADR-0044) before we unlink the socket.
+        drop(input_lane);
 
         // Always try to unlink the socket on the way out; ignore NotFound.
         if let Err(err) = std::fs::remove_file(&socket_path)

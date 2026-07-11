@@ -494,6 +494,15 @@ pub struct SubscribeToEventsRequest {
 /// Request to unsubscribe from semantic terminal events.
 #[derive(Debug)]
 pub struct UnsubscribeFromEventsRequest {
-    /// Pointer to the subscriber's outbound mailbox (used for identification).
-    pub outbound_ptr: *const tokio::sync::mpsc::Sender<Outbound>,
+    /// Address of the subscriber's outbound mailbox, used for identity
+    /// comparison against the actor's registered subscribers.
+    ///
+    /// A `usize` address rather than a `*const Sender<Outbound>`: a raw
+    /// pointer is `!Send`, which would make [`TerminalHandle`] — and through
+    /// it the entire [`ServerState`](crate::state::ServerState) — `!Send`,
+    /// blocking the dedicated input lane (phux-51n6.2, ADR-0044) that routes
+    /// input from a separate thread. The identity semantics are unchanged: the
+    /// actor compares this against `&raw const sub.outbound as usize`, exactly
+    /// as the prior pointer equality did.
+    pub outbound_addr: usize,
 }
