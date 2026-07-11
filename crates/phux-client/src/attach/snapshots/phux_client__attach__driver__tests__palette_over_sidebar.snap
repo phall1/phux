@@ -7,21 +7,21 @@ spaces             │PANE-BASE
   foz10-br         │
                    │
                    │
-                ┌────────────── command palette ───────────────┐
-                │>                                             │
-                │                                              │
-                │detach                                        │
-                │new-window                                    │
-                │                                              │
-                │Enter select  ·  Esc cancel  ·  type to filter│
-                │                                              │
-                │                                              │
-                │                                              │
-                │                                              │
-                │                                              │
-                │                                              │
-                └──────────────────────────────────────────────┘
-
+                   │            ┌──────── command palette ─────────┐
+                   │            │>                                 │
+                   │            │                                  │
+                   │            │detach                            │
+                   │            │new-window                        │
+                   │            │                                  │
+                   │            │Enter select  ·  Esc cancel  ·  ty│
+                   │            │                                  │
+                   │            │                                  │
+                   │            │                                  │
+                   │            │                                  │
+                   │            │                                  │
+                   │            │                                  │
+                   │            └──────────────────────────────────┘
+                   │
                    │
                    │
   + new            │

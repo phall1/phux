@@ -513,6 +513,17 @@ fn paint_active_overlay<W: super::RenderSink>(
     session_name: &str,
     theme: &crate::render::Theme,
 ) {
+    // phux-foz.14: floating modals center inside the pane content rect (the
+    // viewport minus the sidebar strip and status-bar row), NOT the raw
+    // viewport, so a centered box never lands on the sidebar columns and
+    // occludes the chrome the base-frame repaint (phux-foz.10) preserves. The
+    // borrow of `status_bar` ends here (position is `Copy`), so it stays
+    // available to move into `paint_full_frame` below.
+    let overlay_content = {
+        let bar_pos = status_bar.as_deref().map(StatusBarPainter::position);
+        let cr = content_rect(viewport_dims, bar_pos, sidebar);
+        ratatui::layout::Rect::new(cr.x, cr.y, cr.w, cr.h)
+    };
     if let Some(sel) = overlays.copy_selection() {
         let (Some(ls), Some(fid)) = (workspace.active_window(), focused) else {
             return;
@@ -544,7 +555,7 @@ fn paint_active_overlay<W: super::RenderSink>(
             slot.renderer.set_selection(None);
         }
         let _ = paint_copy_mode_status(out, sel, viewport_dims, theme);
-    } else if let Some(clip) = overlays.active_bounds(viewport_dims) {
+    } else if let Some(clip) = overlays.active_bounds(overlay_content) {
         // Floating modal (help / prompt / command palette / pickers): keep
         // the live panes visible by repainting the base frame, then emit
         // only the modal's bounded region on top. No `\x1b[2J` — the panes
@@ -565,7 +576,7 @@ fn paint_active_overlay<W: super::RenderSink>(
                 session_name,
             );
         }
-        let _ = overlays.paint_clipped(out, viewport_dims, clip, theme.shadow);
+        let _ = overlays.paint_clipped(out, viewport_dims, overlay_content, clip, theme.shadow);
     } else {
         // Full-screen overlay (no bounded region): clear + paint.
         let _ = out.write_all(b"\x1b[2J\x1b[H");
@@ -5284,6 +5295,13 @@ mod tests {
         assert!(
             all.contains(PROBE_PANE_TEXT),
             "pane content must stay visible around the floating modal;\n{all}"
+        );
+        // phux-foz.14: the modal centers inside the pane content rect, so its
+        // box corners land right of the sidebar divider — never inside the
+        // reserved strip columns (the sidebar draws no corner glyphs itself).
+        assert!(
+            !strip.contains('┌') && !strip.contains('└'),
+            "modal box corners must not intrude into the sidebar columns;\n{strip}"
         );
         // Pin the exact composition: sidebar strip + pane + centered modal.
         insta::assert_snapshot!(
