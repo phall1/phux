@@ -27,7 +27,7 @@ use crate::terminal_actor::{
 /// a capable client gets the refcounted bytes verbatim (no copy); an
 /// incapable one gets an SGR-downsampled rewrite. Shared by both output
 /// pumps (the attach pump and the `SPAWN_TERMINAL` pump).
-fn downsample_for_caps(
+pub(crate) fn downsample_for_caps(
     bytes: &bytes::Bytes,
     caps: phux_protocol::ClientCapabilities,
 ) -> bytes::Bytes {

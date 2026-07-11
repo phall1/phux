@@ -73,6 +73,40 @@ pub(crate) const RELAY_MAILBOX: usize = 64;
 /// error, never an indefinite wait (L1 §9.1).
 pub(crate) const RELAY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// One hub-side consumer's registration on the return leg of a link:
+/// which satellite-local terminal it observes and where re-tagged frames
+/// for it should land.
+#[derive(Debug)]
+pub(crate) struct ProxySubscription {
+    /// Satellite-local terminal id (the `id` of `Satellite { host, id }`).
+    pub(crate) terminal: u32,
+    /// Hub-side client identity, for teardown on detach.
+    pub(crate) client: ClientId,
+    /// The client's outbound mailbox.
+    pub(crate) out_tx: mpsc::Sender<Outbound>,
+}
+
+/// A subscription-withdrawal request, carried on the relay's dedicated
+/// **unbounded** unsubscribe channel (phux-v45.11 finding 1): teardown
+/// must never be droppable under mailbox pressure, or a detached
+/// consumer's `ProxySubscriber` entry outlives it and every future
+/// return-leg frame is `try_send`-ed into a dead mailbox. Unbounded is
+/// safe here — at most a handful per consumer disconnect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Unsubscribe {
+    /// Drop every proxy subscription `ClientId` holds on this link
+    /// (consumer detach / disconnect).
+    Client(ClientId),
+    /// Drop one client's subscription to one satellite-local terminal
+    /// (the relayed `DETACH_TERMINAL` path, phux-v45.7).
+    Terminal {
+        /// The unsubscribing hub-side client.
+        client: ClientId,
+        /// The satellite-local terminal id it stops observing.
+        terminal: u32,
+    },
+}
+
 /// A request from a hub-side consumer path to one satellite's relay.
 #[derive(Debug)]
 pub(crate) enum RelayRequest {
@@ -86,34 +120,47 @@ pub(crate) enum RelayRequest {
         /// Resolved with the satellite's result; dropping the receiver is
         /// legal (detached fire-and-forget relays do exactly that).
         reply: oneshot::Sender<CommandResult>,
+        /// A proxy subscription to register **atomically with** the
+        /// command enqueue (phux-v45.11 finding 2): either the command
+        /// goes on the wire and the hub-side registration exists, or
+        /// neither happens. Rolled back if the satellite answers with an
+        /// error (finding 3) — an errored subscribe took no effect
+        /// satellite-side, so the hub must not keep fanning to a consumer
+        /// the satellite will never feed.
+        subscribe: Option<ProxySubscription>,
     },
     /// Relay a fire-and-forget frame (`INPUT_*`, `FRAME_ACK`,
-    /// `TERMINAL_RESIZE`, `SUBSCRIBE_EVENTS`), terminal ids already
-    /// rewritten satellite-local.
+    /// `TERMINAL_RESIZE`), terminal ids already rewritten satellite-local.
     /// No reply; a dead link drops it (with the teardown notification
     /// covering the observable side).
     Forward {
         /// The frame to forward verbatim.
         frame: FrameKind,
     },
-    /// Register `client`'s outbound mailbox as a proxy subscriber for the
-    /// satellite-local terminal `terminal`: return-leg frames scoped to it
-    /// (`EVENT`, `TERMINAL_OUTPUT`, `TERMINAL_CLOSED`, ...) are re-tagged and
-    /// fanned out to `out_tx`. Idempotent per `(terminal, client)`.
+    /// Register a proxy subscription AND put `forward` on the wire, as
+    /// one atomic step (phux-v45.11 finding 2). Used by the satellite-
+    /// scoped `SUBSCRIBE_EVENTS` path, whose forward has no reply frame:
+    /// if this request cannot be enqueued, the caller pushes a typed
+    /// error to the consumer and nothing is registered anywhere.
+    /// Idempotent per `(terminal, client)`.
     Subscribe {
-        /// Satellite-local terminal id (the `id` of `Satellite { host, id }`).
-        terminal: u32,
-        /// Hub-side client identity, for teardown on detach.
-        client: ClientId,
-        /// The client's outbound mailbox.
-        out_tx: mpsc::Sender<Outbound>,
+        /// The consumer registration.
+        subscription: ProxySubscription,
+        /// The frame to forward to the satellite in the same step
+        /// (already rewritten satellite-local).
+        forward: FrameKind,
     },
-    /// Drop every proxy subscription `client` holds on this link
-    /// (consumer detach / disconnect).
-    UnsubscribeClient {
-        /// The detaching hub-side client.
-        client: ClientId,
-    },
+}
+
+/// The receiving half of one satellite's relay: the bounded request
+/// mailbox plus the unbounded unsubscribe channel, both drained by the
+/// link supervisor ([`super::link::run_link`]).
+#[derive(Debug)]
+pub(crate) struct RelayMailbox {
+    /// Bounded consumer-request mailbox ([`RELAY_MAILBOX`]).
+    pub(crate) requests: mpsc::Receiver<RelayRequest>,
+    /// Unbounded, undroppable subscription teardown (phux-v45.11).
+    pub(crate) unsubscribes: mpsc::UnboundedReceiver<Unsubscribe>,
 }
 
 /// Cheaply-cloneable producer handle to one satellite's relay mailbox.
@@ -121,13 +168,21 @@ pub(crate) enum RelayRequest {
 pub(crate) struct RelayHandle {
     host: SatelliteHost,
     tx: mpsc::Sender<RelayRequest>,
+    unsub_tx: mpsc::UnboundedSender<Unsubscribe>,
 }
 
 impl RelayHandle {
-    /// Pair a fresh handle with the receiver its link supervisor drains.
-    pub(crate) fn new(host: SatelliteHost) -> (Self, mpsc::Receiver<RelayRequest>) {
+    /// Pair a fresh handle with the mailbox its link supervisor drains.
+    pub(crate) fn new(host: SatelliteHost) -> (Self, RelayMailbox) {
         let (tx, rx) = mpsc::channel(RELAY_MAILBOX);
-        (Self { host, tx }, rx)
+        let (unsub_tx, unsub_rx) = mpsc::unbounded_channel();
+        (
+            Self { host, tx, unsub_tx },
+            RelayMailbox {
+                requests: rx,
+                unsubscribes: unsub_rx,
+            },
+        )
     }
 
     /// Relay `command` and await the correlated result. Fails fast — a
@@ -144,8 +199,34 @@ impl RelayHandle {
     /// the session's pending entry for pruning
     /// ([`RelaySession::prune_abandoned`]).
     pub(crate) async fn command(&self, command: Command) -> CommandResult {
+        self.command_inner(command, None).await
+    }
+
+    /// Relay `command` and register `subscription` atomically with its
+    /// enqueue (phux-v45.11 finding 2): a request that never reaches the
+    /// link registers nothing, and the session rolls the registration
+    /// back if the satellite answers with an error (finding 3). This is
+    /// the path for commands that establish a return-leg stream —
+    /// `SUBSCRIBE_TERMINAL_EVENTS` and `ATTACH_TERMINAL` (phux-v45.7).
+    pub(crate) async fn command_subscribing(
+        &self,
+        command: Command,
+        subscription: ProxySubscription,
+    ) -> CommandResult {
+        self.command_inner(command, Some(subscription)).await
+    }
+
+    async fn command_inner(
+        &self,
+        command: Command,
+        subscribe: Option<ProxySubscription>,
+    ) -> CommandResult {
         let (reply, rx) = oneshot::channel();
-        match self.tx.try_send(RelayRequest::Command { command, reply }) {
+        match self.tx.try_send(RelayRequest::Command {
+            command,
+            reply,
+            subscribe,
+        }) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 return CommandResult::Error {
@@ -183,7 +264,11 @@ impl RelayHandle {
         let (reply, _rx) = oneshot::channel();
         if self
             .tx
-            .try_send(RelayRequest::Command { command, reply })
+            .try_send(RelayRequest::Command {
+                command,
+                reply,
+                subscribe: None,
+            })
             .is_err()
         {
             debug!(satellite = %self.host, "detached satellite command dropped (link down or saturated)");
@@ -202,31 +287,59 @@ impl RelayHandle {
         }
     }
 
-    /// Register a proxy subscription (see [`RelayRequest::Subscribe`]).
-    pub(crate) fn subscribe(
-        &self,
-        terminal: u32,
-        client: ClientId,
-        out_tx: mpsc::Sender<Outbound>,
-    ) {
+    /// Register a proxy subscription and forward `forward` to the
+    /// satellite, atomically (see [`RelayRequest::Subscribe`]). On a
+    /// saturated or dead link **nothing** is registered and the consumer
+    /// gets a typed `ERROR` push instead of silence (phux-v45.11
+    /// finding 2 — `SUBSCRIBE_EVENTS` has no reply frame to carry the
+    /// failure, so the push is the only observable channel).
+    pub(crate) fn subscribe(&self, subscription: ProxySubscription, forward: FrameKind) {
+        let consumer = subscription.out_tx.clone();
+        let terminal = subscription.terminal;
         if let Err(err) = self.tx.try_send(RelayRequest::Subscribe {
-            terminal,
-            client,
-            out_tx,
+            subscription,
+            forward,
         }) {
+            let (code, message) = match err {
+                mpsc::error::TrySendError::Full(_) => (
+                    ErrorCode::ResourceExhausted,
+                    format!("satellite {} link is saturated; retry", self.host),
+                ),
+                mpsc::error::TrySendError::Closed(_) => (
+                    ErrorCode::SatelliteUnreachable,
+                    format!("satellite {} link is down", self.host),
+                ),
+            };
             warn!(
                 satellite = %self.host,
                 terminal,
-                reason = %trysend_reason(&err),
-                "satellite proxy subscription dropped"
+                %message,
+                "satellite proxy subscription refused; notifying consumer"
             );
+            let _ = consumer.try_send(Outbound::Frame(FrameKind::Error {
+                request_id: None,
+                code,
+                message,
+            }));
         }
     }
 
     /// Drop every proxy subscription `client` holds on this link.
+    /// Undroppable (phux-v45.11 finding 1): rides the unbounded
+    /// unsubscribe channel, so mailbox pressure can never leave a stale
+    /// `ProxySubscriber` behind. If the link task is gone its registry is
+    /// gone too — the send error is then meaningless.
     pub(crate) fn unsubscribe_client(&self, client: ClientId) {
-        // Best-effort: if the link task is gone its registry is gone too.
-        let _ = self.tx.try_send(RelayRequest::UnsubscribeClient { client });
+        let _ = self.unsub_tx.send(Unsubscribe::Client(client));
+    }
+
+    /// Drop `client`'s subscription to one satellite-local terminal
+    /// (the relayed `DETACH_TERMINAL` path, phux-v45.7). Same undroppable
+    /// channel as [`Self::unsubscribe_client`].
+    pub(crate) fn unsubscribe_terminal(&self, client: ClientId, terminal: u32) {
+        let _ = self
+            .unsub_tx
+            .send(Unsubscribe::Terminal { client, terminal });
     }
 }
 
@@ -273,6 +386,9 @@ impl HubRelays {
 /// drain arms so a consumer never hangs on a dead satellite.
 pub(crate) fn fail_fast(request: RelayRequest, host: &SatelliteHost, why: &str) {
     match request {
+        // A command's atomic `subscribe` rider registers nothing here:
+        // the request never reached a session, so failing the oneshot is
+        // the whole story (the consumer sees the typed error reply).
         RelayRequest::Command { reply, .. } => {
             let _ = reply.send(CommandResult::Error {
                 code: ErrorCode::SatelliteUnreachable,
@@ -282,14 +398,21 @@ pub(crate) fn fail_fast(request: RelayRequest, host: &SatelliteHost, why: &str) 
         RelayRequest::Forward { frame } => {
             trace!(satellite = %host, kind = ?frame_label(&frame), why, "relay frame dropped while disconnected");
         }
-        RelayRequest::Subscribe { client, out_tx, .. } => {
+        RelayRequest::Subscribe { subscription, .. } => {
             // A subscription to an unreachable satellite gets the same
             // typed notification a disconnect would produce — observable,
-            // not silence (SUBSCRIBE_EVENTS has no reply frame).
-            let _ = out_tx.try_send(Outbound::Frame(unreachable_error(host, why)));
-            trace!(satellite = %host, ?client, why, "proxy subscription refused while disconnected");
+            // not silence (SUBSCRIBE_EVENTS has no reply frame). Nothing
+            // was registered, so there is nothing to roll back.
+            let _ = subscription
+                .out_tx
+                .try_send(Outbound::Frame(unreachable_error(host, why)));
+            trace!(
+                satellite = %host,
+                client = ?subscription.client,
+                why,
+                "proxy subscription refused while disconnected"
+            );
         }
-        RelayRequest::UnsubscribeClient { .. } => {}
     }
 }
 
@@ -324,6 +447,20 @@ struct ProxySubscriber {
     out_tx: mpsc::Sender<Outbound>,
 }
 
+/// One in-flight relayed command: the waiting consumer plus, when the
+/// command carried an atomic subscription rider, what to roll back if
+/// the satellite answers with an error (phux-v45.11 finding 3).
+#[derive(Debug)]
+struct PendingCommand {
+    reply: oneshot::Sender<CommandResult>,
+    /// `(terminal, client, was_new)` — `was_new` is `false` when the
+    /// client was already subscribed before this command (an idempotent
+    /// re-subscribe), in which case an error rolls back nothing: the
+    /// pre-existing registration belongs to an earlier successful
+    /// subscribe and must survive.
+    subscription: Option<(u32, ClientId, bool)>,
+}
+
 /// The per-connection relay state a link supervisor drives while its
 /// satellite connection is up (see [`super::link::run_link`]).
 ///
@@ -335,7 +472,7 @@ struct ProxySubscriber {
 pub(crate) struct RelaySession {
     host: SatelliteHost,
     next_request_id: u32,
-    pending: HashMap<u32, oneshot::Sender<CommandResult>>,
+    pending: HashMap<u32, PendingCommand>,
     subscribers: HashMap<u32, Vec<ProxySubscriber>>,
     encode_buf: BytesMut,
 }
@@ -353,42 +490,122 @@ impl RelaySession {
     }
 
     /// Service one consumer request. Returns the encoded frame to put on
-    /// the wire, or `None` when the request was registry-only.
+    /// the wire (every request produces one — subscription registration
+    /// happens as a side effect of its carrying request, phux-v45.11).
     ///
     /// Split from the wire write so the caller (the link supervisor's
     /// select loop) owns all connection I/O in one place.
-    pub(crate) fn handle_request(&mut self, request: RelayRequest) -> Option<Vec<u8>> {
+    pub(crate) fn handle_request(&mut self, request: RelayRequest) -> Vec<u8> {
         match request {
-            RelayRequest::Command { command, reply } => {
+            RelayRequest::Command {
+                command,
+                reply,
+                subscribe,
+            } => {
+                // Register the subscription rider in the same step as the
+                // command enqueue (phux-v45.11 finding 2), remembering
+                // enough to roll it back on an error reply (finding 3).
+                let subscription = subscribe.map(|sub| {
+                    let (terminal, client) = (sub.terminal, sub.client);
+                    let was_new = self.register_subscriber(sub);
+                    (terminal, client, was_new)
+                });
                 let request_id = self.allocate_request_id();
-                self.pending.insert(request_id, reply);
-                Some(self.encode(&FrameKind::Command {
+                self.pending.insert(
+                    request_id,
+                    PendingCommand {
+                        reply,
+                        subscription,
+                    },
+                );
+                self.encode(&FrameKind::Command {
                     request_id,
                     command,
-                }))
+                })
             }
-            RelayRequest::Forward { frame } => Some(self.encode(&frame)),
+            RelayRequest::Forward { frame } => self.encode(&frame),
             RelayRequest::Subscribe {
-                terminal,
-                client,
-                out_tx,
+                subscription,
+                forward,
             } => {
-                let subs = self.subscribers.entry(terminal).or_default();
-                if let Some(existing) = subs.iter_mut().find(|s| s.client == client) {
-                    existing.out_tx = out_tx;
-                } else {
-                    subs.push(ProxySubscriber { client, out_tx });
-                }
-                None
-            }
-            RelayRequest::UnsubscribeClient { client } => {
-                self.subscribers.retain(|_, subs| {
-                    subs.retain(|s| s.client != client);
-                    !subs.is_empty()
-                });
-                None
+                // Atomic with the wire write: the caller either sees this
+                // request accepted (registration + forward both happen —
+                // the supervisor writes the returned frame) or refused
+                // up-front with a typed error and no registration.
+                self.register_subscriber(subscription);
+                self.encode(&forward)
             }
         }
+    }
+
+    /// Register one proxy subscriber, idempotently. Returns `true` when
+    /// the `(terminal, client)` pair was not previously subscribed; a
+    /// re-subscribe refreshes the stored mailbox and returns `false`.
+    fn register_subscriber(&mut self, subscription: ProxySubscription) -> bool {
+        let ProxySubscription {
+            terminal,
+            client,
+            out_tx,
+        } = subscription;
+        let subs = self.subscribers.entry(terminal).or_default();
+        if let Some(existing) = subs.iter_mut().find(|s| s.client == client) {
+            existing.out_tx = out_tx;
+            false
+        } else {
+            subs.push(ProxySubscriber { client, out_tx });
+            true
+        }
+    }
+
+    /// Withdraw proxy subscriptions (the undroppable unsubscribe channel,
+    /// phux-v45.11 findings 1 and 4). Returns the encoded wire frames to
+    /// send to the satellite: one `COMMAND { DETACH_TERMINAL }` per
+    /// terminal whose **last** proxy subscriber just went away, so the
+    /// satellite stops streaming output for terminals nobody on this hub
+    /// observes anymore. Fire-and-forget: the link allocates a request id
+    /// but registers no pending entry — the reply (always `Ok`;
+    /// `DETACH_TERMINAL` is idempotent) is logged and dropped.
+    pub(crate) fn handle_unsubscribe(&mut self, unsubscribe: Unsubscribe) -> Vec<Vec<u8>> {
+        let mut orphaned: Vec<u32> = Vec::new();
+        match unsubscribe {
+            Unsubscribe::Client(client) => {
+                self.subscribers.retain(|terminal, subs| {
+                    subs.retain(|s| s.client != client);
+                    if subs.is_empty() {
+                        orphaned.push(*terminal);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            Unsubscribe::Terminal { client, terminal } => {
+                if let Some(subs) = self.subscribers.get_mut(&terminal) {
+                    subs.retain(|s| s.client != client);
+                    if subs.is_empty() {
+                        self.subscribers.remove(&terminal);
+                        orphaned.push(terminal);
+                    }
+                }
+            }
+        }
+        orphaned
+            .into_iter()
+            .map(|terminal| {
+                debug!(
+                    satellite = %self.host,
+                    terminal,
+                    "last proxy subscriber gone; detaching satellite-side"
+                );
+                let request_id = self.allocate_request_id();
+                self.encode(&FrameKind::Command {
+                    request_id,
+                    command: Command::DetachTerminal {
+                        terminal_id: TerminalId::local(terminal),
+                    },
+                })
+            })
+            .collect()
     }
 
     /// Dispatch one frame arriving from the satellite: resolve relayed
@@ -499,8 +716,8 @@ impl RelaySession {
     /// then clear the registries. Called exactly once per session, on
     /// disconnect or hub shutdown.
     pub(crate) fn teardown(&mut self, why: &str) {
-        for (_, reply) in self.pending.drain() {
-            let _ = reply.send(CommandResult::Error {
+        for (_, pending) in self.pending.drain() {
+            let _ = pending.reply.send(CommandResult::Error {
                 code: ErrorCode::SatelliteUnreachable,
                 message: format!("satellite {} is unreachable: {why}", self.host),
             });
@@ -540,7 +757,7 @@ impl RelaySession {
     /// per mailbox refill, and nothing else removes them).
     pub(crate) fn prune_abandoned(&mut self) -> usize {
         let before = self.pending.len();
-        self.pending.retain(|_, reply| !reply.is_closed());
+        self.pending.retain(|_, pending| !pending.reply.is_closed());
         let pruned = before - self.pending.len();
         if pruned > 0 {
             debug!(
@@ -554,11 +771,33 @@ impl RelaySession {
     }
 
     /// Resolve a link-side `request_id` back to its waiting consumer.
+    ///
+    /// An error reply rolls back the command's atomic subscription rider
+    /// when this command was the one that created it (phux-v45.11
+    /// finding 3): the satellite refused, so nothing will ever stream for
+    /// that registration and keeping it would fan future frames (from a
+    /// later, unrelated subscriber's stream) to a consumer that was told
+    /// its subscribe failed.
     fn resolve_pending(&mut self, request_id: u32, result: CommandResult) {
         match self.pending.remove(&request_id) {
-            Some(reply) => {
+            Some(pending) => {
+                if matches!(result, CommandResult::Error { .. })
+                    && let Some((terminal, client, true)) = pending.subscription
+                    && let Some(subs) = self.subscribers.get_mut(&terminal)
+                {
+                    subs.retain(|s| s.client != client);
+                    if subs.is_empty() {
+                        self.subscribers.remove(&terminal);
+                    }
+                    debug!(
+                        satellite = %self.host,
+                        terminal,
+                        ?client,
+                        "satellite refused the subscribing command; proxy registration rolled back"
+                    );
+                }
                 // A dropped receiver (detached relay) is fine.
-                let _ = reply.send(result);
+                let _ = pending.reply.send(result);
             }
             None => {
                 debug!(
@@ -638,6 +877,24 @@ pub(crate) fn satellite_route(terminal_id: &TerminalId) -> Option<(SatelliteHost
 )]
 pub(crate) fn route_to_satellite(command: &Command) -> Option<(SatelliteHost, Command)> {
     match command {
+        Command::AttachTerminal { terminal_id } => {
+            let (host, id) = satellite_route(terminal_id)?;
+            Some((
+                host,
+                Command::AttachTerminal {
+                    terminal_id: TerminalId::local(id),
+                },
+            ))
+        }
+        Command::DetachTerminal { terminal_id } => {
+            let (host, id) = satellite_route(terminal_id)?;
+            Some((
+                host,
+                Command::DetachTerminal {
+                    terminal_id: TerminalId::local(id),
+                },
+            ))
+        }
         Command::KillTerminal { terminal_id } => {
             let (host, id) = satellite_route(terminal_id)?;
             Some((
@@ -785,6 +1042,31 @@ mod tests {
         buf.to_vec()
     }
 
+    /// Register a proxy subscription through the atomic Subscribe request
+    /// (the `SUBSCRIBE_EVENTS` shape) and assert the paired forward frame
+    /// was produced.
+    fn subscribe(
+        session: &mut RelaySession,
+        terminal: u32,
+        client: ClientId,
+        out_tx: mpsc::Sender<Outbound>,
+    ) {
+        let wire = session.handle_request(RelayRequest::Subscribe {
+            subscription: ProxySubscription {
+                terminal,
+                client,
+                out_tx,
+            },
+            forward: FrameKind::SubscribeEvents {
+                terminal: Some(TerminalId::local(terminal)),
+            },
+        });
+        assert!(
+            !wire.is_empty(),
+            "atomic subscribe must produce the forward frame"
+        );
+    }
+
     // --- outbound command rewrite ---------------------------------------
 
     #[test]
@@ -836,6 +1118,12 @@ mod tests {
     fn route_to_satellite_covers_every_per_terminal_command() {
         let sat = TerminalId::satellite("devbox", 3);
         let commands = [
+            Command::AttachTerminal {
+                terminal_id: sat.clone(),
+            },
+            Command::DetachTerminal {
+                terminal_id: sat.clone(),
+            },
             Command::KillTerminal {
                 terminal_id: sat.clone(),
             },
@@ -887,20 +1175,18 @@ mod tests {
         let (reply_a, mut rx_a) = oneshot::channel();
         let (reply_b, mut rx_b) = oneshot::channel();
 
-        let wire_a = session
-            .handle_request(RelayRequest::Command {
-                command: Command::GetState {
-                    scope: StateScope::Server,
-                },
-                reply: reply_a,
-            })
-            .expect("command produces a wire frame");
-        let wire_b = session
-            .handle_request(RelayRequest::Command {
-                command: Command::Upgrade,
-                reply: reply_b,
-            })
-            .expect("command produces a wire frame");
+        let wire_a = session.handle_request(RelayRequest::Command {
+            command: Command::GetState {
+                scope: StateScope::Server,
+            },
+            reply: reply_a,
+            subscribe: None,
+        });
+        let wire_b = session.handle_request(RelayRequest::Command {
+            command: Command::Upgrade,
+            reply: reply_b,
+            subscribe: None,
+        });
 
         let FrameKind::Command {
             request_id: id_a, ..
@@ -937,12 +1223,11 @@ mod tests {
     fn session_maps_correlated_error_frames_to_command_errors() {
         let mut session = RelaySession::new(host());
         let (reply, mut rx) = oneshot::channel();
-        let wire = session
-            .handle_request(RelayRequest::Command {
-                command: Command::Upgrade,
-                reply,
-            })
-            .expect("wire frame");
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::Upgrade,
+            reply,
+            subscribe: None,
+        });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {
             panic!("expected COMMAND");
         };
@@ -966,11 +1251,7 @@ mod tests {
     fn session_retags_subscribed_streams_local_to_satellite() {
         let mut session = RelaySession::new(host());
         let (out_tx, mut out_rx) = mpsc::channel(8);
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 9,
-            client: ClientId(1),
-            out_tx,
-        });
+        subscribe(&mut session, 9, ClientId(1), out_tx);
 
         session.handle_inbound(&encode(&FrameKind::Event {
             terminal: Some(TerminalId::local(9)),
@@ -1008,11 +1289,7 @@ mod tests {
     fn session_drops_chained_satellite_tags_from_the_return_leg() {
         let mut session = RelaySession::new(host());
         let (out_tx, mut out_rx) = mpsc::channel(8);
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 9,
-            client: ClientId(1),
-            out_tx,
-        });
+        subscribe(&mut session, 9, ClientId(1), out_tx);
         // ADR-0007: satellites are unaware of each other; a nested
         // Satellite tag must never be re-relayed.
         session.handle_inbound(&encode(&FrameKind::Event {
@@ -1026,11 +1303,7 @@ mod tests {
     fn terminal_closed_retags_and_drops_the_proxy_subscription() {
         let mut session = RelaySession::new(host());
         let (out_tx, mut out_rx) = mpsc::channel(8);
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 9,
-            client: ClientId(1),
-            out_tx,
-        });
+        subscribe(&mut session, 9, ClientId(1), out_tx);
         session.handle_inbound(&encode(&FrameKind::TerminalClosed {
             terminal_id: TerminalId::local(9),
             exit_status: Some(0),
@@ -1060,19 +1333,12 @@ mod tests {
         let _ = session.handle_request(RelayRequest::Command {
             command: Command::Upgrade,
             reply,
+            subscribe: None,
         });
         let (out_tx, mut out_rx) = mpsc::channel(8);
         // Two subscriptions for the same client: one notification.
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 1,
-            client: ClientId(7),
-            out_tx: out_tx.clone(),
-        });
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 2,
-            client: ClientId(7),
-            out_tx,
-        });
+        subscribe(&mut session, 1, ClientId(7), out_tx.clone());
+        subscribe(&mut session, 2, ClientId(7), out_tx);
 
         session.teardown("satellite went away");
 
@@ -1102,19 +1368,192 @@ mod tests {
     fn unsubscribe_client_stops_fan_out() {
         let mut session = RelaySession::new(host());
         let (out_tx, mut out_rx) = mpsc::channel(8);
-        session.handle_request(RelayRequest::Subscribe {
-            terminal: 9,
-            client: ClientId(1),
-            out_tx,
-        });
-        session.handle_request(RelayRequest::UnsubscribeClient {
-            client: ClientId(1),
-        });
+        subscribe(&mut session, 9, ClientId(1), out_tx);
+        let frames = session.handle_unsubscribe(Unsubscribe::Client(ClientId(1)));
         session.handle_inbound(&encode(&FrameKind::Event {
             terminal: Some(TerminalId::local(9)),
             event: AgentEvent::CommandStarted,
         }));
         assert!(out_rx.try_recv().is_err());
+        // phux-v45.11 finding 4: the last proxy subscriber left, so the
+        // session tells the satellite to stop streaming the terminal.
+        assert_eq!(frames.len(), 1, "one satellite-side detach expected");
+        let FrameKind::Command { command, .. } = decode(&frames[0]) else {
+            panic!("expected COMMAND on the wire");
+        };
+        assert_eq!(
+            command,
+            Command::DetachTerminal {
+                terminal_id: TerminalId::local(9),
+            }
+        );
+    }
+
+    // --- lifecycle hardening (phux-v45.11) ---------------------------------
+
+    #[test]
+    fn unsubscribe_keeps_satellite_streaming_while_other_subscribers_remain() {
+        let mut session = RelaySession::new(host());
+        let (tx_a, _rx_a) = mpsc::channel(8);
+        let (tx_b, mut rx_b) = mpsc::channel(8);
+        subscribe(&mut session, 9, ClientId(1), tx_a);
+        subscribe(&mut session, 9, ClientId(2), tx_b);
+        // Client 1 detaches its terminal: client 2 still observes it, so
+        // no satellite-side DETACH_TERMINAL may be emitted (it would tear
+        // down the link's single shared stream under client 2).
+        let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
+            client: ClientId(1),
+            terminal: 9,
+        });
+        assert!(
+            frames.is_empty(),
+            "satellite-side detach must wait for the last subscriber"
+        );
+        session.handle_inbound(&encode(&FrameKind::Event {
+            terminal: Some(TerminalId::local(9)),
+            event: AgentEvent::CommandStarted,
+        }));
+        let Outbound::Frame(_) = rx_b.try_recv().expect("client 2 still fanned out");
+        // Now the last subscriber leaves: exactly one detach goes out.
+        let frames = session.handle_unsubscribe(Unsubscribe::Terminal {
+            client: ClientId(2),
+            terminal: 9,
+        });
+        assert_eq!(frames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_survives_a_full_relay_mailbox() {
+        // phux-v45.11 finding 1: unsubscribes ride a dedicated unbounded
+        // channel, so a saturated request mailbox cannot drop them.
+        let (handle, mut mailbox) = RelayHandle::new(host());
+        for _ in 0..RELAY_MAILBOX {
+            handle.forward(FrameKind::Detach);
+        }
+        handle.unsubscribe_client(ClientId(1));
+        handle.unsubscribe_terminal(ClientId(2), 7);
+        assert_eq!(
+            mailbox.unsubscribes.try_recv().expect("delivered"),
+            Unsubscribe::Client(ClientId(1))
+        );
+        assert_eq!(
+            mailbox.unsubscribes.try_recv().expect("delivered"),
+            Unsubscribe::Terminal {
+                client: ClientId(2),
+                terminal: 7,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_on_a_full_mailbox_registers_nothing_and_notifies_the_consumer() {
+        // phux-v45.11 finding 2: the register + forward pair is atomic —
+        // when the request cannot be enqueued the consumer gets a typed
+        // error push and no hub-side registration exists.
+        let (handle, _mailbox) = RelayHandle::new(host());
+        for _ in 0..RELAY_MAILBOX {
+            handle.forward(FrameKind::Detach);
+        }
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        handle.subscribe(
+            ProxySubscription {
+                terminal: 9,
+                client: ClientId(1),
+                out_tx,
+            },
+            FrameKind::SubscribeEvents {
+                terminal: Some(TerminalId::local(9)),
+            },
+        );
+        let Outbound::Frame(frame) = out_rx.try_recv().expect("typed error pushed");
+        assert!(matches!(
+            frame,
+            FrameKind::Error {
+                request_id: None,
+                code: ErrorCode::ResourceExhausted,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn satellite_error_rolls_back_the_commands_subscription() {
+        // phux-v45.11 finding 3: a subscribing command the satellite
+        // refuses must not leave a proxy registration behind.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let (reply, mut reply_rx) = oneshot::channel();
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::AttachTerminal {
+                terminal_id: TerminalId::local(9),
+            },
+            reply,
+            subscribe: Some(ProxySubscription {
+                terminal: 9,
+                client: ClientId(1),
+                out_tx,
+            }),
+        });
+        let FrameKind::Command { request_id, .. } = decode(&wire) else {
+            panic!("expected COMMAND");
+        };
+        session.handle_inbound(&encode(&FrameKind::CommandResult {
+            request_id,
+            result: CommandResult::Error {
+                code: ErrorCode::TerminalNotFound,
+                message: "nope".to_owned(),
+            },
+        }));
+        assert!(matches!(
+            reply_rx.try_recv().expect("resolved"),
+            CommandResult::Error { .. }
+        ));
+        // The rolled-back registration must not fan anything out.
+        session.handle_inbound(&encode(&FrameKind::TerminalOutput {
+            terminal_id: TerminalId::local(9),
+            seq: 1,
+            bytes: bytes::Bytes::from_static(b"leak"),
+        }));
+        assert!(out_rx.try_recv().is_err(), "rolled-back subscriber leaked");
+    }
+
+    #[test]
+    fn satellite_error_never_rolls_back_a_preexisting_subscription() {
+        // The rollback is scoped to registrations the failing command
+        // created: an idempotent re-subscribe that errors must leave the
+        // original (successful) registration in place.
+        let mut session = RelaySession::new(host());
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        subscribe(&mut session, 9, ClientId(1), out_tx.clone());
+        let (reply, _reply_rx) = oneshot::channel();
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::AttachTerminal {
+                terminal_id: TerminalId::local(9),
+            },
+            reply,
+            subscribe: Some(ProxySubscription {
+                terminal: 9,
+                client: ClientId(1),
+                out_tx,
+            }),
+        });
+        let FrameKind::Command { request_id, .. } = decode(&wire) else {
+            panic!("expected COMMAND");
+        };
+        session.handle_inbound(&encode(&FrameKind::Error {
+            request_id: Some(request_id),
+            code: ErrorCode::InternalError,
+            message: "transient".to_owned(),
+        }));
+        session.handle_inbound(&encode(&FrameKind::TerminalOutput {
+            terminal_id: TerminalId::local(9),
+            seq: 1,
+            bytes: bytes::Bytes::from_static(b"still here"),
+        }));
+        assert!(
+            out_rx.try_recv().is_ok(),
+            "pre-existing subscription must survive the errored re-subscribe"
+        );
     }
 
     // --- fail-fast + handle backpressure -----------------------------------
@@ -1126,6 +1565,7 @@ mod tests {
             RelayRequest::Command {
                 command: Command::Upgrade,
                 reply,
+                subscribe: None,
             },
             &host(),
             "backoff",
@@ -1165,13 +1605,13 @@ mod tests {
         let _ = session.handle_request(RelayRequest::Command {
             command: Command::Upgrade,
             reply: reply_live,
+            subscribe: None,
         });
-        let wire = session
-            .handle_request(RelayRequest::Command {
-                command: Command::Upgrade,
-                reply: reply_gone,
-            })
-            .expect("wire frame");
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::Upgrade,
+            reply: reply_gone,
+            subscribe: None,
+        });
         let FrameKind::Command { request_id, .. } = decode(&wire) else {
             panic!("expected COMMAND");
         };
@@ -1201,7 +1641,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_command_fails_fast_when_mailbox_is_full_or_closed() {
-        let (handle, mut rx) = RelayHandle::new(host());
+        let (handle, mut mailbox) = RelayHandle::new(host());
         // Fill the bounded mailbox.
         for _ in 0..RELAY_MAILBOX {
             handle.forward(FrameKind::Detach);
@@ -1215,9 +1655,9 @@ mod tests {
             }
         ));
         // Drop the receiver: the link task is gone.
-        rx.close();
-        while rx.try_recv().is_ok() {}
-        drop(rx);
+        mailbox.requests.close();
+        while mailbox.requests.try_recv().is_ok() {}
+        drop(mailbox);
         let result = handle.command(Command::Upgrade).await;
         assert!(matches!(
             result,
