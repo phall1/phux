@@ -31,7 +31,7 @@ use ratatui::buffer::{Buffer, Cell as RatatuiCell, CellDiffOption};
 use ratatui::style::{Color, Modifier};
 
 use super::driver::PaneSlot;
-use super::paint::{SidebarReservation, content_rect, sidebar_rect};
+use super::paint::{SidebarReservation, bar_inset, content_rect, sidebar_rect};
 use crate::layout::LayoutState;
 use crate::render::chrome::dividers::compose_buffer as compose_divider_buffer;
 use crate::render::chrome::sidebar::SidebarPainter;
@@ -105,18 +105,22 @@ pub(super) fn compose_full_frame_cells(
     // the strip's full extent shows; it sits in columns `content_rect` carved
     // out, never over pane content.
     if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
-        let rect = sidebar_rect(viewport_dims, bar, res);
+        let rect = sidebar_rect(viewport_dims, res);
         let strip = painter.compose_buffer(rect);
         overlay_buffer(&mut frame, &strip, (rect.x, rect.y), false);
     }
 
     // Overlay the status bar onto its reserved row. Styled blanks are kept
-    // (an error strip's reverse-video field spans the full width); the bar
-    // row sits below the panes, so writing every cell is safe.
+    // (an error strip's reverse-video field spans the bar's full span); the bar
+    // row sits below the panes, so writing every cell is safe. phux-qtw8: the
+    // bar yields the sidebar's columns, so it composes at its own origin —
+    // the strip painted above keeps the columns the bar gave up.
     if let Some(painter) = status_bar {
         let ctx = make_context(session_name, now);
-        if let Some((bar_buf, row_index)) = painter.compose_buffer(cols, rows, &ctx) {
-            overlay_buffer(&mut frame, &bar_buf, (0, row_index), false);
+        if let Some((bar_buf, x, row_index)) =
+            painter.compose_buffer(bar_inset(viewport_dims, sidebar), cols, rows, &ctx)
+        {
+            overlay_buffer(&mut frame, &bar_buf, (x, row_index), false);
         }
     }
 
@@ -491,5 +495,87 @@ mod tests {
         );
         // Pane content still lands on the top row (above the reserved bar).
         assert_eq!(frame.cell(0, 0).expect("top-left").grapheme, "h");
+    }
+
+    /// phux-qtw8: with the sidebar open the bar row belongs to the STRIP in the
+    /// strip's columns — the window tabs start beside it, not underneath. This
+    /// is the reported bug, asserted on the assembled frame: before the fix the
+    /// tabs composed from column 0 and read as sitting "under" the sidebar.
+    #[test]
+    fn compose_keeps_the_bar_out_of_the_sidebar_columns() {
+        use crate::render::Theme;
+        use phux_config::widget::WindowInfo;
+
+        let pane = TerminalId::local(1);
+        let workspace = Workspace::single(pane.clone());
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(pane.clone(), pane_with(b"hi"));
+
+        // A bar whose ONLY widget is the window tabs, left-slotted — the strip
+        // that was landing under the sidebar.
+        let cfg = phux_config::StatusCfg {
+            left: vec![phux_config::Widget::Bare("windows".to_owned())],
+            ..Default::default()
+        };
+        let reg = phux_config::widget::WidgetRegistry::with_builtins();
+        let bar = phux_config::widget::StatusBar::build(&cfg, &reg).expect("bar build");
+        let mut painter = StatusBarPainter::new(bar, Position::Bottom);
+        let windows = vec![WindowInfo {
+            name: "editor".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }];
+        painter.set_windows(windows.clone());
+
+        let mut sidebar_painter = SidebarPainter::new(Theme::default());
+        sidebar_painter.set_windows(windows);
+
+        let strip = SidebarReservation {
+            edge: super::super::paint::SidebarEdge::Left,
+            width: 20,
+        };
+        let frame = compose_full_frame_cells(
+            workspace.active_window().expect("active window"),
+            &mut panes,
+            Some(&pane),
+            (80, 24),
+            Some(&painter),
+            Some(strip),
+            Some(&sidebar_painter),
+            "alpha",
+            UNIX_EPOCH,
+        );
+
+        // The bar row's first 20 columns are the strip's, so the tab text
+        // ("0:editor") must not appear there.
+        let under_strip: String = (0..20)
+            .filter_map(|c| frame.cell(23, c).map(|cell| cell.grapheme.clone()))
+            .collect();
+        assert!(
+            !under_strip.contains("editor"),
+            "window tabs must not paint under the sidebar; got {under_strip:?}"
+        );
+        // The strip owns the bar row outright: full-height means its
+        // bottom-corner collapse chevron now lands ON that row (23, 19) — the
+        // cell the bar used to cover.
+        assert_eq!(
+            frame
+                .cell(23, 19)
+                .expect("strip bottom corner")
+                .grapheme
+                .as_str(),
+            crate::render::chrome::sidebar::COLLAPSE_GLYPH,
+            "the full-height strip's collapse chevron owns the bar row's corner"
+        );
+        // The tabs themselves live beside the strip, from column 20 on.
+        let beside_strip: String = (20..80)
+            .filter_map(|c| frame.cell(23, c).map(|cell| cell.grapheme.clone()))
+            .collect();
+        assert!(
+            beside_strip.contains("editor"),
+            "window tabs must paint beside the strip; got {beside_strip:?}"
+        );
     }
 }

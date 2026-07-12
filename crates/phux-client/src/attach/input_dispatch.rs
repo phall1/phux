@@ -538,7 +538,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // is consumed and dropped so it can never leak into a pane
             // whose rect does not contain it anyway.
             if let Some(res) = ctx.sidebar {
-                let strip = super::paint::sidebar_rect(ctx.viewport, ctx.bar, res);
+                let strip = super::paint::sidebar_rect(ctx.viewport, res);
                 let (cell_x, cell_y) = (quantize_cell(mouse.x), quantize_cell(mouse.y));
                 if strip_contains(strip, cell_x, cell_y) {
                     if matches!(mouse.action, MouseAction::Press)
@@ -578,12 +578,14 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
             // (resolved against the painter's cached strip, so the hit
             // targets are exactly the cells on screen) dispatches
             // `select-window { index }` through the same `run_action`
-            // path the sidebar affordances and keybindings use. The
-            // sidebar strip never overlaps this row (its rect stops above
-            // a bottom bar and starts below a top one), and pane content
-            // is untouched — everything else on the row (non-tab cells,
-            // motion, wheel, non-left buttons) is consumed and dropped,
-            // matching the pre-claim behavior bit for bit.
+            // path the sidebar affordances and keybindings use. phux-qtw8:
+            // the sidebar strip is full-height and claims its columns on
+            // THIS row too — but it hit-tests first (above), so by here the
+            // event is in the bar's own inset span and `window_hit_at`
+            // (which indexes off the origin it painted at) resolves it.
+            // Pane content is untouched — everything else on the row
+            // (non-tab cells, motion, wheel, non-left buttons) is consumed
+            // and dropped, matching the pre-claim behavior bit for bit.
             if let Some(pos) = ctx.bar {
                 let bar_row = match pos {
                     crate::render::chrome::status_bar::Position::Bottom => {
@@ -5148,8 +5150,9 @@ mod tests {
     /// mouse route runs the same `select-window` a keybinding would.
     #[tokio::test]
     async fn sidebar_click_on_window_block_selects_it() {
-        // Strip rows with a status bar: h = 23; row 0 is the spaces header
-        // (phux-foz.9), so window 1's name row is y=3.
+        // phux-qtw8: the strip is full-height (h = 24 in a 24-row viewport)
+        // even with a bar docked. Row 0 is the spaces header (phux-foz.9), so
+        // window 1's name row is y=3.
         let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 3)).await;
         assert_eq!(active, 1, "clicking window 1's block must select it");
         assert!(!overlay_active);
@@ -5160,7 +5163,9 @@ mod tests {
     /// the window), exactly like the `new-window` chord.
     #[tokio::test]
     async fn sidebar_click_on_new_parks_a_window_spawn() {
-        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 21)).await;
+        // The footer is bottom-anchored: `+ new` is the strip's second-to-last
+        // row, y = 22 of a full-height 24-row strip (phux-qtw8).
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 22)).await;
         assert_eq!(active, 0, "spawn is parked; no window switch yet");
         assert!(!overlay_active);
         assert_eq!(pending, 1, "new-window spawn must be parked");
@@ -5168,9 +5173,13 @@ mod tests {
 
     /// A left press on `= menu` opens the command palette overlay — the
     /// session/plugin menu built from the action registry.
+    ///
+    /// phux-qtw8: `= menu` is the strip's last row, which is also the bar row —
+    /// the strip owns its columns there, and the bar has yielded them. The
+    /// strip hit-tests first, so the click reaches the footer, not the bar.
     #[tokio::test]
     async fn sidebar_click_on_menu_opens_the_command_palette() {
-        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 22)).await;
+        let (active, overlay_active, pending) = dispatch_sidebar_click(left_press_at(3, 23)).await;
         assert_eq!(active, 0);
         assert!(overlay_active, "menu click must push the palette overlay");
         assert_eq!(pending, 0);
@@ -5226,6 +5235,7 @@ mod tests {
         painter
             .paint(
                 &mut sink,
+                crate::render::chrome::status_bar::BarInset::NONE,
                 cols,
                 rows,
                 &make_context("", std::time::SystemTime::UNIX_EPOCH),

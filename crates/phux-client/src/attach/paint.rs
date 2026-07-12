@@ -19,7 +19,7 @@ use phux_protocol::ids::TerminalId;
 
 use super::driver::PaneSlot;
 use crate::layout::LayoutState;
-use crate::render::chrome::status_bar::{Position, StatusBarPainter, make_context};
+use crate::render::chrome::status_bar::{BarInset, Position, StatusBarPainter, make_context};
 
 /// Fallback per-cell pixel size for client-side libghostty mirrors.
 ///
@@ -241,7 +241,7 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     // the columns `content_rect` carved out, so it never overlaps pane content.
     if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
         painter.invalidate();
-        let _ = painter.paint(out, sidebar_rect(viewport_dims, bar, res));
+        let _ = painter.paint(out, sidebar_rect(viewport_dims, res));
     }
     // The ED2 above cleared the bar row, so force a re-emit even if the
     // bar's content is byte-identical to the previous frame.
@@ -249,6 +249,7 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
         status_bar,
         out,
         viewport_dims,
+        sidebar,
         session_name,
         None,
         None,
@@ -314,10 +315,15 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
 /// from callers that physically cleared the bar row (the `paint_full_frame`
 /// `ED2`), where the on-screen row must be re-emitted even if its content
 /// is identical to last frame.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "phux-qtw8 adds the sidebar reservation so the bar can inset out of the strip's columns; same arg-list refactor follow-up as paint_full_frame / paint_focused_pane"
+)]
 pub(super) fn paint_bar_after_pane<W: Write>(
     status_bar: Option<&mut StatusBarPainter>,
     out: &mut W,
     viewport_dims: (u16, u16),
+    sidebar: Option<SidebarReservation>,
     session_name: &str,
     restore_cursor: Option<(u16, u16)>,
     fallback_origin: Option<(u16, u16)>,
@@ -335,6 +341,9 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     }
     let _ = painter.paint(
         out,
+        // phux-qtw8: yield the sidebar's columns so the window tabs start
+        // beside the strip, not underneath it.
+        bar_inset(viewport_dims, sidebar),
         viewport_dims.0,
         viewport_dims.1,
         // The window list is owned by the painter and injected inside
@@ -447,32 +456,55 @@ pub(super) fn content_rect(
 }
 
 /// The sidebar strip's own `Rect` — the columns [`content_rect`] reserved for
-/// it. Shares the status-bar height reservation so the strip stops above the
-/// bar row (the bar spans the full width below both panes and sidebar). The
-/// strip docks flush to the left or right outer edge per `res.edge`.
-pub(super) fn sidebar_rect(
+/// it, over the FULL viewport height. The strip docks flush to the left or
+/// right outer edge per `res.edge`.
+///
+/// The strip owns its columns for every row, the bar row included: it is
+/// [`bar_rect`] that yields, insetting the bar out of the strip's columns so
+/// the window tabs never paint underneath it. The two are complementary —
+/// `sidebar_rect ∪ bar_rect ∪ content_rect` tiles the viewport with no overlap
+/// — and mouse routing depends on it, since `input_dispatch` hit-tests the
+/// strip BEFORE the bar row and so hands the strip the corner cell the bar
+/// gave up.
+pub(super) const fn sidebar_rect(
     outer: (u16, u16),
-    bar: Option<Position>,
     res: SidebarReservation,
 ) -> crate::layout::Rect {
     let (cols, rows) = outer;
-    let h = if bar.is_some() {
-        rows.saturating_sub(1)
-    } else {
-        rows
-    };
-    // phux-foz.8: match `content_rect` — a top bar pushes the strip down
-    // one row so it never underlaps the bar row.
-    let y = match bar {
-        Some(Position::Top) => 1,
-        Some(Position::Bottom) | None => 0,
-    };
-    let width = res.width.min(cols);
+    // `Ord::min` is not const for u16.
+    let width = if res.width < cols { res.width } else { cols };
     let x = match res.edge {
         SidebarEdge::Left => 0,
         SidebarEdge::Right => cols - width,
     };
-    crate::layout::Rect { x, y, w: width, h }
+    crate::layout::Rect {
+        x,
+        y: 0,
+        w: width,
+        h: rows,
+    }
+}
+
+/// Columns the status bar yields at each edge so it does not paint under a
+/// docked sidebar (phux-qtw8): the strip is full-height, so the bar shrinks to
+/// [`content_rect`]'s horizontal extent rather than spanning the full width.
+///
+/// `BarInset::NONE` with the sidebar disabled, which keeps the bar row
+/// byte-identical to the pre-sidebar paint.
+pub(super) fn bar_inset(outer: (u16, u16), sidebar: Option<SidebarReservation>) -> BarInset {
+    sidebar.map_or(BarInset::NONE, |res| {
+        let width = res.width.min(outer.0);
+        match res.edge {
+            SidebarEdge::Left => BarInset {
+                left: width,
+                right: 0,
+            },
+            SidebarEdge::Right => BarInset {
+                left: 0,
+                right: width,
+            },
+        }
+    })
 }
 
 #[cfg(test)]
@@ -597,14 +629,15 @@ mod tests {
         assert_eq!(huge.x, 80);
     }
 
-    /// The strip rect docks flush to the outer edge, spans `width` columns, and
-    /// shares the content height (stops above the status bar row).
+    /// phux-qtw8: the strip docks flush to the outer edge, spans `width`
+    /// columns, and runs the FULL viewport height — the bar row included. It is
+    /// the bar that yields (see [`bar_inset`]), so the strip's height no longer
+    /// depends on whether a bar is docked, or where.
     #[test]
-    fn sidebar_rect_docks_flush_to_the_edge() {
+    fn sidebar_rect_is_full_height_regardless_of_the_bar() {
         let outer = (80, 24);
         let left = sidebar_rect(
             outer,
-            Some(Position::Bottom),
             SidebarReservation {
                 edge: SidebarEdge::Left,
                 width: 20,
@@ -616,34 +649,15 @@ mod tests {
                 x: 0,
                 y: 0,
                 w: 20,
-                h: 23,
+                h: 24,
             }
         );
         let right = sidebar_rect(
             outer,
-            None,
             SidebarReservation {
                 edge: SidebarEdge::Right,
                 width: 20,
             },
-        );
-        // phux-foz.8: a top bar pushes the strip down one row.
-        let top = sidebar_rect(
-            outer,
-            Some(Position::Top),
-            SidebarReservation {
-                edge: SidebarEdge::Left,
-                width: 20,
-            },
-        );
-        assert_eq!(
-            top,
-            crate::layout::Rect {
-                x: 0,
-                y: 1,
-                w: 20,
-                h: 23,
-            }
         );
         assert_eq!(
             right,
@@ -654,6 +668,47 @@ mod tests {
                 h: 24,
             }
         );
+    }
+
+    /// phux-qtw8: the bar yields exactly the strip's columns, so the window tabs
+    /// start beside the sidebar instead of painting underneath it. Its span is
+    /// the content rect's horizontal extent — the two agree by construction.
+    #[test]
+    fn bar_inset_yields_the_sidebar_columns() {
+        let outer = (80, 24);
+        assert_eq!(bar_inset(outer, None), BarInset::NONE);
+
+        let left = SidebarReservation {
+            edge: SidebarEdge::Left,
+            width: 20,
+        };
+        assert_eq!(
+            bar_inset(outer, Some(left)),
+            BarInset { left: 20, right: 0 }
+        );
+        let right = SidebarReservation {
+            edge: SidebarEdge::Right,
+            width: 20,
+        };
+        assert_eq!(
+            bar_inset(outer, Some(right)),
+            BarInset { left: 0, right: 20 }
+        );
+
+        // The bar and the panes occupy the same columns: whatever the edge,
+        // `bar_inset`'s span IS `content_rect`'s (x, w).
+        for res in [left, right] {
+            let content = content_rect(outer, Some(Position::Bottom), Some(res));
+            let span = bar_inset(outer, Some(res)).span(outer.0);
+            assert_eq!(span, (content.x, content.w), "edge {:?}", res.edge);
+        }
+
+        // Over-wide strip: the bar has nowhere to paint rather than underflowing.
+        let huge = SidebarReservation {
+            edge: SidebarEdge::Left,
+            width: 999,
+        };
+        assert_eq!(bar_inset(outer, Some(huge)).span(outer.0).1, 0);
     }
 
     /// ADR-0029: the one composite cursor emitter resolves the three-way
@@ -760,6 +815,7 @@ mod tests {
             Some(&mut painter),
             &mut out,
             (80, 24),
+            None,
             "demo",
             None,
             Some((3, 5)),
@@ -793,6 +849,7 @@ mod tests {
             Some(&mut painter),
             &mut out,
             (80, 24),
+            None,
             "demo",
             Some((4, 7)),
             Some((0, 0)),
@@ -822,6 +879,7 @@ mod tests {
             Some(&mut painter),
             &mut out,
             (80, 24),
+            None,
             "demo",
             None,
             None,
@@ -857,6 +915,7 @@ mod tests {
             Some(&mut painter),
             &mut first,
             (80, 24),
+            None,
             "demo",
             Some((4, 7)),
             None,
@@ -875,6 +934,7 @@ mod tests {
             Some(&mut painter),
             &mut second,
             (80, 24),
+            None,
             "demo",
             Some((4, 7)),
             None,
@@ -904,6 +964,7 @@ mod tests {
             Some(&mut painter),
             &mut first,
             (80, 24),
+            None,
             "demo",
             Some((4, 7)),
             None,
@@ -917,6 +978,7 @@ mod tests {
             Some(&mut painter),
             &mut second,
             (80, 24),
+            None,
             "demo",
             Some((4, 7)),
             None,

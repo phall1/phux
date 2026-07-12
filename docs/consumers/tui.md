@@ -1305,6 +1305,12 @@ The new layout broadcasts to other attached clients via `SET_METADATA`
 collapse chevron in the strip's bottom corner. Panes tile into the
 remaining content rect, so the strip never overlaps content.
 
+The strip runs the **full height** of the terminal, and the status bar
+yields its columns rather than spanning underneath it (`phux-qtw8`): with
+the sidebar open, the bar — window tabs included — starts beside the
+strip. The three regions tile the viewport without overlap, and a click
+in the strip's columns is the strip's, on every row.
+
 The strip is laid out herdr-style in two labelled sections, headed by
 muted lowercase headers (the `sidebar_section` theme slot):
 
@@ -1473,9 +1479,11 @@ position = "bottom"   # or "top"; default "bottom"
 ```
 
 `position` moves the whole reserved row: with `"top"` the bar draws on
-the outer terminal's first row and the panes (and sidebar strip) shift
-down one row, so nothing ever underlaps the bar. Everything else —
-widgets, styling, refresh — is identical in both positions.
+the outer terminal's first row and the panes shift down one row, so
+nothing ever underlaps the bar. The sidebar strip is the exception — it
+is full-height in both positions, and the bar insets out of its columns
+instead (§6.4). Everything else — widgets, styling, refresh — is
+identical in both positions.
 
 There are three categories of widgets:
 

@@ -3155,6 +3155,7 @@ async fn main_loop<W: super::RenderSink>(
                         status_bar.as_mut(),
                         out,
                         viewport_dims,
+                        sidebar,
                         &session_name,
                         focused_cursor,
                         fallback_origin,
