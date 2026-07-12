@@ -167,8 +167,12 @@ fn parse_color(spec: Option<&str>) -> Option<Color> {
     )
 }
 
-/// Render the composed status row at `row_index` for a viewport of
-/// `cols` columns and emit raw VT bytes to `out`.
+/// Render the composed status row at `row_index`, spanning `cols` columns from
+/// origin column `x`, and emit raw VT bytes to `out`.
+///
+/// `x` is `0` for a full-width bar; a docked sidebar shifts the origin (and
+/// narrows `cols`) so the row paints beside the strip rather than under it —
+/// see [`BarInset`].
 ///
 /// `bar` is the already-composed widget pipeline — we ask it for a
 /// `Vec<WidgetCell>` of the right width and copy that into a ratatui
@@ -185,6 +189,7 @@ pub fn render_status_bar<W: Write>(
     bar: &StatusBar,
     ctx: &StatusBarContext<'_>,
     row_index: u16,
+    x: u16,
     cols: u16,
 ) -> io::Result<()> {
     // phux-4li.17: paint when there are configured widgets OR a window
@@ -207,7 +212,7 @@ pub fn render_status_bar<W: Write>(
     //    paint; SGR reset on entry and exit so we don't inherit nor
     //    bequeath attributes. Cursor restore is the caller's job —
     //    see module header.
-    write_buffer(out, &buffer, row_index, cols)
+    write_buffer(out, &buffer, row_index, x, cols)
 }
 
 /// Copy a [`StatusBar`] composer row into a ratatui [`Buffer`].
@@ -248,17 +253,22 @@ fn fill_buffer(buffer: &mut Buffer, row: &[WidgetCell], cols: u16) {
 }
 
 /// Walk a ratatui [`Buffer`] left-to-right at `y=0` and emit raw VT
-/// bytes for the row. Encoding: hide cursor, CUP to `(row_index, 1)`,
+/// bytes for the row. Encoding: hide cursor, CUP to `(row_index, x + 1)`,
 /// SGR reset, per-cell symbol, SGR reset, flush. The painter does
 /// NOT show the cursor again — the caller restores it at the focused
 /// pane's logical position.
+///
+/// The buffer is composed at its own origin (`0..cols`); `x` places it on
+/// screen, so a sidebar-inset bar lands beside the strip (phux-qtw8).
 fn write_buffer<W: Write>(
     out: &mut W,
     buffer: &Buffer,
     row_index: u16,
+    x: u16,
     cols: u16,
 ) -> io::Result<()> {
     let one_based_row = row_index.saturating_add(1);
+    let one_based_col = x.saturating_add(1);
     // CUP to the bar row + SGR reset. We deliberately do NOT hide the
     // cursor here: the bar paint completes in sub-ms on a modern
     // terminal, and the old `?25l`-without-guaranteed-`?25h` pattern
@@ -266,7 +276,7 @@ fn write_buffer<W: Write>(
     // to restore (fresh attach, libghostty snapshot before first PTY
     // output). Caller still positions the cursor at the focused pane
     // after this returns.
-    write!(out, "\x1b[{one_based_row};1H\x1b[0m")?;
+    write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[0m")?;
     let mut prev_styled = false;
     for x in 0..cols {
         let cell = &buffer[(x, 0)];
@@ -287,10 +297,14 @@ fn write_buffer<W: Write>(
 /// ADR-0033: emit the supervisory badge right-aligned on `row_index`, as a
 /// reverse-video + bold chip atop the already-painted widget row. ASCII-only
 /// (no emojis, per repo convention), so the char count is the cell width.
+///
+/// `x` is the bar's origin column; the chip right-aligns to the bar's own right
+/// edge (`x + cols`), which a sidebar inset may pull in from the viewport's.
 fn paint_supervisory_overlay<W: Write>(
     out: &mut W,
     badge: &str,
     row_index: u16,
+    x: u16,
     cols: u16,
 ) -> io::Result<()> {
     if cols == 0 || badge.is_empty() {
@@ -298,7 +312,7 @@ fn paint_supervisory_overlay<W: Write>(
     }
     let visible: String = badge.chars().take(cols as usize).collect();
     let width = u16::try_from(visible.chars().count()).unwrap_or(cols);
-    let start_col = cols.saturating_sub(width);
+    let start_col = x.saturating_add(cols.saturating_sub(width));
     let one_based_row = row_index.saturating_add(1);
     let one_based_col = start_col.saturating_add(1);
     // CUP to the chip's left edge, reverse+bold, text, hard reset.
@@ -318,6 +332,7 @@ fn paint_attention_overlay<W: Write>(
     out: &mut W,
     hint: &str,
     row_index: u16,
+    x: u16,
     cols: u16,
     right_offset: u16,
     color: Color,
@@ -328,7 +343,7 @@ fn paint_attention_overlay<W: Write>(
     }
     let visible: String = hint.chars().take(avail as usize).collect();
     let width = u16::try_from(visible.chars().count()).unwrap_or(avail);
-    let start_col = avail.saturating_sub(width);
+    let start_col = x.saturating_add(avail.saturating_sub(width));
     let one_based_row = row_index.saturating_add(1);
     let one_based_col = start_col.saturating_add(1);
     write!(out, "\x1b[{one_based_row};{one_based_col}H\x1b[7;1m")?;
@@ -366,6 +381,40 @@ fn overlay_badge_into_buffer(
     }
 }
 
+/// Columns the bar yields at each edge of the viewport (phux-qtw8).
+///
+/// A docked sidebar is a full-height strip, so the bar cannot span the full
+/// width without painting its window tabs underneath it. The caller
+/// (`attach::paint::bar_inset`) folds the strip's width into the matching side
+/// and the painter renders into the residual span — exactly the columns panes
+/// tile into. [`Self::NONE`] (no sidebar) is a full-width bar, byte-identical
+/// to the pre-sidebar paint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BarInset {
+    /// Columns yielded at the left edge.
+    pub left: u16,
+    /// Columns yielded at the right edge.
+    pub right: u16,
+}
+
+impl BarInset {
+    /// The full-width bar: no sidebar docked, nothing yielded.
+    pub const NONE: Self = Self { left: 0, right: 0 };
+
+    /// The bar's origin column and width within a `cols`-wide viewport.
+    ///
+    /// Saturating throughout: an inset wider than the viewport yields a
+    /// zero-width bar (which every paint path treats as a no-op) rather than
+    /// underflowing.
+    #[must_use]
+    pub const fn span(self, cols: u16) -> (u16, u16) {
+        // `Ord::min` is not const for u16.
+        let x = if self.left < cols { self.left } else { cols };
+        let width = cols.saturating_sub(self.left).saturating_sub(self.right);
+        (x, width)
+    }
+}
+
 /// VT painter for a composed [`StatusBar`].
 ///
 /// Thin stateful wrapper over [`render_status_bar`]: caches the last
@@ -376,9 +425,12 @@ fn overlay_badge_into_buffer(
 pub struct StatusBarPainter {
     bar: StatusBar,
     position: Position,
-    /// Last painted strip, keyed by viewport width. `None` ⇒ never
-    /// painted (or width changed); next call paints unconditionally.
-    last_row: Option<(u16, Vec<WidgetCell>)>,
+    /// Last painted strip, keyed by the `(x, width)` span it was painted
+    /// into. `None` ⇒ never painted (or the span changed); next call paints
+    /// unconditionally. The origin is part of the key so a sidebar toggle
+    /// repaints an otherwise byte-identical row into its new columns — and so
+    /// [`Self::window_hit_at`] can map a screen column back onto the strip.
+    last_row: Option<(u16, u16, Vec<WidgetCell>)>,
     /// Last (cols, rows) we painted into. Different dims invalidate
     /// `last_row` and force a fresh paint.
     last_viewport: Option<(u16, u16)>,
@@ -425,7 +477,7 @@ impl std::fmt::Debug for StatusBarPainter {
             .field("position", &self.position)
             .field(
                 "last_row.len",
-                &self.last_row.as_ref().map(|(_, r)| r.len()),
+                &self.last_row.as_ref().map(|(_, _, r)| r.len()),
             )
             .field("last_viewport", &self.last_viewport)
             .field("windows.len", &self.windows.len())
@@ -623,7 +675,8 @@ impl StatusBarPainter {
         }
     }
 
-    /// Paint the bar onto `out` for a viewport of `cols × rows`.
+    /// Paint the bar onto `out` for a viewport of `cols × rows`, spanning the
+    /// columns `inset` leaves it ([`BarInset::NONE`] ⇒ the full width).
     ///
     /// Cheap to call repeatedly: identical widget output + unchanged
     /// dims is a no-op (zero bytes written). Dimension changes force
@@ -635,6 +688,7 @@ impl StatusBarPainter {
     pub fn paint<W: Write>(
         &mut self,
         out: &mut W,
+        inset: BarInset,
         cols: u16,
         rows: u16,
         ctx: &StatusBarContext<'_>,
@@ -642,11 +696,18 @@ impl StatusBarPainter {
         if cols == 0 || rows == 0 {
             return Ok(());
         }
+        // phux-qtw8: the bar yields the sidebar's columns. Everything below
+        // composes and hit-tests against this span, not the viewport — an
+        // inset wider than the terminal leaves nothing to paint.
+        let (x, cols) = inset.span(cols);
+        if cols == 0 {
+            return Ok(());
+        }
         // phux-9vf: an error-line painter bypasses the widget pipeline and
         // paints the fixed diagnostic. It takes priority over the normal
         // "empty bar with no windows is a no-op" short-circuit below.
         if self.error.is_some() {
-            return self.paint_error_line(out, cols, rows);
+            return self.paint_error_line(out, x, cols, rows);
         }
         // The supervisory badge rides the normal bar row, so it only paints
         // when there is a bar to host it. An empty configured bar with no
@@ -670,8 +731,10 @@ impl StatusBarPainter {
         };
         let new_row = self.bar.render(&ctx.as_widget(), cols);
         let viewport_changed = self.last_viewport != Some((cols, rows));
+        // The origin is part of the key: toggling a sidebar can leave the
+        // composed row byte-identical while moving the columns it belongs in.
         let row_changed = match &self.last_row {
-            Some((w, prev)) => *w != cols || prev != &new_row,
+            Some((prev_x, w, prev)) => *prev_x != x || *w != cols || prev != &new_row,
             None => true,
         };
         if !viewport_changed && !row_changed {
@@ -685,12 +748,12 @@ impl StatusBarPainter {
         // `new_row` for cache-keying; the renderer recomposes — cheap
         // (same inputs, deterministic) and keeps `render_status_bar`
         // usable standalone in tests.
-        render_status_bar(out, &self.bar, &ctx, row_index, cols)?;
+        render_status_bar(out, &self.bar, &ctx, row_index, x, cols)?;
         // ADR-0033: overlay the supervisory badge atop the freshly-painted
         // widget row (right-aligned). Emitted after the row so it wins; the
         // full-row repaint above erases any stale/cleared badge first.
         if let Some(badge) = &self.supervisory {
-            paint_supervisory_overlay(out, badge, row_index, cols)?;
+            paint_supervisory_overlay(out, badge, row_index, x, cols)?;
         }
         // phux-foz.1: the attention hint chips in immediately left of the
         // badge (or at the right edge when no badge is up). Same repaint
@@ -700,32 +763,40 @@ impl StatusBarPainter {
                 out,
                 hint,
                 row_index,
+                x,
                 cols,
                 self.attention_offset(),
                 self.attention_fg,
             )?;
         }
-        self.last_row = Some((cols, new_row));
+        self.last_row = Some((x, cols, new_row));
         self.last_viewport = Some((cols, rows));
         Ok(())
     }
 
-    /// Compose the status row into a fresh `cols × 1` ratatui [`Buffer`]
-    /// without emitting VT or touching the paint cache (`phux-l5xa`).
+    /// Compose the status row into a fresh ratatui [`Buffer`] the width of the
+    /// bar's `inset` span, without emitting VT or touching the paint cache
+    /// (`phux-l5xa`).
     ///
-    /// Returns `(buffer, row_index)` where `row_index` is the bar's row in a
-    /// `rows`-high viewport, or `None` when nothing would paint (zero dims,
-    /// or an empty bar with no windows and no error). Mirrors the
-    /// composition in [`Self::paint`] / [`Self::paint_error_line`] so the
-    /// `phux snapshot --rendered` frame shows the same bar the live VT paint
-    /// would — read as dense cells, with no emulator re-parse.
+    /// Returns `(buffer, x, row_index)` — the buffer's origin column and row in
+    /// a `cols × rows` viewport — or `None` when nothing would paint (zero
+    /// dims, an inset that leaves no columns, or an empty bar with no windows
+    /// and no error). Mirrors the composition in [`Self::paint`] /
+    /// [`Self::paint_error_line`] so the `phux snapshot --rendered` frame shows
+    /// the same bar the live VT paint would — read as dense cells, with no
+    /// emulator re-parse.
     pub(crate) fn compose_buffer(
         &self,
+        inset: BarInset,
         cols: u16,
         rows: u16,
         ctx: &StatusBarContext<'_>,
-    ) -> Option<(Buffer, u16)> {
+    ) -> Option<(Buffer, u16, u16)> {
         if cols == 0 || rows == 0 {
+            return None;
+        }
+        let (x, cols) = inset.span(cols);
+        if cols == 0 {
             return None;
         }
         let row_index: u16 = match self.position {
@@ -736,25 +807,25 @@ impl StatusBarPainter {
             let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
             let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
             let mut tmp = [0u8; 4];
-            let mut x: u16 = 0;
+            let mut col: u16 = 0;
             for ch in message.chars() {
-                if x >= cols {
+                if col >= cols {
                     break;
                 }
-                let cell = &mut buffer[(x, 0)];
+                let cell = &mut buffer[(col, 0)];
                 cell.set_symbol(ch.encode_utf8(&mut tmp));
                 cell.set_style(style);
-                x = x.saturating_add(1);
+                col = col.saturating_add(1);
             }
             // Extend the reverse-video strip across the rest of the row so it
-            // spans the full width, matching `paint_error_line`.
-            while x < cols {
-                let cell = &mut buffer[(x, 0)];
+            // spans the bar's full span, matching `paint_error_line`.
+            while col < cols {
+                let cell = &mut buffer[(col, 0)];
                 cell.set_symbol(" ");
                 cell.set_style(style);
-                x = x.saturating_add(1);
+                col = col.saturating_add(1);
             }
-            return Some((buffer, row_index));
+            return Some((buffer, x, row_index));
         }
         // Match `paint`: the badge only composes onto a non-empty bar row.
         if self.bar.is_empty() && self.windows.is_empty() {
@@ -794,7 +865,7 @@ impl StatusBarPainter {
                     .add_modifier(Modifier::REVERSED | Modifier::BOLD),
             );
         }
-        Some((buffer, row_index))
+        Some((buffer, x, row_index))
     }
 
     /// phux-9vf: paint the fixed error diagnostic onto the bar row.
@@ -804,15 +875,25 @@ impl StatusBarPainter {
     /// into normal chrome) and truncated to `cols`. Cached on `last_row` /
     /// `last_viewport` like the normal path so repeated paints with
     /// unchanged dims are no-ops; a resize forces a repaint.
-    fn paint_error_line<W: Write>(&mut self, out: &mut W, cols: u16, rows: u16) -> io::Result<()> {
+    fn paint_error_line<W: Write>(
+        &mut self,
+        out: &mut W,
+        x: u16,
+        cols: u16,
+        rows: u16,
+    ) -> io::Result<()> {
         // Callers gate on `self.error.is_some()`; an empty string is a
         // valid (if unusual) diagnostic, so default to "" rather than
         // returning early.
         let message = self.error.clone().unwrap_or_default();
         // The error row carries no widget cells; we key the cache solely on
-        // viewport dims (the message is fixed for this painter's lifetime).
+        // the span (the message is fixed for this painter's lifetime).
         let viewport_changed = self.last_viewport != Some((cols, rows));
-        if !viewport_changed && self.last_row.is_some() {
+        let moved = self
+            .last_row
+            .as_ref()
+            .is_some_and(|(px, pw, _)| *px != x || *pw != cols);
+        if !viewport_changed && !moved && self.last_row.is_some() {
             return Ok(());
         }
         let row_index: u16 = match self.position {
@@ -821,29 +902,29 @@ impl StatusBarPainter {
         };
         let mut buffer = Buffer::empty(Rect::new(0, 0, cols, 1));
         let style = Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
-        let mut x: u16 = 0;
+        let mut col: u16 = 0;
         for ch in message.chars() {
-            if x >= cols {
+            if col >= cols {
                 break;
             }
             let mut tmp = [0u8; 4];
-            let cell = &mut buffer[(x, 0)];
+            let cell = &mut buffer[(col, 0)];
             cell.set_symbol(ch.encode_utf8(&mut tmp));
             cell.set_style(style);
-            x = x.saturating_add(1);
+            col = col.saturating_add(1);
         }
         // Extend the reverse-video field across the rest of the row so the
-        // alarm strip spans the full width, not just the message.
-        while x < cols {
-            let cell = &mut buffer[(x, 0)];
+        // alarm strip spans the bar's full span, not just the message.
+        while col < cols {
+            let cell = &mut buffer[(col, 0)];
             cell.set_symbol(" ");
             cell.set_style(style);
-            x = x.saturating_add(1);
+            col = col.saturating_add(1);
         }
-        write_buffer(out, &buffer, row_index, cols)?;
-        // Mark the cache populated so the dims-only key short-circuits the
+        write_buffer(out, &buffer, row_index, x, cols)?;
+        // Mark the cache populated so the span-only key short-circuits the
         // next repaint; the stored row is empty (we don't compose widgets).
-        self.last_row = Some((cols, Vec::new()));
+        self.last_row = Some((x, cols, Vec::new()));
         self.last_viewport = Some((cols, rows));
         Ok(())
     }
@@ -870,14 +951,18 @@ impl StatusBarPainter {
     /// screen and cannot drift from the composed layout (slot placement,
     /// separators, truncation, `Z`/`!` markers all included).
     ///
-    /// `None` when the bar has never painted, `x` is off the strip, or
-    /// the cell under `x` is not a window tab (a separator, another
-    /// widget, blank padding, or the error line — whose cached row is
-    /// empty).
+    /// `x` is a screen column; a sidebar-inset bar (phux-qtw8) is painted from
+    /// its own origin, so the cached origin is subtracted to index the strip.
+    ///
+    /// `None` when the bar has never painted, `x` is off the strip (left of its
+    /// origin, or past its end), or the cell under `x` is not a window tab (a
+    /// separator, another widget, blank padding, or the error line — whose
+    /// cached row is empty).
     #[must_use]
     pub fn window_hit_at(&self, x: u16) -> Option<usize> {
-        let (_, row) = self.last_row.as_ref()?;
-        let phux_config::widget::CellHit::Window(i) = row.get(usize::from(x))?.hit?;
+        let (origin, _, row) = self.last_row.as_ref()?;
+        let col = x.checked_sub(*origin)?;
+        let phux_config::widget::CellHit::Window(i) = row.get(usize::from(col))?.hit?;
         Some(i)
     }
 }
@@ -915,7 +1000,8 @@ mod tests {
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         assert!(p.is_empty());
         let mut buf = Vec::new();
-        p.paint(&mut buf, 80, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 80, 24, &ctx_default(""))
+            .unwrap();
         assert!(buf.is_empty());
     }
 
@@ -927,7 +1013,8 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("hi")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("hi"))
+            .unwrap();
         let s = String::from_utf8_lossy(&buf);
         // Row 24 (last of 24-row viewport).
         assert!(s.contains("\x1b[24;1H"), "no CUP-to-row-24: {s:?}");
@@ -942,7 +1029,8 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Top);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("hi")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("hi"))
+            .unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("\x1b[1;1H"), "no CUP-to-row-1: {s:?}");
     }
@@ -976,10 +1064,12 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("x"))
+            .unwrap();
         let first_len = buf.len();
         // Second paint with same dims + same ctx must add nothing.
-        p.paint(&mut buf, 10, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("x"))
+            .unwrap();
         assert_eq!(buf.len(), first_len);
     }
 
@@ -991,10 +1081,12 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("x"))
+            .unwrap();
         let first_len = buf.len();
         // Change width — must repaint.
-        p.paint(&mut buf, 20, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 20, 24, &ctx_default("x"))
+            .unwrap();
         assert!(buf.len() > first_len);
     }
 
@@ -1006,9 +1098,11 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("a")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("a"))
+            .unwrap();
         let first_len = buf.len();
-        p.paint(&mut buf, 10, 24, &ctx_default("b")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("b"))
+            .unwrap();
         assert!(buf.len() > first_len);
     }
 
@@ -1020,8 +1114,10 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 0, 24, &ctx_default("x")).unwrap();
-        p.paint(&mut buf, 80, 0, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 0, 24, &ctx_default("x"))
+            .unwrap();
+        p.paint(&mut buf, BarInset::NONE, 80, 0, &ctx_default("x"))
+            .unwrap();
         assert!(buf.is_empty());
     }
 
@@ -1038,7 +1134,8 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 30, 24, &ctx_default("main")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 30, 24, &ctx_default("main"))
+            .unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("main"), "session widget missing: {s:?}");
         assert!(s.contains("LITERAL"), "time widget missing: {s:?}");
@@ -1062,7 +1159,8 @@ mod tests {
         let mut p =
             StatusBarPainter::error_line("config error: dup [status] (run: phux config show)");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 80, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 80, 24, &ctx_default(""))
+            .unwrap();
         let s = String::from_utf8_lossy(&buf);
         assert!(s.contains("\x1b[24;1H"), "no CUP-to-bar-row: {s:?}");
         // The painter emits one SGR-wrapped cell per glyph, so the message
@@ -1083,10 +1181,12 @@ mod tests {
     fn error_line_painter_repaint_is_idempotent_on_unchanged_dims() {
         let mut p = StatusBarPainter::error_line("config error: boom");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let first_len = buf.len();
         assert!(first_len > 0, "first paint must emit the error row");
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         assert_eq!(buf.len(), first_len, "unchanged dims must be a no-op");
     }
 
@@ -1096,10 +1196,12 @@ mod tests {
         // bottom row; the diagnostic must then repaint.
         let mut p = StatusBarPainter::error_line("config error: boom");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let first_len = buf.len();
         p.invalidate();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         assert!(buf.len() > first_len, "invalidate must force a repaint");
     }
 
@@ -1128,10 +1230,12 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 10, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("x"))
+            .unwrap();
         let first_len = buf.len();
         p.invalidate();
-        p.paint(&mut buf, 10, 24, &ctx_default("x")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 10, 24, &ctx_default("x"))
+            .unwrap();
         assert!(buf.len() > first_len);
     }
 
@@ -1195,7 +1299,7 @@ mod tests {
             ..make_context("", UNIX_EPOCH)
         };
         let mut buf = Vec::new();
-        render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
+        render_status_bar(&mut buf, &bar, &ctx, 0, 0, 40).unwrap();
         let s = String::from_utf8(buf).unwrap();
         // The active tab carries an SGR (default preset = bold+reverse),
         // so glyphs interleave with escapes — strip CSI before the text
@@ -1214,7 +1318,7 @@ mod tests {
         let bar = build_bar(&StatusCfg::default());
         let ctx = make_context("", UNIX_EPOCH);
         let mut buf = Vec::new();
-        render_status_bar(&mut buf, &bar, &ctx, 0, 40).unwrap();
+        render_status_bar(&mut buf, &bar, &ctx, 0, 0, 40).unwrap();
         assert!(buf.is_empty(), "empty bar + no windows must not paint");
     }
 
@@ -1231,7 +1335,8 @@ mod tests {
             branch: None,
         }]);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         let s = strip_csi(&String::from_utf8(buf).unwrap());
         assert!(
             s.contains("0:a"),
@@ -1255,7 +1360,8 @@ mod tests {
         p.set_attention_color(Color::Rgb(251, 191, 36));
         assert!(p.set_attention(Some("[ ASK ]".to_owned())));
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         let s = String::from_utf8(buf).unwrap();
         // Right-aligned: "[ ASK ]" is 7 cells wide in a 40-col bar on the
         // bottom row (row 10) => CUP col 34.
@@ -1285,7 +1391,8 @@ mod tests {
         assert!(p.set_supervisory(Some("[ FROZEN ]".to_owned())));
         assert!(p.set_attention(Some("[ ASK ]".to_owned())));
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         let s = String::from_utf8(buf).unwrap();
         // Badge: 10 cells at cols 31..40. Chip: offset 11 from the right
         // edge => right-aligned at col 40-11-7+1 = 23.
@@ -1319,10 +1426,12 @@ mod tests {
             "unchanged hint must report no change"
         );
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         assert!(p.set_attention(None), "clearing must report a change");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8(buf).unwrap());
         assert!(
             !visible.contains("ASK"),
@@ -1341,7 +1450,8 @@ mod tests {
         };
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         assert!(
             !strip_csi(&String::from_utf8_lossy(&buf)).contains("/tmp"),
             "unknown cwd renders nothing"
@@ -1352,7 +1462,8 @@ mod tests {
             "unchanged cwd reports no change"
         );
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8_lossy(&buf));
         assert!(
             visible.contains("/tmp/project"),
@@ -1374,7 +1485,8 @@ mod tests {
         let mut p = StatusBarPainter::new(build_bar(&cfg), Position::Bottom);
         assert!(p.set_last_exit(Some(127)));
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8_lossy(&buf));
         assert!(
             visible.contains("rc=127"),
@@ -1382,7 +1494,8 @@ mod tests {
         );
         assert!(p.set_last_exit(None), "clearing reports a change");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8_lossy(&buf));
         assert!(
             !visible.contains("rc="),
@@ -1407,7 +1520,8 @@ mod tests {
         assert_eq!(feeds.len(), 1, "one exec widget => one feed");
 
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         assert!(
             !strip_csi(&String::from_utf8_lossy(&buf)).contains("BAT"),
             "no output before the first run"
@@ -1415,7 +1529,8 @@ mod tests {
 
         feeds[0].apply_output("BAT 87%\n");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 24, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 24, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8_lossy(&buf));
         assert!(
             visible.contains("BAT 87%"),
@@ -1449,7 +1564,8 @@ mod tests {
         // Before the first paint there is no strip to hit.
         assert_eq!(p.window_hit_at(0), None);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         // "0:bash 1:vim": tabs at 0..=5 and 7..=11.
         for x in 0..=5 {
             assert_eq!(p.window_hit_at(x), Some(0), "col {x}");
@@ -1461,6 +1577,123 @@ mod tests {
         assert_eq!(p.window_hit_at(12), None, "padding is inert");
         assert_eq!(p.window_hit_at(39), None, "right edge is inert");
         assert_eq!(p.window_hit_at(40), None, "off-strip is inert");
+    }
+
+    /// phux-qtw8: with a left sidebar docked the bar starts BESIDE the strip,
+    /// not under it — the window tabs the user reported reading as "under the
+    /// sidebar". The CUP lands on the strip's first free column and no cell is
+    /// emitted left of it.
+    #[test]
+    fn left_sidebar_inset_shifts_the_bar_out_of_the_strip() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "bash".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        let inset = BarInset { left: 20, right: 0 };
+        let mut buf = Vec::new();
+        p.paint(&mut buf, inset, 40, 10, &ctx_default("")).unwrap();
+        let s = String::from_utf8(buf).expect("utf8");
+        // Bottom row of a 10-row viewport, column 21 (1-based) = x 20.
+        assert!(
+            s.contains("\x1b[10;21H"),
+            "bar must start at the strip's right edge: {s:?}"
+        );
+        assert!(
+            !s.contains("\x1b[10;1H"),
+            "bar must not paint from column 0 (under the strip): {s:?}"
+        );
+        // Only the residual span is composed — 40 cols minus the 20-col strip.
+        assert_eq!(
+            p.last_row.as_ref().map(|(x, w, _)| (*x, *w)),
+            Some((20, 20))
+        );
+    }
+
+    /// phux-qtw8: a screen column is mapped back through the origin the bar
+    /// painted at, so a tab click with a sidebar docked selects the window
+    /// actually under the pointer rather than one 20 columns to its left.
+    #[test]
+    fn window_hit_at_is_relative_to_the_inset_origin() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![
+            WindowInfo {
+                name: "bash".to_owned(),
+                active: true,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+            WindowInfo {
+                name: "vim".to_owned(),
+                active: false,
+                zoomed: false,
+                attention: false,
+                branch: None,
+            },
+        ]);
+        let mut buf = Vec::new();
+        p.paint(
+            &mut buf,
+            BarInset { left: 20, right: 0 },
+            40,
+            10,
+            &ctx_default(""),
+        )
+        .unwrap();
+        // Same "0:bash 1:vim" strip as the full-width case, shifted right 20.
+        for x in 0..20 {
+            assert_eq!(
+                p.window_hit_at(x),
+                None,
+                "col {x} is the strip, not the bar"
+            );
+        }
+        for x in 20..=25 {
+            assert_eq!(p.window_hit_at(x), Some(0), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(26), None, "separator is inert");
+        for x in 27..=31 {
+            assert_eq!(p.window_hit_at(x), Some(1), "col {x}");
+        }
+        assert_eq!(p.window_hit_at(32), None, "padding is inert");
+    }
+
+    /// phux-qtw8: a right-docked sidebar narrows the bar instead of moving it —
+    /// the origin stays at 0 and the right-aligned widgets (and the supervisory
+    /// badge) stop at the strip's left edge.
+    #[test]
+    fn right_sidebar_inset_narrows_the_bar_in_place() {
+        let mut p = StatusBarPainter::new(windows_bar(), Position::Bottom);
+        p.set_windows(vec![WindowInfo {
+            name: "bash".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        p.set_supervisory(Some("[F]".to_owned()));
+        let mut buf = Vec::new();
+        p.paint(
+            &mut buf,
+            BarInset { left: 0, right: 20 },
+            40,
+            10,
+            &ctx_default(""),
+        )
+        .unwrap();
+        let s = String::from_utf8(buf).expect("utf8");
+        assert!(s.contains("\x1b[10;1H"), "bar keeps its origin: {s:?}");
+        // The badge right-aligns to the BAR's right edge (col 20, 0-based 17),
+        // not the viewport's — 1-based column 18.
+        assert!(
+            s.contains("\x1b[10;18H\x1b[7;1m[F]"),
+            "badge must right-align to the bar, not the viewport: {s:?}"
+        );
+        assert_eq!(p.last_row.as_ref().map(|(x, w, _)| (*x, *w)), Some((0, 20)));
     }
 
     /// phux-foz.12: the hit map tracks the strip across a window-list
@@ -1477,7 +1710,8 @@ mod tests {
             branch: None,
         }]);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         assert_eq!(p.window_hit_at(0), Some(0));
         assert_eq!(p.window_hit_at(4), None, "only one 3-cell tab");
         // Grow the list; the next paint extends the hit map.
@@ -1498,7 +1732,8 @@ mod tests {
             },
         ]);
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         assert_eq!(p.window_hit_at(4), Some(1), "new tab is hittable");
     }
 
@@ -1508,7 +1743,8 @@ mod tests {
     fn window_hit_at_is_inert_on_the_error_line() {
         let mut p = StatusBarPainter::error_line("config error: boom");
         let mut buf = Vec::new();
-        p.paint(&mut buf, 40, 10, &ctx_default("")).unwrap();
+        p.paint(&mut buf, BarInset::NONE, 40, 10, &ctx_default(""))
+            .unwrap();
         for x in 0..40 {
             assert_eq!(p.window_hit_at(x), None);
         }
@@ -1523,7 +1759,7 @@ mod tests {
         };
         let bar = build_bar(&cfg);
         let mut buf = Vec::new();
-        render_status_bar(&mut buf, &bar, &ctx_default("hello"), 23, 20).unwrap();
+        render_status_bar(&mut buf, &bar, &ctx_default("hello"), 23, 0, 20).unwrap();
         let s = String::from_utf8_lossy(&buf);
         // 23 → 24 (1-based).
         assert!(s.contains("\x1b[24;1H"), "no CUP-to-row-24: {s:?}");
@@ -1541,7 +1777,9 @@ mod tests {
         painter.set_prefix("C-b");
 
         let mut buf = Vec::new();
-        painter.paint(&mut buf, 80, 24, &ctx_default("")).unwrap();
+        painter
+            .paint(&mut buf, BarInset::NONE, 80, 24, &ctx_default(""))
+            .unwrap();
         let visible = strip_csi(&String::from_utf8(buf).unwrap());
 
         assert!(
@@ -1559,7 +1797,7 @@ mod tests {
         let cfg = StatusCfg::default();
         let bar = build_bar(&cfg);
         let mut buf = Vec::new();
-        render_status_bar(&mut buf, &bar, &ctx_default(""), 0, 80).unwrap();
+        render_status_bar(&mut buf, &bar, &ctx_default(""), 0, 0, 80).unwrap();
         assert!(buf.is_empty());
     }
 
@@ -1571,7 +1809,7 @@ mod tests {
         };
         let bar = build_bar(&cfg);
         let mut buf = Vec::new();
-        render_status_bar(&mut buf, &bar, &ctx_default("x"), 0, 0).unwrap();
+        render_status_bar(&mut buf, &bar, &ctx_default("x"), 0, 0, 0).unwrap();
         assert!(buf.is_empty());
     }
 }
