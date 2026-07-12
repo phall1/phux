@@ -36,7 +36,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write # FlakeHub Cache auth via GitHub OIDC (magic-nix-cache)
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -350,7 +349,11 @@ jobs:
           fi
 
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: cachix/cachix-action@v15
+        with:
+          name: phux
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
 
       - name: Package + verify phux-protocol
         run: nix develop -c cargo publish --dry-run -p phux-protocol

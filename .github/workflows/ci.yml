@@ -27,9 +27,8 @@
 # via flake-utils.lib.eachDefaultSystem).
 #
 # Caching, two layers:
-#   * Nix store — `magic-nix-cache` persists the realized devshell (rustc,
-#     zig, nextest, deny) across runs, so each job restores the toolchain
-#     instead of re-fetching it from substituters. Matches release.yml.
+#   * Nix store — Cachix persists the realized devshell (rustc, zig, nextest,
+#     deny) across runs without consuming GitHub's shared Actions cache.
 #   * Rust artifacts — `rust-cache` holds the compiled workspace + the zig
 #     `.a`. Its key includes a CPU fingerprint (`CPU_KEY`): libghostty-vt's
 #     build.rs lets zig auto-detect the host CPU for native builds, so the
@@ -42,12 +41,10 @@
 #     so `check` and `test` keep separate caches (different profiles, must
 #     not clobber).
 #
-# Cache RETENTION: `save-if` restricts cache *writes* to pushes on `main`.
-# GitHub's Actions cache is a hard 10 GB/repo with LRU eviction; letting
-# every PR save would thrash the store and evict the warm `main` base —
-# whose hot entry is the zig blob, the single dominant cost. PRs still
-# *restore* that base; only `main` refreshes it. This keeps a stable warm
-# floor so a PR never pays a cold zig rebuild just because sibling PRs ran.
+# Cache RETENTION: `save-if` restricts Rust artifact cache writes to pushes
+# on `main`. GitHub's Actions cache is a hard 10 GB/repo with LRU eviction;
+# letting every PR save would thrash the store and evict the warm `main` base,
+# whose hot entry is the zig blob. Cachix separately stores the Nix closure.
 #
 # Docs-only fast path: the `changes` gate skips the compile-heavy steps when
 # EVERY changed file is documentation (`docs/`, `ADR/`, or `*.md`). It is
@@ -70,7 +67,6 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write # FlakeHub Cache auth via GitHub OIDC (magic-nix-cache)
 
 jobs:
   # Cheap gate: decide whether this change is docs-only so the compile lanes
@@ -122,7 +118,11 @@ jobs:
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: cachix/cachix-action@v15
+        with:
+          name: phux
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
@@ -161,7 +161,11 @@ jobs:
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: cachix/cachix-action@v15
+        with:
+          name: phux
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}

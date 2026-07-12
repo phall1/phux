@@ -1,6 +1,13 @@
 {
   description = "phux — a terminal multiplexer built on libghostty-vt";
 
+  nixConfig = {
+    extra-substituters = [ "https://phux.cachix.org" ];
+    extra-trusted-public-keys = [
+      "phux.cachix.org-1:DXR/XX4dfm0juc8k04vgkKRY8V/IhUtgJF6ynxnqQOk="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";

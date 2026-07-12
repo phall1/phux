@@ -28,7 +28,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write # FlakeHub Cache auth via GitHub OIDC (magic-nix-cache)
 
 jobs:
   publish:
@@ -39,7 +38,11 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: DeterminateSystems/magic-nix-cache-action@v14
+      - uses: cachix/cachix-action@v15
+        with:
+          name: phux
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
 
       - name: Check release version
         run: bash scripts/check-release-version.sh "${{ inputs.tag }}"
