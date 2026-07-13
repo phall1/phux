@@ -21,6 +21,9 @@ use super::driver::PaneSlot;
 use crate::layout::LayoutState;
 use crate::render::chrome::status_bar::{BarInset, Position, StatusBarPainter, make_context};
 
+const SYNC_OUTPUT_BEGIN: &[u8] = b"\x1b[?2026h";
+const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+
 /// Fallback per-cell pixel size for client-side libghostty mirrors.
 ///
 /// The server-side actor uses the same conventional 8x16 default until a real
@@ -203,6 +206,9 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     let bar = status_bar.as_ref().map(|p| p.position());
     let content = content_rect(viewport_dims, bar, sidebar);
     let multi = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims);
+    // Component painters flush independently. Keep their intermediate states
+    // hidden from the outer terminal while the destructive frame is rebuilt.
+    let _ = out.write_all(SYNC_OUTPUT_BEGIN);
     // ED2 (clear screen) + cursor home. Cheap and unambiguous.
     let _ = out.write_all(b"\x1b[2J\x1b[H");
     // Non-focused panes first; chrome (dividers + status bar) next; the
@@ -282,6 +288,8 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
         .and_then(|fid| multi.rects.get(fid).copied())
         .map(|r| (r.x, r.y));
     let _ = end_of_frame_cursor(out, final_cursor, fallback_origin);
+    let _ = out.write_all(SYNC_OUTPUT_END);
+    let _ = out.flush();
 }
 
 /// Repaint ONLY the chrome — the sidebar strip and the status bar — in place.
@@ -352,6 +360,9 @@ pub(super) fn paint_chrome_in_place<W: super::RenderSink>(
     let fallback = focused_pane
         .and_then(|fid| multi.rects.get(fid))
         .map(|r| (r.x, r.y));
+    // Sidebar/status painters flush independently. Publish their updates and
+    // final cursor restoration as one outer-terminal transaction.
+    let _ = out.write_all(SYNC_OUTPUT_BEGIN);
     if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
         let _ = painter.paint(out, sidebar_rect(viewport_dims, res));
     }
@@ -366,6 +377,8 @@ pub(super) fn paint_chrome_in_place<W: super::RenderSink>(
     // cursor sitting in the strip until the next pane render (never, for an
     // idle pane).
     let _ = end_of_frame_cursor(out, restore, fallback);
+    let _ = out.write_all(SYNC_OUTPUT_END);
+    let _ = out.flush();
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -857,7 +870,8 @@ mod tests {
     }
 
     /// `paint_full_frame` against an injected `Vec<u8>` sink composites
-    /// the whole frame for a two-pane layout: it leads with ED2 + home,
+    /// the whole frame for a two-pane layout: it wraps ED2 + home and all
+    /// component writes in synchronized output,
     /// emits both panes' rect-anchored content, draws the divider, and
     /// ends with an explicit cursor placement. Locks the full-frame
     /// composition contract on the now-injectable sink (phux-549).
@@ -892,10 +906,16 @@ mod tests {
         );
 
         let s = String::from_utf8_lossy(&out);
-        // ED2 (clear screen) + cursor home must lead the frame.
+        // The destructive clear and every component write are one outer
+        // terminal transaction, so nested flushes cannot expose a blank or
+        // partially rebuilt frame.
         assert!(
-            s.starts_with("\x1b[2J\x1b[H"),
-            "frame must open with ED2 + home; out = {s:?}"
+            s.starts_with("\x1b[?2026h\x1b[2J\x1b[H"),
+            "frame must open a synchronized ED2 transaction; out = {s:?}"
+        );
+        assert!(
+            s.ends_with("\x1b[?2026l"),
+            "frame must close synchronized output; out = {s:?}"
         );
         // The divider for a 0.5 side-by-side split sits at column 40
         // (1-based 41). render_dividers emits CUPs into that column.
@@ -1157,6 +1177,10 @@ mod tests {
         );
         let s = String::from_utf8_lossy(&out);
         assert!(
+            s.starts_with("\x1b[?2026h") && s.ends_with("\x1b[?2026l"),
+            "chrome components must publish as one transaction; out = {s:?}"
+        );
+        assert!(
             !s.contains("\x1b[2J"),
             "in-place chrome must never clear the viewport; out = {s:?}"
         );
@@ -1274,14 +1298,15 @@ mod tests {
             "bar-less chrome paint must still end with an explicit cursor \
              visibility; out = {s:?}"
         );
-        // The tail is LAST: nothing may be emitted after the cursor is placed.
+        // The cursor placement is the final operation inside the synchronized
+        // transaction; only the publication barrier follows it.
         let tail = s
             .rfind("\x1b[?25")
             .expect("cursor visibility present in the tail");
         assert_eq!(
             &s[tail..],
-            "\x1b[?25l",
-            "the cursor tail must be the final emit of the frame; out = {s:?}"
+            "\x1b[?25l\x1b[?2026l",
+            "only the sync-output close may follow the cursor tail; out = {s:?}"
         );
         // The pane never rendered, so the fallback parks (hidden) at the
         // focused pane's rect origin — column 21, right of the 20-col strip.
