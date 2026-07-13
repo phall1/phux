@@ -13,12 +13,25 @@
 //! - Up / `C-p` and Down / `C-n` move the selection (also `j` / `k` when
 //!   the query is empty, so a fresh palette is vi-navigable; once the
 //!   user starts typing, `j`/`k` are treated as filter text).
+//! - `PageUp` / `PageDown` move by a screenful, `Home` / `End` jump to the
+//!   first / last selectable row, and the mouse wheel moves the selection
+//!   [`WHEEL_SCROLL_ROWS`] rows at a time.
 //! - Printable text appends to the query and re-filters.
 //! - Backspace edits the query.
 //! - Enter commits the selected item's [`ResolvedAction`]
 //!   ([`OverlayCommand::Commit`]); on an empty filtered list it is a
 //!   no-op.
 //! - Esc dismisses ([`OverlayCommand::Dismiss`]).
+//!
+//! ## Scrolling
+//!
+//! The rows are a *viewport* over the filtered list, not the whole list:
+//! only the rows that fit inside the modal are painted, windowed so the
+//! selection is always on screen ([`scroll_into_view`]). A list that
+//! overflows its box paints a scrollbar in the right border column
+//! ([`paint_scrollbar`]) — without one, navigating past the last visible
+//! row walked the selection off the bottom edge with no way to tell where
+//! you were, which is the bug this viewport exists to fix (phux-ep9s).
 //!
 //! ## Filtering and ranking
 //!
@@ -37,16 +50,28 @@
 //! flat best-first ranking, not a grouped one). Selectable rows may be
 //! [`indented`](SelectItem::indented) to nest under the header above them.
 
+use std::cell::Cell;
+
 use phux_config::keybind::ResolvedAction;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use super::widgets::{Modal, centered};
+use super::widgets::{Modal, centered, paint_scrollbar, scroll_into_view};
 use super::{OverlayCommand, RenderOverlay};
 use crate::render::Theme;
+
+/// Rows of the modal box that are *not* list rows: the two borders, the
+/// query line, the blank beneath it, and the footer's blank + text. The list
+/// viewport is whatever height is left over.
+const CHROME_ROWS: u16 = 6;
+
+/// Rows the selection moves per mouse-wheel detent, matching copy-mode's
+/// `WHEEL_SCROLL_LINES` so the wheel feels the same everywhere in the client.
+pub const WHEEL_SCROLL_ROWS: usize = 3;
 
 /// Whether a [`SelectItem`] is a selectable row or a non-selectable
 /// section header.
@@ -185,6 +210,20 @@ pub struct SelectList {
     /// default) makes the list a static snapshot — palette and pickers —
     /// that ignores every refresh.
     live_key: Option<&'static str>,
+    /// First visible row of the filtered list (an index into the filtered
+    /// indices) — the scroll offset.
+    ///
+    /// Interior-mutable because the window can only be resolved at paint
+    /// time, when the viewport height is finally known, and
+    /// [`RenderOverlay::render`] takes `&self`. This is the same bargain
+    /// ratatui's own `ListState::offset` makes; the offset is pure view
+    /// state, derived from `selected` on every paint, so nothing observable
+    /// depends on when it is written.
+    scroll: Cell<usize>,
+    /// Rows the list viewport held at the last paint, recorded so
+    /// `PageUp`/`PageDown` can move by a real screenful. Zero until the
+    /// first render (page keys then fall back to a single row).
+    page: Cell<usize>,
 }
 
 impl SelectList {
@@ -200,6 +239,8 @@ impl SelectList {
             selected: 0,
             theme: *theme,
             live_key: None,
+            scroll: Cell::new(0),
+            page: Cell::new(0),
         };
         // The first row may be a header (grouped pickers always open on
         // one); start the cursor on the first selectable row instead.
@@ -335,16 +376,76 @@ impl SelectList {
         }
     }
 
+    /// Move the selection down a screenful, saturating at the last
+    /// selectable row. Repeated single steps rather than an index jump, so
+    /// header-skipping and the bottom clamp stay in one place.
+    fn select_page_down(&mut self, indices: &[usize]) {
+        for _ in 0..self.page_rows() {
+            self.select_down(indices);
+        }
+    }
+
+    /// Move the selection up a screenful, saturating at the first selectable
+    /// row.
+    fn select_page_up(&mut self, indices: &[usize]) {
+        for _ in 0..self.page_rows() {
+            self.select_up(indices);
+        }
+    }
+
+    /// Rows in a page move: the last painted viewport height, or a single row
+    /// before the first paint (no viewport measured yet — better a small step
+    /// than a wild one).
+    fn page_rows(&self) -> usize {
+        self.page.get().max(1)
+    }
+
+    /// Jump to the first selectable row (Home).
+    fn select_first(&mut self, indices: &[usize]) {
+        self.selected = 0;
+        self.snap_to_selectable(indices);
+    }
+
+    /// Jump to the last selectable row (End). `snap_to_selectable` searches
+    /// backward once the forward search runs out, so a trailing header row
+    /// resolves to the item above it.
+    fn select_last(&mut self, indices: &[usize]) {
+        self.selected = indices.len().saturating_sub(1);
+        self.snap_to_selectable(indices);
+    }
+
     /// The modal rect: 60% of the viewport, min 30x10, clamped to the
     /// outer rect (like the help overlay, but a touch narrower).
     fn modal_area(outer: Rect) -> Rect {
         centered(outer, 6, 30, 10)
     }
 
-    /// Build the body lines: a query line, a separator, then the filtered
-    /// rows (selected row reverse-video). A dimmed notice replaces the
-    /// rows when nothing matches.
-    fn body_lines(&self, indices: &[usize], inner_width: u16) -> Vec<Line<'static>> {
+    /// Rows available to the list inside `modal_area`, once the borders, the
+    /// query line + its blank, and the footer + its blank are taken out.
+    const fn list_height(modal_area: Rect) -> usize {
+        modal_area.height.saturating_sub(CHROME_ROWS) as usize
+    }
+
+    /// The one-column scrollbar track: the modal's right border column,
+    /// spanning exactly the list rows (which start below the border, the
+    /// query line, and its blank).
+    fn scrollbar_track(modal_area: Rect) -> Rect {
+        Rect::new(
+            modal_area.x + modal_area.width.saturating_sub(1),
+            modal_area.y.saturating_add(3),
+            1,
+            u16::try_from(Self::list_height(modal_area)).unwrap_or(u16::MAX),
+        )
+    }
+
+    /// Build the body lines: a query line, a separator, then the *visible*
+    /// filtered rows (selected row reverse-video). A dimmed notice replaces
+    /// the rows when nothing matches.
+    ///
+    /// `window` is the slice of filtered indices that fits the viewport and
+    /// `offset` is where that slice starts in the filtered list, so a row's
+    /// absolute position — the thing `selected` indexes — is `offset + row`.
+    fn body_lines(&self, window: &[usize], offset: usize, inner_width: u16) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
         // Query line: a `> ` prompt, the text, and a reverse-video caret.
         lines.push(Line::from(vec![
@@ -354,7 +455,7 @@ impl SelectList {
         ]));
         lines.push(Line::from(""));
 
-        if indices.is_empty() {
+        if window.is_empty() {
             lines.push(Line::from(Span::styled(
                 "(no matches)".to_owned(),
                 Style::default().fg(self.theme.dim),
@@ -362,13 +463,13 @@ impl SelectList {
             return lines;
         }
 
-        for (row, &idx) in indices.iter().enumerate() {
+        for (row, &idx) in window.iter().enumerate() {
             let item = &self.items[idx];
             if item.is_header() {
                 lines.push(self.header_line(item));
                 continue;
             }
-            let selected = row == self.selected;
+            let selected = offset + row == self.selected;
             lines.push(self.item_line(item, selected, inner_width));
         }
         lines
@@ -437,10 +538,31 @@ impl RenderOverlay for SelectList {
         // Body width is the modal interior minus the 1-cell border on
         // each side.
         let inner_width = modal_area.width.saturating_sub(2);
-        let body = self.body_lines(&indices, inner_width);
+
+        // Window the rows to what actually fits, keeping the selection in
+        // view. Both are view state: recorded here (the only place the
+        // viewport height is known) for the next page-key press to use.
+        let height = Self::list_height(modal_area);
+        self.page.set(height);
+        let offset = scroll_into_view(self.scroll.get(), self.selected, indices.len(), height);
+        self.scroll.set(offset);
+        let window = indices
+            .get(offset..(offset + height).min(indices.len()))
+            .unwrap_or(&[]);
+
+        let body = self.body_lines(window, offset, inner_width);
         Modal::new(&self.theme, self.title.clone(), body)
             .footer("Enter select  ·  Esc cancel  ·  type to filter")
             .render_into(modal_area, buf);
+        // Over the border the modal just drew, so an overflowing list shows
+        // its extent and position instead of silently clipping.
+        paint_scrollbar(
+            buf,
+            Self::scrollbar_track(modal_area),
+            &self.theme,
+            indices.len(),
+            offset,
+        );
     }
 
     fn bounds(&self, area: Rect) -> Option<Rect> {
@@ -455,6 +577,32 @@ impl RenderOverlay for SelectList {
         }
         self.replace_items(items.to_vec());
         true
+    }
+
+    /// The wheel moves the *selection*, not the view on its own — the
+    /// viewport follows the selection ([`scroll_into_view`]), so scrolling
+    /// the box away from the cursor would only be undone on the next paint.
+    /// Moving the selection keeps the two in lockstep and leaves Enter
+    /// meaning what the user just scrolled to.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> OverlayCommand {
+        if mouse.action != MouseAction::Press {
+            return OverlayCommand::Stay;
+        }
+        let indices = self.filtered_indices();
+        match mouse.button {
+            MouseButton::Four => {
+                for _ in 0..WHEEL_SCROLL_ROWS {
+                    self.select_up(&indices);
+                }
+            }
+            MouseButton::Five => {
+                for _ in 0..WHEEL_SCROLL_ROWS {
+                    self.select_down(&indices);
+                }
+            }
+            _ => {}
+        }
+        OverlayCommand::Stay
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
@@ -499,6 +647,22 @@ impl RenderOverlay for SelectList {
             }
             PhysicalKey::ArrowUp => {
                 self.select_up(&indices);
+                OverlayCommand::Stay
+            }
+            PhysicalKey::PageDown => {
+                self.select_page_down(&indices);
+                OverlayCommand::Stay
+            }
+            PhysicalKey::PageUp => {
+                self.select_page_up(&indices);
+                OverlayCommand::Stay
+            }
+            PhysicalKey::Home => {
+                self.select_first(&indices);
+                OverlayCommand::Stay
+            }
+            PhysicalKey::End => {
+                self.select_last(&indices);
                 OverlayCommand::Stay
             }
             PhysicalKey::Backspace => {
@@ -903,6 +1067,241 @@ mod tests {
         sl.handle_key(&press(PhysicalKey::J, Some("j")));
         assert_eq!(sl.query, "dj");
         assert_eq!(sl.filtered_indices().len(), 0);
+    }
+
+    // ---------- phux-ep9s: scroll viewport ----------
+
+    /// A list of `n` rows labelled `item-0 ..= item-(n-1)`, long enough to
+    /// overflow any modal a test viewport can produce.
+    fn long_list(n: usize) -> SelectList {
+        let items = (0..n)
+            .map(|i| SelectItem::new(format!("item-{i}"), action(&format!("act-{i}"))))
+            .collect();
+        SelectList::new("command palette", items, &Theme::default())
+    }
+
+    /// Paint `sl` into a `w`x`h` viewport and flatten it to text.
+    fn render_to_string(sl: &SelectList, w: u16, h: u16) -> String {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        sl.render(area, &mut buf);
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The label of the row painted reverse-video — what the user sees as
+    /// selected. `None` when no row is highlighted anywhere on screen, which
+    /// is exactly the bug: the cursor walked off the bottom of the box.
+    fn painted_selection(sl: &SelectList, w: u16, h: u16) -> Option<String> {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        sl.render(area, &mut buf);
+        for y in 0..area.height {
+            // The query line's caret is reverse-video too; a *row* is a run of
+            // reversed cells carrying a label, so require some non-space text.
+            let mut row = String::new();
+            let mut reversed = false;
+            for x in 0..area.width {
+                let cell = &buf[(x, y)];
+                if cell.style().add_modifier.contains(Modifier::REVERSED) {
+                    reversed = true;
+                    row.push_str(cell.symbol());
+                }
+            }
+            let row = row.trim().to_owned();
+            if reversed && row.starts_with("item-") {
+                return Some(row.split_whitespace().next().unwrap_or_default().to_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn selection_stays_on_screen_when_navigating_past_the_viewport() {
+        // The reported bug (phux-ep9s): the palette painted every filtered row
+        // into a Paragraph that clipped at the modal's bottom edge, so walking
+        // the cursor down a long list marched it off-screen — no highlighted
+        // row anywhere, no way to tell where you were.
+        let mut sl = long_list(40);
+        // A 40x16 viewport ⇒ a 10-row modal ⇒ 4 visible rows. Step well past it.
+        for _ in 0..20 {
+            sl.handle_key(&press(PhysicalKey::ArrowDown, None));
+        }
+        assert_eq!(sl.selected, 20, "20 downs move the cursor 20 rows");
+        assert_eq!(
+            painted_selection(&sl, 40, 16).as_deref(),
+            Some("item-20"),
+            "the selected row must be painted inside the modal, not clipped away",
+        );
+    }
+
+    #[test]
+    fn the_viewport_scrolls_back_up_with_the_selection() {
+        let mut sl = long_list(40);
+        for _ in 0..20 {
+            sl.handle_key(&press(PhysicalKey::ArrowDown, None));
+        }
+        render_to_string(&sl, 40, 16);
+        assert!(
+            sl.scroll.get() > 0,
+            "the view scrolled to follow the cursor"
+        );
+        for _ in 0..20 {
+            sl.handle_key(&press(PhysicalKey::ArrowUp, None));
+        }
+        let text = render_to_string(&sl, 40, 16);
+        assert_eq!(sl.scroll.get(), 0, "returning to the top rewinds the view");
+        assert!(text.contains("item-0"), "first row visible again:\n{text}");
+    }
+
+    #[test]
+    fn an_overflowing_list_paints_a_scrollbar() {
+        // 4 rows visible out of 40 ⇒ the box must say so.
+        let sl = long_list(40);
+        let text = render_to_string(&sl, 40, 16);
+        assert!(
+            text.contains('█'),
+            "an overflowing list must paint a scrollbar thumb:\n{text}"
+        );
+        // A list that fits paints a plain border — no bar, no lie about extent.
+        let sl = long_list(3);
+        let text = render_to_string(&sl, 40, 16);
+        assert!(
+            !text.contains('█'),
+            "a list that fits must not paint a scrollbar:\n{text}"
+        );
+    }
+
+    #[test]
+    fn filtering_rewinds_the_viewport() {
+        // Scroll deep, then type a query that narrows the list to rows above
+        // the current offset. A stranded offset would paint a blank window.
+        let mut sl = long_list(40);
+        for _ in 0..30 {
+            sl.handle_key(&press(PhysicalKey::ArrowDown, None));
+        }
+        render_to_string(&sl, 40, 16);
+        assert!(sl.scroll.get() > 0);
+        // "item-7" is the only exact hit for the 7 at the end; whatever the
+        // filter keeps, it is a short list that must be visible from row 0.
+        for ch in ['i', 't', 'e', 'm', '-', '7'] {
+            sl.handle_key(&press(PhysicalKey::A, Some(&ch.to_string())));
+        }
+        let text = render_to_string(&sl, 40, 16);
+        assert_eq!(sl.scroll.get(), 0, "a narrowed list rewinds to the top");
+        assert!(text.contains("item-7"), "matches must be visible:\n{text}");
+    }
+
+    #[test]
+    fn page_keys_move_by_a_screenful() {
+        let mut sl = long_list(40);
+        // Before the first paint the viewport height is unknown; a page key
+        // then steps one row rather than guessing.
+        sl.handle_key(&press(PhysicalKey::PageDown, None));
+        assert_eq!(sl.selected, 1, "no measured viewport ⇒ a single-row step");
+        // After a paint (4 visible rows), a page is a real screenful.
+        render_to_string(&sl, 40, 16);
+        sl.handle_key(&press(PhysicalKey::PageDown, None));
+        assert_eq!(sl.selected, 5);
+        sl.handle_key(&press(PhysicalKey::PageUp, None));
+        assert_eq!(sl.selected, 1);
+        // And both saturate rather than wrapping.
+        for _ in 0..40 {
+            sl.handle_key(&press(PhysicalKey::PageUp, None));
+        }
+        assert_eq!(sl.selected, 0);
+        for _ in 0..40 {
+            sl.handle_key(&press(PhysicalKey::PageDown, None));
+        }
+        assert_eq!(sl.selected, 39);
+    }
+
+    #[test]
+    fn home_and_end_jump_to_the_ends() {
+        let mut sl = long_list(40);
+        sl.handle_key(&press(PhysicalKey::End, None));
+        assert_eq!(sl.selected, 39);
+        assert_eq!(
+            painted_selection(&sl, 40, 16).as_deref(),
+            Some("item-39"),
+            "End must land the last row inside the viewport",
+        );
+        sl.handle_key(&press(PhysicalKey::Home, None));
+        assert_eq!(sl.selected, 0);
+    }
+
+    #[test]
+    fn end_skips_a_trailing_header() {
+        // The window picker's grouped rows can end on a header (a session with
+        // no windows yet). End must land on the last *selectable* row.
+        let items = vec![
+            SelectItem::new("only-item", action("only")),
+            SelectItem::header("Empty session"),
+        ];
+        let mut sl = SelectList::new("picker", items, &Theme::default());
+        sl.handle_key(&press(PhysicalKey::End, None));
+        let cmd = sl.handle_key(&press(PhysicalKey::Enter, None));
+        let OverlayCommand::Commit(a) = cmd else {
+            panic!("End must select a committable row, got {cmd:?}");
+        };
+        assert_eq!(a.action, "only");
+    }
+
+    #[test]
+    fn wheel_moves_the_selection() {
+        fn wheel(button: MouseButton) -> MouseEvent {
+            MouseEvent {
+                action: MouseAction::Press,
+                button,
+                mods: ModSet::empty(),
+                x: 0.0,
+                y: 0.0,
+            }
+        }
+        let mut sl = long_list(40);
+        assert_eq!(
+            sl.handle_mouse(&wheel(MouseButton::Five)),
+            OverlayCommand::Stay
+        );
+        assert_eq!(
+            sl.selected, WHEEL_SCROLL_ROWS,
+            "wheel-down advances a detent"
+        );
+        sl.handle_mouse(&wheel(MouseButton::Four));
+        assert_eq!(sl.selected, 0, "wheel-up rewinds it");
+        // Saturates at the top instead of underflowing.
+        sl.handle_mouse(&wheel(MouseButton::Four));
+        assert_eq!(sl.selected, 0);
+    }
+
+    #[test]
+    fn scrolled_list_render_is_stable() {
+        // Pin the painted mid-scroll box: a windowed row set, the selected row
+        // reverse-video inside it, and the scrollbar thumb sitting away from
+        // both ends of the border.
+        let mut sl = long_list(24);
+        for _ in 0..10 {
+            sl.handle_key(&press(PhysicalKey::ArrowDown, None));
+        }
+        let area = Rect::new(0, 0, 44, 16);
+        let mut buf = Buffer::empty(area);
+        sl.render(area, &mut buf);
+        let mut out = String::new();
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push_str(row.trim_end());
+            out.push('\n');
+        }
+        insta::assert_snapshot!(out);
     }
 
     // ---------- phux-foz.7: live refresh + attention rows ----------

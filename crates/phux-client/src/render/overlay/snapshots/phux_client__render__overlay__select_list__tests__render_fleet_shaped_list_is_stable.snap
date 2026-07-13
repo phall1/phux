@@ -7,10 +7,10 @@ expression: out
           ┌──────── agent fleet ────────┐
           │>                            │
           │                             │
-          │work (current)               │
-          │  ! 0:main.0 reviewer [claude│
-          │  * 0:main.1 builder working │
+          │work (current)               █
+          │  ! 0:main.0 reviewer [claude█
+          │  * 0:main.1 builder working █
           │scratch                      │
-          │  switch to this session 2 wi│
           │                             │
+          │Enter select  ·  Esc cancel  │
           └─────────────────────────────┘
