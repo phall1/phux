@@ -643,11 +643,21 @@ impl ServerRuntime {
                 // pre-seeds its single session instead (the `else` branch).
                 if let Some(blob) = resume_blob {
                     match state.with_mut(|s| s.rebuild_from_blob(&blob)) {
-                        Ok(()) => info!(
-                            sessions = blob.sessions.len(),
-                            panes = blob.panes.len(),
-                            "resumed session tree from upgrade blob"
-                        ),
+                        Ok(exit_watchers) => {
+                            for (pane, exit_notify) in exit_watchers {
+                                spawn_terminal_exit_watcher(
+                                    state.clone(),
+                                    pane,
+                                    Some(exit_notify),
+                                    root_token.clone(),
+                                );
+                            }
+                            info!(
+                                sessions = blob.sessions.len(),
+                                panes = blob.panes.len(),
+                                "resumed session tree from upgrade blob"
+                            );
+                        }
                         Err(err) => {
                             error!(error = %err, "failed to rebuild state from upgrade blob");
                         }
