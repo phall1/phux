@@ -284,6 +284,85 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
     let _ = end_of_frame_cursor(out, final_cursor, fallback_origin);
 }
 
+/// Repaint ONLY the chrome — the sidebar strip and the status bar — in place.
+///
+/// The cheap counterpart to [`paint_full_frame`], and the reason a live
+/// agent-state detector is not a regression. Every agent-state change (and
+/// every other `chrome_dirty` event) used to route to `paint_full_frame`,
+/// which leads with `ESC[2J` and force-redraws every visible pane. That was
+/// survivable only because the `phux.agent/v1` state never actually changed;
+/// the moment a server-side detector starts publishing transitions, the same
+/// path becomes a full-screen strobe. This function is what the
+/// `RepaintLevel::Chrome` drain calls instead.
+///
+/// The contract, mirroring the one [`paint_bar_after_pane`] already proves:
+///
+/// * NO `ED2` — the viewport is never cleared, so pane interiors keep whatever
+///   the last content paint left on screen.
+/// * NO pane render — not even the focused pane. `panes` is taken by shared
+///   reference precisely so this is unrepresentable; we only READ the focused
+///   renderer's cached `last_cursor` so the frame can end where it began.
+/// * NO cache invalidation. [`paint_full_frame`] calls
+///   `SidebarPainter::invalidate` only because its own `ED2` physically wiped
+///   the strip's cells. Invalidating here would re-emit the entire strip on
+///   every tick and throw away the zero-byte no-op the painter's content cache
+///   exists to provide — an unchanged strip must cost nothing.
+///
+/// Order is load-bearing: the sidebar paint moves the host cursor into the
+/// strip, so [`paint_bar_after_pane`] runs last and its
+/// [`end_of_frame_cursor`] puts the cursor back at the focused pane's
+/// authoritative position (ADR-0020 invariant 4 / ADR-0029).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors paint_full_frame's chrome context minus the pane map's mutability; same arg-list refactor follow-up"
+)]
+pub(super) fn paint_chrome_in_place<W: super::RenderSink>(
+    out: &mut W,
+    layout_state: &LayoutState,
+    panes: &HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    viewport_dims: (u16, u16),
+    status_bar: Option<&mut StatusBarPainter>,
+    sidebar: Option<SidebarReservation>,
+    sidebar_painter: Option<&mut crate::render::chrome::sidebar::SidebarPainter>,
+    session_name: &str,
+) {
+    let _paint = tracing::debug_span!(
+        "paint_chrome_in_place",
+        cols = viewport_dims.0,
+        rows = viewport_dims.1,
+    )
+    .entered();
+    let bar = status_bar.as_ref().map(|p| p.position());
+    let content = content_rect(viewport_dims, bar, sidebar);
+    let multi = super::multi_pane::compute_layout_in(layout_state, content, viewport_dims);
+    // The focused pane's LAST authoritative cursor — read, never re-derived by
+    // a render. `None` (hidden / not yet rendered) falls back to the pane's
+    // rect origin, hidden, exactly as every other paint tail does.
+    let restore = focused_pane
+        .and_then(|fid| panes.get(fid))
+        .and_then(|slot| slot.renderer.last_cursor());
+    let fallback = focused_pane
+        .and_then(|fid| multi.rects.get(fid))
+        .map(|r| (r.x, r.y));
+    if let (Some(res), Some(painter)) = (sidebar, sidebar_painter) {
+        let _ = painter.paint(out, sidebar_rect(viewport_dims, res));
+    }
+    // `bar_row_clobbered = false`: nothing cleared the bar row, so the
+    // painter's cache decides. Ends in `end_of_frame_cursor` — the sole
+    // CUP + DECTCEM + flush authority.
+    paint_bar_after_pane(
+        status_bar,
+        out,
+        viewport_dims,
+        sidebar,
+        session_name,
+        restore,
+        fallback,
+        false,
+    );
+}
+
 /// phux-nz4.5: shared helper invoked after every pane render so the
 /// status row is restored on top of whatever VT the pane renderer just
 /// wrote. No-op when there is no painter or no live viewport.
@@ -988,6 +1067,135 @@ mod tests {
         assert!(
             second_s.contains("\x1b[24;1H"),
             "clobbered bar must re-emit its row even when unchanged; out = {second_s:?}"
+        );
+    }
+
+    /// Build a left-docked sidebar painter primed with one window, plus its
+    /// reservation, for the in-place chrome tests.
+    fn build_sidebar() -> (
+        crate::render::chrome::sidebar::SidebarPainter,
+        SidebarReservation,
+    ) {
+        let mut painter =
+            crate::render::chrome::sidebar::SidebarPainter::new(crate::render::Theme::default());
+        painter.set_windows(vec![phux_config::widget::WindowInfo {
+            name: "editor".to_owned(),
+            active: true,
+            zoomed: false,
+            attention: false,
+            branch: None,
+        }]);
+        (
+            painter,
+            SidebarReservation {
+                edge: SidebarEdge::Left,
+                width: 20,
+            },
+        )
+    }
+
+    /// THE anti-regression contract for the agent-state detector: the in-place
+    /// chrome paint must never emit `ED2` and never re-render a pane interior.
+    /// Routing the (now live) `agent_meta_changed` arm at `paint_full_frame`
+    /// would clear the screen on every state transition — a full-screen strobe.
+    #[test]
+    fn paint_chrome_in_place_never_clears_the_viewport_or_repaints_a_pane() {
+        let id = TerminalId::local(1);
+        let layout = LayoutState {
+            tree: None,
+            focus: Some(id.clone()),
+        };
+        let mut slot = PaneSlot::new_with_size(60, 23).expect("slot");
+        // Pane content that a full-frame repaint WOULD re-emit.
+        slot.terminal.vt_write(b"PANEBODY");
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), slot);
+
+        let mut bar = build_painter();
+        let (mut sidebar_painter, res) = build_sidebar();
+        let mut out: Vec<u8> = Vec::new();
+        paint_chrome_in_place(
+            &mut out,
+            &layout,
+            &panes,
+            Some(&id),
+            (80, 24),
+            Some(&mut bar),
+            Some(res),
+            Some(&mut sidebar_painter),
+            "demo",
+        );
+        let s = String::from_utf8_lossy(&out);
+        assert!(
+            !s.contains("\x1b[2J"),
+            "in-place chrome must never clear the viewport; out = {s:?}"
+        );
+        assert!(
+            !s.contains("PANEBODY"),
+            "in-place chrome must not re-render a pane interior; out = {s:?}"
+        );
+        // It still ends with the one composite cursor authority (ADR-0029).
+        assert!(
+            s.contains("\x1b[?25h") || s.contains("\x1b[?25l"),
+            "frame must end with an explicit cursor visibility; out = {s:?}"
+        );
+        // And the strip itself painted: its second row CUPs to column 1.
+        assert!(
+            s.contains("\x1b[2;1H"),
+            "sidebar strip rows must be emitted; out = {s:?}"
+        );
+    }
+
+    /// The painter's content cache must survive the in-place path: an
+    /// unchanged strip is a ZERO-byte no-op. (`paint_full_frame` invalidates
+    /// only because its own ED2 wiped the cells.) With a detector ticking at
+    /// up to 10 Hz per pane, re-emitting the whole strip on every unchanged
+    /// chrome raise is exactly the cost this path exists to avoid.
+    #[test]
+    fn paint_chrome_in_place_keeps_the_sidebar_cache() {
+        let id = TerminalId::local(1);
+        let layout = LayoutState {
+            tree: None,
+            focus: Some(id.clone()),
+        };
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), PaneSlot::new_with_size(60, 23).expect("slot"));
+        let mut bar = build_painter();
+        let (mut sidebar_painter, res) = build_sidebar();
+
+        let mut first: Vec<u8> = Vec::new();
+        paint_chrome_in_place(
+            &mut first,
+            &layout,
+            &panes,
+            Some(&id),
+            (80, 24),
+            Some(&mut bar),
+            Some(res),
+            Some(&mut sidebar_painter),
+            "demo",
+        );
+        assert!(
+            String::from_utf8_lossy(&first).contains("\x1b[2;1H"),
+            "first paint primes the strip"
+        );
+
+        let mut second: Vec<u8> = Vec::new();
+        paint_chrome_in_place(
+            &mut second,
+            &layout,
+            &panes,
+            Some(&id),
+            (80, 24),
+            Some(&mut bar),
+            Some(res),
+            Some(&mut sidebar_painter),
+            "demo",
+        );
+        let s = String::from_utf8_lossy(&second);
+        assert!(
+            !s.contains("\x1b[2;1H"),
+            "unchanged strip must not re-emit its rows; out = {s:?}"
         );
     }
 

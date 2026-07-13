@@ -2282,6 +2282,7 @@ dependencies = [
  "portable-pty-adopt",
  "quinn",
  "rcgen 0.13.2",
+ "regex",
  "rustix 0.38.44",
  "rustls",
  "serde",

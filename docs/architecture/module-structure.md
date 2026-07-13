@@ -80,6 +80,18 @@ src/
                         graphemes + cursor restore + DECSCUSR)
   downsample.rs       — per-client capability rewrite of outbound VT bytes
                         (truecolor → 256/16, OSC 8 / image / KIP gating)
+  agent_detect/       — level-triggered per-terminal agent-state detector
+                        (ADR-0046). mod.rs is the pure state machine (adaptive
+                        tick, hysteresis, edge-filtered publish); regions.rs
+                        slices the live screen; rules.rs loads + compiles the
+                        TOML manifests; identify.rs names the agent from the
+                        PTY's foreground process; record.rs is the
+                        phux.agent/v1 JSON shape
+  agent_state.rs      — arbitration between an explicit SET_METADATA and the
+                        detector's writes (ADR-0046: a declared `state` wins;
+                        the detector only deletes what it wrote)
+  proc_query.rs       — best-effort process introspection (foreground pgid of
+                        a PTY, argv of a pid); sibling of cwd_query.rs
   id_bridge.rs        — core SessionId <-> wire SessionId (u32)
   telemetry.rs        — tracing setup; opt-in tokio-console behind a feature
   input/              — server-side encoders bridging wire input -> PTY bytes;

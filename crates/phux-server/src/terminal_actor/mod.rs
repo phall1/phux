@@ -47,6 +47,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
+use crate::agent_detect::{AgentDetectEvent, AgentDetector, DetectOutcome};
 use crate::grid::{ConsumerReference, SnapshotBytes, SnapshotSynthesizer};
 use crate::input::paste::PasteOutcome;
 use crate::input::{
@@ -455,7 +456,30 @@ pub struct TerminalActor {
     event_sink: Option<mpsc::Sender<AgentEvent>>,
     /// Last terminal title observed (OSC 0 / OSC 2), for change detection.
     /// `title_changed` fires only when the polled title differs from this.
+    ///
+    /// Refreshed UNCONDITIONALLY by [`Self::refresh_title`] on every PTY
+    /// chunk — including for a pane nobody is watching — because the
+    /// agent-state detector reads it on its own timer and the OSC title is
+    /// its highest-priority signal (ADR-0046 §B).
     last_title: String,
+    /// Level-triggered agent-state detector (ADR-0046). `Some` only for a
+    /// PTY-backed actor with a wired `agent_state_sink` and a non-empty rule
+    /// set; constructed in [`Self::run`], so no existing constructor or test
+    /// actor grows one.
+    agent_detect: Option<crate::agent_detect::AgentDetector>,
+    /// Sink for edge-filtered detector outputs. Drained by
+    /// `runtime::client::spawn_agent_state_drain`, which owns `ServerState`
+    /// and performs the arbitration + `metadata_set`.
+    agent_state_sink: Option<mpsc::Sender<AgentDetectEvent>>,
+    /// Grid-mutation flag scoped to the DETECTOR's tick (100-500 ms).
+    ///
+    /// Deliberately distinct from `terminal_dirty_since_tick`, which
+    /// `tick_emit` clears every ~30 ms: a detector reading that flag would
+    /// see `false` on nearly every tick and its "skip the scan when nothing
+    /// changed" fast path would skip *every* scan, so it would never see the
+    /// screen at all. Set at the same three mutation sites, cleared by
+    /// [`Self::detect_tick`].
+    agent_dirty_since_detect: bool,
     /// Last in-pane "ask" marker observed, for coalescing `AgentEvent::Asked`.
     ///
     /// The v1 ask-trigger is OSC-driven: an in-pane agent signals a pending
@@ -867,6 +891,9 @@ impl TerminalActor {
             token,
             event_sink: None,
             last_title: String::new(),
+            agent_detect: None,
+            agent_state_sink: None,
+            agent_dirty_since_detect: false,
             last_ask: None,
             in_output_burst: false,
             event_subscribers: RefCell::new(Vec::new()),
@@ -1393,6 +1420,106 @@ impl TerminalActor {
         }
     }
 
+    /// Wire the agent-state detector's sink (ADR-0046). The actor's detector
+    /// timer emits edge-filtered [`AgentDetectEvent`]s here; the runtime's
+    /// `spawn_agent_state_drain` owns `ServerState` and performs the
+    /// arbitration + `metadata_set`. Called by the spawn path before the
+    /// actor is handed to `spawn_local`, exactly like [`Self::set_event_sink`].
+    ///
+    /// `pub(crate)`, unlike `set_event_sink`: `AgentEvent` is a wire type, but
+    /// [`AgentDetectEvent`] is deliberately server-internal — the detector
+    /// introduces no wire surface.
+    pub(crate) fn set_agent_state_sink(&mut self, sink: mpsc::Sender<AgentDetectEvent>) {
+        self.agent_state_sink = Some(sink);
+    }
+
+    /// Best-effort detector emission. `try_send`: a full sink drops the
+    /// event rather than stalling the actor. Safe to drop — the detector is
+    /// level-triggered, so the next tick re-derives and re-publishes.
+    fn emit_agent_state(&self, event: AgentDetectEvent) {
+        if let Some(sink) = self.agent_state_sink.as_ref() {
+            let _ = sink.try_send(event);
+        }
+    }
+
+    /// Sync `last_title` with libghostty's tracked OSC 0/2 title. Returns
+    /// `true` on a real change.
+    ///
+    /// The `RefCell` borrow of `self.terminal` MUST be released before
+    /// `self.last_title` is written, hence the two-step. No allocation on the
+    /// steady path: the common case compares and returns `false`.
+    fn refresh_title(&mut self) -> bool {
+        let next: Option<String> = {
+            let terminal = self.terminal.borrow();
+            let current = terminal.title().unwrap_or("");
+            (current != self.last_title).then(|| current.to_owned())
+        }; // borrow released here — required
+        match next {
+            Some(title) => {
+                self.last_title = title;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Right-trimmed live-viewport rows, top to bottom. The detector's ONLY
+    /// grid read.
+    ///
+    /// Routes through the synthesizer's fresh-`RenderState` projection
+    /// (`scrollback = None`, so the LIVE screen and never history). That
+    /// projection deliberately allocates its own `RenderState` per call
+    /// rather than reusing the pooled one, precisely so a read like this does
+    /// not consume the shared libghostty dirty bits the per-consumer
+    /// state-sync tick needs (the phux-ia4 bug). Do not "optimize" it.
+    fn viewport_lines(&self) -> Option<Vec<String>> {
+        let terminal = self.terminal.borrow();
+        let synth = self.synth.borrow();
+        match synth.screen_state_with_scrollback(&terminal, 0, None, false) {
+            Ok(state) => Some(state.lines),
+            Err(err) => {
+                trace!(error = %err, "agent-detect: viewport read failed; skipping tick");
+                None
+            }
+        }
+    }
+
+    /// One agent-detector tick (ADR-0046). Returns the interval the caller
+    /// should re-arm the detector timer at.
+    ///
+    /// The detector is taken out of its `Option` for the duration: it needs
+    /// `&mut` while `viewport_lines` needs `&self`, and the borrow checker
+    /// will not have both. Put back before returning, always.
+    fn detect_tick(&mut self) -> Option<std::time::Duration> {
+        let mut detector = self.agent_detect.take()?;
+        let now = std::time::Instant::now();
+        // The detector's OWN dirty flag, not `terminal_dirty_since_tick`:
+        // that one is cleared every ~30 ms by `tick_emit`, so a detector
+        // ticking at 100-500 ms would observe it as `false` almost always and
+        // skip every single scan.
+        let dirty = std::mem::replace(&mut self.agent_dirty_since_detect, false);
+        let screen = detector
+            .wants_screen(dirty)
+            .then(|| self.viewport_lines())
+            .flatten();
+        let master_fd = self
+            .pty
+            .as_ref()
+            .and_then(|p| p.master.lock().ok().and_then(|m| m.as_raw_fd()));
+        let outcome = detector.tick(now, master_fd, &self.last_title, screen.as_deref());
+        let next = detector.interval();
+        self.agent_detect = Some(detector);
+
+        match outcome {
+            DetectOutcome::Quiet => {}
+            DetectOutcome::Publish(report) => {
+                self.emit_agent_state(AgentDetectEvent::State(report));
+            }
+            DetectOutcome::Retract => self.emit_agent_state(AgentDetectEvent::Retract),
+        }
+        Some(next)
+    }
+
     /// Source agent events from a freshly-applied PTY chunk (phux-y2t),
     /// called right after `vt_write`. Sources, in order:
     ///
@@ -1415,6 +1542,15 @@ impl TerminalActor {
     /// `D` mark is also a prompt boundary: the pane's kernel cwd is
     /// re-queried there and a change emits `cwd_changed`.
     fn source_events_from_chunk(&mut self, chunk: &[u8]) {
+        // UNCONDITIONAL, and deliberately ahead of the no-listener guard
+        // below (ADR-0046). The agent-state detector reads `last_title` on
+        // its own timer, and the OSC title is its highest-priority signal —
+        // but this function used to return early for a pane nobody was
+        // watching, which left `last_title` stale forever for exactly the
+        // panes the sidebar most wants to describe. Refreshing here keeps one
+        // title parser (libghostty's) and one mirror. Costs one FFI read plus
+        // one compare per chunk, and allocates only when the title changes.
+        let title_changed = self.refresh_title();
         if self.event_sink.is_none() && self.event_subscribers.borrow().is_empty() {
             return;
         }
@@ -1440,14 +1576,11 @@ impl TerminalActor {
         if chunk.contains(&0x07) {
             self.emit_event(AgentEvent::Bell);
         }
-        // Title: poll libghostty's tracked title and emit on change. The
-        // borrow is released before `emit_event` (which doesn't touch the
-        // terminal) to keep the RefCell discipline simple.
-        let current_title = self.terminal.borrow().title().unwrap_or("").to_owned();
-        if current_title != self.last_title {
-            self.last_title.clone_from(&current_title);
+        // Title: `refresh_title` (above) already synced the mirror; emit on a
+        // real change.
+        if title_changed {
             self.emit_event(AgentEvent::TitleChanged {
-                title: current_title.clone(),
+                title: self.last_title.clone(),
             });
         }
         // Asked: source a pending human-answerable question from a `phux-ask`
@@ -1456,7 +1589,7 @@ impl TerminalActor {
         // changes; retitling away from a `phux-ask` title clears the ask so
         // the next distinct one fires. The v1 trigger is OSC-driven; full
         // agent-state detection (manifests / hooks) is phux-2sl6.4.
-        let current_ask = AskMarker::parse(&current_title);
+        let current_ask = AskMarker::parse(&self.last_title);
         if current_ask != self.last_ask {
             if let Some(ask) = current_ask.as_ref() {
                 self.emit_event(AgentEvent::Asked {
@@ -1742,6 +1875,7 @@ impl TerminalActor {
     pub fn vt_write_for_test(&mut self, bytes: &[u8]) {
         self.terminal.borrow_mut().vt_write(bytes);
         self.terminal_dirty_since_tick = true;
+        self.agent_dirty_since_detect = true;
     }
 
     /// Test-only: install in-memory PTY channels on a no-PTY actor so a
@@ -1928,8 +2062,11 @@ impl TerminalActor {
             cell_height: u32::from(cell_h),
         });
         // A resize reflows the grid: every consumer reference is rebuilt
-        // on the next diff, so force the next tick to walk (phux-4l0).
+        // on the next diff, so force the next tick to walk (phux-4l0), and
+        // force the next detector tick to re-scan (ADR-0046) — a reflow can
+        // move the prompt box, which is a region the rules depend on.
         self.terminal_dirty_since_tick = true;
+        self.agent_dirty_since_detect = true;
         if let Some(pty) = &self.pty {
             // The kernel `winsize` pixel fields are the whole text area;
             // saturate rather than wrap if an enormous grid on a dense
@@ -2297,6 +2434,21 @@ impl TerminalActor {
         // tick before any other branch has a chance to react.
         let _ = tick.tick().await;
 
+        // Agent-state detector (ADR-0046). Constructed HERE, not in `build`,
+        // for two reasons: `started` then anchors the startup grace window at
+        // the moment the child actually begins painting, and no existing
+        // constructor or test actor grows a detector it never asked for. Only
+        // a PTY-backed actor with a wired sink and a non-empty rule set gets
+        // one — everything else pays exactly nothing.
+        let rules = crate::agent_detect::rules::global();
+        if self.pty.is_some() && self.agent_state_sink.is_some() && !rules.is_empty() {
+            self.agent_detect = Some(AgentDetector::new(rules, std::time::Instant::now()));
+        }
+        let mut detect_interval = crate::agent_detect::TICK_UNIDENTIFIED;
+        let mut detect_tick = tokio::time::interval(detect_interval);
+        detect_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let _ = detect_tick.tick().await;
+
         // phux-8v1 drag fix: debounce timer for the post-resize client
         // resync. (Re)armed on each resync-requesting resize; when it
         // fires we broadcast ONE snapshot at the settled size. Init far
@@ -2426,8 +2578,10 @@ impl TerminalActor {
                             self.terminal.borrow_mut().vt_write(&payload);
                             self.answer_color_queries(&payload);
                             // The grid changed: let the next tick walk
-                            // the rows (phux-4l0 idle short-circuit).
+                            // the rows (phux-4l0 idle short-circuit) and let
+                            // the next detector tick re-scan (ADR-0046).
                             self.terminal_dirty_since_tick = true;
+                            self.agent_dirty_since_detect = true;
                             // phux-y2t: source agent events (bell, title,
                             // dirty) from the just-applied bytes for any
                             // event-stream subscriber. No-op without a sink.
@@ -2698,6 +2852,21 @@ impl TerminalActor {
                     // reads. No-op without an event sink.
                     self.maybe_emit_idle();
                     self.tick_emit();
+                }
+
+                // Agent-state detector (ADR-0046). This interval is the SOLE
+                // driver: PTY bytes deliberately do NOT wake it. A chatty
+                // agent spewing megabytes must cost zero extra detector work
+                // — the whole design is a periodic re-derivation, not a
+                // reaction to output. The cadence is adaptive (500 ms while
+                // unidentified, 300 ms once identified, 100 ms while
+                // confirming a working -> idle transition) and is re-armed
+                // through the existing `rearm_tick`, whose deadband keeps a
+                // steady cadence from churning the scheduler.
+                _ = detect_tick.tick(), if self.agent_detect.is_some() => {
+                    if let Some(next) = self.detect_tick() {
+                        Self::rearm_tick(&mut detect_tick, &mut detect_interval, next);
+                    }
                 }
 
                 else => break,

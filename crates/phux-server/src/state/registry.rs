@@ -63,6 +63,7 @@ impl ServerState {
             client_layers: HashMap::new(),
             event_subscriptions: HashMap::new(),
             agent_asked: crate::agent_asked::AskedDetector::default(),
+            agent_records: crate::agent_state::AgentRecordArbiter::default(),
             attach_create_seeds_pty: false,
             attach_create_seed_command: None,
             history_limit: phux_config::DefaultsCfg::default().history_limit,
@@ -781,6 +782,18 @@ impl ServerState {
         self.agent_asked.current(terminal)
     }
 
+    /// Read the `phux.agent/v1` record arbiter (ADR-0046 §E).
+    pub(crate) const fn agent_records(&self) -> &crate::agent_state::AgentRecordArbiter {
+        &self.agent_records
+    }
+
+    /// Mutate the `phux.agent/v1` record arbiter (ADR-0046 §E).
+    pub(crate) const fn agent_records_mut(
+        &mut self,
+    ) -> &mut crate::agent_state::AgentRecordArbiter {
+        &mut self.agent_records
+    }
+
     /// Whether any client has ever attached (arms the phux-60s self-exit).
     /// See the `has_served_client` field documentation for the rationale.
     #[must_use]
@@ -864,6 +877,10 @@ impl ServerState {
         if let Some(wire) = self.terminal_wire_forward.remove(&pane) {
             self.terminal_wire_reverse.remove(&wire);
             self.metadata.forget_terminal(&wire);
+            // The record died with the per-Terminal metadata scope; the
+            // arbiter's bookkeeping about who owned it must not outlive it,
+            // or a recycled wire id would inherit a stale declaration.
+            self.agent_records.forget(&wire);
         }
     }
 
