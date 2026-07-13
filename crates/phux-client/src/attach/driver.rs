@@ -1961,10 +1961,49 @@ async fn main_loop<W: super::RenderSink>(
         // site. A later agent-state change on an unfocused pane re-arms the
         // bit (see `server_frame::note_agent_change`), which is what lets a
         // background agent's `done` climb back above the working ones.
-        if let Some(fid) = focused_pane.as_ref()
-            && let Some(slot) = panes.get_mut(fid)
-        {
-            slot.seen = true;
+        //
+        // The FLIP is a chrome trigger, not a silent side effect. The focus
+        // action that made this pane focused ran in the PREVIOUS iteration, and
+        // it recomputed the chrome while `seen` was still false — so the strip
+        // it painted still carries the filled "look at me" diamond, bold,
+        // pinned above every working agent, about the very pane the user is now
+        // looking at. Nothing else recomputes `agent_entries` (the status tick
+        // paints only the bar), so without this the row keeps lying until some
+        // unrelated chrome event happens to fire — indefinitely, in a
+        // single-agent session. That defeats the ladder's central promise:
+        // visiting a pane demotes it.
+        if mark_focused_seen(&mut panes, focused_pane.as_ref()) {
+            let chrome_changed = refresh_window_chrome(
+                status_bar.as_mut(),
+                &mut sidebar_painter,
+                &workspace,
+                &panes,
+                focused_pane.as_ref(),
+                zoomed.as_ref(),
+                own_client_id,
+                &agent_meta,
+                &mut vcs,
+            );
+            // ADR-0029: demoting a ladder row touches no pane interior, so this
+            // is an in-place CHROME paint, never a full-frame clear. Gated on
+            // the painter's own change report, so a focus change that moves no
+            // agent row costs zero bytes.
+            if chrome_changed
+                && !overlays.is_active()
+                && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
+            {
+                paint_chrome_in_place(
+                    out,
+                    ls,
+                    &panes,
+                    focused_pane.as_ref(),
+                    viewport_dims,
+                    status_bar.as_mut(),
+                    sidebar,
+                    Some(&mut sidebar_painter),
+                    &session_name,
+                );
+            }
         }
         let want_capture =
             desired_mouse_capture(mouse_capture_cfg, focused_pane.as_ref(), &mouse_optout);
@@ -2348,26 +2387,13 @@ async fn main_loop<W: super::RenderSink>(
                                         )
                                         .await?;
                                     }
-                                    refresh_fleet_if_open(
-                                        out,
-                                        &mut overlays,
-                                        &workspace,
-                                        &mut panes,
-                                        focused_pane.as_ref(),
-                                        zoomed.as_ref(),
-                                        viewport_dims,
-                                        status_bar.as_mut(),
-                                        sidebar,
-                                        &mut sidebar_painter,
-                                        &session_name,
-                                        &theme,
-                                        &sessions,
-                                        focused_session,
-                                        &agent_meta.records,
-                                        &mut vcs,
-                                        &foreign_layouts,
-                                        &foreign_agents,
-                                    );
+                                    // ADR-0029 §2: raise, drain once (below the
+                                    // loop). A peer's layout reply arrives with
+                                    // one agent-record reply per foreign pane
+                                    // right behind it; refreshing inline would
+                                    // re-project (and repaint) the dashboard
+                                    // once per reply.
+                                    repaint.raise_fleet();
                                 }
                                 continue;
                             }
@@ -2384,26 +2410,7 @@ async fn main_loop<W: super::RenderSink>(
                                         id,
                                         value.as_deref(),
                                     );
-                                    refresh_fleet_if_open(
-                                        out,
-                                        &mut overlays,
-                                        &workspace,
-                                        &mut panes,
-                                        focused_pane.as_ref(),
-                                        zoomed.as_ref(),
-                                        viewport_dims,
-                                        status_bar.as_mut(),
-                                        sidebar,
-                                        &mut sidebar_painter,
-                                        &session_name,
-                                        &theme,
-                                        &sessions,
-                                        focused_session,
-                                        &agent_meta.records,
-                                        &mut vcs,
-                                        &foreign_layouts,
-                                        &foreign_agents,
-                                    );
+                                    repaint.raise_fleet();
                                 }
                                 continue;
                             }
@@ -2754,12 +2761,34 @@ async fn main_loop<W: super::RenderSink>(
                         // projection — while it is open, a frame that
                         // changed fleet-projected state (an agent record,
                         // an ADR-0035 Asked, a pane spawn/close, a layout
-                        // or session-graph change) rebuilds its rows in
-                        // place and repaints the overlay layer. Push, not
-                        // poll: nothing runs when no such frame lands, and
-                        // `refresh_items` is a no-op unless a live fleet
-                        // list is actually in the overlay stack.
+                        // or session-graph change) rebuilds its rows and
+                        // repaints the overlay layer. Push, not poll:
+                        // nothing runs when no such frame lands.
+                        //
+                        // RAISED, not called: `refresh_fleet_if_open` repaints
+                        // the overlay over a `paint_full_frame` base, so a call
+                        // per frame is an `ESC[2J` per frame. Nine panes
+                        // publishing an agent-state transition coalesce into one
+                        // batch, and this arm used to fire nine times inside it —
+                        // nine full-screen clears in one iteration, in exactly
+                        // the view that exists for watching agents. The
+                        // accumulator collapses them into ONE refresh at the
+                        // drain below.
                         if fleet_dirty {
+                            repaint.raise_fleet();
+                        }
+                        }
+                        // ADR-0029 §2: the ONE drain. Every loop-level repaint
+                        // trigger in this batch has raised; the highest level
+                        // wins and paints exactly once. `Chrome` repaints the
+                        // sidebar strip + status bar in place (no ED2, no pane
+                        // re-render); `Full` clears and recomposites because
+                        // the pane rects moved under us.
+                        let drained = repaint.drain();
+                        // The overlay half of the same drain. A no-op unless a
+                        // live fleet list is actually in the overlay stack, so
+                        // the raise costs nothing when the dashboard is closed.
+                        if drained.fleet_dirty {
                             refresh_fleet_if_open(
                                 out,
                                 &mut overlays,
@@ -2781,18 +2810,10 @@ async fn main_loop<W: super::RenderSink>(
                                 &foreign_agents,
                             );
                         }
-                        }
-                        // ADR-0029 §2: the ONE drain. Every loop-level repaint
-                        // trigger in this batch has raised; the highest level
-                        // wins and paints exactly once. `Chrome` repaints the
-                        // sidebar strip + status bar in place (no ED2, no pane
-                        // re-render); `Full` clears and recomposites because
-                        // the pane rects moved under us.
-                        let (level, _cleared) = repaint.drain();
                         if !overlays.is_active()
                             && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
                         {
-                            match level {
+                            match drained.level {
                                 RepaintLevel::None => {}
                                 RepaintLevel::Chrome => paint_chrome_in_place(
                                     out,
@@ -3768,6 +3789,30 @@ fn agent_entries(
     // last, since `None < Some(_)`), then declaration (window/leaf) order.
     rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
     rows.into_iter().map(|(entry, _, _)| entry).collect()
+}
+
+/// Mark the focused pane as reviewed — the `seen` half of the attention ladder.
+///
+/// Returns `true` only on the FLIP (`false` -> `true`), so the caller can
+/// schedule a chrome repaint on a real transition and nothing at all in the
+/// steady state (the same shape as [`clear_attention_on_input`]).
+///
+/// The flip MUST be a repaint trigger. `seen` feeds both the sidebar's glyph
+/// (the filled `◆` of "finished, unread" vs the quiet `○` of a reviewed row)
+/// and its
+/// [`attention_rank`](crate::render::chrome::sidebar::attention_rank), and the
+/// focus action that made this pane focused recomputed the chrome one iteration
+/// EARLIER — while the bit was still `false`. Left as a silent side effect, the
+/// strip goes on claiming "finished, unreviewed", pinned above every working
+/// agent, about the very pane the user is looking at, until some unrelated
+/// chrome event happens to recompute [`agent_entries`].
+fn mark_focused_seen(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+) -> bool {
+    focused_pane
+        .and_then(|fid| panes.get_mut(fid))
+        .is_some_and(|slot| !std::mem::replace(&mut slot.seen, true))
 }
 
 /// phux-foz.1: clear a pane's asked-attention flag because the user sent it
@@ -5169,6 +5214,130 @@ mod tests {
             names,
             vec!["b", "w", "d"],
             "a reviewed done drops below working"
+        );
+    }
+
+    /// The TRIGGER half of the ladder's central promise: focusing a pane must
+    /// not just flip `seen`, it must be OBSERVABLE, so the driver can recompute
+    /// the chrome and repaint. The flip used to be a silent side effect at the
+    /// top of the loop, one iteration AFTER the focus action already recomputed
+    /// (and painted) the chrome with the stale bit — so the strip went on
+    /// showing `◆ done` bold, pinned above every working agent, about the pane
+    /// the user was staring at, until an unrelated chrome event fired.
+    ///
+    /// The contract: the flip reports `true` exactly once, that flip makes
+    /// `refresh_window_chrome` report a real change (a demoted row + a new
+    /// glyph), and the steady state — re-marking an already-seen pane — reports
+    /// `false`, so an idle loop pass costs one hash lookup and nothing else.
+    #[test]
+    fn focusing_an_unreviewed_done_pane_flips_seen_and_dirties_the_chrome() {
+        let working = TerminalId::local(1);
+        let done = TerminalId::local(2);
+        let mut workspace = Workspace::single(working.clone());
+        workspace.add_window("w2".to_owned(), done.clone());
+
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        for id in [&working, &done] {
+            panes.insert(id.clone(), PaneSlot::new_with_size(80, 24).expect("slot"));
+        }
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        for (id, name, state) in [
+            (&working, "w", AgentMetaState::Working),
+            (&done, "d", AgentMetaState::Done),
+        ] {
+            records.insert(
+                id.clone(),
+                AgentRecord {
+                    name: name.to_owned(),
+                    state,
+                    ..AgentRecord::default()
+                },
+            );
+        }
+        let meta = meta_index(records);
+
+        // The background agent finished while another pane was focused, so its
+        // row is unreviewed: pinned to the top.
+        let names: Vec<String> = agent_entries(&workspace, &panes, &meta)
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["d", "w"], "unreviewed done pins to the top");
+
+        // Prime the painters against that (stale) view — this is the paint the
+        // focus action itself produced, one iteration before the flip.
+        let mut sidebar_painter = SidebarPainter::new(crate::render::Theme::default());
+        let mut vcs = VcsIndex::default();
+        refresh_window_chrome(
+            None,
+            &mut sidebar_painter,
+            &workspace,
+            &panes,
+            Some(&done),
+            None,
+            None,
+            &meta,
+            &mut vcs,
+        );
+
+        // The user is now looking at the finished pane.
+        assert!(
+            mark_focused_seen(&mut panes, Some(&done)),
+            "the first mark after a focus change must report the flip"
+        );
+
+        // The flip must move the chrome: the row demotes below the working
+        // agent, and its glyph stops shouting.
+        let chrome_changed = refresh_window_chrome(
+            None,
+            &mut sidebar_painter,
+            &workspace,
+            &panes,
+            Some(&done),
+            None,
+            None,
+            &meta,
+            &mut vcs,
+        );
+        assert!(
+            chrome_changed,
+            "the seen flip must dirty the chrome, or nothing repaints the strip"
+        );
+        let entries = agent_entries(&workspace, &panes, &meta);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["w", "d"],
+            "the reviewed row drops below working"
+        );
+        // Only the FOCUSED pane's row is reviewed — the background `working`
+        // one is still unvisited, and the glyph derives from this bit.
+        let reviewed: Vec<(&str, bool)> =
+            entries.iter().map(|e| (e.name.as_str(), e.seen)).collect();
+        assert_eq!(
+            reviewed,
+            vec![("w", false), ("d", true)],
+            "the focused pane's row — and only it — must carry the reviewed bit"
+        );
+
+        // Steady state: no flip, no chrome change, no paint.
+        assert!(
+            !mark_focused_seen(&mut panes, Some(&done)),
+            "re-marking an already-seen pane must not report a flip"
+        );
+        assert!(
+            !refresh_window_chrome(
+                None,
+                &mut sidebar_painter,
+                &workspace,
+                &panes,
+                Some(&done),
+                None,
+                None,
+                &meta,
+                &mut vcs,
+            ),
+            "an unchanged chrome must stay zero-cost"
         );
     }
 

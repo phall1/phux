@@ -48,6 +48,26 @@ pub(super) struct RepaintAccumulator {
     /// bypassed for the cells it wiped. Reported out of [`Self::drain`] so the
     /// caller can pass the force-full flag on.
     viewport_was_cleared: bool,
+    /// `true` once a frame changed something the agent-fleet dashboard projects.
+    /// Carried here, and not as a loop-local `bool`, because the fleet refresh
+    /// is a REPAINT trigger like any other: while the dashboard is open it
+    /// repaints the overlay layer (today, via `paint_full_frame` under the
+    /// modal), so a per-frame call is a per-frame full-screen clear. It must
+    /// obey the same raise-then-drain-once discipline as [`Self::level`].
+    fleet_dirty: bool,
+}
+
+/// One iteration's drained repaint work: the level to paint, whether the
+/// viewport was physically cleared, and whether a live fleet dashboard must be
+/// re-projected. Returned by [`RepaintAccumulator::drain`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Repaint {
+    /// The highest level any trigger raised this iteration.
+    pub(super) level: RepaintLevel,
+    /// Whether a raised level physically cleared the viewport (`ED2`).
+    pub(super) viewport_was_cleared: bool,
+    /// Whether an open agent-fleet dashboard needs its rows rebuilt + repainted.
+    pub(super) fleet_dirty: bool,
 }
 
 impl RepaintAccumulator {
@@ -71,17 +91,40 @@ impl RepaintAccumulator {
         self.viewport_was_cleared = true;
     }
 
-    /// The accumulated level plus "was the viewport cleared", resetting to
-    /// [`Default`]. Called EXACTLY ONCE per loop iteration.
-    pub(super) fn drain(&mut self) -> (RepaintLevel, bool) {
+    /// Request a re-projection of the agent-fleet dashboard.
+    ///
+    /// Raised by every frame that changed fleet-projected state (an agent
+    /// record, an ADR-0035 `Asked`, a pane spawn/close, a layout or
+    /// session-graph change). Idempotent: nine panes publishing a state
+    /// transition in one coalesced batch rebuild the fleet ONCE.
+    pub(super) const fn raise_fleet(&mut self) {
+        self.fleet_dirty = true;
+    }
+
+    /// The accumulated repaint work, resetting to [`Default`]. Called EXACTLY
+    /// ONCE per loop iteration.
+    pub(super) fn drain(&mut self) -> Repaint {
         let taken = std::mem::take(self);
-        (taken.level, taken.viewport_was_cleared)
+        Repaint {
+            level: taken.level,
+            viewport_was_cleared: taken.viewport_was_cleared,
+            fleet_dirty: taken.fleet_dirty,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The drained work for a level-only raise: no fleet re-projection.
+    fn painted(level: RepaintLevel, viewport_was_cleared: bool) -> Repaint {
+        Repaint {
+            level,
+            viewport_was_cleared,
+            fleet_dirty: false,
+        }
+    }
 
     /// Declaration order IS the cost order, and that is what makes `raise` a
     /// monotone max.
@@ -105,8 +148,8 @@ mod tests {
         b.raise_full();
 
         assert_eq!(a, b);
-        assert_eq!(a.drain(), (RepaintLevel::Full, true));
-        assert_eq!(b.drain(), (RepaintLevel::Full, true));
+        assert_eq!(a.drain(), painted(RepaintLevel::Full, true));
+        assert_eq!(b.drain(), painted(RepaintLevel::Full, true));
     }
 
     /// Raising is idempotent: twenty `MetadataChanged` frames in one coalesced
@@ -118,10 +161,10 @@ mod tests {
         for _ in 0..20 {
             accum.raise_chrome();
         }
-        assert_eq!(accum.drain(), (RepaintLevel::Chrome, false));
+        assert_eq!(accum.drain(), painted(RepaintLevel::Chrome, false));
         // Drained: the next iteration starts clean, so an idle loop pass
         // paints nothing at all.
-        assert_eq!(accum.drain(), (RepaintLevel::None, false));
+        assert_eq!(accum.drain(), painted(RepaintLevel::None, false));
     }
 
     /// A chrome-only iteration must NOT report the viewport as cleared — only
@@ -130,15 +173,65 @@ mod tests {
     fn chrome_never_reports_a_cleared_viewport() {
         let mut accum = RepaintAccumulator::default();
         accum.raise_chrome();
-        let (level, cleared) = accum.drain();
-        assert_eq!(level, RepaintLevel::Chrome);
-        assert!(!cleared, "chrome paints in place; it clears nothing");
+        let drained = accum.drain();
+        assert_eq!(drained.level, RepaintLevel::Chrome);
+        assert!(
+            !drained.viewport_was_cleared,
+            "chrome paints in place; it clears nothing"
+        );
     }
 
     /// The default (no trigger) iteration drains to `None` and paints nothing.
     #[test]
     fn untouched_accumulator_drains_to_none() {
         let mut accum = RepaintAccumulator::default();
-        assert_eq!(accum.drain(), (RepaintLevel::None, false));
+        assert_eq!(accum.drain(), painted(RepaintLevel::None, false));
+    }
+
+    /// The fleet half of the same collapse. Nine panes publishing a state
+    /// transition in one coalesced batch must rebuild the dashboard ONCE, not
+    /// nine times — while the dashboard is open, each refresh repaints the
+    /// overlay layer over a full-frame base (an `ESC[2J` per refresh), which is
+    /// the strobe this accumulator exists to prevent, in precisely the view
+    /// that exists for watching agents.
+    #[test]
+    fn nine_fleet_raises_collapse_into_one_fleet_drain() {
+        let mut accum = RepaintAccumulator::default();
+        for _ in 0..9 {
+            accum.raise_fleet();
+        }
+        let drained = accum.drain();
+        assert!(
+            drained.fleet_dirty,
+            "nine raises must survive as one refresh"
+        );
+        assert_eq!(
+            drained.level,
+            RepaintLevel::None,
+            "a fleet refresh is not itself a base-frame repaint level"
+        );
+        // Drained: the next iteration re-projects nothing.
+        assert!(
+            !accum.drain().fleet_dirty,
+            "the fleet flag must not survive its drain"
+        );
+    }
+
+    /// A fleet raise composes with a level raise: an agent-state batch that
+    /// also dirtied the chrome drains to ONE chrome paint AND ONE fleet
+    /// refresh, in one iteration.
+    #[test]
+    fn fleet_and_level_raises_compose_in_one_drain() {
+        let mut accum = RepaintAccumulator::default();
+        accum.raise_chrome();
+        accum.raise_fleet();
+        assert_eq!(
+            accum.drain(),
+            Repaint {
+                level: RepaintLevel::Chrome,
+                viewport_was_cleared: false,
+                fleet_dirty: true,
+            }
+        );
     }
 }

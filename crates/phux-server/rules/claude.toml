@@ -35,9 +35,9 @@ binaries = ["claude", "claude-code"]
 #
 # The static U+2733 is deliberately NOT given an `idle` rule: it means "not
 # busy", which covers BOTH idle and waiting-on-a-permission-dialog. Asserting
-# `idle` from it would outrank (title beats screen) the prompt-box `blocked`
-# rule below and mask every permission prompt. "Not busy" is already the
-# detector's fail-safe default, so the absence of a match says it for us.
+# `idle` from it would outrank (title beats screen) the permission-dialog
+# `blocked` rule below and mask every permission prompt. "Not busy" is already
+# the detector's fail-safe default, so the absence of a match says it for us.
 [[rules]]
 id = "title-busy-spinner"
 state = "working"
@@ -48,17 +48,8 @@ match = { line-regex = "^[⠂⠐]" }
 
 # --- Screen rules -----------------------------------------------------------
 
-# A permission prompt. Claude Code renders it as a bordered box containing the
-# question and a numbered option list ("1. Yes", "2. Yes, and don't ask
-# again...", "3. No, and tell Claude what to do differently"), with a U+276F
-# caret on the selected row.
-#
-# Scoped to `prompt-box` — the live, bottom-most bordered box — and NOT to the
-# bottom lines, which is the entire point of regions: the string "do you want
-# to proceed?" inside a diff Claude just printed means nothing, while the same
-# string inside the live prompt box means a human is being asked. Requiring
-# BOTH the question AND a numbered-option line is a second, independent guard:
-# prose that merely quotes the question cannot trip it.
+# A permission prompt: the question stem plus a numbered option list, with a
+# U+276F caret on the selected row.
 #
 # The question stem is dynamic in the CLI ("Do you want to " + proceed? /
 # make this edit to / create / overwrite / write to / insert / delete), so we

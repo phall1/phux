@@ -38,8 +38,11 @@ value, which every pane needs continuously and which no agent CLI reports.
    Terminal, driven by its own interval on the terminal actor's `select!`
    (adaptive: ~500 ms unidentified, ~300 ms identified, ~100 ms while confirming
    a `working` → `idle` transition). PTY bytes never wake it, so a chatty agent
-   costs no extra detector work; the grid scan is skipped when the actor's
-   dirty flag is clear and the state is already `idle`.
+   costs no extra detector work; the grid scan is skipped whenever the actor's
+   dirty flag is clear and something has already been derived — a clean grid
+   cannot yield a different answer than the last one, whatever that answer was.
+   The dirty flag is consumed only by a tick that actually scans, so a tick that
+   skips can never launder "no evidence" into a derived state.
 2. **Detection is level-triggered.** Each tick re-derives the state from
    scratch — identify the PTY's foreground process, read the title, read the
    live viewport, match rules, publish if the answer changed. Nothing is

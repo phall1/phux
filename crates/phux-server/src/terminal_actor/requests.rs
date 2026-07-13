@@ -31,6 +31,17 @@ pub enum ControlRequest {
         /// The client that performed the action.
         actor: ClientId,
     },
+    /// Something other than the detector wrote this pane's `phux.agent/v1`
+    /// record (an explicit `SET_METADATA` or `DELETE_METADATA`), so the
+    /// detector's edge filter — a model of its own emissions — is now a model
+    /// of a store that no longer exists (ADR-0046 §E).
+    ///
+    /// The actor clears the filter, re-arming exactly one republish on the
+    /// next tick. This is what makes `DELETE` mean "the detector resumes"
+    /// rather than "the record vanishes until the agent's state happens to
+    /// change" — which, for an agent sitting idle waiting on a human, is
+    /// never. No-op on a pane with no detector.
+    AgentRecordInvalidated,
     /// Deliver `signal` to the pane's process group, update the lifecycle
     /// (`Freeze` → `Frozen`, `Resume` → `Running`), and broadcast a
     /// `TerminalControl`. `reply` carries `Ok(())` on delivery or a
